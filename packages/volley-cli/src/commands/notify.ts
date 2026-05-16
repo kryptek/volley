@@ -59,8 +59,15 @@ const PRODUCTION_FACTORIES: Required<NotifySurfaceFactories> = {
     const sound = env.VOLLEY_NOTIFY_SOUND;
     return createDesktopSurface(sound === undefined ? { io } : { io, sound });
   },
-  // The caller has already verified `url` is non-null before invoking the webhook factory.
-  webhook: (io, url) => createWebhookSurface({ io, url: url ?? "" }),
+  webhook: (io, url) => {
+    // Unreachable in practice — the argv validation in `notify` exits 2 when
+    // `webhook ∈ surfaces && webhookUrl === null` before this factory is ever
+    // invoked. A named throw here converts an internal-invariant violation into
+    // a loud, traceable error instead of a silent `fetch("")` at the first
+    // matching notification.
+    if (url === null) throw new Error("internal: webhook factory invoked without URL");
+    return createWebhookSurface({ io, url });
+  },
 };
 
 export async function notify({
