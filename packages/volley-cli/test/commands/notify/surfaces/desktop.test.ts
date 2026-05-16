@@ -52,7 +52,9 @@ describe("desktop surface", () => {
     });
     expect(spawn).toHaveBeenCalledTimes(1);
     const [cmd, args] = spawn.mock.calls[0] ?? [];
-    expect(cmd).toBe("terminal-notifier");
+    // spawn-by-absolute-path defends against PATH mutation between factory
+    // construction and fire-time; the `which` mock returns the path above.
+    expect(cmd).toBe("/usr/local/bin/terminal-notifier");
     expect(args).toEqual([
       "-title",
       "Volley",

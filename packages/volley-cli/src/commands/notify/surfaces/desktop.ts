@@ -16,11 +16,21 @@ export interface CreateDesktopSurfaceOpts {
   which?: DesktopWhichFn;
 }
 
-const defaultSpawn: DesktopSpawnFn = (cmd, args) => {
-  // Fire-and-forget: don't wait on the child, swallow its I/O so it can't
-  // pollute the notify loop's own stdio. Phase-2 dispatcher relies on this.
-  nodeSpawn(cmd, args, { stdio: "ignore" }).unref();
-};
+function makeDefaultSpawn(io: IO): DesktopSpawnFn {
+  return (cmd, args) => {
+    // Fire-and-forget: don't wait on the child, swallow its I/O so it can't
+    // pollute the notify loop's own stdio. The `'error'` handler is required —
+    // without it, an async spawn failure (binary vanished between the
+    // construction-time `which` probe and now) would surface as an unhandled
+    // EventEmitter error and crash the parent. Route it through io.stderr for
+    // parity with the synchronous-throw branch in `fire()`.
+    nodeSpawn(cmd, args, { stdio: "ignore" })
+      .on("error", (e) => {
+        io.stderr(`[notify] desktop spawn failed: ${e.message}\n`);
+      })
+      .unref();
+  };
+}
 
 const defaultWhich: DesktopWhichFn = (cmd) => {
   try {
@@ -38,11 +48,11 @@ const defaultWhich: DesktopWhichFn = (cmd) => {
 export function createDesktopSurface(opts: CreateDesktopSurfaceOpts): Surface {
   const { io } = opts;
   const which = opts.which ?? defaultWhich;
-  const spawn = opts.spawn ?? defaultSpawn;
+  const spawn = opts.spawn ?? makeDefaultSpawn(io);
   const sound = opts.sound ?? "Glass";
-  const path = which("terminal-notifier");
+  const resolvedPath = which("terminal-notifier");
 
-  if (path === null) {
+  if (resolvedPath === null) {
     io.stderr(
       "[notify] desktop surface disabled: terminal-notifier not found on PATH (brew install terminal-notifier)\n",
     );
@@ -58,7 +68,9 @@ export function createDesktopSurface(opts: CreateDesktopSurfaceOpts): Surface {
     name: "desktop",
     async fire({ envelope }) {
       try {
-        spawn("terminal-notifier", [
+        // Spawn by absolute path (from the construction-time `which` probe) so a
+        // PATH mutation between factory-construction and fire-time can't break us.
+        spawn(resolvedPath, [
           "-title",
           "Volley",
           "-subtitle",
