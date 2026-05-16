@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "issue-42-fix-7a3f",
+  "parent_id": "coordinator-abcd",
+  "wall_time": "2026-05-14T02:08:00.000Z",
+  "channel": "capability",
+  "type": "advertise",
+  "payload": {
+    "tools": ["Read", "Write", "Edit", "Bash", "Grep"],
+    "models": ["claude-opus-4-7"],
+    "vendor": "claude-code"
+  }
+}

@@ -1,0 +1,104 @@
+#!/usr/bin/env bun
+import { parseGlobal } from "./args";
+import { EXIT, type ExitCode } from "./exit-codes";
+import { type IO, realIO } from "./io";
+
+const VERSION = "0.1.0-dev";
+
+const USAGE = `Usage: volley <subcommand> [options]
+
+Subcommands:
+  pub    Publish one envelope to a Volley channel
+  sub    Subscribe to a wildcard topic pattern (live tail)
+  wait   Block until an agent reaches a terminal status
+  list   Enumerate agents registered on the broker
+  dash   Launch the Volley dashboard (Vite)
+
+Global flags:
+  --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --namespace <ns>     Volley namespace (env: VOLLEY_NAMESPACE; default: default)
+  --help               Show this help and exit
+  --version            Print version and exit
+
+Run \`volley <subcommand> --help\` for per-subcommand options.
+`;
+
+export interface MainArgs {
+  argv: string[];
+  env: Record<string, string | undefined>;
+  io: IO;
+}
+
+type Subcommand = (args: MainArgs) => Promise<ExitCode>;
+
+/**
+ * Subcommand dispatch table. Phase-2..5 tasks populate this map; until then the
+ * commands resolve to a stub that prints a not-yet-implemented stderr.
+ *
+ * The map is built lazily inside `main` so `cli.test.ts` can run against the
+ * scaffold before any subcommand exists.
+ */
+async function loadSubcommand(name: string): Promise<Subcommand | null> {
+  switch (name) {
+    case "pub":
+      return (await import("./commands/pub")).pub as Subcommand;
+    case "sub":
+      return (await import("./commands/sub")).sub as Subcommand;
+    case "wait":
+      return (await import("./commands/wait")).wait as Subcommand;
+    case "list":
+      return (await import("./commands/list")).list as Subcommand;
+    case "dash":
+      return (await import("./commands/dash")).dash as Subcommand;
+    default:
+      return null;
+  }
+}
+
+export async function main(args: MainArgs): Promise<ExitCode> {
+  const { subcommand, rest } = parseGlobal(args.argv);
+
+  if (subcommand === null) {
+    args.io.stderr(USAGE);
+    return EXIT.USAGE;
+  }
+  if (subcommand === "--help" || subcommand === "-h") {
+    args.io.stdout(USAGE);
+    return EXIT.OK;
+  }
+  if (subcommand === "--version" || subcommand === "-V") {
+    args.io.stdout(`${VERSION}\n`);
+    return EXIT.OK;
+  }
+
+  const cmd = await loadSubcommand(subcommand);
+  if (cmd === null) {
+    args.io.stderr(`volley: unknown subcommand: ${subcommand}\n\n${USAGE}`);
+    return EXIT.USAGE;
+  }
+
+  try {
+    return await cmd({ argv: rest, env: args.env, io: args.io });
+  } catch (e) {
+    // Subcommands print their own contextual stderr before throwing. This is the last-
+    // line safety net for anything that escapes.
+    const msg = e instanceof Error ? e.message : String(e);
+    args.io.stderr(`volley: ${msg}\n`);
+    return EXIT.ERROR;
+  }
+}
+
+// Real-process entry point. `import.meta.main` is Bun-only; under vitest it stays false.
+if (import.meta.main) {
+  main({ argv: process.argv.slice(2), env: process.env, io: realIO })
+    .then((code) => {
+      process.exit(code);
+    })
+    .catch((e) => {
+      // Last-resort: if main itself rejects (e.g. a dynamic import of a command module
+      // throws a syntax error), Node would otherwise print an UnhandledPromiseRejection
+      // and exit 0. Surface the error explicitly and exit non-zero.
+      process.stderr.write(`volley: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
+      process.exit(1);
+    });
+}

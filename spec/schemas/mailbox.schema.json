@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/mailbox.schema.json",
+  "title": "Volley Mailbox Channel Message",
+  "description": "Inbound request or command directed at this agent. Must-deliver. See spec section 4. The mailbox 'nudge' type is a lightweight prod to re-evaluate, distinct from the deferred control-channel 'nudge' lifecycle command.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "mailbox" },
+        "type": { "enum": ["steering", "cancel", "nudge", "query"] },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string" },
+            "from_agent_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+          },
+          "required": ["text"]
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

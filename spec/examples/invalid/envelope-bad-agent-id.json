@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "Issue 929 Bad ID",
+  "wall_time": "2026-05-14T02:11:23.000Z",
+  "channel": "status",
+  "type": "done",
+  "payload": {}
+}

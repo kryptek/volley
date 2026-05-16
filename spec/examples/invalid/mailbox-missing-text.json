@@ -1,0 +1,10 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-abcd",
+  "wall_time": "2026-05-14T02:09:00.000Z",
+  "channel": "mailbox",
+  "type": "steering",
+  "payload": {
+    "from_agent_id": "coordinator-abcd"
+  }
+}

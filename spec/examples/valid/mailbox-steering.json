@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-abcd",
+  "parent_id": null,
+  "wall_time": "2026-05-14T02:09:00.000Z",
+  "channel": "mailbox",
+  "type": "steering",
+  "payload": {
+    "text": "Skip the integration sweep; pre-existing flake is unrelated.",
+    "from_agent_id": "coordinator-abcd"
+  },
+  "correlation_id": "0a4f3e7c-8b21-4f3a-9d2e-1c8f7a3e2b41"
+}

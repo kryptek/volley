@@ -1,0 +1,330 @@
+<div align="center">
+
+```
+██╗   ██╗ ██████╗ ██╗     ██╗     ███████╗██╗   ██╗
+██║   ██║██╔═══██╗██║     ██║     ██╔════╝╚██╗ ██╔╝
+██║   ██║██║   ██║██║     ██║     █████╗   ╚████╔╝
+╚██╗ ██╔╝██║   ██║██║     ██║     ██╔══╝    ╚██╔╝
+ ╚████╔╝ ╚██████╔╝███████╗███████╗███████╗   ██║
+  ╚═══╝   ╚═════╝ ╚══════╝╚══════╝╚══════╝   ╚═╝
+       ▓▒░  agent coordination over MQTT  ░▒▓
+```
+
+**A messaging protocol for AI agents that need to talk to each other, watch each other, or just know whether the others are still alive.**
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Schema version](https://img.shields.io/badge/schema-v0.1-orange.svg)](spec/SPEC.md)
+[![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#license)
+[![Runtime](https://img.shields.io/badge/runtime-bun-black.svg)](https://bun.sh)
+
+</div>
+
+---
+
+## Contents
+
+- [What is Volley?](#what-is-volley) — the backstory and the gap it fills
+  - [The story](#the-story)
+  - [What gap does it fill?](#what-gap-does-it-fill)
+  - [Why would *you* need it?](#why-would-you-need-it)
+- [The 60-second mental model](#the-60-second-mental-model) — three ideas, one diagram
+- [Quickstart (5 minutes, fresh Mac)](#quickstart-5-minutes-fresh-mac) — copy-paste setup
+  - [1. Install Homebrew](#1-install-homebrew-skip-if-you-already-have-it)
+  - [2. Install the MQTT broker](#2-install-the-mqtt-broker)
+  - [3. Clone and install Volley](#3-clone-and-install-volley)
+  - [4. Register the MCP server with Claude Code](#4-register-the-mcp-server-with-claude-code)
+  - [5. Install the `/volley` skill](#5-install-the-volley-skill)
+  - [6. See your first agent](#6-see-your-first-agent)
+- [Use cases](#use-cases) — four concrete scenarios
+  - [1. Dispatch long-running work to autonomous agents](#1-dispatch-long-running-work-to-autonomous-agents)
+  - [2. One pane of glass across machines](#2-one-pane-of-glass-across-machines)
+  - [3. Cross-vendor coordination](#3-cross-vendor-coordination)
+  - [4. Wait for external events without polling](#4-wait-for-external-events-without-polling)
+- [What ships in this repo](#what-ships-in-this-repo)
+- [Why MQTT?](#why-mqtt) — the tradeoff comparison
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## What is Volley?
+
+Volley is a thin protocol — an MQTT topic convention plus a JSON envelope — that lets autonomous agents coordinate.
+
+It exists because **agent-to-agent coordination is a real, recurring problem and nobody had standardized it.** Every team building with LLM agents ends up writing the same plumbing: file-based mailboxes, polling loops, custom HTTP endpoints, ad-hoc Slack DMs. None of those interop. None of them detect crashes. None of them surface "who's alive right now?" without you cobbling together a status page.
+
+Volley is what you'd build if you sat down to solve this once, on top of a 30-year-old battle-tested transport, and stopped.
+
+### The story
+
+This started as a yak-shave inside a single repo: dispatch a batch of GitHub issues to autonomous Claude Code instances, each in its own git worktree, and have one coordinator agent wake up the moment any of them finishes.
+
+The legacy approach used a polling loop with `ScheduleWakeup` callbacks every few seconds. It worked, sort of. But:
+
+- The coordinator woke up **4 seconds after** an agent finished, on average — not catastrophic, but felt sluggish, and the per-poll cost added up across long-running batches.
+- If an agent's process died (OOM, `kill -9`, network drop), the coordinator had **no way to know**. It would poll forever against a dead agent.
+- There was no "show me everything happening right now" view. To see what the dispatched agents were doing, you'd open each cmux workspace by hand.
+
+These aren't novel problems. MQTT solved them in 1999. So Volley is the smallest possible adapter that lets LLM agents speak MQTT and get retained registries, wildcard subscriptions, and Last-Will-and-Testament crash detection for free.
+
+### What gap does it fill?
+
+| | Without Volley | With Volley |
+|---|---|---|
+| Wake on agent terminal status | Poll every 3–5s | Sub-2s, event-driven |
+| Detect crashed agent | Never (poll loops forever) | ~60s via MQTT LWT |
+| "Who's alive right now?" | Build a status page | `/volley list` |
+| Cross-vendor agent coordination | Build a custom protocol | Both speak Volley's JSON envelope |
+| Cross-machine coordination | VPN + custom RPC | Point at the same broker |
+| Watch any agent's progress live | SSH + tail -f | `/volley watch <agent>` |
+
+### Why would *you* need it?
+
+Four concrete situations:
+
+1. **You're dispatching long-running work to autonomous agents.** Maybe it's GitHub issues, maybe it's data pipelines, maybe it's overnight test runs. You need to know the moment each finishes, distinguish "done" from "blocked" from "crashed," and not have to babysit them.
+
+2. **You want one pane of glass across all your agents.** Your Claude Code session on this laptop, the Codex session on your desktop, the shell script running on your VPS — you want to see them all, in one list, with their status, in real time.
+
+3. **You're building tools that should compose with other people's agents.** Volley is vendor-neutral. If your tool publishes to and subscribes from the topic conventions in [`SPEC.md`](spec/SPEC.md), it interoperates with any other Volley-aware agent — Claude Code, Codex, future things, plain bash.
+
+4. **You want your Claude Code session to react to external events without polling.** A CI run finishes, a deploy lands, a webhook fires — your conversation resumes within ~1s instead of waking on a sleep timer.
+
+If none of those describe you, you probably don't need Volley. That's fine.
+
+---
+
+## The 60-second mental model
+
+```mermaid
+graph LR
+  A[Agent A<br/>Claude Code] -->|publish| B((MQTT broker<br/>mosquitto))
+  C[Agent B<br/>Codex] -->|publish| B
+  D[Shell script<br/>volley pub] -->|publish| B
+  B -->|retained + live| E[Coordinator<br/>/volley list]
+  B -->|wildcard tap| F[Observer<br/>/volley watch]
+
+  classDef agent fill:#1e293b,stroke:#475569,color:#e2e8f0
+  classDef broker fill:#7c3aed,stroke:#5b21b6,color:#fff
+  classDef observer fill:#059669,stroke:#047857,color:#fff
+  class A,C,D agent
+  class B broker
+  class E,F observer
+```
+
+Three ideas do all the work:
+
+1. **Topics**: every message lives at `volley/<namespace>/<agent_id>/<channel>`. Channels are things like `status`, `progress`, `mailbox`, `result`. The `_system/registry/<id>` topic carries each agent's discovery record.
+2. **Envelopes**: every message body is a JSON object with `schema_version`, `agent_id`, `wall_time`, `channel`, `type`, `payload`. Forward-compatible by design.
+3. **Lifecycle**: agents transition `spawning → registered → working → (done | blocked | failed) → reaped`. The retained value at `<id>/status` always reflects current state.
+
+That's it. Everything else in the spec is a refinement.
+
+---
+
+## Quickstart (5 minutes, fresh Mac)
+
+> All commands assume macOS with [Homebrew](https://brew.sh). Linux works too — substitute your package manager. Windows: WSL recommended.
+
+### 1. Install Homebrew (skip if you already have it)
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### 2. Install the MQTT broker
+
+```sh
+brew install mosquitto
+```
+
+Mosquitto's stock install ships with a config that doesn't accept connections out of the box. Replace it with the localhost-anonymous config bundled in this repo, then start the service:
+
+```sh
+# macOS (Apple Silicon):
+cp examples/mosquitto-localhost.conf /opt/homebrew/etc/mosquitto/mosquitto.conf
+
+# macOS (Intel):
+cp examples/mosquitto-localhost.conf /usr/local/etc/mosquitto/mosquitto.conf
+
+# Linux (apt / yum / dnf):
+sudo cp examples/mosquitto-localhost.conf /etc/mosquitto/mosquitto.conf
+
+brew services start mosquitto      # macOS
+sudo systemctl start mosquitto      # Linux
+```
+
+You now have a broker with two listeners on `127.0.0.1`:
+- **`1883`** (raw MQTT) — used by `volley-mcp`, `volley-cli`, and any native MQTT client
+- **`9001`** (MQTT-over-WebSocket) — used by the [`volley dash`](packages/volley-cli/README.md#volley-dash) browser dashboard, since browsers can't speak raw MQTT-over-TCP
+
+> 🔄 **Upgrading from an earlier Volley setup?** The WebSocket listener (`:9001`) was added with the v0.1.2 dashboard. If your installed `mosquitto.conf` predates that, re-copy `examples/mosquitto-localhost.conf` and `brew services restart mosquitto`. Verify with `lsof -nP -iTCP:9001 -sTCP:LISTEN` — you should see `mosquitto … (LISTEN)`. Without it, the dashboard browser console will hang on `mqtt.connect('ws://localhost:9001')` and you'll see no agents.
+
+> ⚠️ **Security note.** The bundled config is **localhost-only and anonymous on purpose** — safe because nothing outside your machine can reach the listener. **If you plan to expose your broker on a network**, that config is not safe. You'll want to enable TLS, add password authentication, and probably ACLs. Start at the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/) and the [`mosquitto.conf(5)` reference](https://mosquitto.org/man/mosquitto-conf-5.html). Don't copy a "works on my laptop" config to a public host.
+
+### 3. Clone and install Volley
+
+```sh
+git clone https://github.com/<your-fork>/volley.git
+cd volley
+bun install
+```
+
+Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`.
+
+### 4. Register the MCP server with Claude Code
+
+Substitute `<absolute-path-to-this-repo>` with the actual path you cloned to (e.g. `~/repos/volley`):
+
+```sh
+claude mcp add-json -s user volley '{
+  "command": "bun",
+  "args": ["run", "<absolute-path-to-this-repo>/packages/volley-mcp/src/index.ts"],
+  "env": {
+    "VOLLEY_AGENT_ID": "coordinator",
+    "VOLLEY_NAMESPACE": "default"
+  }
+}'
+```
+
+Then **quit Claude Code completely (Cmd-Q) and reopen it.** MCP registration is read at startup.
+
+Verify:
+
+```sh
+claude mcp list
+```
+
+You should see `volley: ... ✓ Connected`.
+
+### 5. Install the `/volley` skill
+
+```sh
+bash packages/volley-skill/scripts/install.sh
+```
+
+This symlinks the skill into `~/.claude/skills/volley/`. Edits to the skill file take effect immediately.
+
+### 6. See your first agent
+
+Open Claude Code and run:
+
+```
+/volley list
+```
+
+That's it. Your session is already there — the volley-mcp server auto-registers on startup, with an auto-suffixed `agent_id` like `coordinator-7b9c` (the prefix comes from the `VOLLEY_AGENT_ID` env you set in step 4; the suffix is fresh per process). Open a second Claude Code window and run `/volley list` again — both sessions show up, each with its own distinct id. They can now send each other messages (`/volley msg <id> "..."`), watch each other's status (`/volley watch <id>`), and coordinate.
+
+To declare what your session does (capabilities, model, role) so other agents can find you, ask Claude to call `vol_register` with whatever fits — it's idempotent and updates the registry entry. For most casual use, you never have to.
+
+From here, look at the [`/volley`](packages/volley-skill/SKILL.md) and [`/volley-issues`](packages/volley-issues/SKILL.md) skills for what's possible.
+
+---
+
+## Use cases
+
+### 1. Dispatch long-running work to autonomous agents
+
+You point `/volley-issues` at ten GitHub issue numbers and walk away.
+
+What happens next is fully automated:
+
+- A release branch is created off `main` (only when more than one issue is in flight; single-issue dispatches just branch from main).
+- Ten git worktrees are spun up under `/private/tmp/`, each on its own branch off the release branch.
+- Ten cmux workspaces launch in parallel, each running a real `claude --dangerously-skip-permissions` process in its worktree, each with an issue-specific spawn brief.
+- Each child auto-registers as a Volley agent, declares its capabilities, transitions through `working → done` (or `blocked` / `failed`), and publishes a one-line summary on completion.
+- The coordinator backgrounds one `volley wait` per child. The moment any child publishes terminal status, that wait exits, the coordinator wakes, reads the child's diff, commits it, opens a PR against the release branch, and goes back to sleep waiting on the others.
+- When all ten finish and their PRs merge into the release branch, the coordinator prompts you to deploy the release branch to staging.
+- If any child crashes hard (OOM, `kill -9`), the broker's LWT fires within ~60s and that child's status flips to `reaped` — the coordinator wakes the same way it does for `done`, opens the workspace so you can see what happened, and **does not auto-restart**. Crash recovery is a human decision; crash *detection* is free.
+
+End-to-end wake latency in production: **~1.5 seconds** between a child publishing `done` and the coordinator beginning to act on it. Compare to the legacy poll-loop's 4-second median.
+
+You go from "ten issues sitting in the backlog" to "ten merged PRs on a release branch ready for staging" with a single command and a few approvals along the way.
+
+### 2. One pane of glass across machines
+
+Your Claude Code is running here. Your overnight Codex job is running on your desktop. A nightly shell script is running on a VPS in Europe. Point all three at the same MQTT broker (mosquitto over TLS, or any cloud MQTT service). Run `/volley list --all-namespaces` from any machine, see everyone:
+
+```
+AGENT_ID                NAMESPACE      STATUS        LAST_SEEN
+coordinator-a3f1        default        🔄 working    2m ago
+codex-overnight-9d2e    default        ✅ done       17m ago
+backup-script-1c8f      ops            🔄 working    14s ago
+```
+
+Crash detection comes for free — if any of those processes dies hard, MQTT's Last-Will-and-Testament fires within 60–90 seconds and the registry flips that agent to `reaped`.
+
+### 3. Cross-vendor coordination
+
+Volley doesn't care what's publishing or subscribing. If your tool can speak MQTT v5 and emit a JSON envelope per `spec/SPEC.md`, it participates. Claude Code can dispatch to Codex agents that publish their own progress; a CI job can be a one-shot Volley agent that announces its result; a long-lived background watcher can be a non-LLM Python script.
+
+The protocol is the contract. The implementations don't need to know about each other.
+
+### 4. Wait for external events without polling
+
+You push a branch and want your Claude Code session to react the moment CI finishes — not on the next `gh run watch` refresh, not after `sleep 60; gh run view` wakes up. Drop one line into your GitHub Actions workflow (see [`examples/bridges/github-actions/`](examples/bridges/github-actions/)) and the runner publishes a Volley status envelope when the job flips state. In your Claude Code session, run `/wait gh-<owner>-<repo>-<run-id> --namespace ci` and the conversation blocks until that topic fires. When CI lands, the session wakes within ~1s with a single summary line.
+
+The same pattern works for anything that can shell out: a deploy script, a webhook receiver, a cron job, a long-running data pipeline. The bridge is a few lines that compute a deterministic `agent_id` from whatever stable identifiers the source system exposes, then publish to `volley/<ns>/<agent_id>/status`. The waiter computes the same id and targets the same topic. Neither side has to know the other exists.
+
+The [`/wait`](packages/volley-wait/SKILL.md) skill and the [bridge pattern](examples/bridges/) are the two pieces. The skill is `bash packages/volley-wait/scripts/install.sh` to install; the bridges are copy-paste shell snippets you adapt to your source system.
+
+---
+
+## What ships in this repo
+
+```
+spec/                     The protocol — wire format, conformance, error codes
+  SPEC.md                 Normative spec (read this if you're implementing Volley)
+  schemas/*.json          JSON Schema for every envelope shape
+  examples/               Valid + invalid example envelopes (used for testing)
+
+packages/volley-mcp/      Reference MCP server. The seven vol_* tools.
+packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` subcommand.
+packages/volley-dash/     Browser dashboard (Vite + React + Tailwind + shadcn/ui + GSAP). Subscribes via WebSocket; no backend.
+packages/volley-skill/    The /volley Claude Code slash command.
+packages/volley-wait/     The /wait Claude Code slash command (event-driven block on a topic).
+packages/volley-issues/   The /volley-issues dispatch skill.
+
+examples/bridges/         Adapters that publish external events (CI, webhooks, ...) onto Volley topics.
+  github-actions/         GitHub Actions → mosquitto bridge script.
+```
+
+Each `packages/*/` has its own README with install, usage, and architecture notes. `examples/bridges/` has an index README explaining the bridge pattern and how to add a new one.
+
+---
+
+## Why MQTT?
+
+The honest answer: because the alternatives were worse.
+
+| Option | Why we didn't pick it |
+|---|---|
+| **HTTP webhooks** | Every agent needs a publicly reachable endpoint. NAT punching, port forwarding, ngrok-style tunnels. No retained state. No discovery. |
+| **WebSockets** | Solves bidirectional, but you still have to design retained-state, discovery, crash-detection on top. |
+| **gRPC streams** | Tight coupling. Schema-bound. No retained state. No wildcards. Heavy. |
+| **A custom binary protocol** | One more thing to maintain. Nobody else can plug in. |
+| **Redis pub/sub** | No retained messages. No LWT. No wildcards in the message bus sense. |
+| **MQTT v5** | Has all four primitives (retained, wildcard, QoS, LWT) baked in. Brokers are commodity (mosquitto is `brew install` away). 30 years of production hardening. Cross-language. |
+
+MQTT's main downside is unfamiliarity in the LLM-tooling crowd. That's a docs problem, not a protocol problem.
+
+---
+
+## Contributing
+
+Currently a private repo; external contributions aren't open yet. If you found this somehow and want to collaborate early, open an issue or reach out.
+
+---
+
+## License
+
+Apache 2.0. See [`LICENSE`](LICENSE).
+
+---
+
+<div align="center">
+
+*Volley is built on the assumption that the right primitive is messaging,*
+*not RPC, not files, not polling. If that resonates, it should fit.*
+
+</div>

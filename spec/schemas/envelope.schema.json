@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/envelope.schema.json",
+  "title": "Volley Envelope",
+  "description": "Base envelope shared by all Volley messages. Per-channel schemas extend this with channel-specific payload constraints.",
+  "type": "object",
+  "required": ["schema_version", "agent_id", "wall_time", "channel", "type"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^0\\.[0-9]+$",
+      "description": "Volley protocol version. v0.x only in this schema."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "description": "Sender agent ID. See spec section 2.2."
+    },
+    "parent_id": {
+      "oneOf": [{ "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }, { "type": "null" }],
+      "description": "Parent agent ID if this agent was spawned by another Volley agent."
+    },
+    "wall_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp with millisecond precision."
+    },
+    "channel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One of the reserved channel names or a _user/* prefixed user channel."
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Channel-specific event type."
+    },
+    "payload": {
+      "description": "Channel-specific data. Shape constrained by per-channel schemas."
+    },
+    "correlation_id": {
+      "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }]
+    }
+  },
+  "additionalProperties": true
+}

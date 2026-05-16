@@ -1,0 +1,41 @@
+# Bun
+node_modules/
+bun.lockb.bak
+*.tsbuildinfo
+
+# Build output
+dist/
+build/
+*.tgz
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*~
+
+# Test output
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local broker data (if user runs mosquitto in-tree for testing)
+mosquitto-data/
+mosquitto.log
+
+# Volley local state
+.volley/
+
+# Internal planning + design docs (local only; do not commit)
+docs/superpowers/

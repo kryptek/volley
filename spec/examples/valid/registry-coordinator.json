@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-abcd",
+  "parent_id": null,
+  "namespace": "example-dispatch",
+  "wall_time": "2026-05-14T01:38:00.000Z",
+  "channel": "_system/registry",
+  "type": "registered",
+  "payload": {
+    "capabilities": ["dispatches-issues", "reviews-prs", "watches-ci"],
+    "cwd": "/path/to/your/repo",
+    "model": "claude-opus-4-7",
+    "started_at": "2026-05-14T01:38:00.000Z"
+  }
+}

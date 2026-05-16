@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "issue-42-fix-7a3f",
+  "parent_id": "coordinator-abcd",
+  "wall_time": "2026-05-14T02:11:23.000Z",
+  "channel": "status",
+  "type": "done",
+  "payload": {
+    "summary": "Single-element batch fix shipped; 61/61 tests green",
+    "worktree": "/private/tmp/example-issue-42",
+    "deploy_md_path": "/private/tmp/example-issue-42/DEPLOY.md"
+  },
+  "correlation_id": null
+}

@@ -1,0 +1,22 @@
+{
+  "name": "volley-issues",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Volley dispatch-issues skill — autonomous GH-issue agents coordinating via Volley instead of claude-peers",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:parity": "vitest run test/parity/parity.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate:skill": "bun run scripts/validate-skill.ts SKILL.md"
+  },
+  "dependencies": {
+    "volley-mcp": "workspace:*",
+    "volley-cli": "workspace:*"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.0",
+    "vitest": "^2.1.0"
+  }
+}

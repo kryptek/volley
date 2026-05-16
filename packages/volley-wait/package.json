@@ -1,0 +1,16 @@
+{
+  "name": "volley-wait",
+  "version": "0.1.1-dev",
+  "private": true,
+  "description": "Volley /wait Claude Code skill — event-driven wait on a Volley topic, replacing the polling loop pattern",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate:skill": "bun run scripts/validate-skill.ts SKILL.md"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

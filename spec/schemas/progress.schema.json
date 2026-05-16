@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/progress.schema.json",
+  "title": "Volley Progress Channel Message",
+  "description": "Fire-and-forget progress event published on the progress channel. See spec section 4.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "progress" },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Free-form progress event tag (e.g. tests-green, mvn-verify-done, diff-ready)."
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "detail": { "type": "string" },
+            "elapsed_ms": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "required": ["channel", "type"]
+    }
+  ]
+}

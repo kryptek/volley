@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/control.schema.json",
+  "title": "Volley Control Channel Message (RESERVED)",
+  "description": "Reserved control channel for agent lifecycle commands. v0.1 specifies the topic and reserves type names; semantics are deferred to v0.2+. Implementations MUST NOT act on control messages in v0.1.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "control" },
+        "type": { "enum": ["kill", "pause", "resume", "nudge"] },
+        "payload": { "type": "object" }
+      },
+      "required": ["channel", "type"]
+    }
+  ]
+}

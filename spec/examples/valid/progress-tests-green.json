@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "issue-42-fix-7a3f",
+  "parent_id": "coordinator-abcd",
+  "wall_time": "2026-05-14T02:10:42.000Z",
+  "channel": "progress",
+  "type": "tests-green",
+  "payload": {
+    "detail": "61/61 ExampleBackendTest cases pass",
+    "elapsed_ms": 50321
+  }
+}

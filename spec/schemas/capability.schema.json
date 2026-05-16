@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/capability.schema.json",
+  "title": "Volley Capability Channel Message",
+  "description": "Retained advertisement of an agent's tools/models. See spec section 4.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "capability" },
+        "type": { "const": "advertise" },
+        "payload": {
+          "type": "object",
+          "required": ["tools"],
+          "properties": {
+            "tools": { "type": "array", "items": { "type": "string" } },
+            "models": { "type": "array", "items": { "type": "string" } },
+            "vendor": { "type": "string" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

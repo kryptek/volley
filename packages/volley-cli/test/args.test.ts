@@ -1,0 +1,90 @@
+import { describe, expect, it } from "vitest";
+import {
+  parseCsv,
+  parseGlobal,
+  parseJsonPayload,
+  parsePositiveInt,
+  resolveBrokerUrl,
+  resolveNamespace,
+} from "../src/args";
+
+describe("parseGlobal", () => {
+  it("splits the first positional as the subcommand", () => {
+    expect(parseGlobal(["pub", "--agent-id", "x"])).toEqual({
+      subcommand: "pub",
+      rest: ["--agent-id", "x"],
+    });
+  });
+  it("returns a null subcommand on empty argv (caller prints help)", () => {
+    expect(parseGlobal([])).toEqual({ subcommand: null, rest: [] });
+  });
+  it("treats --help as a subcommand of its own so cli.ts can intercept it", () => {
+    expect(parseGlobal(["--help"])).toEqual({ subcommand: "--help", rest: [] });
+    expect(parseGlobal(["--version"])).toEqual({ subcommand: "--version", rest: [] });
+  });
+});
+
+describe("parseCsv", () => {
+  it("splits on commas, trims, and drops empties", () => {
+    expect(parseCsv("done, blocked,failed,, reaped")).toEqual([
+      "done",
+      "blocked",
+      "failed",
+      "reaped",
+    ]);
+  });
+  it("returns the empty array on undefined or empty input", () => {
+    expect(parseCsv(undefined)).toEqual([]);
+    expect(parseCsv("")).toEqual([]);
+  });
+});
+
+describe("parsePositiveInt", () => {
+  it("parses positive integer strings", () => {
+    expect(parsePositiveInt("30")).toBe(30);
+    expect(parsePositiveInt("1")).toBe(1);
+  });
+  it("throws on zero, negative, NaN, or non-integer", () => {
+    expect(() => parsePositiveInt("0")).toThrow(/positive integer/);
+    expect(() => parsePositiveInt("-1")).toThrow(/positive integer/);
+    expect(() => parsePositiveInt("abc")).toThrow(/positive integer/);
+    expect(() => parsePositiveInt("3.5")).toThrow(/positive integer/);
+  });
+  it("prefixes the error message with the flag name when given", () => {
+    expect(() => parsePositiveInt("abc", "--timeout")).toThrow(
+      /^--timeout must be a positive integer/,
+    );
+  });
+});
+
+describe("parseJsonPayload", () => {
+  it("returns the empty object on undefined", () => {
+    expect(parseJsonPayload(undefined)).toEqual({});
+  });
+  it("parses a JSON object literal", () => {
+    expect(parseJsonPayload('{"a":1,"b":"x"}')).toEqual({ a: 1, b: "x" });
+  });
+  it("throws on non-object JSON or invalid JSON", () => {
+    expect(() => parseJsonPayload("[1,2]")).toThrow(/JSON object/);
+    expect(() => parseJsonPayload('"string"')).toThrow(/JSON object/);
+    expect(() => parseJsonPayload("{ not json")).toThrow(/invalid JSON/);
+  });
+});
+
+describe("resolveBrokerUrl / resolveNamespace", () => {
+  it("prefers the flag value over the env var, falls back to the default", () => {
+    expect(resolveBrokerUrl("mqtt://flag:1883", { VOLLEY_BROKER_URL: "mqtt://env:1883" })).toBe(
+      "mqtt://flag:1883",
+    );
+    expect(resolveBrokerUrl(undefined, { VOLLEY_BROKER_URL: "mqtt://env:1883" })).toBe(
+      "mqtt://env:1883",
+    );
+    expect(resolveBrokerUrl(undefined, {})).toBe("mqtt://localhost:1883");
+  });
+  it("resolves the namespace the same way and validates the grammar", () => {
+    expect(resolveNamespace("ns-flag", { VOLLEY_NAMESPACE: "ns-env" })).toBe("ns-flag");
+    expect(resolveNamespace(undefined, { VOLLEY_NAMESPACE: "ns-env" })).toBe("ns-env");
+    expect(resolveNamespace(undefined, {})).toBe("default");
+    expect(() => resolveNamespace("Bad Name", {})).toThrow(/namespace/);
+  });
+});

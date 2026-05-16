@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/status.schema.json",
+  "title": "Volley Status Channel Message",
+  "description": "Lifecycle state transition published on the status channel. See spec section 5.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "status" },
+        "type": {
+          "enum": ["spawning", "registered", "working", "done", "blocked", "failed", "reaped"]
+        },
+        "payload": {
+          "type": "object",
+          "description": "Free-form payload, conventionally including: started_at, ended_at, reason (for blocked/failed/reaped), summary (for done), worktree, deploy_md_path."
+        }
+      },
+      "required": ["channel", "type"]
+    }
+  ]
+}

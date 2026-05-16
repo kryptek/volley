@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-schemas:
+    name: Schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run validate:schemas
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  test:
+    name: Unit tests (Aedes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+
+  validate-skill:
+    name: Skill validation (SKILL.md frontmatter + dispatch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun --cwd packages/volley-skill run validate:skill
+
+  test-integration:
+    name: Integration tests (mosquitto)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - name: Start mosquitto
+        run: |
+          docker run -d --name mosquitto -p 1883:1883 \
+            -v "$PWD/packages/volley-mcp/test/integration/mosquitto.conf:/mosquitto/config/mosquitto.conf" \
+            eclipse-mosquitto:2
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/1883) 2>/dev/null; then echo "mosquitto up"; break; fi
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/1883) 2>/dev/null || { echo "mosquitto did not start in 30s"; exit 1; }
+      - name: Run integration tests
+        working-directory: packages/volley-mcp
+        run: bun run test:integration
+      - name: Stop mosquitto
+        if: always()
+        run: docker rm -f mosquitto
+
+  parity:
+    name: Parity test (4 legacy vs 4 volley)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun --cwd packages/volley-issues run test:parity
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: packages/volley-issues/parity-report.md

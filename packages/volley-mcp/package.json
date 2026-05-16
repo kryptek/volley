@@ -1,0 +1,32 @@
+{
+  "name": "volley-mcp",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Volley reference MCP server — stdio MCP server wrapping an MQTT broker",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "volley-mcp": "./src/index.ts" },
+  "exports": {
+    "./broker": "./src/broker.ts",
+    "./topics": "./src/topics.ts",
+    "./envelope": "./src/envelope.ts",
+    "./channels": "./src/channels.ts",
+    "./errors": "./src/errors.ts",
+    "./config": "./src/config.ts",
+    "./util": "./src/util.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:integration": "VOLLEY_INTEGRATION=1 vitest run test/integration",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "mqtt": "^5.10.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.0",
+    "vitest": "^2.1.0"
+  }
+}

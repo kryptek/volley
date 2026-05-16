@@ -1,0 +1,16 @@
+{
+  "name": "volley-skill",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Volley Claude Code skill — the /volley slash command",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate:skill": "bun run scripts/validate-skill.ts SKILL.md"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

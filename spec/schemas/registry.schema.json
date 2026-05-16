@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/registry.schema.json",
+  "title": "Volley Registry Entry",
+  "description": "Retained registry entry published to volley/_system/registry/<agent_id>. See spec section 6.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/registry" },
+        "type": { "const": "registered" },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["capabilities", "started_at"],
+          "properties": {
+            "capabilities": { "type": "array", "items": { "type": "string" } },
+            "cwd": { "type": "string" },
+            "model": { "type": "string" },
+            "started_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "required": ["channel", "type", "namespace", "payload"]
+    }
+  ]
+}

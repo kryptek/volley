@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/result.schema.json",
+  "title": "Volley Result Channel Message",
+  "description": "Retained pointer to the agent's final artifact (PR URL, log path, deploy summary). See spec section 4.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "result" },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Result kind tag, e.g. pr-merged, pr-opened, build-artifact, log-pointer."
+        },
+        "payload": {
+          "type": "object",
+          "minProperties": 1,
+          "properties": {
+            "url": { "type": "string", "format": "uri" },
+            "path": { "type": "string" },
+            "summary": { "type": "string" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}
