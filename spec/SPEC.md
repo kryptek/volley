@@ -38,6 +38,10 @@ Volley sits **adjacent to the Model Context Protocol (MCP), not in competition w
 - **Broker** — an MQTT broker (mosquitto for the reference implementation).
 - **Conforming implementation** — any client library, MCP server, or CLI that follows the requirements in §11.
 
+### 1.3 Notification (informative)
+
+*Notification is a client-side concern on top of the existing `status` channel. The protocol does not standardize notification semantics — when, where, or how an observer surfaces a state transition to a human is left to each implementation. The reference implementation ships two surfaces in v0.1.3 (`volley notify` CLI and a Settings popover in the web dashboard); both consume the status channel via the standard subscribe mechanism and introduce no new envelope fields, topics, or MCP tools. Conforming implementations MAY ship their own notification UIs against the same channel.*
+
 ---
 
 ## 2. Topic hierarchy

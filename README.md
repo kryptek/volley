@@ -35,11 +35,12 @@
   - [4. Register the MCP server with Claude Code](#4-register-the-mcp-server-with-claude-code)
   - [5. Install the `/volley` skill](#5-install-the-volley-skill)
   - [6. See your first agent](#6-see-your-first-agent)
-- [Use cases](#use-cases) — four concrete scenarios
+- [Use cases](#use-cases) — five concrete scenarios
   - [1. Dispatch long-running work to autonomous agents](#1-dispatch-long-running-work-to-autonomous-agents)
   - [2. One pane of glass across machines](#2-one-pane-of-glass-across-machines)
   - [3. Cross-vendor coordination](#3-cross-vendor-coordination)
   - [4. Wait for external events without polling](#4-wait-for-external-events-without-polling)
+  - [5. Get notified when agents need attention](#5-get-notified-when-agents-need-attention)
 - [What ships in this repo](#what-ships-in-this-repo)
 - [Why MQTT?](#why-mqtt) — the tradeoff comparison
 - [Contributing](#contributing)
@@ -268,6 +269,15 @@ The same pattern works for anything that can shell out: a deploy script, a webho
 
 The [`/wait`](packages/volley-wait/SKILL.md) skill and the [bridge pattern](examples/bridges/) are the two pieces. The skill is `bash packages/volley-wait/scripts/install.sh` to install; the bridges are copy-paste shell snippets you adapt to your source system.
 
+### 5. Get notified when agents need attention
+
+v0.1.3 adds two surfaces for surfacing agent state transitions to the human, on whichever channel you're already paying attention to:
+
+- **[`volley notify`](packages/volley-cli/README.md#volley-notify)** — a long-lived CLI subscriber that fires the terminal bell + macOS desktop banners + arbitrary HTTP webhooks on matching agent transitions. Default trigger set is "attention-needed only" (`blocked,failed,reaped`). Run one per terminal tab; pipe its JSON output to `jq` for live tail. Webhook lets you bridge to ntfy.sh, Slack, Discord, or anything else that takes a POST.
+- **[Dashboard "Browser notifications"](packages/volley-dash/README.md#browser-notifications)** — a bell-icon Settings popover in the [`volley dash`](packages/volley-cli/README.md#volley-dash) top bar that fires the browser Notification API + a short bundled chime for the same trigger events. Respects `prefers-reduced-motion`. Per-origin localStorage.
+
+Both surfaces are pure clients of the existing `status` channel — no new envelope fields, no new topics, no new MCP tools. They observe the same protocol any other Volley client does; the protocol is unaffected by their presence.
+
 ---
 
 ## What ships in this repo
@@ -279,7 +289,7 @@ spec/                     The protocol — wire format, conformance, error codes
   examples/               Valid + invalid example envelopes (used for testing)
 
 packages/volley-mcp/      Reference MCP server. The seven vol_* tools.
-packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` subcommand.
+packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` and `volley notify` subcommands.
 packages/volley-dash/     Browser dashboard (Vite + React + Tailwind + shadcn/ui + GSAP). Subscribes via WebSocket; no backend.
 packages/volley-skill/    The /volley Claude Code slash command.
 packages/volley-wait/     The /wait Claude Code slash command (event-driven block on a topic).
