@@ -286,6 +286,11 @@ body,
   gap: 12px;
   min-width: 260px;
   padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line-hi);
+  border-radius: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 12px;
 }
@@ -331,6 +336,27 @@ body,
   font-size: 12px;
   text-transform: capitalize;
   cursor: pointer;
+}
+/* Radix Switch + Checkbox in the popover — shadcn's bg-primary / bg-input
+ * Tailwind classes don't resolve in this design system, so paint them via the
+ * project's tokens. Selectors are scoped to .vd-notify-popover so we don't
+ * affect any future shadcn controls elsewhere. */
+.vd-notify-popover [role="switch"] {
+  background: var(--surface-2);
+}
+.vd-notify-popover [role="switch"][data-state="checked"] {
+  background: var(--accent);
+}
+.vd-notify-popover [role="switch"] > span {
+  background: var(--fg);
+}
+.vd-notify-popover [role="checkbox"] {
+  border-color: var(--line-hi);
+}
+.vd-notify-popover [role="checkbox"][data-state="checked"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
 }
 .vd-search {
   display: flex;
