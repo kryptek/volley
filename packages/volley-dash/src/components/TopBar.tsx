@@ -16,6 +16,7 @@
  */
 import { Search, X } from "lucide-react";
 import { type ChangeEvent, type KeyboardEvent, useEffect, useRef } from "react";
+import { NotifySettings } from "./NotifySettings";
 import { Input } from "./ui/input";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
@@ -111,6 +112,7 @@ export function TopBar({
         <b style={{ color: "inherit" }}>{stuckCount}</b> stuck
       </div>
       <div className="vd-divider" />
+      <NotifySettings />
       <div className="vd-stat">
         <span
           className="vd-led"

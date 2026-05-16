@@ -16,6 +16,8 @@
  * handled inside TopBar.
  */
 import { useEffect, useMemo } from "react";
+import { useNotifyOnAgentEvent } from "../hooks/use-notify-on-agent-event";
+import { useNotifySettings } from "../hooks/use-notify-settings";
 import { useNow } from "../hooks/use-now";
 import type { VolleyMqttClient } from "../lib/mqtt-client";
 import { DashboardProvider, useDashboard } from "../state/dashboard-context";
@@ -41,6 +43,8 @@ export function Dashboard({ brokerUrl, clientFactory }: DashboardProps = {}): JS
 function DashboardShell(): JSX.Element {
   const { state, dispatch, brokerStatus, brokerUrl } = useDashboard();
   const now = useNow();
+  const [notifySettings] = useNotifySettings();
+  useNotifyOnAgentEvent(notifySettings, state.events);
 
   const agents = useMemo(() => Array.from(state.agents.values()), [state.agents]);
   const nsScoped = useMemo(
