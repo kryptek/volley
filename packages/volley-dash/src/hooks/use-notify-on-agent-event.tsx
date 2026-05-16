@@ -6,8 +6,10 @@
  * Strategy: snapshot `events[0].id` on mount so pre-existing history doesn't
  * fire a flurry of notifications; on each subsequent change, walk newest→
  * oldest until we re-meet that id, then dispatch the collected events in
- * chronological order. The "last seen" id ref tolerates the ring buffer
- * dropping old events off the tail.
+ * chronological order. The walk is bounded to MAX_WALK so a burst that fills
+ * the ring buffer (≥200 events between renders, e.g. broker-reconnect storm)
+ * cannot carpet-bomb the user's notification center — overflow is skipped and
+ * the cursor advances to head.
  *
  * Two gates per event:
  *   - `settings.enabled` + `Notification.permission === "granted"` → fire
@@ -19,6 +21,11 @@
 import { useEffect, useRef } from "react";
 import type { FeedEvent } from "../types";
 import type { NotifyOptions } from "./use-notify-settings";
+
+/** Upper bound on the per-render walk — guards against ring-buffer overflow
+ * carpet-bombing notifications on a reconnect storm. Well above any realistic
+ * one-render delta; well below the buffer's 200-event cap. */
+const MAX_WALK = 64;
 
 export function useNotifyOnAgentEvent(settings: NotifyOptions, events: FeedEvent[]): void {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -39,8 +46,9 @@ export function useNotifyOnAgentEvent(settings: NotifyOptions, events: FeedEvent
     }
 
     const fresh: FeedEvent[] = [];
-    for (const ev of events) {
-      if (ev.id === lastSeenIdRef.current) break;
+    for (let i = 0; i < events.length && i < MAX_WALK; i++) {
+      const ev = events[i];
+      if (ev === undefined || ev.id === lastSeenIdRef.current) break;
       fresh.push(ev);
     }
     const head = events[0];

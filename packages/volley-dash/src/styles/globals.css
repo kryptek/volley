@@ -252,6 +252,86 @@ body,
     display: none;
   }
 }
+
+/* NotifySettings — bell-icon popover for browser-notification preferences. */
+.vd-notify-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.vd-notify-trigger:hover {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.vd-notify-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.vd-notify-trigger .vd-icon {
+  width: 14px;
+  height: 14px;
+}
+.vd-notify-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 260px;
+  padding: 14px;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 12px;
+}
+.vd-notify-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.vd-notify-label {
+  color: var(--fg);
+  font-weight: 500;
+  font-size: 12px;
+  margin: 0;
+}
+.vd-notify-caption {
+  display: block;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 0;
+}
+.vd-notify-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.vd-notify-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.vd-notify-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vd-notify-check label {
+  color: var(--fg-2);
+  font-size: 12px;
+  text-transform: capitalize;
+  cursor: pointer;
+}
 .vd-search {
   display: flex;
   align-items: center;
