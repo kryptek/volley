@@ -1,5 +1,5 @@
 /**
- * NotifySettings — the gear-icon popover that lives in the top bar (right of
+ * NotifySettings — the bell-icon popover that lives in the top bar (right of
  * the namespace dropdown, before the broker LED). Three control groups:
  *   1. "Browser notifications" — Radix Switch. On toggle-on, requests
  *      `Notification.requestPermission()`; if denied/unsupported, the switch

@@ -86,7 +86,7 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 
 - [ ] Open DevTools → Rendering → "Emulate CSS media feature prefers-reduced-motion" → set to `reduce`.
 
-- [ ] Publish another `blocked`:
+- [ ] Publish another matching event (e.g. `failed`):
    ```sh
    bun run packages/volley-cli/src/cli.ts pub \
      --agent-id smoke-beta --namespace default \

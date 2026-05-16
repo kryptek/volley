@@ -1,5 +1,5 @@
 /**
- * Tests for the NotifySettings popover — the gear-icon control surface that
+ * Tests for the NotifySettings popover — the bell-icon control surface that
  * sits on the right of the TopBar. Covers the three high-value behaviors: the
  * popover exposes all three control groups, the browser-notifications switch
  * rolls back when permission is denied, and a grant persists enabled=true.
