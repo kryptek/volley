@@ -145,4 +145,46 @@ describe("actionsFromMessage — registry + transition basics", () => {
       expect(agentAction.agent.pct).toBe(50);
     }
   });
+
+  it("tolerates stringified payload — extracts progress + msg as if it were an object", () => {
+    // Some non-conforming agents JSON-encode the payload before publishing
+    // (a common dispatch-brief footgun). The dashboard must still render
+    // progress bars for them, otherwise live observability silently fails.
+    const state = stateWith([agent({ status: "working", msg: "old", pct: 20 })]);
+    const { agentAction, feedEvent } = actionsFromMessage(
+      topic({ channel: "progress" }),
+      envelope({
+        channel: "progress",
+        type: "tick",
+        payload: '{"msg":"stringified","progress":75}' as unknown as Record<string, unknown>,
+      }),
+      state,
+    );
+    expect(agentAction?.type).toBe("AGENT_UPSERT");
+    if (agentAction?.type === "AGENT_UPSERT") {
+      expect(agentAction.agent.msg).toBe("stringified");
+      expect(agentAction.agent.pct).toBe(75);
+    }
+    expect(feedEvent.msg).toBe("stringified");
+  });
+
+  it("falls back to empty payload when stringified payload is not valid JSON", () => {
+    const state = stateWith([agent({ status: "working", msg: "old", pct: 20 })]);
+    const { agentAction } = actionsFromMessage(
+      topic({ channel: "progress" }),
+      envelope({
+        channel: "progress",
+        type: "tick",
+        payload: "not valid json {{{" as unknown as Record<string, unknown>,
+      }),
+      state,
+    );
+    expect(agentAction?.type).toBe("AGENT_UPSERT");
+    if (agentAction?.type === "AGENT_UPSERT") {
+      // No progress field readable → keeps prior pct.
+      expect(agentAction.agent.pct).toBe(20);
+      // No msg readable → keeps prior msg.
+      expect(agentAction.agent.msg).toBe("old");
+    }
+  });
 });

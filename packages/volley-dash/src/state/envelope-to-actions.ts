@@ -39,6 +39,31 @@ function envelopeWallTime(envelope: ParsedEnvelope, fallback: number): number {
   return fallback;
 }
 
+/**
+ * Coerce an envelope's payload into a plain object for property access. The SPEC
+ * requires payload be a parsed JSON object, but some non-conforming agents
+ * publish payload as a JSON-encoded string (a common dispatch-brief footgun where
+ * a model stringifies before the MCP server serializes). Tolerate both shapes so
+ * the dashboard renders progress bars and other payload-derived fields regardless.
+ */
+function coercePayload(raw: unknown): Record<string, unknown> {
+  if (raw === null || raw === undefined) return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // fall through to empty payload
+    }
+  }
+  return {};
+}
+
 function buildAgent(
   parsed: ParsedTopic,
   envelope: ParsedEnvelope,
@@ -46,7 +71,7 @@ function buildAgent(
   now: number,
 ): Agent {
   const wallTime = envelopeWallTime(envelope, now);
-  const payload = (envelope.payload ?? {}) as Record<string, unknown>;
+  const payload = coercePayload(envelope.payload);
   const status: AgentStatus = isStatusType(envelope.type)
     ? envelope.type
     : (prior?.status ?? "registered");
@@ -185,10 +210,7 @@ export function actionsFromMessage(
 }
 
 function extractFeedMsg(envelope: ParsedEnvelope): string {
-  const payload = envelope.payload;
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const msg = (payload as Record<string, unknown>).msg;
-    if (typeof msg === "string") return msg;
-  }
+  const payload = coercePayload(envelope.payload);
+  if (typeof payload.msg === "string") return payload.msg;
   return envelope.type;
 }
