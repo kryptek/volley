@@ -3,9 +3,12 @@ import {
   parseCsv,
   parseGlobal,
   parseJsonPayload,
+  parseLifecycleEventCsv,
   parsePositiveInt,
+  parseSurfaceCsv,
   resolveBrokerUrl,
   resolveNamespace,
+  resolveWebhookUrl,
 } from "../src/args";
 
 describe("parseGlobal", () => {
@@ -86,5 +89,61 @@ describe("resolveBrokerUrl / resolveNamespace", () => {
     expect(resolveNamespace(undefined, { VOLLEY_NAMESPACE: "ns-env" })).toBe("ns-env");
     expect(resolveNamespace(undefined, {})).toBe("default");
     expect(() => resolveNamespace("Bad Name", {})).toThrow(/namespace/);
+  });
+});
+
+describe("parseLifecycleEventCsv", () => {
+  it("parses a valid CSV of lifecycle types", () => {
+    expect(parseLifecycleEventCsv("blocked,failed,reaped")).toEqual([
+      "blocked",
+      "failed",
+      "reaped",
+    ]);
+    expect(parseLifecycleEventCsv("done")).toEqual(["done"]);
+  });
+  it("throws on empty input", () => {
+    expect(() => parseLifecycleEventCsv("")).toThrow(/at least one lifecycle type/);
+  });
+  it("throws on unknown type, listing the valid types in the message", () => {
+    expect(() => parseLifecycleEventCsv("garbage")).toThrow(/unknown lifecycle type "garbage"/);
+    expect(() => parseLifecycleEventCsv("blocked,bogus")).toThrow(
+      /spawning,working,done,blocked,failed,reaped,registered/,
+    );
+  });
+});
+
+describe("parseSurfaceCsv", () => {
+  it("parses a valid CSV of surfaces", () => {
+    expect(parseSurfaceCsv("bell,desktop,webhook")).toEqual(["bell", "desktop", "webhook"]);
+    expect(parseSurfaceCsv("bell")).toEqual(["bell"]);
+  });
+  it("throws on empty input", () => {
+    expect(() => parseSurfaceCsv("")).toThrow(/at least one surface/);
+  });
+  it("throws on unknown surface, listing the valid surfaces in the message", () => {
+    expect(() => parseSurfaceCsv("zzz")).toThrow(/unknown surface "zzz"/);
+    expect(() => parseSurfaceCsv("bell,zzz")).toThrow(/bell,desktop,webhook/);
+  });
+});
+
+describe("resolveWebhookUrl", () => {
+  it("prefers the flag value over the env var", () => {
+    expect(
+      resolveWebhookUrl("https://flag.example/x", {
+        VOLLEY_NOTIFY_WEBHOOK_URL: "https://env.example/x",
+      }),
+    ).toBe("https://flag.example/x");
+  });
+  it("falls back to the env var when the flag is absent", () => {
+    expect(
+      resolveWebhookUrl(undefined, { VOLLEY_NOTIFY_WEBHOOK_URL: "https://env.example/x" }),
+    ).toBe("https://env.example/x");
+  });
+  it("returns null when neither flag nor env is set", () => {
+    expect(resolveWebhookUrl(undefined, {})).toBeNull();
+  });
+  it("throws on non-http(s) scheme", () => {
+    expect(() => resolveWebhookUrl("file:///tmp/x", {})).toThrow(/http:\/\/ or https:\/\//);
+    expect(() => resolveWebhookUrl("ftp://example.com", {})).toThrow(/http:\/\/ or https:\/\//);
   });
 });

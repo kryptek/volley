@@ -238,6 +238,42 @@ export class VolleyBroker {
    * "block until predicate true," vs. `subscribeCollect` which is "block until N
    * messages arrive or time runs out."
    */
+  /**
+   * Subscribe to a topic pattern and invoke `onMessage` for every message,
+   * indefinitely. Returns an `unsubscribe` function that detaches the listener,
+   * calls MQTT UNSUBSCRIBE, and resolves once both are clean.
+   *
+   * Unlike `subscribeCollect`, this does NOT accumulate messages in memory —
+   * it streams them through the callback. The right primitive for indefinite-
+   * runtime consumers like `volley notify`.
+   */
+  async subscribeStream(
+    topicPattern: string,
+    onMessage: (msg: { topic: string; payload: string }) => void,
+  ): Promise<() => Promise<void>> {
+    const client = this.requireClient();
+    const listener = (t: string, p: Buffer) => {
+      onMessage({ topic: t, payload: p.toString() });
+    };
+    client.on("message", listener);
+    await new Promise<void>((resolve, reject) => {
+      client.subscribe(topicPattern, { qos: 1 }, (err) => {
+        if (err) {
+          client.removeListener("message", listener);
+          reject(
+            new VolleyError("BROKER_DOWN", `subscribe failed for ${topicPattern}: ${err.message}`),
+          );
+          return;
+        }
+        resolve();
+      });
+    });
+    return async () => {
+      client.removeListener("message", listener);
+      await client.unsubscribeAsync(topicPattern).catch(() => {});
+    };
+  }
+
   async subscribeUntil(
     topicPattern: string,
     predicate: (payload: string, topic: string) => boolean,

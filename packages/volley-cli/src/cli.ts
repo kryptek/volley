@@ -8,11 +8,12 @@ const VERSION = "0.1.0-dev";
 const USAGE = `Usage: volley <subcommand> [options]
 
 Subcommands:
-  pub    Publish one envelope to a Volley channel
-  sub    Subscribe to a wildcard topic pattern (live tail)
-  wait   Block until an agent reaches a terminal status
-  list   Enumerate agents registered on the broker
-  dash   Launch the Volley dashboard (Vite)
+  pub      Publish one envelope to a Volley channel
+  sub      Subscribe to a wildcard topic pattern (live tail)
+  wait     Block until an agent reaches a terminal status
+  list     Enumerate agents registered on the broker
+  dash     Launch the Volley dashboard (Vite)
+  notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -50,6 +51,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/list")).list as Subcommand;
     case "dash":
       return (await import("./commands/dash")).dash as Subcommand;
+    case "notify":
+      return (await import("./commands/notify")).notify as Subcommand;
     default:
       return null;
   }

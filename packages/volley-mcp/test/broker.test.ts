@@ -312,3 +312,101 @@ describe("VolleyBroker subscribeUntil", () => {
     expect(got).toBeNull();
   });
 });
+
+describe("VolleyBroker subscribeStream", () => {
+  let tb: TestBroker;
+  let b: VolleyBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+    b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "stream-aaaa",
+      willTopic: "volley/test/stream-aaaa/status",
+      willPayload: "{}",
+    });
+  });
+  afterEach(async () => {
+    await b.disconnect();
+    await tb.close();
+  });
+
+  it("invokes the listener for each published message in publish order", async () => {
+    const received: { topic: string; payload: string }[] = [];
+    const unsubscribe = await b.subscribeStream("volley/test/stream/+", (msg) => {
+      received.push(msg);
+    });
+
+    const pub = new VolleyBroker();
+    await pub.connect({
+      url: tb.url,
+      agentId: "stream-pub",
+      willTopic: "volley/test/stream-pub/status",
+      willPayload: "{}",
+    });
+    try {
+      // QoS 1 is the only way to guarantee publish-order delivery to a single
+      // subscriber against a single broker.
+      await pub.publish("volley/test/stream/1", "one", { qos: 1, retain: false });
+      await pub.publish("volley/test/stream/2", "two", { qos: 1, retain: false });
+      await pub.publish("volley/test/stream/3", "three", { qos: 1, retain: false });
+    } finally {
+      await pub.disconnect();
+    }
+
+    // Give the broker a beat to deliver all three.
+    for (let i = 0; i < 50 && received.length < 3; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(received.map((m) => m.payload)).toEqual(["one", "two", "three"]);
+    expect(received.map((m) => m.topic)).toEqual([
+      "volley/test/stream/1",
+      "volley/test/stream/2",
+      "volley/test/stream/3",
+    ]);
+
+    await unsubscribe();
+  });
+
+  it("stops invoking the listener after unsubscribe() resolves", async () => {
+    const received: { topic: string; payload: string }[] = [];
+    const unsubscribe = await b.subscribeStream("volley/test/stop/+", (msg) => {
+      received.push(msg);
+    });
+
+    const pub = new VolleyBroker();
+    await pub.connect({
+      url: tb.url,
+      agentId: "stop-pub",
+      willTopic: "volley/test/stop-pub/status",
+      willPayload: "{}",
+    });
+    try {
+      await pub.publish("volley/test/stop/1", "before", { qos: 1, retain: false });
+      // Wait for the pre-unsubscribe delivery.
+      for (let i = 0; i < 50 && received.length < 1; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(received).toHaveLength(1);
+
+      await unsubscribe();
+
+      await pub.publish("volley/test/stop/2", "after", { qos: 1, retain: false });
+      // Give the broker time to (not) deliver.
+      await new Promise((r) => setTimeout(r, 200));
+    } finally {
+      await pub.disconnect();
+    }
+
+    // Still only the pre-unsubscribe message.
+    expect(received.map((m) => m.payload)).toEqual(["before"]);
+  });
+
+  it("rejects with BROKER_DOWN when invoked against a disconnected client", async () => {
+    b._destroyForTest();
+    await expect(b.subscribeStream("volley/test/dead/+", () => {})).rejects.toMatchObject({
+      code: "BROKER_DOWN",
+    });
+  });
+});
