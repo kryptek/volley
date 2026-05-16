@@ -112,11 +112,25 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 Run the smoke at tag time. Record results inline below before annotating the `v0.1.3` tag:
 
 ```
-RESULTS (YYYY-MM-DD):
-  - CLI notify: <bell|desktop|webhook fire counts, observed latency>
-  - Dashboard: <permission grant flow OK, banner fired, chime fired>
-  - prefers-reduced-motion: <chime silenced as expected, banner still fires>
-  - Cleanup: <retained slots cleared OK>
+RESULTS (2026-05-16):
+  - CLI notify: published 5 envelopes for smoke-alpha (working / blocked / done / failed / reaped).
+    Surfaces fired exactly on blocked + failed + reaped (3/3 expected). working + done correctly
+    suppressed by default --on. Each fired envelope: bell + desktop banner + webhook POST
+    (verified via nc -lk 9999 capture — 3 smoke-alpha POSTs). Stdout: 3 JSON lines, each with
+    surfaces:["bell","desktop","webhook"]. SIGINT shutdown clean ('[notify] shutting down' + exit 0).
+    Subjective latency from `volley pub` → bell + banner: well under 1s.
+  - Dashboard: popover renders correctly with solid surface + visible Radix Switch/Checkbox controls
+    (required one CSS follow-up commit during smoke — see 1fa5567). Hook fired exactly per spec
+    against a stubbed Notification API (WKWebView denies permission, so stubs were necessary):
+    2 banners on 2 matching publishes (blocked, failed), 0 banner for non-matching working / progress.
+    new Notification('Volley: smoke-beta', {body: <type>, tag: 'smoke-beta'}) — matches §4.3 byte-for-byte.
+  - prefers-reduced-motion: under reduce-motion=false, audio.play() fired once on a blocked publish.
+    Under reduce-motion=true (forced via matchMedia stub), failed publish still fired the banner but
+    audio.play() count stayed at 1 — chime correctly silenced (WCAG SC 2.3.3).
+  - Cleanup: retained registry + status slots cleared for smoke-alpha and smoke-beta via
+    `mosquitto_pub -t <topic> -n -r`. netcat listener killed.
+  - One real issue surfaced: shadcn's stock Tailwind tokens (bg-popover, bg-primary, bg-input,
+    bg-background) don't resolve in the project's OKLCH design system, so the popover content
+    rendered visually transparent and switches were invisible. Fixed in commit 1fa5567 with
+    scoped overrides on .vd-notify-popover. Tests still pass (134 dashboard tests).
 ```
-
-`<TBD — fill after manual smoke>`
