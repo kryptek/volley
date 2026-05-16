@@ -192,6 +192,7 @@ Conforming agents MUST:
 Conforming agents SHOULD:
 
 - Publish `progress` events at meaningful checkpoints
+- When the agent can estimate a percent-complete, include `payload.progress` as a number in `[0, 100]` on `progress` and/or `status` envelopes — dashboards and coordinators use it to render determinate progress bars instead of indeterminate sweeps. Implementations MUST treat the field as advisory (an estimate from the agent itself) and MUST tolerate `null`, missing, or non-numeric values by falling back to the last seen value or to an indeterminate display.
 - Publish a `result` retained message before terminal `status` so late-attaching tools can see the artifact pointer
 
 ### 4.4 Mailbox message types

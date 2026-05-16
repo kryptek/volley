@@ -127,10 +127,19 @@ For each issue in the dispatch set:
      1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"claude-opus-4-7\". The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
      2. Call vol_publish with channel=\"status\", type=\"working\", payload={ issue: <N>, started_at: <ISO timestamp> }.
 
-   AT MEANINGFUL CHECKPOINTS, publish progress via vol_publish:
-     - channel=\"progress\", type=\"tests-green\", payload={} — when test suite first passes
-     - channel=\"progress\", type=\"mvn-verify-done\", payload={} — when mvn verify passes
-     - channel=\"progress\", type=\"diff-ready\", payload={} — when implementation is complete
+   AT MEANINGFUL CHECKPOINTS, publish progress via vol_publish. Include a numeric progress field (0-100) in every payload so dashboards / coordinators can render a determinate progress bar instead of an indeterminate sweep. Suggested progression for a coding task — adjust the percentages to match the actual work shape, but always include the field:
+     - channel=\"progress\", type=\"prereqs-verified\", payload={ progress: 15 } — after prereq verification in step 1 / step 2 of your brief
+     - channel=\"progress\", type=\"scope-read\", payload={ progress: 25 } — after reading plan + linked docs
+     - channel=\"progress\", type=\"implementation-started\", payload={ progress: 40 } — first file edit
+     - channel=\"progress\", type=\"implementation-complete\", payload={ progress: 60 } — last file edit
+     - channel=\"progress\", type=\"tests-green\", payload={ progress: 75 } — when test suite first passes
+     - channel=\"progress\", type=\"mvn-verify-done\", payload={ progress: 75 } — when mvn verify passes (Java projects)
+     - channel=\"progress\", type=\"gates-green\", payload={ progress: 85 } — lint + typecheck + tests all clean
+     - channel=\"progress\", type=\"commit-made\", payload={ progress: 95 } — work committed to the branch
+     - channel=\"progress\", type=\"diff-ready\", payload={ progress: 95 } — implementation complete (alias for commit-made when no commit is made yet)
+   The final 100% comes from the terminal `status` envelope below, not a progress event.
+
+   You MAY also include `progress: N` in your `working`-state `status` envelope payload at startup or any time you publish a status tick — the dashboard reads `payload.progress` from any envelope.
 
    ON TERMINAL COMPLETION (successful, blocked, OR failed): you MUST call vol_publish ONCE with channel=\"status\" and one of:
      - type=\"done\", payload={ summary: \"<one-line>\", worktree: \"/private/tmp/example-issue-<N>\", deploy_md_path: \"./DEPLOY.md\" }
