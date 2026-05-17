@@ -28,6 +28,7 @@
   - [What gap does it fill?](#what-gap-does-it-fill)
   - [Why would *you* need it?](#why-would-you-need-it)
 - [The 60-second mental model](#the-60-second-mental-model) — three ideas, one diagram
+- [See it running](#see-it-running) — the dashboard, in one screenshot
 - [Quickstart (5 minutes, fresh Mac)](#quickstart-5-minutes-fresh-mac) — copy-paste setup
   - [1. Install Homebrew](#1-install-homebrew-skip-if-you-already-have-it)
   - [2. Install the MQTT broker](#2-install-the-mqtt-broker)
@@ -35,6 +36,7 @@
   - [4. Register the MCP server with Claude Code](#4-register-the-mcp-server-with-claude-code)
   - [5. Install the `/volley` skill](#5-install-the-volley-skill)
   - [6. See your first agent](#6-see-your-first-agent)
+  - [7. See everything in one view](#7-see-everything-in-one-view)
 - [Use cases](#use-cases) — five concrete scenarios
   - [1. Dispatch long-running work to autonomous agents](#1-dispatch-long-running-work-to-autonomous-agents)
   - [2. One pane of glass across machines](#2-one-pane-of-glass-across-machines)
@@ -120,6 +122,14 @@ Three ideas do all the work:
 3. **Lifecycle**: agents transition `spawning → registered → working → (done | blocked | failed) → reaped`. The retained value at `<id>/status` always reflects current state.
 
 That's it. Everything else in the spec is a refinement.
+
+---
+
+## See it running
+
+![Volley dashboard — agent grid with live status, progress bars, and a live event feed across all topics](docs/images/dashboard-grid.png)
+
+`volley dash` opens a browser view of every registered agent — live status, progress, retained envelopes, full event feed. No Volley-side backend; the browser connects directly to your broker over WebSocket. Launch command and walkthrough in [Quickstart step 7](#7-see-everything-in-one-view).
 
 ---
 
@@ -219,6 +229,36 @@ That's it. Your session is already there — the volley-mcp server auto-register
 To declare what your session does (capabilities, model, role) so other agents can find you, ask Claude to call `vol_register` with whatever fits — it's idempotent and updates the registry entry. For most casual use, you never have to.
 
 From here, look at the [`/volley`](packages/volley-skill/SKILL.md) and [`/volley-issues`](packages/volley-issues/SKILL.md) skills for what's possible.
+
+### 7. See everything in one view
+
+Launch the browser dashboard:
+
+```sh
+volley dash
+```
+
+That spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client.
+
+![Volley dashboard — agent grid](docs/images/dashboard-grid.png)
+
+Every registered agent shows up as a card with live status, progress, and capability tags. The top bar surfaces working/stuck counts, a namespace filter, broker connection state, and a notification bell (`/` focuses the agent filter). The right rail is a live event feed across all topics — status, progress, mailbox, result.
+
+Click any card to open the inspector drawer:
+
+![Volley dashboard — agent inspector drawer](docs/images/dashboard-detail.png)
+
+The drawer shows the retained status envelope verbatim, the agent's recent progress messages, and the topic subscriptions it's holding — useful when you're debugging a misbehaving publisher and want to see what the broker actually has.
+
+Flags worth knowing:
+
+```sh
+volley dash --no-open                     # don't auto-open the browser
+volley dash --build                       # production build + preview server
+volley dash --broker-url ws://host:9001   # point at a non-default broker
+```
+
+See [`packages/volley-cli/README.md#volley-dash`](packages/volley-cli/README.md#volley-dash) for the full flag set and [`packages/volley-dash/README.md`](packages/volley-dash/README.md) for the dashboard's own architecture notes (browser notifications, keyboard shortcuts, theming).
 
 ---
 
