@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Volley is an agent-messaging protocol — an MQTT topic + JSON envelope convention that lets agents from any vendor (Claude Code, Codex, plain shell scripts) coordinate across machines. This repo ships the spec, a reference MCP server, a CLI, a Claude Code skill, and dispatch-issues examples.
 
-**Status:** private MVP, no git remote. The repo goes public at Plan 7 launch. SPEC.md still has `<TBD-at-launch>` for the GitHub URL.
+**Status:** public; pre-1.0. Most recent shipped phase is Plan 9 at `v0.1.3` (notify subcommand + dashboard browser notifications). Canonical repository URL is in `spec/SPEC.md`.
 
 **Authoritative docs (read these before changing anything substantive):**
 - `spec/SPEC.md` — wire-format contract, MUST/SHOULD/MAY conformance, error codes

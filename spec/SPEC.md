@@ -4,7 +4,7 @@
 **Status:** Draft
 **License:** Apache 2.0
 **Website:** https://volley.systems
-**Repository:** https://github.com/<TBD-at-launch>/volley
+**Repository:** https://github.com/kryptek/volley
 
 ---
 
