@@ -987,6 +987,12 @@ ALLOW (program by bare name only — never a path):
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]
+  volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
+  volley auth add <agent_id> --role ROLE [--kind KIND] --json
+  volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
+  volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+    ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
+    LABEL 1..64 printable characters, not starting with `-`
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service

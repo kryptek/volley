@@ -37,7 +37,12 @@
             "wake_detected",
             "reap_suppressed",
             "reconciled",
-            "config_changed"
+            "config_changed",
+            "account_created",
+            "account_rotated",
+            "account_revoked",
+            "signin_link_issued",
+            "token_redeemed"
           ]
         },
         "payload": {

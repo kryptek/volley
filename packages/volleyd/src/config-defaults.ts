@@ -105,6 +105,14 @@ export const DAEMON_DEFAULTS = {
   issue_fetch_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
+  /** Kill a `volley auth` account command (accounts.ts) after this long. */
+  auth_exec_timeout_ms: 15_000,
+  /** Lifetime of a `signin_link` whose request names no `ttl_s`. */
+  signin_link_ttl_s: 600,
+  /** The longest a sign-in link may live (`volley auth` enforces the same bound). */
+  token_max_ttl_s: 86_400,
+  /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
+  reply_key_min_bits: 2048,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */

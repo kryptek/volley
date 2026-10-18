@@ -17,6 +17,17 @@ import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
 import {
+  AUTH_CHANNEL,
+  AUTH_OPS_FILTER,
+  AUTH_REDEEM_TOPIC,
+  type AuthOutcome,
+  type AuthReply,
+  accountOp,
+  authReplyTopic,
+  isValidCorrelationId,
+  redeemToken,
+} from "./accounts";
+import {
   type AdmissionState,
   type AdmissionSummary,
   type Sample,
@@ -248,6 +259,8 @@ export interface DaemonOptions {
   clock?: () => ClockSample;
   /** Override of the model-switch verification window (tests; ms). */
   recoveryTimeouts?: { modelSwitchVerifyMs?: number };
+  /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
+  authExec?: ExecFn;
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
 }
@@ -566,6 +579,10 @@ export class Daemon {
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
   private readonly deferred = new Set<string>();
+  /** Answered auth requests by `<topic>/<correlation_id>`, for QoS 1 redelivery. */
+  private readonly authAnswered = new Map<string, AuthReply>();
+  /** When each account last sent an auth request (account_list's `last_seen`). */
+  private readonly authSeen = new Map<string, string>();
   /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
   private readonly screens: ScreenPublisher;
   /** Remote hosts (T15) by resolved spec, their reverse tunnels and tunnel checks. */
@@ -794,6 +811,8 @@ export class Daemon {
     const legacyProgress = buildTopic(this.opts.namespace, "+", "progress");
     await (await this.broker.subscribeStream(legacyProgress, () => {}))();
     void this.leaseRequestLoop();
+    void this.drainLoop(AUTH_OPS_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
+    void this.drainLoop(AUTH_REDEEM_TOPIC, (m) => this.onAuthRequest(m.topic, m.payload));
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
       this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`),
@@ -3265,6 +3284,58 @@ export class Daemon {
       .catch((e: unknown) => this.log(`error: ${String(e)}`));
   }
 
+  /**
+   * An account op (`volley/_system/auth/ops/<username>`) or a token redemption
+   * (`volley/_system/auth/redeem`), answered on `volley/_system/auth/replies/<correlation_id>`.
+   * The broker ACL lets only an admin account write its own ops topic, so the topic names the
+   * sender; accounts.ts checks that account's role again.
+   */
+  private async onAuthRequest(topic: string, raw: string): Promise<void> {
+    const req = parseEnvelope(raw);
+    if (req === null || req.type !== "query") return;
+    const cid = req.correlation_id;
+    if (cid === null || !isValidCorrelationId(cid)) {
+      this.log(`dropped auth request on ${topic}: no usable correlation_id`);
+      return;
+    }
+    const replyTo = authReplyTopic(cid);
+    const send = (r: AuthReply) =>
+      this.publish(replyTo, this.envelope(AUTH_CHANNEL, "ack", r, cid), false);
+    const key = `${topic}/${cid}`;
+    const prior = this.authAnswered.get(key);
+    if (prior !== undefined) return send(prior);
+    const payload = (req.payload ?? {}) as Record<string, unknown>;
+    const exec = this.opts.authExec ?? realExec;
+    let out: AuthOutcome;
+    try {
+      if (topic === AUTH_REDEEM_TOPIC) {
+        out = await redeemToken(exec, payload);
+      } else {
+        const sender = topic.split("/")[4] ?? "";
+        this.authSeen.set(sender, new Date().toISOString());
+        out = await accountOp(exec, sender, payload, (name) => this.authSeen.get(name));
+      }
+    } catch (e) {
+      const op = typeof payload.op === "string" ? payload.op : "";
+      out = {
+        reply: {
+          text: "ACKED",
+          acked_type: "query",
+          op,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+    if (out.event !== undefined) this.system.append(out.event);
+    if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
+    this.authAnswered.set(key, out.reply);
+    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    }
+    await send(out.reply);
+  }
+
   private async handle(
     op: string,
     p: Record<string, unknown>,
@@ -3354,6 +3425,17 @@ export class Daemon {
           result: { version: r.version },
         };
       }
+      case "account_list":
+      case "account_create":
+      case "account_rotate":
+      case "account_revoke":
+      case "signin_link":
+      case "token_redeem":
+        // The mailbox does not name its sender (anyone who steers can write it).
+        return {
+          ok: false,
+          error: `${op} is answered only on volley/_system/auth/ops/<your username> (token_redeem: volley/_system/auth/redeem)`,
+        };
       default:
         return { ok: false, error: `unknown op '${op}'` };
     }

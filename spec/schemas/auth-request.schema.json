@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/auth-request.schema.json",
+  "title": "Volley Account / Token Request",
+  "description": "A request on volley/_system/auth/ops/<username> (account ops, admin accounts only) or volley/_system/auth/redeem (token_redeem). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.9.",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    },
+    {
+      "type": "object",
+      "required": [
+        "channel",
+        "type",
+        "payload",
+        "correlation_id"
+      ],
+      "properties": {
+        "channel": {
+          "const": "_system/auth"
+        },
+        "type": {
+          "const": "query"
+        },
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "enum": [
+                "account_list",
+                "account_create",
+                "account_rotate",
+                "account_revoke",
+                "signin_link",
+                "token_redeem"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+            },
+            "role": {
+              "enum": [
+                "admin",
+                "steer",
+                "watch",
+                "supervisor",
+                "peer"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "human",
+                "device",
+                "machine",
+                "service"
+              ]
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]*$"
+            },
+            "ttl_s": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "desk_url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://[^#]*$"
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^vly_(admin|signin)_[0-9a-f]{8}_[0-9a-f]{32}$"
+            },
+            "reply_key": {
+              "$ref": "#/$defs/reply_key"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "account_create"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "op",
+                  "name",
+                  "role",
+                  "reply_key"
+                ],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "account_rotate"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "op",
+                  "name",
+                  "reply_key"
+                ],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "account_revoke"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "op",
+                  "name"
+                ],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "signin_link"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "op",
+                  "role",
+                  "label",
+                  "reply_key"
+                ],
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "steer",
+                      "watch"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "token_redeem"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "op",
+                  "token",
+                  "label",
+                  "reply_key"
+                ],
+                "properties": {}
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "reply_key": {
+      "type": "object",
+      "required": [
+        "kty",
+        "n",
+        "e"
+      ],
+      "properties": {
+        "kty": {
+          "const": "RSA"
+        },
+        "n": {
+          "type": "string",
+          "minLength": 342,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "e": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "description": "An RSA public key (JWK, at least 2048 bits) the secret in the answer is sealed to with RSA-OAEP / SHA-256."
+    }
+  }
+}

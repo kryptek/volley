@@ -233,6 +233,12 @@ export const WAVE_EVENT_TYPES = [
   "reap_suppressed",
   "reconciled",
   "config_changed",
+  // Account management over the control channel (accounts.ts), in the `_system` journal.
+  "account_created",
+  "account_rotated",
+  "account_revoked",
+  "signin_link_issued",
+  "token_redeemed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
