@@ -50,6 +50,8 @@ export interface DecisionPayload {
 export interface DecisionRecord extends DecisionPayload {
   /** The task's stage when the decision opened; restored when its last open decision resolves. */
   resume_stage?: TaskStage;
+  /** `false`: opened with `park: false`, the task keeps running while it is open. */
+  parks?: boolean;
   rationale?: string;
 }
 
@@ -62,7 +64,15 @@ export interface DecisionInput {
   options?: string[];
   /** Optional caller-chosen id (idempotent re-open); default `d-<random>`. */
   id?: string;
+  /**
+   * `false`: a task-level decision that does not park its task (the work is untouched until the
+   * answer — plan_change decisions about in-flight tasks). Default: the task parks.
+   */
+  park?: boolean;
 }
+
+/** Whether an open decision parks its task in `awaiting_decision` (all do unless opened with `park: false`). */
+export const parksTask = (d: { parks?: boolean }): boolean => d.parks !== false;
 
 /** Task stages a task-level decision may not park: their dependents already moved on. */
 const SETTLED = new Set<TaskStage>(["done", "merge_ready", "cancelled"]);
@@ -117,6 +127,7 @@ export function openEvent(
           ? { options: input.options }
           : {}),
         opened_at: now.toISOString(),
+        ...(input.park === false ? { parks: false } : {}),
       },
     },
   };
@@ -154,7 +165,7 @@ export function resolveEvent(
 
 /** The retained topic payload (decision.schema.json) for a decision record. */
 export function decisionPayload(d: DecisionRecord): DecisionPayload {
-  const { resume_stage: _s, rationale: _r, ...payload } = d;
+  const { resume_stage: _s, rationale: _r, parks: _p, ...payload } = d;
   return payload;
 }
 

@@ -37,6 +37,7 @@ coordinator session.
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
 - [Recovery](#recovery)
+- [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
@@ -109,7 +110,8 @@ config.hard_ceiling: must be <= 100
 | `volleyd daemon` | Run the supervisor in the foreground until SIGINT/SIGTERM. |
 | `volleyd install [--dry-run]` | Write `~/Library/LaunchAgents/systems.volley.volleyd.plist` and `launchctl bootstrap` it. |
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
-| `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. |
+| `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
+| `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors. |
 | `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions and `needs you: N` on waves the caller owns. `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
@@ -685,6 +687,62 @@ spawn path (its lock check still applies). Either answer journals `agent_retired
 "gone" }` for the vanished agent (its minted credentials revoked), so no later restart
 reconciles it again. Open recovery decisions are re-linked to the agent
 they name when it is watched again, so `resumed` still closes them after a restart.
+
+---
+
+## Plan changes (versioned wave files)
+
+Plans change while a wave runs. `volleyd run <wave.yaml>` with the id of a wave the daemon already
+holds (running, paused or awaiting a decision) submits the file as that wave's **next version**:
+
+1. The file is stored as `$VOLLEYD_HOME/waves/<wave>/v<N>.yaml`. The daemon numbers versions:
+   the first submission is always `v1.yaml` (plan v1), whatever the file's own `version:` field
+   says; that field is informational.
+2. `wave_versioned` is journaled with the structural diff (`src/plan-diff.ts`: tasks added,
+   removed, and changed — dependencies, issue, pipeline, model), the submitted plan and the
+   effective plan, then the rule events below. A file with no changes is refused (`already
+   submitted as vN`); the order of tasks or keys alone is no change. Other edits that are not
+   structural (a title, a `files` hint, `config:`) still make a new version, with an empty diff.
+   A different `repo:`, `release_branch:` or `namespace:` is refused: running agents work against
+   them. A re-submission of a wave with an owner must come from that owner (`--owner`).
+3. The rules (`src/plan-apply.ts`) apply mechanically, against the wave's current state:
+
+| Change | Task not started | Task in flight (an agent spawned or spawning, or past `queued`) |
+|---|---|---|
+| task added | `task_queued` (a task removed earlier and re-added is re-queued) | — |
+| task removed | `task_cancelled` (an admitted task gives its admission back) | untouched; decision `plan_change` "stop T3 (implementer working 14 min)?" — `stop` / `let finish` |
+| `after` changed | the new dependencies apply (`waiting_on` re-evaluated) | not paused (it already started); its dependents re-evaluate |
+| `issue` changed | applies | keeps the old issue; decision `plan_change` — `restart` / `let finish` |
+| `pipeline` / `model` changed | applies | applies to stages not yet started; running agents keep theirs |
+
+Tasks that finished (`merge_ready`, `done`) are left as they are. The scheduler and spawner use the
+*effective* plan: the submitted one, plus removed in-flight tasks and in-flight tasks' old issues,
+kept until their decision is answered. The wave state's `spec` is the plan as submitted and
+`version` is the plan version; `volleyd status` shows `plan v3 (2 tasks pending decision)`.
+
+`plan_change` decisions are ordinary [decisions](#decisions): opened through the decision store,
+published retained on `volley/_waves/<wave>/decisions/<id>`, listed by `volleyd decisions` and
+answered with `volleyd resolve`. Unlike other decisions they do **not** park their task — the
+in-flight work is untouched until the answer. Each carries `change` (`removed` | `issue`),
+`plan_version` and, for an issue change, `from_issue` / `to_issue`. The answers act:
+
+- `stop` (task removed): the task's running agents get a mailbox `cancel` and an interrupt, and
+  the task is `task_cancelled`.
+- `restart` (issue changed): the same cancel, then the task is queued again on the new issue (if
+  the current plan still points it there) and starts over.
+- `let finish`: nothing; the task finishes on what it was doing.
+
+A question is asked once. A later version does not ask again about a decision that is open or
+answered; re-pointing an issue to yet another issue is a new question with a new id
+(`plan_change-<hash of wave, task, change, version>`), and supersedes an open one
+(`decision_resolved` with answer `superseded`). A later version that undoes a change withdraws its
+open decision (answer `withdrawn`), and removing a task withdraws its open issue decision before
+asking to stop it. A version's `config:` block replaces the wave's overrides.
+
+```sh
+volleyd diff 2026-10-20-example wave-v2.yaml   # + T6 / - T3 / ~ T2  after +T6; model a -> b
+volleyd run wave-v2.yaml                        # submitted wave 2026-10-20-example plan v2
+```
 
 ---
 

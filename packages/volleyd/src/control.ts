@@ -4,7 +4,9 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
+import type { PlanDiff } from "./plan-diff";
 import type { PathError } from "./schemas";
 
 /**
@@ -27,6 +29,7 @@ export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 /** Control ops the daemon answers. */
 export type ControlOp =
   | "run"
+  | "diff"
   | "status"
   | "config_get"
   | "config_set"
@@ -57,6 +60,8 @@ export interface ControlResponse {
   rejected?: PathError[];
   /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
   warnings?: string[];
+  /** run (a new version of a submitted wave) and diff: the structural plan change. */
+  plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
