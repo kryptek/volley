@@ -1,0 +1,10 @@
+{
+  "session_id": "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+  "transcript_path": "/tmp/volley-hooks-fixture/transcript.jsonl",
+  "cwd": "/tmp/volley-hooks-fixture",
+  "prompt_id": "04ca2be9-16e8-4c27-91d5-14e8574ea845",
+  "permission_mode": "bypassPermissions",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Both reviews are in.\n\nShould I merge PR 12 now?\nIt has two approvals.\nOr should I wait for CI?"
+}

@@ -1,0 +1,21 @@
+{
+  "session_id": "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+  "transcript_path": "/tmp/volley-hooks-fixture/transcript.jsonl",
+  "cwd": "/tmp/volley-hooks-fixture",
+  "prompt_id": "409de951-0cf7-4bb5-8410-479493e00612",
+  "permission_mode": "bypassPermissions",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo hi",
+    "description": "Print hi"
+  },
+  "tool_response": {
+    "stdout": "hi",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  },
+  "tool_use_id": "toolu_01NFF7V78DPYfDYn7DtY52ck",
+  "duration_ms": 394
+}
