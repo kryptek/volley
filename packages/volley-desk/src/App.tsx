@@ -11,16 +11,14 @@ import { type Rect, useViewport } from "./canvas/useViewport";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState, WaveView } from "./store/types";
-import { AgentWindow } from "./windows/agent/AgentWindow";
+import { AGENT_WIDTH, AgentWindow, NEUTRAL_ACCENT } from "./windows/agent/AgentWindow";
 
 const WAVE_W = 620;
-const AGENT_W = 460;
 const WAVE_H = 300;
 const AGENT_H = 470;
 const GAP = 36;
 const CGAP = 96;
 const ACCENT = "#6ee7f9";
-const NEUTRAL = "#a3abc0";
 
 type Pos = { x: number; y: number };
 
@@ -33,7 +31,7 @@ function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]
     const kids = groups[id] ?? [];
     kids.forEach((a, k) => {
       at[a.id] = {
-        x: WAVE_W + GAP + (k % 2) * (AGENT_W + GAP),
+        x: WAVE_W + GAP + (k % 2) * (AGENT_WIDTH + GAP),
         y: y + Math.floor(k / 2) * (AGENT_H + GAP),
       };
     });
@@ -69,7 +67,7 @@ export default function App() {
 
   const rects: Rect[] = waveIds.flatMap((id) => [
     { ...pos(id), w: WAVE_W, h: WAVE_H },
-    ...(groups[id] ?? []).map((a) => ({ ...pos(a.id), w: AGENT_W, h: AGENT_H })),
+    ...(groups[id] ?? []).map((a) => ({ ...pos(a.id), w: AGENT_WIDTH, h: AGENT_H })),
   ]);
   const fitted = useRef(false);
   useEffect(() => {
@@ -78,10 +76,7 @@ export default function App() {
     fitTo(rects);
   });
 
-  const frame = (id: string, accent: string, width: number) => ({
-    id,
-    accent,
-    width,
+  const place = (id: string) => ({
     pos: pos(id),
     z: z(id),
     scale: view.s,
@@ -103,7 +98,12 @@ export default function App() {
               wave={state.waves[id]}
               id={id}
               count={groups[id]?.length ?? 0}
-              frame={frame(id, id === UNASSIGNED ? NEUTRAL : ACCENT, WAVE_W)}
+              frame={{
+                ...place(id),
+                id,
+                accent: id === UNASSIGNED ? NEUTRAL_ACCENT : ACCENT,
+                width: WAVE_W,
+              }}
             />
           ))}
           {waveIds.flatMap((id) =>
@@ -115,7 +115,7 @@ export default function App() {
                 agent={a}
                 wave={state.waves[id]}
                 accent={ACCENT}
-                frame={frame(a.id, ACCENT, AGENT_W)}
+                frame={place(a.id)}
               />
             )),
           )}

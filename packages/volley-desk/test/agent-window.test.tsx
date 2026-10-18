@@ -5,7 +5,7 @@ import { DeskStoreProvider } from "../src/store/context";
 import { demoMessages, demoReviewer } from "../src/store/fixtures";
 import { UNASSIGNED, initialState, reduceAll } from "../src/store/reducer";
 import type { DeskMessage, DeskState } from "../src/store/types";
-import { AgentWindow, NEUTRAL_ACCENT } from "../src/windows/agent/AgentWindow";
+import { AgentWindow, NEUTRAL_ACCENT, markStatus } from "../src/windows/agent/AgentWindow";
 import { Pipeline } from "../src/windows/agent/Pipeline";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
@@ -23,6 +23,21 @@ const frame = {
 
 function stateWith(...extra: DeskMessage[]): DeskState {
   return reduceAll(initialState(), [...demoMessages(NOW), ...extra]);
+}
+
+function status(id: string, type: string, at: number, payload: unknown = {}): DeskMessage {
+  return {
+    topic: `volley/demo/${id}/status`,
+    envelope: {
+      schema_version: "0.1",
+      agent_id: id,
+      wall_time: new Date(at).toISOString(),
+      channel: "status",
+      type,
+      payload,
+    },
+    receivedAt: at,
+  };
 }
 
 function renderAgent(
@@ -124,6 +139,8 @@ describe("AgentWindow", () => {
     expect(screen.getByText(UNASSIGNED)).toHaveClass("chip--wave");
     expect(container.querySelector(".a-title")).toBeNull();
     expect(container.querySelector(".pipe")).toBeNull();
+    // The title already names a task-less agent by its id; it is not repeated.
+    expect(screen.getAllByText("adhoc-1")).toHaveLength(1);
     expect(container.querySelector(".hb")).toHaveTextContent("—");
     expect(container.querySelector(".win-foot")).toHaveTextContent("model unknown");
   });
@@ -185,6 +202,80 @@ describe("AgentWindow", () => {
     );
     const line = screen.getByText("needs you");
     expect(line.parentElement?.querySelector(".narr")).not.toBeNull();
+  });
+});
+
+describe("AgentWindow status mark", () => {
+  it("a done agent that is then reaped keeps its Completed mark", () => {
+    const state = stateWith(
+      status(FIXUP, "done", NOW + 1000, { msg: "merged" }),
+      status(FIXUP, "reaped", NOW + 2000, { reason: "disconnect" }),
+    );
+    renderAgent(state, FIXUP, { now: NOW + 3000 });
+    expect(screen.getByRole("img", { name: "Completed" })).toBeInTheDocument();
+  });
+
+  it("an agent reaped while working shows the crash (failed) mark", () => {
+    const state = stateWith(status(FIXUP, "reaped", NOW + 1000, { reason: "disconnect" }));
+    renderAgent(state, FIXUP, { now: NOW + 2000 });
+    expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
+  });
+
+  it("a blocked agent does not look like one that has not started", () => {
+    const state = stateWith(status(FIXUP, "blocked", NOW + 1000, { reason: "needs a decision" }));
+    renderAgent(state, FIXUP, { now: NOW + 2000 });
+    expect(screen.queryByRole("img", { name: "Pending" })).toBeNull();
+    expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
+  });
+
+  const at = (type: string) => ({ type, payload: {}, at: NOW });
+  const fe = (channel: string, type: string) => ({
+    topic: `volley/demo/a/${channel}`,
+    envelope: { schema_version: "0.1", agent_id: "a", channel, type, payload: {} },
+    receivedAt: NOW,
+  });
+  it.each([
+    ["no status", "pending", null, []],
+    ["spawning", "pending", at("spawning"), []],
+    ["registered", "pending", at("registered"), []],
+    ["working", "running", at("working"), []],
+    ["done", "done", at("done"), []],
+    ["failed", "failed", at("failed"), []],
+    ["blocked", "failed", at("blocked"), []],
+    ["reaped after done", "done", at("reaped"), [fe("status", "done"), fe("status", "reaped")]],
+    [
+      "reaped after done, then a heartbeat",
+      "done",
+      at("reaped"),
+      [fe("status", "done"), fe("progress", "heartbeat"), fe("status", "reaped")],
+    ],
+    [
+      "reaped after failed",
+      "failed",
+      at("reaped"),
+      [fe("status", "failed"), fe("status", "reaped")],
+    ],
+    [
+      "reaped after blocked",
+      "failed",
+      at("reaped"),
+      [fe("status", "blocked"), fe("status", "reaped")],
+    ],
+    [
+      "reaped while working",
+      "failed",
+      at("reaped"),
+      [fe("status", "working"), fe("status", "reaped")],
+    ],
+    [
+      "reaped, replay with only a result",
+      "done",
+      at("reaped"),
+      [fe("result", "pr"), fe("status", "reaped")],
+    ],
+    ["reaped, nothing else known", "failed", at("reaped"), [fe("status", "reaped")]],
+  ] as const)("%s → %s", (_name, mark, st, feed) => {
+    expect(markStatus({ status: st, feed: [...feed] })).toBe(mark);
   });
 });
 

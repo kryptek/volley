@@ -22,6 +22,26 @@ const working = entry("status", "working", { msg: "implementing shard split" }, 
 const steer = entry("mailbox", "steering", { text: "keep the matrix to 4 shards" }, 30);
 const narr = entry("progress", "narration", { msg: "Matrix written", progress: 38 }, 60);
 
+/** jsdom has no layout: give `el` a fixed scroll geometry and a writable `scrollTop`. */
+function layout(el: HTMLElement, scrollHeight: number, clientHeight: number) {
+  let top = el.scrollTop;
+  Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => scrollHeight });
+  Object.defineProperty(el, "clientHeight", { configurable: true, get: () => clientHeight });
+  Object.defineProperty(el, "scrollTop", {
+    configurable: true,
+    get: () => top,
+    set: (v: number) => {
+      top = Math.max(0, Math.min(v, scrollHeight - clientHeight));
+    },
+  });
+}
+
+/** The user scrolls `el` to `to`. */
+function scrollTo(el: HTMLElement, to: number) {
+  el.scrollTop = to;
+  fireEvent.scroll(el);
+}
+
 describe("Feed", () => {
   it("renders envelopes in time order, newest last", () => {
     // Arrival order differs from envelope time order (retained replay).
@@ -72,5 +92,45 @@ describe("Feed", () => {
   it("shows a placeholder with no envelopes", () => {
     render(<Feed feed={[]} />);
     expect(screen.getByText("no envelopes yet")).toBeInTheDocument();
+  });
+
+  describe("auto-scroll", () => {
+    function setup() {
+      const r = render(<Feed feed={[working, steer]} />);
+      const el = r.container.querySelector(".feed") as HTMLElement;
+      layout(el, 1000, 200);
+      return { ...r, el };
+    }
+
+    it("follows new envelopes while the reader is at the bottom", () => {
+      const { el, rerender } = setup();
+      scrollTo(el, 800);
+      layout(el, 1300, 200);
+      rerender(<Feed feed={[working, steer, narr]} />);
+      expect(el.scrollTop).toBe(1100);
+    });
+
+    it("stops following once the reader scrolls up, and resumes at the bottom", () => {
+      const { el, rerender } = setup();
+      scrollTo(el, 300);
+      layout(el, 1300, 200);
+      rerender(<Feed feed={[working, steer, narr]} />);
+      expect(el.scrollTop).toBe(300);
+      scrollTo(el, 1100);
+      layout(el, 1600, 200);
+      rerender(
+        <Feed feed={[working, steer, narr, entry("progress", "narration", { msg: "x" }, 90)]} />,
+      );
+      expect(el.scrollTop).toBe(1400);
+    });
+  });
+
+  it("keeps rows mounted when the ring drops its oldest entry", () => {
+    const more = entry("progress", "narration", { msg: "Shards balanced" }, 120);
+    const { rerender } = render(<Feed feed={[working, steer, narr]} />);
+    const before = screen.getByRole("button", { name: /Matrix written/ }).closest(".env");
+    // FEED_LIMIT reached: the oldest entry is sliced off as a new one arrives.
+    rerender(<Feed feed={[steer, narr, more]} />);
+    expect(screen.getByRole("button", { name: /Matrix written/ }).closest(".env")).toBe(before);
   });
 });

@@ -14,8 +14,8 @@ import { type ReactNode, useEffect, useState } from "react";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
 import { UNASSIGNED } from "../../store/reducer";
-import type { AgentView, Role, WaveView } from "../../store/types";
-import { Feed } from "./Feed";
+import type { AgentView, FeedEntry, Role, WaveView } from "../../store/types";
+import { Feed, feedChannel } from "./Feed";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
 import "../../styles/agent.css";
@@ -57,20 +57,31 @@ export interface AgentWindowProps {
   steer?: ReactNode;
 }
 
-function markStatus(type: string | undefined): StatusMarkStatus {
-  switch (type) {
-    case "working":
-      return "running";
-    case "done":
-      return "done";
-    case "failed":
-    case "reaped":
-      return "failed";
-    case "cancelled":
-      return "cancelled";
-    default:
-      return "pending";
+/** The mark for an outcome status: `blocked` (SPEC §5.2, terminal) needs the operator, like `failed`. */
+function outcomeMark(type: string): StatusMarkStatus | null {
+  if (type === "done") return "done";
+  if (type === "failed" || type === "blocked") return "failed";
+  return null;
+}
+
+/**
+ * The status mark for an agent. `reaped` (SPEC §5.2) only says the connection
+ * ended, normally right after `done`, so it shows the outcome before it: the
+ * latest other `status` in the feed, else (a retained replay, where only the
+ * `reaped` status survives) `done` if the agent left a `result`. Anything else
+ * — reaped while working, or with nothing known — is a crash.
+ */
+export function markStatus(agent: Pick<AgentView, "status" | "feed">): StatusMarkStatus {
+  const type = agent.status?.type;
+  if (type === "working") return "running";
+  if (type !== "reaped") return (type ? outcomeMark(type) : null) ?? "pending";
+  for (let i = agent.feed.length - 1; i >= 0; i--) {
+    const e = agent.feed[i] as FeedEntry;
+    if (feedChannel(e) === "status" && e.envelope.type !== "reaped") {
+      return outcomeMark(e.envelope.type) ?? "failed";
+    }
   }
+  return agent.feed.some((e) => feedChannel(e) === "result") ? "done" : "failed";
 }
 
 /** The prototype's `ago`: `42s`, `3m`, `1.5h`. */
@@ -114,7 +125,7 @@ export function AgentWindow({
   const spec = agent.task ? ws?.spec?.tasks[agent.task] : undefined;
   const issue = task?.issue ?? spec?.issue;
   const progress = agent.progress === null ? null : Math.max(0, Math.min(100, agent.progress));
-  const status = markStatus(agent.status?.type);
+  const status = markStatus(agent);
   const hbAge = agent.heartbeat === null ? null : now - agent.heartbeat;
   const hbStale = hbAge === null || hbAge > HEARTBEAT_STALE_MS;
   const born = agent.bornAt !== null && now - agent.bornAt < BORN_MS;
@@ -183,7 +194,6 @@ export function AgentWindow({
       actions={actions}
       footer={footer}
     >
-      {agent.task === null && <div className="a-id mono dim ell">{agent.id}</div>}
       {spec?.title && <div className="a-title">{spec.title}</div>}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
       <div className="narr" aria-live="polite">
@@ -215,6 +225,9 @@ export function AgentWindow({
       {tab === "feed" ? (
         <Feed feed={agent.feed} />
       ) : (
+        // Assumed contract for T13: the supervisor flags a stale capture per task,
+        // as `tasks[].screen_stale: true` in the wave state (not yet in SPEC §4.6
+        // or wave-state.schema.json).
         <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
       )}
       {steer}

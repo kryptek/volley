@@ -3,10 +3,10 @@
  * captures for the agent (SPEC §4.6.6, T13), with the prototype's blinking
  * caret and `tl-cmd` / `tl-ok` / `tl-bad` line classes; a capture the
  * supervisor has flagged `screen_stale` in the wave state carries a `stale`
- * marker.
+ * marker. A new capture scrolls to the bottom only while the reader is there.
  */
-import { useLayoutEffect, useRef } from "react";
 import type { ScreenPayload } from "../../store/types";
+import { useFollow } from "./Feed";
 
 /** The prototype's line classes: `⏺` lines are commands, `✗`/`CONFLICT` bad, `✓` ok. */
 export function lineClass(line: string): string {
@@ -17,14 +17,10 @@ export function lineClass(line: string): string {
 }
 
 export function Terminal({ screen, stale }: { screen: ScreenPayload | null; stale: boolean }) {
-  const box = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const el = box.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
+  const { ref, onScroll } = useFollow<HTMLDivElement>(screen);
 
   return (
-    <div className={`term${stale ? " term--stale" : ""}`} ref={box}>
+    <div className={`term${stale ? " term--stale" : ""}`} ref={ref} onScroll={onScroll}>
       {stale && (
         <span className="term-stale" title="The supervisor could not refresh this screen">
           stale

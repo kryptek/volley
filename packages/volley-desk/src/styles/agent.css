@@ -192,9 +192,6 @@
 }
 
 /* ------------------------------------------------------- D2 additions */
-.a-id {
-  margin-top: -4px;
-}
 .pipe li.held {
   border-color: rgba(251, 191, 36, 0.5);
   background: rgba(251, 191, 36, 0.1);
