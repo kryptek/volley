@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import {
   type ClockState,
-  heartbeatDuringReap,
+  heartbeatSuppresses,
   holdReap,
   inWakeGrace,
   reapVerdict,
   sampleClock,
 } from "../src/clock";
+import { NS } from "./helpers/daemon-env";
 import {
   AGENT,
   type SupervisedEnv,
@@ -50,11 +53,7 @@ describe("pending reaps", () => {
   it("a reaped within grace for an agent whose heartbeat arrives 20 s later → reap_suppressed", () => {
     const p = holdReap(AGENT, T0, 120 * S, true);
     expect(reapVerdict(p, T0 + 60 * S)).toBe("hold");
-    const r = heartbeatDuringReap(p, T0 + 20 * S, 120 * S);
-    expect(r.suppressed).toBe(true);
-    // Suppressed once: a later heartbeat keeps it suppressed without a second record.
-    expect(heartbeatDuringReap(r.pending, T0 + 30 * S, 120 * S).suppressed).toBe(false);
-    expect(reapVerdict(r.pending, T0 + 125 * S)).toBe("hold");
+    expect(heartbeatSuppresses(p, T0 + 20 * S)).toBe(true);
   });
 
   it("no heartbeat → the reap is accepted after the grace", () => {
@@ -65,8 +64,8 @@ describe("pending reaps", () => {
 
   it("a heartbeat from before the LWT does not suppress it", () => {
     const p = holdReap(AGENT, T0, 120 * S, true);
-    expect(heartbeatDuringReap(p, T0 - S, 120 * S).suppressed).toBe(false);
-    expect(reapVerdict(p, T0 + 120 * S)).toBe("accept");
+    expect(heartbeatSuppresses(p, T0 - S)).toBe(false);
+    expect(heartbeatSuppresses(p, T0)).toBe(false);
   });
 });
 
@@ -76,12 +75,17 @@ describe("daemon: sleep/wake and reap suppression", () => {
     await s.cleanup();
   });
 
-  /** A controllable clock: `sleep(ms)` moves the wall clock only. */
+  /**
+   * A controllable clock shared by the daemon's `now` and its clock sampler: `advance(ms)` moves
+   * both clocks, `sleep(ms)` the wall clock only. Nothing in these tests waits on real time for
+   * a verdict: reaps are accepted (or not) on explicit ticks.
+   */
   function fakeClock() {
     let mono = 0;
     let wall = Date.now();
     return {
       read: () => ({ mono, wall }),
+      now: () => wall,
       advance: (ms: number) => {
         mono += ms;
         wall += ms;
@@ -91,48 +95,116 @@ describe("daemon: sleep/wake and reap suppression", () => {
       },
     };
   }
+  type Clock = ReturnType<typeof fakeClock>;
 
-  it("journals wake_detected; a reaped agent that heartbeats within the grace is kept (reap_suppressed)", async () => {
-    const clock = fakeClock();
-    s = await makeSupervisedEnv({
-      config: "wake_grace_s: 2",
-      reapGraceMs: 60_000,
-      daemon: { clock: clock.read },
-    });
+  /** Wake the daemon from a 300 s sleep (journals wake_detected). */
+  async function wake(clock: Clock) {
     await s.daemon.tick();
     clock.advance(10_000);
     clock.sleep(300_000);
     await s.daemon.tick();
+  }
+  /** One tick at `ms` later, then a second one: anything the first enqueued has run. */
+  async function tickAfter(clock: Clock, ms: number) {
+    clock.advance(ms);
+    await s.daemon.tick();
+    await s.daemon.tick();
+  }
+  const retired = () => s.journal().some((e) => e.type === "agent_retired");
+  /**
+   * A sync point: the agent asks its n-th question (after a `resumed` closing the previous one);
+   * once that is journaled, everything it published before was consumed. The clock is not moved,
+   * so these hook signals carry the LWT's own instant: not after it, so they suppress nothing.
+   */
+  async function consumed(n: number) {
+    await s.hook("resumed.json", { seq: 200 + n });
+    await s.hook("awaiting-permission-prompt.json", { seq: 100 + n });
+    await s.until(
+      () =>
+        s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_question")
+          .length >= n,
+    );
+  }
+  const statusTopic = buildTopic(NS, AGENT, "status");
+  const reapedRaw = () =>
+    JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "status",
+        type: "reaped",
+        payload: { reason: "lwt" },
+      }),
+    );
+
+  it("journals wake_detected; a reaped agent that heartbeats is kept for good, even past many graces and a re-delivered LWT", async () => {
+    const clock = fakeClock();
+    s = await makeSupervisedEnv({
+      config: "wake_grace_s: 2",
+      reapGraceMs: 60_000,
+      daemon: { clock: clock.read, now: clock.now },
+    });
+    await wake(clock);
     expect(systemJournal(s.env).find((e) => e.type === "wake_detected")?.data).toMatchObject({
       jump_ms: 300_000,
     });
     // The flood of LWTs after the wake: this agent is fine and heartbeats on its next tool call.
-    await s.status("reaped", { reason: "lwt" });
-    await new Promise((r) => setTimeout(r, 100));
+    const lwt = reapedRaw();
+    await s.agent.publish(statusTopic, lwt, { qos: 1, retain: true });
+    await consumed(1);
+    clock.advance(1000);
     await s.hook("heartbeat.json");
     await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
     expect(s.journal().find((e) => e.type === "reap_suppressed")?.data).toMatchObject({
       agent_id: AGENT,
       wake: true,
     });
-    await new Promise((r) => setTimeout(r, 2500));
-    expect(s.journal().some((e) => e.type === "agent_retired")).toBe(false);
+    // The retained LWT re-delivered (e.g. a re-subscribe after a reconnect) is the same reap.
+    await s.agent.publish(statusTopic, lwt, { qos: 1, retain: true });
+    await consumed(2);
+    // Ten minutes is ten reap graces: the agent was never retired.
+    for (let i = 0; i < 10; i++) await tickAfter(clock, 60_000);
+    expect(retired()).toBe(false);
+    expect(s.host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([]);
   });
 
-  it("a reaped agent that stays quiet through the wake grace is retired after it", async () => {
+  it("a new LWT after a suppressed one is held again and accepted once its grace runs out quietly", async () => {
+    const clock = fakeClock();
+    s = await makeSupervisedEnv({
+      reapGraceMs: 60_000,
+      daemon: { clock: clock.read, now: clock.now },
+    });
+    await s.status("reaped", { reason: "lwt" });
+    await consumed(1);
+    clock.advance(1000);
+    await s.hook("heartbeat.json");
+    await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
+    clock.advance(1000);
+    await s.status("reaped", { reason: "lwt" });
+    await consumed(2);
+    await tickAfter(clock, 59_000);
+    expect(retired()).toBe(false);
+    await tickAfter(clock, 1000);
+    expect(s.journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
+      agent_id: AGENT,
+      status: "reaped",
+    });
+  });
+
+  it("a wake never shortens the reap grace: a quiet reaped agent is retired after the normal grace", async () => {
     const clock = fakeClock();
     s = await makeSupervisedEnv({
       config: "wake_grace_s: 1",
       reapGraceMs: 60_000,
-      daemon: { clock: clock.read },
+      daemon: { clock: clock.read, now: clock.now },
     });
-    await s.daemon.tick();
-    clock.advance(10_000);
-    clock.sleep(300_000);
-    await s.daemon.tick();
+    await wake(clock);
     await s.status("reaped", { reason: "lwt" });
-    // The wake grace (1 s), not the normal 60 s reap grace, applies.
-    await s.until(() => s.journal().some((e) => e.type === "agent_retired"), 4000);
+    await consumed(1);
+    // Well past the 1 s wake grace, still inside the normal 60 s reap grace: kept.
+    await tickAfter(clock, 30_000);
+    expect(retired()).toBe(false);
+    await tickAfter(clock, 30_000);
     expect(s.journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: AGENT,
       status: "reaped",

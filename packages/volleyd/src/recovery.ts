@@ -19,6 +19,8 @@ import { type AgentWatch, sameModel } from "./verify";
 export const CREDIT_CLASS = "credit_exhausted";
 /** `class` of the decision re-opened when a switch was not verified. */
 export const UNVERIFIED_CLASS = "model_switch_unverified";
+/** `class` of the decision re-opened when an approved switch hit the recovery limit (not typed). */
+export const LIMITED_CLASS = "model_switch_limited";
 
 export type SwitchAnswer =
   | { kind: "switch"; model: string }
@@ -43,7 +45,7 @@ export interface ModelSwitchRequest {
   text: string | null;
   /** Path of the saved screen capture, if any. */
   screen?: string;
-  /** `CREDIT_CLASS` (default) or `UNVERIFIED_CLASS`. */
+  /** `CREDIT_CLASS` (default), `UNVERIFIED_CLASS` or `LIMITED_CLASS`. */
   class?: string;
   /** The model a failed switch tried. */
   tried?: string;
@@ -55,15 +57,18 @@ export function modelSwitchInput(r: ModelSwitchRequest): {
   data: Record<string, unknown>;
 } {
   const cls = r.class ?? CREDIT_CLASS;
+  const limit = `${DAEMON_DEFAULTS.recovery_max_per_window} times in the last ${DAEMON_DEFAULTS.recovery_window_ms / 60_000} min`;
   const what =
     cls === UNVERIFIED_CLASS
       ? `the switch of ${r.agent_id} to ${r.tried} was not confirmed by its hooks (no PostModelSwitch re-publish)`
-      : `${r.agent_id} is out of credits (${r.source === "hook" ? "the hooks reported a usage-limit prompt" : "a usage-limit prompt is on its screen"})`;
+      : cls === LIMITED_CLASS
+        ? `the switch of ${r.agent_id} to ${r.tried} was not typed: model switches for it already ran ${limit}`
+        : `${r.agent_id} is out of credits (${r.source === "hook" ? "the hooks reported a usage-limit prompt" : "a usage-limit prompt is on its screen"})`;
   const offer =
     r.fallback_model === null
       ? " No fallback_model is configured: wait for the limit to reset, or stop the task."
       : !r.allowed
-        ? " This recovery already ran twice in the last hour for this agent: no automatic switch is offered."
+        ? ` This recovery already ran ${limit} for this agent: no automatic switch is offered.`
         : ` Switch it to ${r.fallback_model}?`;
   return {
     input: {
@@ -131,7 +136,7 @@ export const recoveryAllowed = (count: number) => count < DAEMON_DEFAULTS.recove
 /**
  * Type `/model <m>` + Enter into the agent's terminal and wait for the hooks' PostModelSwitch
  * registry re-publish naming `m`. An entry that already named `m` before the switch does not
- * count: the registry must be re-published.
+ * count, nor does a re-delivery of it (same `wall_time`): the registry must be re-published.
  */
 export async function switchModel(r: {
   host: Host;
@@ -140,14 +145,14 @@ export async function switchModel(r: {
   model: string;
   timeoutMs: number;
 }): Promise<{ ok: boolean; registry: Record<string, unknown> | null }> {
-  const before = r.watch.state.hookRegistry;
+  const before = r.watch.state.hookRegistryAt;
   await r.host.sendText(r.workspace, `/model ${r.model}`);
   await r.host.sendKeys(r.workspace, "Enter");
   const ok = await r.watch.waitFor((s) => {
     const reg = s.hookRegistry;
     return (
       reg !== null &&
-      reg !== before &&
+      s.hookRegistryAt !== before &&
       reg.model_source === "harness-hook" &&
       typeof reg.model === "string" &&
       sameModel(reg.model, r.model)

@@ -6,9 +6,10 @@ import type { JournalEvent, TaskId, TaskStage, TaskState } from "./types";
 /**
  * Restart reconciliation. On start the daemon has no live watch on any agent, so for every task
  * that is not settled and has an agent it compares what the journal says (stage, agent) with the
- * broker (retained registry entry + status, the latest heartbeat), the worktree lock, git (does
- * the branch exist, its head) and GitHub (a PR for the branch, its CI), and journals one
- * `reconciled { agent_id, drift, action? }` per task:
+ * broker (retained registry entry + status, and a heartbeat seen while reconciling: the daemon
+ * keeps none across a restart), the worktree lock, git (does the branch exist, its head) and
+ * GitHub (a PR for the branch, its CI), and journals one
+ * `reconciled { agent_id, drift, action?, branch }` per task:
  *
  *   consistent                                      → drift: [] (the agent is watched again)
  *   the agent reported done meanwhile + PR + CI green → mark_done_verified (PR recorded)
@@ -90,7 +91,10 @@ export interface ReconcileTarget {
   spawned: Record<string, unknown>;
 }
 
-/** Every unsettled task's live (spawned, not retired) agents, in journal order. */
+/**
+ * Every unsettled task's current agents: per (task, role) the latest `agent_spawned` (an earlier
+ * one was superseded), unless it was retired. In the journal order of each role's first spawn.
+ */
 export function reconcileTargets(
   rec: WaveRecord,
   events: readonly JournalEvent[],
@@ -98,9 +102,13 @@ export function reconcileTargets(
   const retired = new Set(
     events.filter((e) => e.type === "agent_retired").map((e) => e.data.agent_id as string),
   );
-  const out: ReconcileTarget[] = [];
+  const latest = new Map<string, JournalEvent & { task: TaskId }>();
   for (const e of events) {
     if (e.type !== "agent_spawned" || e.task === undefined) continue;
+    latest.set(`${e.task}/${String(e.data.role)}`, { ...e, task: e.task });
+  }
+  const out: ReconcileTarget[] = [];
+  for (const e of latest.values()) {
     const id = e.data.agent_id as string;
     if (retired.has(id)) continue;
     const t = rec.state?.tasks.find((x) => x.id === e.task);

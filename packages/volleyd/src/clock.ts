@@ -7,10 +7,11 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
  * clock on every monitor tick. When the wall clock moved more than `wake_jump_ms` further than
  * the monotonic one between two samples, the host slept: `wake_detected`. For `wake_grace_s`
  * after a wake the liveness alarms are held and every `reaped` status (the LWTs a sleep floods
- * the broker with) is held in a pending reap: a heartbeat within the grace keeps the agent
- * (`reap_suppressed` — the daemon never republishes `working` for an agent, SPEC linearity: the
- * agent's own hooks clear it), no heartbeat accepts the reap. Outside a wake the same pending
- * reap applies with the daemon's normal reap grace.
+ * the broker with) is held in a pending reap: a heartbeat after the LWT proves the session alive
+ * and suppresses the reap for good (`reap_suppressed` — the daemon never republishes `working`
+ * for an agent, SPEC linearity: the agent stays supervised and its next status decides), no
+ * heartbeat accepts the reap after the grace. The same pending reap applies outside a wake with
+ * the daemon's normal reap grace; a wake never shortens it.
  */
 
 export interface ClockSample {
@@ -54,12 +55,10 @@ export function inWakeGrace(state: ClockState, now: number, graceS: number): boo
 export interface PendingReap {
   agent_id: string;
   reaped_at: number;
-  /** Accept the reap at this time unless a heartbeat moves it. */
+  /** Accept the reap at this time unless a heartbeat suppresses it first. */
   until: number;
   /** Held because of a wake (journaled on `reap_suppressed`). */
   wake: boolean;
-  /** When the first heartbeat after the LWT arrived (null: none yet). */
-  suppressed_at: number | null;
 }
 
 export function holdReap(
@@ -68,24 +67,11 @@ export function holdReap(
   graceMs: number,
   wake: boolean,
 ): PendingReap {
-  return { agent_id: agentId, reaped_at: now, until: now + graceMs, wake, suppressed_at: null };
+  return { agent_id: agentId, reaped_at: now, until: now + graceMs, wake };
 }
 
-/**
- * A heartbeat from the agent while its reap is pending. One after the LWT suppresses the reap
- * (`suppressed` is true the first time only, so it is journaled once) and restarts the grace.
- */
-export function heartbeatDuringReap(
-  p: PendingReap,
-  at: number,
-  graceMs: number,
-): { pending: PendingReap; suppressed: boolean } {
-  if (at <= p.reaped_at) return { pending: p, suppressed: false };
-  return {
-    pending: { ...p, until: Math.max(p.until, at + graceMs), suppressed_at: p.suppressed_at ?? at },
-    suppressed: p.suppressed_at === null,
-  };
-}
+/** A heartbeat at `at` suppresses the pending reap when it came after the LWT. */
+export const heartbeatSuppresses = (p: PendingReap, at: number): boolean => at > p.reaped_at;
 
 export function reapVerdict(p: PendingReap, now: number): "accept" | "hold" {
   return now >= p.until ? "accept" : "hold";

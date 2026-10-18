@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildTopic } from "volley-mcp/topics";
 import {
   type AgentLiveness,
+  CONTINUE_TEXT,
   type HookSignal,
   type LivenessAction,
   checkLiveness,
   noteCapture,
   noteDecision,
+  noteResolved,
   observeScreen,
   observeSignal,
   parseHookSignal,
@@ -114,6 +117,37 @@ describe("liveness: questions (awaiting_input permission_prompt / agent_needs_in
     expect(after.state.activity).toBe("working");
     expect(after.state.decisions.question).toBeUndefined();
   });
+  it("a question after the turn resumed quotes the prompt, not the previous turn's Stop text", () => {
+    const r = run(fresh(), [
+      signal("idle-stop.json", T0),
+      signal("resumed.json", T0 + MIN),
+      signal("awaiting-permission-prompt.json", T0 + 2 * MIN),
+    ]);
+    expect(kinds(r.actions)).toEqual(["agent_question"]);
+    expect(r.actions[0]).toMatchObject({
+      question: "Claude needs your permission",
+      last_text: null,
+    });
+  });
+
+  it("idle_prompt while a question (or credit prompt) is open keeps the wait: no steer, no stall", () => {
+    for (const [fixture, slot] of [
+      ["awaiting-permission-prompt.json", "question"],
+      ["awaiting-credit.json", "credit"],
+    ] as const) {
+      const asked = run(fresh(), [signal(fixture, T0)]);
+      const opened = noteDecision(asked.state, slot, "d-1");
+      const r = run(opened, [
+        signal("idle-prompt.json", T0 + MIN),
+        check(T0 + MIN + 1000),
+        check(T0 + 10 * MIN),
+        check(T0 + 60 * MIN),
+      ]);
+      expect(r.actions).toEqual([]);
+      expect(r.state.activity).toBe("awaiting_input");
+      expect(r.state.decisions[slot]).toBe("d-1");
+    }
+  });
 });
 
 describe("liveness: idle stalls (Stop without a terminal status)", () => {
@@ -133,6 +167,31 @@ describe("liveness: idle stalls (Stop without a terminal status)", () => {
     ]);
     expect(kinds(rest.actions)).toEqual(["agent_stalled"]);
     expect(rest.actions[0]).toMatchObject({ last_text: expect.stringContaining("schema change") });
+  });
+
+  it("an answered agent_stalled (not stopped) gets a full grace again: it never re-opens on the next tick", () => {
+    const stalled = run(fresh(), [
+      signal("idle-stop.json", T0),
+      check(T0 + 3 * MIN),
+      check(T0 + 6 * MIN),
+    ]);
+    expect(kinds(stalled.actions)).toEqual(["steer", "agent_stalled"]);
+    const answered = T0 + 7 * MIN;
+    const resolved = noteResolved(noteDecision(stalled.state, "stalled", "d-1"), "d-1", answered);
+    expect(resolved.decisions.stalled).toBeUndefined();
+    const after = run(resolved, [
+      check(answered + 10_000),
+      check(answered + 20_000),
+      check(answered + 2 * MIN),
+    ]);
+    expect(after.actions).toEqual([]);
+    // Still idle a full grace after the answer: exactly one new decision, then nothing more.
+    const again = run(after.state, [
+      check(answered + 3 * MIN),
+      check(answered + 3 * MIN + 10_000),
+      check(answered + 10 * MIN),
+    ]);
+    expect(kinds(again.actions)).toEqual(["agent_stalled"]);
   });
 
   it("idle_prompt confirms the idle before the grace is up", () => {
@@ -373,6 +432,37 @@ describe("daemon: hook-signal liveness", () => {
     await s.daemon.tick();
     expect(steers()).toHaveLength(1);
     expect(decisions("agent_stalled")).toEqual([]);
+  });
+
+  it("in a wave with its own namespace, the nudge and an answer reach the agent's mailbox there", async () => {
+    s = await makeSupervisedEnv({ namespace: "w1-ns" });
+    const got: { type: string; text: string }[] = [];
+    await s.agent.subscribeStream(buildTopic("w1-ns", AGENT, "mailbox"), ({ payload }) => {
+      const e = JSON.parse(payload) as { type: string; payload: { text: string } };
+      got.push({ type: e.type, text: e.payload.text });
+    });
+    await s.hook("awaiting-permission-prompt.json");
+    await s.until(() => decisions("agent_question").length === 1);
+    await s.daemon.resolveDecision(
+      "w1",
+      decisions("agent_question")[0]?.data.decision_id as string,
+      {
+        answer: "Create a new table.",
+        by: "tester",
+      },
+    );
+    await s.until(() => got.length === 1);
+    expect(got[0]).toEqual({ type: "steering", text: "Create a new table." });
+
+    await s.hook("resumed.json");
+    await s.hook("idle-stop.json");
+    await s.hook("idle-prompt.json"); // confirms the idle: the next tick nudges
+    // Ticks until the daemon has consumed the hooks (the clock stands still: one nudge, ever).
+    for (let i = 0; i < 100 && got.length < 2; i++) {
+      await s.daemon.tick();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(got.map((m) => m.text)).toEqual(["Create a new table.", CONTINUE_TEXT]);
   });
 
   it("silence past heartbeat_alarm_s reads the screen once per tick and opens hooks_silent", async () => {

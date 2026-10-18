@@ -186,6 +186,8 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
         }
       } else if (type === "idle_prompt") {
         // Claude Code's "waiting for your input" a minute after the turn ended: the idle is real.
+        // It also fires a minute into an unanswered question or credit prompt: that stays a wait.
+        if (s.awaiting !== null) break;
         if (s.activity !== "idle") {
           s.activity = "idle";
           s.activity_at = sig.at;
@@ -213,6 +215,7 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
     case "resumed":
       s.activity = "working";
       s.activity_at = sig.at;
+      s.last_text = null; // a new turn: an earlier Stop text is not what it asks next
       s.awaiting = null;
       s.idle_confirmed = false;
       s.steered_at = null;
@@ -235,7 +238,9 @@ export function checkLiveness(
   const actions: LivenessAction[] = [];
   const graceMs = secondsMs(tunables.idle_grace_s);
 
-  if (s.activity === "idle") {
+  // An open question or credit prompt is a wait on the human: never steered or called a stall.
+  const waiting = s.decisions.question !== undefined || s.decisions.credit !== undefined;
+  if (s.activity === "idle" && !waiting) {
     if (s.steered_at === null) {
       if (s.idle_confirmed || now - s.activity_at >= graceMs) {
         s.steered_at = now;
@@ -328,11 +333,20 @@ export function noteDecision(
   return { ...prev, decisions };
 }
 
-/** A decision was resolved (by anyone): free its slot. */
-export function noteResolved(prev: AgentLiveness, id: string): AgentLiveness {
+/**
+ * A decision was resolved (by anyone) at `now`: free its slot. An answered `agent_stalled` counts
+ * as the nudge of a new idle cycle (the answer is steered to the agent), so the agent gets a full
+ * `idle_grace_s` before another decision instead of one on the next tick.
+ */
+export function noteResolved(prev: AgentLiveness, id: string, now: number): AgentLiveness {
   const entries = Object.entries(prev.decisions).filter(([, v]) => v !== id);
   if (entries.length === Object.keys(prev.decisions).length) return prev;
-  return { ...prev, decisions: Object.fromEntries(entries) };
+  const stalled = prev.decisions.stalled === id && prev.activity === "idle";
+  return {
+    ...prev,
+    decisions: Object.fromEntries(entries),
+    ...(stalled ? { steered_at: now } : {}),
+  };
 }
 
 /**

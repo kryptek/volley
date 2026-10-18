@@ -23,10 +23,12 @@ const HOOK_MODEL_SOURCES = new Set(["harness-hook", "unknown"]);
 export interface SignalState {
   /** The latest registry entry the hooks published (has `model_source`), or null. */
   hookRegistry: Record<string, unknown> | null;
+  /** `wall_time` of that entry's envelope: a fresh re-publish has a new one, a re-delivery not. */
+  hookRegistryAt: string | null;
   /** True once a SessionStart heartbeat arrived. */
   sessionStart: boolean;
-  /** The agent's latest retained status. */
-  status: { type: string; payload: unknown } | null;
+  /** The agent's latest retained status (`wall_time` tells a re-delivery from a new one). */
+  status: { type: string; payload: unknown; wall_time: string } | null;
   /** Epoch ms of the latest heartbeat. */
   lastHeartbeatAt: number | null;
 }
@@ -58,6 +60,7 @@ export async function watchAgent(
 ): Promise<AgentWatch> {
   const state: SignalState = {
     hookRegistry: null,
+    hookRegistryAt: null,
     sessionStart: false,
     status: null,
     lastHeartbeatAt: null,
@@ -77,9 +80,10 @@ export async function watchAgent(
     if (topic === regTopic) {
       if (env.type === "registered" && HOOK_MODEL_SOURCES.has(String(p.model_source))) {
         state.hookRegistry = p;
+        state.hookRegistryAt = env.wall_time;
       }
     } else if (topic === statusTopic) {
-      state.status = { type: env.type, payload: env.payload };
+      state.status = { type: env.type, payload: env.payload, wall_time: env.wall_time };
       for (const cb of statusCbs) cb(env.type, env.payload);
     } else if (topic === progressTopic) {
       if (env.type === "heartbeat") {

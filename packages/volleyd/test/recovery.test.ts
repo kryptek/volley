@@ -5,10 +5,12 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { registryTopic } from "volley-mcp/topics";
 import {
   CREDIT_CLASS,
+  LIMITED_CLASS,
   UNVERIFIED_CLASS,
   creditOccurrences,
   modelSwitchInput,
   parseSwitchAnswer,
+  recoveryAllowed,
   switchModel,
   switchOptions,
 } from "../src/recovery";
@@ -79,13 +81,31 @@ describe("model_switch decision (credit_exhausted)", () => {
       task: "T1",
       agent_id: AGENT,
       fallback_model: "claude-sonnet-5-5",
-      allowed: creditOccurrences(events, AGENT, T0) < 2,
+      allowed: recoveryAllowed(creditOccurrences(events, AGENT, T0)),
       source: "hook",
       text: null,
     });
+    expect(recoveryAllowed(creditOccurrences(events.slice(0, 1), AGENT, T0))).toBe(true);
     expect(third.input.options).toEqual(["wait", "stop task"]);
     expect(third.data.recovery_allowed).toBe(false);
-    expect(third.input.question).toMatch(/twice in the last hour/);
+    expect(third.input.question).toMatch(/already ran 2 times in the last 60 min/);
+  });
+
+  it("a switch refused by the limit says so (nothing was typed), not that it went unverified", () => {
+    const limited = modelSwitchInput({
+      task: "T1",
+      agent_id: AGENT,
+      fallback_model: "claude-sonnet-5-5",
+      allowed: false,
+      source: "screen",
+      text: null,
+      class: LIMITED_CLASS,
+      tried: "claude-sonnet-5-5",
+    });
+    expect(limited.input.question).toMatch(/was not typed/);
+    expect(limited.input.question).not.toMatch(/not confirmed/);
+    expect(limited.input.options).toEqual(["wait", "stop task"]);
+    expect(limited.data.class).toBe(LIMITED_CLASS);
   });
 
   it("parses the resolve answer; a switch needs an allowed recovery and a model", () => {
@@ -198,6 +218,25 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
     expect(r.ok).toBe(false);
     await watch.close();
   });
+
+  it("a re-delivery of that same retained entry (e.g. after a reconnect) is not a re-publish", async () => {
+    const raw = registry("claude-sonnet-5-5");
+    await agentSide.publish(registryTopic(AGENT), raw, { qos: 1, retain: true });
+    const host = fakeHost();
+    const watch = await watchAgent(daemonSide, NS, AGENT);
+    await watch.waitFor((s) => s.hookRegistry !== null, 1000);
+    const pending = switchModel({
+      host,
+      workspace: "workspace:1",
+      watch,
+      model: "claude-sonnet-5-5",
+      timeoutMs: 1000,
+    });
+    // The identical envelope again (same wall_time): a new object in the watch, the same entry.
+    await agentSide.publish(registryTopic(AGENT), raw, { qos: 1, retain: true });
+    expect((await pending).ok).toBe(false);
+    await watch.close();
+  });
 });
 
 describe("daemon: credit exhaustion → approval-gated model switch", () => {
@@ -260,6 +299,48 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
         .journal()
         .some((e) => e.type === "alarm_raised" && e.data.alarm === "model_switch_unverified"),
     ).toBe(true);
+  });
+
+  it("the third credit exhaustion within the hour is decision only: no switch offered, a switch answer types nothing", async () => {
+    s = await makeSupervisedEnv({ config: "fallback_model: claude-sonnet-5-5" });
+    for (let n = 1; n <= 3; n++) {
+      await s.hook("awaiting-credit.json", { seq: 10 + n });
+      await s.until(() => opened().length === n);
+      if (n === 3) break;
+      await s.daemon.resolveDecision("w1", opened()[n - 1]?.data.decision_id as string, {
+        answer: "wait",
+        by: "tester",
+      });
+      await s.hook("resumed.json", { seq: 20 + n });
+    }
+    expect(opened()[1]?.data).toMatchObject({
+      options: ["switch to claude-sonnet-5-5", "wait", "stop task"],
+      recovery_allowed: true,
+    });
+    const third = opened()[2] as JournalEvent;
+    expect(third.data).toMatchObject({
+      class: CREDIT_CLASS,
+      options: ["wait", "stop task"],
+      recovery_allowed: false,
+    });
+    await s.daemon.resolveDecision("w1", third.data.decision_id as string, {
+      answer: "switch to claude-sonnet-5-5",
+      by: "tester",
+    });
+    await s.until(() =>
+      s
+        .journal()
+        .some(
+          (e) => e.type === "decision_resolved" && e.data.decision_id === third.data.decision_id,
+        ),
+    );
+    // A tick after the resolve: anything it started has run by then.
+    await s.daemon.tick();
+    await s.daemon.tick();
+    expect(s.host.texts).toEqual([]);
+    expect(
+      s.journal().some((e) => e.type === "alarm_raised" && e.data.alarm === "model_switch_sent"),
+    ).toBe(false);
   });
 
   it("'wait' types nothing; 'stop task' cancels the task's agent", async () => {

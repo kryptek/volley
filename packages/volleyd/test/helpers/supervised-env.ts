@@ -49,6 +49,8 @@ export interface SupervisedEnvOptions {
   config?: string;
   daemon?: Partial<DaemonOptions>;
   reapGraceMs?: number;
+  /** The wave's own `namespace:` (default: none, so its agents live in the daemon's, NS). */
+  namespace?: string;
   /** Extra fake-exec replies (prefix, reply). */
   exec?: [string[], { stdout?: string; code?: number }][];
 }
@@ -74,13 +76,14 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     }));
   for (const [prefix, reply] of o.exec ?? []) fake.on(prefix, reply);
   const host = fakeHost(fake);
+  const ns = o.namespace ?? NS;
 
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
     agent.publish(
       topic,
       JSON.stringify({
         ...buildEnvelope({ agentId: AGENT, parentId: "volleyd", channel, type, payload }),
-        ...(channel === "_system/registry" ? { namespace: NS } : {}),
+        ...(channel === "_system/registry" ? { namespace: ns } : {}),
       }),
       { qos: 1, retain },
     );
@@ -90,14 +93,14 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     e.wall_time = new Date().toISOString();
     e.payload = { ...e.payload, ...payload };
     const topic =
-      e.channel === "_system/registry" ? registryTopic(AGENT) : buildTopic(NS, AGENT, e.channel);
+      e.channel === "_system/registry" ? registryTopic(AGENT) : buildTopic(ns, AGENT, e.channel);
     await agent.publish(topic, JSON.stringify(e), {
       qos: 1,
       retain: e.channel === "_system/registry",
     });
   };
   const status = (type: string, payload: Record<string, unknown> = {}) =>
-    pub(buildTopic(NS, AGENT, "status"), type, "status", payload);
+    pub(buildTopic(ns, AGENT, "status"), type, "status", payload);
 
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
   host.onLaunch = () => {
@@ -111,7 +114,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
       });
       await status("working", { source: "harness-hook" });
       await pub(
-        buildTopic(NS, AGENT, "progress"),
+        buildTopic(ns, AGENT, "progress"),
         "heartbeat",
         "progress",
         { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
@@ -132,7 +135,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   const waveFile = join(env.home, "w1.yaml");
   writeFileSync(
     waveFile,
-    `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
   const r = await runCli(["run", waveFile], env.env);
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);

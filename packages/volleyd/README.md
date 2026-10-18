@@ -609,9 +609,10 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 
 | Signal | Action | What needs approval |
 |---|---|---|
-| `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the last Stop text and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
+| `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the Stop text of the current idle (never an earlier turn's: `resumed` clears it; else the notification text) and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
 | `idle` (Stop) with no terminal status and no `resumed` for `idle_grace_s` (default 3 min; an `idle_prompt` confirms the idle sooner) | one steer: "Continue; publish done/blocked/failed when finished" | — |
-| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent; `stop task` cancels it |
+| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge: a further decision only if it is still idle a full `idle_grace_s` later; `stop task` cancels it |
+| `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
 | `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
 | no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` | read the screen (bounded, once per tick until decided) and classify it: | |
 | ↳ the credit prompt (`screens.ts` `credit_exhausted`) | decision `model_switch` with the capture | the switch |
@@ -635,8 +636,9 @@ and waits up to 60 s for the hooks' PostModelSwitch registry re-publish naming `
 already named it does not count). Verified → `alarm_raised { alarm: "model_switch_verified" }`;
 otherwise `model_switch_unverified` and the decision is re-opened (`class:
 "model_switch_unverified"`) with a fresh screen capture. The same recovery fires at most twice
-per agent per hour: the third credit exhaustion in an hour, or a third switch, is decision only
-(no switch offered or typed). Models are never switched without approval. Known-screen actions
+per agent per hour: the third credit exhaustion in an hour is decision only (no switch offered),
+and an approved third switch is not typed (`alarm_raised { alarm: "recovery_limited" }`, the
+decision re-opened as `class: "model_switch_limited"`, which says so). Models are never switched without approval. Known-screen actions
 beyond this stay with spawning: `update_prompt` → Enter is pre-hook only.
 
 **Sleep/wake (`src/clock.ts`).** Every tick samples a monotonic clock (stopped while the host
@@ -644,28 +646,37 @@ sleeps) and the wall clock; the wall clock running more than 60 s ahead between 
 journals `wake_detected { jump_ms }` in `_system`. Liveness clocks restart at the wake (the sleep
 is not silence) and liveness alarms are held for `wake_grace_s` (default 120 s). A `reaped`
 status (an LWT) is never retired at once: it is held as a pending reap for the reap grace
-(`wake_grace_s` right after a wake, `heartbeat_alarm_s` otherwise). A heartbeat from the agent
-in that window journals `reap_suppressed { agent_id, reaped_at, heartbeat_at, wake }` and keeps
-it supervised — the daemon never republishes `working` on an agent's behalf (SPEC linearity);
-the agent's own hooks clear it on their next tool call. No heartbeat by the end of the grace:
-the reap is accepted and the agent retired.
+(`heartbeat_alarm_s`; right after a wake at least `wake_grace_s`: a wake never shortens it). A
+heartbeat from the agent after the LWT journals `reap_suppressed { agent_id, reaped_at,
+heartbeat_at, wake }` and drops that reap for good: the agent stays supervised, however long it
+then sits quiet, and a re-delivery of the same retained LWT changes nothing. The daemon never
+republishes `working` on an agent's behalf (SPEC linearity), so its retained status stays
+`reaped` until the agent publishes one; meanwhile liveness checks it as its last status before
+the reap, so a session that really died ends in the silence path (`crash_candidate`, alarm
+only). Only a new LWT is held again. No heartbeat by the end of the grace: the reap is accepted
+(on the reap timer or the next tick) and the agent retired.
 
-**Restart reconciliation (`src/reconcile.ts`).** On start (with spawning on), for every task that
-is not `done` / `merge_ready` / `cancelled` and has a spawned, not-retired agent, the daemon
-compares the journal (stage, agent) with the retained registry entry and status, the worktree
+**Restart reconciliation (`src/reconcile.ts`).** On start (spawning on or off), for every task
+that is not `done` / `merge_ready` / `cancelled`, its current agents — the latest spawn per role,
+not retired — are compared with the retained registry entry and status, any heartbeat seen while
+reconciling (the daemon keeps none across a restart, so only a live one counts), the worktree
 lock, git (`rev-parse --verify` of the branch) and — for an agent that reported `done` while the
-daemon was down — GitHub (`gh pr list --head`, `gh pr checks`), and journals one `reconciled {
-agent_id, drift, action? }` per task:
+daemon was down — GitHub (`gh pr list --head`, `gh pr checks`). The probes run concurrently and
+beside the serial queue, after the mailbox loop started (control ops are answered meanwhile);
+one `reconciled { agent_id, drift, action?, branch: { name, exists, head } }` per agent is
+journaled inside it:
 
 | Finding | `action` | Then |
 |---|---|---|
 | consistent | none (`drift: []`) | the agent is watched again (status, hooks, screen tail) |
 | the agent reported `done`, its PR exists and CI is green | `mark_done_verified` | `artifact_verified { pr }`; watched again, so its `done` retires it |
 | any sign it may be alive (registry, live status, lock, recent heartbeat), or `done` without a green PR, or `failed` | `re_wait` | watched again; the normal status path takes over |
-| no registry entry, no status, no heartbeat, no lock | `respawn_needed` | decision `agent_blocked`, `class: "respawn_needed"` (options `respawn`, `stop task`) |
+| no registry entry, no status, no heartbeat, no lock | `respawn_needed` | decision `agent_blocked`, `class: "respawn_needed"` (options `respawn`, `stop task`; `stop task` only with spawning off) — not a second one while it is open |
 
 Nothing is respawned automatically — only on the owner's `respawn` answer, through the normal
-spawn path (its lock check still applies). Open recovery decisions are re-linked to the agent
+spawn path (its lock check still applies). Either answer journals `agent_retired { status:
+"gone" }` for the vanished agent (its minted credentials revoked), so no later restart
+reconciles it again. Open recovery decisions are re-linked to the agent
 they name when it is watched again, so `resumed` still closes them after a restart.
 
 ---

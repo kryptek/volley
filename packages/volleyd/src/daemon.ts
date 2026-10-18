@@ -67,6 +67,7 @@ import {
 import { type ExecFn, exec as realExec } from "./exec";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import { revokeCredentials } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -105,7 +106,7 @@ import {
   type ClockSample,
   type ClockState,
   type PendingReap,
-  heartbeatDuringReap,
+  heartbeatSuppresses,
   holdReap,
   inWakeGrace,
   initialClock,
@@ -134,12 +135,15 @@ import { type AgentProbe, FINAL_STATUS, lockPath, readLock } from "./locks";
 import {
   type ReconcileProbes,
   type ReconcileTarget,
+  type Reconciliation,
+  type TaskFacts,
   execProbes,
   reconcileTargets,
   reconcileTask,
 } from "./reconcile";
 import {
   CREDIT_CLASS,
+  LIMITED_CLASS,
   STOP_ANSWER,
   UNVERIFIED_CLASS,
   creditOccurrences,
@@ -251,6 +255,10 @@ interface Supervised {
   reapTimer?: ReturnType<typeof setTimeout> | undefined;
   /** The `reaped` status being re-verified (clock.ts). */
   pendingReap?: PendingReap | undefined;
+  /** `wall_time` of a `reaped` status a heartbeat suppressed: never accepted, even re-delivered. */
+  suppressedReap?: string | undefined;
+  /** The latest status other than `reaped` (what liveness checks while a reap is suppressed). */
+  liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
   liveness: AgentLiveness;
 }
@@ -261,6 +269,7 @@ const SLOT_OF: Record<string, DecisionSlot> = {
   agent_stalled: "stalled",
   [CREDIT_CLASS]: "credit",
   [UNVERIFIED_CLASS]: "credit",
+  [LIMITED_CLASS]: "credit",
   hooks_silent: "silent",
   screen_static: "silent",
 };
@@ -436,6 +445,8 @@ export class Daemon {
   /** `stop --all` engaged: every wave admits nothing and `run` is refused until `resume --all`. */
   private killSwitch: boolean;
   private readonly acks = new AckTracker();
+  /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
+  private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
   private readonly lastSeen = new Map<string, number>();
   /**
@@ -654,7 +665,6 @@ export class Daemon {
     }
     await this.subscribeLeaseInputs();
     await this.publishAllPools();
-    if (this.opts.spawner !== undefined) await this.enqueue(() => this.reconcileAll());
     // One pressure sample before the first admission (`tick` samples first): a daemon restarted
     // on an overloaded machine must not admit every ready task (admissions are journaled, so
     // they would stick).
@@ -666,6 +676,10 @@ export class Daemon {
     await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
     void this.mailboxLoop();
     void this.leaseRequestLoop();
+    // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
+    this.reconciling = this.reconcileAll().catch((e: unknown) =>
+      this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`),
+    );
 
     await this.publish(
       this.statusTopic,
@@ -1346,12 +1360,17 @@ export class Daemon {
     const check = (type: string) => {
       if (this.supervised.get(agentId) !== a) return;
       if (type === "reaped") {
+        // A re-delivery (same wall_time) of a reap a heartbeat already suppressed changes nothing.
+        if (a.watch.state.status?.wall_time === a.suppressedReap) return;
+        a.suppressedReap = undefined;
         if (a.pendingReap === undefined) holdReaped();
         return;
       }
       clearTimeout(a.reapTimer);
       a.reapTimer = undefined;
       a.pendingReap = undefined;
+      a.suppressedReap = undefined;
+      a.liveStatus = type;
       if (FINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
     };
     watch.onStatus(check);
@@ -1426,15 +1445,16 @@ export class Daemon {
     return s;
   }
 
-  /** The reap grace that applies now: `wake_grace_s` right after a wake, else the normal one. */
+  /**
+   * The reap grace that applies now: the normal one, at least `wake_grace_s` right after a wake.
+   * A wake never shortens it: the LWT flood a sleep causes is exactly what must not be rushed.
+   */
   private reapGrace(wave: WaveId): { ms: number; wake: boolean } {
     const eff = this.config.effective(wave);
+    const ms = this.opts.spawner?.reapGraceMs ?? secondsMs(eff.heartbeat_alarm_s);
     if (inWakeGrace(this.clock, this.wallNow(), eff.wake_grace_s))
-      return { ms: secondsMs(eff.wake_grace_s), wake: true };
-    return {
-      ms: this.opts.spawner?.reapGraceMs ?? secondsMs(eff.heartbeat_alarm_s),
-      wake: false,
-    };
+      return { ms: Math.max(secondsMs(eff.wake_grace_s), ms), wake: true };
+    return { ms, wake: false };
   }
 
   private wallNow(): number {
@@ -1449,15 +1469,23 @@ export class Daemon {
     a.reapTimer = setTimeout(
       () => {
         a.reapTimer = undefined;
-        if (this.supervised.get(agentId) !== a || a.watch.state.status?.type !== "reaped") return;
-        const pending = a.pendingReap;
-        if (pending === undefined) return;
-        if (reapVerdict(pending, this.now()) === "accept") {
-          void this.enqueue(() => this.retire(agentId, "reaped"));
-        } else this.scheduleReap(agentId, a);
+        if (!this.acceptReap(agentId, a)) this.scheduleReap(agentId, a);
       },
       Math.max(0, p.until - this.now()),
     );
+  }
+
+  /** Retire the agent if its pending reap is due (the timer, and every monitor tick, ask). */
+  private acceptReap(agentId: string, a: Supervised): boolean {
+    const pending = a.pendingReap;
+    if (this.supervised.get(agentId) !== a || pending === undefined) return true;
+    if (a.watch.state.status?.type !== "reaped") return true;
+    if (reapVerdict(pending, this.now()) !== "accept") return false;
+    clearTimeout(a.reapTimer);
+    a.reapTimer = undefined;
+    a.pendingReap = undefined;
+    void this.enqueue(() => this.retire(agentId, "reaped"));
+    return true;
   }
 
   /** A message on a supervised agent's progress channel. */
@@ -1467,13 +1495,15 @@ export class Daemon {
     if (env === null || env.agent_id !== agentId) return;
     const now = this.now();
     const sig = parseHookSignal(raw, now);
-    // A heartbeat after the LWT: the session is alive (its MCP server may be reconnecting).
-    if (a.pendingReap !== undefined && (sig !== null || env.type === "heartbeat")) {
-      const r = heartbeatDuringReap(a.pendingReap, now, this.reapGrace(a.wave).ms);
-      a.pendingReap = r.pending;
-      this.scheduleReap(agentId, a);
-      if (r.suppressed) {
-        const p = r.pending;
+    // A heartbeat after the LWT: the session is alive (its MCP server may be reconnecting). The
+    // reap is dropped for good; the agent's next status (or the liveness silence path) decides.
+    const p = a.pendingReap;
+    if (p !== undefined && (sig !== null || env.type === "heartbeat")) {
+      if (heartbeatSuppresses(p, now)) {
+        clearTimeout(a.reapTimer);
+        a.reapTimer = undefined;
+        a.pendingReap = undefined;
+        a.suppressedReap = a.watch.state.status?.wall_time;
         void this.enqueue(() =>
           this.append(a.wave, {
             type: "reap_suppressed",
@@ -1509,13 +1539,23 @@ export class Daemon {
       });
     }
     for (const [agentId, a] of [...this.supervised]) {
+      if (a.pendingReap !== undefined) {
+        this.acceptReap(agentId, a);
+        continue;
+      }
       const eff = this.config.effective(a.wave);
       if (inWakeGrace(this.clock, this.wallNow(), eff.wake_grace_s)) continue;
       // A stopped wave's agents were cancelled: never nudge them back to work.
       const state = this.waves.get(a.wave)?.record.state;
       const stage = state?.tasks.find((t) => t.id === a.task)?.stage;
       if (this.killSwitch || state?.status === "stopped" || stage === "cancelled") continue;
-      const status = a.watch.state.status?.type ?? null;
+      // A suppressed reap leaves the retained status at `reaped` (only the agent may change it):
+      // liveness goes on from the status before it, so silence still raises its alarms.
+      const retained = a.watch.state.status;
+      const status =
+        retained?.type === "reaped" && retained.wall_time === a.suppressedReap
+          ? (a.liveStatus ?? "working")
+          : (retained?.type ?? null);
       await this.applyLiveness(
         agentId,
         a,
@@ -1677,7 +1717,10 @@ export class Daemon {
   private saveCapture(wave: WaveId, agentId: string, screen: string): string {
     const dir = join(this.opts.home, "waves", wave, "screens");
     mkdirSync(dir, { recursive: true });
-    const path = join(dir, `${agentId}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`);
+    const path = join(
+      dir,
+      `${agentId}-${new Date(this.now()).toISOString().replace(/[:.]/g, "-")}.txt`,
+    );
     writeFileSync(path, screen);
     return path;
   }
@@ -1694,7 +1737,7 @@ export class Daemon {
     await this.deliverSteer(
       a.wave,
       a.task,
-      { role: a.role, agent_id: agentId },
+      { role: a.role, agent_id: agentId, namespace: a.namespace },
       text,
       DAEMON_AGENT_ID,
       messageId,
@@ -1760,22 +1803,27 @@ export class Daemon {
     if (agentId === undefined || cls === undefined || d.resolved === undefined || d.task === null)
       return;
     const a = this.supervised.get(agentId);
-    if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id);
+    if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
     const { answer, by } = d.resolved;
     if (by === agentId) return;
     const why = `${by} stopped the task (decision ${d.decision_id})`;
     if (cls === "respawn_needed") {
-      if (answer.trim().toLowerCase() === STOP_ANSWER)
+      const a = answer.trim().toLowerCase();
+      const respawn = a === "respawn" && isRole(String(x.role)) && this.opts.spawner !== undefined;
+      if (a !== STOP_ANSWER && !respawn) return;
+      // Either way the vanished agent is done with: retired, so no later restart reconciles it.
+      await this.retireGone(wave, d.task, agentId, x);
+      if (!respawn) {
         await this.append(wave, { type: "task_cancelled", task: d.task, data: { by, why } });
-      else if (answer.trim().toLowerCase() === "respawn" && isRole(String(x.role))) {
-        // Approved by the owner: a fresh spawn (its own lock check still applies).
-        const role = String(x.role) as Role;
-        const task = d.task;
-        this.refused.delete(`${wave}/${task}/${role}`);
-        void this.startSpawn(wave, task, role).catch((e: unknown) =>
-          this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
-        );
+        return;
       }
+      // Approved by the owner: a fresh spawn (its own lock check still applies).
+      const role = String(x.role) as Role;
+      const task = d.task;
+      this.refused.delete(`${wave}/${task}/${role}`);
+      void this.startSpawn(wave, task, role).catch((e: unknown) =>
+        this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
+      );
       return;
     }
     if (a === undefined) return;
@@ -1795,12 +1843,38 @@ export class Daemon {
           { reason: "stalled", decision_id: d.decision_id },
         );
       case CREDIT_CLASS:
-      case UNVERIFIED_CLASS: {
+      case UNVERIFIED_CLASS:
+      case LIMITED_CLASS: {
         const sw = parseSwitchAnswer(answer, x);
         if (sw.kind === "switch") void this.runModelSwitch(agentId, a, sw.model, d.decision_id);
         return;
       }
     }
+  }
+
+  /** Journal `agent_retired` for an agent reconciliation found gone (its credentials revoked). */
+  private async retireGone(
+    wave: WaveId,
+    task: TaskId,
+    agentId: string,
+    d: Record<string, unknown>,
+  ): Promise<void> {
+    const done = this.journalEvents(wave).some(
+      (e) => e.type === "agent_retired" && e.data.agent_id === agentId,
+    );
+    if (done) return;
+    const revoked = d.minted === true ? await revokeCredentials(this.host.exec, agentId) : null;
+    await this.append(wave, {
+      type: "agent_retired",
+      task,
+      data: {
+        agent_id: agentId,
+        role: d.role,
+        status: "gone",
+        credentials_revoked: revoked,
+        lock_released: false,
+      },
+    });
   }
 
   /**
@@ -1816,7 +1890,11 @@ export class Daemon {
   ): Promise<void> {
     const { wave, task } = a;
     const fallback = this.config.effective(wave).fallback_model;
-    const reopen = async (data: Record<string, unknown>, allowed: boolean) => {
+    const reopen = async (
+      data: Record<string, unknown>,
+      allowed: boolean,
+      cls: typeof UNVERIFIED_CLASS | typeof LIMITED_CLASS = UNVERIFIED_CLASS,
+    ) => {
       const raw = await this.readScreenBounded(a.workspace);
       const screen = raw !== null ? this.saveCapture(wave, agentId, raw) : undefined;
       await this.serial(async () => {
@@ -1829,7 +1907,7 @@ export class Daemon {
           allowed,
           source: "screen",
           text: null,
-          class: UNVERIFIED_CLASS,
+          class: cls,
           tried: model,
           ...(screen !== undefined ? { screen } : {}),
         });
@@ -1843,6 +1921,7 @@ export class Daemon {
         await reopen(
           { alarm: "recovery_limited", agent_id: agentId, model, decision_id: decisionId },
           false,
+          LIMITED_CLASS,
         );
         return;
       }
@@ -1885,25 +1964,34 @@ export class Daemon {
     }
   }
 
+  /** Resolves once the restart reconciliation `start()` began has journaled every task. */
+  reconciled(): Promise<void> {
+    return this.reconciling;
+  }
+
   /**
    * Restart reconciliation: every unsettled task's agent is compared with the broker, its lock,
    * git and GitHub (reconcile.ts), journaled as `reconciled`, and watched again — except one that
-   * is gone without a trace, which opens a `respawn_needed` decision. Never respawns by itself.
+   * is gone without a trace, which opens a `respawn_needed` decision (once: not again while one is
+   * open). Never respawns by itself. The targets are probed concurrently, outside the queue; only
+   * the journaling and the supervision run inside it.
    */
   private async reconcileAll(): Promise<void> {
     const probes = this.opts.reconcile ?? execProbes(this.host.exec);
+    const jobs: Promise<void>[] = [];
     for (const [wave, log] of this.waves) {
       const rec = log.record;
       const repo = rec.wave?.repo !== undefined ? expandHome(rec.wave.repo) : undefined;
       const ns = rec.wave?.namespace ?? this.opts.namespace;
       for (const t of reconcileTargets(rec, log.journal.readAll())) {
-        try {
-          await this.reconcileOne(wave, t, ns, repo, probes);
-        } catch (e) {
-          this.log(`reconcile ${wave}/${t.task}: ${e instanceof Error ? e.message : String(e)}`);
-        }
+        jobs.push(
+          this.reconcileOne(wave, t, ns, repo, probes).catch((e: unknown) =>
+            this.log(`reconcile ${wave}/${t.task}: ${e instanceof Error ? e.message : String(e)}`),
+          ),
+        );
       }
     }
+    await Promise.all(jobs);
   }
 
   private async reconcileOne(
@@ -1914,89 +2002,119 @@ export class Daemon {
     probes: ReconcileProbes,
   ): Promise<void> {
     const id = t.agent_id;
-    const [statusRaw, regRaw] = await Promise.all([
-      this.broker.queryRetained(buildTopic(ns, id, "status"), DAEMON_DEFAULTS.probe_ms),
-      this.broker.queryRetained(registryTopic(id), DAEMON_DEFAULTS.probe_ms),
-    ]);
-    const status =
-      statusRaw !== null && statusRaw !== "" ? (parseEnvelope(statusRaw)?.type ?? null) : null;
+    // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
+    const watch = await watchAgent(this.broker, ns, id, this.now);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
     const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
     const role =
       typeof t.spawned.role === "string" && isRole(t.spawned.role) ? t.spawned.role : "implementer";
-    const branch =
-      repo !== undefined && branchName !== undefined
-        ? await probes.branch(repo, branchName)
-        : { name: branchName ?? "(unknown)", exists: null, head: null };
-    // The PR only decides anything for an agent that finished while the daemon was down.
-    const pr =
-      status === "done" && repo !== undefined && branchName !== undefined
-        ? await probes.pr(repo, branchName)
-        : null;
-    const r = reconcileTask(
-      {
-        task: t.task,
-        stage: t.stage,
-        agent_id: id,
-        role,
-        registered: regRaw !== null && regRaw !== "",
-        status,
-        heartbeat_at: this.lastSeen.get(id) ?? null,
-        lock: lockFile !== undefined && readLock(lockFile)?.agent_id === id,
-        branch,
-        pr,
-      },
-      Date.now(),
-      secondsMs(this.config.effective(wave).heartbeat_alarm_s),
-    );
-    await this.append(wave, {
-      type: "reconciled",
-      task: t.task,
-      data: {
-        agent_id: id,
-        drift: r.drift,
-        ...(r.action !== undefined ? { action: r.action } : {}),
-        ...(r.pr !== undefined ? { pr: r.pr } : {}),
-      },
-    });
-    if (r.drift.length > 0)
-      this.log(`reconciled ${wave}/${t.task}: ${r.action} (${r.drift.join("; ")})`);
-    if (r.action === "mark_done_verified") {
-      await this.append(wave, {
-        type: "artifact_verified",
-        task: t.task,
-        data: { pr: r.pr, source: "reconcile" },
-      });
-    }
-    if (r.action === "respawn_needed") {
-      await this.openDecisionNow(
-        wave,
+    let r: Reconciliation;
+    let branch: TaskFacts["branch"];
+    try {
+      const [statusRaw, regRaw, b] = await Promise.all([
+        this.broker.queryRetained(buildTopic(ns, id, "status"), DAEMON_DEFAULTS.probe_ms),
+        this.broker.queryRetained(registryTopic(id), DAEMON_DEFAULTS.probe_ms),
+        repo !== undefined && branchName !== undefined
+          ? probes.branch(repo, branchName)
+          : Promise.resolve({ name: branchName ?? "(unknown)", exists: null, head: null }),
+      ]);
+      branch = b;
+      const status =
+        statusRaw !== null && statusRaw !== "" ? (parseEnvelope(statusRaw)?.type ?? null) : null;
+      // The PR only decides anything for an agent that finished while the daemon was down.
+      const pr =
+        status === "done" && repo !== undefined && branchName !== undefined
+          ? await probes.pr(repo, branchName)
+          : null;
+      r = reconcileTask(
         {
-          kind: "agent_blocked",
           task: t.task,
-          question: `Needs you: ${id} (${t.task}) is gone after a volleyd restart: ${r.drift.join("; ")}. Respawn it?`,
-          options: ["respawn", STOP_ANSWER],
+          stage: t.stage,
+          agent_id: id,
+          role,
+          registered: regRaw !== null && regRaw !== "",
+          status,
+          heartbeat_at: watch.state.lastHeartbeatAt,
+          lock: lockFile !== undefined && readLock(lockFile)?.agent_id === id,
+          branch,
+          pr,
         },
-        { class: "respawn_needed", agent_id: id, role },
+        this.now(),
+        secondsMs(this.config.effective(wave).heartbeat_alarm_s),
       );
-      return;
+    } catch (e) {
+      await watch.close();
+      throw e;
     }
-    const watch = await watchAgent(this.broker, ns, id);
-    this.supervise(
-      wave,
-      t.task,
-      role,
-      {
-        kind: "registered",
-        agentId: id,
-        workspace: typeof t.spawned.workspace === "string" ? t.spawned.workspace : "",
-        model: null,
-        modelVerified: false,
-        watch,
-        minted: t.spawned.credentials === "minted",
-      },
-      lockFile ?? "",
-    );
+    const gone = r.action === "respawn_needed";
+    if (gone) await watch.close();
+    await this.serial(async () => {
+      if (!this.running) {
+        await watch.close();
+        return;
+      }
+      await this.append(wave, {
+        type: "reconciled",
+        task: t.task,
+        data: {
+          agent_id: id,
+          drift: r.drift,
+          ...(r.action !== undefined ? { action: r.action } : {}),
+          ...(r.pr !== undefined ? { pr: r.pr } : {}),
+          branch,
+        },
+      });
+      if (r.drift.length > 0)
+        this.log(`reconciled ${wave}/${t.task}: ${r.action} (${r.drift.join("; ")})`);
+      if (r.action === "mark_done_verified") {
+        await this.append(wave, {
+          type: "artifact_verified",
+          task: t.task,
+          data: { pr: r.pr, source: "reconcile" },
+        });
+      }
+      if (gone) {
+        const rec = this.waves.get(wave)?.record;
+        const open = rec !== undefined ? openDecisions(rec) : [];
+        const already = open.some((d) => {
+          const x = d as unknown as Record<string, unknown>;
+          return x.class === "respawn_needed" && x.agent_id === id;
+        });
+        if (already) return;
+        const canSpawn = this.opts.spawner !== undefined;
+        await this.openDecisionNow(
+          wave,
+          {
+            kind: "agent_blocked",
+            task: t.task,
+            question: `Needs you: ${id} (${t.task}) is gone after a volleyd restart: ${r.drift.join("; ")}. ${canSpawn ? "Respawn it?" : "Spawning is disabled on this daemon: stop the task, or respawn it from a daemon that spawns."}`,
+            options: canSpawn ? ["respawn", STOP_ANSWER] : [STOP_ANSWER],
+          },
+          {
+            class: "respawn_needed",
+            agent_id: id,
+            role,
+            minted: t.spawned.credentials === "minted",
+          },
+        );
+        return;
+      }
+      this.supervise(
+        wave,
+        t.task,
+        role,
+        {
+          kind: "registered",
+          agentId: id,
+          workspace: typeof t.spawned.workspace === "string" ? t.spawned.workspace : "",
+          model: null,
+          modelVerified: false,
+          watch,
+          minted: t.spawned.credentials === "minted",
+        },
+        lockFile ?? "",
+      );
+    });
   }
 
   /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
@@ -2755,11 +2873,14 @@ export class Daemon {
     );
   }
 
-  /** Publish one numbered `steering` to `target` and journal it (`steer`, and recovery's own). */
+  /**
+   * Publish one numbered `steering` to `target`'s mailbox in its namespace (the wave's, for an
+   * agent spawned with `namespace:`) and journal it (`steer`, and recovery's own).
+   */
   private async deliverSteer(
     wave: WaveId,
     task: TaskId,
-    target: { role: keyof TaskAgents; agent_id: string },
+    target: { role: keyof TaskAgents; agent_id: string; namespace: string },
     text: string,
     by: string,
     messageId: string,
@@ -2768,7 +2889,7 @@ export class Daemon {
     const log = this.waves.get(wave) as WaveLog;
     const { seq, supersedes } = nextSteer(log.record, task);
     await this.publish(
-      buildTopic(this.opts.namespace, target.agent_id, "mailbox"),
+      buildTopic(target.namespace, target.agent_id, "mailbox"),
       this.envelope(
         "mailbox",
         "steering",
@@ -2836,7 +2957,11 @@ export class Daemon {
         ? Math.min(p.wait_ack_ms, DAEMON_DEFAULTS.steer_wait_ack_max_ms)
         : DAEMON_DEFAULTS.steer_wait_ack_ms;
     const heard = waitMs > 0 ? this.acks.wait(messageId, target.agent_id, waitMs) : null;
-    await this.deliverSteer(w.wave, p.task, target, p.text, by, messageId);
+    const namespace =
+      this.supervised.get(target.agent_id)?.namespace ??
+      w.log.record.wave?.namespace ??
+      this.opts.namespace;
+    await this.deliverSteer(w.wave, p.task, { ...target, namespace }, p.text, by, messageId);
     const result = {
       wave: w.wave,
       task: p.task,
