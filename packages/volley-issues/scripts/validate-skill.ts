@@ -9,6 +9,10 @@ export interface ValidationResult {
 export const REQUIRED_SECTIONS = [
   "## Prerequisites",
   "## Usage",
+  // The volleyd path is the default dispatch path; the hand-launched flow stays, labelled legacy.
+  "## Choosing a dispatch path",
+  "## Volleyd path",
+  "## Legacy path",
   "## Batch setup",
   "## Workflow per issue",
   "## Coordinator loop",
@@ -18,6 +22,25 @@ export const REQUIRED_SECTIONS = [
   // behaviors. Required so a future editor can't accidentally drop the "yes, we
   // ship a conforming Volley agent" claim without the validator catching it.
   "## Conformance with Volley v0.1",
+] as const;
+
+/**
+ * Strings the volleyd path must name verbatim: the helper, where the wave file goes, and the
+ * exact commands of each step, so an edit can't silently drop one.
+ */
+export const REQUIRED_VOLLEYD_PATH = [
+  "scripts/wave-from-issues.ts",
+  ".volley/waves/",
+  "volleyd status",
+  "volleyd validate",
+  "volleyd run",
+  "--owner",
+  "volley sub --pattern",
+  "volley/_waves/",
+  "volleyd decisions",
+  "volleyd resolve",
+  "volleyd cleanup",
+  "--yes",
 ] as const;
 
 /** Split a markdown file into its frontmatter block and body. */
@@ -85,10 +108,21 @@ export function validateSections(source: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
+export function validateVolleydPath(source: string): ValidationResult {
+  const { body } = splitFrontmatter(source);
+  const errors = REQUIRED_VOLLEYD_PATH.filter((needle) => !body.includes(needle)).map(
+    (needle) => `volleyd path must mention: ${needle}`,
+  );
+  return { ok: errors.length === 0, errors };
+}
+
 export function validateSkill(source: string): ValidationResult {
-  const fm = validateFrontmatter(source);
-  const sections = validateSections(source);
-  return { ok: fm.ok && sections.ok, errors: [...fm.errors, ...sections.errors] };
+  const results = [
+    validateFrontmatter(source),
+    validateSections(source),
+    validateVolleydPath(source),
+  ];
+  return { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
 }
 
 if (import.meta.main) {
