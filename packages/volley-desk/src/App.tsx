@@ -16,7 +16,7 @@ import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
 const AGENT_W = 460;
-const WAVE_H = 340;
+const WAVE_H = 440;
 const AGENT_H = 220;
 const GAP = 36;
 const CGAP = 96;

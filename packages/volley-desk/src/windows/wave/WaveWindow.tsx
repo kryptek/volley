@@ -2,19 +2,19 @@
  * The wave window, ported from the prototype `WaveWindow`: Clawd + wave id +
  * owner chip in the title, chat and gear glyphs (their panels land with the
  * steering panel and settings tasks), a banner slot for the Needs-you / claim
- * banners, the dependency graph or the wave file, and a footer rail with one
- * segment per task and the wave's completion.
+ * banners, the dependency graph above the wave file, and a footer rail with
+ * one segment per task, the wave's completion and its counts.
  */
-import { BubbleChatIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
 import { Dag, type DagNode } from "./Dag";
 import { WaveYaml } from "./WaveYaml";
 import { accentFor } from "./accent";
-import { STAGE_LABEL, deskStage, wavePct } from "./stages";
+import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
 
 export const WAVE_W = 620;
@@ -27,10 +27,15 @@ export interface WaveWindowProps {
   coordinatorState?: CoordinatorState | undefined;
   /** ms when the wave started (its earliest agent); omitted → no age shown. */
   startedAt?: number | null | undefined;
+  /** Fixed clock for tests; otherwise the window re-renders every 5 s. */
   now?: number;
   frame: Omit<FrameProps, "id" | "title" | "accent" | "width" | "actions" | "footer" | "children">;
-  /** Needs-you / claim banners. */
+  /** Needs-you / claim banners, shown above the graph. */
   banner?: ReactNode;
+  /** Children after the wave file (the steering panel). */
+  children?: ReactNode;
+  /** Highlights the chat glyph while the steering panel is open. */
+  steerOpen?: boolean;
   onChat?: (wave: string) => void;
   onSettings?: (wave: string) => void;
 }
@@ -40,13 +45,38 @@ export function meFromSearch(search: string): string | null {
   return new URLSearchParams(search).get("me") || null;
 }
 
-const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
-
 function ago(ms: number): string {
-  const m = Math.max(0, Math.floor(ms / 60_000));
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  return `${Math.floor(m / 60)}h ${m % 60}m ago`;
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+}
+
+function useNow(fixed: number | undefined, ms = 5000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (fixed !== undefined) return;
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [fixed, ms]);
+  return fixed ?? now;
+}
+
+function IconBtn(p: {
+  label: string;
+  i: typeof BubbleChatIcon;
+  onClick: () => void;
+  hot?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={`icon-btn${p.hot ? " icon-btn--hot" : ""}`}
+      onClick={p.onClick}
+      aria-label={p.label}
+      title={p.label}
+    >
+      <HugeiconsIcon icon={p.i} size={15} strokeWidth={1.8} />
+    </button>
+  );
 }
 
 /** Graph nodes in wave-file order; tasks the spec does not list are appended. */
@@ -54,6 +84,7 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
   const stage = new Map(s.tasks.map((t) => [t.id, deskStage(t.stage)]));
   const fromSpec: DagNode[] = Object.entries(s.spec?.tasks ?? {}).map(([id, t]) => ({
     id,
+    issue: t.issue,
     after: t.after,
     stage: stage.get(id) ?? "queued",
     ...(t.title ? { title: t.title } : {}),
@@ -61,69 +92,78 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
   const listed = new Set(fromSpec.map((n) => n.id));
   const extra = s.tasks
     .filter((t) => !listed.has(t.id))
-    .map((t): DagNode => ({ id: t.id, after: [], stage: deskStage(t.stage) }));
+    .map((t): DagNode => ({ id: t.id, issue: t.issue, after: [], stage: deskStage(t.stage) }));
   return [...fromSpec, ...extra];
 }
 
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
 export function WaveWindow(p: WaveWindowProps) {
-  const [view, setView] = useState<"graph" | "file">("graph");
+  const now = useNow(p.now);
   const s = p.wave.state;
   const id = p.wave.id;
+  const accent = accentFor(id);
   const waiting = (p.coordinatorState ?? s?.coordinator?.state) === "awaiting_input";
   const mine = p.me !== null && s?.owner === p.me;
-  const nodes = s ? dagNodes(s) : [];
-  const pct = wavePct(nodes.map((n) => n.stage));
+  const tasks = s ? dagNodes(s) : [];
+  const pct = wavePct(tasks.map((t) => t.stage));
+  const merged = tasks.filter((t) => t.stage === "merged").length;
 
   const title = (
     <>
       <Clawd waiting={waiting} />
-      <span className="t-name ell">{id}</span>
-      {mine ? (
-        <span className="chip chip--mine">★ yours</span>
-      ) : (
-        s && <span className="chip mono">{s.owner ?? "no owner"}</span>
+      <span className="t-name">{id}</span>
+      {s && (
+        <span className={`chip${mine ? " chip--mine" : ""}`}>
+          {mine ? "★ yours" : (s.owner ?? "no owner")}
+        </span>
       )}
     </>
   );
 
   const actions = (
     <>
-      <button
-        type="button"
-        className="icon-btn"
-        aria-label="Steer wave"
-        title="Steer wave"
+      <IconBtn
+        label={`Message the coordinator of ${id}`}
+        i={BubbleChatIcon}
         onClick={() => p.onChat?.(id)}
-      >
-        <HugeiconsIcon icon={BubbleChatIcon} size={16} />
-      </button>
-      <button
-        type="button"
-        className="icon-btn"
-        aria-label="Wave settings"
-        title="Wave settings"
-        onClick={() => p.onSettings?.(id)}
-      >
-        <HugeiconsIcon icon={Settings01Icon} size={16} />
-      </button>
+        hot={p.steerOpen ?? false}
+      />
+      <IconBtn label={`Settings for ${id}`} i={Settings02Icon} onClick={() => p.onSettings?.(id)} />
     </>
   );
 
   const footer = s && (
-    <div className="rail-row">
-      <div className="rail">
-        {nodes.map((n) => (
+    <div className="rail">
+      {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a read-only status, not a control */}
+      <div
+        className="rail-bar"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`${id} progress`}
+      >
+        {tasks.map((t) => (
           <span
-            key={n.id}
-            className={`rail-seg rail-seg--${n.stage}`}
-            title={`${n.id} · ${STAGE_LABEL[n.stage]}`}
-          />
+            key={t.id}
+            className={`rail-seg st-${t.stage}`}
+            title={`${t.id} · ${STAGE_LABEL[t.stage]}`}
+          >
+            <span style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }} />
+          </span>
         ))}
       </div>
-      <span className="rail-pct mono">{pct}%</span>
-      {p.startedAt != null && (
-        <span className="rail-age dim">started {ago((p.now ?? Date.now()) - p.startedAt)}</span>
-      )}
+      <div className="rail-meta">
+        <span className="rail-pct">{pct}%</span>
+        <span>
+          {merged} of {tasks.length} merged
+        </span>
+        <span>
+          {plural(s.open_decisions.length, "decision")} · {plural(s.gates.length, "gate")}
+        </span>
+        {p.startedAt != null && <span className="mono dim">running {ago(now - p.startedAt)}</span>}
+      </div>
     </div>
   );
 
@@ -132,47 +172,29 @@ export function WaveWindow(p: WaveWindowProps) {
       {...p.frame}
       id={id}
       title={title}
-      accent={accentFor(id)}
+      accent={accent}
       width={WAVE_W}
       actions={actions}
       footer={footer}
     >
       {p.banner}
       {s ? (
-        <>
-          <div className="wave-meta">
-            <span className="mono dim ell min0">
-              {s.status} · {s.release_branch}
-            </span>
-            <span className="wave-counts">
-              {plural(s.open_decisions.length, "decision")} · {plural(s.gates.length, "gate")}
-            </span>
+        <div className="wave-grid">
+          <div>
+            <div className="lbl">Dependency graph</div>
+            <Dag tasks={tasks} accent={accent} />
           </div>
-          <div className="wave-tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "graph"}
-              className={`pill${view === "graph" ? " pill--on" : ""}`}
-              onClick={() => setView("graph")}
-            >
-              graph
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "file"}
-              className={`pill${view === "file" ? " pill--on" : ""}`}
-              onClick={() => setView("file")}
-            >
-              wave file
-            </button>
+          <div className="min0">
+            <div className="lbl">
+              Wave file <span className="dim mono">v{s.spec?.version ?? s.version}</span>
+            </div>
+            <WaveYaml wave={s} />
           </div>
-          {view === "graph" ? <Dag nodes={nodes} /> : <WaveYaml wave={s} />}
-        </>
+        </div>
       ) : (
         <div className="dim">waiting for wave state</div>
       )}
+      {p.children}
     </Frame>
   );
 }
