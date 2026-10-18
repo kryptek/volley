@@ -8,7 +8,7 @@ Your `done` is checked: the PR branch on origin must equal this worktree's HEAD,
 
 ## Rules
 
-- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from `{{release_branch}}`).
+- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the PR head named in `.volley/rebase.md`).
 - The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
 - Never push to or merge into `{{release_branch}}` or any default branch. The only force-push allowed is the `--force-with-lease` push to the PR branch in `.volley/rebase.md`.
 

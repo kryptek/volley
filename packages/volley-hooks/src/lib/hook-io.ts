@@ -30,8 +30,17 @@ export interface HookContext {
   afterEmit: (fn: AfterEmit) => void;
 }
 
-/** Returns text to inject as `additionalContext`, or null. */
-export type HookHandler = (ctx: HookContext) => Promise<string | null>;
+/**
+ * Structured hook output: `additionalContext` (events in CONTEXT_EVENTS) and, for PreToolUse,
+ * `updatedInput` (the tool input Claude Code runs instead of the original).
+ */
+export interface HookResult {
+  additionalContext?: string;
+  updatedInput?: Record<string, unknown>;
+}
+
+/** Returns text to inject as `additionalContext`, a structured result, or null. */
+export type HookHandler = (ctx: HookContext) => Promise<string | HookResult | null>;
 
 /** Events whose `additionalContext` reaches the model (Claude Code hooks reference). */
 const CONTEXT_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"]);
@@ -48,6 +57,16 @@ export function parseHookInput(raw: string): HookInput | null {
 /** The JSON stdout that injects `text` (plain stdout does not reach the model on PostToolUse). */
 export function contextOutput(event: string, text: string): string {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } });
+}
+
+/** The JSON stdout for a structured result; "" when it carries nothing the event accepts. */
+export function resultOutput(event: string, r: HookResult): string {
+  const out: Record<string, unknown> = {};
+  if (r.updatedInput !== undefined && event === "PreToolUse") out.updatedInput = r.updatedInput;
+  if (r.additionalContext !== undefined && r.additionalContext !== "" && CONTEXT_EVENTS.has(event))
+    out.additionalContext = r.additionalContext;
+  if (Object.keys(out).length === 0) return "";
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: event, ...out } });
 }
 
 /** First `max` characters of a string field, or undefined. */
@@ -114,6 +133,7 @@ export async function invokeHook(
     identity,
     afterEmit: (fn) => afterEmit.push(fn),
   });
+  if (text !== null && typeof text === "object") return resultOutput(event, text);
   if (text === null || text === "" || !CONTEXT_EVENTS.has(event)) return "";
   return contextOutput(event, text);
 }

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Role } from "../../src/brief";
 import { type DecisionRecord, openEvent, resolveEvent } from "../../src/decisions";
-import type { ExecFn, ExecResult } from "../../src/exec";
+import type { ExecFn, ExecOptions, ExecResult } from "../../src/exec";
 import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
@@ -45,6 +45,14 @@ export interface World {
   prState: Record<number, "OPEN" | "MERGED" | "CLOSED">;
   /** `git diff --name-only a b` per `a..b`. */
   diffNames: Record<string, string[]>;
+  /** Called with every argv before it is answered (a test may change the world mid-run). */
+  before?: ((argv: string[]) => void) | undefined;
+  /** An argv this answers true for never returns (a hung network call). */
+  hang?: ((argv: string[]) => boolean) | undefined;
+  /** An argv this answers true for comes back `timedOut` (exec's hard timeout fired). */
+  timeout?: ((argv: string[]) => boolean) | undefined;
+  /** An argv this answers true for rejects (e.g. `gh` not on PATH). */
+  fail?: ((argv: string[]) => boolean) | undefined;
 }
 
 export interface Spawned {
@@ -96,16 +104,23 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     diffNames: {},
   };
   const calls: string[][] = [];
+  /** The exec options of every call, parallel to `calls`. */
+  const callOpts: ExecOptions[] = [];
   const out = (stdout: string, code = 0): ExecResult => ({
     code,
     stdout,
     stderr: "",
     timedOut: false,
   });
-  const exec: ExecFn = async (argv) => {
+  const exec: ExecFn = async (argv, opts = {}) => {
     if (o.fence !== false) assertAllowed(argv);
     calls.push([...argv]);
+    callOpts.push(opts);
     const a = [...argv];
+    world.before?.(a);
+    if (world.hang?.(a)) return new Promise<ExecResult>(() => {});
+    if (world.timeout?.(a)) return { ...out(""), code: 124, timedOut: true };
+    if (world.fail?.(a)) throw new Error(`spawn ${a[0]} ENOENT`);
     if (a[0] === "git" && a[1] === "-C") {
       const wt = a[2] as string;
       const [verb, ...rest] = a.slice(3);
@@ -136,6 +151,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return out(
         JSON.stringify({
           state,
+          headRefOid: world.prs.find((p) => p.number === n)?.headRefOid ?? null,
           mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
           mergeCommit: state === "MERGED" ? { oid: sha(0xa11) } : null,
           baseRefName: wave.release_branch,
@@ -179,6 +195,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const spawns: Spawned[] = [];
   const steers: { role: Role; agent_id: string; text: string; reason: string }[] = [];
   const attempts: Record<string, number> = {};
+  /** The last result each agent reported (retire journals it, as retireAgent does). */
+  const lastResult: Record<string, unknown> = {};
+  /** Role spawns the daemon holds (budget, admission, a refused launch) while this is true. */
+  let holdSpawns = false;
   const spawnAgent = async (role: Role, start?: SpawnStart, files: Record<string, string> = {}) => {
     const attempt = (attempts[role] ?? 0) + 1;
     attempts[role] = attempt;
@@ -205,13 +225,20 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   };
 
   let clock = Date.parse("2026-10-18T12:00:00.000Z");
+  let queue: Promise<unknown> = Promise.resolve();
   const driver = new PipelineDriver("w1", {
     now: () => clock,
     exec,
     home,
     record: () => rec,
     journal,
-    spawn: async (_task, role, req) => spawnAgent(role, req.start, req.files),
+    spawn: async (_task, role, req) => (holdSpawns ? null : spawnAgent(role, req.start, req.files)),
+    // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
+    enqueue: (fn) => {
+      const p = queue.then(fn);
+      queue = p.catch(() => {});
+      return p;
+    },
     steer: async (task, role, agentId, text, reason) => {
       steers.push({ role, agent_id: agentId, text, reason });
       await journal({
@@ -240,7 +267,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await journal({
         type: "agent_retired",
         task: "T1",
-        data: { agent_id: agentId, role, status: "done" },
+        data: {
+          agent_id: agentId,
+          role,
+          status: "done",
+          ...(lastResult[agentId] !== undefined ? { result: lastResult[agentId] } : {}),
+        },
       });
     },
   });
@@ -253,6 +285,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     wave,
     world,
     calls,
+    callOpts,
     events,
     spawns,
     steers,
@@ -265,6 +298,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       clock += ms;
     },
     task: () => rec.state?.tasks.find((t) => t.id === "T1"),
+    /** While true, role spawns are held (the daemon refused them); the next tick retries. */
+    holdSpawns(v: boolean) {
+      holdSpawns = v;
+    },
+    /** One level-triggered tick, then wait for the pipeline I/O it started to fold back in. */
+    async tick() {
+      await driver.tick();
+      await driver.settled();
+    },
     run,
     journal,
     /** Submit the wave and start the implementer (what the daemon's admission + T4 spawn do). */
@@ -315,7 +357,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         status: o.status ?? "done",
         ...(o.result !== undefined ? { result: o.result } : {}),
       };
+      if (o.result !== undefined) lastResult[r.agent_id] = o.result;
       await driver.handle("T1", ev);
+      await driver.settled();
     },
     /** Resolve an open decision and hand the resolution to the pipeline. */
     async resolve(id: string, answer: string) {
@@ -326,6 +370,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         kind: "decision_resolved",
         decision: rec.decisions[id] as DecisionRecord,
       });
+      await driver.settled();
     },
     openDecisions: () =>
       (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),

@@ -2,6 +2,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CiRun, RebaseCheck } from "./artifacts";
 import {
+  type Disagreement,
   type FixupResult,
   REVIEWER_ROLES,
   type ReviewResult,
@@ -33,6 +34,11 @@ export interface EvidenceInput {
   /** Every fixup that ran, oldest first. */
   fixups: { round: number; from?: string; to: string; result?: FixupResult; diffstat?: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
+  /** Heads pushed to the PR outside the pipeline after a verification (CI re-verified on each). */
+  moves?: { from: string; to: string; touched: string[] }[];
+  /** P1s the owner ruled not blockers (`reviewers_disagree` → fine), and who ruled. */
+  not_blockers?: Disagreement[];
+  ruled_by?: string;
   /** The release-branch check the gate passed. */
   release: RebaseCheck;
   generated_at: string;
@@ -46,6 +52,8 @@ export interface EvidenceFinding {
   text: string;
   /** How the fixup resolved it (`how`), or null when no resolution was reported. */
   resolution: string | null;
+  /** Why its severity is not the reviewer's (the owner's ruling). */
+  note?: string;
 }
 
 export interface EvidenceJson {
@@ -67,6 +75,7 @@ export interface EvidenceJson {
   unresolved_p1: string[];
   fixups: { round: number; diffstat: string | null; from: string | null; to: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
+  moves: { from: string; to: string; touched: string[] }[];
   current_with_release_branch: boolean;
   behind_by: number;
   release_sha: string;
@@ -81,11 +90,13 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
       .filter((f) => f.round === round)
       .flatMap((f) => f.result?.resolved ?? [])
       .find((r) => r.finding === id)?.how ?? null;
-  // Ids are numbered exactly as the fixup brief numbered them (S1…, Q1…).
+  // Ids are numbered exactly as the fixup brief numbered them (S1…, Q1…); a P1 the owner ruled
+  // not a blocker is a P3 here too, so it is not an unresolved P1.
   const items = fixupItems(
     Object.fromEntries(
       REVIEWER_ROLES.flatMap((r) => (e.reviews[r] ? [[r, e.reviews[r]?.result]] : [])),
     ),
+    { notBlockers: e.not_blockers ?? [] },
   );
   const reviews: EvidenceJson["reviews"] = {};
   for (const role of REVIEWER_ROLES) {
@@ -104,6 +115,9 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
           ...(i.finding.line !== undefined ? { line: i.finding.line } : {}),
           text: i.finding.text,
           resolution: resolution(rv.round, i.id),
+          ...(i.note !== undefined
+            ? { note: e.ruled_by !== undefined ? `${i.note} (${e.ruled_by})` : i.note }
+            : {}),
         })),
     };
   }
@@ -131,6 +145,7 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
       to: f.to,
     })),
     rebases: e.rebases,
+    moves: e.moves ?? [],
     current_with_release_branch: e.release.behind === 0,
     behind_by: e.release.behind,
     release_sha: e.release.release_sha,
@@ -169,7 +184,8 @@ export function renderEvidenceMd(j: EvidenceJson): string {
           : f.severity === "P1"
             ? " → **UNRESOLVED**"
             : "";
-      out.push(`- **${f.id} · ${f.severity}** \`${where(f)}\`: ${f.text}${res}`);
+      const note = f.note !== undefined ? ` _(${f.note})_` : "";
+      out.push(`- **${f.id} · ${f.severity}** \`${where(f)}\`: ${f.text}${note}${res}`);
     }
   }
   out.push("", "## Fixup", "");
@@ -190,6 +206,14 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     for (const r of j.rebases) {
       out.push(
         `- \`${r.from ?? "?"}\` → \`${r.to}\`; touched: ${r.touched.length > 0 ? r.touched.join(", ") : "(nothing)"}`,
+      );
+    }
+  }
+  if (j.moves.length > 0) {
+    out.push("", "## Pushes outside the pipeline", "");
+    for (const m of j.moves) {
+      out.push(
+        `- \`${m.from}\` → \`${m.to}\`: pushed outside the pipeline after verification; CI re-verified on the new head, the reviews above stay at the heads they name; touched: ${m.touched.length > 0 ? m.touched.join(", ") : "(nothing)"}`,
       );
     }
   }

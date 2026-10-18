@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/review-result.schema.json",
   "title": "Volley Pipeline Result",
-  "description": "The retained result a supervised pipeline role publishes before its done status: a reviewer's findings (type review) or a fix-up's resolutions (type fixup). See spec section 4.6.7.",
+  "description": "The retained result a supervised pipeline role publishes before its done status: a reviewer's findings (type review) or a fix-up's resolutions (type fixup). See spec section 4.6.8.",
   "allOf": [
     { "$ref": "result.schema.json" },
     {

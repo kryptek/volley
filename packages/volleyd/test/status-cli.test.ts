@@ -165,7 +165,7 @@ describe("volleyd status formatting", () => {
       updated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(out).toBe(
-      "w1  running  v1  owner: -  tasks: 2  gates: 0  decisions: 0\n" +
+      "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 0\n" +
         "  T1  #101   spec_review     PR #7\n" +
         "  T2  #102   queued          after: T1\n",
     );

@@ -583,6 +583,7 @@ describe("App wiring", () => {
     const client: DeskMqttClient = {
       connect: async () => {},
       disconnect: async () => {},
+      publish: async () => {},
       onMessage: (h) => {
         handlers.add(h);
         return () => handlers.delete(h);

@@ -10,7 +10,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `mailbox.schema.json` | `mailbox` | section 4 |
 | `registry.schema.json` | `_system/registry/<id>` | section 6 |
 | `result.schema.json` | `result` | section 4 |
-| `review-result.schema.json` | `result` (pipeline roles: `review`, `fixup`) | section 4.6.7 |
+| `review-result.schema.json` | `result` (pipeline roles: `review`, `fixup`) | section 4.6.8 |
 | `capability.schema.json` | `capability` | section 4 |
 | `control.schema.json` | `control` (reserved) | section 4 |
 | `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
@@ -21,6 +21,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
 | `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
+| `admission.schema.json` | `_system/admission` | section 4.6.7 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
 
 ## Validating a payload

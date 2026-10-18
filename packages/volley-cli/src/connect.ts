@@ -25,16 +25,20 @@ export async function connectAsClient(
   brokerUrl: string,
   io: IO,
   auth: BrokerAuth | null = null,
+  will?: { topic: string; payload: string },
 ): Promise<VolleyBroker | null> {
   const broker = new VolleyBroker();
   const clientId = `cli-${randomSuffix(8)}`;
   try {
-    // No will: the CLI is not a conforming Volley agent (SPEC §7 says agents MUST set
-    // an LWT; the CLI does not — it's a transient tool, not a tracked participant).
-    // VolleyBroker.connect accepts willTopic/willPayload being absent for this case.
+    // No status LWT: the CLI is not a conforming Volley agent (SPEC §7 says agents MUST set
+    // an LWT; the CLI does not — it's a transient tool, not a tracked participant). A caller
+    // may still arm a non-retained will (`volley lease` releases its lease that way).
     await broker.connect({
       url: brokerUrl,
       agentId: clientId, // VolleyBroker uses this in the underlying MQTT clientId.
+      ...(will !== undefined
+        ? { willTopic: will.topic, willPayload: will.payload, willRetain: false }
+        : {}),
       ...(auth ?? {}),
     });
     return broker;

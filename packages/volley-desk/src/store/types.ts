@@ -174,6 +174,7 @@ export interface Tunables {
   worktree_root?: string;
   spawn_timeout_s?: number;
   wake_grace_s?: number;
+  screen_tail_interval_s?: number;
   [key: string]: unknown;
 }
 
@@ -276,4 +277,27 @@ export interface DeskState {
    * them once the replay has settled.
    */
   unconfirmed?: string[];
+  /**
+   * The Desk's own agent id (its broker identity) once it signs in. Its
+   * mailbox carries the acks and replies to what it sends, never an agent.
+   */
+  self?: string;
+  /** Delivery receipts for mailbox messages (D4 steering); live-only. */
+  steering?: SteeringReceipts;
+}
+
+/** When each agent (by id) answered a message id, in local ms. */
+export type Receipts = Record<string, Record<string, number>>;
+
+/**
+ * What came back for mailbox messages, keyed by message id (`correlation_id`)
+ * then by the answering envelope's `agent_id`: SPEC §4.4 `ack`s, the model's
+ * own `steering_acked` (§4.3), and any other mailbox message correlated to it.
+ */
+export interface SteeringReceipts {
+  acks: Receipts;
+  applied: Receipts;
+  replies: Receipts;
+  /** When each agent last signalled live `resumed` / `working` (never a retained replay). */
+  signals: Record<string, number>;
 }

@@ -17,6 +17,11 @@ export interface ArtifactSpec {
   release_branch: string;
   /** The previously verified head: the report then lists the files changed since (a rebase). */
   since?: string;
+  /**
+   * Someone pushed the PR branch after this role's head was verified: check the branch head on
+   * origin as it is now, not the role's own local HEAD.
+   */
+  adopt?: boolean;
 }
 
 export interface CiRun {
@@ -70,9 +75,10 @@ function parseJson<T>(text: string): T | null {
 /** Gather the artifacts of a role's claimed work. Never throws for a missing artifact. */
 export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise<ArtifactReport> {
   const git = (...args: string[]) => exec(["git", "-C", spec.cwd, ...args]);
-  const local = await git("rev-parse", "HEAD");
-  const head = local.code === 0 ? line(local.stdout) : "";
-  if (head === "") return { kind: "missing", missing: "push", detail: "no local HEAD" };
+  const local = spec.adopt === true ? null : await git("rev-parse", "HEAD");
+  let head = local !== null && local.code === 0 ? line(local.stdout) : "";
+  if (local !== null && head === "")
+    return { kind: "missing", missing: "push", detail: "no local HEAD" };
 
   const fetched = await git("fetch", "origin", spec.branch);
   const remote = await git(
@@ -85,6 +91,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
   if (fetched.code !== 0 || remoteHead === "") {
     return { kind: "missing", missing: "push", detail: `${spec.branch} is not on origin` };
   }
+  if (spec.adopt === true) head = remoteHead;
   if (remoteHead !== head) {
     return {
       kind: "missing",

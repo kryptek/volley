@@ -3,7 +3,7 @@ import type { TaskId, TaskStage, Wave } from "./types";
 
 /**
  * An admission verdict: how many more agents may start right now, and why not more.
- * T5 computes it from measured pressure; until then the daemon passes an open verdict.
+ * `decide` (src/admission.ts) computes it from measured pressure; open is `allow: Infinity`.
  */
 export interface Admission {
   allow: number;

@@ -1,9 +1,9 @@
 /*
  * Attention styles, ported from the approved prototype's styles.css: the
- * Needs-you pulse (the default effect; electric/star land in D7), the
- * Needs-you banners, the agent attention line, the coordinators window and
- * the top-bar pill. The coordinator-tier ring (`.win--attn-coordinator`) is
- * in desk.css.
+ * Needs-you pulse (the default effect; electric/star are React Bits wrappers
+ * in Frame.tsx), the Needs-you banners, the agent attention line, the
+ * coordinators window and the top-bar pill. The coordinator-tier ring
+ * (`.win--attn-coordinator`) is in desk.css.
  */
 .win-attn {
   border-radius: 14px;

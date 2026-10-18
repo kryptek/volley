@@ -79,7 +79,7 @@ describe("volleyd never merges", () => {
     expect(h.task()?.stage).toBe("merge_ready");
     h.world.prState[7] = "MERGED";
     h.elapse(60 * 60 * 1000);
-    await h.driver.tick();
+    await h.tick();
     expect(h.task()?.stage).toBe("done");
 
     expect(h.calls.length).toBeGreaterThan(20);

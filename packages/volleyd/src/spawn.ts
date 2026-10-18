@@ -262,7 +262,9 @@ async function launchAttempt(
     ...(req.start?.detach === true ? { detach: true } : {}),
   });
 
-  await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
+  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
+  if (req.role !== "quality_reviewer")
+    await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
   for (const [name, content] of Object.entries(req.files ?? {})) {
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }

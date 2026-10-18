@@ -373,6 +373,92 @@ describe("steer", () => {
     expect(daemon.record(WAVE)?.seq).toBe(seq);
     expect(daemon.record(WAVE)?.steers).toEqual({});
   });
+  it("urgent: interrupts the agent BEFORE delivering the one steering message", async () => {
+    const order: string[] = [];
+    const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
+      const env = parseEnvelope(payload);
+      if (env !== null) order.push(`${env.type}:${(env.payload as { text?: string }).text}`);
+    });
+    const before = interrupted.length;
+    const res = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      text: "stop the migration",
+      urgent: true,
+      by: "coord-a",
+      wait_ack_ms: 0,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    await unsub();
+    expect(res.error).toBeUndefined();
+    expect(res.result).toMatchObject({ agent_id: "agent-a1", seq: 1, interrupted: true });
+    expect(interrupted.slice(before)).toEqual(["agent-a1"]);
+    // Exactly one message, carrying the operator's text (no machine-worded second steer).
+    expect(order).toEqual(["steering:stop the migration"]);
+    expect(daemon.journalEvents(WAVE).filter((e) => e.type === "steering_sent")).toHaveLength(1);
+  });
+
+  it("escape_only: interrupts and delivers nothing (the caller publishes its own message)", async () => {
+    const seen: string[] = [];
+    const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
+      seen.push(parseEnvelope(payload)?.type ?? "?");
+    });
+    const seq = daemon.record(WAVE)?.seq;
+    const res = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      urgent: true,
+      escape_only: true,
+      by: "coord-a",
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    await unsub();
+    expect(res.error).toBeUndefined();
+    expect(res.result).toMatchObject({
+      wave: WAVE,
+      task: "A",
+      agent_id: "agent-a1",
+      escape_only: true,
+      interrupted: true,
+    });
+    expect(interrupted).toEqual(["agent-a1"]);
+    expect(seen).toEqual([]);
+    expect(daemon.record(WAVE)?.seq).toBe(seq);
+    expect(daemon.record(WAVE)?.steers).toEqual({});
+  });
+
+  it("escape_only without an interrupt hook answers ok with interrupted: false", async () => {
+    await daemon.stop();
+    daemon = await Daemon.start({
+      brokerUrl: broker.url,
+      namespace: NS,
+      home,
+      tickMs: 0,
+      protocolVersion: 4,
+    });
+    const res = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      urgent: true,
+      escape_only: true,
+      by: "coord-a",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.result).toMatchObject({ agent_id: "agent-a1", interrupted: false });
+    expect(interrupted).toEqual([]);
+  });
+
+  it("escape_only by a non-owner is refused and interrupts nobody", async () => {
+    const res = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      urgent: true,
+      escape_only: true,
+      by: "coord-z",
+    });
+    expect(res.error).toContain("owned by coord-a");
+    expect(interrupted).toEqual([]);
+  });
 });
 
 describe("controls (pure)", () => {

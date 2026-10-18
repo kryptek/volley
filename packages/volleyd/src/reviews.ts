@@ -130,11 +130,15 @@ export function fixupItems(
   reviews: Reviews,
   o: { notBlockers?: Disagreement[] } = {},
 ): FixupItem[] {
-  const downgraded = new Set((o.notBlockers ?? []).map((d) => d.blocker.finding));
+  // By content, not identity: a cloned review still carries the owner's ruling.
+  const key = (role: ReviewerRole, f: Finding) => JSON.stringify([role, f.file, f.line, f.text]);
+  const downgraded = new Set(
+    (o.notBlockers ?? []).map((d) => key(d.blocker.role, d.blocker.finding)),
+  );
   return REVIEWER_ROLES.flatMap((role) =>
     (reviews[role]?.findings ?? []).map((f, i): FixupItem => {
       const id = `${ID_PREFIX[role]}${i + 1}`;
-      return downgraded.has(f)
+      return downgraded.has(key(role, f))
         ? { id, role, finding: { ...f, severity: "P3" }, note: "owner: not a blocker" }
         : { id, role, finding: f };
     }),
@@ -170,9 +174,4 @@ export function renderFindingsMd(
     );
   }
   return `${lines.join("\n")}\n`;
-}
-
-/** Every file a review names (any severity) — what a rebase must not touch unreviewed. */
-export function flaggedFiles(review: ReviewResult | undefined): Set<string> {
-  return new Set((review?.findings ?? []).map((f) => f.file));
 }

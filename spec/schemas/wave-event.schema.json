@@ -35,6 +35,8 @@
             "lease_expired",
             "alarm_raised",
             "wake_detected",
+            "reap_suppressed",
+            "reconciled",
             "config_changed"
           ]
         },

@@ -1,7 +1,11 @@
 /**
  * Vitest setup — jest-dom matchers, RTL cleanup, and the browser APIs jsdom
  * lacks but the canvas uses: `ResizeObserver` (Frame sizing) and pointer
- * capture (pan and title-bar drag).
+ * capture (pan and title-bar drag). The React Bits components (D7) also want
+ * `IntersectionObserver`, `matchMedia`, `Element.animate` (SwipeToast's
+ * fuse; a stub animation that never finishes) and a canvas `getContext`; jsdom's
+ * `getContext` logs "not implemented", so it is replaced with one that
+ * quietly returns null (no 2D / WebGL here, as in a browser without them).
  */
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
@@ -39,6 +43,58 @@ if (typeof window !== "undefined" && typeof window.PointerEvent === "undefined")
 if (typeof Element !== "undefined" && !Element.prototype.setPointerCapture) {
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};
+}
+
+if (typeof globalThis.IntersectionObserver === "undefined") {
+  class StubIntersectionObserver {
+    readonly root = null;
+    readonly rootMargin = "0px";
+    readonly thresholds: readonly number[] = [];
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  }
+  globalThis.IntersectionObserver =
+    StubIntersectionObserver as unknown as typeof IntersectionObserver;
+}
+
+if (typeof window !== "undefined" && typeof window.matchMedia === "undefined") {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList;
+}
+
+if (typeof Element !== "undefined" && !Element.prototype.animate) {
+  Element.prototype.animate = function animate() {
+    const anim = {
+      playState: "running" as AnimationPlayState,
+      onfinish: null,
+      play() {
+        anim.playState = "running";
+      },
+      pause() {
+        anim.playState = "paused";
+      },
+      cancel() {},
+      finish() {},
+    };
+    return anim as unknown as Animation;
+  };
+}
+
+if (typeof HTMLCanvasElement !== "undefined") {
+  HTMLCanvasElement.prototype.getContext = (() => null) as HTMLCanvasElement["getContext"];
 }
 
 afterEach(() => {

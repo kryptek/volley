@@ -4,6 +4,7 @@ import { DAEMON_DEFAULTS } from "../config-defaults";
 import { resolveTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
+import { formatDiff } from "../plan-diff";
 import type { WaveState } from "../types";
 import { parseWaveFile } from "../wave-file";
 import { formatWave } from "./status";
@@ -16,6 +17,10 @@ daemon has journaled the wave; tasks start as the scheduler admits them.
 The wave's owner (the one coordinator allowed to resolve, pause, stop and steer it) is --owner,
 else VOLLEY_AGENT_ID, else the session registered for this directory (printed as "(auto)").
 Paths a task shares with a running wave's task are printed as overlap warnings (advisory).
+If the daemon already runs a wave with this id, the file is that wave's next plan version: the
+daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
+it (added tasks queue, removed queued tasks cancel, in-flight tasks get a plan_change decision).
+Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 `;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -69,6 +74,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
+    } else if (res.plan !== undefined) {
+      io.stdout(
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+      );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(

@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import type { EvidenceJson } from "../src/evidence";
+import { roleSpawnHold } from "../src/pipeline";
 import { FIXTURES } from "./helpers/fake-host";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
@@ -169,11 +171,11 @@ describe("pipeline: artifacts and CI", () => {
     // Re-checks are rate-limited.
     const runLists = () => h.calls.filter((c) => c[1] === "run" && c[2] === "list").length;
     const before = runLists();
-    await h.driver.tick();
+    await h.tick();
     expect(runLists()).toBe(before);
     h.world.ci[H1] = "red";
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-    await h.driver.tick();
+    await h.tick();
     const [d] = h.openDecisions();
     expect(d?.kind).toBe("ci_failed");
     expect(d?.question).toContain("actions/runs/1001");
@@ -226,7 +228,7 @@ describe("pipeline: rebase before the gate", () => {
     expect(h.record().state?.gates).toEqual([]);
     h.world.ci[H3] = "green";
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-    await h.driver.tick();
+    await h.tick();
     expect(stage()).toBe("merge_ready");
     expect(h.task()?.pr?.head_sha).toBe(H3);
   });
@@ -246,7 +248,7 @@ describe("pipeline: after the gate", () => {
     expect(stage()).toBe("merge_ready");
     // Still open: polling (rate-limited) changes nothing.
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-    await h.driver.tick();
+    await h.tick();
     expect(stage()).toBe("merge_ready");
     const views = h.calls.filter((c) => c[1] === "pr" && c[2] === "view");
     expect(views.at(-1)).toEqual([
@@ -255,14 +257,14 @@ describe("pipeline: after the gate", () => {
       "view",
       "7",
       "--json",
-      "state,mergedAt,mergeCommit,baseRefName",
+      "state,mergedAt,mergeCommit,baseRefName,headRefOid",
     ]);
 
     h.world.prState[7] = "MERGED";
-    await h.driver.tick(); // within the poll interval: not re-checked yet
+    await h.tick(); // within the poll interval: not re-checked yet
     expect(stage()).toBe("merge_ready");
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-    await h.driver.tick();
+    await h.tick();
     expect(stage()).toBe("done");
     expect(h.record().state?.gates).toEqual([]);
     expect(h.events.find((e) => e.data.role === "merged")?.data).toMatchObject({
@@ -279,7 +281,7 @@ describe("pipeline: after the gate", () => {
     h.world.prState[7] = "CLOSED";
     for (let i = 0; i < 2; i++) {
       h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-      await h.driver.tick();
+      await h.tick();
     }
     expect(stage()).toBe("merge_ready");
     expect(h.events.filter((e) => e.data.alarm === "pr_closed_unmerged")).toHaveLength(1);
@@ -305,12 +307,40 @@ describe("pipeline role spawns", () => {
       const wt = join(env.dir, "wt", "w1", "T1-spec_reviewer-2");
       expect(env.host.worktrees[0]).toMatchObject({ path: wt, base: H1, detach: true });
       expect(readFileSync(join(wt, ".volley", "review.md"), "utf-8")).toBe("# What to review\n");
+      expect(existsSync(join(wt, "ISSUE.md"))).toBe(true);
       expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
         role: "spec_reviewer",
         start: H1,
         detached: true,
         branch: `HEAD (detached at ${H1})`,
       });
+      if (res.kind === "launched") {
+        await res.verified;
+        res.lock.release();
+      }
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("the quality reviewer's worktree has no ISSUE.md (it reviews the diff only)", async () => {
+    const { makeSpawnEnv } = await import("./helpers/fake-host");
+    const { spawnAgent } = await import("../src/spawn");
+    const env = await makeSpawnEnv();
+    try {
+      const res = await spawnAgent(
+        env.request({
+          role: "quality_reviewer",
+          attempt: 1,
+          start: { ref: H1, detach: true },
+          files: { "review.md": "# What to review\n" },
+        }),
+        env.deps,
+      );
+      expect(res.kind).toBe("launched");
+      const wt = join(env.dir, "wt", "w1", "T1-quality_reviewer-1");
+      expect(existsSync(join(wt, ".volley", "review.md"))).toBe(true);
+      expect(existsSync(join(wt, "ISSUE.md"))).toBe(false);
       if (res.kind === "launched") {
         await res.verified;
         res.lock.release();
@@ -344,5 +374,276 @@ describe("pipeline role spawns", () => {
       ],
     ]);
     expect(r.branch).toBe(`HEAD (detached at ${H1})`);
+  });
+});
+
+/** The gate's evidence JSON. */
+const evidence = (): EvidenceJson =>
+  JSON.parse(readFileSync((h.task()?.evidence_path as string).replace(/\.md$/, ".json"), "utf-8"));
+
+describe("pipeline: the fixup's result is durable", () => {
+  it("a fixup done while CI is still running keeps its resolutions until CI settles", async () => {
+    await reviewed();
+    await h.finish("fixup", { head: H2, ci: "running", result: result("fixup-resolved") });
+    expect(stage()).toBe("fixup");
+    h.world.ci[H2] = "green";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("merge_ready");
+    expect(h.record().pipeline.T1?.fixups[0]?.result).toEqual(result("fixup-resolved"));
+    const j = evidence();
+    expect(j.unresolved_p1).toEqual([]);
+    expect(j.reviews.spec_reviewer?.findings[0]?.resolution).toMatch(/\S/);
+    // The fixup's diffstat keeps git's alignment.
+    expect(readFileSync(h.task()?.evidence_path as string, "utf-8")).toContain(
+      "```\n src/batch.ts | 4 ++--\n 1 file changed\n```",
+    );
+  });
+
+  it("CI red at the fixup's done → re-verify after a fix keeps the resolutions", async () => {
+    await reviewed();
+    await h.finish("fixup", { head: H2, ci: "red", result: result("fixup-resolved") });
+    const [d] = h.openDecisions();
+    expect(d?.kind).toBe("ci_failed");
+    h.world.ci[H2] = "green";
+    await h.resolve(d?.decision_id as string, "re-verify");
+    expect(stage()).toBe("merge_ready");
+    expect(evidence().unresolved_p1).toEqual([]);
+  });
+
+  it("a fixup done without a parseable result is steered once, then a decision", async () => {
+    await reviewed();
+    const id = h.run("fixup")?.agent_id as string;
+    await h.finish("fixup", { head: H2, ci: "green" });
+    expect(h.steers).toEqual([
+      expect.objectContaining({ role: "fixup", agent_id: id, reason: "result" }),
+    ]);
+    expect(h.steers[0]?.text).toMatch(/channel="result", type="fixup"/);
+    expect(h.run("fixup")?.accepted).toBe(false);
+    await h.finish("fixup", { head: H2, ci: "green" });
+    expect(h.steers).toHaveLength(1);
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "agent_blocked", options: ["skip", "respawn", "cancel"] });
+    // skip: the pushed work is verified; the P1s it reported nothing for stay UNRESOLVED.
+    await h.resolve(d?.decision_id as string, "skip");
+    expect(stage()).toBe("merge_ready");
+    expect(evidence().unresolved_p1).toEqual(["S1", "Q1"]);
+  });
+});
+
+describe("pipeline: decisions", () => {
+  it("a free-text answer that merely contains 'cancel' does not cancel", async () => {
+    await reviewed();
+    await h.finish("fixup", { head: H2, ci: "red", result: result("fixup-resolved") });
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "re-verify, do not cancel");
+    expect(stage()).not.toBe("cancelled");
+    // Re-verified (still red): asked again.
+    expect(h.openDecisions().map((x) => x.kind)).toEqual(["ci_failed"]);
+  });
+
+  it("an answer that is not one of the options re-asks instead of guessing", async () => {
+    await implemented();
+    await h.finish("spec_reviewer", {});
+    await h.finish("spec_reviewer", {});
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "hmm, not sure");
+    const [again] = h.openDecisions();
+    expect(again?.decision_id).not.toBe(d?.decision_id);
+    expect(again).toMatchObject({ kind: "agent_blocked", options: ["respawn", "skip"] });
+    expect(again?.question).toMatch(/not one of/);
+  });
+
+  it("a respawn the daemon holds is retried on later ticks", async () => {
+    await implemented();
+    await h.finish("spec_reviewer", { status: "failed" });
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["respawn", "cancel"]);
+    h.holdSpawns(true);
+    await h.resolve(d?.decision_id as string, "respawn");
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    await h.tick();
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    h.holdSpawns(false);
+    await h.tick();
+    const specs = h.spawns.filter((s) => s.role === "spec_reviewer");
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.start).toEqual({ ref: H1, detach: true });
+    expect(h.task()?.agents.spec_reviewer).toBe(specs[1]?.agent_id);
+  });
+
+  it("a P1 the owner ruled not a blocker is not an unresolved P1 in the evidence", async () => {
+    await implemented();
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-fine-same-hunk") });
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "fine");
+    // The fixup resolves nothing it reports (S1 is a P3 to it now).
+    await h.finish("fixup", { head: H2, ci: "green", result: { resolved: [] } });
+    expect(stage()).toBe("merge_ready");
+    const j = evidence();
+    expect(j.unresolved_p1).toEqual([]);
+    expect(j.reviews.spec_reviewer?.findings[0]).toMatchObject({
+      id: "S1",
+      severity: "P3",
+      note: "owner: not a blocker (coord-1)",
+    });
+    const md = readFileSync(h.task()?.evidence_path as string, "utf-8");
+    expect(md).toMatch(/S1 · P3.*owner: not a blocker/);
+  });
+});
+
+describe("pipeline: rebase without CI", () => {
+  it("accepting a no-CI rebase head keeps its touched files: a flagged one still re-runs that review", async () => {
+    await reviewed();
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
+    await h.finish("rebase", { head: H3 }); // no CI run at all
+    h.elapse(DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["accept", "cancel"]);
+    await h.resolve(d?.decision_id as string, "accept");
+    expect(h.record().pipeline.T1?.rebases).toEqual([
+      { from: H2, to: H3, touched: ["src/api.ts"] },
+    ]);
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(2);
+    expect(stage()).toBe("spec_review");
+  });
+});
+
+describe("pipeline: the PR head at the gate and at the merge", () => {
+  it("a push after verification is re-verified before the gate; the evidence names both heads", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]" });
+    await h.start();
+    h.openPr(H1);
+    // Someone pushes H2 to the PR after the implementer's H1 was verified, before the gate.
+    h.world.before = (a) => {
+      if (a[1] !== "pr" || a[2] !== "view") return;
+      h.world.before = undefined;
+      h.world.origin[h.PR_BRANCH] = H2;
+      (h.world.prs[0] as { headRefOid: string }).headRefOid = H2;
+      h.world.ci[H2] = "running";
+    };
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.events.find((e) => e.data.alarm === "pr_head_moved")?.data).toMatchObject({
+      expected: H1,
+      actual: H2,
+    });
+    expect(stage()).toBe("implement");
+    expect(h.record().state?.gates).toEqual([]);
+    h.world.ci[H2] = "green";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("merge_ready");
+    const j = evidence();
+    expect(j.head_sha).toBe(H2);
+    expect(j.moves).toEqual([{ from: H1, to: H2, touched: [] }]);
+    expect(readFileSync(h.task()?.evidence_path as string, "utf-8")).toMatch(
+      /pushed outside the pipeline/,
+    );
+  });
+
+  it("a PR merged at another head than the gated one is done, with an alarm naming both", async () => {
+    await implemented({ pipeline: "[implement, merge_ready]" });
+    (h.world.prs[0] as { headRefOid: string }).headRefOid = H2;
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("done");
+    expect(h.events.find((e) => e.data.alarm === "merged_unverified_head")?.data).toMatchObject({
+      gated: H1,
+      merged: H2,
+    });
+    expect(h.events.find((e) => e.data.role === "merged")?.data).toMatchObject({
+      head_sha: H1,
+      merged_head_sha: H2,
+    });
+  });
+});
+
+describe("pipeline: I/O never blocks the queue", () => {
+  it("every git / gh call has a hard timeout", async () => {
+    await reviewed();
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(stage()).toBe("merge_ready");
+    expect(h.calls.length).toBeGreaterThan(0);
+    expect(h.callOpts.every((o) => o.timeoutMs === DAEMON_DEFAULTS.pipeline_io_ms)).toBe(true);
+  });
+
+  it("a hung gh call does not hold up handle(): the work runs beside the queue", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.hang = (a) => a[0] === "gh";
+    const done = h.driver.handle("T1", {
+      kind: "agent_done",
+      role: "implementer",
+      agent_id: h.run("implementer")?.agent_id as string,
+      status: "done",
+    });
+    const raced = await Promise.race([
+      done.then(() => "returned"),
+      new Promise((r) => setTimeout(() => r("blocked"), 200)),
+    ]);
+    expect(raced).toBe("returned");
+    // A second observation of the same check while it is in flight starts nothing new.
+    const n = h.calls.length;
+    await h.driver.tick();
+    expect(h.calls.length).toBe(n);
+  });
+
+  it("a timed-out call is 'not verified yet': no alarm, re-checked on a later tick", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ci[H1] = "green";
+    h.world.local[h.run("implementer")?.worktree as string] = H1;
+    h.world.origin[h.PR_BRANCH] = H1;
+    (h.world.prs[0] as { headRefOid: string }).headRefOid = H1;
+    h.world.timeout = (a) => a[1] === "run";
+    await h.finish("implementer", {});
+    expect(h.events.filter((e) => e.type === "alarm_raised")).toEqual([]);
+    expect(h.openDecisions()).toEqual([]);
+    expect(stage()).toBe("implement");
+    h.world.timeout = undefined;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.spawns.map((s) => s.role)).toContain("spec_reviewer");
+  });
+
+  it("an error in one check is one pipeline_error alarm, not an aborted tick", async () => {
+    await implemented({ pipeline: "[implement, merge_ready]" });
+    h.cleanup();
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]" });
+    await h.start();
+    h.openPr(H1);
+    h.world.fail = (a) => a[0] === "git" && a.includes("merge-base");
+    await h.finish("implementer", { head: H1, ci: "green" });
+    for (let i = 0; i < 2; i++) {
+      h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+      await expect(h.tick()).resolves.toBeUndefined();
+    }
+    const alarms = h.events.filter((e) => e.data.alarm === "pipeline_error");
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]?.data.message).toMatch(/ENOENT/);
+    h.world.fail = undefined;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("merge_ready");
+  });
+});
+
+describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
+  const ok = { killSwitch: false, running: true, admission: 1, used: 0, budget: 4 };
+  it("holds on the kill switch, a wave not running, a closed admission or a spent budget", () => {
+    expect(roleSpawnHold(ok)).toBeNull();
+    expect(roleSpawnHold({ ...ok, killSwitch: true })).toMatch(/kill switch/);
+    expect(roleSpawnHold({ ...ok, running: false })).toMatch(/not running/);
+    expect(roleSpawnHold({ ...ok, admission: 0, reasons: ["memory pressure"] })).toMatch(
+      /admission closed: memory pressure/,
+    );
+    expect(roleSpawnHold({ ...ok, used: 4 })).toMatch(/spawn budget exhausted \(4\/4\)/);
   });
 });

@@ -198,6 +198,45 @@ describe("createMqttClient (desk)", () => {
   });
 });
 
+describe("createMqttClient publish (D4 steering)", () => {
+  const creds = { username: "desk", password: "s3cret" };
+  let broker: TestBroker;
+  let client: DeskMqttClient | null = null;
+
+  beforeEach(async () => {
+    broker = await startTestBroker({ credentials: creds });
+  });
+
+  afterEach(async () => {
+    await client?.disconnect();
+    client = null;
+    await broker.close();
+  });
+
+  it("signs in with broker credentials and publishes at QoS 1, resolving on PUBACK", async () => {
+    const sub = await mqtt.connectAsync(broker.url, { reconnectPeriod: 0, ...creds });
+    const got: { topic: string; qos: number; retain: boolean }[] = [];
+    sub.on("message", (topic, _payload, packet) =>
+      got.push({ topic, qos: packet.qos, retain: packet.retain }),
+    );
+    await sub.subscribeAsync("volley/default/impl-a1/mailbox", { qos: 1 });
+
+    client = createMqttClient({ url: broker.url, reconnectPeriod: 0, auth: creds });
+    await client.connect();
+    await client.publish("volley/default/impl-a1/mailbox", envelope("desk"));
+    await waitFor(() => got.length >= 1, 2000);
+    await sub.endAsync();
+
+    expect(got).toEqual([{ topic: "volley/default/impl-a1/mailbox", qos: 1, retain: false }]);
+  });
+
+  it("rejects a publish when not connected", async () => {
+    client = createMqttClient({ url: broker.url, reconnectPeriod: 0, auth: creds });
+    const err = await client.publish("volley/default/x/mailbox", "{}").catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/not connected/);
+  });
+});
+
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
@@ -219,6 +258,7 @@ describe("attachClient settling", () => {
     const client: DeskMqttClient = {
       connect: async () => {},
       disconnect: async () => {},
+      publish: async () => {},
       onMessage: () => () => {},
       onConnect: on(connect),
       onDisconnect: on(disconnect),

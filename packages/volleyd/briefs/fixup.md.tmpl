@@ -12,7 +12,7 @@ volleyd then verifies the push, the PR and CI on the new head before anything mo
 
 ## Rules
 
-- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from `{{release_branch}}`).
+- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the reviewed PR head named in `.volley/findings.md`).
 - The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
 - Never push to or merge into `{{release_branch}}` or any default branch; never force-push.
 

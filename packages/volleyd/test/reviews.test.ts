@@ -6,7 +6,6 @@ import {
   disagreementDecision,
   findDisagreements,
   fixupItems,
-  flaggedFiles,
   parseFixupResult,
   parseReviewResult,
   renderFindingsMd,
@@ -119,10 +118,13 @@ describe("fixup brief", () => {
     expect(fixupItems(reviews).find((i) => i.id === "S1")?.finding.severity).toBe("P1");
   });
 
-  it("flagged files are every file a reviewer named", () => {
-    expect([...flaggedFiles(review("quality-p1-elsewhere"))].sort()).toEqual([
-      "src/batch.ts",
-      "src/retry.ts",
-    ]);
+  it("the owner's ruling survives a cloned review (matched by content, not identity)", () => {
+    const reviews = {
+      spec_reviewer: review("spec-p1"),
+      quality_reviewer: review("quality-fine-same-hunk"),
+    };
+    const ruled = findDisagreements(reviews);
+    const items = fixupItems(structuredClone(reviews), { notBlockers: ruled });
+    expect(items.find((i) => i.id === "S1")?.finding.severity).toBe("P3");
   });
 });
