@@ -52,4 +52,8 @@ export interface Host {
   sendText(workspace: string, text: string): Promise<void>;
   /** Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`. */
   close(workspace: string, consent: ConsentToken): Promise<void>;
+  /** The screen channel's `source` for this host's captures (default `cmux`). */
+  readonly screenSource?: string;
+  /** Extra launch.sh exports for an agent (remote hosts: broker URL, namespace, agent id). */
+  launchEnv?(id: { agent_id: string; namespace: string }): Record<string, string>;
 }

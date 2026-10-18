@@ -1,0 +1,17 @@
+{
+  "wave": "2026-10-20-remote",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/2026-10-20-remote",
+  "model": "claude-opus-5-5",
+  "pipeline": ["implement"],
+  "tasks": {
+    "T1": {
+      "issue": 102,
+      "host": {
+        "type": "ssh",
+        "target": "-oProxyCommand=touch /tmp/pwned",
+        "repo": "/home/dev/src/example-repo"
+      }
+    }
+  }
+}

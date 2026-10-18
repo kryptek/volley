@@ -22,6 +22,8 @@ export interface LaunchScriptVars {
   hooksDir: string;
   model: string;
   agentId: string;
+  /** Extra exports (a remote host's VOLLEY_BROKER_URL / _NAMESPACE / _AGENT_ID, for tooling). */
+  env?: Record<string, string>;
 }
 
 /**
@@ -29,7 +31,8 @@ export interface LaunchScriptVars {
  * exports `VOLLEY_HOOKS_DIR` for the hook commands in the settings template, and execs claude
  * with the hooks via `--settings` — never `--mcp-config`, which is variadic and would swallow the
  * prompt. The brief is read from `.volley/brief.md` at launch, so it never appears in any argv
- * volleyd builds. Identity comes from `.volley/agent.json`; no env carries it.
+ * volleyd builds. Identity comes from `.volley/agent.json`; `env` exports (remote hosts) are for
+ * tooling that reads env only — the identity file wins.
  */
 export function renderLaunchScript(v: LaunchScriptVars): string {
   return [
@@ -38,6 +41,7 @@ export function renderLaunchScript(v: LaunchScriptVars): string {
     "set -euo pipefail",
     'cd "$(dirname "${BASH_SOURCE[0]}")/.."',
     `export VOLLEY_HOOKS_DIR=${shq(v.hooksDir)}`,
+    ...Object.entries(v.env ?? {}).map(([k, val]) => `export ${k}=${shq(val)}`),
     `exec claude --dangerously-skip-permissions --model ${shq(v.model)} --settings ${shq(hooksSettingsPath(v.hooksDir))} --name ${shq(v.agentId)} "$(cat .volley/brief.md)"`,
     "",
   ].join("\n");

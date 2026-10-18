@@ -4,7 +4,9 @@ import { parseArgs } from "node:util";
 import { volleydHome } from "../config-store";
 import { type ExecFn, exec as fencedExec } from "../exec";
 import { type ConsentToken, mintConsentToken } from "../fence";
+import type { Host } from "../hosts/host";
 import { LocalCmuxHost } from "../hosts/local-cmux";
+import { SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
 import { readJournalFile } from "../journal";
 import type { Wave } from "../types";
@@ -12,7 +14,8 @@ import { expandHome } from "../worktree";
 
 const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force]
 
-Remove what a wave's retired agents left behind: their cmux workspaces and git worktrees.
+Remove what a wave's retired agents left behind: their cmux workspaces (tmux sessions on a
+remote host) and git worktrees.
 Without --yes, only prints what would be removed. Only worktrees whose every agent is retired
 (journaled agent_retired) are touched; live agents are listed and skipped. Branches are kept.
 A worktree with uncommitted changes is skipped unless --force is given.
@@ -24,6 +27,8 @@ interface Target {
   agents: string[];
   workspaces: string[];
   live: string[];
+  /** Set for a remote host's worktree (agent_spawned `remote`): where it lives. */
+  remote?: { host: string; target: string; repo: string };
 }
 
 /** The cleanup plan from a wave journal: one entry per worktree its agents used. */
@@ -46,6 +51,10 @@ export function cleanupPlan(home: string, wave: string): { repo: string; targets
     };
     const id = e.data.agent_id as string;
     t.agents.push(id);
+    const remote = e.data.remote as { target?: unknown; repo?: unknown } | undefined;
+    if (typeof remote?.target === "string" && typeof remote.repo === "string") {
+      t.remote = { host: String(e.data.host), target: remote.target, repo: remote.repo };
+    }
     const ws = e.data.workspace;
     if (typeof ws === "string" && !t.workspaces.includes(ws)) t.workspaces.push(ws);
     if (!retired.has(id)) t.live.push(id);
@@ -69,7 +78,7 @@ export async function cleanupWave(
 ): Promise<number> {
   const { repo, targets } = cleanupPlan(home, wave);
   const run = opts.exec ?? fencedExec;
-  const host = new LocalCmuxHost(run);
+  const local = new LocalCmuxHost(run);
   const consent: ConsentToken | undefined = opts.yes
     ? mintConsentToken(`volleyd cleanup ${wave} --yes`)
     : undefined;
@@ -85,6 +94,7 @@ export async function cleanupWave(
       );
       continue;
     }
+    const host: Host = t.remote !== undefined ? remoteHost(t.remote, run) : local;
     for (const ws of t.workspaces) {
       try {
         await host.close(ws, consent);
@@ -92,12 +102,13 @@ export async function cleanupWave(
         io.stderr(`workspace ${ws}: ${e instanceof Error ? e.message : String(e)}\n`);
       }
     }
-    if (!existsSync(t.worktree)) {
+    if (t.remote === undefined && !existsSync(t.worktree)) {
       io.stdout(`gone ${t.worktree}\n`);
       continue;
     }
-    const argv = ["git", "-C", repo, "worktree", "remove", ...(opts.force ? ["--force"] : [])];
-    const r = await run([...argv, t.worktree], { consent });
+    const gitRepo = t.remote?.repo ?? repo;
+    const argv = ["git", "-C", gitRepo, "worktree", "remove", ...(opts.force ? ["--force"] : [])];
+    const r = await host.exec([...argv, t.worktree], { consent });
     if (r.code === 0) io.stdout(`removed ${t.worktree}\n`);
     else {
       failed++;
@@ -108,6 +119,22 @@ export async function cleanupWave(
     io.stdout("dry run: pass --yes to remove\n");
   }
   return failed;
+}
+
+/** The remote host a journaled worktree lives on: only its target and repo are needed here. */
+function remoteHost(r: NonNullable<Target["remote"]>, exec: ExecFn): Host {
+  return new SshTmuxHost(
+    {
+      name: r.host,
+      target: r.target,
+      repo: r.repo,
+      // Not used by close() or exec(); cleanup never launches anything.
+      worktree_root: r.repo,
+      volley_dir: r.repo,
+      tunnel: { remote_port: 0, supervise: false },
+    },
+    exec,
+  );
 }
 
 export async function cleanup({ argv, env, io }: CommandArgs): Promise<ExitCode> {

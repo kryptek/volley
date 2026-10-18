@@ -257,7 +257,14 @@ async function launchAttempt(
     });
     await host.writeFile(
       launchScriptPath(ctx.worktree),
-      renderLaunchScript({ hooksDir: deps.hooksDir, model: task.model, agentId }),
+      renderLaunchScript({
+        hooksDir: deps.hooksDir,
+        model: task.model,
+        agentId,
+        ...(host.launchEnv !== undefined
+          ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
+          : {}),
+      }),
       0o700,
     );
 

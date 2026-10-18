@@ -1,7 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { type PathError, toPathErrors, validator } from "./schemas";
-import type { PipelineStage, PipelineStep, TaskId, TunablesPatch, Wave, WaveTask } from "./types";
+import type {
+  PipelineStage,
+  PipelineStep,
+  RemoteHostConfig,
+  TaskId,
+  TunablesPatch,
+  Wave,
+  WaveTask,
+} from "./types";
 
 /** A wave file failed to parse or validate. `errors` are path-qualified (`tasks.T3.after[1]`). */
 export class WaveFileError extends Error {
@@ -16,13 +24,15 @@ export class WaveFileError extends Error {
   }
 }
 
+type InlineHost = RemoteHostConfig & { type: "ssh"; name?: string };
+
 interface RawTask {
   issue: number;
   title?: string;
   after?: TaskId[];
   pipeline?: PipelineStep[];
   model?: string;
-  host?: string;
+  host?: string | InlineHost;
   files?: string[];
 }
 
@@ -71,6 +81,22 @@ export function parseWaveFile(text: string, source?: string): Wave {
   }
   if (unknown.length > 0) fail(unknown);
 
+  // An inline host without a name has no config entry to inherit from: it must be complete.
+  const hostErrors: PathError[] = [];
+  for (const id of ids) {
+    const h = w.tasks[id]?.host;
+    if (typeof h !== "object" || h.name !== undefined) continue;
+    for (const key of ["target", "repo", "volley_dir"] as const) {
+      if (h[key] === undefined) {
+        hostErrors.push({
+          path: `tasks.${id}.host.${key}`,
+          reason: "required for an inline host without a name",
+        });
+      }
+    }
+  }
+  if (hostErrors.length > 0) fail(hostErrors);
+
   const cycle = findCycle(ids, (id) => w.tasks[id]?.after ?? []);
   if (cycle !== null) {
     fail([{ path: `tasks.${cycle[0]}.after`, reason: `dependency cycle ${cycle.join(" -> ")}` }]);
@@ -96,7 +122,7 @@ function normalise(w: RawWave): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
-      host: t.host ?? "local",
+      ...normaliseHost(t.host),
       files: t.files ?? [],
     };
   }
@@ -115,6 +141,13 @@ function normalise(w: RawWave): Wave {
     ...(w.spawn_budget !== undefined ? { spawn_budget: w.spawn_budget } : {}),
     config: w.config ?? {},
   };
+}
+
+/** `host:` as a name (`local`, a config `hosts.<name>`) plus the inline spec when there is one. */
+function normaliseHost(h: RawTask["host"]): Pick<WaveTask, "host" | "host_spec"> {
+  if (h === undefined) return { host: "local" };
+  if (typeof h === "string") return { host: h };
+  return { host: h.name ?? (h.target as string), host_spec: h };
 }
 
 /** `[a, [b, c], d]` → `[[a], [b, c], [d]]`: every entry becomes a parallel group. */
