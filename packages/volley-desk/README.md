@@ -39,7 +39,7 @@ src/canvas/useViewport.ts   pan / wheel / zoomAt / fitTo (port of the prototype 
 src/canvas/World.tsx        the transformed world layer (world--anim while arranging)
 src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-column packing,
                             rows × columns chosen for the largest zoom (port of the prototype)
-src/layout/useAutoArrange.ts auto-arrange triggers and the persisted ON/OFF setting
+src/layout/useAutoArrange.ts auto-arrange triggers (the ON/OFF setting is the look's autoArrange)
 src/canvas/Frame.tsx        window frame: drag, focus (useFocusOrder), win--born (4 s), onSize,
                             chromes glass | liquid | spotlight | glow | solid, Needs-you
                             effect pulse | electric | star (attnStyle; wrapAttention overrides)
@@ -63,10 +63,12 @@ src/styles/attention.css    pulse (default Needs-you effect), banners, coordinat
 src/settings/               settings modal (wave gear): rows built from spec/schemas/config.schema.json
                             (schemaRows), config_set requests + acks (configTransport), SettingsModal
 src/styles/settings.css     settings modal rules
+src/look/options.ts         chrome, Needs-you and narration option tables (labels, keys, types)
 src/look/useLook.ts         the look, persisted in localStorage `volley-desk-look`: bg, dim,
                             chrome, attn, narr, tethers, autoArrange (defaults = prototype LOOK0)
 src/look/backgrounds.ts     all 63 free React Bits backgrounds + None, each lazy (its own chunk)
-src/look/Background.tsx     background layer: error boundary → no-WebGL message, bg-dim overlay
+src/look/Background.tsx     background layer: error boundary → no-WebGL message, or a failed chunk
+                            load → "Couldn’t load" + Retry; bg-dim overlay
 src/look/Appearance.tsx     Appearance panel: background search + list, dim, window style,
                             auto-arrange, Needs-you effect, narration effect
 src/look/Tethers.tsx        SVG cubic per agent, wave window → agent, in the wave accent
@@ -131,7 +133,9 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 | ShinyText | `bunx --bun shadcn@latest add @react-bits/ShinyText-TS-CSS --path src/rb/ShinyText --yes` | shiny narration (`src/windows/agent/Narration.tsx`) |
 | every background (63, the list in `src/look/backgrounds.ts`) | `bunx --bun shadcn@latest add @react-bits/<Name>-TS-CSS --path src/rb/<Name> --yes` | background picker (`src/look/backgrounds.ts`) |
 
-**Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome ignores `src/rb/` (`biome.json`). The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
+**Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome skips the vendored components (a `biome.json` override on `src/rb/`) but still lints `StatusMark` and `ElasticSlider`, which were adapted by hand. The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
+
+**Reduced motion.** The prototype's CSS rule stops the tethers' flow. Most React Bits components check `prefers-reduced-motion` themselves; `ColorBends` (a continuously animated background), `BorderGlow` and `GlassSurface` don't.
 
 **Backgrounds stay complete.** `bun run sync:react-bits-backgrounds` compares the `## Backgrounds` section of https://reactbits.dev/llms.txt with `src/look/backgrounds.ts` and exits 1 when React Bits lists one the picker lacks (CI shows it as a warning). To add one: install it, add it to the allow-list and to `BACKGROUNDS` (components with a required prop get a generated input in `p`, as `GridDistortion.imageSrc` does).
 

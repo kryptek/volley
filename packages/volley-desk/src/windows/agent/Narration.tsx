@@ -6,7 +6,8 @@
 import DecryptedText from "../../rb/DecryptedText/DecryptedText";
 import ShinyText from "../../rb/ShinyText/ShinyText";
 
-export type NarrationFx = "decrypt" | "shiny" | "plain";
+import type { NarrationFx } from "../../look/options";
+export type { NarrationFx };
 
 export function Narration({ text, fx = "plain" }: { text: string | null; fx?: NarrationFx }) {
   return (

@@ -9,19 +9,126 @@
 import { type ComponentType, type LazyExoticComponent, lazy } from "react";
 
 export type BackgroundComponent = ComponentType<Record<string, unknown>>;
+type LazyBackground = LazyExoticComponent<BackgroundComponent>;
 
 export interface BackgroundDef {
   key: string;
   name: string;
   /** `null` for "None (plain)". */
-  C: LazyExoticComponent<BackgroundComponent> | null;
+  C: LazyBackground | null;
   /** Inputs for required props. */
   p?: Record<string, unknown>;
 }
 
-// The vendored components are `@ts-nocheck`; each default export renders with no props.
-const L = (load: () => Promise<{ default: unknown }>) =>
-  lazy(load as () => Promise<{ default: BackgroundComponent }>);
+type Module = { default: unknown };
+type Failure = { err: unknown };
+
+/** Each registry entry's loader, the lazy component that last loaded it, and failed loads. */
+const loaders = new WeakMap<LazyBackground, (after?: Failure) => LazyBackground>();
+const latest = new WeakMap<LazyBackground, LazyBackground>();
+const failures = new WeakMap<LazyBackground, Failure>();
+
+/** How a retry fetches a chunk again (tests swap in their own). */
+export interface ChunkFetch {
+  importUrl: (url: string) => Promise<Module>;
+  addStylesheet: (url: string) => Promise<void>;
+}
+
+/** Adds a stylesheet and resolves once it loads (rejects, and removes it, if it doesn't). */
+export function addStylesheet(href: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.onload = () => resolve();
+    link.onerror = () => {
+      link.remove();
+      reject(new Error(`Unable to preload CSS for ${href}`));
+    };
+    document.head.appendChild(link);
+  });
+}
+
+const BROWSER: ChunkFetch = {
+  importUrl: (url) => import(/* @vite-ignore */ url),
+  addStylesheet,
+};
+
+/** The chunk a load error names: Chrome and Firefox name the module, Vite the stylesheet. */
+export function failedChunk(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  return err.message.match(/(\S+?\.(?:js|css))(?:\?\S*)?\s*$/)?.[1] ?? null;
+}
+
+/**
+ * Loads a background again after a failed load. Browsers keep a failed module
+ * import for the life of the page, and Vite never re-adds a stylesheet it has
+ * tried, so the chunk the error names is fetched again under a fresh URL.
+ * Safari names no chunk: its retry runs the loader as is.
+ */
+export function reloadChunk(load: () => Promise<Module>, err: unknown, fetch = BROWSER) {
+  const chunk = failedChunk(err);
+  const fresh = `${chunk}?retry=${Date.now()}`;
+  if (chunk?.endsWith(".css")) return fetch.addStylesheet(fresh).then(load);
+  return chunk ? fetch.importUrl(fresh) : load();
+}
+
+/**
+ * A lazy background whose failed chunk load can be retried. `React.lazy`
+ * keeps a rejected import for the life of the page, so a load that failed
+ * (offline, or a redeploy removed the old chunk) is remembered here and
+ * `loadable` swaps in a fresh lazy, which fetches the chunk again, on the
+ * next pick or Retry. It never retries on its own.
+ */
+export function lazyBackground(load: () => Promise<Module>, fetch = BROWSER): LazyBackground {
+  const make = (after?: Failure): LazyBackground => {
+    const C: LazyBackground = lazy(() =>
+      // The vendored components are `@ts-nocheck`; each default export renders with no props.
+      (
+        (after ? reloadChunk(load, after.err, fetch) : load()) as Promise<{
+          default: BackgroundComponent;
+        }>
+      ).catch((err: unknown) => {
+        failures.set(C, { err });
+        throw err;
+      }),
+    );
+    return C;
+  };
+  const C = make();
+  loaders.set(C, make);
+  return C;
+}
+const L = lazyBackground;
+
+/** The component to render for a registry entry: a fresh lazy if its last load failed. */
+export function loadable(C: LazyBackground): LazyBackground {
+  const now = latest.get(C) ?? C;
+  const failure = failures.get(now);
+  const make = loaders.get(C);
+  if (!failure || !make) return now;
+  const next = make(failure);
+  latest.set(C, next);
+  return next;
+}
+
+/** `true` for a background `lazyBackground` made (never a static import). */
+export const isLazyBackground = (C: unknown): boolean =>
+  typeof C === "object" && C !== null && loaders.has(C as LazyBackground);
+
+/**
+ * A failed chunk load (Chrome, Firefox, Safari, Vite's CSS preload, webpack's
+ * ChunkLoadError) as opposed to a background that failed to render.
+ */
+export function isChunkLoadError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (
+    err.name === "ChunkLoadError" ||
+    /dynamically imported module|Importing a module script failed|Unable to preload/i.test(
+      err.message,
+    )
+  );
+}
 
 /** GridDistortion needs an image: a generated gradient gives it something to bend. */
 export const GRADIENT_IMAGE = `data:image/svg+xml;utf8,${encodeURIComponent(

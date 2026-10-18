@@ -1,7 +1,8 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { LOOK_STORAGE_KEY } from "../src/layout/useAutoArrange";
 import { Appearance } from "../src/look/Appearance";
 import { Background } from "../src/look/Background";
 import {
@@ -9,8 +10,9 @@ import {
   type BackgroundDef,
   NO_BACKGROUND,
   REACT_BITS_BACKGROUNDS,
+  isLazyBackground,
 } from "../src/look/backgrounds";
-import { type Look, useLook } from "../src/look/useLook";
+import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 
 /** The "Backgrounds" section of https://reactbits.dev/llms.txt (the owner's amendment). */
@@ -48,6 +50,28 @@ describe("background registry", () => {
     expect(REACT_BITS_BACKGROUNDS.map((b) => b.key).sort()).toEqual([...REACT_BITS_63].sort());
     expect(BACKGROUNDS.map((b) => b.key)).toEqual([...REACT_BITS_63, NO_BACKGROUND]);
     expect(new Set(BACKGROUNDS.map((b) => b.name)).size).toBe(BACKGROUNDS.length);
+  });
+
+  it("lazy-loads every background into its own chunk", () => {
+    for (const b of REACT_BITS_BACKGROUNDS) {
+      expect(isLazyBackground(b.C), b.key).toBe(true);
+      expect((b.C as unknown as { $$typeof: symbol }).$$typeof).toBe(Symbol.for("react.lazy"));
+    }
+  });
+
+  it("imports no background statically (it would pull its WebGL stack into the entry chunk)", () => {
+    const src = join(__dirname, "../src");
+    const files = readdirSync(src, { recursive: true, encoding: "utf8" }).filter(
+      (f) => /\.tsx?$/.test(f) && !f.startsWith("rb"),
+    );
+    expect(files.length).toBeGreaterThan(10);
+    const dirs = REACT_BITS_63.join("|");
+    const staticImport = new RegExp(`^\\s*import[^(]*from\\s*["'][^"']*/rb/(${dirs})/`, "m");
+    for (const f of files) {
+      expect(staticImport.test(readFileSync(join(src, f), "utf8")), f).toBe(false);
+    }
+    // The guard itself works: a static import is caught.
+    expect(staticImport.test('import Aurora from "../rb/Aurora/Aurora";')).toBe(true);
   });
 
   it("feeds GridDistortion a generated image", () => {
@@ -158,6 +182,7 @@ describe("App look (demo mode)", () => {
     expect(container.querySelector(".bg-layer")).toHaveAttribute("data-bg", "none");
     expect((container.querySelector(".bg-dim") as HTMLElement).style.opacity).toBe("0.4");
     const agents = container.querySelectorAll(".world .win .narr").length;
+    expect(agents).toBeGreaterThan(0);
     expect(container.querySelectorAll(".world svg.tethers path")).toHaveLength(agents);
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
     const n = pill.match(/(\d+) needs? you/)?.[1];
@@ -165,6 +190,21 @@ describe("App look (demo mode)", () => {
     expect(dock().getByRole("button", { name: "Wave coordinators" })).toHaveTextContent(n ?? "");
     // Narration uses the default effect (decrypt).
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "decrypt");
+  });
+
+  it("draws tethers only for the agents of visible waves", () => {
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
+    const { container } = renderApp();
+    const paths = () => container.querySelectorAll(".world svg.tethers path").length;
+    const agents = () => container.querySelectorAll(".world .win .narr").length;
+    const before = paths();
+    const first = container.querySelector(".coord-list > li") as HTMLElement;
+    const wave = first.getAttribute("aria-label") ?? "";
+    fireEvent.click(within(first).getByRole("button", { name: `Hide ${wave}` }));
+    expect(agents()).toBeLessThan(before);
+    expect(paths()).toBe(agents());
+    fireEvent.click(within(first).getByRole("button", { name: `Show ${wave}` }));
+    expect(paths()).toBe(before);
   });
 
   it("opens Appearance from the dock; picks reach every window; tethers toggle", () => {

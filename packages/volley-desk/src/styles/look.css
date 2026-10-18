@@ -1,6 +1,6 @@
 /*
  * The look, ported from the approved prototype's styles.css: the background
- * layer (dim overlay, no-WebGL fallback), tethers, the React Bits window
+ * layer (dim overlay, no-WebGL fallback, failed-load Retry), tethers, the React Bits window
  * chromes (liquid glass, spotlight, border glow), the star Needs-you border,
  * the dock and the Appearance panel. Glass and solid chromes, the pulse and
  * the arrange transitions are in desk.css / attention.css.
@@ -23,6 +23,32 @@
   display: grid;
   place-items: center;
   color: var(--dim);
+}
+/* A chunk that failed to load: above the stage (z-index 1) so Retry can be clicked. */
+.bg-load-failed {
+  position: fixed;
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 64px);
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(5, 6, 11, 0.8);
+  color: var(--mute);
+  font-size: 13px;
+}
+.bg-load-failed button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  cursor: pointer;
 }
 
 /* -------------------------------------------------------------- tethers */

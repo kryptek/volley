@@ -1,7 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { LOOK_STORAGE_KEY } from "../src/layout/useAutoArrange";
-import { LOOK0, loadLook, useLook } from "../src/look/useLook";
+import { LOOK0, LOOK_STORAGE_KEY, loadLook, useLook } from "../src/look/useLook";
 
 const stored = () => JSON.parse(localStorage.getItem(LOOK_STORAGE_KEY) ?? "null");
 

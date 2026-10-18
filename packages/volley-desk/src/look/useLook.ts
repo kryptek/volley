@@ -2,18 +2,25 @@
  * The Desk look, ported from the prototype `App.tsx` (`Look`, `LOOK0`, load /
  * save): background, dim, window chrome, Needs-you effect, narration effect,
  * tethers and auto-arrange, persisted per browser in the `volley-desk-look`
- * localStorage entry. D6's `useAutoArrangeSetting` writes `autoArrange` into
- * the same entry, so its saved value carries over. Unlike the prototype, a
- * stored value of the wrong kind falls back to its default instead of
- * reaching the UI.
+ * localStorage entry; D6's saved `autoArrange` lives in the same entry and
+ * carries over. Unlike the prototype, a stored value of the wrong kind falls
+ * back to its default instead of reaching the UI.
  */
 import { useCallback, useState } from "react";
-import type { AttnStyle, Chrome } from "../canvas/Frame";
-import { LOOK_STORAGE_KEY } from "../layout/useAutoArrange";
 import { isBackground } from "./backgrounds";
+import {
+  ATTN_STYLES,
+  type AttnStyle,
+  CHROMES,
+  type Chrome,
+  NARRATION_FX,
+  type NarrationFx,
+} from "./options";
 
-import type { NarrationFx } from "../windows/agent/Narration";
 export type { NarrationFx };
+
+/** The Desk look entry in localStorage. */
+export const LOOK_STORAGE_KEY = "volley-desk-look";
 
 export interface Look {
   bg: string;
@@ -37,10 +44,6 @@ export const LOOK0: Look = {
 
 /** The dim slider's range (prototype: 0–0.85 in 0.05 steps). */
 export const DIM_MAX = 0.85;
-
-export const CHROMES: readonly Chrome[] = ["glass", "liquid", "spotlight", "glow", "solid"];
-export const ATTN_STYLES: readonly AttnStyle[] = ["electric", "star", "pulse"];
-export const NARRATION_FX: readonly NarrationFx[] = ["decrypt", "shiny", "plain"];
 
 const oneOf =
   <T>(list: readonly T[]) =>

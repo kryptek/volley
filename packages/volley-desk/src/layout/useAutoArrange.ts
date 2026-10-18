@@ -6,7 +6,7 @@
  * prototype, only the first schedule waits 400 ms: a key change after mount
  * waits 120 ms even if the first arrange has not run yet. A drag moves a
  * window without touching the layout key, so it never re-arranges. The ON/OFF
- * setting (default ON) lives in the Desk look entry, `autoArrange`.
+ * setting (default ON) is the Desk look's `autoArrange` (`look/useLook.ts`).
  *
  * `hold` (not in the prototype, which has no broker) freezes the layout key
  * while a reconnect's resync and retained replay settle: the replay rebuilds
@@ -14,43 +14,13 @@
  * hold lifts, a key that differs from the one held (a window really came or
  * went) arranges as usual.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 export const FIRST_ARRANGE_MS = 400;
 export const RELAYOUT_MS = 120;
 export const RESIZE_MS = 200;
 /** How long `world--anim` stays on after an arrange (desk.css transitions). */
 export const ARRANGE_ANIM_MS = 650;
-/** The Desk look entry in localStorage (D7's appearance settings share it). */
-export const LOOK_STORAGE_KEY = "volley-desk-look";
-
-function readLook(): Record<string, unknown> {
-  if (typeof localStorage === "undefined") return {};
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(LOOK_STORAGE_KEY) ?? "{}");
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Auto-arrange ON/OFF, persisted per browser; a missing or corrupt entry means
- * ON. The value is per hook instance. The App reads the setting through
- * `useLook` (D7), which owns the whole entry; don't use both in one page.
- */
-export function useAutoArrangeSetting(): [boolean, (on: boolean) => void] {
-  const [on, setOn] = useState(() => readLook().autoArrange !== false);
-  const set = useCallback((next: boolean) => {
-    setOn(next);
-    try {
-      localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ ...readLook(), autoArrange: next }));
-    } catch {
-      // private window: the setting lasts for this page only
-    }
-  }, []);
-  return [on, set];
-}
 
 export function useAutoArrange({
   enabled,

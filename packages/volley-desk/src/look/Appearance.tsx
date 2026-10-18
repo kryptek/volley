@@ -8,28 +8,10 @@
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
-import type { AttnStyle, Chrome } from "../canvas/Frame";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "./backgrounds";
-import { DIM_MAX, type Look, type NarrationFx } from "./useLook";
+import { ATTN_LABEL, CHROME_LABEL, NARR_LABEL } from "./options";
+import { DIM_MAX, type Look } from "./useLook";
 import "../styles/look.css";
-
-export const CHROME_LABEL: readonly (readonly [Chrome, string])[] = [
-  ["glass", "Frosted glass"],
-  ["liquid", "Liquid glass"],
-  ["spotlight", "Spotlight"],
-  ["glow", "Border glow"],
-  ["solid", "Solid"],
-];
-export const ATTN_LABEL: readonly (readonly [AttnStyle, string])[] = [
-  ["electric", "Electric border"],
-  ["star", "Star border"],
-  ["pulse", "Pulse"],
-];
-export const NARR_LABEL: readonly (readonly [NarrationFx, string])[] = [
-  ["decrypt", "Decrypt"],
-  ["shiny", "Shiny"],
-  ["plain", "Plain"],
-];
 
 function Segments<K extends string>({
   label,

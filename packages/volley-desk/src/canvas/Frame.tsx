@@ -20,16 +20,15 @@ import {
   useRef,
   useState,
 } from "react";
+import type { AttnStyle, Chrome } from "../look/options";
 import BorderGlow from "../rb/BorderGlow/BorderGlow";
 import ElectricBorder from "../rb/ElectricBorder/ElectricBorder";
 import GlassSurface from "../rb/GlassSurface/GlassSurface";
 import SpotlightCard from "../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../rb/StarBorder/StarBorder";
 
-export type Chrome = "glass" | "liquid" | "spotlight" | "glow" | "solid";
+export type { AttnStyle, Chrome } from "../look/options";
 export type Attention = "you" | "coordinator" | "info";
-/** The Needs-you effect; `pulse` is the owner's default. */
-export type AttnStyle = "electric" | "star" | "pulse";
 /** The Needs-you colour (prototype `--hot`). */
 const HOT = "#ff7a59";
 
