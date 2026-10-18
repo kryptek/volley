@@ -23,7 +23,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
   const text = clip(ctx.input.message, 500);
   const base = { notification_type: type, ...(text !== undefined ? { text } : {}) };
   const { identity } = ctx;
-  const session = await openSession(identity, ctx.event);
+  const session = await openSession(identity, ctx.event, ctx.env);
   try {
     let state: Activity["state"] | null = null;
     if (AWAITING.has(type) || type.startsWith("quota_auto_resume")) {

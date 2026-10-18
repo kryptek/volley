@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { isValidAgentId, isValidNamespace } from "volley-mcp/topics";
+import { isAuthFailed } from "./auth";
 import type { Env, HookInput } from "./hook-io";
 import { writeFileAtomic } from "./seq";
 
@@ -66,6 +67,11 @@ function canonical(dir: string): string {
   } catch {
     return dir;
   }
+}
+
+/** The broker a coordinator session's hooks use (no identity file to name one). */
+export function coordinatorBrokerUrl(env: Env): string {
+  return env.VOLLEY_BROKER_URL ?? "mqtt://localhost:1883";
 }
 
 /** Registry lookups (hits and misses) are cached this long; SessionStart always refreshes. */
@@ -142,7 +148,7 @@ export async function resolveCoordinatorIdentity(
 ): Promise<HookIdentity | null> {
   const now = opts.now ?? Date.now;
   const stateDir = coordinatorStateDir(dir, env);
-  const brokerUrl = env.VOLLEY_BROKER_URL ?? "mqtt://localhost:1883";
+  const brokerUrl = coordinatorBrokerUrl(env);
   const cachePath = join(stateDir, "identity.json");
   const make = (c: { agent_id: string; namespace: string; parent_id: string | null }) => ({
     mode: "coordinator" as const,
@@ -177,7 +183,9 @@ export async function resolveCoordinatorIdentity(
     let candidates: RegistryCandidate[];
     try {
       candidates = await lookup(brokerUrl, dir);
-    } catch {
+    } catch (e) {
+      // A refused CONNACK is not "no coordinator here": never cache it as a miss.
+      if (isAuthFailed(e)) throw e;
       candidates = [];
     }
     const best = candidates.find((c) => c.status === null || !GONE.has(c.status)) ?? null;

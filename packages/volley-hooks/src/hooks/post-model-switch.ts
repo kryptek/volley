@@ -4,7 +4,7 @@ import { type HookContext, runHook } from "../lib/hook-io";
 import { openSession, writeHarnessModel } from "../lib/session";
 
 export async function handle(ctx: HookContext): Promise<string | null> {
-  const session = await openSession(ctx.identity, ctx.event);
+  const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
     const to = ctx.input.to_model;
     const model = typeof to === "string" && to !== "" ? to : undefined;

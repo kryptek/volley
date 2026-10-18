@@ -171,6 +171,45 @@ describe("volley auth", () => {
       expect(code).toBe(0);
       expect(existsSync(join(dir, "passwd"))).toBe(true);
     });
+
+    it("--coordinator-file writes $VOLLEY_AUTH_DIR/coordinator.json (0600) with the coordinator password", async () => {
+      const io = makeBufferIO();
+      const code = await auth(
+        { argv: ["init", "--coordinator-file"], env: { VOLLEY_AUTH_DIR: dir }, io },
+        fakeDeps(),
+      );
+      expect(code).toBe(0);
+      const path = join(dir, "coordinator.json");
+      expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+        username: "coordinator",
+        password: "pw-3",
+      });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(io.readStdout()).toContain(path);
+    });
+
+    it("without --coordinator-file writes no coordinator.json; --force rotates an existing one", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      expect(existsSync(join(dir, "coordinator.json"))).toBe(false);
+
+      writeFileSync(join(dir, "coordinator.json"), "{}");
+      const r = await run(["init", "--dir", dir, "--force"], deps); // pw-4..pw-6
+      expect(r.code).toBe(0);
+      // A stale file would lock the coordinator's hooks out after the rotation.
+      expect(JSON.parse(readFileSync(join(dir, "coordinator.json"), "utf-8"))).toEqual({
+        username: "coordinator",
+        password: "pw-6",
+      });
+      expect(statSync(join(dir, "coordinator.json")).mode & 0o777).toBe(0o600);
+    });
+
+    it("--coordinator-file is only for init", async () => {
+      await run(["init", "--dir", dir]);
+      const r = await run(["add-agent", "w1-t1-implementer-1", "--dir", dir, "--coordinator-file"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--coordinator-file");
+    });
   });
 
   describe("add-agent / rm-agent", () => {

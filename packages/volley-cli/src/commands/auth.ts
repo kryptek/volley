@@ -199,6 +199,7 @@ export async function auth(
         force: { type: "boolean" },
         json: { type: "boolean" },
         "no-reload": { type: "boolean" },
+        "coordinator-file": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -235,6 +236,10 @@ export async function auth(
   const passwdFile = join(dir, "passwd");
   const aclFile = join(dir, "acl.conf");
   const skipReload = parsed.values["no-reload"] === true;
+  if (parsed.values["coordinator-file"] === true && verb !== "init") {
+    io.stderr("volley auth: --coordinator-file only applies to init\n");
+    return EXIT.USAGE;
+  }
 
   if (verb === "init") {
     const existed = existsSync(passwdFile);
@@ -268,6 +273,18 @@ export async function auth(
       minted.push([user, password]);
     }
     chmodSync(passwdFile, 0o600);
+    // The coordinator's hooks read their credentials from here (never from settings.json).
+    // An existing file is rotated with the passwd entry, so it cannot go stale.
+    const coordinatorFile = join(dir, "coordinator.json");
+    const wroteCoordinator =
+      parsed.values["coordinator-file"] === true || existsSync(coordinatorFile);
+    if (wroteCoordinator) {
+      const password = minted.find(([user]) => user === "coordinator")?.[1] as string;
+      writeFileSync(coordinatorFile, `${JSON.stringify({ username: "coordinator", password })}\n`, {
+        mode: 0o600,
+      });
+      chmodSync(coordinatorFile, 0o600);
+    }
     const owner = deps.brokerOwner();
     if (owner !== null) {
       for (const path of [dir, aclFile, passwdFile]) deps.chown(path, owner.uid, owner.gid);
@@ -281,6 +298,9 @@ export async function auth(
               `Kept the existing ${aclFile}; compare it with ${BUNDLED_ACL.pathname} after upgrading Volley.`,
             ]
           : []),
+        ...(wroteCoordinator
+          ? [`Wrote ${coordinatorFile} (mode 0600): the coordinator's hook credentials.`]
+          : []),
         ...(owner !== null ? [`Handed ${dir} to the broker's user (uid ${owner.uid}).`] : []),
         "",
         "Broker identities (passwords are shown ONCE; store them now):",
@@ -293,7 +313,8 @@ export async function auth(
         "",
         "Then give each client its identity:",
         "  - coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator VOLLEY_AUTH_PASSWORD=<pw> in the MCP server env,",
-        "    AND exported in your shell profile (the volley CLI and mosquitto_pub run from the shell)",
+        "    AND exported in your shell profile (the volley CLI and mosquitto_pub run from the shell);",
+        "    the hooks also read VOLLEY_AUTH_* or, failing that, coordinator.json (--coordinator-file)",
         "  - volley dash / Desk:   sign in as desk in the browser",
         "  - volleyd:              its config file",
         "",
@@ -379,6 +400,10 @@ Options:
                   write no mailbox and its acks are dropped by the broker.
   --force         init: rotate the fixed identities' passwords in an existing passwd
                   file (minted agents and an existing acl.conf are kept)
+  --coordinator-file
+                  init: also write <dir>/coordinator.json (mode 0600) with the
+                  coordinator's credentials, read by the coordinator's volley-hooks
+                  (so no password goes in settings.json). Rotated by --force.
   --json          add-agent: print {"username","password"} instead of the bare password
   --no-reload     Do not signal the broker; reload it yourself before relying on the change
   -h, --help      Show this help and exit

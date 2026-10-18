@@ -12,7 +12,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
   const { stateDir } = ctx.identity;
   const steering = join(stateDir, "STEERING.md");
   if (existsSync(steering)) copyFileSync(steering, join(stateDir, "steering.snapshot.md"));
-  const session = await openSession(ctx.identity, ctx.event);
+  const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
     await session.heartbeat();
     return null;

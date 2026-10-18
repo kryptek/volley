@@ -1,6 +1,9 @@
+import { type ConnectTarget, isAuthFailed, resolveHooksAuth, writeHooksError } from "./auth";
 import {
   type HookIdentity,
+  coordinatorBrokerUrl,
   coordinatorEnabled,
+  coordinatorStateDir,
   projectDirOf,
   readAgentIdentity,
   resolveCoordinatorIdentity,
@@ -37,6 +40,11 @@ export interface HookContext {
 export interface HookResult {
   additionalContext?: string;
   updatedInput?: Record<string, unknown>;
+}
+
+/** Who the hook was connecting as, recorded before any connect so a refusal can be reported. */
+export interface HookTrace {
+  target?: ConnectTarget & Pick<HookIdentity, "stateDir">;
 }
 
 /** Returns text to inject as `additionalContext`, a structured result, or null. */
@@ -103,7 +111,8 @@ export function questionOf(text: string | undefined): string | null {
  * `.volley/agent.json` returns "" before any socket is opened. In coordinator mode the
  * registry lookup costs one connection per minute per directory (misses are cached too), so
  * the hooks stay cheap in a global settings file. `afterEmit` collects the handler's
- * deferred callbacks; the caller runs them once stdout is written.
+ * deferred callbacks; the caller runs them once stdout is written. `trace` records who the hook
+ * connects as.
  */
 export async function invokeHook(
   event: string,
@@ -111,6 +120,7 @@ export async function invokeHook(
   raw: string,
   env: Env,
   afterEmit: AfterEmit[] = [],
+  trace: HookTrace = {},
 ): Promise<string> {
   const input = parseHookInput(raw);
   if (input === null) return "";
@@ -119,13 +129,22 @@ export async function invokeHook(
   if (identity === null && coordinatorEnabled(env)) {
     const { lookupRegistry } = await import("./session");
     const startup = event === "SessionStart" && input.source === "startup";
-    identity = await resolveCoordinatorIdentity(dir, env, lookupRegistry, {
+    trace.target = {
+      mode: "coordinator",
+      projectDir: dir,
+      agentId: "volley-hooks",
+      brokerUrl: coordinatorBrokerUrl(env),
+      stateDir: coordinatorStateDir(dir, env),
+    };
+    const lookup = (url: string, d: string) => lookupRegistry(url, d, env);
+    identity = await resolveCoordinatorIdentity(dir, env, lookup, {
       refresh: event === "SessionStart",
       // A new session's entry is newer than the session; an older one is a previous session.
       ...(startup ? { notBefore: Date.now() - STARTUP_SKEW_MS } : {}),
     });
   }
   if (identity === null) return "";
+  trace.target = identity;
   const text = await handler({
     event,
     input,
@@ -158,9 +177,44 @@ async function readStdin(): Promise<string> {
 }
 
 /**
+ * A refused CONNACK: one stderr line (Claude Code shows it to the operator on exit 1) and
+ * `<stateDir>/hooks-error.json` for the supervisor. Never throws.
+ */
+export function reportAuthFailed(event: string, trace: HookTrace, env: Env): string {
+  const t = trace.target;
+  let username: string | null = null;
+  try {
+    if (t !== undefined) username = resolveHooksAuth(t, env)?.username ?? null;
+  } catch {
+    // unreadable credentials cannot have been sent
+  }
+  const hint =
+    t?.mode === "coordinator"
+      ? "set VOLLEY_AUTH_*, or write $VOLLEY_AUTH_DIR/coordinator.json with `volley auth init --coordinator-file`"
+      : "run volley auth add-agent, or check the .volley/agent.json broker block / VOLLEY_AUTH_*";
+  const line = `volley-hooks ${event}: AUTH_FAILED for ${username ?? "anonymous"} at ${t?.brokerUrl ?? "the broker"} — ${hint}\n`;
+  if (t !== undefined) {
+    try {
+      writeHooksError(t.stateDir, {
+        code: "AUTH_FAILED",
+        at: new Date().toISOString(),
+        hook_event: event,
+        username,
+      });
+    } catch {
+      // the stderr line still reaches the operator
+    }
+  }
+  return line;
+}
+
+/**
  * Script entry point: read stdin, run, print, exit 0. A hook never fails the session — any
  * error is swallowed (set `VOLLEY_HOOKS_DEBUG=1` to see it on stderr), and a deadline
- * (`VOLLEY_HOOKS_TIMEOUT_MS`, default 10 s) bounds how long Claude waits on us.
+ * (`VOLLEY_HOOKS_TIMEOUT_MS`, default 10 s) bounds how long Claude waits on us. The one
+ * exception is a broker refusing the hooks' credentials (`AUTH_FAILED`): it is loud — a stderr
+ * line, `hooks-error.json`, exit 1 (a non-blocking error: never 2, which would block the tool
+ * call, and never 0, which would look like success).
  */
 export async function runHook(event: string, handler: HookHandler): Promise<void> {
   const env = process.env;
@@ -170,9 +224,16 @@ export async function runHook(event: string, handler: HookHandler): Promise<void
     process.exit(0);
   }, hookTimeoutMs(env)).unref();
   let out = "";
+  const trace: HookTrace = {};
   try {
-    out = await invokeHook(event, handler, await readStdin(), env, after);
+    out = await invokeHook(event, handler, await readStdin(), env, after, trace);
   } catch (e) {
+    if (isAuthFailed(e)) {
+      const line = reportAuthFailed(event, trace, env);
+      runAfterEmit(after, false);
+      process.stderr.write(line, () => process.exit(1));
+      return;
+    }
     if (env.VOLLEY_HOOKS_DEBUG === "1") process.stderr.write(`volley-hooks ${event}: ${e}\n`);
   }
   if (out === "") {

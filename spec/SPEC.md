@@ -284,7 +284,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 |---|---|---|
 | `decision_id`, `wave` | string | Identity. |
 | `task` | task id \| null | `null` for a wave-level decision. |
-| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `model_switch` \| `repo_untrusted` \| `ci_failed` \| `wave_complete` \| `plan_change`. |
+| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `model_switch` \| `repo_untrusted` \| `ci_failed` \| `wave_complete` \| `plan_change`. |
 | `question` | string | What needs answering. |
 | `options` | string[] | Suggested answers (optional; free text is always allowed). |
 | `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
