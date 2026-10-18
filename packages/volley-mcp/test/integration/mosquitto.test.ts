@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { VolleyBroker } from "../../src/broker";
+import { DEFAULT_SESSION_EXPIRY_S, VolleyBroker } from "../../src/broker";
 import { shutdownLifecycle, startLifecycle } from "../../src/lifecycle";
 import type { ServerState } from "../../src/state";
 import { volListAgents } from "../../src/tools/list-agents";
@@ -49,11 +49,11 @@ describe.skipIf(!RUN)("volley-mcp against real mosquitto", () => {
 
 describe.skipIf(!RUN)("persistent mailbox sessions against real mosquitto (MQTT v5)", () => {
   it.each([
-    ["an explicit sessionExpirySeconds", { sessionExpirySeconds: 60 }],
-    ["the default session expiry", {}],
+    ["an explicit sessionExpirySeconds", { sessionExpirySeconds: 60 }, 60],
+    ["the default session expiry", {}, DEFAULT_SESSION_EXPIRY_S],
   ])(
     "queues an offline QoS 1 message for a v5 session with %s and drains it on reconnect",
-    async (_label, expiry) => {
+    async (_label, expiry, expectedExpiry) => {
       // Unique per run so a session left behind by an earlier run cannot interfere.
       const suffix = randomBytes(4).toString("hex");
       const topic = `volley/integration/mosq-${suffix}/mailbox`;
@@ -68,6 +68,7 @@ describe.skipIf(!RUN)("persistent mailbox sessions against real mosquitto (MQTT 
 
       const consumer = new VolleyBroker();
       await consumer.connect(opts);
+      expect(consumer.sessionExpiryInterval).toBe(expectedExpiry);
       expect(await consumer.drainQueued(topic, { idleMs: 200 })).toEqual([]);
       await consumer.disconnect();
 

@@ -75,7 +75,7 @@ await broker.connect({
 const queued = await broker.drainQueued(`volley/${ns}/${agentId}/mailbox`, { idleMs: 250 });
 ```
 
-`drainQueued` subscribes at QoS 1, collects until no message has arrived for `idleMs`, and keeps the subscription, so the broker goes on queueing while the client is away. Each persistent consumer needs its own clientId, because a same-clientId connect kicks the older client off. Without a `clientId`, `cleanSession: false` throws `IMPL_CLIENT_ID_REQUIRED`. Callers read the session expiry from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the fallback. **A changed value applies to new connections only**: an existing session keeps the expiry it was created with until its client reconnects. See SPEC §4.4 for the ack protocol.
+`drainQueued` subscribes at QoS 1, collects until no message has arrived for `idleMs`, and keeps the subscription, so the broker goes on queueing while the client is away. Each persistent consumer needs its own clientId, because a same-clientId connect kicks the older client off. Without a `clientId`, `cleanSession: false` throws `IMPL_CLIENT_ID_REQUIRED`. `VolleyBroker` itself only takes `sessionExpirySeconds`; the hooks drain client (forthcoming) will read it from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the fallback. Dedicate a persistent `VolleyBroker` to draining: messages no other helper claims are buffered until drained, and another helper's release on a not-yet-drained filter would UNSUBSCRIBE the restored subscription. **A changed value applies to new connections only**: an existing session keeps the expiry it was created with until its client reconnects. See SPEC §4.4 for the ack protocol.
 
 ---
 

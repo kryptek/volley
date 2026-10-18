@@ -51,14 +51,27 @@ export async function volSendMailbox(
       `to_agent_id "${input.to_agent_id}" does not match the agent id grammar`,
     );
   }
-  if (input.type === "ack" && (input.correlation_id ?? null) === null) {
+  // "" is no id at all (and not a UUID): treat it as missing.
+  const suppliedId =
+    input.correlation_id === undefined ||
+    input.correlation_id === null ||
+    input.correlation_id === ""
+      ? null
+      : input.correlation_id;
+  if (input.type === "ack" && suppliedId === null) {
     throw new VolleyError(
       "IMPL_CORRELATION_ID_REQUIRED",
       "an ack must carry the correlation_id of the message it acknowledges",
     );
   }
+  if (input.type === "ack" && input.wait_ack_ms !== undefined) {
+    throw new VolleyError(
+      "IMPL_INVALID_INPUT",
+      "wait_ack_ms cannot be used on an ack: recipients never ack an ack (SPEC §4.4)",
+    );
+  }
   // The id goes into the envelope BEFORE publishing so the recipient can ack it.
-  const messageId = input.correlation_id ?? randomUUID();
+  const messageId = suppliedId ?? randomUUID();
   const topic = buildTopic(state.config.namespace, input.to_agent_id, "mailbox");
   const envelope = buildEnvelope({
     agentId: state.config.agentId,
@@ -69,7 +82,9 @@ export async function volSendMailbox(
     correlationId: messageId,
   });
   // Subscribe to our own mailbox before publishing, so an ack that races back cannot
-  // land before the subscription exists (MQTT orders SUBSCRIBE ahead of PUBLISH).
+  // land before the subscription exists (MQTT orders SUBSCRIBE ahead of PUBLISH). The
+  // broker reference-counts the filter, so concurrent waits on it don't cut each other off.
+  const cancelWait = new AbortController();
   const ackWait =
     input.wait_ack_ms === undefined
       ? null
@@ -77,15 +92,24 @@ export async function volSendMailbox(
           buildTopic(state.config.namespace, state.config.agentId, "mailbox"),
           (raw) => {
             const env = parseEnvelope(raw);
-            return env?.type === "ack" && env.correlation_id === messageId;
+            // Only the recipient acks (SPEC §4.4); an ack from anyone else is not this one.
+            return (
+              env?.type === "ack" &&
+              env.correlation_id === messageId &&
+              env.agent_id === input.to_agent_id
+            );
           },
           input.wait_ack_ms,
+          cancelWait.signal,
         );
+  // Handled up front: a failed SUBSCRIBE must not surface as an unhandled rejection
+  // while the publish below is still awaiting its PUBACK.
+  ackWait?.catch(() => {});
   try {
     // mailbox is QoS 1, not retained (SPEC.md §4.1). publishAsync resolves on PUBACK.
     await state.broker.publish(topic, JSON.stringify(envelope), { qos: 1, retain: false });
   } catch (e) {
-    ackWait?.catch(() => {});
+    cancelWait.abort();
     throw e;
   }
   if (ackWait === null) return { message_id: messageId, delivered: true };

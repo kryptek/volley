@@ -163,30 +163,133 @@ describe("vol_send_mailbox", () => {
     expect(res).not.toHaveProperty("acked_by");
   });
 
-  it("ignores an ack for a different message id", async () => {
+  async function startAgent(agentId: string): Promise<ServerState> {
+    const s = await startLifecycle({
+      brokerUrl: tb.url,
+      namespace: "test",
+      agentId,
+      parentId: null,
+    });
+    s.registered = true;
+    return s;
+  }
+
+  /** Resolve with the correlation_id of the next envelope that lands in `agentId`'s mailbox. */
+  function nextMailboxId(s: ServerState, agentId: string): Promise<string> {
+    return s.broker
+      .subscribeUntil(`volley/test/${agentId}/mailbox`, () => true, 3000)
+      .then((m) => JSON.parse(m?.payload ?? "{}").correlation_id);
+  }
+
+  const ackFrom = (s: ServerState, id: string) =>
+    volSendMailbox(s, {
+      to_agent_id: "coordinator-aaaa",
+      type: "ack",
+      payload: { text: "ACKED", acked_type: "steering" },
+      correlation_id: id,
+    });
+
+  it("ignores an ack for a different message id, and still accepts the matching one after it", async () => {
     sender.registered = true;
+    const other = await startAgent("worker-ffff");
+    const landed = nextMailboxId(other, "worker-ffff");
+    await new Promise((r) => setTimeout(r, 100));
     const waiting = volSendMailbox(sender, {
       to_agent_id: "worker-ffff",
       type: "steering",
       payload: { text: "x" },
-      wait_ack_ms: 500,
+      wait_ack_ms: 1500,
     });
-    await new Promise((r) => setTimeout(r, 100));
-    const other = await startLifecycle({
-      brokerUrl: tb.url,
-      namespace: "test",
-      agentId: "worker-ffff",
-      parentId: null,
+    const id = await landed;
+    let done = false;
+    void waiting.then(() => {
+      done = true;
     });
-    other.registered = true;
-    await volSendMailbox(other, {
-      to_agent_id: "coordinator-aaaa",
-      type: "ack",
-      payload: { text: "ACKED", acked_type: "steering" },
-      correlation_id: "44444444-4444-4444-8444-444444444444",
-    });
-    expect((await waiting).acked).toBe(false);
+    await ackFrom(other, "44444444-4444-4444-8444-444444444444");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(done).toBe(false); // the stray ack reached the sender and was ignored
+    await ackFrom(other, id);
+    expect(await waiting).toMatchObject({ acked: true, acked_by: "worker-ffff" });
     await other.broker.disconnect();
+  });
+
+  it("ignores an ack for the right id from an agent other than the recipient", async () => {
+    sender.registered = true;
+    const worker = await startAgent("worker-bbbb");
+    const mallory = await startAgent("mallory-cccc");
+    const landed = nextMailboxId(worker, "worker-bbbb");
+    await new Promise((r) => setTimeout(r, 100));
+    const waiting = volSendMailbox(sender, {
+      to_agent_id: "worker-bbbb",
+      type: "steering",
+      payload: { text: "x" },
+      wait_ack_ms: 1500,
+    });
+    const id = await landed;
+    await ackFrom(mallory, id);
+    await new Promise((r) => setTimeout(r, 200));
+    await ackFrom(worker, id);
+    expect(await waiting).toMatchObject({ acked: true, acked_by: "worker-bbbb" });
+    await worker.broker.disconnect();
+    await mallory.broker.disconnect();
+  });
+
+  it("concurrent wait_ack_ms sends each see their own ack, even when one resolves first", async () => {
+    sender.registered = true;
+    const w1 = await startAgent("worker-1111");
+    const w2 = await startAgent("worker-2222");
+    const landed1 = nextMailboxId(w1, "worker-1111");
+    const landed2 = nextMailboxId(w2, "worker-2222");
+    await new Promise((r) => setTimeout(r, 100));
+    const send = (to: string) =>
+      volSendMailbox(sender, {
+        to_agent_id: to,
+        type: "steering",
+        payload: { text: `to ${to}` },
+        wait_ack_ms: 2000,
+      });
+    const first = send("worker-1111");
+    const second = send("worker-2222");
+    await ackFrom(w1, await landed1);
+    expect(await first).toMatchObject({ acked: true, acked_by: "worker-1111" });
+    // The first wait has finished (and released its subscription) before this ack.
+    await new Promise((r) => setTimeout(r, 200));
+    await ackFrom(w2, await landed2);
+    expect(await second).toMatchObject({ acked: true, acked_by: "worker-2222" });
+    await w1.broker.disconnect();
+    await w2.broker.disconnect();
+  });
+
+  it("treats an empty correlation_id as missing", async () => {
+    sender.registered = true;
+    await expect(
+      volSendMailbox(sender, {
+        to_agent_id: "worker-bbbb",
+        type: "ack",
+        payload: { text: "ACKED", acked_type: "steering" },
+        correlation_id: "",
+      }),
+    ).rejects.toMatchObject({ code: "IMPL_CORRELATION_ID_REQUIRED" });
+    const res = await volSendMailbox(sender, {
+      to_agent_id: "worker-bbbb",
+      type: "steering",
+      payload: { text: "x" },
+      correlation_id: "",
+    });
+    expect(res.message_id).toMatch(UUID);
+  });
+
+  it("rejects wait_ack_ms on an ack (recipients never ack an ack)", async () => {
+    sender.registered = true;
+    await expect(
+      volSendMailbox(sender, {
+        to_agent_id: "worker-bbbb",
+        type: "ack",
+        payload: { text: "ACKED", acked_type: "steering" },
+        correlation_id: "55555555-5555-4555-8555-555555555555",
+        wait_ack_ms: 500,
+      }),
+    ).rejects.toMatchObject({ code: "IMPL_INVALID_INPUT" });
   });
 
   it("rejects an ack without a correlation_id (it has nothing to acknowledge)", async () => {

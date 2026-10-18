@@ -521,6 +521,80 @@ describe("VolleyBroker persistent sessions + drainQueued", () => {
     await a.disconnect();
   });
 
+  it("keeps buffering a restored subscription's messages after another topic is drained", async () => {
+    const INBOX = "volley/t/a/_user/inbox";
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    await a.drainQueued(INBOX, { idleMs: 100 });
+    await a.disconnect();
+
+    for (const i of [0, 1, 2]) await publishOnce(MAILBOX, `a${i}`);
+    for (const i of [0, 1, 2]) await publishOnce(INBOX, `b${i}`);
+
+    await a.connect(persistentOpts());
+    const gotA = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    await publishOnce(INBOX, "b-live");
+    await new Promise((r) => setTimeout(r, 100));
+    const gotB = await a.drainQueued(INBOX, { idleMs: 200 });
+    expect(gotA.map((m) => m.payload)).toEqual(["a0", "a1", "a2"]);
+    expect(gotB.map((m) => m.payload)).toEqual(["b0", "b1", "b2", "b-live"]);
+    await a.disconnect();
+  });
+
+  it("a helper subscription on a drained filter does not remove the persistent subscription", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    // subscribeUntil on the same filter finishes (and releases) first.
+    expect(await a.subscribeUntil(MAILBOX, () => true, 100)).toBeNull();
+    await a.disconnect();
+
+    await publishOnce(MAILBOX, "still-queued");
+
+    await a.connect(persistentOpts());
+    const got = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    expect(got.map((m) => m.payload)).toEqual(["still-queued"]);
+    await a.disconnect();
+  });
+
+  it("a drain still pending at disconnect resolves with what it had, and never takes from the next connection", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    const pending = a.drainQueued(MAILBOX, { idleMs: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    await a.disconnect();
+    expect(await pending).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(1000);
+
+    await publishOnce(MAILBOX, "for-the-new-connection");
+    await a.connect(persistentOpts());
+    const got = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    expect(got.map((m) => m.payload)).toEqual(["for-the-new-connection"]);
+    await a.disconnect();
+  });
+
+  it("drainQueued honours maxWaitMs while messages keep arriving faster than idleMs", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    const pub = new VolleyBroker();
+    await pub.connect({ url: tb.url, agentId: "pub-only" });
+    let i = 0;
+    const flood = setInterval(() => {
+      pub.publish(MAILBOX, `m${i++}`, { qos: 1, retain: false }).catch(() => {});
+    }, 20);
+    const t0 = Date.now();
+    const got = await a.drainQueued(MAILBOX, { idleMs: 200, maxWaitMs: 400 });
+    const elapsed = Date.now() - t0;
+    clearInterval(flood);
+    expect(elapsed).toBeLessThan(1000);
+    expect(got.length).toBeGreaterThan(0);
+    await pub.disconnect();
+    await a.disconnect();
+  });
+
   it("throws IMPL_CLIENT_ID_REQUIRED when cleanSession:false is requested without a clientId", async () => {
     const a = new VolleyBroker();
     const err = await a
@@ -529,5 +603,80 @@ describe("VolleyBroker persistent sessions + drainQueued", () => {
     expect(err).toBeInstanceOf(VolleyError);
     expect(err).toMatchObject({ code: "IMPL_CLIENT_ID_REQUIRED" });
     expect(a.connected).toBe(false);
+  });
+});
+
+describe("VolleyBroker shared filters (one connection, many local subscribers)", () => {
+  let tb: TestBroker;
+  let b: VolleyBroker;
+  let pub: VolleyBroker;
+  const TOPIC = "volley/t/self/mailbox";
+  beforeEach(async () => {
+    tb = await startTestBroker();
+    b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "self" });
+    pub = new VolleyBroker();
+    await pub.connect({ url: tb.url, agentId: "pub-only" });
+  });
+  afterEach(async () => {
+    await b.disconnect();
+    await pub.disconnect();
+    await tb.close();
+  });
+
+  const send = (payload: string, topic = TOPIC) =>
+    pub.publish(topic, payload, { qos: 1, retain: false });
+
+  it("a finished subscribeUntil does not tear down a concurrent subscribeUntil on the same filter", async () => {
+    const first = b.subscribeUntil(TOPIC, (p) => p === "one", 2000);
+    const second = b.subscribeUntil(TOPIC, (p) => p === "two", 2000);
+    await new Promise((r) => setTimeout(r, 100));
+    await send("one");
+    expect(await first).toMatchObject({ payload: "one" });
+    await new Promise((r) => setTimeout(r, 100));
+    await send("two");
+    expect(await second).toMatchObject({ payload: "two" });
+  });
+
+  it("a finished subscribeUntil does not tear down a concurrent subscribeCollect on the same filter", async () => {
+    const collecting = b.subscribeCollect(TOPIC, 2, 1500);
+    const until = b.subscribeUntil(TOPIC, () => true, 1500);
+    await new Promise((r) => setTimeout(r, 100));
+    await send("x");
+    await until;
+    await new Promise((r) => setTimeout(r, 100));
+    await send("y");
+    expect((await collecting).map((m) => m.payload)).toEqual(["x", "y"]);
+  });
+
+  it("a released subscribeStream keeps the filter alive for the other holders", async () => {
+    const seen: string[] = [];
+    const unsubscribe = await b.subscribeStream(TOPIC, (m) => seen.push(m.payload));
+    const collecting = b.subscribeCollect(TOPIC, 1, 1500);
+    await new Promise((r) => setTimeout(r, 50));
+    await unsubscribe();
+    await send("after-stream-release");
+    expect((await collecting).map((m) => m.payload)).toEqual(["after-stream-release"]);
+    expect(seen).toEqual([]);
+  });
+
+  it("routes each message only to subscribers whose filter matches its topic", async () => {
+    const other = "volley/t/other/mailbox";
+    const mine = b.subscribeCollect(TOPIC, 5, 400);
+    const theirs = b.subscribeCollect("volley/t/+/status", 5, 400);
+    await new Promise((r) => setTimeout(r, 100));
+    await send("for-me");
+    await send("not-for-anyone", other);
+    expect((await mine).map((m) => m.payload)).toEqual(["for-me"]);
+    expect(await theirs).toEqual([]);
+  });
+
+  it("subscribeUntil resolves null as soon as its signal aborts", async () => {
+    const ac = new AbortController();
+    const t0 = Date.now();
+    const waiting = b.subscribeUntil(TOPIC, () => true, 5000, ac.signal);
+    setTimeout(() => ac.abort(), 50);
+    expect(await waiting).toBeNull();
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 });

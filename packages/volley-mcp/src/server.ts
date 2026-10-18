@@ -134,10 +134,10 @@ export function createServer(state: ServerState): McpServer {
           .object({
             text: z.string(),
             seq: z.number().int().nonnegative().optional(),
-            supersedes: z.string().optional(),
+            supersedes: z.string().uuid().optional(),
           })
           .passthrough(),
-        correlation_id: z.string().nullable().optional(),
+        correlation_id: z.string().uuid().nullable().optional(),
         wait_ack_ms: z.number().int().positive().optional(),
       },
     },
