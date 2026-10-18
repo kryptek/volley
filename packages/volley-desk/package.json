@@ -34,6 +34,7 @@
     "@types/three": "0.180.0",
     "@vitejs/plugin-react": "4.5.2",
     "aedes": "^0.51.0",
+    "axe-core": "4.10.3",
     "jsdom": "^25.0.1",
     "vite": "6.3.5",
     "vitest": "^3.2.4"

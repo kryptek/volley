@@ -43,6 +43,7 @@ export async function dash({
       args: argv,
       options: {
         build: { type: "boolean" },
+        legacy: { type: "boolean" },
         port: { type: "string" },
         "broker-url": { type: "string" },
         open: { type: "boolean" },
@@ -63,6 +64,8 @@ export async function dash({
   }
 
   const buildMode = parsed.values.build === true;
+  // The Desk replaced the dashboard; `--legacy` keeps the old one reachable until its removal.
+  const pkg = parsed.values.legacy === true ? "volley-dash" : "volley-desk";
   const openFlag = parsed.values.open === true;
   const noOpenFlag = parsed.values["no-open"] === true;
   if (openFlag && noOpenFlag) {
@@ -93,6 +96,7 @@ export async function dash({
     return EXIT.ERROR;
   }
 
+  const cwd = resolve(repoRoot, "packages", pkg);
   const childEnv: Record<string, string | undefined> = {
     ...env,
     VITE_VOLLEY_BROKER_URL: brokerUrl,
@@ -103,38 +107,23 @@ export async function dash({
   if (port !== null) viteArgs.push("--port", String(port));
   if (shouldOpen) viteArgs.push("--open");
 
-  if (buildMode) {
-    const buildExit = await runChild(
+  // `bun run <script>` in the package directory runs its Vite; bun forwards
+  // everything after the script name (dropping the `--`) to the script.
+  const run = (script: string, extra: string[] = []) =>
+    runChild(
       spawn,
       "bun",
-      ["run", "--filter", "volley-dash", "build"],
-      { cwd: repoRoot, env: childEnv, stdio: "inherit" },
+      ["run", script, ...(extra.length > 0 ? ["--", ...extra] : [])],
+      { cwd, env: childEnv, stdio: "inherit" },
       io,
     );
-    if (buildExit !== 0) return EXIT.ERROR;
 
-    const previewArgs = ["run", "--filter", "volley-dash", "preview"];
-    if (viteArgs.length > 0) previewArgs.push("--", ...viteArgs);
-    const previewExit = await runChild(
-      spawn,
-      "bun",
-      previewArgs,
-      { cwd: repoRoot, env: childEnv, stdio: "inherit" },
-      io,
-    );
-    return previewExit === 0 ? EXIT.OK : EXIT.ERROR;
+  if (buildMode) {
+    if ((await run("build")) !== 0) return EXIT.ERROR;
+    return (await run("preview", viteArgs)) === 0 ? EXIT.OK : EXIT.ERROR;
   }
 
-  const devArgs = ["run", "--filter", "volley-dash", "dev"];
-  if (viteArgs.length > 0) devArgs.push("--", ...viteArgs);
-  const devExit = await runChild(
-    spawn,
-    "bun",
-    devArgs,
-    { cwd: repoRoot, env: childEnv, stdio: "inherit" },
-    io,
-  );
-  return devExit === 0 ? EXIT.OK : EXIT.ERROR;
+  return (await run("dev", viteArgs)) === 0 ? EXIT.OK : EXIT.ERROR;
 }
 
 function runChild(
@@ -203,12 +192,15 @@ function walkUpToBunLock(start: string): string | null {
 
 const DASH_HELP = `Usage: volley dash [options]
 
-Launches the Volley dashboard (Vite dev server by default).
+Launches the Volley Desk (packages/volley-desk; Vite dev server by default).
 
 Options:
+  --legacy             Launch the old dashboard (packages/volley-dash) instead;
+                       deprecated, removed in a later release
   --build              Run vite build + preview the production bundle
-  --port <N>           Override Vite's port (default: Vite's default 5173)
-  --broker-url <url>   MQTT broker URL passed to the dashboard via
+  --port <N>           Override Vite's port (dev default: 5174, 5173 with --legacy;
+                       --build: Vite preview's 4173)
+  --broker-url <url>   MQTT broker URL passed to the Desk via
                        VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open               Open browser on start (default in dev mode)
   --no-open            Don't open browser

@@ -103,18 +103,49 @@ describe("volley dash", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("default (no flags) spawns `bun run --filter volley-dash dev` with --open", async () => {
+  it("default (no flags) spawns Vite (`bun run dev`) in packages/volley-desk with --open", async () => {
     const io = makeBufferIO();
     const { spawn, calls } = recordingSpawn(0);
     const exitCode = await dash({ argv: [], env: {}, io, spawn });
     expect(exitCode).toBe(0);
     expect(calls).toHaveLength(1);
-    const args = calls[0]?.args ?? [];
-    expect(args).toContain("run");
-    expect(args).toContain("--filter");
-    expect(args).toContain("volley-dash");
-    expect(args).toContain("dev");
-    expect(args).toContain("--open");
+    expect(calls[0]?.cmd).toBe("bun");
+    expect(calls[0]?.opts.cwd).toMatch(/[\\/]packages[\\/]volley-desk$/);
+    expect(calls[0]?.args).toEqual(["run", "dev", "--", "--open"]);
+  });
+
+  it("--legacy spawns the old dashboard in packages/volley-dash", async () => {
+    const io = makeBufferIO();
+    const { spawn, calls } = recordingSpawn(0);
+    const exitCode = await dash({ argv: ["--legacy", "--port", "6000"], env: {}, io, spawn });
+    expect(exitCode).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.opts.cwd).toMatch(/[\\/]packages[\\/]volley-dash$/);
+    expect(calls[0]?.args).toEqual(["run", "dev", "--", "--port", "6000", "--open"]);
+  });
+
+  it("--build builds and previews the Desk (or the old dashboard with --legacy)", async () => {
+    for (const [argv, pkg] of [
+      [["--build"], "volley-desk"],
+      [["--build", "--legacy"], "volley-dash"],
+    ] as const) {
+      const io = makeBufferIO();
+      const { spawn, calls } = recordingSpawn(0);
+      expect(await dash({ argv: [...argv], env: {}, io, spawn })).toBe(0);
+      expect(calls.map((c) => c.args)).toEqual([
+        ["run", "build"],
+        ["run", "preview"],
+      ]);
+      for (const c of calls) expect(c.opts.cwd.endsWith(pkg)).toBe(true);
+    }
+  });
+
+  it("--help names the Desk and the --legacy dashboard", async () => {
+    const io = makeBufferIO();
+    const { spawn } = recordingSpawn();
+    await dash({ argv: ["--help"], env: {}, io, spawn });
+    expect(io.readStdout()).toContain("Volley Desk");
+    expect(io.readStdout()).toContain("--legacy");
   });
 
   it("--open --no-open exits 2 with a mutual-exclusion stderr and does not spawn", async () => {

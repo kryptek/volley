@@ -154,6 +154,13 @@ export function AgentWindow({
     </>
   );
 
+  // The window's accessible name: its wave, task and role (or the agent id).
+  const name = [
+    agent.task ? `${agent.wave} · ${agent.task}` : agent.id,
+    agent.role && ROLE_LABEL[agent.role],
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const label = `Message ${[agent.task ?? agent.id, agent.role && ROLE_LABEL[agent.role]]
     .filter(Boolean)
     .join(" ")}`;
@@ -171,7 +178,16 @@ export function AgentWindow({
 
   const footer = (
     <div className="agent-foot">
-      <div className="bar">
+      {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a read-only status, not a control */}
+      <div
+        className="bar"
+        role="progressbar"
+        aria-label={`${name} progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        // No value yet: an indeterminate progressbar.
+        aria-valuenow={progress ?? undefined}
+      >
         <span style={{ width: `${progress ?? 0}%` }} />
       </div>
       <span className="mono">{progress === null ? "—" : `${progress}%`}</span>
@@ -192,6 +208,7 @@ export function AgentWindow({
       {...frame}
       id={agent.id}
       title={title}
+      label={name}
       accent={accent}
       width={AGENT_WIDTH}
       born={born}

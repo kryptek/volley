@@ -8,7 +8,8 @@
 :root {
   --ink: #e8ecf4;
   --mute: #a3abc0;
-  --dim: #6f7890;
+  /* Lightened from the prototype's #6f7890 to reach WCAG AA (4.5:1) on every chrome. */
+  --dim: #7c859d;
   --line: rgba(214, 224, 255, 0.1);
   --panel: rgba(13, 15, 25, 0.6);
   --panel-solid: #0f111b;
@@ -357,7 +358,7 @@ code {
   color: var(--ink);
 }
 
-@media (max-width: 700px) {
+@media (max-width: 699.98px) {
   .topbar-mid {
     display: none;
   }

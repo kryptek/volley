@@ -130,20 +130,29 @@ export interface WaveStatePayload {
   [key: string]: unknown;
 }
 
+/** `decision.schema.json`'s `payload.kind` enum (a test keeps the two in step). */
+export const DECISION_KINDS = [
+  "reviewers_disagree",
+  "merge_conflict",
+  "agent_blocked",
+  "agent_question",
+  "agent_stalled",
+  "unknown_screen",
+  "model_switch",
+  "repo_untrusted",
+  "ci_failed",
+  "wave_complete",
+  "plan_change",
+] as const;
+export type DecisionKind = (typeof DECISION_KINDS)[number];
+
 /** decision.schema.json payload. */
 export interface DecisionPayload {
   decision_id: string;
   wave: string;
   task: string | null;
-  kind:
-    | "reviewers_disagree"
-    | "merge_conflict"
-    | "agent_blocked"
-    | "unknown_screen"
-    | "model_switch"
-    | "ci_failed"
-    | "wave_complete"
-    | "plan_change";
+  /** A schema kind, or a newer one this Desk does not know: shown by its question either way. */
+  kind: DecisionKind | (string & {});
   question: string;
   options?: string[];
   pointers?: { diff?: string; transcript?: string; screen?: string; pr?: string };

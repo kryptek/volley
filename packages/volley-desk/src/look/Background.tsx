@@ -6,13 +6,63 @@
  * down; picking another one clears it. A chunk that fails to load (offline,
  * or the Desk was redeployed under an open tab) says so instead, with a Retry
  * that loads it again (not in the prototype, which had no deploys).
+ *
+ * WebGL (D8) is detected up front (`hasWebGL`): without it `degradeLook`
+ * renders `none` for a WebGL background and `glass` for the `liquid` chrome,
+ * and the Appearance panel hides both; the saved look is left alone. The
+ * error boundary stays as the last line (a context lost later, a driver bug).
  */
 import { Component, type ReactNode, Suspense, useMemo, useState } from "react";
-import { BACKGROUNDS, type BackgroundDef, isChunkLoadError, loadable } from "./backgrounds";
+import {
+  BACKGROUNDS,
+  type BackgroundDef,
+  NO_BACKGROUND,
+  isChunkLoadError,
+  loadable,
+} from "./backgrounds";
+import type { Look } from "./useLook";
 import "../styles/look.css";
 
 export const BG_FALLBACK = "This background needs WebGL, which this browser didn’t provide.";
 export const BG_LOAD_FAILED = "Couldn’t load this background.";
+export const BG_NO_WEBGL_NOTE =
+  "This browser didn’t provide WebGL, so only the backgrounds that work without it are listed.";
+
+/** The React Bits backgrounds that draw with the DOM or a 2D canvas; every other one needs WebGL. */
+const NO_WEBGL_BACKGROUNDS: ReadonlySet<string> = new Set(["GridMotion", "ShapeGrid"]);
+
+export const needsWebGL = (key: string, backgrounds = BACKGROUNDS): boolean =>
+  !NO_WEBGL_BACKGROUNDS.has(key) && (backgrounds.find((b) => b.key === key)?.C ?? null) !== null;
+
+/** Whether this browser gives a canvas a WebGL context; the probe context is released at once. */
+export function hasWebGL(): boolean {
+  try {
+    const canvas = document.createElement("canvas");
+    const gl = (canvas.getContext("webgl2") ?? canvas.getContext("webgl")) as
+      | WebGLRenderingContext
+      | WebGL2RenderingContext
+      | null;
+    if (!gl) return false;
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** WebGL availability, probed once per mount. */
+export function useWebGL(): boolean {
+  const [webgl] = useState(hasWebGL);
+  return webgl;
+}
+
+/** The look as this browser can render it: without WebGL, `none` and `glass` stand in. */
+export function degradeLook(look: Look, webgl: boolean): Look {
+  if (webgl) return look;
+  const bg = needsWebGL(look.bg) ? NO_BACKGROUND : look.bg;
+  const chrome = look.chrome === "liquid" ? "glass" : look.chrome;
+  return bg === look.bg && chrome === look.chrome ? look : { ...look, bg, chrome };
+}
 
 type Failure = "render" | "load";
 
