@@ -452,6 +452,7 @@ function globals(now: number): DeskMessage[] {
     worktree_root: "~/.volley/worktrees",
     spawn_timeout_s: 120,
     wake_grace_s: 60,
+    screen_tail_interval_s: 5,
   };
   const since = iso(now - 20 * 60_000);
   const heavy = {

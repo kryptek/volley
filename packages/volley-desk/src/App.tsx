@@ -3,8 +3,10 @@
  * coordinators window, a wave window per wave and an agent window per agent
  * (a plain frame for agents with no wave). Every window carries its attention
  * tier (`attention.ts`); the top bar counts what needs you and notifications
- * fire when something starts to. The chat glyphs open the steering panel
- * (D4). Backgrounds, dock and arrange come in later tasks.
+ * fire when something starts to. Arrange & fit (`layout/arrange.ts`) packs
+ * the windows into per-wave clusters and re-runs on structural changes while
+ * auto-arrange is on. The chat glyphs open the steering panel (D4).
+ * Backgrounds and the dock come in later tasks.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -20,6 +22,8 @@ import {
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
+import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
+import { ARRANGE_ANIM_MS, useAutoArrange, useAutoArrangeSetting } from "./layout/useAutoArrange";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -41,11 +45,12 @@ import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
 const AGENT_W = AGENT_WIDTH;
-// Guesses until D6's arrange measures real windows.
+// Sizes until a window has been measured (Frame `onSize`), shared by the
+// placeholder layout, the fits and arrange. The prototype's arrange guessed
+// 620 / 520; in a browser the ResizeObserver reports before arrange runs, so
+// one set of guesses is kept on purpose.
 const WAVE_H = 440;
 const AGENT_H = 470;
-const GAP = 36;
-const CGAP = 96;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
 
@@ -125,7 +130,7 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 
 export default function App() {
   const { state, connection, demo, settling, offline, writer, identity } = useDesk();
-  const { view, fitTo, stageRef, stageHandlers } = useViewport();
+  const { view, setView, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -167,9 +172,15 @@ export default function App() {
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
 
+  const sizes = useRef<Record<string, { w: number; h: number }>>({});
+  const sizeOf = (id: string, w: number, h: number) => ({ id, ...(sizes.current[id] ?? { w, h }) });
+  const rectOf = (id: string, w: number, h: number): Rect => {
+    const { w: sw, h: sh } = sizeOf(id, w, h);
+    return { ...pos(id), w: sw, h: sh };
+  };
   const clusterOf = (id: string): Rect[] => [
-    { ...pos(id), w: WAVE_W, h: WAVE_H },
-    ...(groups[id] ?? []).map((a) => ({ ...pos(a.id), w: AGENT_W, h: AGENT_H })),
+    rectOf(id, WAVE_W, WAVE_H),
+    ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
   ];
   const visible = waveIds.filter((id) => !hidden.has(id));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
@@ -185,6 +196,51 @@ export default function App() {
     fitTo(rects);
   });
 
+  // ------------------------------------------------------- arrange & fit
+  // D7's dock adds "Arrange & fit" (calls `arrange`) and the auto-arrange toggle.
+  const [autoArrange] = useAutoArrangeSetting();
+  const [animating, setAnimating] = useState(false);
+  const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(animEnd.current), []);
+  const arrange = () => {
+    // Forget the sizes of windows that have left the store.
+    for (const id of Object.keys(sizes.current)) {
+      if (id !== COORDS_ID && !state.agents[id] && !waveIds.includes(id)) delete sizes.current[id];
+    }
+    const clusters: Cluster[] = [
+      ...(coordsShown
+        ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(waveList.length)), kids: [] }]
+        : []),
+      ...visible.map((id) => ({
+        main: sizeOf(id, WAVE_W, WAVE_H),
+        kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
+      })),
+    ];
+    const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
+    if (!r) return;
+    setAnimating(true);
+    setMoved((m) => ({ ...m, ...r.place }));
+    setView(r.view);
+    clearTimeout(animEnd.current);
+    animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
+  };
+  const layoutKey = [
+    coordsShown ? "c" : "",
+    ...visible,
+    ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
+  ].join("|");
+  // A reconnect's resync empties the waves and the replay rebuilds them: hold the
+  // key until it settles, so only windows that really came or went re-arrange.
+  // The first connect (and demo load) settles too, but arranges as data arrives.
+  const settledOnce = useRef(false);
+  if (!settling) settledOnce.current = true;
+  useAutoArrange({
+    enabled: autoArrange,
+    layoutKey,
+    arrange,
+    hold: settling && settledOnce.current,
+  });
+
   const place = (id: string, attn?: Attention) => ({
     pos: pos(id),
     z: z(id),
@@ -192,6 +248,10 @@ export default function App() {
     chrome: "glass" as const,
     onMove: move(id),
     onFocus: () => focus(id),
+    // A window not laid out yet (0 × 0) keeps its fallback size.
+    onSize: (w: number, h: number) => {
+      if (w > 0 && h > 0) sizes.current[id] = { w, h };
+    },
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -232,7 +292,7 @@ export default function App() {
     });
   const goTo = (t: NeedsYouTarget) => {
     show(t.wave);
-    fitTo(t.kind === "wave" ? clusterOf(t.id) : [{ ...pos(t.id), w: AGENT_W, h: AGENT_H }]);
+    fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
     focus(t.id);
   };
 
@@ -261,7 +321,7 @@ export default function App() {
       <div className="bg-layer bg-plain" aria-hidden />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
-        <World view={view}>
+        <World view={view} animating={animating}>
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}

@@ -25,8 +25,15 @@ import { basename } from "node:path";
  *   gh issue view · gh pr view | list | checks · gh run list | view | watch · gh api (GET only)
  *   cmux new-workspace | list-workspaces | send | send-key | read-screen | ping
  *   claude (any arguments)
+ *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
+ *   volley auth rm-agent <agent_id> [--no-reload]
  *   launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
+ *   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
+ *     memory_pressure (no arguments: report only) · docker info --format {{json .}}
+ *
+ * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
+ *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
  * GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,
@@ -66,8 +73,25 @@ export function mintConsentToken(reason: string): ConsentToken {
   return token;
 }
 
+const scripts = new WeakSet<object>();
+
+/**
+ * Permission to run one local script by its exact path. Only `mintScriptToken` creates one
+ * (checked by identity, like consent tokens). Callers: the brief gate only.
+ */
+export interface ScriptToken {
+  readonly path: string;
+}
+
+export function mintScriptToken(path: string): ScriptToken {
+  const token = Object.freeze({ path });
+  scripts.add(token);
+  return token;
+}
+
 export interface FenceOptions {
   consent?: ConsentToken;
+  script?: ScriptToken;
 }
 
 type Verdict =
@@ -355,8 +379,28 @@ const DOCKER_DENY = new Set([
   "volume prune",
 ]);
 
+/** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
+const PRESSURE_READS: readonly (readonly string[])[] = [
+  ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+  ["memory_pressure"],
+  ["docker", "info", "--format", "{{json .}}"],
+];
+
+function exactly(argv: readonly string[], allowed: readonly (readonly string[])[]): Verdict {
+  const ok = allowed.some((a) => a.length === argv.length && a.every((x, i) => x === argv[i]));
+  return ok ? ALLOW : deny(argv.slice(0, 2).join(" "));
+}
+
 /** Throw `FenceError` unless the policy above allows `argv`. */
 export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}): void {
+  if (
+    opts.script !== undefined &&
+    scripts.has(opts.script) &&
+    argv[0] !== undefined &&
+    argv[0] === opts.script.path
+  ) {
+    return;
+  }
   const v = evaluate(argv);
   if (v.kind === "allow") return;
   if (v.kind === "consent") {
@@ -380,9 +424,15 @@ function evaluate(argv: readonly string[]): Verdict {
       return cmux(args);
     case "claude":
       return ALLOW;
+    case "volley":
+      return volley(args);
     case "launchctl":
       return launchctl(args);
+    case "sysctl":
+    case "memory_pressure":
+      return exactly(argv, PRESSURE_READS);
     case "docker": {
+      if (exactly(argv, PRESSURE_READS).kind === "allow") return ALLOW;
       const two = args.slice(0, 2).join(" ");
       if (DOCKER_DENY.has(args[0] ?? "") || DOCKER_DENY.has(two))
         return deny(`docker ${two}`.trim());
@@ -511,6 +561,27 @@ function cmux(args: string[]): Verdict {
   const sub = args[0] ?? "";
   if (sub === "close-workspace") return { kind: "consent", verb: "cmux close-workspace" };
   return CMUX_ALLOW.has(sub) ? ALLOW : deny(`cmux ${sub}`.trim());
+}
+
+const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
+/** `volley auth add-agent|rm-agent <id>`: mint and revoke one agent's broker credentials. */
+function volley(args: string[]): Verdict {
+  const [group, verb, id, ...rest] = args;
+  const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
+  if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent")) return deny(name);
+  if (id === undefined || !AGENT_ID.test(id)) return deny(`${name} (agent id)`);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--no-reload") continue;
+    if (verb === "add-agent" && a === "--json") continue;
+    if (verb === "add-agent" && a === "--ack-to" && AGENT_ID.test(rest[i + 1] ?? "")) {
+      i++;
+      continue;
+    }
+    return deny(`${name} ${a}`);
+  }
+  return ALLOW;
 }
 
 function launchctl(args: string[]): Verdict {

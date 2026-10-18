@@ -30,6 +30,7 @@
     "mailbox": { "session_expiry_s": 604800 },
     "worktree_root": "~/.volley/worktrees",
     "spawn_timeout_s": 120,
-    "wake_grace_s": 60
+    "wake_grace_s": 60,
+    "screen_tail_interval_s": 5
   }
 }

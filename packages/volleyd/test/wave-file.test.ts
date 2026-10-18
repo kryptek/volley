@@ -39,6 +39,7 @@ describe("parseWaveFile", () => {
       pipeline: ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
       stages: [["implement"], ["spec_review", "quality_review"], ["fixup"], ["merge_ready"]],
       model: "claude-opus-5-5",
+      host: "local",
       files: [],
     });
     expect(w.tasks.T3?.after).toEqual(["T1", "T2"]);
@@ -64,6 +65,17 @@ describe("parseWaveFile", () => {
     expect(w.tasks.B?.files).toEqual(["src/a.ts"]);
     expect(w.spawn_budget).toBe(5);
     expect(w.config).toEqual({ hard_ceiling: 3, admission: { ci_queue_max: 4 } });
+  });
+
+  it("carries a per-task host (default local) and rejects a malformed one", () => {
+    const w = parseWaveFile(
+      `${HEADER}tasks:\n  A: { issue: 1 }\n  B: { issue: 2, host: build-box.lan }\n`,
+    );
+    expect(w.tasks.A?.host).toBe("local");
+    expect(w.tasks.B?.host).toBe("build-box.lan");
+    expect(errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: "-oProxyCommand=x" }\n`)).toEqual([
+      expect.stringMatching(/^tasks\.A\.host: must match pattern/),
+    ]);
   });
 
   it("rejects an unknown after target with a path-qualified error", () => {
@@ -98,6 +110,11 @@ describe("parseWaveFile", () => {
     expect(errs).toEqual(["tasks.T1: duplicate task id 'T1'"]);
   });
 
+  it("rejects task ids that differ only in case (they would share an agent id)", () => {
+    const errs = errorsOf(`${HEADER}tasks:\n  T1: { issue: 1 }\n  t1: { issue: 2 }\n`);
+    expect(errs).toEqual(["tasks.t1: task id 't1' differs from 'T1' only in case"]);
+  });
+
   it("rejects a dependency cycle, naming the loop", () => {
     const errs = errorsOf(
       `${HEADER}tasks:\n  T1: { issue: 1, after: [T3] }\n  T2: { issue: 2, after: [T1] }\n  T3: { issue: 3, after: [T2] }\n`,
@@ -126,6 +143,15 @@ describe("parseWaveFile", () => {
     expect(errs).toContain("tasks.T1.color: unknown key");
     expect(errs).toContain("tasks.T1.issue: must be >= 1");
     expect(errs).toContain("config.hard_ceiling: must be <= 100");
+  });
+
+  it("rejects per-wave lease_pools overrides: pools are machine-global", () => {
+    const errs = errorsOf(
+      `${HEADER}tasks:\n  T1: { issue: 1 }\nconfig:\n  lease_pools:\n    build: { capacity: 5, ttl_s: 600 }\n`,
+    );
+    expect(errs).toEqual([
+      "config.lease_pools: lease pools are machine-global; set them in volleyd's global config, not per wave",
+    ]);
   });
 
   it("rejects malformed YAML and non-mapping documents", () => {

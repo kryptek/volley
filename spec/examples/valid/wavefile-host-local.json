@@ -1,0 +1,11 @@
+{
+  "wave": "w1",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/w1",
+  "model": "claude-opus-5-5",
+  "pipeline": ["implement", "merge_ready"],
+  "tasks": {
+    "T1": { "issue": 101, "host": "local" },
+    "T2": { "issue": 102, "after": ["T1"] }
+  }
+}

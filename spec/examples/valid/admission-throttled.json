@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-18T15:00:10.000Z",
+  "channel": "_system/admission",
+  "type": "admission",
+  "correlation_id": null,
+  "payload": {
+    "sampled_at": "2026-10-18T15:00:10.000Z",
+    "allow": 0,
+    "throttled": true,
+    "reasons": [
+      "memory pressure critical (level 4 > max 2)",
+      "recovering: cmux ping clear for 1/3 samples"
+    ],
+    "signals": {
+      "memory_pressure": { "state": "over", "value": 4, "max": 2 },
+      "cmux_ping": { "state": "recovering", "value": 140, "max": 2000, "clean_samples": 1 },
+      "containers": { "state": "clear", "value": 6, "max": 20 },
+      "api_overload": { "state": "clear", "value": 0, "max": 3 },
+      "ci_queue": { "state": "unknown", "error": "gh: not logged in" }
+    },
+    "waves": {
+      "2026-10-20-example": {
+        "allow": 0,
+        "reasons": ["memory pressure critical (level 4 > max 2)", "recovering: cmux ping clear for 1/3 samples"]
+      }
+    }
+  }
+}
