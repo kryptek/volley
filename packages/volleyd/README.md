@@ -243,9 +243,9 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   `decision_resolved { answer, by, at, rationale? }`, re-publishes the decision once with
   `resolved` set and clears the retained topic, and, once the task's last open decision is
   resolved, puts it back in the stage it was in. The task's resolved decisions are written to
-  `.volley/decisions.md` in its task directory for the next stage's brief. Until the spawner
-  (T4) points that at the task's worktree it lands in `$VOLLEYD_HOME/waves/<wave>/tasks/<task>/`,
-  where no agent reads it yet. A failed write is logged and the answer omits `brief`; the
+  `.volley/decisions.md` in its task directory for the next stage's brief: the task's latest
+  worktree (from its `agent_spawned`), or `$VOLLEYD_HOME/waves/<wave>/tasks/<task>/` before the
+  task has one or when spawning is off. A failed write is logged and the answer omits `brief`; the
   resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
 
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
@@ -277,14 +277,15 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   `why_waiting: "wave paused"`. `resume <wave>` re-admits.
 - `stop <wave>`: journals `wave_stopped` (no new admissions), then sends a mailbox `cancel`
   to every running agent of the wave (journaled as `steering_sent { type: "cancel" }`). The
-  daemon also calls its `interrupt` hook for each agent (Escape into the agent's session); the
-  spawner (T4) wires it to cmux, so until then `stop` sends only the mailbox cancel. A stopped
-  wave can be resumed explicitly. Known gap until the spawner (T4) can respawn: `stop` journals
+  daemon also interrupts each agent: with spawning on, Escape into its cmux workspace (from its
+  `agent_spawned`); with `--no-spawn`, only the mailbox cancel is sent. A stopped
+  wave can be resumed explicitly. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
   in their stage, counting against `hard_ceiling`) with no agent working them.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
   even if the daemon dies part-way, and survives restarts), every wave stops, and the daemon refuses `run` with `kill switch engaged` until
-  `resume --all`. Anyone may pull it; releasing it leaves stopped waves stopped.
+  `resume --all`, and spawns nothing (neither admitted tasks nor `volleyd spawn`). Anyone may
+  pull it; releasing it leaves stopped waves stopped.
 
 ## Steering
 
@@ -372,7 +373,9 @@ the contract the subsystems that read them (leases, monitors, decisions, spawnin
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
-The gate runs before credentials are minted, so a rejected brief costs nothing to undo.
+The gate runs before credentials are minted, so a rejected brief costs nothing to undo. An
+automatic spawn the loop got refused is retried with backoff (30 s, doubling, capped at 15 min);
+`volleyd spawn` retries at once. While the kill switch is engaged nothing is spawned.
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
@@ -385,8 +388,9 @@ exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --name <id> "$(cat .volley/brief.md)"`.
 The hooks come in through `--settings`, never `--mcp-config` (variadic: it would swallow the
 prompt). The cmux command starts with two spaces, which keeps it out of shell history and away
-from prompts that eat the first character; nothing else is ever typed into the pane, and the
-brief never appears in an argv.
+from prompts that eat the first character. Nothing else is typed into the pane, with two
+exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
+Escape that `volleyd stop` sends. The brief never appears in an argv.
 
 **Brief gate and extras.** If `$VOLLEYD_HOME/brief-gate` exists and is executable, it runs as
 `brief-gate <worktree>/.volley/brief.md` in the worktree; a non-zero exit is
@@ -403,12 +407,15 @@ same worktree asks about the holder's agent:
 | Holder's agent | Verdict |
 |---|---|
 | retained status `spawning` / `registered` / `working` / `blocked` | live → `SPAWN_LOCKED` |
-| retained status `done` / `failed` / `reaped` | stale → reclaimed |
+| retained status `done` / `failed` | stale → reclaimed |
+| retained status `reaped` (the LWT, which a network blip also fires) | live until no heartbeat (and no lock write) for longer than `heartbeat_alarm_s`, then stale |
 | no status, but a registry entry, or the writing process is another live pid | live |
 | no status, no registry entry, no heartbeat (and no lock write) for longer than `heartbeat_alarm_s` | stale → reclaimed |
 
-The one relaunch after an update prompt keeps the lock and rewrites its holder (attempt + 1).
-Retiring the agent releases it.
+`blocked` is terminal in SPEC §5.2, but SPEC lets a blocked agent stay alive awaiting mailbox
+guidance, so here it keeps its lock and credentials until it reaches `done`, `failed` or
+`reaped`. The one relaunch after an update prompt keeps the lock and rewrites its holder
+(attempt + 1). Retiring the agent releases it.
 
 ### Verification signals
 
@@ -421,8 +428,9 @@ SessionStart heartbeat and a registry entry with `model_source` `harness-hook` o
 arrive within `spawn_timeout_s`; it is journaled as `agent_registered { model, model_source,
 model_verified }`.
 
-- `model_source: "harness-hook"`: the model is compared with the task's (a dated id or `[1m]`
-  suffix still matches); a mismatch opens decision `model_switch` and leaves the agent running.
+- `model_source: "harness-hook"`: the model id is compared exactly with the task's. Only an
+  8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-opus-5` is a mismatch for
+  `claude-opus-5-5`. A mismatch opens decision `model_switch` and leaves the agent running.
 - `model_source: "unknown"` (the hook input had no model): the terminal's status line is read
   once as the model source; unreadable → `model_verified: false`.
 
@@ -435,10 +443,18 @@ truth). When no SessionStart heartbeat arrived in time, the screen is captured t
 | Screen | Action |
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
-| `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then relaunch once (attempt + 1: new id and credentials, same lock and worktree; journaled as `agent_spawned { recovered_from, recovery: "update_prompt" }`) |
-| `login`, `working` (Claude up, hooks silent), `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
+| `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
+| `login`, `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
 
-A second update prompt after the relaunch is `unknown_screen`.
+After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
+signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
+verified once more and nothing is typed. Only when the pane is back at a bare `shell_prompt`
+(the prompt ate the launch command) is it relaunched, once, **in the same workspace**: the
+first attempt is retired as `agent_retired { status: "superseded" }` (credentials revoked,
+retained records cleared, lock kept), then attempt + 1 gets a new id and credentials and the
+launch command is typed into that pane (`agent_spawned { recovered_from, recovery:
+"update_prompt" }`). A second workspace is never opened in the same worktree. A second failed
+verification opens `unknown_screen`.
 
 ### Journal mapping
 
@@ -446,22 +462,31 @@ The journal's event types are the closed `wave-event` enum, so the steps use it 
 refusals → `alarm_raised { code, … }`; a launch → `agent_spawned { agent_id, role, attempt,
 host, workspace, worktree, branch, issue, credentials, lock }` (plus `stage_entered implement`
 for an implementer's first attempt); verification → `agent_registered`; trust, model and screen
-questions → `decision_opened { decision_id, kind, question, options, pointers }`; trust accepted
-in the dialog later → `decision_resolved { answer: "trusted" }`; retire → `agent_retired`.
+questions → `decision_opened { decision_id, kind, question, options, pointers }`, opened through
+the decision store (retained on `volley/_waves/<wave>/decisions/<id>`, notify bridge; a
+`repo_untrusted` one also carries `repo`); trust accepted later → `decision_resolved { answer:
+"trusted", by: "claude-trust-dialog" }`; retire → `agent_retired`.
 
 ### Retire and cleanup
 
-When a supervised agent's terminal status (`done`, `failed`, `reaped`) arrives, the daemon
-retires it: `volley auth rm-agent <id>`, empty retained payloads on its `registry`, `status`,
-`result`, `capability` and `screen` topics, the lock released, `agent_retired` journaled. Only
-the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
+When a supervised agent's `done` or `failed` status arrives, the daemon retires it. `reaped` (its
+LWT) is retired only after `heartbeat_alarm_s` passes with no fresh status or heartbeat: a
+network blip or an MCP-server restart also fires the LWT, and the assigned identity may
+reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
+retained payloads on its `registry`, `status`, `result`, `capability` and `screen` topics, the
+lock released, and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
+so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
 --yes` closes the retired agents' workspaces and runs `git worktree remove` with the fence's
 consent token (`--force` for dirty worktrees); worktrees of agents not yet retired are skipped,
 and branches are never deleted.
 
-Answering a `repo_untrusted` decision with `trust` records exactly
-`projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`); accepting the dialog in any
-worktree of the repo works too, and the next tick resumes the parked spawns.
+Answering a `repo_untrusted` decision with `volleyd resolve <id> trust` (owner only) records
+exactly `projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`; it re-checks the
+file just before its rename and retries rather than drop a concurrent Claude Code write).
+Accepting the dialog by hand in any worktree of the repo works too: every tick re-checks the
+open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
+resume.
 
 ---
 
