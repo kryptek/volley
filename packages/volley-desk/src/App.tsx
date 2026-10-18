@@ -1,8 +1,9 @@
 /**
- * The Desk shell: plain background, pannable/zoomable stage, top bar, and a
- * placeholder window per wave and agent so the canvas can be exercised. The
- * real windows (wave, agent, coordinators), backgrounds, dock and arrange
- * replace the placeholders in later tasks.
+ * The Desk shell: plain background, pannable/zoomable stage, top bar, a wave
+ * window per wave, and a placeholder window per agent (and for agents with no
+ * wave) so the canvas can be exercised. The real agent and coordinators
+ * windows, backgrounds, dock and arrange replace the placeholders in later
+ * tasks.
  */
 import { useEffect, useRef, useState } from "react";
 import { BORN_MS, Frame, useFocusOrder } from "./canvas/Frame";
@@ -10,16 +11,25 @@ import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
-import type { AgentView, DeskState, WaveView } from "./store/types";
+import type { AgentView, DeskState } from "./store/types";
+import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
+import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
-const WAVE_W = 620;
 const AGENT_W = 460;
-const WAVE_H = 300;
+const WAVE_H = 340;
 const AGENT_H = 220;
 const GAP = 36;
 const CGAP = 96;
-const ACCENT = "#6ee7f9";
-const NEUTRAL = "#a3abc0";
+
+const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
+
+/** Earliest start among a wave's agents (registry `started_at`, else first sighting). */
+function waveStartedAt(agents: readonly AgentView[]): number | null {
+  const starts = agents
+    .map((a) => Date.parse(a.registry?.started_at ?? "") || a.bornAt)
+    .filter((t): t is number => typeof t === "number" && Number.isFinite(t));
+  return starts.length ? Math.min(...starts) : null;
+}
 
 type Pos = { x: number; y: number };
 
@@ -52,6 +62,7 @@ export default function App() {
   const { view, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
+  const [me] = useState(() => meFromSearch(window.location.search));
 
   const groups = agentsByWave(state);
   const waveIds = [
@@ -77,16 +88,19 @@ export default function App() {
     fitTo(rects);
   });
 
-  const frame = (id: string, accent: string, width: number) => ({
-    id,
-    accent,
-    width,
+  const place = (id: string) => ({
     pos: pos(id),
     z: z(id),
     scale: view.s,
     chrome: "glass" as const,
     onMove: move(id),
     onFocus: () => focus(id),
+  });
+  const frame = (id: string, accent: string, width: number) => ({
+    id,
+    accent,
+    width,
+    ...place(id),
   });
 
   const agents = Object.values(state.agents);
@@ -96,20 +110,32 @@ export default function App() {
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
         <World view={view}>
-          {waveIds.map((id) => (
-            <PlaceholderWave
-              key={id}
-              wave={state.waves[id]}
-              id={id}
-              count={groups[id]?.length ?? 0}
-              frame={frame(id, id === UNASSIGNED ? NEUTRAL : ACCENT, WAVE_W)}
-            />
-          ))}
+          {waveIds.map((id) => {
+            const wave = state.waves[id];
+            if (!wave) {
+              return (
+                <Frame key={id} {...frame(id, NEUTRAL_ACCENT, WAVE_W)} title={id}>
+                  <div className="dim">{groups[id]?.length ?? 0} agents with no wave</div>
+                </Frame>
+              );
+            }
+            const owner = wave.state?.owner;
+            return (
+              <WaveWindow
+                key={id}
+                wave={wave}
+                me={me}
+                coordinatorState={owner ? state.coordinators[owner]?.state : undefined}
+                startedAt={waveStartedAt(groups[id] ?? [])}
+                frame={place(id)}
+              />
+            );
+          })}
           {waveIds.flatMap((id) =>
             (groups[id] ?? []).map((a) => (
               <Frame
                 key={a.id}
-                {...frame(a.id, id === UNASSIGNED ? NEUTRAL : ACCENT, AGENT_W)}
+                {...frame(a.id, accentOf(id), AGENT_W)}
                 title={a.id}
                 born={a.bornAt !== null && Date.now() - a.bornAt < BORN_MS}
               >
@@ -143,44 +169,5 @@ export default function App() {
         </div>
       </header>
     </div>
-  );
-}
-
-function PlaceholderWave({
-  id,
-  wave,
-  count,
-  frame,
-}: {
-  id: string;
-  wave: WaveView | undefined;
-  count: number;
-  frame: Omit<Parameters<typeof Frame>[0], "title" | "children">;
-}) {
-  const s = wave?.state;
-  const coordinator = s?.coordinator;
-  return (
-    <Frame {...frame} title={id}>
-      {s ? (
-        <>
-          <div className="mono dim">
-            {s.status} · {s.release_branch} · owner {s.owner ?? "none"}
-            {coordinator && ` (${coordinator.state})`}
-          </div>
-          <ul className="placeholder-tasks">
-            {s.tasks.map((t) => (
-              <li key={t.id} className="mono">
-                {t.id} · {s.spec?.tasks[t.id]?.title ?? `#${t.issue}`} · {t.stage}
-              </li>
-            ))}
-          </ul>
-          <div className="dim">
-            {Object.keys(wave.decisions).length} open decisions · {s.gates.length} gates
-          </div>
-        </>
-      ) : (
-        <div className="dim">{count} agents with no wave</div>
-      )}
-    </Frame>
   );
 }

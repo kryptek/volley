@@ -1,0 +1,201 @@
+/*
+ * Wave window: Clawd, meta line, graph / wave-file tabs, dependency graph,
+ * YAML view and the progress rail. Stage colours are shared by graph nodes
+ * and rail segments.
+ */
+.win {
+  --st-queued: rgba(214, 224, 255, 0.16);
+  --st-implement: #6ee7f9;
+  --st-review: #c4b5fd;
+  --st-fixup: #fdba74;
+  --st-merge_ready: var(--ok);
+  --st-merged: color-mix(in srgb, var(--ok) 45%, transparent);
+  --st-decision: var(--hot);
+}
+
+/* ---------------------------------------------------------------- clawd */
+.clawd {
+  flex: none;
+  overflow: visible;
+}
+.clawd-body {
+  fill: #d97757;
+}
+.clawd-eye {
+  fill: #1a0b05;
+}
+.clawd--wait {
+  animation: clawd-hop 0.9s cubic-bezier(0.3, 0, 0.3, 1) infinite;
+}
+@keyframes clawd-hop {
+  0%,
+  55%,
+  100% {
+    transform: translateY(0);
+  }
+  25% {
+    transform: translateY(-4px);
+  }
+}
+
+/* ----------------------------------------------------------------- body */
+.wave-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.wave-counts {
+  font-size: 12.5px;
+  color: var(--mute);
+  white-space: nowrap;
+}
+.wave-tabs {
+  display: flex;
+  gap: 6px;
+}
+.pill--on {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--acc) 55%, transparent);
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
+}
+
+/* ------------------------------------------------------------------ dag */
+.dag-wrap {
+  overflow-x: auto;
+  padding: 4px 0 2px;
+}
+.dag {
+  position: relative;
+  margin: 0 auto;
+}
+.dag-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+.dag-edge {
+  fill: none;
+  stroke: rgba(214, 224, 255, 0.22);
+  stroke-width: 1.5;
+}
+.dag-edge--done {
+  stroke: color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.dag-node {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--st);
+  background: rgba(255, 255, 255, 0.04);
+  line-height: 1.2;
+}
+.dag-id {
+  font-family: var(--f-mono);
+  font-size: 12px;
+}
+.dag-stage {
+  font-size: 11px;
+  color: var(--mute);
+}
+.dag-node--queued {
+  --st: var(--st-queued);
+}
+.dag-node--implement {
+  --st: var(--st-implement);
+}
+.dag-node--review {
+  --st: var(--st-review);
+}
+.dag-node--fixup {
+  --st: var(--st-fixup);
+}
+.dag-node--merge_ready {
+  --st: var(--st-merge_ready);
+  background: color-mix(in srgb, var(--ok) 9%, transparent);
+}
+.dag-node--merged {
+  --st: var(--st-merged);
+  opacity: 0.7;
+}
+.dag-node--decision {
+  --st: var(--st-decision);
+  background: rgba(255, 122, 89, 0.1);
+}
+
+/* ----------------------------------------------------------------- yaml */
+.yaml {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  overflow-x: auto;
+  line-height: 1.55;
+}
+.y-k {
+  color: color-mix(in srgb, var(--acc) 80%, var(--ink));
+}
+.y-v {
+  color: var(--ink);
+}
+.y-c {
+  color: var(--dim);
+}
+
+/* ----------------------------------------------------------------- rail */
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rail {
+  flex: 1;
+  display: flex;
+  gap: 3px;
+  height: 6px;
+}
+.rail-seg {
+  flex: 1;
+  border-radius: 3px;
+  background: var(--st);
+}
+.rail-seg--queued {
+  --st: var(--st-queued);
+}
+.rail-seg--implement {
+  --st: var(--st-implement);
+}
+.rail-seg--review {
+  --st: var(--st-review);
+}
+.rail-seg--fixup {
+  --st: var(--st-fixup);
+}
+.rail-seg--merge_ready {
+  --st: var(--st-merge_ready);
+}
+.rail-seg--merged {
+  --st: var(--st-merged);
+}
+.rail-seg--decision {
+  --st: var(--st-decision);
+}
+.rail-pct {
+  color: var(--ink);
+}
+.rail-age {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clawd--wait {
+    animation: none;
+  }
+}
