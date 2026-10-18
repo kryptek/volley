@@ -1,0 +1,8 @@
+{
+  "wave": "w1",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/2026-10-20-example",
+  "model": "claude-opus-5-5",
+  "pipeline": ["implement", ["spec_review", "deploy"]],
+  "tasks": { "T0": { "issue": 101 } }
+}
