@@ -25,8 +25,9 @@ export const REQUIRED_SECTIONS = [
 ] as const;
 
 /**
- * Strings the volleyd path must name verbatim: the helper, where the wave file goes, and the
- * exact commands of each step, so an edit can't silently drop one.
+ * Strings the volleyd path (the text from `## Volleyd path` to `## Legacy path`) must name
+ * verbatim: the helper, where the wave file goes, and the exact commands of each step, so an
+ * edit can't silently drop one.
  */
 export const REQUIRED_VOLLEYD_PATH = [
   "scripts/wave-from-issues.ts",
@@ -108,9 +109,19 @@ export function validateSections(source: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
+/** The body text from the `## Volleyd path` heading up to `## Legacy path`, or null. */
+export function volleydPathSection(body: string): string | null {
+  const start = /^## Volleyd path\b.*$/m.exec(body);
+  if (start === null) return null;
+  const rest = body.slice(start.index);
+  const end = /^## Legacy path\b/m.exec(rest);
+  return end === null ? rest : rest.slice(0, end.index);
+}
+
 export function validateVolleydPath(source: string): ValidationResult {
-  const { body } = splitFrontmatter(source);
-  const errors = REQUIRED_VOLLEYD_PATH.filter((needle) => !body.includes(needle)).map(
+  const section = volleydPathSection(splitFrontmatter(source).body);
+  if (section === null) return { ok: false, errors: ["missing the ## Volleyd path section"] };
+  const errors = REQUIRED_VOLLEYD_PATH.filter((needle) => !section.includes(needle)).map(
     (needle) => `volleyd path must mention: ${needle}`,
   );
   return { ok: errors.length === 0, errors };

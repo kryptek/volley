@@ -81,9 +81,9 @@ The `volleyd` supervisor owns everything the legacy path does by hand: worktrees
 ### Volleyd prerequisites
 
 - Prerequisites 1–4 above (broker, volley-mcp, shell credentials, coordinator registered). The coordinator's auto-suffixed `agent_id` from Prerequisites step 4 becomes the wave's **owner**.
-- `volleyd status` exits 0 (see Choosing a dispatch path). Use the same `VOLLEY_BROKER_URL` / `--namespace` the daemon uses.
+- `volleyd status` exits 0 (see Choosing a dispatch path). Use the same `VOLLEY_BROKER_URL` / `--namespace` the daemon uses, and run on the daemon's host with the daemon's `VOLLEYD_HOME`: `volleyd events` and `volleyd ack` read the journal there directly, not over the broker.
 - A release branch the wave's PRs target: create or reuse one exactly as in **Batch setup** step 1, after the **Global open-PR check**. A wave always has a release branch, even for one issue.
-- Repo-specific brief extras live in the repo, not in this skill: put the **Migration number reservation** block (or any other per-repo notes) in `<repo>/.volley/brief-extra.md` (kept out of git); volleyd appends it to every brief it renders. Run the migration counter init (**Batch setup** step 2) yourself before submitting if the repo uses it. volleyd's briefs already carry the narration contract; to enforce it anyway, install the skill's gate as volleyd's brief gate: `ln -s <skill-dir>/scripts/validate-brief.sh "${VOLLEYD_HOME:-$HOME/.volley/volleyd}/brief-gate"` (volleyd refuses to launch an agent whose brief fails it).
+- Repo-specific brief extras live in the repo, not in this skill: put the **Migration number reservation** block (or any other per-repo notes) in `<repo>/.volley/brief-extra.md` (kept out of git); volleyd appends it to every brief it renders. Run the migration counter init (**Batch setup** step 2) yourself before submitting if the repo uses it. volleyd's briefs already carry the narration contract. To enforce it anyway (say, against a customised template), install the skill's gate as volleyd's brief gate: `ln -s <skill-dir>/scripts/validate-brief.sh "${VOLLEYD_HOME:-$HOME/.volley/volleyd}/brief-gate"`. volleyd refuses to launch an agent whose brief fails it. The gate accepts volleyd's own briefs: their session hooks register the agent, so the brief's "already registered" line stands in for the legacy `vol_register` step (volleyd briefs must never ask the agent to register). Do not "fix" a refused volleyd brief by appending `brief/NARRATION_BLOCK.txt`: its step 1 is `vol_register`.
 
 ### Step 1: collect issues
 
@@ -98,8 +98,9 @@ gh issue list --state open --label enhancement --limit 200 --json number,title,b
 
 ### Step 2: derive dependencies
 
-Each issue becomes task `i<N>`. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after: [i101, i102]`: that task starts only once its dependencies are `done`. `Depends on: none` declares no dependencies.
+Each issue becomes task `i<N>`. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis and parentheticals allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after: [i101, i102]`: that task starts only once its dependencies are `done` (see the gate note in Step 5). `Depends on: none` (or `n/a`) declares no dependencies. An empty `Depends on:` label reads the `- #N` list items under it. `owner/repo#N` and issue URLs are accepted when `--repo-slug` names this repository; any other repository is an error.
 
+- A dependency line the helper cannot read (`Depends on: T3`, free text next to the references) is an error naming the issue, never a silently dropped dependency. Rewrite the line as `#N` references (or `none`) in the issue, or fix the JSON, and re-run.
 - A dependency on an issue **outside** the set is an error that names it. Either add that issue to the set, or, if it is already merged (`gh issue view <N> --json state` is `CLOSED` and its PR is in the release branch), pass it with `--satisfied <N,...>` so it is dropped.
 - Issues with **no** dependency line are listed on stderr (`note: no Depends on:/deps: line in ...`). Ask the user how they are ordered (or confirm they are independent), then add `after:` lines to the wave file by hand before Step 4.
 
@@ -115,12 +116,13 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --repo "$(git rev-parse --show-toplevel)" \
   --release-branch release/$WAVE \
   --model claude-opus-4-7 \
+  --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
   [--satisfied 5,6] [--namespace example-dispatch] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --out .volley/waves/$WAVE.yaml
 ```
 
-The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). Exit 1 means a dependency or issue problem (the message names the issue); exit 2 is a usage error. Show the user the generated file.
+The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array). Show the user the generated file.
 
 ### Step 4: validate and submit
 
@@ -136,14 +138,19 @@ volleyd run .volley/waves/$WAVE.yaml --owner <COORDINATOR-AGENT-ID>
 
 **You are done when every task is merged, not when `volleyd run` returns.** The loop waits on the wave's event stream and acts on two things: **decisions** and **merge-ready gates**. Do not background `volley wait` per agent; volleyd watches the agents.
 
-`volley/_waves/<wave>/events` is a live, non-retained mirror of the wave's journal, so it is only the **wake signal**. The record is the journal, read with a named cursor that you advance only after acting. Arm the wake first, then catch up, so nothing published in between is missed:
+`volley/_waves/<wave>/events` is a live, non-retained mirror of the wave's journal, so it is only the **wake signal**. The record is the journal, read with a named cursor that you advance only after acting. Arm the wake first, let it subscribe, then catch up, so nothing published in between is missed:
 
 ```bash
-# 1. Arm the wake: exits on the next wave event (0), or after 30 min (124) as a fallback heartbeat.
-volley sub --pattern "volley/_waves/$WAVE/events" --max-messages 1 --timeout 1800 &
-# 2. Catch up: every journal event after the cursor, one JSON object per line.
+# 1. Arm the wake: exits on the next wave event (0), or after 5 min (124) as a fallback heartbeat.
+volley sub --pattern "volley/_waves/$WAVE/events" --max-messages 1 --timeout 300 &
+# 2. Give it time to connect and subscribe: `volley sub` prints nothing until a message arrives,
+#    and an event published before its SUBSCRIBE lands would wake nobody.
+sleep 2
+# 3. Catch up: every journal event after the cursor, one JSON object per line.
 volleyd events "$WAVE" --cursor coordinator
 ```
+
+The 5-minute heartbeat bounds the cost of a slow subscribe: an event that slipped between the catch-up and the subscription is picked up by the next catch-up, at most one heartbeat later. Nothing is lost either way; the journal is the record.
 
 For each event printed, by `type`:
 
@@ -152,10 +159,12 @@ For each event printed, by `type`:
   volleyd resolve <decision-id> <answer...> --wave "$WAVE" --rationale "<why>"
   ```
   The task resumes and the answer reaches its next stage.
-- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`.
+- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
 - **`alarm_raised`**, **`task_cancelled`**, **`wave_stopped`**: tell the user what happened and where to look (`volleyd status "$WAVE"`).
-- **`wave_complete`**: every task is settled; go to Step 6.
+- **`wave_complete`** (when volleyd records it): every task is settled; go to Step 6. Until volleyd detects merges it will not, so the loop's real exit is your own check: every task's PR is merged (`volleyd status "$WAVE"`, `gh pr view <pr> --json state`). Then go to Step 6.
 - Anything else (spawns, stage changes, leases): informational.
+
+**Merges and dependents.** volleyd never merges and does not yet detect a merge, so nothing moves a task to `done` after its PR lands. Merge-ready gates appear only once volleyd's pipeline stage machine is in place; until then a task's stage stops at `implement` when its agent finishes, and you review and merge its PR as in the legacy path. Either way a task with `after:` on it stays `queued`. After each merge, look at `volleyd status "$WAVE"`: for every queued task whose dependencies are now all merged, start it yourself with `volleyd spawn "$WAVE" <task>` (spawns outside admission).
 
 After acting on everything printed, advance the cursor to the last `seq` you handled, then loop back to 1 when the backgrounded `volley sub` exits:
 
@@ -163,7 +172,7 @@ After acting on everything printed, advance the cursor to the last `seq` you han
 volleyd ack "$WAVE" --cursor coordinator --seq <last-seq>
 ```
 
-`volley sub` exit `124` is the fallback heartbeat: run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
+`volley sub` exit `124` is the fallback heartbeat: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
 
 ### Step 6: volleyd cleanup
 

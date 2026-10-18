@@ -63,6 +63,44 @@ describe("parseDependsOn", () => {
   });
   it("rejects a cross-repository reference", () => {
     expect(() => parseDependsOn("Depends on: other/repo#5")).toThrow(/other\/repo#5/);
+    expect(() => parseDependsOn("Depends on: other/repo#5", "owner/repo")).toThrow(
+      /cross-repository dependency other\/repo#5/,
+    );
+  });
+  it("accepts a reference qualified with this wave's own repository", () => {
+    expect(parseDependsOn("Depends on: owner/repo#5, #6", "owner/repo").refs).toEqual([5, 6]);
+    expect(parseDependsOn("Depends on: Owner/Repo#5", "owner/repo").refs).toEqual([5]);
+  });
+  it("accepts issue URLs of this repository", () => {
+    expect(
+      parseDependsOn("Depends on: https://github.com/owner/repo/issues/5", "owner/repo").refs,
+    ).toEqual([5]);
+    expect(() =>
+      parseDependsOn("Depends on: https://github.com/other/repo/issues/5", "owner/repo"),
+    ).toThrow(/cross-repository/);
+  });
+  it("reads a list of references on the lines after an empty dependency label", () => {
+    expect(parseDependsOn("Depends on:\n- #5\n- #6 (T4)\n\nMore text #9")).toEqual({
+      declared: true,
+      refs: [5, 6],
+    });
+    expect(parseDependsOn("**Depends on:**\n* #7\n")).toEqual({ declared: true, refs: [7] });
+  });
+  it("never silently drops a dependency it cannot read", () => {
+    expect(() => parseDependsOn("Depends on: T3, T4")).toThrow(
+      /unparseable dependency line 'Depends on: T3, T4'/,
+    );
+    expect(() => parseDependsOn("Depends on: #5, T3")).toThrow(/unparseable dependency/);
+    expect(() => parseDependsOn("Depends on:\n- T3\n")).toThrow(/unparseable dependency/);
+    expect(() => parseDependsOn("Depends on:\n\nNothing listed.")).toThrow(/empty dependency line/);
+  });
+  it("accepts 'none' with punctuation or a parenthetical", () => {
+    for (const body of ["Depends on: None.", "deps: none (foundation task)", "Depends on: n/a"]) {
+      expect(parseDependsOn(body)).toEqual({ declared: true, refs: [] });
+    }
+  });
+  it("keeps underscores in names it reports", () => {
+    expect(() => parseDependsOn("Depends on: owner/my_repo#5")).toThrow(/owner\/my_repo#5/);
   });
 });
 
@@ -138,6 +176,55 @@ describe("waveFromIssues", () => {
   it("rejects an invalid wave id before emitting anything", () => {
     expect(() => waveFromIssues(THREE, { ...OPTS, wave: "Bad Wave" })).toThrow(/wave id/);
   });
+
+  it("rejects a wave id that is a reserved channel name (SPEC §4.6)", () => {
+    expect(() => waveFromIssues(THREE, { ...OPTS, wave: "status" })).toThrow(
+      /reserved channel name/,
+    );
+  });
+
+  it("quotes the wave id so YAML never reads it as a number, boolean or null", () => {
+    for (const wave of ["123", "null", "true", "1e5"]) {
+      const { yaml } = waveFromIssues(THREE, { ...OPTS, wave });
+      expect(yaml).toContain(`wave: "${wave}"\n`);
+      const r = volleydValidate(yaml);
+      expect(r.out).toContain(`ok: wave ${wave}`);
+      expect(r.code).toBe(0);
+    }
+  });
+
+  it("names the issue whose dependency line it cannot read", () => {
+    const issues: IssueInput[] = [
+      { number: 101, title: "A", body: "" },
+      { number: 102, title: "B", body: "Depends on: T3" },
+    ];
+    expect(() => waveFromIssues(issues, OPTS)).toThrow(/#102: unparseable dependency line/);
+  });
+
+  it("resolves same-repo qualified references with repoSlug", () => {
+    const issues: IssueInput[] = [
+      { number: 101, title: "A", body: "Depends on: none" },
+      { number: 102, title: "B", body: "Depends on: owner/repo#101" },
+    ];
+    const { yaml } = waveFromIssues(issues, { ...OPTS, repoSlug: "owner/repo" });
+    expect(yaml).toContain("    after: [i101]\n");
+  });
+
+  it("rejects an issue that is both in the set and listed as satisfied", () => {
+    const issues: IssueInput[] = [
+      { number: 101, title: "A", body: "" },
+      { number: 102, title: "B", body: "Depends on: #101" },
+    ];
+    expect(() => waveFromIssues(issues, { ...OPTS, satisfied: [101] })).toThrow(
+      /#101 is in this wave and also listed as satisfied/,
+    );
+  });
+
+  it("names the index of an issue entry that is not an object", () => {
+    expect(() =>
+      waveFromIssues([{ number: 1, title: "A", body: "" }, null] as unknown as IssueInput[], OPTS),
+    ).toThrow(/issue at index 1/);
+  });
 });
 
 describe("wave-from-issues CLI", () => {
@@ -179,6 +266,65 @@ describe("wave-from-issues CLI", () => {
     );
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("#7 depends on #8");
+  });
+
+  it("exits 2 on a --pipeline that is not a JSON array", () => {
+    const input = join(tmp, "pipe.json");
+    writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: none" }]));
+    for (const pipeline of ["[implement", '{"a":1}']) {
+      const r = spawnSync(
+        "bun",
+        [
+          HELPER_CLI,
+          input,
+          "--wave",
+          "w",
+          "--repo",
+          "/r",
+          "--release-branch",
+          "b",
+          "--model",
+          "m",
+          "--pipeline",
+          pipeline,
+        ],
+        { encoding: "utf-8" },
+      );
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--pipeline");
+    }
+  });
+
+  it("passes --repo-slug through to dependency parsing", () => {
+    const input = join(tmp, "slug.json");
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { number: 7, title: "x", body: "deps: none" },
+        { number: 8, title: "y", body: "deps: owner/repo#7" },
+      ]),
+    );
+    const r = spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        "w",
+        "--repo",
+        "/r",
+        "--release-branch",
+        "b",
+        "--model",
+        "m",
+        "--repo-slug",
+        "owner/repo",
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("after: [i7]");
   });
 
   it("exits 2 on a --satisfied entry that is not an issue number", () => {

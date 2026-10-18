@@ -9,6 +9,7 @@ import {
   validateSections,
   validateSkill,
   validateVolleydPath,
+  volleydPathSection,
 } from "../scripts/validate-skill";
 
 const GOOD_FRONTMATTER = `---
@@ -18,10 +19,10 @@ user_invocable: true
 ---
 `;
 
-const ALL_SECTIONS = [
-  ...REQUIRED_SECTIONS.map((h) => `${h}\n\nbody\n`),
-  ...REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`),
-].join("\n");
+const VOLLEYD_NEEDLES = REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`).join("");
+const ALL_SECTIONS = REQUIRED_SECTIONS.map((h) =>
+  h === "## Volleyd path" ? `${h}\n\n${VOLLEYD_NEEDLES}` : `${h}\n\nbody\n`,
+).join("\n");
 const FULL_OK = `${GOOD_FRONTMATTER}\n# /volley-issues\n\n${ALL_SECTIONS}`;
 
 describe("splitFrontmatter", () => {
@@ -77,35 +78,41 @@ describe("validateSections", () => {
   });
 });
 
+const SHIPPED = readFileSync(new URL("../SKILL.md", import.meta.url), "utf8");
+
 describe("validateVolleydPath", () => {
-  it("requires the volleyd path sections and the legacy label", () => {
-    expect(REQUIRED_SECTIONS).toEqual(
-      expect.arrayContaining(["## Choosing a dispatch path", "## Volleyd path", "## Legacy path"]),
-    );
-  });
-  it("requires the exact volleyd commands the coordinator runs", () => {
-    for (const cmd of [
-      "scripts/wave-from-issues.ts",
-      ".volley/waves/",
-      "volleyd validate",
-      "volleyd run",
-      "--owner",
-      "volley sub --pattern",
-      "volley/_waves/",
-      "volleyd resolve",
-      "volleyd cleanup",
-      "--yes",
-    ]) {
-      expect(REQUIRED_VOLLEYD_PATH).toContain(cmd);
-    }
-  });
-  it("accepts a body that names every command", () => {
+  it("accepts a body that names every command inside the volleyd path", () => {
     expect(validateVolleydPath(FULL_OK).ok).toBe(true);
   });
   it("flags a missing command", () => {
     const without = FULL_OK.replace("- volleyd resolve\n", "");
     expect(validateVolleydPath(without).errors.join(" ")).toContain("volleyd resolve");
   });
+  it("does not count a command that only appears outside the volleyd path", () => {
+    const moved = `${FULL_OK.replace("- volleyd resolve\n", "")}\n- volleyd resolve\n`;
+    expect(validateVolleydPath(moved).errors.join(" ")).toContain("volleyd resolve");
+  });
+  it("flags a missing volleyd path section", () => {
+    const r = validateVolleydPath(FULL_OK.replace("## Volleyd path", "## Something else"));
+    expect(r.errors).toEqual(["missing the ## Volleyd path section"]);
+  });
+  it("slices the shipped SKILL.md between the volleyd and legacy headings", () => {
+    const section = volleydPathSection(splitFrontmatter(SHIPPED).body) ?? "";
+    expect(section.startsWith("## Volleyd path")).toBe(true);
+    expect(section).not.toContain("## Legacy path");
+    expect(section).not.toContain("## Batch setup");
+  });
+  it.each([...REQUIRED_VOLLEYD_PATH])(
+    "rejects the shipped SKILL.md when its volleyd path loses %s",
+    (needle) => {
+      const body = splitFrontmatter(SHIPPED).body;
+      const section = volleydPathSection(body) ?? "";
+      const stripped = SHIPPED.replace(section, section.split(needle).join(""));
+      expect(validateVolleydPath(stripped).errors).toContain(
+        `volleyd path must mention: ${needle}`,
+      );
+    },
+  );
 });
 
 describe("validateSkill (end-to-end)", () => {
@@ -118,7 +125,6 @@ describe("validateSkill (end-to-end)", () => {
     expect(r.errors.join(" ")).toContain("volleyd cleanup");
   });
   it("accepts the shipped SKILL.md", () => {
-    const shipped = readFileSync(new URL("../SKILL.md", import.meta.url), "utf8");
-    expect(validateSkill(shipped).errors).toEqual([]);
+    expect(validateSkill(SHIPPED).errors).toEqual([]);
   });
 });

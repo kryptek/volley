@@ -68,9 +68,20 @@ bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
 ```
 
 Each issue becomes task `i<N>`; `Depends on: #101` becomes `after: [i101]`.
-A dependency outside the set is an error naming it, unless it is listed in
-`--satisfied` (already merged). Issues with no dependency line are reported on
-stderr so their order can be confirmed. `--help` lists every option.
+`--repo-slug <owner/repo>` also accepts `owner/repo#N` references and issue
+URLs for this repository. A dependency outside the set is an error naming it,
+unless it is listed in `--satisfied` (already merged); so is a dependency line
+the helper cannot read (`Depends on: T3`): a dependency is never silently
+dropped. Issues with no dependency line are reported on stderr so their order
+can be confirmed. `--help` lists every option.
+
+## Brief gate
+
+`scripts/validate-brief.sh <brief>` refuses a spawn brief that lacks the
+narration contract. The legacy path runs it before every launch; it can also be
+installed as volleyd's `$VOLLEYD_HOME/brief-gate`, and accepts volleyd's own
+briefs (whose session hooks register the agent instead of a `vol_register`
+step). `test/validate-brief.test.ts` runs it against volleyd's templates.
 
 ## Parity vs. legacy
 
