@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/config-set-request.schema.json",
   "title": "Volley Supervisor config_set Request",
-  "description": "Control request sent to a supervisor's mailbox to change its effective config. See spec section 4.6.4. The patch is a partial object of the config.schema.json tunables; unknown keys and out-of-bounds values are rejected. Senders SHOULD include payload.text so the message is also a well-formed mailbox message.",
+  "description": "Control request sent to a supervisor's mailbox to change its effective config. See spec section 4.6.4. It is a well-formed mailbox message (payload.text required) with a non-null correlation_id so the sender can match the supervisor's acknowledgement. The patch is a partial object of the config.schema.json tunables; unknown keys and out-of-bounds values are rejected.",
   "allOf": [
     {
-      "$ref": "envelope.schema.json"
+      "$ref": "mailbox.schema.json"
     },
     {
       "type": "object",
@@ -16,15 +16,20 @@
         "type": {
           "const": "query"
         },
+        "correlation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
         "payload": {
           "type": "object",
-          "required": ["op", "patch", "by"],
+          "required": ["op", "text", "patch", "by"],
           "properties": {
             "op": {
               "const": "config_set"
             },
             "text": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "patch": {
               "allOf": [
@@ -35,9 +40,8 @@
                   "type": "object",
                   "minProperties": 1,
                   "properties": {
-                    "version": false,
-                    "updated_at": false,
-                    "updated_by": false
+                    "admission": { "minProperties": 1 },
+                    "mailbox": { "minProperties": 1 }
                   }
                 }
               ]
@@ -50,7 +54,7 @@
           }
         }
       },
-      "required": ["channel", "type", "payload"]
+      "required": ["channel", "type", "payload", "correlation_id"]
     }
   ]
 }

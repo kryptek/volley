@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T12:05:00.000Z",
+  "channel": "mailbox",
+  "type": "query",
+  "correlation_id": null,
+  "payload": {
+    "op": "config_set",
+    "text": "config_set hard_ceiling=8 admission.ci_queue_max=5",
+    "patch": {
+      "hard_ceiling": 8,
+      "admission": {
+        "ci_queue_max": 5
+      }
+    },
+    "by": "coordinator-ab12"
+  }
+}

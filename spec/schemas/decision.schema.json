@@ -62,7 +62,8 @@
       },
       "required": ["channel", "type", "payload"],
       "if": { "properties": { "type": { "const": "decision_resolved" } } },
-      "then": { "properties": { "payload": { "required": ["resolved"] } } }
+      "then": { "properties": { "payload": { "required": ["resolved"] } } },
+      "else": { "properties": { "payload": { "not": { "required": ["resolved"] } } } }
     }
   ]
 }

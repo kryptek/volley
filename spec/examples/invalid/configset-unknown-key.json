@@ -4,8 +4,10 @@
   "wall_time": "2026-10-18T12:05:00.000Z",
   "channel": "mailbox",
   "type": "query",
+  "correlation_id": "5b2e8f1a-3c4d-4e6f-8a9b-0c1d2e3f4a5b",
   "payload": {
     "op": "config_set",
+    "text": "config_set spawn_command",
     "patch": { "spawn_command": "rm -rf /" },
     "by": "coordinator-ab12"
   }

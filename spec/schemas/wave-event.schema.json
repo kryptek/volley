@@ -44,8 +44,8 @@
           "properties": {
             "wave": {
               "type": "string",
-              "pattern": "^[a-z0-9_][a-z0-9_-]{0,62}$",
-              "description": "Wave id, or a supervisor pseudo-wave such as _system for global events."
+              "oneOf": [{ "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }, { "const": "_system" }],
+              "description": "Wave id, or the pseudo-wave _system for global events."
             },
             "seq": {
               "type": "integer",

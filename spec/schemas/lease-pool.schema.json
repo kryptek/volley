@@ -15,7 +15,7 @@
           "required": ["pool", "capacity", "held", "queue", "reasons"],
           "properties": {
             "pool": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
-            "capacity": { "type": "integer", "minimum": 0 },
+            "capacity": { "$ref": "config.schema.json#/$defs/leasePool/properties/capacity" },
             "held": {
               "type": "array",
               "items": {
@@ -25,7 +25,7 @@
                   "lease_id": { "$ref": "#/$defs/leaseId" },
                   "holder": { "$ref": "#/$defs/agentId" },
                   "since": { "type": "string", "format": "date-time" },
-                  "ttl_s": { "type": "integer", "minimum": 1 }
+                  "ttl_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
                 }
               }
             },

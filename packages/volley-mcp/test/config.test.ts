@@ -169,16 +169,30 @@ describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
 
   it("throws when the file is not an object or lacks agent_id", () => {
     writeIdentity("[]");
-    expect(() => loadConfig({}, cwd)).toThrow(/agent\.json/);
+    expect(() => loadConfig({}, cwd)).toThrow(/must be a JSON object/);
     writeIdentity(JSON.stringify({ namespace: "dispatch" }));
-    expect(() => loadConfig({}, cwd)).toThrow(/agent_id/);
+    expect(() => loadConfig({}, cwd)).toThrow(/must set agent_id to a string/);
+    writeIdentity(JSON.stringify({ agent_id: 42 }));
+    expect(() => loadConfig({}, cwd)).toThrow(/must set agent_id to a string/);
   });
 
   it("throws an INVALID_AGENT_ID error when agent_id violates the §2.2 grammar", () => {
-    writeIdentity(JSON.stringify({ agent_id: "W1-T1-Implementer" }));
-    expect(() => loadConfig({}, cwd)).toThrow(/INVALID_AGENT_ID/);
-    writeIdentity(JSON.stringify({ agent_id: "a".repeat(64) }));
-    expect(() => loadConfig({}, cwd)).toThrow(/INVALID_AGENT_ID/);
+    for (const agent_id of ["W1-T1-Implementer", "a".repeat(64)]) {
+      writeIdentity(JSON.stringify({ agent_id }));
+      expect(() => loadConfig({}, cwd)).toThrow(
+        expect.objectContaining({
+          code: "INVALID_AGENT_ID",
+          message: expect.stringContaining(join(cwd, ".volley", "agent.json")),
+        }),
+      );
+    }
+  });
+
+  it("rejects a non-string or empty broker_url in the file", () => {
+    for (const broker_url of ["", 1883]) {
+      writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", broker_url }));
+      expect(() => loadConfig({}, cwd)).toThrow(/broker_url must be a non-empty string/);
+    }
   });
 
   it("rejects an out-of-grammar namespace or parent_id in the file", () => {

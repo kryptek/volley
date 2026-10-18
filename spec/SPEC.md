@@ -68,7 +68,8 @@ Topics follow this structure:
 #### Agent identity at runtime (informative)
 
 A conforming Volley MCP server MUST produce a unique `agent_id` per
-process start. The recommended mechanism is:
+process start, unless an assigned identity (§6.5) is present. The
+recommended mechanism is:
 
 1. Read the `VOLLEY_AGENT_ID` environment variable as a **prefix** (not
    a literal agent_id). The prefix MUST match the SPEC §2.2 grammar
@@ -94,7 +95,9 @@ entry. The auto-suffix makes the user-scope-MCP-shared-across-sessions
 case correct by default.
 
 **Discovering an agent_id.** Because the suffix is fresh per process,
-the agent_id is not knowable ahead of time. Discovery options:
+the agent_id is not knowable ahead of time (unless an assigned identity
+(§6.5) is present, in which case the supervisor that wrote it already
+knows it). Discovery options:
 
 - The MCP server's `vol_register` tool returns `{ agent_id, namespace }`
   so the calling Claude session learns its own id immediately.
@@ -124,7 +127,7 @@ see §6.5.
 
 ### 2.3 Channel
 
-`channel` is one of the reserved channel names listed in §4.1, OR a user-defined channel under the `_user/*` prefix.
+`channel` is one of the reserved channel names listed in §4.1, OR a user-defined channel under the `_user/*` prefix, OR a supervisor channel defined in §4.6 (informative in 0.1).
 
 ### 2.4 Reserved namespaces
 
@@ -134,7 +137,7 @@ The following top-level namespace prefixes are reserved:
 - `volley/_meta/*` — implementation tooling (debug taps, replay logs, capture files)
 - `volley/_waves/*` — supervisor state: wave snapshots, decisions, journal events, effective supervisor config (§4.6)
 
-Implementations MUST NOT publish user-space messages under these prefixes.
+Implementations MUST NOT publish user-space messages under these prefixes. One exception: any agent MAY publish lease requests to `volley/_system/leases/<pool>/requests` (§4.6.5). Every other topic under these prefixes is written only by the broker, the implementation's own tooling, or a supervisor (§4.6).
 
 ---
 
@@ -160,7 +163,7 @@ All Volley messages share a common JSON envelope:
 - **`schema_version`** (string) — semver of the Volley protocol. v0.1 implementations MUST emit `"0.1"` and MUST reject envelopes whose major version does not match a supported major. See §8.
 - **`agent_id`** (string) — sender's agent ID, MUST match the grammar in §2.2.
 - **`wall_time`** (string, ISO-8601 UTC with milliseconds) — sender's wall-clock at publish time. Receivers MUST NOT rely on this for ordering; it is informational.
-- **`channel`** (string) — one of the reserved channels (§4.1) or a `_user/*`-prefixed user channel.
+- **`channel`** (string) — one of the reserved channels (§4.1), a `_user/*`-prefixed user channel, or a supervisor channel defined in §4.6.
 - **`type`** (string) — channel-specific event type (e.g. `done` on the `status` channel, `tests-green` on `progress`).
 
 ### 3.2 Optional fields
@@ -205,7 +208,7 @@ Conforming agents SHOULD:
 - When the agent can estimate a percent-complete, include `payload.progress` as a number in `[0, 100]` on `progress` and/or `status` envelopes — dashboards and coordinators use it to render determinate progress bars instead of indeterminate sweeps. Implementations MUST treat the field as advisory (an estimate from the agent itself) and MUST tolerate `null`, missing, or non-numeric values by falling back to the last seen value or to an indeterminate display.
 - Publish a `result` retained message before terminal `status` so late-attaching tools can see the artifact pointer
 
-**Hook activity events (informative).** The `status` state machine (§5.3) is linear, so non-terminal attention states are not status types. A harness hook (e.g. a Claude Code hook running beside the agent) reports them on the `progress` channel instead, with `payload.source: "harness-hook"`, a per-agent monotonic `payload.seq`, and the `payload.hook_event` that fired. The documented types are `heartbeat` (the agent is alive and doing something), `idle` (the turn ended; `payload.text` carries the last assistant line), `awaiting_input` (the harness is waiting on a human; `payload.text` / `payload.notification_type` carry the notification, `payload.screen_tail` MAY carry the last terminal lines), `resumed` (the agent is working again; it clears any earlier `awaiting_input`) and `steering_applied` (a hook injected mailbox steering into the session). For a coordinator session, `awaiting_input` additionally carries `payload.question` (the first one or two lines of what it is asking), `payload.session_url` and `payload.workspace` when known, so a dashboard can surface and link the waiting session; the coordinator's registry entry carries the same `session_url` / `workspace` when known. When the model itself has acted on a steering message it publishes `type: "steering_acked"` with `correlation_id` set to that mailbox message's id. A hook that re-publishes the registry entry with the harness-reported model sets `payload.model_source: "harness-hook"` (an agent's own `vol_register` is `"self-reported"`). The `type` field stays an open string; observers ignore progress types they do not recognise. See `spec/schemas/progress.schema.json`.
+**Hook activity events (informative).** The `status` state machine (§5.3) is linear, so non-terminal attention states are not status types. A harness hook (e.g. a Claude Code hook running beside the agent) reports them on the `progress` channel instead, with `payload.source: "harness-hook"`, a per-agent monotonic `payload.seq`, and the `payload.hook_event` that fired. The documented types are `heartbeat` (the agent is alive and doing something), `idle` (the turn ended; `payload.text` carries the last assistant line), `awaiting_input` (the harness is waiting on a human; `payload.text` / `payload.notification_type` carry the notification, `payload.screen_tail` MAY carry the last terminal lines), `resumed` (the agent is working again; it clears any earlier `awaiting_input`) and `steering_applied` (a hook injected mailbox steering into the session). For a coordinator session, `awaiting_input` additionally carries `payload.question` (the first one or two lines of what it is asking), `payload.session_url` and `payload.workspace` when known, so a dashboard can surface and link the waiting session; the coordinator's registry entry carries the same `session_url` / `workspace` when known. When the model itself has acted on a steering message it publishes `type: "steering_acked"` with `correlation_id` set to that mailbox message's id. A hook that re-publishes the registry entry with the harness-reported model sets `payload.model_source: "harness-hook"`, or `"unknown"` when the hook input carries no model (an agent's own `vol_register` is `"self-reported"`). The `type` field stays an open string; observers ignore progress types they do not recognise. See `spec/schemas/progress.schema.json`.
 
 ### 4.4 Mailbox message types
 
@@ -286,11 +289,11 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 Per-wave overrides use the same shape with every key optional (a wave file's `config:` block) and appear in the wave state as `effective_config`.
 
-**Changing config.** A client sends a mailbox message (§4.4) to the supervisor with `type: "query"`, a fresh `correlation_id`, and `payload: { op: "config_set", patch, by, text? }`, where `patch` is a partial tunables object (`config-set-request.schema.json`). Senders SHOULD include `text` (a one-line human summary) so the request is also a well-formed mailbox message. The supervisor answers with a mailbox acknowledgement correlated to the request carrying `{ applied, rejected: [{ path, reason }] }`; a patch with an unknown key or an out-of-bounds value is rejected as a whole. On success the supervisor re-publishes the retained `_config` topic with `version` incremented.
+**Changing config.** A client sends a mailbox message (§4.4) to the supervisor with `type: "query"`, a fresh `correlation_id`, and `payload: { op: "config_set", patch, by, text }`, where `patch` is a partial tunables object (`config-set-request.schema.json`). Senders MUST include `text` (a one-line human summary), so the request is also a well-formed mailbox message (`mailbox.schema.json`), and MUST set a non-null `correlation_id` so they can match the acknowledgement. The supervisor answers with a mailbox acknowledgement correlated to the request carrying `{ applied, rejected: [{ path, reason }] }`; a patch with an unknown key or an out-of-bounds value is rejected as a whole. On success the supervisor re-publishes the retained `_config` topic with `version` incremented.
 
 #### 4.6.5 Leases
 
-Heavy operations (integration test suites, builds, browsers) are gated by machine-global lease pools. `volley/_system/leases/<pool>` holds the retained pool state `{ pool, capacity, held: [{ lease_id, holder, since, ttl_s }], queue: [{ lease_id, holder, since }], reasons[] }`; `queue` is FIFO and `reasons` explains the queue in human terms (e.g. `"queued: 3/3 backend-it leases held"`). Agents ask on `volley/_system/leases/<pool>/requests` with `payload: { op: "acquire" | "release" | "renew", lease_id, holder, ttl_s? }`; the supervisor answers by re-publishing the pool state, and expires leases on TTL or when the holder's `status` turns terminal.
+Heavy operations (integration test suites, builds, browsers) are gated by machine-global lease pools. `volley/_system/leases/<pool>` holds the retained pool state `{ pool, capacity, held: [{ lease_id, holder, since, ttl_s }], queue: [{ lease_id, holder, since }], reasons[] }`; `queue` is FIFO and `reasons` explains the queue in human terms (e.g. `"queued: 3/3 backend-it leases held"`). Agents ask on `volley/_system/leases/<pool>/requests` with `payload: { op: "acquire" | "release" | "renew", lease_id, holder, ttl_s? }` (the one user-space publish §2.4 allows under a reserved prefix); the supervisor answers by re-publishing the pool state, and expires leases on TTL or when the holder's `status` turns terminal. The supervisor ignores a request whose `holder` differs from the envelope `agent_id`, so an agent can only acquire, renew or release its own leases. Requests are not retained, so one sent while the supervisor is down is lost: an agent that does not see its `lease_id` in `held` or `queue` within 30 seconds SHOULD re-send `acquire`, and the supervisor treats a repeated `acquire` for a `lease_id` it already holds or queues as a no-op.
 
 #### 4.6.6 Screen channel
 
@@ -386,7 +389,9 @@ A supervisor that spawns an agent usually needs to know the agent's id *before* 
 - Only `agent_id` is required. A conforming MCP server that finds this file in its working directory MUST use `agent_id` verbatim (no suffix) and MUST use `namespace`, `parent_id` and `broker_url` when present.
 - Values in the file take precedence over the corresponding environment variables (`VOLLEY_AGENT_ID`, `VOLLEY_NAMESPACE`, `VOLLEY_PARENT_ID`, `VOLLEY_BROKER_URL`); keys absent from the file fall back to the environment, then to defaults.
 - `agent_id`, `namespace` and `parent_id` MUST satisfy the §2 grammar. A server MUST refuse to start on an out-of-grammar `agent_id` (`INVALID_AGENT_ID`) or on a malformed file, naming the file path in the error, rather than fall back silently to a generated id.
-- Uniqueness is the supervisor's responsibility. The RECOMMENDED form is `<wave>-<task>-<role>-<attempt>`, lowercased (e.g. `w1-t1-implementer-1`); a retry increments `<attempt>` so a dead agent's retained topics are never overwritten by its successor.
+- Uniqueness is the supervisor's responsibility. The RECOMMENDED form is `<wave>-<task>-<role>-<attempt>`, lowercased (e.g. `w1-t1-implementer-1`); a supervisor retry increments `<attempt>` so a dead agent's retained topics are never overwritten by its successor.
+- An assigned identity is the one exception to §2.2's unique-id-per-process-start rule. A restart of the MCP server in the same working directory (a harness reconnect, a crash and restart) reuses the assigned id and starts a new session in the §5.3 sense; supervisors MUST tolerate a fresh `spawning` after a terminal status on an assigned id. The file pins one id to one working directory, so do not run two agent sessions there at once.
+- Supervisors SHOULD keep the file out of commits by adding `.volley/` to the repository's `info/exclude` (`git rev-parse --git-path info/exclude`) when the working directory is a git worktree.
 - `wave`, `task` and `role` are informational for tools that read the file (hooks, the supervisor itself); the MCP server does not interpret them.
 
 ---
