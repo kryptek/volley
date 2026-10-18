@@ -13,6 +13,15 @@
  *   - `result-*.json` -> result.schema.json
  *   - `capability-*.json` -> capability.schema.json
  *   - `envelope-*.json` -> envelope.schema.json (envelope-level violations only)
+ *   - `wave-*.json` -> wave-state.schema.json
+ *   - `waveevent-*.json` -> wave-event.schema.json
+ *   - `decision-*.json` -> decision.schema.json
+ *   - `lease-*.json` -> lease-pool.schema.json
+ *   - `leasereq-*.json` -> lease-request.schema.json
+ *   - `identity-*.json` -> agent-identity.schema.json (a file, not an envelope)
+ *   - `config-*.json` -> config.schema.json
+ *   - `configset-*.json` -> config-set-request.schema.json
+ *   - `screen-*.json` -> screen.schema.json
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -33,6 +42,15 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   registry: "registry.schema.json",
   result: "result.schema.json",
   capability: "capability.schema.json",
+  wave: "wave-state.schema.json",
+  waveevent: "wave-event.schema.json",
+  decision: "decision.schema.json",
+  lease: "lease-pool.schema.json",
+  leasereq: "lease-request.schema.json",
+  identity: "agent-identity.schema.json",
+  config: "config.schema.json",
+  configset: "config-set-request.schema.json",
+  screen: "screen.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

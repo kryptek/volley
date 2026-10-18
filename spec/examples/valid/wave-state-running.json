@@ -1,0 +1,67 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": "coordinator-ab12",
+    "repo": "example-org/example-repo",
+    "release_branch": "release/2026-10-18-example",
+    "status": "running",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "spec_review",
+        "agents": {
+          "implementer": "w1-t1-implementer-1",
+          "spec_reviewer": "w1-t1-spec_reviewer-1"
+        },
+        "pr": {
+          "number": 7,
+          "url": "https://github.com/example-org/example-repo/pull/7",
+          "head_sha": "9fd33a4c1b2e",
+          "ci": "running"
+        }
+      },
+      {
+        "id": "T2",
+        "issue": 102,
+        "stage": "queued",
+        "agents": {},
+        "waiting_on": ["T1"],
+        "why_waiting": "after: T1"
+      },
+      {
+        "id": "T3",
+        "issue": 103,
+        "stage": "merge_ready",
+        "agents": { "implementer": "w1-t3-implementer-1" },
+        "evidence_path": "waves/w1/evidence/T3.md"
+      }
+    ],
+    "open_decisions": [],
+    "gates": ["T3"],
+    "spec": {
+      "version": 1,
+      "release_branch": "release/2026-10-18-example",
+      "model": "claude-opus-5-5",
+      "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+      "tasks": {
+        "T1": { "issue": 101, "title": "SPEC + schemas", "after": [] },
+        "T2": { "issue": 102, "title": "Hooks package", "after": ["T1"] },
+        "T3": { "issue": 103, "title": "Daemon foundation", "after": [] }
+      }
+    },
+    "coordinator": {
+      "agent_id": "coordinator-ab12",
+      "state": "working",
+      "last_seen": "2026-10-18T14:02:00.000Z"
+    },
+    "effective_config": { "hard_ceiling": 12, "spawn_budget_multiplier": 3 },
+    "updated_at": "2026-10-18T14:02:11.000Z"
+  }
+}

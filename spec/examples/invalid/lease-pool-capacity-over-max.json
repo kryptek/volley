@@ -1,0 +1,41 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T15:00:00.000Z",
+  "channel": "_system/leases",
+  "type": "lease_pool",
+  "payload": {
+    "pool": "backend-it",
+    "capacity": 9999,
+    "held": [
+      {
+        "lease_id": "l-001",
+        "holder": "w1-t1-implementer-1",
+        "since": "2026-10-18T14:40:00.000Z",
+        "ttl_s": 3600
+      },
+      {
+        "lease_id": "l-002",
+        "holder": "w1-t3-implementer-1",
+        "since": "2026-10-18T14:45:00.000Z",
+        "ttl_s": 3600
+      },
+      {
+        "lease_id": "l-003",
+        "holder": "w2-t1-implementer-1",
+        "since": "2026-10-18T14:50:00.000Z",
+        "ttl_s": 3600
+      }
+    ],
+    "queue": [
+      {
+        "lease_id": "l-004",
+        "holder": "w1-t2-implementer-1",
+        "since": "2026-10-18T14:59:00.000Z"
+      }
+    ],
+    "reasons": [
+      "queued: 3/3 backend-it leases held"
+    ]
+  }
+}

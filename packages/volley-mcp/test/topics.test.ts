@@ -33,6 +33,7 @@ describe("topics", () => {
   it("flags reserved-namespace topics", () => {
     expect(isReservedTopic("volley/_system/registry/x")).toBe(true);
     expect(isReservedTopic("volley/_meta/tap/x")).toBe(true);
+    expect(isReservedTopic("volley/_waves/w1/state")).toBe(true);
     expect(isReservedTopic("volley/default/agent/status")).toBe(false);
   });
   it("validates MQTT topic filters", () => {

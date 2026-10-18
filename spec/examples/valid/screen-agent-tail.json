@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:06:00.000Z",
+  "channel": "screen",
+  "type": "screen_tail",
+  "payload": {
+    "lines": ["> bun run test", " ✓ test/config.test.ts (19 tests)", " Test Files  1 passed (1)"],
+    "captured_at": "2026-10-18T14:06:00.000Z",
+    "workspace": "w1-t1-implementer",
+    "hash": "3b5d9c1e",
+    "source": "cmux"
+  }
+}
