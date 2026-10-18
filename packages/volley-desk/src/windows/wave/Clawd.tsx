@@ -1,33 +1,35 @@
 /**
- * Clawd, the Claude Code mascot, as a pixel sprite in the wave title. It hops
- * (`clawd--wait`) while the wave's coordinator is waiting for its human.
+ * Claude's pixel mascot, drawn on a 12×9 grid (ported from the prototype
+ * `Clawd`). It hops (`clawd--wait`) while the wave's coordinator is waiting
+ * for its human.
  */
-const PIXELS = ["..XXXXXXX..", "..XoXXXoX..", "XXXXXXXXXXX", "..XXXXXXX..", "..X.X.X.X.."];
-const W = PIXELS[0]?.length ?? 0;
-const CELLS = PIXELS.flatMap((row, y) =>
-  [...row].flatMap((c, x) => (c === "." ? [] : [{ key: `${x}-${y}`, x, y, eye: c === "o" }])),
+const PX = [
+  "..XXXXXXXX..",
+  "..XXXXXXXX..",
+  "XXXX.XX.XXXX",
+  "XXXXXXXXXXXX",
+  "..XXXXXXXX..",
+  "..XXXXXXXX..",
+  "..X.X..X.X..",
+  "..X.X..X.X..",
+  "............",
+];
+const CELLS = PX.flatMap((row, y) =>
+  [...row].flatMap((c, x) => (c === "X" ? [{ key: `${x}-${y}`, x, y }] : [])),
 );
 
-export function Clawd({ waiting = false }: { waiting?: boolean }) {
+export function Clawd({ size = 22, waiting = false }: { size?: number; waiting?: boolean }) {
   return (
     <svg
       className={`clawd${waiting ? " clawd--wait" : ""}`}
-      viewBox={`0 0 ${W} ${PIXELS.length}`}
-      width={22}
-      height={10}
+      width={size}
+      height={(size * 9) / 12}
+      viewBox="0 0 12 9"
+      aria-label="Claude coordinator"
       role="img"
-      aria-label={waiting ? "Claude, waiting for you" : "Claude"}
-      shapeRendering="crispEdges"
     >
       {CELLS.map((c) => (
-        <rect
-          key={c.key}
-          x={c.x}
-          y={c.y}
-          width={1}
-          height={1}
-          className={c.eye ? "clawd-eye" : "clawd-body"}
-        />
+        <rect key={c.key} x={c.x} y={c.y} width="1.02" height="1.02" fill="#d97757" />
       ))}
     </svg>
   );

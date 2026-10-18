@@ -4,10 +4,10 @@ import { Dag, type DagNode, layoutDag } from "../src/windows/wave/Dag";
 
 // The epic's example wave file: T0 → T1, T2 → T3.
 const EXAMPLE: DagNode[] = [
-  { id: "T0", title: "Status chip data contract", after: [], stage: "merged" },
-  { id: "T1", title: "Chip mapper", after: ["T0"], stage: "fixup" },
-  { id: "T2", title: "Status column", after: ["T0"], stage: "merge_ready" },
-  { id: "T3", title: "Detail page badge", after: ["T1", "T2"], stage: "queued" },
+  { id: "T0", issue: 101, title: "Status chip data contract", after: [], stage: "merged" },
+  { id: "T1", issue: 102, title: "Chip mapper", after: ["T0"], stage: "fixup" },
+  { id: "T2", issue: 103, title: "Status column", after: ["T0"], stage: "merge_ready" },
+  { id: "T3", issue: 104, title: "Detail page badge", after: ["T1", "T2"], stage: "queued" },
 ];
 
 describe("layoutDag", () => {
@@ -25,8 +25,8 @@ describe("layoutDag", () => {
 
   it("drops edges to tasks outside the wave and survives a cycle", () => {
     const l = layoutDag([
-      { id: "A", after: ["B", "ghost"], stage: "queued" },
-      { id: "B", after: ["A"], stage: "queued" },
+      { id: "A", issue: 1, after: ["B", "ghost"], stage: "queued" },
+      { id: "B", issue: 2, after: ["A"], stage: "queued" },
     ]);
     expect(l.nodes).toHaveLength(2);
     expect(l.edges.every((e) => e.from !== "ghost")).toBe(true);
@@ -35,21 +35,27 @@ describe("layoutDag", () => {
 
 describe("Dag", () => {
   it("renders the example graph in 3 columns with 4 edges and stage classes", () => {
-    const { container } = render(<Dag nodes={EXAMPLE} />);
-    const nodes = [...container.querySelectorAll<HTMLElement>(".dag-node")];
+    const { container } = render(<Dag tasks={EXAMPLE} accent="#6ee7f9" />);
+    const nodes = [...container.querySelectorAll<SVGGElement>(".dag-node")];
     expect(nodes).toHaveLength(4);
     expect(new Set(nodes.map((n) => n.dataset.col))).toEqual(new Set(["0", "1", "2"]));
     expect(container.querySelectorAll(".dag-edge")).toHaveLength(4);
-    expect(nodes[0]).toHaveClass("dag-node--merged");
-    expect(nodes[1]).toHaveClass("dag-node--fixup");
-    expect(nodes[2]).toHaveClass("dag-node--merge_ready");
-    expect(nodes[3]).toHaveClass("dag-node--queued");
+    expect(nodes.map((n) => n.getAttribute("class"))).toEqual([
+      "dag-node st-merged",
+      "dag-node st-fixup",
+      "dag-node st-merge_ready",
+      "dag-node st-queued",
+    ]);
     expect(nodes[1]).toHaveTextContent("T1");
     expect(nodes[1]).toHaveTextContent("fixup");
+    expect(nodes[1]).toHaveTextContent("#102");
   });
 
-  it("marks edges out of a merged task as done", () => {
-    const { container } = render(<Dag nodes={EXAMPLE} />);
-    expect(container.querySelectorAll(".dag-edge--done")).toHaveLength(2);
+  it("colours task ids in the wave accent and centres the single-task columns", () => {
+    const { container } = render(<Dag tasks={EXAMPLE} accent="#fbbf24" />);
+    expect(container.querySelector(".dag-id")?.getAttribute("fill")).toBe("#fbbf24");
+    const [t0, t1, t2, t3] = layoutDag(EXAMPLE).nodes.map((n) => n.y);
+    expect(t0).toBe(((t1 ?? 0) + (t2 ?? 0)) / 2);
+    expect(t3).toBe(t0);
   });
 });

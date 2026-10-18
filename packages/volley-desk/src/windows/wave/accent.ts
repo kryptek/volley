@@ -5,9 +5,9 @@
  */
 export const ACCENT_PALETTE: readonly string[] = [
   "#6ee7f9",
+  "#fbbf24",
   "#c4b5fd",
   "#f9a8d4",
-  "#fbbf24",
   "#86efac",
   "#fdba74",
   "#93c5fd",

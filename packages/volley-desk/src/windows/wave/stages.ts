@@ -52,18 +52,18 @@ export const STAGE_LABEL: Record<DeskStage, string> = {
   fixup: "fixup",
   merge_ready: "merge-ready",
   merged: "merged",
-  decision: "needs decision",
+  decision: "decision",
 };
 
 /** How far along a task in each stage is, 0–1; `wavePct` averages these. */
 export const STAGE_WEIGHT: Record<DeskStage, number> = {
   queued: 0,
-  implement: 0.3,
-  review: 0.55,
-  fixup: 0.7,
+  implement: 0.35,
+  review: 0.6,
+  fixup: 0.75,
+  decision: 0.7,
   merge_ready: 0.9,
   merged: 1,
-  decision: 0.45,
 };
 
 /** Wave completion as a whole percentage: the mean task stage weight. */

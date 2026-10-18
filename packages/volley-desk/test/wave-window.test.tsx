@@ -64,18 +64,24 @@ describe("WaveWindow", () => {
     expect(screen.getByText("1 decision · 2 gates")).toBeInTheDocument();
     const segs = container.querySelectorAll(".rail-seg");
     expect(segs).toHaveLength(4);
-    expect(segs[0]).toHaveClass("rail-seg--merged");
-    expect(segs[3]).toHaveClass("rail-seg--decision");
-    expect(container.querySelector(".rail-pct")).toHaveTextContent(/^\d+%$/);
+    expect(segs[0]).toHaveClass("st-merged");
+    expect(segs[3]).toHaveClass("st-decision");
+    // (1 + 0.9 + 0.9 + 0.7) / 4
+    expect(container.querySelector(".rail-pct")).toHaveTextContent("88%");
+    expect(screen.getByRole("progressbar", { name: "status-chip progress" })).toHaveAttribute(
+      "aria-valuenow",
+      "88",
+    );
+    expect(screen.getByText("1 of 4 merged")).toBeInTheDocument();
   });
 
   it("shows the ★ yours chip only when the owner is this browser's coordinator", () => {
     const { unmount } = renderWave({ me: "coordinator-desk1" });
-    expect(screen.getByText("★ yours")).toHaveClass("chip--mine");
+    expect(screen.getByText("★ yours")).toHaveClass("chip", "chip--mine");
     unmount();
     renderWave({ me: "coordinator-other" });
     expect(screen.queryByText("★ yours")).not.toBeInTheDocument();
-    expect(screen.getByText("coordinator-desk1")).toBeInTheDocument();
+    expect(screen.getByText("coordinator-desk1")).not.toHaveClass("chip--mine");
   });
 
   it("shows no ★ yours chip by default", () => {
@@ -86,12 +92,14 @@ describe("WaveWindow", () => {
   it("renders the dependency graph, and the wave file with v3 and titles as comments", () => {
     const { container } = renderWave();
     expect(container.querySelectorAll(".dag-node")).toHaveLength(4);
-    fireEvent.click(screen.getByRole("tab", { name: "wave file" }));
     expect(screen.getByText("v3")).toBeInTheDocument();
-    const yaml = container.querySelector(".yaml") as HTMLElement;
+    const yaml = screen.getByLabelText("Wave file");
     expect(yaml).toHaveTextContent("T3: { issue: 104, after: [T1, T2] }");
+    expect(yaml).toHaveTextContent("T0: { issue: 101 }");
     expect(yaml).toHaveTextContent("# Detail page badge");
-    expect(container.querySelector(".dag")).not.toBeInTheDocument();
+    expect(yaml).toHaveTextContent(
+      "pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]",
+    );
   });
 
   it("makes the Claude icon hop while the coordinator awaits input", () => {
@@ -113,21 +121,30 @@ describe("WaveWindow", () => {
     const onChat = vi.fn();
     const onSettings = vi.fn();
     renderWave({ onChat, onSettings });
-    fireEvent.click(screen.getByRole("button", { name: "Steer wave" }));
-    fireEvent.click(screen.getByRole("button", { name: "Wave settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Message the coordinator of status-chip" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings for status-chip" }));
     expect(onChat).toHaveBeenCalledWith("status-chip");
     expect(onSettings).toHaveBeenCalledWith("status-chip");
   });
 
   it("renders the banner slot above the graph", () => {
     renderWave({ banner: <div>needs you</div> });
-    expect(screen.getByText("needs you")).toBeInTheDocument();
+    const banner = screen.getByText("needs you");
+    const graph = screen.getByRole("img", { name: "Task dependency graph" });
+    expect(banner.compareDocumentPosition(graph) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("highlights the chat glyph while the steering panel is open", () => {
+    renderWave({ steerOpen: true });
+    expect(
+      screen.getByRole("button", { name: "Message the coordinator of status-chip" }),
+    ).toHaveClass("icon-btn--hot");
   });
 
   it("shows how long ago the wave started", () => {
     const now = Date.parse("2026-10-18T12:00:00Z");
     renderWave({ startedAt: now - 52 * 60_000, now });
-    expect(screen.getByText("started 52m ago")).toBeInTheDocument();
+    expect(screen.getByText("running 52m")).toBeInTheDocument();
   });
 
   it("waits for the wave state when only a decision has arrived", () => {
