@@ -48,11 +48,10 @@ describe("AgentWindow", () => {
   it("title shows task, issue, the wave chip in the wave accent, and the role", () => {
     const { container } = renderAgent(stateWith(), FIXUP);
     const bar = container.querySelector(".win-bar") as HTMLElement;
-    expect(within(bar).getByText("T1")).toBeInTheDocument();
-    expect(within(bar).getByText("#102")).toBeInTheDocument();
+    expect(bar.querySelector(".t-name")).toHaveTextContent("T1 #102");
     const chip = within(bar).getByText("status-chip");
     expect(chip).toHaveClass("chip--wave");
-    expect(chip.style.getPropertyValue("--acc")).toBe(ACCENT);
+    expect(chip.querySelector("i")).toHaveStyle({ background: ACCENT });
     expect(within(bar).getByText("fixup")).toHaveClass("chip--role");
     expect(within(bar).getByRole("img", { name: "In progress, 62%" })).toBeInTheDocument();
     expect(container.querySelector(".win")).toHaveStyle({ width: "460px" });
@@ -63,7 +62,7 @@ describe("AgentWindow", () => {
     expect(container.querySelector(".a-title")).toHaveTextContent(
       "Chip mapper + null-case handling",
     );
-    expect(container.querySelector(".a-narr")).toHaveTextContent(
+    expect(container.querySelector(".narr")).toHaveTextContent(
       "Addressing quality P1: legacy CLSD alias falls through to the raw enum",
     );
   });
@@ -72,19 +71,19 @@ describe("AgentWindow", () => {
     renderAgent(stateWith(), FIXUP);
     const current = screen.getByRole("listitem", { current: "step" });
     expect(current).toHaveTextContent("fixup");
-    expect(screen.getByRole("listitem", { name: "implement" })).toHaveClass("is-done");
-    expect(screen.getByRole("listitem", { name: "merge-ready" })).not.toHaveClass("is-done");
+    expect(screen.getByRole("listitem", { name: "implement" })).toHaveClass("done");
+    expect(screen.getByRole("listitem", { name: "merge-ready" })).not.toHaveClass("done");
   });
 
   it("footer shows progress, heartbeat age and model", () => {
     const { container } = renderAgent(stateWith(), FIXUP);
     const foot = container.querySelector(".win-foot") as HTMLElement;
     expect(foot).toHaveTextContent("62%");
-    expect(foot.querySelector(".bar i")).toHaveStyle({ width: "62%" });
+    expect(foot.querySelector(".bar > span")).toHaveStyle({ width: "62%" });
     const hb = foot.querySelector(".hb") as HTMLElement;
     expect(hb).toHaveTextContent("4s");
     expect(hb).not.toHaveClass("hb--stale");
-    expect(foot).toHaveTextContent("claude-opus-5-5");
+    expect(foot).toHaveTextContent("opus-5-5");
   });
 
   it("marks the heartbeat stale after 60 s", () => {
@@ -166,7 +165,7 @@ describe("AgentWindow", () => {
   it("the chat glyph emits a callback with the agent id", () => {
     const onChat = vi.fn();
     renderAgent(stateWith(), FIXUP, { onChat });
-    fireEvent.click(screen.getByRole("button", { name: "Steer this agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Message T1 fixup" }));
     expect(onChat).toHaveBeenCalledWith(FIXUP);
   });
 
@@ -184,7 +183,8 @@ describe("AgentWindow", () => {
         attention={<span>needs you</span>}
       />,
     );
-    expect(screen.getByText("needs you").closest(".a-attn")).not.toBeNull();
+    const line = screen.getByText("needs you");
+    expect(line.parentElement?.querySelector(".narr")).not.toBeNull();
   });
 });
 
@@ -192,21 +192,21 @@ describe("Pipeline", () => {
   it("a reviewer's task in review: implement done, review current", () => {
     render(<Pipeline stage="quality_review" agentRole="quality_reviewer" />);
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent("review");
-    expect(screen.getByRole("listitem", { name: "implement" })).toHaveClass("is-done");
+    expect(screen.getByRole("listitem", { name: "implement" })).toHaveClass("done");
   });
 
   it("a held stage falls back to the agent's role step and marks it held", () => {
     render(<Pipeline stage="awaiting_decision" agentRole="implementer" />);
     const cur = screen.getByRole("listitem", { current: "step" });
     expect(cur).toHaveTextContent("implement");
-    expect(cur).toHaveClass("is-held");
+    expect(cur).toHaveClass("held");
   });
 
   it("done marks every step done and none current", () => {
     render(<Pipeline stage="done" agentRole="implementer" />);
     expect(screen.queryByRole("listitem", { current: "step" })).toBeNull();
     for (const name of ["implement", "review", "fixup", "merge-ready"]) {
-      expect(screen.getByRole("listitem", { name })).toHaveClass("is-done");
+      expect(screen.getByRole("listitem", { name })).toHaveClass("done");
     }
   });
 });
@@ -228,7 +228,7 @@ describe("App agent windows", () => {
     act(() => {
       vi.advanceTimersByTime(22_500);
     });
-    expect(born().map((n) => n.textContent)).toEqual(["T1"]);
+    expect(born().map((n) => n.textContent)).toEqual(["T1 #102"]);
     expect(container.querySelector(".world .win--born .chip--role")).toHaveTextContent(
       "spec review",
     );

@@ -1,24 +1,18 @@
 /**
  * The agent window's Terminal tab: the retained `screen` tail the supervisor
- * captures for the agent (SPEC §4.6.6, T13), with a blinking caret. Commands
- * (`⏺ Tool(…)` or `⏺ <shell command>`), passes and failures get the
- * prototype's `tl-cmd` / `tl-ok` / `tl-bad` classes; a capture the supervisor
- * has flagged `screen_stale` in the wave state carries a `stale` marker.
+ * captures for the agent (SPEC §4.6.6, T13), with the prototype's blinking
+ * caret and `tl-cmd` / `tl-ok` / `tl-bad` line classes; a capture the
+ * supervisor has flagged `screen_stale` in the wave state carries a `stale`
+ * marker.
  */
 import { useLayoutEffect, useRef } from "react";
 import type { ScreenPayload } from "../../store/types";
 
-/** `⏺ Bash(…)`, `⏺ Update(…)`, or `⏺ gh pr checks` — not `⏺ The alias…` prose. */
-const CMD = /^⏺\s+(?:[A-Z][\w-]*\(|[a-z][\w.-]*(?:\s|$))/;
-const BAD = /[✗✘]|\b(?:CONFLICT|ERROR|Error|error|FAIL|FAILED|failed|fatal)\b/;
-const OK = /[✓✔]/;
-
-/** The line class for one screen line: `tl-cmd`, `tl-bad`, `tl-ok`, or `""`. */
+/** The prototype's line classes: `⏺` lines are commands, `✗`/`CONFLICT` bad, `✓` ok. */
 export function lineClass(line: string): string {
-  const t = line.trim();
-  if (CMD.test(t)) return "tl-cmd";
-  if (BAD.test(t)) return "tl-bad";
-  if (OK.test(t)) return "tl-ok";
+  if (line.startsWith("⏺")) return "tl-cmd";
+  if (line.includes("✗") || line.includes("CONFLICT")) return "tl-bad";
+  if (line.includes("✓")) return "tl-ok";
   return "";
 }
 
@@ -50,7 +44,9 @@ export function Terminal({ screen, stale }: { screen: ScreenPayload | null; stal
               </div>
             );
           })}
-          <span className="term-caret" aria-hidden />
+          <div className="caret" aria-hidden>
+            ▍
+          </div>
         </>
       )}
     </div>

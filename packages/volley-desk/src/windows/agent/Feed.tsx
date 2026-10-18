@@ -1,5 +1,5 @@
 /**
- * The agent window's Volley feed: every envelope the store kept for the agent
+ * The agent window's Volley feed (prototype `AgentWindow` feed tab): every envelope the store kept for the agent
  * (registry, status, progress, result, mailbox), oldest first and newest last,
  * auto-scrolled to the bottom. Clicking a row toggles the pretty JSON of the
  * real envelope as it arrived, not a reconstruction.
@@ -67,20 +67,22 @@ export function Feed({ feed }: { feed: readonly FeedEntry[] }) {
         const ch = feedChannel(e);
         const isOpen = open === e;
         return (
-          <div key={String(e.envelope.message_id ?? `${e.receivedAt}-${i}`)} className="feed-item">
+          <div
+            key={String(e.envelope.message_id ?? `${e.receivedAt}-${i}`)}
+            className={`env ch-${ch}`}
+          >
             <button
               type="button"
-              className={`feed-row ch-${ch}${isOpen ? " is-open" : ""}`}
+              className="env-row"
               aria-expanded={isOpen}
               onClick={() => setOpen(isOpen ? null : e)}
             >
-              <span className="feed-t mono">{clock(t)}</span>
-              <span className="feed-ch mono">
-                {ch}/{e.envelope.type}
-              </span>
-              <span className="feed-msg ell min0">{summary(e)}</span>
+              <span className="mono dim">{clock(t)}</span>
+              <span className="env-ch">{ch}</span>
+              <span className="env-type">{e.envelope.type}</span>
+              <span className="env-msg">{summary(e)}</span>
             </button>
-            {isOpen && <pre className="feed-json">{JSON.stringify(e.envelope, null, 2)}</pre>}
+            {isOpen && <pre className="env-json">{JSON.stringify(e.envelope, null, 2)}</pre>}
           </div>
         );
       })}

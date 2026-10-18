@@ -29,8 +29,8 @@ describe("Terminal", () => {
     expect(lines[0]).toHaveClass("tl-cmd");
     expect(lines[1]).toHaveClass("tl-ok");
     expect(lines[2]).toHaveClass("tl-bad");
-    expect(lines[3]).not.toHaveClass("tl-cmd", "tl-ok", "tl-bad");
-    expect(container.querySelector(".term-caret")).not.toBeNull();
+    expect(lines[3]).toHaveClass("tl-cmd");
+    expect(container.querySelector(".caret")).toHaveTextContent("▍");
     expect(screen.queryByText("stale")).toBeNull();
   });
 
@@ -40,9 +40,9 @@ describe("Terminal", () => {
     ["⏺ Update(src/chip-mapper.ts)", "tl-cmd"],
     ["  ⎿  CONFLICT (content): Merge conflict in test/query-plan.test.ts", "tl-bad"],
     ["  ⎿  Tests run: 412, Failures: 0  (2m12s)", ""],
-    ["  ⎿  Error: Cannot find module 'x'", "tl-bad"],
     ["     ✓ integration    6m10s", "tl-ok"],
-    ["⏺ Published merge-ready evidence. Done.", ""],
+    ["⏺ Published merge-ready evidence. Done.", "tl-cmd"],
+    ["  ⎿  queued: position 2 of 2", ""],
   ])("%s → %s", (line, cls) => {
     expect(lineClass(line)).toBe(cls);
   });

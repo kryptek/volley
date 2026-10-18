@@ -12,7 +12,7 @@ describe("App (demo mode)", () => {
     );
     expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5);
     expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
-    expect(container.querySelectorAll(".world .a-narr")).toHaveLength(5);
+    expect(container.querySelectorAll(".world .narr")).toHaveLength(5);
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("3 waves");
   });
