@@ -1,3 +1,4 @@
+import type { DecisionRecord } from "./decisions";
 import type {
   JournalEvent,
   TaskAgents,
@@ -27,10 +28,23 @@ export interface WaveRecord {
   spawns: number;
   /** This wave's `config:` overrides. */
   overrides: TunablesPatch;
+  /** Every decision opened in this wave (open and resolved), by id. */
+  decisions: Record<string, DecisionRecord>;
+  /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
+  steers: Record<TaskId, { seq: number; message_id: string }>;
 }
 
 export function emptyRecord(): WaveRecord {
-  return { seq: 0, state: null, wave: null, admitted: [], spawns: 0, overrides: {} };
+  return {
+    seq: 0,
+    state: null,
+    wave: null,
+    admitted: [],
+    spawns: 0,
+    overrides: {},
+    decisions: {},
+    steers: {},
+  };
 }
 
 const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
@@ -48,6 +62,9 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.seq <= rec.seq) return rec;
   const next = structuredClone(rec);
   next.seq = ev.seq;
+  // Snapshots written before decisions/steers existed lack these fields.
+  next.decisions ??= {};
+  next.steers ??= {};
 
   if (ev.type === "wave_submitted") {
     const wave = ev.data.wave as Wave;
@@ -113,7 +130,18 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       break;
     case "stage_entered":
-      if (task !== undefined) task.stage = ev.data.stage as TaskStage;
+      if (task === undefined) break;
+      if (task.stage === "awaiting_decision" && ev.data.stage !== "awaiting_decision") {
+        // Parked on a decision: the task stays parked; the stage is where it resumes once its
+        // last open decision is resolved.
+        for (const d of Object.values(next.decisions)) {
+          if (d.task === task.id && d.resolved === undefined) {
+            d.resume_stage = ev.data.stage as TaskStage;
+          }
+        }
+        break;
+      }
+      task.stage = ev.data.stage as TaskStage;
       break;
     case "task_cancelled":
       if (task !== undefined) task.stage = "cancelled";
@@ -127,10 +155,50 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "decision_opened": {
       const id = ev.data.decision_id as string;
       if (!state.open_decisions.includes(id)) state.open_decisions.push(id);
+      const d: DecisionRecord = {
+        ...(ev.data as Omit<DecisionRecord, "wave" | "task">),
+        decision_id: id,
+        wave: state.wave,
+        task: ev.task ?? null,
+        pointers: (ev.data.pointers as DecisionRecord["pointers"] | undefined) ?? {},
+        opened_at: (ev.data.opened_at as string | undefined) ?? ev.at,
+      };
+      if (task !== undefined) {
+        // Park the task; a second open decision keeps the stage the first one saved.
+        const parked = Object.values(next.decisions).find(
+          (o) => o.task === task.id && o.resolved === undefined && o.resume_stage !== undefined,
+        );
+        d.resume_stage = parked?.resume_stage ?? task.stage;
+        task.stage = "awaiting_decision";
+      }
+      next.decisions[id] = d;
       break;
     }
-    case "decision_resolved":
-      state.open_decisions = state.open_decisions.filter((d) => d !== ev.data.decision_id);
+    case "decision_resolved": {
+      const id = ev.data.decision_id as string;
+      state.open_decisions = state.open_decisions.filter((d) => d !== id);
+      const d = next.decisions[id];
+      if (d !== undefined) {
+        d.resolved = {
+          answer: ev.data.answer as string,
+          by: ev.data.by as string,
+          at: (ev.data.at as string | undefined) ?? ev.at,
+        };
+        if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
+        const stillOpen = state.open_decisions.some((o) => next.decisions[o]?.task === d.task);
+        if (task !== undefined && task.stage === "awaiting_decision" && !stillOpen) {
+          task.stage = d.resume_stage ?? "queued";
+        }
+      }
+      break;
+    }
+    case "steering_sent":
+      if (ev.task !== undefined && ev.data.type === "steering") {
+        next.steers[ev.task] = {
+          seq: ev.data.seq as number,
+          message_id: ev.data.message_id as string,
+        };
+      }
       break;
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
@@ -151,14 +219,28 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
 /** Recompute the fields that follow from task stages: waiting_on/why_waiting and gates. */
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
+  const openOn = (task: TaskId) =>
+    state.open_decisions.filter((id) => rec.decisions?.[id]?.task === task);
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
+    if (t.stage === "awaiting_decision") {
+      const ids = openOn(t.id);
+      return ids.length > 0
+        ? { ...t, waiting_on: ids, why_waiting: `awaiting decision ${ids.join(", ")}` }
+        : t;
+    }
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
         : [];
-    return pending.length > 0
-      ? { ...t, waiting_on: pending, why_waiting: `after: ${pending.join(", ")}` }
-      : t;
+    if (pending.length === 0) return t;
+    // A dependency parked on a decision parks its dependents, naming the decision.
+    const parked = pending.filter((d) => stageOf.get(d) === "awaiting_decision");
+    const ids = parked.flatMap(openOn);
+    const why =
+      ids.length > 0
+        ? `awaiting decision ${ids.join(", ")} (${parked.join(", ")})`
+        : `after: ${pending.join(", ")}`;
+    return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
 }

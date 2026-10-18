@@ -54,4 +54,12 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */
+  steer_wait_ack_ms: 30_000,
+  /** Upper bound on a caller's `wait_ack_ms`, so a steer cannot park a waiter indefinitely. */
+  steer_wait_ack_max_ms: 300_000,
+  /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
+  issue_fetch_ms: 15_000,
+  /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
+  registry_scan_ms: 250,
 } as const;
