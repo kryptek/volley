@@ -7,6 +7,7 @@ export type SpawnErrorCode =
   | "CREDENTIALS_FAILED"
   | "WORKTREE_FAILED"
   | "LAUNCH_FAILED"
+  | "REMOTE_REPO_MISSING"
   | "RETIRE_REFUSED";
 
 /** A spawn (or retire) step refused. `detail` is journaled with the refusal. */

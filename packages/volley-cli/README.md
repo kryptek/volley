@@ -74,14 +74,17 @@ volley auth --help
 
 ## `volley dash`
 
-Launches the [`volley-dash`](../volley-dash/) browser dashboard — a live view of every registered agent (status grid + event feed + per-agent drawer) that subscribes directly to your mosquitto broker over WebSocket. No backend.
+Launches the [Volley Desk](../volley-desk/) — an infinite canvas of live wave and agent windows (steering, settings, attention, arrange & fit) that subscribes directly to your mosquitto broker over WebSocket. No backend. It works at phone width, without WebGL and from the keyboard.
 
 ```sh
-volley dash                          # dev server, opens browser at http://localhost:5173
+volley dash                          # dev server, opens browser at http://localhost:5174
 volley dash --no-open                # dev server, don't open browser
-volley dash --build                  # production build + preview
+volley dash --build                  # production build + preview (http://localhost:4173)
 volley dash --broker-url ws://host:9001  # point at a non-default broker
+volley dash --legacy                 # the classic dashboard (packages/volley-dash, :5173)
 ```
+
+`--legacy` launches the classic [`volley-dash`](../volley-dash/) dashboard (status grid + event feed + per-agent drawer) instead. It is deprecated and will be removed in a later release; every other flag works with it.
 
 **Prerequisite:** mosquitto must have a WebSocket listener on `:9001` — the bundled `examples/mosquitto-localhost.conf` configures it. If `lsof -nP -iTCP:9001 -sTCP:LISTEN` returns nothing, see the root [README §2](../../README.md) for the install + upgrade steps.
 
@@ -139,6 +142,7 @@ volley auth rm-agent w1-t1-implementer-1  # revoke on retire (succeeds if alread
 - `--ack-to <sender_id>` (repeatable) appends a managed `user` block to `acl.conf` that lets the agent write exactly those senders' mailboxes, so its acks (SPEC §4.4) and query replies reach them. Without it a minted agent can write no mailbox at all, and the broker silently drops its acks. Pass the parent's agent id (and `volleyd` when the daemon steers it).
 - `add-agent` refuses the fixed identity names and ids the ACL's namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, and the channel names).
 - `init --force` rotates the three fixed passwords in place: minted agents and an existing (possibly edited) `acl.conf` are kept.
+- `init --coordinator-file` also writes `coordinator.json` (`{ "username": "coordinator", "password" }`, mode 0600) next to `passwd`: the credentials the coordinator session's hooks read when `VOLLEY_AUTH_*` is unset (see volley-hooks' README). Once the file exists, every `init --force` rewrites it with the rotated password. On an existing install, adopting it means `init --force --coordinator-file`, which rotates all three fixed identities (`volleyd`, `desk`, `coordinator`). Run as root, the file stays root-owned inside a directory handed to the broker's user, so `init` warns that your session cannot read it: copy it and point `VOLLEY_AUTH_DIR` at the copy, or use `VOLLEY_AUTH_*`.
 - Run as root (e.g. `sudo volley auth init --dir /etc/mosquitto/volley` on Linux), `init` hands the directory and files to the `mosquitto` user, because the distro broker drops to that user before it opens `password_file`.
 - `mosquitto_passwd` receives each generated password on its command line, so it is briefly visible in `ps` while that child runs.
 
@@ -377,14 +381,17 @@ ci-abc12345             ci             🔄 working    -                       8
 Usage: volley dash [options]
 
 Optional:
+  --legacy                Launch the old dashboard (packages/volley-dash) instead;
+                          deprecated, removed in a later release
   --build                 Run vite build + preview the production bundle
-  --port <N>              Override Vite's port (default: Vite's default 5173)
-  --broker-url <url>      MQTT broker URL passed to the dashboard via
+  --port <N>              Override Vite's port (dev default: 5174, 5173 with --legacy;
+                          --build: Vite preview's 4173)
+  --broker-url <url>      MQTT broker URL passed to the Desk via
                           VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open / --no-open      Open the browser on start (default: --open in dev mode)
 ```
 
-Spawns Vite as a child process; passes the broker URL through as a build-time env var so the bundled JS hardcodes it. The dashboard subscribes to `volley/_system/registry/+` (retained) plus the four status/progress/mailbox/result wildcards on connect, then renders state changes in ~1s.
+Spawns Vite as a child process (`bun run dev`, or `build` then `preview`, in `packages/volley-desk`, or `packages/volley-dash` with `--legacy`); passes the broker URL through as a build-time env var so the bundled JS hardcodes it. The Desk's subscriptions are listed in [its README](../volley-desk/README.md#subscriptions). The legacy dashboard subscribes to `volley/_system/registry/+` (retained) plus the four status/progress/mailbox/result wildcards on connect, then renders state changes in ~1s.
 
 ### `volley notify`
 

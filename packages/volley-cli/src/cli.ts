@@ -12,7 +12,7 @@ Subcommands:
   sub      Subscribe to a wildcard topic pattern (live tail)
   wait     Block until an agent reaches a terminal status
   list     Enumerate agents registered on the broker
-  dash     Launch the Volley dashboard (Vite)
+  dash     Launch the Volley Desk (Vite; --legacy: the old dashboard)
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
   auth     Manage broker credentials (init, add-agent, rm-agent)
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)

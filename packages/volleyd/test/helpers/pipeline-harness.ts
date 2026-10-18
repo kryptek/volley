@@ -67,6 +67,8 @@ export interface HarnessOptions {
   pipeline?: string;
   /** Enforce the real fence on every argv (default true). */
   fence?: boolean;
+  /** Wrap the harness exec per task (the daemon's remote-host routing). */
+  execFor?: (task: string, exec: ExecFn) => ExecFn;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -229,6 +231,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const driver = new PipelineDriver("w1", {
     now: () => clock,
     exec,
+    ...(o.execFor !== undefined
+      ? {
+          execFor: (task: string) =>
+            (o.execFor as NonNullable<HarnessOptions["execFor"]>)(task, exec),
+        }
+      : {}),
     home,
     record: () => rec,
     journal,

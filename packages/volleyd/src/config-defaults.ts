@@ -28,7 +28,21 @@ export const CONFIG_DEFAULTS: Tunables = {
   spawn_timeout_s: 120,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  hosts: {},
 };
+
+/** Defaults for a remote host's unset keys (config `hosts.<name>`). */
+export const REMOTE_HOST_DEFAULTS = {
+  /**
+   * Port on the remote machine's 127.0.0.1 that reaches the broker through the tunnel. Not
+   * MQTT's 1883: a box running its own broker has that port taken.
+   */
+  remote_port: 21883,
+  /** volleyd keeps the reverse tunnel up itself. */
+  supervise_tunnel: true,
+  /** `worktree_root` default: this directory beside the remote repo. */
+  worktree_dir: ".volley-worktrees",
+} as const;
 
 /** Who `updated_by` names before anyone has changed the config. */
 export const DEFAULTS_AUTHOR = "volleyd-defaults";
@@ -115,6 +129,32 @@ export const DAEMON_DEFAULTS = {
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */
   screen_backoff_s: 30,
+  /** The broker port when the broker URL names none (MQTT's registered port). */
+  mqtt_default_port: 1883,
+  /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */
+  ssh_connect_timeout_s: 10,
+  /** ssh `ServerAliveInterval` for the reverse tunnel (seconds). */
+  ssh_alive_interval_s: 15,
+  /** Bound on one remote command (`ssh … bash -s`); a hung connection must not stall a spawn. */
+  remote_exec_timeout_ms: 120_000,
+  /** Bound on one tunnel check (`nc -z` over `bash -s`). */
+  tunnel_check_timeout_ms: 15_000,
+  /** Wait before restarting a reverse tunnel that exited; doubles per failure up to the max. */
+  tunnel_restart_ms: 1_000,
+  tunnel_restart_max_ms: 60_000,
+  /**
+   * How often each forward with an unfinished task on it (queued, parked or running: a running
+   * agent's reap waits while its tunnel is down) is re-checked.
+   */
+  tunnel_check_ms: 10_000,
+  /** How long a fresh tunnel ssh may take to bring its forward up before a failed check counts. */
+  tunnel_settle_ms: 15_000,
+  /** How often an open repo_untrusted decision on a remote host re-reads the box's trust. */
+  remote_trust_check_ms: 10_000,
+  /** Tail of a tunnel's stderr kept on its journaled exit alarm. */
+  alarm_stderr_max_chars: 500,
+  /** Session-name suffixes tried when a tmux session name is taken (a relaunch). */
+  tmux_session_attempts: 20,
   /** Wall clock ahead of the monotonic clock by more than this between two samples = a wake. */
   wake_jump_ms: 60_000,
   /** How long a model switch waits for the hooks' PostModelSwitch registry re-publish. */

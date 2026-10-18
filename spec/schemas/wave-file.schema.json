@@ -65,6 +65,21 @@
   "$defs": {
     "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
     "taskId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+    "hostName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+    "remoteHost": {
+      "description": "An inline remote host: agents run in tmux on another machine reached over SSH. Every key but type is optional here; layered over hosts.<name> from the supervisor config, the host must end up with target, repo and volley_dir. Its keywords apply to objects only, so host: <name> strings pass through it.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "ssh" },
+        "name": {
+          "$ref": "#/$defs/hostName",
+          "not": { "const": "local" },
+          "description": "Host label (wave state, journal) and the hosts.<name> config entry layered under this one; default: the target."
+        }
+      },
+      "$ref": "config.schema.json#/$defs/remoteHostProperties",
+      "unevaluatedProperties": false
+    },
     "stageName": { "enum": ["implement", "spec_review", "quality_review", "fixup", "merge_ready"] },
     "pipeline": {
       "type": "array",
@@ -98,10 +113,11 @@
         "pipeline": { "$ref": "#/$defs/pipeline" },
         "model": { "type": "string", "minLength": 1 },
         "host": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
           "default": "local",
-          "description": "Where the task's agents run: local (the supervisor's own host), or a remote host the supervisor is configured with."
+          "description": "Where the task's agents run: local (the supervisor's own host), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one).",
+          "type": ["string", "object"],
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+          "$ref": "#/$defs/remoteHost"
         },
         "files": {
           "type": "array",

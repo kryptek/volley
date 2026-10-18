@@ -31,6 +31,8 @@ export interface TopBarProps {
   onToggleCoords: () => void;
   notify: NotifyOptions;
   setNotify: (next: NotifyOptions) => void;
+  /** Phone width: the counts collapse, the pill stays. */
+  compact?: boolean;
 }
 
 function leaseSummary(state: DeskState): string {
@@ -84,17 +86,19 @@ export function TopBar(p: TopBarProps) {
         <span className="brand-sub">desk</span>
       </div>
       <span className="proto">{p.demo ? "Demo · sample data" : p.connection}</span>
-      <div className="topbar-mid">
-        <span>
-          <b>{waves}</b> waves
-        </span>
-        <span>
-          <b>{working}</b> agents working
-        </span>
-        {Object.keys(p.state.leases).length > 0 && (
-          <span className="mono">{leaseSummary(p.state)}</span>
-        )}
-      </div>
+      {!p.compact && (
+        <div className="topbar-mid">
+          <span>
+            <b>{waves}</b> waves
+          </span>
+          <span>
+            <b>{working}</b> agents working
+          </span>
+          {Object.keys(p.state.leases).length > 0 && (
+            <span className="mono">{leaseSummary(p.state)}</span>
+          )}
+        </div>
+      )}
       {p.needsYou > 0 && (
         <button type="button" className="ny-pill" onClick={p.onNeedsYou}>
           <Clawd size={18} waiting /> {p.needsYou} need{p.needsYou === 1 ? "s" : ""} you

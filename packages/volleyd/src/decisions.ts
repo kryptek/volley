@@ -18,6 +18,7 @@ export const DECISION_KINDS = [
   "agent_question",
   "agent_stalled",
   "unknown_screen",
+  "hooks_auth_failed",
   "model_switch",
   "repo_untrusted",
   "ci_failed",

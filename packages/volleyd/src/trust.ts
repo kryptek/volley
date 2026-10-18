@@ -100,9 +100,11 @@ export function recordRepoTrust(
   throw new Error(`${claudeJsonPath} kept changing; trust not recorded`);
 }
 
-/** Write the updated file next to the original; returns the temp path. */
-function writeTrusted(claudeJsonPath: string, root: string): string {
-  const cfg = readClaudeJson(claudeJsonPath) ?? {};
+/**
+ * `cfg` with `projects[root].hasTrustDialogAccepted` set and nothing else changed (mutates and
+ * returns it). Shared by the local write and a remote host's (RemoteHost.recordTrust).
+ */
+export function withTrust(cfg: Record<string, unknown>, root: string): Record<string, unknown> {
   const projects =
     typeof cfg.projects === "object" && cfg.projects !== null
       ? (cfg.projects as Record<string, unknown>)
@@ -113,6 +115,12 @@ function writeTrusted(claudeJsonPath: string, root: string): string {
     hasTrustDialogAccepted: true,
   };
   cfg.projects = projects;
+  return cfg;
+}
+
+/** Write the updated file next to the original; returns the temp path. */
+function writeTrusted(claudeJsonPath: string, root: string): string {
+  const cfg = withTrust(readClaudeJson(claudeJsonPath) ?? {}, root);
   // Atomic replace that keeps the file's mode (it holds credentials; usually 0600).
   const mode = existsSync(claudeJsonPath) ? statSync(claudeJsonPath).mode & 0o777 : 0o600;
   const tmp = `${claudeJsonPath}.volleyd.tmp`;
@@ -126,10 +134,16 @@ function writeTrusted(claudeJsonPath: string, root: string): string {
   return tmp;
 }
 
-/** One `repo_untrusted` decision per repo root (a wave's spawns into it all park on it). */
-export function trustDecisionId(root: string): string {
-  return `repo_untrusted-${createHash("sha256").update(root).digest("hex").slice(0, 12)}`;
+/**
+ * One `repo_untrusted` decision per repo root (a wave's spawns into it all park on it), per
+ * machine: a remote host's clone (`target`) is trusted in its own `~/.claude.json`, so it never
+ * shares an id with a local clone at the same path.
+ */
+export function trustDecisionId(root: string, target?: string): string {
+  const key = target === undefined ? root : `${target}:${root}`;
+  return `repo_untrusted-${createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
 }
 
 /** The decision's question, as the owner sees it. */
-export const trustQuestion = (root: string) => `Needs you: trust ${root} for dispatch?`;
+export const trustQuestion = (root: string, target?: string) =>
+  `Needs you: trust ${root}${target !== undefined ? ` on ${target}` : ""} for dispatch?`;

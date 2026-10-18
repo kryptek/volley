@@ -8,8 +8,12 @@
  * auto-arrange is on. The chat glyphs open the steering panel (D4). The look (D7,
  * `look/`): the picked React Bits background under its dim, the window chrome,
  * Needs-you and narration effects, tethers, the Appearance panel, the dock and toasts.
+ * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
+ * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
+ * focusable, labelled stage.
  */
 import { useEffect, useRef, useState } from "react";
+import { useDeskKeys } from "./a11y/keys";
 import {
   type Attn,
   type NeedsYouTarget,
@@ -22,11 +26,18 @@ import {
 } from "./attention";
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
-import { type Rect, useViewport } from "./canvas/useViewport";
+import {
+  NARROW_PX,
+  type Rect,
+  clampWindowWidth,
+  phoneMaxWidth,
+  useViewport,
+  useViewportWidth,
+} from "./canvas/useViewport";
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
 import { Appearance } from "./look/Appearance";
-import { Background } from "./look/Background";
+import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
 import { useLook } from "./look/useLook";
@@ -82,8 +93,13 @@ const coordsH = (waves: number) => 150 + 66 * waves;
 /**
  * Placeholder layout: one row per wave, its agents in two columns to the
  * right; the coordinators window below the waves, as in the prototype.
+ * `clampW` gives a window's rendered width (clamped on a phone).
  */
-function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]>) {
+function placeholderLayout(
+  waveIds: string[],
+  groups: Record<string, AgentView[]>,
+  clampW: (w: number) => number,
+) {
   const at: Record<string, Pos> = {};
   let y = 0;
   for (const id of waveIds) {
@@ -91,7 +107,7 @@ function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]
     const kids = groups[id] ?? [];
     kids.forEach((a, k) => {
       at[a.id] = {
-        x: WAVE_W + GAP + (k % 2) * (AGENT_W + GAP),
+        x: clampW(WAVE_W) + GAP + (k % 2) * (clampW(AGENT_W) + GAP),
         y: y + Math.floor(k / 2) * (AGENT_H + GAP),
       };
     });
@@ -136,7 +152,9 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 
 export default function App() {
   const { state, connection, demo, settling, offline, writer, identity } = useDesk();
-  const { view, setView, zoomAt, fitTo, stageRef, stageHandlers } = useViewport();
+  const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
+  const vw = useViewportWidth();
+  const narrow = vw < NARROW_PX;
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -170,7 +188,9 @@ export default function App() {
     ...Object.keys(state.waves),
     ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
   ];
-  const layout = placeholderLayout(waveIds, groups);
+  /** A window's rendered width: the prototype width, clamped on a phone. */
+  const clampW = (w: number) => clampWindowWidth(w, vw);
+  const layout = placeholderLayout(waveIds, groups, clampW);
   const pos = (id: string): Pos => moved[id] ?? layout[id] ?? { x: 0, y: 0 };
   const move = (id: string) => (dx: number, dy: number) =>
     setMoved((m) => {
@@ -179,7 +199,11 @@ export default function App() {
     });
 
   const sizes = useRef<Record<string, { w: number; h: number }>>({});
-  const sizeOf = (id: string, w: number, h: number) => ({ id, ...(sizes.current[id] ?? { w, h }) });
+  // Until a window is measured it is its (clamped) default size.
+  const sizeOf = (id: string, w: number, h: number) => ({
+    id,
+    ...(sizes.current[id] ?? { w: clampW(w), h }),
+  });
   const rectOf = (id: string, w: number, h: number): Rect => {
     const { w: sw, h: sh } = sizeOf(id, w, h);
     return { ...pos(id), w: sw, h: sh };
@@ -193,7 +217,7 @@ export default function App() {
   const coordsShown = coordsOpen && waveList.length > 0;
   const rects: Rect[] = [
     ...visible.flatMap(clusterOf),
-    ...(coordsShown ? [{ ...pos(COORDS_ID), w: COORDS_W, h: coordsH(waveList.length) }] : []),
+    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(waveList.length))] : []),
   ];
   const fitted = useRef(false);
   useEffect(() => {
@@ -203,7 +227,10 @@ export default function App() {
   });
 
   // ------------------------------------------------------------ look (D7)
-  const [look, setLook] = useLook();
+  const [saved, setLook] = useLook();
+  const webgl = useWebGL();
+  // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
+  const look = degradeLook(saved, webgl);
   const [lookOpen, setLookOpen] = useState(false);
   const [toast, say, closeToast] = useToast();
 
@@ -263,6 +290,7 @@ export default function App() {
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
     },
+    ...(narrow ? { maxWidth: phoneMaxWidth(vw) } : {}),
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -332,11 +360,26 @@ export default function App() {
   const tethers: Tether[] = visible.flatMap((id) =>
     (groups[id] ?? []).map((a) => ({
       id: a.id,
-      wave: { ...pos(id), w: WAVE_W },
+      // The rendered width: on a phone the wave window is clamped.
+      wave: rectOf(id, WAVE_W, WAVE_H),
       agent: pos(a.id),
       accent: accentOf(id),
     })),
   );
+  useDeskKeys({
+    stageRef,
+    panBy,
+    zoomAt: (f) => zoomAt(f),
+    arrange,
+    closeTop: () => {
+      if (settings !== null) setSettings(null);
+      else if (steerOpen !== null) setSteerOpen(null);
+      else if (lookOpen) setLookOpen(false);
+      else return false;
+      return true;
+    },
+  });
+
   const toggleAutoArrange = () => {
     const on = !look.autoArrange;
     setLook({ autoArrange: on });
@@ -351,7 +394,16 @@ export default function App() {
     <div className="app">
       <Background which={look.bg} dim={look.dim} />
 
-      <div className="stage" ref={stageRef} {...stageHandlers}>
+      <div
+        className="stage"
+        ref={stageRef}
+        {...stageHandlers}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: the canvas pans with the arrow keys while focused
+        tabIndex={0}
+        // biome-ignore lint/a11y/useSemanticElements: a pannable canvas of windows, not a document <section>
+        role="region"
+        aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
+      >
         <World view={view} animating={animating}>
           <Tethers on={look.tethers} tethers={tethers} />
           {coordsShown && (
@@ -477,6 +529,7 @@ export default function App() {
         onToggleCoords={() => setCoordsOpen((o) => !o)}
         notify={notify}
         setNotify={setNotify}
+        compact={narrow}
       />
 
       {lookOpen && (
@@ -485,6 +538,7 @@ export default function App() {
           setLook={setLook}
           onClose={() => setLookOpen(false)}
           onArrange={arrange}
+          webgl={webgl}
         />
       )}
 

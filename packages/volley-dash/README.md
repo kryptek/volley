@@ -1,5 +1,7 @@
 # volley-dash
 
+> **Deprecated.** The [Volley Desk](../volley-desk/) replaces this dashboard: `volley dash` opens the Desk, and this one is reachable with `volley dash --legacy` until it is removed in a later release. New work goes into `packages/volley-desk`.
+
 Real-time MQTT monitoring web UI for Volley agents (Vite + React + Tailwind + shadcn/ui + GSAP).
 
 ## Browser notifications

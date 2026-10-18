@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -67,6 +67,19 @@ import {
 import { type ExecFn, exec as realExec } from "./exec";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import {
+  type RemoteHost,
+  type RemoteHostSpec,
+  SshTmuxHost,
+  resolveRemoteHost,
+} from "./hosts/ssh-tmux";
+import {
+  TunnelChecks,
+  type TunnelExit,
+  type TunnelStatus,
+  TunnelSupervisor,
+  tunnelKey,
+} from "./hosts/tunnel";
 import { revokeCredentials } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
@@ -100,6 +113,7 @@ import type {
   Wave,
   WaveId,
   WaveState,
+  WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
@@ -244,6 +258,10 @@ export interface SpawnerOptions {
    * waiting for a fresh status or heartbeat. Default `heartbeat_alarm_s` (tests shorten it).
    */
   reapGraceMs?: number;
+  /** A remote host for a resolved spec (default: SshTmuxHost over the fenced exec). */
+  remoteHost?: (spec: RemoteHostSpec) => RemoteHost;
+  /** The exec remote hosts and their tunnels run with (default: the fenced exec). */
+  remoteExec?: ExecFn;
 }
 
 /** A spawned agent the daemon watches until it is retired. */
@@ -251,6 +269,11 @@ interface Supervised {
   wave: WaveId;
   task: string;
   role: Role;
+  host: Host;
+  /** A remote agent's forward (tunnelKey): its reap waits while that tunnel is down. */
+  tunnel?: string;
+  /** Set once a reap was deferred for the tunnel (one alarm per outage). */
+  reapDeferred?: boolean;
   namespace: string;
   watch: AgentWatch;
   lockPath: string;
@@ -495,6 +518,18 @@ export class Daemon {
   private readonly deferred = new Set<string>();
   /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
   private readonly screens: ScreenPublisher;
+  /** Remote hosts (T15) by resolved spec, their reverse tunnels and tunnel checks. */
+  private readonly remotes = new Map<string, RemoteHost>();
+  private readonly tunnels: TunnelSupervisor;
+  private readonly tunnelChecks: TunnelChecks;
+  /** Spawns parked on a remote host's tunnel, by `<wave>/<task>`: the why_waiting text. */
+  private readonly parked = new Map<string, string>();
+  /** Why a forward (tunnelKey) is down, when it is more than its check failing. */
+  private readonly tunnelDownWhy = new Map<string, string>();
+  /** The tunnels' shutdown, started by halt(); stop() waits for it. */
+  private tunnelsStopped: Promise<void> = Promise.resolve();
+  /** Remote trust re-reads for open repo_untrusted decisions: when each last started. */
+  private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
   private clock: ClockState = initialClock();
   /** Liveness clock (epoch ms). */
@@ -528,6 +563,20 @@ export class Daemon {
         if (a !== undefined) void this.enqueue(() => this.publishState(a.wave));
       },
       log: this.log,
+    });
+    this.tunnels = new TunnelSupervisor({
+      exec: opts.spawner?.remoteExec ?? realExec,
+      log: this.log,
+      now: opts.now ?? Date.now,
+      onExit: (x) => this.onTunnelExit(x),
+    });
+    this.tunnelChecks = new TunnelChecks({
+      now: opts.now ?? Date.now,
+      log: this.log,
+      onChange: (key, status) => {
+        // A check that lands after shutdown changes nothing.
+        if (this.running) void this.enqueue(() => this.onTunnel(key, status));
+      },
     });
     // The capture feeds the silence fallback (single reader): when each screen last changed.
     this.screens.onCapture((c) => {
@@ -765,6 +814,7 @@ export class Daemon {
     clearInterval(this.watchdog);
     clearInterval(this.screenTimer);
     this.screens.clear();
+    this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
       clearTimeout(a.reapTimer);
       void a.watch.close();
@@ -785,6 +835,7 @@ export class Daemon {
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
     this.halt();
+    await this.tunnelsStopped;
     await this.enqueue(async () => {});
     this.acks.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
@@ -1122,11 +1173,13 @@ export class Daemon {
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
+    this.checkTunnels(wave);
     for (const id of rec.admitted) {
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
       const key = `${wave}/${id}/implementer`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) continue;
+      if (this.parkOnTunnel(wave, id)) continue;
       void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
         this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
       });
@@ -1150,18 +1203,23 @@ export class Daemon {
     const t = w.tasks[task];
     if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
     const key = `${wave}/${task}/${role}`;
+    let remote: RemoteHost | undefined;
     if (t.host !== "local") {
-      // Remote hosts plug in behind the same Host interface; none is configured yet.
-      this.noteRefusal(key);
-      const e = new SpawnError("LAUNCH_FAILED", `host '${t.host}' is not configured`, {
-        host: t.host,
-      });
-      await this.append(wave, {
-        type: "alarm_raised",
-        task,
-        data: { code: e.code, message: e.message, role, ...e.detail },
-      });
-      throw e;
+      try {
+        remote = this.remoteHost(wave, t);
+      } catch (e) {
+        this.noteRefusal(key);
+        const err =
+          e instanceof SpawnError
+            ? e
+            : new SpawnError("LAUNCH_FAILED", e instanceof Error ? e.message : String(e));
+        await this.append(wave, {
+          type: "alarm_raised",
+          task,
+          data: { code: err.code, message: err.message, role, host: t.host, ...err.detail },
+        });
+        throw err;
+      }
     }
     this.spawning.add(key);
     try {
@@ -1170,15 +1228,21 @@ export class Daemon {
           .readAll()
           .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
           .length + 1;
+      const deps = this.spawnDeps(wave);
+      let req = { wave: w, task, role, attempt, ...pipeline };
+      if (remote !== undefined) {
+        const r = await this.remoteSpawn(wave, task, remote, deps);
+        req = { ...req, wave: r.wave };
+        Object.assign(deps, r.deps);
+      }
       // spawnAgent journals its own refusals.
-      const res = await spawnAgent(
-        { wave: w, task, role, attempt, ...pipeline },
-        this.spawnDeps(wave),
-      );
+      const res = await spawnAgent(req, deps);
+      const host = deps.host;
+      const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
-          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path),
+          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel),
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
       }
@@ -1229,8 +1293,9 @@ export class Daemon {
   }
 
   /**
-   * Interrupt an agent's session: the configured hook, else Escape into the agent's workspace.
-   * Resolves false when there is nothing to interrupt with; rejects when the interrupt failed.
+   * Interrupt an agent's session: the configured hook, else Escape into the agent's workspace
+   * (on the host it runs on). Resolves false when there is nothing to interrupt with; rejects
+   * when the interrupt failed.
    */
   private async interruptAgent(agentId: string): Promise<boolean> {
     if (this.opts.interrupt !== undefined) {
@@ -1238,11 +1303,10 @@ export class Daemon {
       return true;
     }
     if (this.opts.spawner === undefined) return false;
-    const ws =
-      this.supervised.get(agentId)?.workspace ??
-      this.spawnedRecord((e) => e.data.agent_id === agentId)?.workspace;
+    const a = this.supervised.get(agentId);
+    const ws = a?.workspace ?? this.spawnedRecord((e) => e.data.agent_id === agentId)?.workspace;
     if (typeof ws !== "string") return false;
-    await this.host.sendKeys(ws, "Escape");
+    await (a?.host ?? this.host).sendKeys(ws, "Escape");
     return true;
   }
 
@@ -1269,6 +1333,11 @@ export class Daemon {
         const root = (d as { repo?: unknown }).repo;
         const repo = typeof root === "string" ? root : log.record.wave?.repo;
         if (repo === undefined) continue;
+        if (typeof (d as { target?: unknown }).target === "string") {
+          // Trusted on the box, in its own ~/.claude.json: read there, beside the queue.
+          this.checkRemoteTrust(wave, d, repo);
+          continue;
+        }
         cfg ??= readClaudeJson(this.claudeJsonPath);
         if (!isRepoTrusted(cfg, expandHome(repo))) continue;
         await this.resolveNow(wave, d.decision_id, {
@@ -1276,6 +1345,57 @@ export class Daemon {
           by: "claude-trust-dialog",
         });
       }
+    }
+  }
+
+  /**
+   * A remote repo_untrusted decision resolves itself once the box's own `~/.claude.json` trusts
+   * the repo (the owner accepted the dialog there). Throttled per decision; the ssh read runs
+   * beside the serial queue and only the resolution is queued.
+   */
+  private checkRemoteTrust(wave: WaveId, d: DecisionRecord, repo: string): void {
+    const now = (this.opts.now ?? Date.now)();
+    const c = this.trustChecks.get(d.decision_id);
+    if (
+      c?.inFlight === true ||
+      (c !== undefined && now - c.at < DAEMON_DEFAULTS.remote_trust_check_ms)
+    )
+      return;
+    const remote = this.remoteForDecision(wave, d);
+    if (remote === undefined) return;
+    const entry = { at: now, inFlight: true };
+    this.trustChecks.set(d.decision_id, entry);
+    void remote
+      .readTrust()
+      .then((cfg) => {
+        if (!isRepoTrusted(cfg, repo) || !this.running) return;
+        return this.enqueue(async () => {
+          const cur = this.waves.get(wave)?.record.decisions[d.decision_id];
+          if (cur === undefined || cur.resolved !== undefined) return;
+          await this.resolveNow(wave, d.decision_id, {
+            answer: "trusted",
+            by: "claude-trust-dialog",
+          });
+        });
+      })
+      .catch((e: unknown) =>
+        this.log(`trust check ${d.decision_id}: ${e instanceof Error ? e.message : String(e)}`),
+      )
+      .finally(() => {
+        entry.inFlight = false;
+      });
+  }
+
+  /** The remote host a decision's `target` names, through its task's host (null: none now). */
+  private remoteForDecision(wave: WaveId, d: DecisionRecord): RemoteHost | undefined {
+    const target = (d as { target?: unknown }).target;
+    const def = d.task !== null ? this.waves.get(wave)?.record.wave?.tasks[d.task] : undefined;
+    if (def === undefined || def.host === "local") return undefined;
+    try {
+      const h = this.remoteHost(wave, def);
+      return h.spec.target === target ? h : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1348,6 +1468,296 @@ export class Daemon {
     };
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Remote hosts (T15): ssh + tmux on a second machine, broker through a reverse tunnel.
+  // -------------------------------------------------------------------------------------------
+
+  /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
+  private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
+    const spec = resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts);
+    const key = JSON.stringify(spec);
+    let h = this.remotes.get(key);
+    if (h === undefined) {
+      const make =
+        this.opts.spawner?.remoteHost ??
+        ((s: RemoteHostSpec) => new SshTmuxHost(s, this.opts.spawner?.remoteExec ?? realExec));
+      h = make(spec);
+      this.remotes.set(key, h);
+    }
+    return h;
+  }
+
+  /**
+   * Remote hosts of the wave's unfinished tasks (queued, parked or running): keep their tunnels
+   * up and their checks fresh. Running agents need the check too: their reap waits while their
+   * tunnel is down.
+   */
+  private checkTunnels(wave: WaveId): void {
+    const rec = this.waves.get(wave)?.record;
+    for (const t of rec?.state?.tasks ?? []) {
+      const def = rec?.wave?.tasks[t.id];
+      if (
+        def === undefined ||
+        def.host === "local" ||
+        t.stage === "done" ||
+        t.stage === "cancelled"
+      )
+        continue;
+      let h: RemoteHost;
+      try {
+        h = this.remoteHost(wave, def);
+      } catch {
+        continue; // refused (and journaled) when its spawn is attempted
+      }
+      const { target, tunnel } = h.spec;
+      const port = tunnel.remote_port;
+      const key = forwardOf(h);
+      if (tunnel.supervise && !this.tunnels.has(target, port)) {
+        this.tunnelChecks.poke(key, () => this.startTunnel(h));
+        continue;
+      }
+      this.tunnelChecks.poke(key, async (): Promise<TunnelStatus> => {
+        // Only the supervised ssh having stayed up says the port is the tunnel: a forward whose
+        // ssh keeps failing is down whatever answers there (the box's own broker, a stale
+        // forward), and one still coming up is not known either way yet.
+        const health = tunnel.supervise ? this.tunnels.health(target, port) : "ok";
+        if (health === "failing") {
+          this.tunnelDownWhy.set(key, "its ssh keeps exiting");
+          return "down";
+        }
+        if (health === "settling") return "unknown";
+        if (await h.tunnelUp()) return "up";
+        this.tunnelDownWhy.delete(key);
+        return "down";
+      });
+    }
+  }
+
+  /**
+   * Start a supervised forward, unless something already answers on the box's port: before
+   * the tunnel exists, a listener there is not it (the box's own broker, a forward left by an
+   * earlier daemon), and agents sent to it would never reach this broker. sshd binds a loopback
+   * forward on IPv4 and IPv6, so a listener on one of them does not make ssh's forward fail.
+   */
+  private async startTunnel(h: RemoteHost): Promise<TunnelStatus> {
+    const { target, tunnel } = h.spec;
+    const key = forwardOf(h);
+    if (await h.tunnelUp()) {
+      this.tunnelDownWhy.set(key, `port ${tunnel.remote_port} on ${target} is already in use`);
+      return "down";
+    }
+    try {
+      this.tunnels.ensure(target, tunnel.remote_port, this.opts.brokerUrl);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      this.log(`tunnel ${target}: ${why}`);
+      this.tunnelDownWhy.set(key, why);
+      return "down";
+    }
+    this.tunnelDownWhy.delete(key);
+    return "unknown";
+  }
+
+  /**
+   * True (and the reason kept for why_waiting) when the task's remote host has no working
+   * tunnel: its spawn waits. Only new spawns wait; running agents are never touched.
+   */
+  private parkOnTunnel(wave: WaveId, task: string): boolean {
+    const key = `${wave}/${task}`;
+    const def = this.waves.get(wave)?.record.wave?.tasks[task];
+    let target: string | undefined;
+    let forward: string | undefined;
+    if (def !== undefined && def.host !== "local") {
+      try {
+        const h = this.remoteHost(wave, def);
+        target = h.spec.target;
+        forward = forwardOf(h);
+      } catch {}
+    }
+    const status = forward !== undefined ? this.tunnelChecks.status(forward) : "up";
+    const before = this.parked.get(key);
+    const reason =
+      status === "up"
+        ? undefined
+        : status === "down"
+          ? `tunnel down to ${target}`
+          : `checking tunnel to ${target}`;
+    if (reason === undefined) this.parked.delete(key);
+    else this.parked.set(key, reason);
+    if (reason !== before) void this.enqueue(() => this.publishState(wave));
+    return reason !== undefined;
+  }
+
+  /** The wave's unfinished tasks whose remote host uses the forward `key`, with that host. */
+  private tasksOnForward(wave: WaveId, key: string): { ids: string[]; host?: RemoteHost } {
+    const rec = this.waves.get(wave)?.record;
+    const ids: string[] = [];
+    let host: RemoteHost | undefined;
+    for (const t of rec?.state?.tasks ?? []) {
+      const def = rec?.wave?.tasks[t.id];
+      if (def === undefined || def.host === "local") continue;
+      if (t.stage === "done" || t.stage === "cancelled") continue;
+      try {
+        const h = this.remoteHost(wave, def);
+        if (forwardOf(h) !== key) continue;
+        ids.push(t.id);
+        host ??= h;
+      } catch {}
+    }
+    return host !== undefined ? { ids, host } : { ids };
+  }
+
+  /** A tunnel check changed: journal a drop for the waves on that forward, then re-admit. */
+  private async onTunnel(key: string, status: TunnelStatus): Promise<void> {
+    if (!this.running) return;
+    for (const wave of this.waves.keys()) {
+      const { ids, host } = this.tasksOnForward(wave, key);
+      if (host === undefined) continue;
+      if (status === "down") {
+        const { target, tunnel } = host.spec;
+        const why = this.tunnelDownWhy.get(key);
+        await this.append(wave, {
+          type: "alarm_raised",
+          data: {
+            code: "TUNNEL_DOWN",
+            message: `tunnel down to ${target} (port ${tunnel.remote_port}${why !== undefined ? `: ${why}` : ""}): spawns on it wait; running agents are left alone`,
+            host: host.spec.name,
+            target,
+            remote_port: tunnel.remote_port,
+            ...(why !== undefined ? { reason: why } : {}),
+            tasks: ids,
+          },
+        });
+      }
+      await this.publishState(wave);
+    }
+    await this.tickNow();
+  }
+
+  /**
+   * A supervised tunnel's ssh exited (it restarts with backoff). Journaled on the waves that use
+   * the forward, log-spaced (the 1st, 2nd, 4th, 8th … exit of a streak) so a flapping tunnel
+   * cannot flood the journal; from the 2nd exit in a row the forward is failing (TunnelHealth),
+   * and its check is re-run at once so spawns on it park.
+   */
+  private onTunnelExit(x: TunnelExit): void {
+    if (!this.running) return;
+    const key = tunnelKey(x.target, x.remotePort);
+    this.tunnelChecks.invalidate(key);
+    if ((x.streak & (x.streak - 1)) !== 0) return;
+    const failing = x.streak >= 2;
+    void this.enqueue(async () => {
+      for (const wave of this.waves.keys()) {
+        const { ids, host } = this.tasksOnForward(wave, key);
+        if (host === undefined) continue;
+        await this.append(wave, {
+          type: "alarm_raised",
+          data: {
+            code: failing ? "TUNNEL_FORWARD_FAILED" : "TUNNEL_EXITED",
+            message: failing
+              ? `the tunnel to ${x.target} keeps failing (port ${x.remotePort} on the box may be taken): spawns on it wait`
+              : `the tunnel to ${x.target} exited; restarting it`,
+            host: host.spec.name,
+            target: x.target,
+            remote_port: x.remotePort,
+            exit: x.code,
+            stderr: x.stderr.trim().slice(-DAEMON_DEFAULTS.alarm_stderr_max_chars),
+            restarts: x.streak,
+            tasks: ids,
+          },
+        });
+      }
+    });
+  }
+
+  /**
+   * The remote half of a spawn's setup: the box's clone must exist (else a
+   * `remote_repo_missing` decision), its folder trust is mirrored (trust bits only) for the
+   * trust check, and spawn runs with the box's repo, worktree root, hooks, broker URL and a lock
+   * directory per target (`$VOLLEYD_HOME/hosts/<target>/locks`: the lock is keyed by target and
+   * worktree path).
+   */
+  private async remoteSpawn(
+    wave: WaveId,
+    task: string,
+    remote: RemoteHost,
+    deps: SpawnDeps,
+  ): Promise<{ wave: NonNullable<WaveLog["record"]["wave"]>; deps: Partial<SpawnDeps> }> {
+    const log = this.waves.get(wave) as WaveLog;
+    const w = log.record.wave as NonNullable<WaveLog["record"]["wave"]>;
+    const { spec } = remote;
+    const journal = deps.journal;
+    const decisionId = `remote_repo_missing-${createHash("sha256").update(`${spec.target}:${spec.repo}`).digest("hex").slice(0, 12)}`;
+    const open = log.record.state?.open_decisions ?? [];
+    // An ssh failure is not a missing clone: it throws a transient LAUNCH_FAILED (backed off).
+    const exists = await remote.repoExists().catch(async (e: unknown) => {
+      const err =
+        e instanceof SpawnError
+          ? e
+          : new SpawnError("LAUNCH_FAILED", e instanceof Error ? e.message : String(e));
+      await this.append(wave, {
+        type: "alarm_raised",
+        task,
+        data: { code: err.code, message: err.message, role: "implementer", ...err.detail },
+      });
+      throw err;
+    });
+    if (!exists) {
+      if (!open.includes(decisionId)) {
+        await this.append(wave, {
+          type: "decision_opened",
+          task,
+          data: {
+            decision_id: decisionId,
+            kind: "remote_repo_missing",
+            wave,
+            task,
+            question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
+            options: ["retry", "cancel"],
+            pointers: {},
+            opened_at: new Date().toISOString(),
+            host: spec.name,
+            target: spec.target,
+            repo: spec.repo,
+          },
+        });
+      }
+      throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
+        host: spec.name,
+        target: spec.target,
+        repo: spec.repo,
+      });
+    }
+    if (open.includes(decisionId)) {
+      await this.append(wave, {
+        type: "decision_resolved",
+        task,
+        data: { decision_id: decisionId, answer: "found", by: DAEMON_AGENT_ID },
+      });
+    }
+    const lockHome = join(this.opts.home, "hosts", spec.target);
+    mkdirSync(lockHome, { recursive: true, mode: 0o700 });
+    return {
+      wave: { ...w, repo: spec.repo },
+      deps: {
+        host: remote,
+        lockHome,
+        brokerUrl: remote.brokerUrl,
+        hooksDir: remote.hooksDir,
+        // Trust is the box's own: read from its ~/.claude.json at every spawn, never mirrored.
+        remoteTrust: { host: spec.name, target: spec.target, read: () => remote.readTrust() },
+        tunables: { ...deps.tunables, worktree_root: spec.worktree_root },
+        // cleanup reaches the box again from the journal: record where the agent runs.
+        journal: (ev) =>
+          journal(
+            ev.type === "agent_spawned"
+              ? { ...ev, data: { ...ev.data, remote: { target: spec.target, repo: spec.repo } } }
+              : ev,
+          ),
+      },
+    };
+  }
+
   /**
    * Keep watching a spawned agent; retire it once it is gone: at once on `done`/`failed`, and on
    * `reaped` (its LWT, which a network blip also fires) only after a grace period in which no
@@ -1359,6 +1769,8 @@ export class Daemon {
     role: Role,
     outcome: SpawnOutcome,
     lock: string,
+    host: Host,
+    tunnel?: string,
   ): void {
     const { agentId, watch } = outcome;
     if (!this.running) {
@@ -1369,6 +1781,8 @@ export class Daemon {
       wave,
       task,
       role,
+      host,
+      ...(tunnel !== undefined ? { tunnel } : {}),
       namespace: watch.namespace,
       watch,
       lockPath: lock,
@@ -1388,13 +1802,11 @@ export class Daemon {
       a.pendingReap = holdReap(agentId, this.now(), g.ms, g.wake);
       this.scheduleReap(agentId, a);
     };
-    const host = this.host;
     this.screens.track({
       agentId,
       namespace: watch.namespace,
       workspace: outcome.workspace,
       host,
-      source: host.name === "local" ? "cmux" : "tmux",
       intervalS: () => this.config.effective(wave).screen_tail_interval_s,
     });
     const check = (type: string) => {
@@ -1408,6 +1820,7 @@ export class Daemon {
       }
       clearTimeout(a.reapTimer);
       a.reapTimer = undefined;
+      a.reapDeferred = false;
       a.pendingReap = undefined;
       a.suppressedReap = undefined;
       a.liveStatus = type;
@@ -1460,7 +1873,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
       },
       {
-        exec: this.host.exec,
+        exec: a.host.exec,
         clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
         journal: (ev) => this.append(a.wave, ev),
         releaseLock: (path) => {
@@ -1483,6 +1896,13 @@ export class Daemon {
     const log = this.waves.get(wave) as WaveLog;
     d = new PipelineDriver(wave, {
       exec: this.host.exec,
+      // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
+      execFor: (task) => {
+        const t = log.record.wave?.tasks[task];
+        return t === undefined || t.host === "local"
+          ? this.host.exec
+          : this.remoteHost(wave, t).exec;
+      },
       home: this.opts.home,
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
@@ -1626,6 +2046,27 @@ export class Daemon {
     if (this.supervised.get(agentId) !== a || pending === undefined) return true;
     if (a.watch.state.status?.type !== "reaped") return true;
     if (reapVerdict(pending, this.now()) !== "accept") return false;
+    // A remote agent cut off by its tunnel is still working on the box: no heartbeat can arrive
+    // until the tunnel is back, so its reap is held for another grace while it is down.
+    if (a.tunnel !== undefined && this.tunnelChecks.status(a.tunnel) !== "up") {
+      if (a.reapDeferred !== true) {
+        a.reapDeferred = true;
+        void this.enqueue(() =>
+          this.append(a.wave, {
+            type: "alarm_raised",
+            task: a.task,
+            data: {
+              code: "REAP_DEFERRED",
+              message: `${agentId} lost its broker connection while its tunnel is down: not retired until the tunnel is back`,
+              agent_id: agentId,
+              forward: a.tunnel,
+            },
+          }),
+        );
+      }
+      a.pendingReap = { ...pending, until: this.now() + this.reapGrace(a.wave).ms };
+      return false;
+    }
     clearTimeout(a.reapTimer);
     a.reapTimer = undefined;
     a.pendingReap = undefined;
@@ -1650,6 +2091,7 @@ export class Daemon {
         a.reapTimer = undefined;
         a.pendingReap = undefined;
         a.suppressedReap = a.watch.state.status?.wall_time;
+        a.reapDeferred = false;
         void this.enqueue(() =>
           this.append(a.wave, {
             type: "reap_suppressed",
@@ -1836,17 +2278,17 @@ export class Daemon {
 
   /** One silence probe: a bounded screen read beside the queue, folded back in through it. */
   private async probeScreen(agentId: string, a: Supervised): Promise<void> {
-    const screen = await this.readScreenBounded(a.workspace);
+    const screen = await this.readScreenBounded(a.workspace, a.host);
     await this.enqueue(async () => {
       if (this.supervised.get(agentId) !== a) return;
       await this.applyLiveness(agentId, a, observeScreen(a.liveness, { now: this.now(), screen }));
     });
   }
 
-  private readScreenBounded(workspace: string): Promise<string | null> {
+  private readScreenBounded(workspace: string, host: Host = this.host): Promise<string | null> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(null), DAEMON_DEFAULTS.screen_read_timeout_ms);
-      this.host.readScreen(workspace, DAEMON_DEFAULTS.screen_lines).then(
+      host.readScreen(workspace, DAEMON_DEFAULTS.screen_lines).then(
         (s) => {
           clearTimeout(timer);
           resolve(s);
@@ -2041,7 +2483,7 @@ export class Daemon {
       allowed: boolean,
       cls: typeof UNVERIFIED_CLASS | typeof LIMITED_CLASS = UNVERIFIED_CLASS,
     ) => {
-      const raw = await this.readScreenBounded(a.workspace);
+      const raw = await this.readScreenBounded(a.workspace, a.host);
       const screen = raw !== null ? this.saveCapture(wave, agentId, raw) : undefined;
       await this.serial(async () => {
         if (this.supervised.get(agentId) !== a) return;
@@ -2079,7 +2521,7 @@ export class Daemon {
         }),
       );
       const r = await switchModel({
-        host: this.host,
+        host: a.host,
         workspace: a.workspace,
         watch: a.watch,
         model,
@@ -2259,8 +2701,21 @@ export class Daemon {
           minted: t.spawned.credentials === "minted",
         },
         lockFile ?? "",
+        ...this.hostOfTask(wave, t.task),
       );
     });
+  }
+
+  /** The host (and a remote one's forward) a task's agents run on; local when unresolvable. */
+  private hostOfTask(wave: WaveId, task: TaskId): [Host, string?] {
+    const def = this.waves.get(wave)?.record.wave?.tasks[task];
+    if (def === undefined || def.host === "local") return [this.host];
+    try {
+      const remote = this.remoteHost(wave, def);
+      return [remote, forwardOf(remote)];
+    } catch {
+      return [this.host];
+    }
   }
 
   /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
@@ -2300,10 +2755,25 @@ export class Daemon {
         error: e instanceof Error ? e.message : String(e),
         result: {
           code: e instanceof SpawnError ? e.code : "SPAWN_FAILED",
-          lock: lockPath(this.opts.home, worktreePath(eff.worktree_root, wave, task, role)),
+          lock: this.lockFor(wave, task, role, eff.worktree_root),
         },
       };
     }
+  }
+
+  /** The worktree lock a spawn of `task`/`role` takes (per target for a remote host). */
+  private lockFor(wave: WaveId, task: string, role: Role, worktreeRoot: string): string {
+    const def = this.waves.get(wave)?.record.wave?.tasks[task];
+    if (def !== undefined && def.host !== "local") {
+      try {
+        const { spec } = this.remoteHost(wave, def);
+        return lockPath(
+          join(this.opts.home, "hosts", spec.target),
+          worktreePath(spec.worktree_root, wave, task, role),
+        );
+      } catch {}
+    }
+    return lockPath(this.opts.home, worktreePath(worktreeRoot, wave, task, role));
   }
 
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
@@ -2335,8 +2805,14 @@ export class Daemon {
     const held = this.heldBack.get(wave) ?? [];
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
+      const host = rec.wave?.tasks[t.id]?.host;
+      if (host !== undefined && host !== "local") t.host = host;
+    }
+    for (const t of state.tasks) {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
-      if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
+      const parked = this.parked.get(`${wave}/${t.id}`);
+      if (parked !== undefined) t.why_waiting = parked;
+      else if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
     }
     for (const t of state.tasks) {
@@ -2844,7 +3320,7 @@ export class Daemon {
       };
     const refused = guardMutation(state, by, "resolve");
     if (refused !== null) return { ok: false, error: refused };
-    const trust = this.trustAnswer(wave, id, p.answer);
+    const trust = await this.trustAnswer(wave, id, p.answer);
     if (trust !== null) return { ok: false, error: trust };
     const r = await this.resolveNow(wave, id, {
       answer: p.answer,
@@ -2883,20 +3359,28 @@ export class Daemon {
 
   /**
    * The owner's explicit `trust` answer to an open `repo_untrusted` decision records the dialog's
-   * acceptance in `~/.claude.json` (that key only) before the decision resolves. Returns an error
-   * message when that write fails, else null. No other answer, and nothing else, ever writes it.
+   * acceptance in `~/.claude.json` (that key only) before the decision resolves: the daemon
+   * machine's, or for a decision with a `target` the remote host's own, over ssh. Returns an
+   * error message when that write fails, else null. No other answer, and nothing else, ever
+   * writes it.
    */
-  private trustAnswer(wave: WaveId, id: string, answer: string): string | null {
+  private async trustAnswer(wave: WaveId, id: string, answer: string): Promise<string | null> {
     const d = this.waves.get(wave)?.record.decisions[id];
     if (d?.kind !== "repo_untrusted" || d.resolved !== undefined) return null;
     if (answer.trim().toLowerCase() !== "trust" || this.opts.spawner === undefined) return null;
     const root = (d as { repo?: unknown }).repo;
     if (typeof root !== "string") return `decision '${id}' names no repo to trust`;
+    const target = (d as { target?: unknown }).target;
     try {
-      recordRepoTrust(this.claudeJsonPath, root);
+      if (typeof target === "string") {
+        const remote = this.remoteForDecision(wave, d);
+        if (remote === undefined) return `no configured host reaches ${target} to trust ${root}`;
+        await remote.recordTrust(root);
+      } else recordRepoTrust(this.claudeJsonPath, root);
       return null;
     } catch (e) {
-      return `recording trust for ${root}: ${e instanceof Error ? e.message : String(e)}`;
+      const where = typeof target === "string" ? ` on ${target}` : "";
+      return `recording trust for ${root}${where}: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
@@ -3355,3 +3839,6 @@ function loadWaves(home: string): WaveLog[] {
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
     .map(({ log }) => log);
 }
+
+/** A remote host's forward (tunnelKey): what its tunnel and tunnel check are keyed by. */
+const forwardOf = (h: RemoteHost) => tunnelKey(h.spec.target, h.spec.tunnel.remote_port);

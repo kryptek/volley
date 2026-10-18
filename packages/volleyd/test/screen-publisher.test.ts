@@ -5,6 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
+import { SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import { retireAgent } from "../src/retire";
 import {
@@ -156,6 +157,41 @@ describe("ScreenPublisher", () => {
     await publisher.tick();
     expect(captures[1]?.changed).toBe(true);
     expect(published).toEqual([SCREEN]);
+  });
+
+  it("a tmux-hosted agent publishes source: 'tmux' (the host's capture mechanism)", async () => {
+    const seen = await collect(reader, SCREEN);
+    const capture = readFileSync(join(FIXTURES, "tmux-capture.txt"), "utf-8");
+    const remote = fakeExec().on(["ssh"], (_argv, opts) =>
+      opts.remote?.steps[0]?.argv[1] === "capture-pane" ? { stdout: capture } : {},
+    );
+    const box = new SshTmuxHost(
+      {
+        name: "box",
+        target: "dev@box",
+        repo: "/src/r",
+        worktree_root: "/wt",
+        volley_dir: "/src/volley",
+        tunnel: { remote_port: 21883, supervise: true },
+      },
+      remote.exec,
+    );
+    const { source: _cmux, ...rest } = target();
+    publisher.track({ ...rest, workspace: "w1-T1-implementer", host: box });
+    await publisher.tick();
+    await until(() => seen.length === 1);
+    const msg = JSON.parse(seen[0] as string);
+    expect(msg.payload).toMatchObject({ workspace: "w1-T1-implementer", source: "tmux" });
+    expect(msg.payload.lines.at(-1)).toBe("✳ Sautéing… (34s · ↓ 2.1k tokens · esc to interrupt)");
+    expect(schemaErrors("screen.schema.json", msg)).toEqual([]);
+    expect(remote.calls[0]?.opts.remote?.steps[0]?.argv).toEqual([
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "=w1-T1-implementer:",
+      "-S-60",
+    ]);
   });
 
   it("reads the interval on every capture (a config change applies without restart)", async () => {

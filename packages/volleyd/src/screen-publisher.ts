@@ -33,8 +33,8 @@ export interface ScreenTarget {
   namespace: string;
   workspace: string;
   host: Host;
-  /** Capture mechanism for `payload.source`: `cmux` locally, `tmux` on remote hosts. */
-  source: string;
+  /** Capture mechanism for `payload.source`; default the host's (`cmux` local, `tmux` remote). */
+  source?: string;
   /** Seconds between captures; read on every capture, so a config change applies at once. */
   intervalS: () => number;
 }
@@ -186,7 +186,7 @@ export class ScreenPublisher {
         captured_at: new Date(finished).toISOString(),
         workspace: target.workspace,
         hash: screenHash(lines),
-        source: target.source,
+        source: target.source ?? target.host.screenSource ?? "cmux",
       };
       // An agent untracked mid-read (retired) publishes nothing: its topic is being cleared.
       if (tail.hash !== a.lastHash && this.agents.get(target.agentId) === a) {

@@ -55,11 +55,18 @@ export function renderBrief(template: string, vars: BriefVars): string {
   });
 }
 
-/** The `extra` section from `<repoRoot>/.volley/brief-extra.md` (kept out of git), or "". */
+/** `<repoRoot>/.volley/brief-extra.md`: repository notes for every brief (kept out of git). */
+export const briefExtraPath = (repoRoot: string) => join(repoRoot, ".volley", "brief-extra.md");
+
+/** The `extra` section from the local `<repoRoot>/.volley/brief-extra.md`, or "". */
 export function briefExtra(repoRoot: string): string {
-  const file = join(repoRoot, ".volley", "brief-extra.md");
-  if (!existsSync(file)) return "";
-  const text = readFileSync(file, "utf-8").trim();
+  const file = briefExtraPath(repoRoot);
+  return briefExtraFrom(existsSync(file) ? readFileSync(file, "utf-8") : null);
+}
+
+/** The `extra` section from the notes file's text (null: no file), or "". */
+export function briefExtraFrom(content: string | null): string {
+  const text = (content ?? "").trim();
   return text === "" ? "" : `\n## Repository notes\n\n${text}\n`;
 }
 

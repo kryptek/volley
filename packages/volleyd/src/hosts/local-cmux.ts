@@ -14,6 +14,7 @@ import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "./host";
  */
 export class LocalCmuxHost implements Host {
   readonly name = "local";
+  readonly screenSource = "cmux";
   constructor(readonly exec: ExecFn) {}
 
   prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult> {

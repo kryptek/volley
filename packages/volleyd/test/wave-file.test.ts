@@ -78,6 +78,54 @@ describe("parseWaveFile", () => {
     ]);
   });
 
+  it("normalises an inline ssh host to its name plus the spec, and checks it", () => {
+    const w = parseWaveFile(
+      `${HEADER}tasks:
+  A: { issue: 1, host: { type: ssh, name: box, tunnel: { remote_port: 21883 } } }
+  B: { issue: 2, host: { type: ssh, target: dev@box.lan, repo: /src/r, volley_dir: /src/volley } }
+`,
+    );
+    expect(w.tasks.A?.host).toBe("box");
+    expect(w.tasks.A?.host_spec).toEqual({
+      type: "ssh",
+      name: "box",
+      tunnel: { remote_port: 21883 },
+    });
+    expect(w.tasks.B?.host).toBe("dev@box.lan");
+    expect(w.tasks.B?.host_spec?.repo).toBe("/src/r");
+
+    // Without a name there is no config entry to inherit from.
+    expect(
+      errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, target: box } }\n`),
+    ).toEqual([
+      "tasks.A.host.repo: required for an inline host without a name",
+      "tasks.A.host.volley_dir: required for an inline host without a name",
+    ]);
+    // A target can never be read as an ssh option; paths are absolute; no unknown keys.
+    expect(
+      errorsOf(
+        `${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, name: b, target: "-oProxyCommand=x" } }\n`,
+      ),
+    ).toEqual([expect.stringMatching(/^tasks\.A\.host\.target: must match pattern/)]);
+    expect(
+      errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, name: b, repo: src/r } }\n`),
+    ).toEqual([expect.stringMatching(/^tasks\.A\.host\.repo: must match pattern/)]);
+    expect(
+      errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, name: b, shell: zsh } }\n`),
+    ).toEqual([expect.stringMatching(/^tasks\.A\.host/)]);
+    expect(
+      errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, name: local } }\n`),
+    ).toEqual([expect.stringMatching(/^tasks\.A\.host\.name/)]);
+    // A nameless inline host is named by its target, and `local` is never an ssh host.
+    expect(
+      errorsOf(
+        `${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, target: local, repo: /src/r, volley_dir: /src/v } }\n`,
+      ),
+    ).toEqual([
+      expect.stringMatching(/^tasks\.A\.host\.target: `local` is the supervisor's own host/),
+    ]);
+  });
+
   it("rejects an unknown after target with a path-qualified error", () => {
     const errs = errorsOf(
       `${HEADER}tasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n  T3: { issue: 3, after: [T1, T9] }\n`,

@@ -635,6 +635,24 @@ describe("pipeline: I/O never blocks the queue", () => {
   });
 });
 
+describe("pipeline: where the checks run", () => {
+  it("a task's git / gh checks go through its own exec when it has one (a remote host)", async () => {
+    const used: string[][] = [];
+    h = pipelineHarness({
+      execFor: (task, exec) => async (argv, opts) => {
+        used.push([task, ...argv.slice(0, 3)]);
+        return exec(argv, opts);
+      },
+    });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(stage()).toBe("spec_review");
+    expect(used.length).toBe(h.calls.length);
+    expect(used.every((u) => u[0] === "T1")).toBe(true);
+  });
+});
+
 describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
   const ok = { killSwitch: false, running: true, admission: 1, used: 0, budget: 4 };
   it("holds on the kill switch, a wave not running, a closed admission or a spent budget", () => {

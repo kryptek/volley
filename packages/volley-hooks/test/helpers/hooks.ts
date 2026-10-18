@@ -51,11 +51,17 @@ export function makeWorkdir(agent?: Record<string, unknown>): string {
   return dir;
 }
 
+/** An empty VOLLEY_AUTH_DIR, made once per test process. */
+let emptyAuthDir: string | undefined;
+
 /**
  * The parent environment minus anything that would leak the developer's own session into a
- * hook under test (Claude Code / cmux / Volley variables), plus `extra`.
+ * hook under test (Claude Code / cmux / Volley variables), plus `extra`. VOLLEY_AUTH_DIR
+ * defaults to an empty temp dir, so a coordinator-mode hook never reads (or sends to a test
+ * broker) the host's real `<mosquitto etc>/volley/coordinator.json`.
  */
 export function hookEnv(extra: Record<string, string> = {}): Record<string, string> {
+  emptyAuthDir ??= mkdtempSync(join(tmpdir(), "volley-hooks-noauth-"));
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
@@ -63,7 +69,7 @@ export function hookEnv(extra: Record<string, string> = {}): Record<string, stri
     env[k] = v;
   }
   // Aedes speaks MQTT 3.1.1 only.
-  return { VOLLEY_HOOKS_MQTT_VERSION: "4", ...env, ...extra };
+  return { VOLLEY_HOOKS_MQTT_VERSION: "4", VOLLEY_AUTH_DIR: emptyAuthDir, ...env, ...extra };
 }
 
 export interface HookRun {

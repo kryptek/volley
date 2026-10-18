@@ -2,13 +2,13 @@
 
 The Desk: an infinite canvas of live wave and agent windows, driven straight off the Volley MQTT topics. There's no backend: the browser subscribes to the broker over WebSocket. The approved interactive prototype is the visual and interaction spec, and this package ports it piece by piece.
 
-**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, and steering (the chat glyphs) with delivery acks. The backgrounds, the dock and settings come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
-**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, settings, and the look (backgrounds, window styles, effects, tethers, the dock). Steering comes in a later task. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
+**Status:** `volley dash` opens the Desk. It ships the canvas (pan and zoom, touch and keyboard), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, steering (the chat glyphs) with delivery acks, settings, and the look (backgrounds, window styles, effects, tethers, the dock). It works at phone width, without WebGL, with reduced motion, and by keyboard and screen reader. The classic dashboard (`packages/volley-dash`) is deprecated and stays reachable as `volley dash --legacy` until it is removed.
 
 ## Run it
 
 ```sh
 bun install                         # from the repo root
+volley dash                         # = bun run dev in this package (see volley-cli's README for flags)
 cd packages/volley-desk
 bun run dev                         # http://localhost:5174 — live, ws://localhost:9001
 open "http://localhost:5174/?demo=1"   # demo mode: sample data, no broker
@@ -27,6 +27,19 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 - Drag empty space to pan. A plain wheel or two-finger scroll also pans.
 - Zoom around the cursor with ⌘/Ctrl + wheel or a trackpad pinch. Scale is clamped to 0.3–1.6.
 - Drag a title bar to move a window. The move is divided by the zoom, so the window tracks the pointer. A pointer-down anywhere on a window brings it to the front.
+- Touch: one finger on empty canvas pans; two fingers pinch-zoom around their midpoint and pan with it, on empty canvas or over a window (anywhere but its title bar, a slider or a text field). Lifting one finger carries on panning with the other, without a jump, if it is on empty canvas.
+
+### Keyboard
+
+| Key | Does |
+|---|---|
+| Tab | Moves through the canvas, then the windows (their buttons, tabs and fields), the top bar and the dock |
+| Arrow keys | Pan, while the canvas (the `Desk canvas` region) has focus |
+| `+` / `=`, `-` | Zoom in / out around the centre of the screen |
+| `f` | Arrange & fit |
+| Escape | Closes the top dialog: the settings modal, then the steering panel, then Appearance |
+
+`+`, `-` and `f` are ignored while typing in a text field, and keys with ⌘, Ctrl or Alt are left to the browser. The settings modal keeps Tab inside itself until it closes, and gives focus back to the gear.
 
 ### Arrange & fit
 
@@ -34,10 +47,30 @@ Each visible wave forms a cluster: the wave window with its agents to the right,
 
 Auto-arrange is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
 
+## Phone width
+
+Below 700 px (`NARROW_PX` in `useViewport.ts`) the Desk starts at scale 0.5 (offset 8, 70, as in the prototype), the top bar drops its counts but keeps the needs-you pill and its toggles, and every window is clamped to `min(460, 100vw - 24)`. The Appearance panel becomes a bottom sheet above the dock, so the dock stays reachable; the steering bar, the settings modal (one column) and the Needs-you actions (wrapping) fit the viewport. Rotating or resizing across the threshold switches layouts live.
+
+## Without WebGL
+
+On load the Desk asks a canvas for a WebGL context (`hasWebGL` in `look/Background.tsx`). Without one, the picker lists only the backgrounds that work without WebGL (Grid Motion, Shape Grid and None) with a note, a saved WebGL background renders as None, and the Liquid glass window style renders as Frosted glass and is not offered. The saved look is left alone, so the same browser profile on a machine with WebGL keeps its picks. The background's error boundary stays as the last line (a context lost later, or a driver that fails to compile a shader).
+
+## Reduced motion
+
+With `prefers-reduced-motion: reduce` the new-window entrance, the waiting Clawd's hop, the Needs-you pulse (a steady ring instead), the terminal caret, the tethers' flow and the arrange animation all stop (`styles/responsive.css` gathers the prototype's rules), and the narration line drops `DecryptedText` / `ShinyText` for plain text whatever the Appearance setting.
+
+## Accessibility
+
+Windows are `section`s named by their wave, task and role; the agent tabs are `tablist` / `tab` with `aria-selected`; progress bars are `progressbar`s with `aria-valuenow` (indeterminate until the agent reports progress); narration is `aria-live="polite"` and the Needs-you banners are `role="status"`; the dock is a labelled `nav`. The settings modal traps focus and owns the keyboard while open (only Escape, which closes it alone, reaches the Desk); the steering panel is a non-modal dialog, so it does not trap focus, and Escape closes it. `test/a11y.test.tsx` runs axe on the demo canvas (and with Appearance, a steering panel and the settings modal open) and checks WCAG AA text contrast (4.5:1) for `--ink`, `--mute` and `--dim` on every window chrome over the Desk ground; `--dim` was lightened from the prototype's `#6f7890` to `#7c859d` to pass.
+
 ## Layout
 
 ```
-src/canvas/useViewport.ts   pan / wheel / zoomAt / fitTo (port of the prototype App.tsx)
+src/canvas/useViewport.ts   pan / wheel / zoomAt / fitTo (port of the prototype App.tsx), touch pan +
+                            two-finger pinch, panBy, phone width (useViewportWidth, clampWindowWidth)
+src/a11y/keys.ts            keyboard: arrow-key pan, +/- zoom, f arrange, Escape, focus trap
+src/a11y/motion.ts          useReducedMotion (prefers-reduced-motion for JS effects)
+src/styles/responsive.css   phone layout (< 700 px) and the reduced-motion rules
 src/canvas/World.tsx        the transformed world layer (world--anim while arranging)
 src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-column packing,
                             rows × columns chosen for the largest zoom (port of the prototype)
@@ -78,13 +111,14 @@ src/look/useLook.ts         the look, persisted in localStorage `volley-desk-loo
                             chrome, attn, narr, tethers, autoArrange (defaults = prototype LOOK0)
 src/look/backgrounds.ts     all 63 free React Bits backgrounds + None, each lazy (its own chunk)
 src/look/Background.tsx     background layer: error boundary → no-WebGL message, or a failed chunk
-                            load → "Couldn’t load" + Retry; bg-dim overlay
+                            load → "Couldn’t load" + Retry; bg-dim overlay; WebGL detection
+                            (hasWebGL, needsWebGL) and the degraded look (degradeLook)
 src/look/Appearance.tsx     Appearance panel: background search + list, dim, window style,
                             auto-arrange, Needs-you effect, narration effect
 src/look/Tethers.tsx        SVG cubic per agent, wave window → agent, in the wave accent
 src/look/DeskDock.tsx       React Bits Dock (coordinators + needs-you badge, appearance, tethers,
                             arrange & fit, auto-arrange, zoom in/out) and SwipeToast notices
-src/windows/agent/Narration narration effect: DecryptedText | ShinyText | plain
+src/windows/agent/Narration narration effect: DecryptedText | ShinyText | plain (plain under reduced motion)
 src/styles/look.css         background, tethers, chromes, dock and Appearance rules
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
@@ -163,7 +197,7 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 
 **Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome skips the vendored components (a `biome.json` override on `src/rb/`) but still lints `StatusMark` and `ElasticSlider`, which were adapted by hand. The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
 
-**Reduced motion.** The prototype's CSS rule stops the tethers' flow. Most React Bits components check `prefers-reduced-motion` themselves; `ColorBends` (a continuously animated background), `BorderGlow` and `GlassSurface` don't.
+**Reduced motion.** The prototype's CSS rules stop the Desk's own animations (see [Reduced motion](#reduced-motion)). Most React Bits components check `prefers-reduced-motion` themselves; `ColorBends` (a continuously animated background), `BorderGlow` and `GlassSurface` don't.
 
 **Backgrounds stay complete.** `bun run sync:react-bits-backgrounds` compares the `## Backgrounds` section of https://reactbits.dev/llms.txt with `src/look/backgrounds.ts` and exits 1 when React Bits lists one the picker lacks (CI shows it as a warning). To add one: install it, add it to the allow-list and to `BACKGROUNDS` (components with a required prop get a generated input in `p`, as `GridDistortion.imageSrc` does).
 

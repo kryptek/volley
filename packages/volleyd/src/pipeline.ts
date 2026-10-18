@@ -1061,6 +1061,8 @@ function renderRebaseMd(c: BriefCtx): string {
 export interface PipelineDeps {
   /** The fenced exec (read-only verbs only are used; the driver adds the hard timeout). */
   exec: ExecFn;
+  /** The exec for one task's worktrees when they live elsewhere (a remote host); default `exec`. */
+  execFor?: (task: TaskId) => ExecFn;
   /** $VOLLEYD_HOME: evidence goes to `<home>/waves/<wave>/evidence/`. */
   home: string;
   /** The wave's current record (re-read after every journal append). */
@@ -1136,12 +1138,15 @@ export class PipelineDriver {
     return this.deps.now?.() ?? Date.now();
   }
 
-  /** The fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */
-  private readonly io: ExecFn = async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
-    const r = await this.deps.exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
-    if (r.timedOut) throw new IoTimeout(`${argv.slice(0, 3).join(" ")} timed out`);
-    return r;
-  };
+  /** The task's fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */
+  private io(task: TaskId): ExecFn {
+    const exec = this.deps.execFor?.(task) ?? this.deps.exec;
+    return async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
+      const r = await exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
+      if (r.timedOut) throw new IoTimeout(`${argv.slice(0, 3).join(" ")} timed out`);
+      return r;
+    };
+  }
 
   /** The task's view, or null when the task is not in the wave (or not running). */
   view(task: TaskId): PipelineView | null {
@@ -1358,7 +1363,7 @@ export class PipelineDriver {
     if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
-    const report = await verifyArtifacts(this.io, {
+    const report = await verifyArtifacts(this.io(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
@@ -1388,11 +1393,12 @@ export class PipelineDriver {
    */
   private async gateCheck(v: PipelineView): Promise<PipelineEvent> {
     const { p } = v;
+    const io = this.io(v.task);
     const head = p.head as string;
     const cwd = this.headWorktree(p);
     if (cwd === undefined) throw new Error("no worktree at the PR head");
     if (p.pr !== undefined) {
-      const r = await this.io(
+      const r = await io(
         ["gh", "pr", "view", String(p.pr.number), "--json", "headRefOid,state,baseRefName"],
         { cwd },
       );
@@ -1401,7 +1407,7 @@ export class PipelineDriver {
       if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
         return { kind: "head_moved", expected: head, actual: pr.headRefOid };
     }
-    const check = await checkRebase(this.io, {
+    const check = await checkRebase(io, {
       cwd,
       head,
       release_branch: v.release_branch,
@@ -1410,7 +1416,7 @@ export class PipelineDriver {
     if (check.behind === 0) {
       for (const f of p.fixups) {
         if (f.from === undefined || f.worktree === undefined) continue;
-        const r = await this.io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+        const r = await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
         // trimEnd only: the first line's leading space is part of git's column alignment.
         if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
       }
@@ -1423,7 +1429,7 @@ export class PipelineDriver {
     const pr = v.p.pr;
     if (pr === undefined) return null;
     const cwd = this.headWorktree(v.p);
-    const r = await this.io(
+    const r = await this.io(v.task)(
       [
         "gh",
         "pr",
