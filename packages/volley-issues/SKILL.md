@@ -108,6 +108,24 @@ For each issue in the dispatch set:
 
 4. **Write `ISSUE.md`** in the worktree root with the issue title, body, and any implementation context the agent needs (file paths, architectural notes). If the issue might need a Flyway migration, include the **Migration number reservation** block (below).
 
+   > **MANDATORY — narration contract (enforced; has regressed 4×, do not skip).**
+   > Operators follow agents live on the volley-dash, which binds the card's
+   > narration to `payload.msg` and the bar to `payload.progress`, and folds them
+   > in **only from `progress`-channel ticks** — status-channel TRANSITIONS
+   > (registered→working, working→done/failed) DROP `msg`+`progress`
+   > (`packages/volley-dash/src/state/envelope-to-actions.ts`). A `progress:N`
+   > milestone list is necessary but **NOT sufficient**. Before launching EACH agent:
+   >   1. Append the canonical block (shipped with this skill) to the brief file:
+   >      `cat <skill-dir>/brief/NARRATION_BLOCK.txt >> <brief-file>`
+   >      (it requires `msg` on every `progress`-channel publish, ad-hoc
+   >      `type="narration"` ticks **at least once every 60 seconds** while working,
+   >      and a final `progress:100` tick just before the terminal status).
+   >   2. The launcher MUST run `<skill-dir>/scripts/validate-brief.sh <brief-file>`
+   >      and refuse to `exec claude` on a nonzero exit. A brief that fails the gate
+   >      is NOT dispatched — full stop.
+   >
+   > `<skill-dir>` is this skill's install directory (e.g. `~/.claude/skills/volley-issues`).
+
 5. **Launch the agent via cmux** with a Volley-aware spawn brief. cmux does not
    accept `--env` flags, and the parent process's exported VOLLEY_AGENT_ID
    would not reach the child's MCP server anyway (Claude Code passes the
@@ -343,14 +361,22 @@ git branch -D issue-<N>-<slug>
 cmux close-workspace --workspace <ref>
 ```
 
-The Volley registry entry for the dispatched agent persists (retained on the broker) so historical dispatches remain inspectable via `/volley list --include-reaped`. If you want to clear an agent's registry entry explicitly:
+**MANDATORY: once an agent's work is complete, clear its retained MQTT records.** "Complete" means its terminal status has been processed: PR filed or merged, review read, fixup retired. Do this at every retire step, and sweep once more at wave or release cleanup:
 
 ```bash
-# Clear the retained registry entry for an old dispatched agent.
-mosquitto_pub -t "volley/_system/registry/<agent-id>" -n -r
+# Clear every retained record of one finished dispatched agent.
+for t in "volley/_system/registry/<agent-id>" volley/<ns>/<agent-id>/{status,result,mailbox,capability}; do
+  mosquitto_pub -t "$t" -n -r
+done
 ```
 
-(`-n` sends an empty payload; `-r` retains; an empty retained payload clears the slot per MQTT semantics.)
+(`-n` sends an empty payload and `-r` retains it; per MQTT semantics, an empty retained payload clears the slot.)
+
+Rules:
+- Clear only agents whose latest status is `done`/`failed`/`blocked`/`reaped`. Never clear a `registered` or `working` agent, or the coordinator.
+- Clear only after the coordinator has consumed the agent's terminal event.
+- **Don't select agents by `parent_id` alone.** Agents from older waves have been seen carrying the current coordinator's id. Also require the agent's `cwd` to be one of this run's worktrees.
+- Records left by other sessions or waves aren't yours. Ask before sweeping them.
 
 ## Conformance with Volley v0.1
 

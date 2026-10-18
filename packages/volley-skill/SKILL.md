@@ -158,7 +158,7 @@ The tool returns `{ messages: CollectedMessage[] }` where each message is `{ top
 
 - Color-code the line by `envelope.type` matching the status emoji map from `list`.
 - Format as: `[wall_time] <emoji> <agent_id> <channel> <type>  <short payload summary>`.
-- For `progress` events, also render any string field in `payload` that names a milestone (e.g. `payload.milestone`, `payload.message`).
+- For `progress` events, render `payload.msg` (the narration string the volley-dash card binds to) alongside `payload.progress` (the percent). The field is literally `msg` — `message` and `milestone` are NOT read by the dashboard (`volley-dash/src/state/envelope-to-actions.ts`).
 - **If `envelope` is null** (malformed payload): derive `<agent_id>` and `<channel>` from the topic — `volley/<ns>/<agent_id>/<channel>` is the grammar, so the 3rd and 4th `/`-segments are what you want. Render as `[now] ❓ <agent_id> <channel> (unparseable)  <raw>` and continue. A null envelope is NOT a terminal status, even if the topic is `<id>/status` — keep watching.
 
 Example output for a single-agent watch:

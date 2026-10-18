@@ -1,0 +1,22 @@
+NARRATION — MANDATORY. The operator watches you live on the volley-dash web dashboard; this block is HOW they see what you are doing. It is a hard requirement, verified against the dashboard source (packages/volley-dash/src/state/envelope-to-actions.ts). Read it.
+
+How the dashboard works (do not fight it):
+- Your card's narration line binds to payload.msg; the progress bar binds to payload.progress.
+- The card ONLY folds in msg + progress from `progress`-channel messages (and same-status status ticks). A status-channel TRANSITION — registered->working, working->done, working->failed — hits AGENT_TRANSITION and DROPS msg + progress. So putting msg on your `working` startup tick or your terminal `done` tick does NOT update the card.
+- The `progress` channel is qos 0, retain=false (fire-and-forget). The operator only sees a progress message if you actually publish it while they're watching, so publish OFTEN.
+
+Therefore you MUST:
+
+1) Publish ALL narration on the `progress` channel (never rely on the status payload for narration). Every progress publish MUST carry:
+     payload = { progress: <integer 0-100>, msg: "<short: what you are doing RIGHT NOW>" }
+   - The field is literally `msg` (lowercase, 3 letters). `message` and `milestone` are IGNORED.
+   - Pass payload as a real JSON object. Do NOT JSON.stringify the payload yourself (that double-encodes it).
+
+2) Narrate FREQUENTLY — at least once every 60 seconds while working, AND immediately before/after every meaningful step (reading a key file, writing a test, starting or finishing a long command). Do not go silent between formal milestones. Use type="narration" for these ad-hoc ticks:
+     vol_publish(channel="progress", type="narration",
+                 payload={ progress: <current %>, msg: "<what you are doing now>" })
+   A long command (mvn clean verify, terraform validate) = publish a narration tick BEFORE you start it ("running mvn clean verify, ~N min") AND when it returns ("mvn green"). The operator must never wonder whether you are stuck.
+
+3) Just before your terminal status, publish a FINAL progress tick so the card lands at 100% with your summary:
+     vol_publish(channel="progress", type="narration", payload={ progress: 100, msg: "<one-line summary>" })
+   THEN publish the terminal status envelope (done/blocked/failed) with the same msg in its payload (for the live feed).
