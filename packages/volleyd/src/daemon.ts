@@ -106,6 +106,7 @@ import type { WaveRecord } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type {
+  CoordinatorAttention,
   JournalEvent,
   NewEvent,
   TaskAgents,
@@ -391,6 +392,12 @@ const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
 
+/** Owner statuses that make its `coordinator.state` `gone`. */
+const OWNER_GONE = new Set(["reaped", "done", "failed"]);
+
+/** The wave_complete decision's id (one per wave). */
+const WAVE_COMPLETE_DECISION = "wave_complete";
+
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -515,6 +522,13 @@ export class Daemon {
   >();
   /** Digests of recent progress messages: a copy delivered twice is handled once. */
   private readonly seenProgress = new Set<string>();
+  /** The latest status (type, wall_time) of every agent id, for a wave owner's `coordinator`. */
+  private readonly statusOf = new Map<string, { type: string; at: string }>();
+  /** What each agent's progress says about its attention (a wave owner's `coordinator`). */
+  private readonly attentionOf = new Map<
+    string,
+    Omit<CoordinatorAttention, "agent_id" | "last_seen">
+  >();
   /** Mailbox topics (one per namespace) whose stray retained message this process cleared. */
   private readonly clearedMailboxes = new Set<string>();
   private lastReading: PressureReading | null = null;
@@ -805,6 +819,7 @@ export class Daemon {
     if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
+    if (env !== null) this.noteAttention(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
@@ -812,6 +827,61 @@ export class Daemon {
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
     }
+  }
+
+  /**
+   * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
+   * question, session and workspace) until anything else but `idle` says it works again.
+   */
+  private noteAttention(agent: string, env: Envelope): void {
+    if (env.type === "idle") return;
+    const p = (
+      typeof env.payload === "object" && env.payload !== null ? env.payload : {}
+    ) as Record<string, unknown>;
+    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen"> =
+      env.type === "awaiting_input"
+        ? {
+            state: "awaiting_input",
+            ...(typeof p.question === "string" && p.question.trim() !== ""
+              ? { question: firstLines(p.question) }
+              : {}),
+            ...(typeof p.session_url === "string" && URL.canParse(p.session_url)
+              ? { session_url: p.session_url }
+              : {}),
+            ...(typeof p.workspace === "string" && p.workspace !== ""
+              ? { workspace: p.workspace }
+              : {}),
+          }
+        : { state: "working" };
+    const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
+    this.attentionOf.set(agent, next);
+    if (before !== JSON.stringify(next)) this.ownerChanged(agent);
+  }
+
+  /** An agent's status or attention changed: re-publish the waves it owns (`coordinator`). */
+  private ownerChanged(agent: string): void {
+    if (!this.running) return;
+    for (const [wave, log] of this.waves) {
+      if (log.record.state?.owner === agent) void this.enqueue(() => this.publishState(wave));
+    }
+  }
+
+  /** wave-state `coordinator` for `owner`; undefined until anything of it was seen. */
+  private coordinatorFor(owner: string): CoordinatorAttention | undefined {
+    const status = this.statusOf.get(owner);
+    const attention = this.attentionOf.get(owner);
+    if (status === undefined && attention === undefined) return undefined;
+    const seen = [
+      this.lastSeen.get(owner),
+      status !== undefined ? Date.parse(status.at) : undefined,
+    ]
+      .filter((t): t is number => t !== undefined && !Number.isNaN(t))
+      .sort((a, b) => b - a)[0];
+    const last_seen = new Date(seen ?? this.now()).toISOString();
+    if (status !== undefined && OWNER_GONE.has(status.type)) {
+      return { agent_id: owner, state: "gone", last_seen };
+    }
+    return { agent_id: owner, ...(attention ?? { state: "working" }), last_seen };
   }
 
   /** False for a progress message already handled (same topic and bytes); bounded memory. */
@@ -1065,6 +1135,11 @@ export class Daemon {
       await this.broker.subscribeStream("volley/+/+/status", (m) => {
         const holder = m.topic.split("/")[2] ?? "";
         const env = parseEnvelope(m.payload);
+        if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
+          const prev = this.statusOf.get(holder)?.type;
+          this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+          if (prev !== env.type) this.ownerChanged(holder);
+        }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
         // Checked in queue order, so an `acquire` from this holder still waiting in the queue
         // is applied first and then freed here.
@@ -1192,6 +1267,7 @@ export class Daemon {
   private async tickNow(): Promise<void> {
     await this.runLeases({ kind: "tick" });
     await this.monitor();
+    for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
@@ -1231,6 +1307,35 @@ export class Daemon {
         }
       }
     }
+  }
+
+  /**
+   * A running wave whose every task is done or cancelled is complete: journal `wave_complete`
+   * (status `complete`; admission stops sampling its repo) and open the wave-level
+   * `wave_complete` decision, so the owner is told (the Desk, the notify bridge).
+   */
+  private async completeIfSettled(wave: WaveId): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const state = rec?.state;
+    if (rec === undefined || state == null || state.status !== "running") return;
+    if (state.tasks.length === 0) return;
+    if (!state.tasks.every((t) => t.stage === "done" || t.stage === "cancelled")) return;
+    const done = state.tasks.filter((t) => t.stage === "done").map((t) => t.id);
+    const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
+    await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
+    if (rec.decisions[WAVE_COMPLETE_DECISION] === undefined) {
+      const merged = done.length > 0 ? ` merged into ${state.release_branch}` : "";
+      await this.openDecisionNow(wave, {
+        kind: "wave_complete",
+        task: null,
+        id: WAVE_COMPLETE_DECISION,
+        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
+        options: ["acknowledged"],
+      });
+    }
+    this.log(
+      `wave ${wave} complete: done ${done.join(", ") || "-"}; cancelled ${cancelled.join(", ") || "-"}`,
+    );
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2894,6 +2999,17 @@ export class Daemon {
       const t = state.tasks.find((x) => x.id === a.task);
       if (why !== undefined && t !== undefined) t.why_waiting = why;
     }
+    // Nothing can move without an answer: every unsettled task is parked on a decision or
+    // queued behind one. Published only; internally the wave keeps running.
+    if (state.status === "running" && state.open_decisions.length > 0) {
+      const unsettled = state.tasks.filter((t) => t.stage !== "done" && t.stage !== "cancelled");
+      const stuck = (t: (typeof unsettled)[number]) =>
+        t.stage === "awaiting_decision" ||
+        (t.stage === "queued" && t.why_waiting?.startsWith("awaiting decision") === true);
+      if (unsettled.length > 0 && unsettled.every(stuck)) state.status = "awaiting_decision";
+    }
+    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner) : undefined;
+    if (coordinator !== undefined) state.coordinator = coordinator;
     return state;
   }
 
@@ -3924,6 +4040,11 @@ function journaledIssueFiles(events: readonly JournalEvent[]): Record<TaskId, st
     }
   }
   return out;
+}
+
+/** A coordinator's question as SPEC §4.3 publishes it: its first one or two lines. */
+function firstLines(text: string): string {
+  return text.trim().split("\n").slice(0, 2).join("\n");
 }
 
 /** A message quoted in a decision question: one line, at most `decision_text_max` characters. */

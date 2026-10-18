@@ -184,8 +184,20 @@ export interface WaveState {
   open_decisions: string[];
   gates: TaskId[];
   spec?: WaveSpec;
+  /** The owner's attention state, maintained by the daemon (not journaled). */
+  coordinator?: CoordinatorAttention;
   effective_config?: TunablesPatch;
   updated_at: string;
+}
+
+/** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
+export interface CoordinatorAttention {
+  agent_id: string;
+  state: "working" | "awaiting_input" | "gone";
+  question?: string;
+  session_url?: string;
+  workspace?: string;
+  last_seen: string;
 }
 
 // ---------------------------------------------------------------------------
