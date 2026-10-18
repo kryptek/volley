@@ -16,6 +16,7 @@
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type CSSProperties, type RefObject, useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "../a11y/keys";
 import ElasticSlider from "../rb/ElasticSlider/ElasticSlider";
 import type { ConfigPayload, Tunables, WaveView } from "../store/types";
 import { Clawd } from "../windows/wave/Clawd";
@@ -190,6 +191,7 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
     for (const path of Object.keys(queued.current)) unqueue(path)?.run();
   };
 
+  useFocusTrap(dialog);
   // Focus moves into the dialog so Escape works at once; it goes back on close.
   useEffect(() => {
     const opener = document.activeElement;
@@ -338,7 +340,8 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
           if (e.key === "Escape") onClose();
         }}
       >
-        <header className="modal-head">
+        {/* A div, not <header>: outside sectioning content a header is a second banner landmark. */}
+        <div className="modal-head">
           <Clawd /> <span className="t-name">Settings</span>
           <div className="seg" role="radiogroup" aria-label="Scope">
             <button
@@ -363,7 +366,7 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Close settings">
             <HugeiconsIcon icon={Cancel01Icon} size={15} strokeWidth={1.8} />
           </button>
-        </header>
+        </div>
         {scope === "wave" ? (
           <p className="modal-note">
             This wave's effective config. Per-wave values come from the wave file's{" "}

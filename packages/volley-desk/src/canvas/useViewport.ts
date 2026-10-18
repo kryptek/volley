@@ -3,7 +3,9 @@
  * empty space to pan (pointer capture), wheel to pan, ⌘/Ctrl-wheel (and
  * trackpad pinch, which browsers report as ctrl-wheel) to zoom around the
  * cursor, scale clamped to [0.3, 1.6], and `fitTo(rects)` to frame a set of
- * world rectangles below the top bar.
+ * world rectangles below the top bar. Touch (D8): one finger pans, two
+ * fingers pinch-zoom around their midpoint; `panBy` serves the arrow keys.
+ * Phones (< 700 px, `useNarrow`) start zoomed out and clamp window widths.
  */
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -30,9 +32,37 @@ const NO_PAN = ".win, .look, .dock-wrap, .topbar, .modal-scrim";
 /** Wheel inside these scrolls the content instead of the canvas. */
 const NO_WHEEL = ".feed, .term, .yaml, .dag-scroll, .look, .modal";
 
+/** Below this viewport width the Desk is in its phone layout. */
+export const NARROW_PX = 700;
+/** The widest a window gets on a phone (the agent window's width). */
+const PHONE_WIN_MAX = 460;
+
+const vw = () => (typeof window === "undefined" ? 1024 : window.innerWidth);
+const isNarrow = () => vw() < NARROW_PX;
+
+/** The viewport width; follows resizes and rotation. */
+export function useViewportWidth(): number {
+  const [w, setW] = useState(vw);
+  useEffect(() => {
+    const on = () => setW(vw());
+    on();
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return w;
+}
+
+/** `true` while the viewport is phone-width. */
+export const useNarrow = (): boolean => useViewportWidth() < NARROW_PX;
+
+/** A window's width at viewport width `vw`: on a phone, `min(460, 100vw - 24)`. */
+export function clampWindowWidth(width: number, vw: number): number {
+  return vw < NARROW_PX ? Math.min(width, PHONE_WIN_MAX, vw - 24) : width;
+}
+
 /** The prototype's initial view; phones (< 700 px) start zoomed out. */
 export function initialView(): View {
-  const narrow = typeof window !== "undefined" && window.innerWidth < 700;
+  const narrow = isNarrow();
   return { x: narrow ? 8 : 40, y: narrow ? 70 : 76, s: narrow ? 0.5 : 0.82 };
 }
 
@@ -41,7 +71,8 @@ const clamp = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
 export function useViewport(opts: { initial?: View } = {}) {
   const [view, setView] = useState<View>(() => opts.initial ?? initialView());
   const stageRef = useRef<HTMLDivElement>(null);
-  const panning = useRef<{ x: number; y: number } | null>(null);
+  /** Pointers down on empty canvas (pointerId → last position): one pans, two pinch. */
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
 
   const zoomAt = useCallback(
     (factor: number, cx = window.innerWidth / 2, cy = window.innerHeight / 2) =>
@@ -84,27 +115,45 @@ export function useViewport(opts: { initial?: View } = {}) {
     return () => el.removeEventListener("wheel", wheel);
   }, [zoomAt]);
 
+  const panBy = useCallback(
+    (dx: number, dy: number) => setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy })),
+    [],
+  );
+
+  const release = (e: React.PointerEvent) => {
+    pointers.current.delete(e.pointerId);
+  };
   const stageHandlers = {
     onPointerDown: (e: React.PointerEvent) => {
       if ((e.target as Element).closest(NO_PAN)) return;
-      panning.current = { x: e.clientX, y: e.clientY };
+      pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
       (e.currentTarget as Element).setPointerCapture(e.pointerId);
     },
     onPointerMove: (e: React.PointerEvent) => {
-      const last = panning.current;
+      const ps = pointers.current;
+      const last = ps.get(e.pointerId);
       if (!last) return;
-      const dx = e.clientX - last.x;
-      const dy = e.clientY - last.y;
-      panning.current = { x: e.clientX, y: e.clientY };
-      setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+      const now = { x: e.clientX, y: e.clientY };
+      const other = [...ps].find(([id]) => id !== e.pointerId)?.[1];
+      ps.set(e.pointerId, now);
+      if (!other) {
+        panBy(now.x - last.x, now.y - last.y);
+        return;
+      }
+      // Pinch: scale by the change in finger distance around the midpoint,
+      // and follow the midpoint as it moves.
+      const d0 = Math.hypot(last.x - other.x, last.y - other.y);
+      const d1 = Math.hypot(now.x - other.x, now.y - other.y);
+      const m0 = { x: (last.x + other.x) / 2, y: (last.y + other.y) / 2 };
+      const m1 = { x: (now.x + other.x) / 2, y: (now.y + other.y) / 2 };
+      setView((v) => {
+        const s = d0 > 0 ? clamp((v.s * d1) / d0) : v.s;
+        return { s, x: m1.x - ((m0.x - v.x) * s) / v.s, y: m1.y - ((m0.y - v.y) * s) / v.s };
+      });
     },
-    onPointerUp: () => {
-      panning.current = null;
-    },
-    onPointerCancel: () => {
-      panning.current = null;
-    },
+    onPointerUp: release,
+    onPointerCancel: release,
   };
 
-  return { view, setView, zoomAt, fitTo, stageRef, stageHandlers };
+  return { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers };
 }

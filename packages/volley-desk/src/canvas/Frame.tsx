@@ -107,6 +107,8 @@ export interface FrameProps {
   accent: string;
   pos: { x: number; y: number };
   width: number;
+  /** Caps `width` (phones: `clampWindowWidth`). */
+  maxWidth?: number;
   z: number;
   scale: number;
   chrome: Chrome;
@@ -222,7 +224,7 @@ export function Frame(p: FrameProps) {
         {
           left: p.pos.x,
           top: p.pos.y,
-          width: p.width,
+          width: p.maxWidth === undefined ? p.width : Math.min(p.width, p.maxWidth),
           zIndex: p.z,
           "--acc": p.accent,
         } as CSSProperties

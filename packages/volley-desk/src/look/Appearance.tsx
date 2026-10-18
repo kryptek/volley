@@ -3,11 +3,14 @@
  * field over every background (the current one always stays listed), the dim
  * slider, the window style, auto-arrange with "Arrange & fit now", the
  * Needs-you effect and the narration effect. Every control writes the look
- * (`useLook`), which persists per browser.
+ * (`useLook`), which persists per browser. Without WebGL (`webgl={false}`)
+ * the WebGL backgrounds and the liquid chrome are not offered, with a note,
+ * and `look` is the degraded look the Desk renders.
  */
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
+import { BG_NO_WEBGL_NOTE, needsWebGL } from "./Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "./backgrounds";
 import { ATTN_LABEL, CHROME_LABEL, NARR_LABEL } from "./options";
 import { DIM_MAX, type Look } from "./useLook";
@@ -40,21 +43,26 @@ export function Appearance({
   setLook,
   onClose,
   onArrange,
+  webgl = true,
 }: {
   look: Look;
   setLook: (change: Partial<Look>) => void;
   onClose: () => void;
   onArrange: () => void;
+  /** Whether this browser has WebGL (`useWebGL`). */
+  webgl?: boolean;
 }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
-  const shown = BACKGROUNDS.filter(
+  const offered = webgl ? BACKGROUNDS : BACKGROUNDS.filter((b) => !needsWebGL(b.key));
+  const shown = offered.filter(
     (b) =>
       !needle ||
       b.name.toLowerCase().includes(needle) ||
       b.key.toLowerCase().includes(needle) ||
       b.key === look.bg,
   );
+  const chromes = webgl ? CHROME_LABEL : CHROME_LABEL.filter(([k]) => k !== "liquid");
   const current = BACKGROUNDS.find((b) => b.key === look.bg);
   return (
     <aside className="look" aria-label="Appearance">
@@ -78,6 +86,7 @@ export function Appearance({
         onChange={(e) => setQ(e.target.value)}
         aria-label="Search backgrounds"
       />
+      {!webgl && <p className="look-note">{BG_NO_WEBGL_NOTE}</p>}
       <fieldset className="bg-grid" aria-label="Backgrounds">
         {shown.map((b) => (
           <button
@@ -109,7 +118,7 @@ export function Appearance({
       <div className="lbl">Window style</div>
       <Segments
         label="Window style"
-        options={CHROME_LABEL}
+        options={chromes}
         value={look.chrome}
         onPick={(chrome) => setLook({ chrome })}
       />

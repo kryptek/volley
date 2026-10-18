@@ -257,7 +257,9 @@ Launch the browser dashboard:
 volley dash
 ```
 
-That spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client. On first load it asks you to sign in: use the `desk` identity from step 2 (stored in that browser's localStorage; a refused login shows the form again).
+> **The Desk replaces the dashboard.** `volley dash` now opens the [Volley Desk](packages/volley-desk/README.md) (`http://localhost:5174`): an infinite canvas of wave and agent windows that works on a phone, without WebGL and from the keyboard. The walkthrough below shows the classic dashboard, which stays available as `volley dash --legacy` until its removal in a later release.
+
+With `--legacy`, that spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client. On first load it asks you to sign in: use the `desk` identity from step 2 (stored in that browser's localStorage; a refused login shows the form again).
 
 ![Volley dashboard — agent grid](docs/images/dashboard-grid.png)
 
@@ -275,6 +277,7 @@ Flags worth knowing:
 volley dash --no-open                     # don't auto-open the browser
 volley dash --build                       # production build + preview server
 volley dash --broker-url ws://host:9001   # point at a non-default broker
+volley dash --legacy                      # the classic dashboard (deprecated)
 ```
 
 See [`packages/volley-cli/README.md#volley-dash`](packages/volley-cli/README.md#volley-dash) for the full flag set and [`packages/volley-dash/README.md`](packages/volley-dash/README.md) for the dashboard's own architecture notes (browser notifications, keyboard shortcuts, theming).
@@ -349,7 +352,7 @@ spec/                     The protocol — wire format, conformance, error codes
 
 packages/volley-mcp/      Reference MCP server. The seven vol_* tools.
 packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` and `volley notify` subcommands.
-packages/volley-dash/     Browser dashboard (Vite + React + Tailwind + shadcn/ui + GSAP). Subscribes via WebSocket; no backend.
+packages/volley-dash/     Classic browser dashboard (deprecated; `volley dash --legacy`). Subscribes via WebSocket; no backend.
 packages/volley-desk/     The Desk: infinite canvas of live wave and agent windows (Vite + React 19 + React Bits). In progress; `?demo=1` runs it on sample data.
 packages/volley-skill/    The /volley Claude Code slash command.
 packages/volley-wait/     The /wait Claude Code slash command (event-driven block on a topic).

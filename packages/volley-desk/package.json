@@ -2,7 +2,7 @@
   "name": "volley-desk",
   "version": "0.1.0-dev",
   "private": true,
-  "description": "Volley Desk \u2014 an infinite canvas of live wave and agent windows over MQTT (Vite + React 19 + React Bits)",
+  "description": "Volley Desk — an infinite canvas of live wave and agent windows over MQTT (Vite + React 19 + React Bits)",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -34,6 +34,7 @@
     "@types/three": "0.180.0",
     "@vitejs/plugin-react": "4.5.2",
     "aedes": "^0.51.0",
+    "axe-core": "4.10.3",
     "jsdom": "^25.0.1",
     "vite": "6.3.5",
     "vitest": "^3.2.4"

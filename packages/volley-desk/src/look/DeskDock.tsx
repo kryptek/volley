@@ -76,7 +76,7 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
 
 export function DeskDock(p: DeskDockProps) {
   return (
-    <div className="dock-wrap">
+    <nav className="dock-wrap" aria-label="Desk controls">
       <Dock
         items={dockItems(p)}
         magnification={62}
@@ -86,7 +86,7 @@ export function DeskDock(p: DeskDockProps) {
         badgeColor="#ff7a59"
         showLabels
       />
-    </div>
+    </nav>
   );
 }
 

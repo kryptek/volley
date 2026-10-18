@@ -8,8 +8,12 @@
  * auto-arrange is on. The chat glyphs open the steering panel (D4). The look (D7,
  * `look/`): the picked React Bits background under its dim, the window chrome,
  * Needs-you and narration effects, tethers, the Appearance panel, the dock and toasts.
+ * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
+ * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
+ * focusable, labelled stage.
  */
 import { useEffect, useRef, useState } from "react";
+import { useDeskKeys } from "./a11y/keys";
 import {
   type Attn,
   type NeedsYouTarget,
@@ -22,11 +26,17 @@ import {
 } from "./attention";
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
-import { type Rect, useViewport } from "./canvas/useViewport";
+import {
+  NARROW_PX,
+  type Rect,
+  clampWindowWidth,
+  useViewport,
+  useViewportWidth,
+} from "./canvas/useViewport";
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
 import { Appearance } from "./look/Appearance";
-import { Background } from "./look/Background";
+import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
 import { useLook } from "./look/useLook";
@@ -136,7 +146,9 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 
 export default function App() {
   const { state, connection, demo, settling, offline, writer, identity } = useDesk();
-  const { view, setView, zoomAt, fitTo, stageRef, stageHandlers } = useViewport();
+  const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
+  const vw = useViewportWidth();
+  const narrow = vw < NARROW_PX;
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -203,7 +215,10 @@ export default function App() {
   });
 
   // ------------------------------------------------------------ look (D7)
-  const [look, setLook] = useLook();
+  const [saved, setLook] = useLook();
+  const webgl = useWebGL();
+  // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
+  const look = degradeLook(saved, webgl);
   const [lookOpen, setLookOpen] = useState(false);
   const [toast, say, closeToast] = useToast();
 
@@ -263,6 +278,7 @@ export default function App() {
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
     },
+    ...(narrow ? { maxWidth: clampWindowWidth(Number.POSITIVE_INFINITY, vw) } : {}),
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -337,6 +353,20 @@ export default function App() {
       accent: accentOf(id),
     })),
   );
+  useDeskKeys({
+    stageRef,
+    panBy,
+    zoomAt: (f) => zoomAt(f),
+    arrange,
+    closeTop: () => {
+      if (settings !== null) setSettings(null);
+      else if (steerOpen !== null) setSteerOpen(null);
+      else if (lookOpen) setLookOpen(false);
+      else return false;
+      return true;
+    },
+  });
+
   const toggleAutoArrange = () => {
     const on = !look.autoArrange;
     setLook({ autoArrange: on });
@@ -351,7 +381,16 @@ export default function App() {
     <div className="app">
       <Background which={look.bg} dim={look.dim} />
 
-      <div className="stage" ref={stageRef} {...stageHandlers}>
+      <div
+        className="stage"
+        ref={stageRef}
+        {...stageHandlers}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: the canvas pans with the arrow keys while focused
+        tabIndex={0}
+        // biome-ignore lint/a11y/useSemanticElements: a pannable canvas of windows, not a document <section>
+        role="region"
+        aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
+      >
         <World view={view} animating={animating}>
           <Tethers on={look.tethers} tethers={tethers} />
           {coordsShown && (
@@ -477,6 +516,7 @@ export default function App() {
         onToggleCoords={() => setCoordsOpen((o) => !o)}
         notify={notify}
         setNotify={setNotify}
+        compact={narrow}
       />
 
       {lookOpen && (
@@ -485,6 +525,7 @@ export default function App() {
           setLook={setLook}
           onClose={() => setLookOpen(false)}
           onArrange={arrange}
+          webgl={webgl}
         />
       )}
 

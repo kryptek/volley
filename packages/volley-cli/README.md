@@ -74,14 +74,17 @@ volley auth --help
 
 ## `volley dash`
 
-Launches the [`volley-dash`](../volley-dash/) browser dashboard — a live view of every registered agent (status grid + event feed + per-agent drawer) that subscribes directly to your mosquitto broker over WebSocket. No backend.
+Launches the [Volley Desk](../volley-desk/) — an infinite canvas of live wave and agent windows (steering, settings, attention, arrange & fit) that subscribes directly to your mosquitto broker over WebSocket. No backend. It works at phone width, without WebGL and from the keyboard.
 
 ```sh
-volley dash                          # dev server, opens browser at http://localhost:5173
+volley dash                          # dev server, opens browser at http://localhost:5174
 volley dash --no-open                # dev server, don't open browser
 volley dash --build                  # production build + preview
 volley dash --broker-url ws://host:9001  # point at a non-default broker
+volley dash --legacy                 # the classic dashboard (packages/volley-dash, :5173)
 ```
+
+`--legacy` launches the classic [`volley-dash`](../volley-dash/) dashboard (status grid + event feed + per-agent drawer) instead. It is deprecated and will be removed in a later release; every other flag works with it.
 
 **Prerequisite:** mosquitto must have a WebSocket listener on `:9001` — the bundled `examples/mosquitto-localhost.conf` configures it. If `lsof -nP -iTCP:9001 -sTCP:LISTEN` returns nothing, see the root [README §2](../../README.md) for the install + upgrade steps.
 
@@ -377,14 +380,16 @@ ci-abc12345             ci             🔄 working    -                       8
 Usage: volley dash [options]
 
 Optional:
+  --legacy                Launch the old dashboard (packages/volley-dash) instead;
+                          deprecated, removed in a later release
   --build                 Run vite build + preview the production bundle
-  --port <N>              Override Vite's port (default: Vite's default 5173)
-  --broker-url <url>      MQTT broker URL passed to the dashboard via
+  --port <N>              Override Vite's port (default: 5174; 5173 with --legacy)
+  --broker-url <url>      MQTT broker URL passed to the Desk via
                           VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open / --no-open      Open the browser on start (default: --open in dev mode)
 ```
 
-Spawns Vite as a child process; passes the broker URL through as a build-time env var so the bundled JS hardcodes it. The dashboard subscribes to `volley/_system/registry/+` (retained) plus the four status/progress/mailbox/result wildcards on connect, then renders state changes in ~1s.
+Spawns Vite as a child process (`bun run dev`, or `build` then `preview`, in `packages/volley-desk`, or `packages/volley-dash` with `--legacy`); passes the broker URL through as a build-time env var so the bundled JS hardcodes it. The Desk's subscriptions are listed in [its README](../volley-desk/README.md#subscriptions). The legacy dashboard subscribes to `volley/_system/registry/+` (retained) plus the four status/progress/mailbox/result wildcards on connect, then renders state changes in ~1s.
 
 ### `volley notify`
 

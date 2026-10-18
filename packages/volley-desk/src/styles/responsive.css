@@ -1,0 +1,80 @@
+/*
+ * Phone width (D8): below 700 px (the JS `NARROW_PX`) the top bar keeps the
+ * brand, the needs-you pill and its tools (`TopBar compact` drops the counts),
+ * windows are clamped in JS (`clampWindowWidth`), the Appearance panel becomes
+ * a bottom sheet above the dock, and the steering bar, settings modal and
+ * Needs-you actions fit the viewport. Loaded after desk.css (main.tsx).
+ */
+@media (max-width: 699.98px) {
+  .topbar {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+  .topbar-tools {
+    margin-left: auto;
+  }
+  .ny-pill {
+    padding: 6px 10px;
+  }
+
+  /* Appearance: a bottom sheet that leaves the dock reachable below it. */
+  .look {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-height: 55vh;
+    border-radius: 14px 14px 10px 10px;
+  }
+  /* The sheet scrolls as a whole; its sections keep their height. */
+  .look > * {
+    flex-shrink: 0;
+  }
+  .look .bg-grid {
+    max-height: 180px;
+  }
+
+  .steer,
+  .prompt-bar {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .modal-scrim {
+    padding: 8px;
+  }
+  .modal {
+    max-height: calc(100% - 16px);
+  }
+  .modal-body {
+    grid-template-columns: 1fr;
+  }
+
+  .needs-you .ny-actions {
+    flex-wrap: wrap;
+  }
+  .needs-you .ny-actions > * {
+    flex: 1 1 auto;
+  }
+}
+
+/*
+ * Reduced motion (D8): the prototype's list in one place (each stylesheet
+ * also stops its own). The React Bits effects read the media query
+ * themselves; the narration effects drop to plain text (`useReducedMotion`).
+ */
+@media (prefers-reduced-motion: reduce) {
+  .tether,
+  .clawd--wait,
+  .win-attn-pulse,
+  .caret,
+  .win--born {
+    animation: none !important;
+  }
+  .world--anim,
+  .world--anim .win,
+  .tethers {
+    transition: none !important;
+  }
+}
