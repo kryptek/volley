@@ -47,6 +47,7 @@ function fakeDeps(): AuthDeps & {
       return `pw-${n}`;
     },
     brokerOwner: (): { uid: number; gid: number } | null => null,
+    invokingUser: (): ReturnType<AuthDeps["invokingUser"]> => null,
     chown(path: string, uid: number, gid: number) {
       deps.chowns.push([path, uid, gid]);
     },
@@ -253,6 +254,76 @@ describe("volley auth", () => {
         password: "pw-7",
       });
       expect(statSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    describe("--volleyd-file under sudo", () => {
+      const sudoRun = async (argv: string[], deps: ReturnType<typeof fakeDeps>, extra = {}) => {
+        const io = makeBufferIO();
+        // sudo resets HOME to root's: the file must still land in the invoking user's home.
+        const env = { HOME: join(dir, "roothome"), SUDO_UID: "501", SUDO_GID: "20", ...extra };
+        const code = await auth({ argv, env, io }, deps);
+        return { code, stdout: io.readStdout(), stderr: io.readStderr() };
+      };
+      const sudoDeps = () => {
+        const deps = fakeDeps();
+        deps.invokingUser = () => ({ uid: 501, gid: 20, home: join(dir, "userhome") });
+        return deps;
+      };
+
+      it("writes broker.json in the invoking user's home, owned by them, 0600", async () => {
+        const deps = sudoDeps();
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps);
+        expect(r.code).toBe(0);
+        const vh = join(dir, "userhome", ".volley", "volleyd");
+        const path = join(vh, "broker.json");
+        expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+          username: "volleyd",
+          password: "pw-1",
+        });
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+        expect(existsSync(join(dir, "roothome"))).toBe(false);
+        // Every directory init created, and the file, go to the invoking user.
+        expect(deps.chowns).toEqual([
+          [join(dir, "userhome"), 501, 20],
+          [join(dir, "userhome", ".volley"), 501, 20],
+          [vh, 501, 20],
+          [path, 501, 20],
+        ]);
+      });
+
+      it("--force without --volleyd-file rotates the invoking user's broker.json", async () => {
+        const deps = sudoDeps();
+        await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps); // pw-1..3
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--force"], deps); // pw-4..6
+        expect(r.code).toBe(0);
+        const path = join(dir, "userhome", ".volley", "volleyd", "broker.json");
+        expect(JSON.parse(readFileSync(path, "utf-8")).password).toBe("pw-4");
+        expect(deps.chowns.at(-1)).toEqual([path, 501, 20]);
+      });
+
+      it("an explicit VOLLEYD_HOME is honoured and still handed to the invoking user", async () => {
+        const deps = sudoDeps();
+        const vh = join(dir, "explicit");
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps, {
+          VOLLEYD_HOME: vh,
+        });
+        expect(r.code).toBe(0);
+        expect(deps.chowns).toEqual([
+          [vh, 501, 20],
+          [join(vh, "broker.json"), 501, 20],
+        ]);
+      });
+
+      it("as root with no sudo user, refuses --volleyd-file without VOLLEYD_HOME (nothing minted)", async () => {
+        const deps = fakeDeps();
+        deps.invokingUser = () => "root";
+        const etc = join(dir, "etc");
+        const r = await sudoRun(["init", "--dir", etc, "--volleyd-file"], deps);
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("VOLLEYD_HOME");
+        expect(deps.calls).toEqual([]);
+        expect(existsSync(join(etc, "passwd"))).toBe(false);
+      });
     });
 
     it("--volleyd-file is only for init", async () => {

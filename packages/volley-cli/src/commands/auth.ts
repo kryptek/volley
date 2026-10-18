@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { isValidAgentId } from "volley-mcp/topics";
@@ -38,11 +38,22 @@ export interface AuthDeps {
    */
   brokerOwner: () => { uid: number; gid: number } | null;
   chown: (path: string, uid: number, gid: number) => void;
+  /**
+   * When `volley auth` runs as root: the user who ran it through sudo (SUDO_UID / SUDO_GID,
+   * home from /etc/passwd), or "root" when there is no such user to hand files to. null when
+   * not root.
+   */
+  invokingUser: (
+    env: Record<string, string | undefined>,
+  ) => { uid: number; gid: number; home: string } | "root" | null;
 }
 
-/** Where volleyd keeps its state (volleyd's config-store.ts `volleydHome`, which this mirrors). */
-function volleydHome(env: Record<string, string | undefined>): string {
-  return env.VOLLEYD_HOME ?? join(env.HOME ?? homedir(), ".volley", "volleyd");
+/**
+ * Where volleyd keeps its state (volleyd's config-store.ts `volleydHome`, which this mirrors),
+ * for the user volleyd runs as: under sudo that is the invoking user, never root.
+ */
+function volleydHome(env: Record<string, string | undefined>, sudoHome?: string): string {
+  return env.VOLLEYD_HOME ?? join(sudoHome ?? env.HOME ?? homedir(), ".volley", "volleyd");
 }
 
 /** volleyd's broker credentials file in $VOLLEYD_HOME (volleyd's broker-auth.ts reads it). */
@@ -112,6 +123,21 @@ export const realAuthDeps: AuthDeps = {
     return uid !== undefined && gid !== undefined ? { uid: Number(uid), gid: Number(gid) } : null;
   },
   chown: (path, uid, gid) => chownSync(path, uid, gid),
+  invokingUser: (env) => {
+    if (process.getuid?.() !== 0) return null;
+    const uid = Number(env.SUDO_UID);
+    const gid = Number(env.SUDO_GID);
+    if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid <= 0 || env.SUDO_GID === "") {
+      return "root";
+    }
+    const line = existsSync("/etc/passwd")
+      ? readFileSync("/etc/passwd", "utf-8")
+          .split("\n")
+          .find((l) => l.split(":")[2] === String(uid))
+      : undefined;
+    const home = line?.split(":")[5];
+    return home !== undefined && home !== "" ? { uid, gid, home } : "root";
+  },
 };
 
 const blockStart = (id: string) =>
@@ -268,6 +294,20 @@ export async function auth(
       );
       return EXIT.ERROR;
     }
+    // volleyd's credentials belong to the user volleyd runs as. Under sudo that is the invoking
+    // user; a root login with no such user must name the home explicitly.
+    const invoker = deps.invokingUser(env);
+    const sudoUser = typeof invoker === "object" && invoker !== null ? invoker : null;
+    if (
+      parsed.values["volleyd-file"] === true &&
+      invoker === "root" &&
+      env.VOLLEYD_HOME === undefined
+    ) {
+      io.stderr(
+        "volley auth: running as root with no sudo user, so whose volleyd home is unknown; set VOLLEYD_HOME to the home of the user volleyd runs as\n",
+      );
+      return EXIT.USAGE;
+    }
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     // An existing ACL may carry the owner's edits and every agent's ack grants: keep it.
     const keptAcl = existsSync(aclFile);
@@ -308,14 +348,28 @@ export async function auth(
       chmodSync(coordinatorFile, 0o600);
     }
     // volleyd reads its credentials from here (never from the launchd plist); rotated the same way.
-    const volleydFile = join(volleydHome(env), VOLLEYD_BROKER_FILE);
+    const volleydDir = volleydHome(env, sudoUser?.home);
+    const volleydFile = join(volleydDir, VOLLEYD_BROKER_FILE);
     const wroteVolleyd = parsed.values["volleyd-file"] === true || existsSync(volleydFile);
     if (wroteVolleyd) {
       if (volleydPassword === null) throw new Error("no volleyd identity was minted");
-      mkdirSync(volleydHome(env), { recursive: true, mode: 0o700 });
+      const firstCreated = mkdirSync(volleydDir, { recursive: true, mode: 0o700 });
       const creds = { username: "volleyd", password: volleydPassword };
       writeFileSync(volleydFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
       chmodSync(volleydFile, 0o600);
+      if (sudoUser !== null) {
+        // Root created these: hand every new directory and the file to the invoking user.
+        const created: string[] = [];
+        if (firstCreated !== undefined) {
+          for (let d = volleydDir; ; d = dirname(d)) {
+            created.unshift(d);
+            if (d === firstCreated || d === dirname(d)) break;
+          }
+        }
+        for (const path of [...created, volleydFile]) {
+          deps.chown(path, sudoUser.uid, sudoUser.gid);
+        }
+      }
     }
     const owner = deps.brokerOwner();
     if (owner !== null) {
@@ -335,7 +389,7 @@ export async function auth(
           : []),
         ...(wroteVolleyd
           ? [
-              `Wrote ${volleydFile} (mode 0600): volleyd's broker credentials (run volleyd as the user that owns it).`,
+              `Wrote ${volleydFile} (mode 0600): volleyd's broker credentials (run volleyd as the user that owns it${sudoUser !== null ? `, uid ${sudoUser.uid}` : ""}).`,
             ]
           : []),
         ...(owner !== null ? [`Handed ${dir} to the broker's user (uid ${owner.uid}).`] : []),
@@ -474,7 +528,8 @@ Options:
   --volleyd-file  init: also write $VOLLEYD_HOME/broker.json (default
                   ~/.volley/volleyd/broker.json, mode 0600) with volleyd's
                   credentials, read by \`volleyd daemon\` (never put in the launchd
-                  plist). Rotated by --force.
+                  plist). Rotated by --force. Under sudo it goes to the
+                  invoking user's home, owned by that user.
   --json          add-agent: print {"username","password"} instead of the bare password
   --no-reload     Do not signal the broker; reload it yourself before relying on the change
   -h, --help      Show this help and exit
