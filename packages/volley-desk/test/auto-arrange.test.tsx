@@ -1,12 +1,8 @@
 import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import {
-  ARRANGE_ANIM_MS,
-  LOOK_STORAGE_KEY,
-  useAutoArrange,
-  useAutoArrangeSetting,
-} from "../src/layout/useAutoArrange";
+import { ARRANGE_ANIM_MS, useAutoArrange } from "../src/layout/useAutoArrange";
+import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 
 const advance = (ms: number) => act(() => vi.advanceTimersByTime(ms));
@@ -143,32 +139,6 @@ describe("useAutoArrange", () => {
     rerender({ enabled: true, layoutKey: "c|w1" });
     advance(400);
     expect(arrange).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("useAutoArrangeSetting", () => {
-  it("defaults to ON", () => {
-    const { result } = renderHook(() => useAutoArrangeSetting());
-    expect(result.current[0]).toBe(true);
-  });
-
-  it("persists into the Desk look entry, keeping its other fields", () => {
-    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "Aurora" }));
-    const { result } = renderHook(() => useAutoArrangeSetting());
-    act(() => result.current[1](false));
-    expect(result.current[0]).toBe(false);
-    expect(JSON.parse(localStorage.getItem(LOOK_STORAGE_KEY) ?? "{}")).toEqual({
-      bg: "Aurora",
-      autoArrange: false,
-    });
-    const again = renderHook(() => useAutoArrangeSetting());
-    expect(again.result.current[0]).toBe(false);
-  });
-
-  it("a corrupt entry falls back to ON", () => {
-    localStorage.setItem(LOOK_STORAGE_KEY, "{not json");
-    const { result } = renderHook(() => useAutoArrangeSetting());
-    expect(result.current[0]).toBe(true);
   });
 });
 

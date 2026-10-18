@@ -61,6 +61,10 @@ jobs:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/volley-desk check:react-bits
+      # Warns (doesn't fail CI) when React Bits adds a background the picker lacks.
+      - name: React Bits backgrounds are all in the picker
+        continue-on-error: true
+        run: bun run --cwd packages/volley-desk sync:react-bits-backgrounds
 
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
