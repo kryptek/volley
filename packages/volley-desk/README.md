@@ -2,7 +2,7 @@
 
 The Desk: an infinite canvas of live wave and agent windows, driven straight off the Volley MQTT topics. There's no backend: the browser subscribes to the broker over WebSocket. The approved interactive prototype is the visual and interaction spec, and this package ports it piece by piece.
 
-**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store and demo mode, and it renders one plain placeholder window per wave and per agent. The real wave, agent and coordinator windows, the backgrounds, the dock, steering, settings and auto-arrange come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
+**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode and the agent window, plus one plain placeholder window per wave. The real wave and coordinator windows, the backgrounds, the dock, steering, settings and auto-arrange come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
 
 ## Run it
 
@@ -40,6 +40,9 @@ src/store/types.ts          payload types mirroring spec/schemas (T1)
 src/store/fixtures.ts       demo state + tick simulation (the prototype's data.ts, as envelopes)
 src/store/context.tsx       <DeskStoreProvider> / useDesk(): live or demo
 src/styles/desk.css         base rules ported from the prototype styles.css
+src/windows/agent/          agent window: AgentWindow (title, pipeline, narration, tabs, footer),
+                            Feed (envelopes + JSON), Terminal (screen tail), Pipeline
+src/styles/agent.css        agent window rules
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
 ```
@@ -70,7 +73,7 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 
 | Component | Install command | Used by |
 |---|---|---|
-| — | none installed yet | — |
+| StatusMark | `bunx --bun shadcn@latest add @react-bits/StatusMark-TS-CSS --path src/rb/StatusMark --yes` | agent window title (`src/windows/agent/AgentWindow.tsx`) |
 
 **Allow-list.** Only the free components that the approved prototype uses are allowed. The list is in `scripts/check-react-bits.ts` (`REACT_BITS_ALLOW_LIST`). `bun run check:react-bits` fails when any entry under `src/rb/` is not on it, and CI runs it as the *React Bits allow-list* job. Pro components are never allowed.
 

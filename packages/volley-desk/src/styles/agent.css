@@ -1,0 +1,282 @@
+/*
+ * Agent window: title chips, task title, pipeline, narration, the Volley
+ * feed and Terminal tabs, and the footer (progress, heartbeat, model).
+ * Class names follow the prototype's styles.css.
+ */
+.chip--role {
+  color: var(--mute);
+  text-transform: lowercase;
+}
+.a-id {
+  margin-top: -4px;
+}
+.a-title {
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.3;
+}
+.a-narr {
+  font-size: 13.5px;
+  color: var(--ink);
+  min-height: 1.45em;
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--acc) 60%, transparent);
+}
+.a-attn:empty {
+  display: none;
+}
+
+/* ------------------------------------------------------------ pipeline */
+.pipe {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11.5px;
+}
+.pipe-step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.pipe-step i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex: none;
+}
+.pipe-step.is-done {
+  color: var(--mute);
+}
+.pipe-step.is-done i {
+  background: var(--ok);
+}
+.pipe-step.is-cur {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--acc) 55%, transparent);
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
+}
+.pipe-step.is-cur i {
+  background: var(--acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 25%, transparent);
+}
+.pipe-step.is-held {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+.pipe-step.is-held i {
+  background: var(--amber);
+}
+
+/* ----------------------------------------------------------------- tabs */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--mute);
+  font-size: 12.5px;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: var(--ink);
+}
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--acc);
+}
+
+/* ----------------------------------------------------------------- feed */
+.feed,
+.term {
+  height: 190px;
+  overflow: auto;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  overscroll-behavior: contain;
+}
+.feed {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.feed--empty,
+.term-empty {
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+}
+.feed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.feed-row:hover,
+.feed-row.is-open {
+  background: rgba(255, 255, 255, 0.06);
+}
+.feed-t {
+  color: var(--dim);
+  font-size: 11px;
+  flex: none;
+}
+.feed-ch {
+  flex: none;
+  font-size: 11px;
+  color: var(--mute);
+}
+.feed-msg {
+  flex: 1;
+  color: var(--ink);
+}
+.ch-status .feed-ch {
+  color: #6ee7f9;
+}
+.ch-progress .feed-ch {
+  color: var(--mute);
+}
+.ch-result .feed-ch {
+  color: var(--ok);
+}
+.ch-mailbox .feed-ch {
+  color: var(--amber);
+}
+.ch-mailbox {
+  box-shadow: inset 2px 0 0 var(--amber);
+}
+.ch-registry .feed-ch {
+  color: #c4b5fd;
+}
+.feed-json {
+  margin: 2px 6px 6px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mute);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* ------------------------------------------------------------- terminal */
+.term {
+  position: relative;
+  padding: 8px 10px;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--mute);
+  user-select: text;
+}
+.tl {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tl-cmd {
+  color: var(--ink);
+}
+.tl-ok {
+  color: var(--ok);
+}
+.tl-bad {
+  color: #ff8f73;
+}
+.term-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  vertical-align: -2px;
+  background: var(--acc);
+  animation: caret 1.05s steps(1) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+.term-stale {
+  position: sticky;
+  top: 0;
+  float: right;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--amber);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(15, 17, 27, 0.9);
+}
+.term--stale .tl {
+  opacity: 0.6;
+}
+
+/* --------------------------------------------------------------- footer */
+.a-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  min-width: 60px;
+}
+.bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--acc);
+  transition: width 0.4s ease;
+}
+.a-pct {
+  color: var(--ink);
+}
+.hb {
+  color: var(--ok);
+}
+.hb--stale {
+  color: var(--amber);
+}
+.a-model {
+  max-width: 150px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term-caret {
+    animation: none;
+  }
+  .bar i {
+    transition: none;
+  }
+}
