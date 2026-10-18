@@ -219,7 +219,7 @@ describe("App look (demo mode)", () => {
     expect((container.querySelector(".bg-dim") as HTMLElement).style.opacity).toBe("0.4");
     const agents = container.querySelectorAll(".world .win .narr").length;
     expect(agents).toBeGreaterThan(0);
-    expect(container.querySelectorAll(".world svg.tethers path")).toHaveLength(agents);
+    expect(container.querySelectorAll(".world svg.tethers path.tether-core")).toHaveLength(agents);
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
     const n = pill.match(/(\d+) needs? you/)?.[1];
     expect(n).toBeDefined();
@@ -231,7 +231,7 @@ describe("App look (demo mode)", () => {
   it("draws tethers only for the agents of visible waves", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
     const { container } = renderApp();
-    const paths = () => container.querySelectorAll(".world svg.tethers path").length;
+    const paths = () => container.querySelectorAll(".world svg.tethers path.tether-core").length;
     const agents = () => container.querySelectorAll(".world .win .narr").length;
     const before = paths();
     const first = container.querySelector(".coord-list > li") as HTMLElement;

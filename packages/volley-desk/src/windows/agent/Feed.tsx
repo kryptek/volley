@@ -83,9 +83,10 @@ export function Feed({ feed }: { feed: readonly FeedEntry[] }) {
     .map((e, i) => ({ e, i, t: entryTime(e) }))
     .sort((a, b) => a.t - b.t || a.i - b.i);
 
-  if (rows.length === 0) return <div className="feed feed--empty dim">no envelopes yet</div>;
+  if (rows.length === 0)
+    return <div className="feed feed--empty recessed dim">no envelopes yet</div>;
   return (
-    <div className="feed" ref={ref} onScroll={onScroll}>
+    <div className="feed recessed" ref={ref} onScroll={onScroll}>
       {rows.map(({ e, t }) => {
         const ch = feedChannel(e);
         const isOpen = open === e;
@@ -102,7 +103,9 @@ export function Feed({ feed }: { feed: readonly FeedEntry[] }) {
               <span className="env-type">{e.envelope.type}</span>
               <span className="env-msg">{summary(e)}</span>
             </button>
-            {isOpen && <pre className="env-json">{JSON.stringify(e.envelope, null, 2)}</pre>}
+            {isOpen && (
+              <pre className="env-json recessed">{JSON.stringify(e.envelope, null, 2)}</pre>
+            )}
           </div>
         );
       })}

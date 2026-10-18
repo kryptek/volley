@@ -40,6 +40,7 @@ import { Appearance } from "./look/Appearance";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
+import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
@@ -402,6 +403,8 @@ export default function App() {
       wave: rectOf(id, WAVE_W, WAVE_H),
       agent: pos(a.id),
       accent: accentOf(id),
+      // A new `progress` envelope sends a pulse down the cable (D10).
+      beat: progressBeat(a.feed),
     })),
   );
   useDeskKeys({

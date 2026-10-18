@@ -14,6 +14,7 @@
 import { Cancel01Icon, Copy01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
+import { PrimaryAction } from "../look/PrimaryAction";
 import PromptBar from "../rb/PromptBar/PromptBar";
 import "../styles/steer.css";
 import { type AckState, ackLabels, ackStep } from "./ackState";
@@ -99,25 +100,27 @@ export function SteerPanel({
         ))}
       </div>
       {onSend ? (
-        <PromptBar
-          placeholder={
-            coordinator
-              ? "Answer or instruct the coordinator…"
-              : "Type a steering message…  ( / for commands )"
-          }
-          sources={[]}
-          commands={[...STEER_COMMANDS]}
-          models={MODELS}
-          defaultModel="mailbox"
-          efforts={[]}
-          background="rgba(10,12,20,.92)"
-          color="#e8ecf4"
-          menuBackground="#12141f"
-          sparkColor="#6ee7f9"
-          onSend={(t, detail) => {
-            if (t.trim()) onSend(t.trim(), detail.model?.key === "urgent");
-          }}
-        />
+        <div className="steer-input recessed">
+          <PromptBar
+            placeholder={
+              coordinator
+                ? "Answer or instruct the coordinator…"
+                : "Type a steering message…  ( / for commands )"
+            }
+            sources={[]}
+            commands={[...STEER_COMMANDS]}
+            models={MODELS}
+            defaultModel="mailbox"
+            efforts={[]}
+            background="rgba(10,12,20,.92)"
+            color="#e8ecf4"
+            menuBackground="#12141f"
+            sparkColor="#6ee7f9"
+            onSend={(t, detail) => {
+              if (t.trim()) onSend(t.trim(), detail.model?.key === "urgent");
+            }}
+          />
+        </div>
       ) : (
         <ReadOnly draft={draft} setDraft={setDraft} copy={copy ?? null} reason={readOnlyReason} />
       )}
@@ -203,7 +206,7 @@ function ReadOnly({
       {copy && (
         <>
           <input
-            className="steer-ro-input"
+            className="steer-ro-input recessed"
             aria-label="Steering text"
             placeholder="Type a steering message…"
             value={draft}
@@ -267,14 +270,9 @@ export function ClaimButton({
   };
   return (
     <>
-      <button
-        type="button"
-        className="btn btn--hot"
-        disabled={state.kind === "sending"}
-        onClick={() => void claim()}
-      >
+      <PrimaryAction hot disabled={state.kind === "sending"} onClick={() => void claim()}>
         Claim this wave
-      </button>
+      </PrimaryAction>
       {state.kind === "sending" && <span className="steer-ro-copied">Claiming…</span>}
       {state.kind === "done" &&
         (state.ok ? (

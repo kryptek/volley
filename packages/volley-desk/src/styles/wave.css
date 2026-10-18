@@ -83,9 +83,7 @@
 .yaml {
   margin: 0;
   font: 11.5px / 1.6 var(--f-mono);
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 10px;
   overflow: auto;
   max-height: 170px;

@@ -47,35 +47,22 @@
 .narr-enc {
   color: color-mix(in srgb, var(--acc) 80%, white);
 }
-.tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--line);
-}
-.tabs button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: none;
-  border: 0;
-  padding: 6px 10px;
+/* Tabs: React Bits Gooey Nav (look/GooeyTabs.tsx, D10) in a recessed track; the goo is the accent. */
+.gooey-tabs {
+  align-self: flex-start;
   font-size: 12.5px;
-  color: var(--dim);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
 }
-.tabs button[aria-selected="true"] {
-  color: var(--ink);
-  border-bottom-color: var(--acc);
+.gooey-tabs.gooey-nav--framed {
+  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08);
+  --gn-muted: var(--mute);
+  --gn-ink: var(--ink);
 }
 .feed,
 .term {
   height: 190px;
   overflow: auto;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 .env-row {
   display: grid;
@@ -122,8 +109,7 @@
   margin: 0 9px 8px;
   font: 11px / 1.5 var(--f-mono);
   color: #b9c3da;
-  background: rgba(0, 0, 0, 0.35);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 8px;
   overflow-x: auto;
 }

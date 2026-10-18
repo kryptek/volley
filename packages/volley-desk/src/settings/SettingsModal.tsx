@@ -19,7 +19,9 @@ import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type CSSProperties, type RefObject, useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
+import { PrimaryAction } from "../look/PrimaryAction";
 import ElasticSlider from "../rb/ElasticSlider/ElasticSlider";
+import RubberSegment from "../rb/RubberSegment/RubberSegment";
 import type { ConfigPayload, Tunables, WaveView } from "../store/types";
 import { Clawd } from "../windows/wave/Clawd";
 import { accentFor } from "../windows/wave/accent";
@@ -139,7 +141,7 @@ function TextControl(p: {
   };
   return (
     <input
-      className="cfg-text mono"
+      className="cfg-text recessed mono"
       aria-label={p.row.label}
       value={draft}
       disabled={p.disabled}
@@ -361,26 +363,22 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
         {/* A div, not <header>: outside sectioning content a header is a second banner landmark. */}
         <div className="modal-head">
           <Clawd /> <span className="t-name">Settings</span>
-          <div className="seg" role="radiogroup" aria-label="Scope">
-            <button
-              type="button"
-              // biome-ignore lint/a11y/useSemanticElements: the prototype's segmented control
-              role="radio"
-              aria-checked={scope === "wave"}
-              onClick={() => setScope("wave")}
-            >
-              This wave ({wave.id})
-            </button>
-            <button
-              type="button"
-              // biome-ignore lint/a11y/useSemanticElements: the prototype's segmented control
-              role="radio"
-              aria-checked={scope === "global"}
-              onClick={() => setScope("global")}
-            >
-              Global
-            </button>
-          </div>
+          <RubberSegment
+            className="scope-seg"
+            aria-label="Scope"
+            size="sm"
+            equalSlots={false}
+            items={[
+              { value: "wave", label: `This wave (${wave.id})` },
+              { value: "global", label: "Global" },
+            ]}
+            value={scope}
+            onChange={(v: string) => setScope(v as Scope)}
+            trackColor="rgba(4, 5, 10, 0.85)"
+            thumbColor={`color-mix(in srgb, ${accent} 24%, rgba(255, 255, 255, 0.08))`}
+            textColor="#e8ecf4"
+            activeTextColor="#ffffff"
+          />
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Close settings">
             <HugeiconsIcon icon={Cancel01Icon} size={15} strokeWidth={1.8} />
           </button>
@@ -426,9 +424,7 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
             Saved through <code>volleyd config set</code> · applies at the next admission tick ·
             never preempts running work
           </span>
-          <button type="button" className="btn btn--hot" onClick={onClose}>
-            Done
-          </button>
+          <PrimaryAction onClick={onClose}>Done</PrimaryAction>
         </footer>
       </div>
     </div>
