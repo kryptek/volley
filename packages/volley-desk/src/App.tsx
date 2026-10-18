@@ -1,24 +1,24 @@
 /**
  * The Desk shell: plain background, pannable/zoomable stage, top bar, a wave
- * window per wave, and a placeholder window per agent (and for agents with no
- * wave) so the canvas can be exercised. The real agent and coordinators
- * windows, backgrounds, dock and arrange replace the placeholders in later
+ * window per wave and an agent window per agent (a plain frame for agents with
+ * no wave). The coordinators window, backgrounds, dock and arrange come in later
  * tasks.
  */
 import { useEffect, useRef, useState } from "react";
-import { BORN_MS, Frame, useFocusOrder } from "./canvas/Frame";
+import { Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
+import { AGENT_WIDTH, AgentWindow } from "./windows/agent/AgentWindow";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
-const AGENT_W = 460;
-// A guess: waves with 4+ parallel tasks run taller. D6 replaces this placeholder layout.
+const AGENT_W = AGENT_WIDTH;
+// Guesses until D6's arrange measures real windows.
 const WAVE_H = 440;
-const AGENT_H = 220;
+const AGENT_H = 470;
 const GAP = 36;
 const CGAP = 96;
 
@@ -145,18 +145,15 @@ export default function App() {
           })}
           {waveIds.flatMap((id) =>
             (groups[id] ?? []).map((a) => (
-              <Frame
-                key={a.id}
-                {...frame(a.id, accentOf(id), AGENT_W)}
-                title={a.id}
-                born={a.bornAt !== null && Date.now() - a.bornAt < BORN_MS}
-              >
-                <div className="mono dim">
-                  {[a.task, a.role, a.status?.type ?? "—"].filter(Boolean).join(" · ")}
-                  {a.progress !== null && ` · ${a.progress}%`}
-                </div>
-                <div>{a.narration ?? <span className="dim">no narration yet</span>}</div>
-              </Frame>
+              // Keyed by bornAt: a window that existed before its registry entry
+              // re-mounts with `born` when the entry arrives.
+              <AgentWindow
+                key={`${a.id}:${a.bornAt ?? ""}`}
+                agent={a}
+                wave={state.waves[id]}
+                accent={accentOf(id)}
+                frame={place(a.id)}
+              />
             )),
           )}
         </World>

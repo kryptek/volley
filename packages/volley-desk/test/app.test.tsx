@@ -8,20 +8,21 @@ import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope } from "../src/store/types";
 
 describe("App (demo mode)", () => {
-  it("renders a wave window per demo wave, a placeholder per agent, and the top-bar counts", () => {
+  it("renders a wave window per demo wave, an agent window per agent, and the top-bar counts", () => {
     const { container } = render(
       <DeskStoreProvider demo>
         <App />
       </DeskStoreProvider>,
     );
     expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5);
-    const waveNames = [...container.querySelectorAll(".world .win .t-name")].map(
-      (n) => n.textContent,
-    );
+    // Agent windows use .t-name too; wave windows are the ones with a dependency graph.
+    const waveNames = [...container.querySelectorAll(".world .win")]
+      .filter((w) => w.querySelector(".dag"))
+      .map((w) => w.querySelector(".t-name")?.textContent);
     expect(waveNames).toEqual(["status-chip", "ci-speed", "leaderboard"]);
     expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
+    expect(container.querySelectorAll(".world .narr")).toHaveLength(5);
     expect(container.querySelectorAll(".world .dag")).toHaveLength(3);
-    expect(screen.getByRole("region", { name: "status-chip-t1-fixup-1" })).toBeInTheDocument();
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("3 waves");
   });
