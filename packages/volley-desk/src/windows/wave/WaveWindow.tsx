@@ -12,7 +12,7 @@ import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
 import { Dag, type DagNode } from "./Dag";
-import { WaveYaml } from "./WaveYaml";
+import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor } from "./accent";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
@@ -29,7 +29,10 @@ export interface WaveWindowProps {
   startedAt?: number | null | undefined;
   /** Fixed clock for tests; otherwise the window re-renders every 5 s. */
   now?: number;
-  frame: Omit<FrameProps, "id" | "title" | "accent" | "width" | "actions" | "footer" | "children">;
+  frame: Omit<
+    FrameProps,
+    "id" | "title" | "label" | "accent" | "width" | "actions" | "footer" | "children"
+  >;
   /** Needs-you / claim banners, shown above the graph. */
   banner?: ReactNode;
   /** Children after the wave file (the steering panel). */
@@ -79,21 +82,32 @@ function IconBtn(p: {
   );
 }
 
-/** Graph nodes in wave-file order; tasks the spec does not list are appended. */
+/**
+ * Graph nodes in wave-file order (`taskOrder`). A cancelled task the spec still
+ * lists is flagged `cancelled`; one the spec no longer lists was removed by a
+ * plan change and is dropped.
+ */
 export function dagNodes(s: WaveStatePayload): DagNode[] {
-  const stage = new Map(s.tasks.map((t) => [t.id, deskStage(t.stage)]));
-  const fromSpec: DagNode[] = Object.entries(s.spec?.tasks ?? {}).map(([id, t]) => ({
-    id,
-    issue: t.issue,
-    after: t.after,
-    stage: stage.get(id) ?? "queued",
-    ...(t.title ? { title: t.title } : {}),
-  }));
-  const listed = new Set(fromSpec.map((n) => n.id));
-  const extra = s.tasks
-    .filter((t) => !listed.has(t.id))
-    .map((t): DagNode => ({ id: t.id, issue: t.issue, after: [], stage: deskStage(t.stage) }));
-  return [...fromSpec, ...extra];
+  const spec = s.spec?.tasks ?? {};
+  const state = new Map(s.tasks.map((t) => [t.id, t]));
+  return taskOrder(s).flatMap((id): DagNode[] => {
+    const t = state.get(id);
+    const sp = spec[id];
+    if (!sp) {
+      if (!t || t.stage === "cancelled") return [];
+      return [{ id, issue: t.issue, after: [], stage: deskStage(t.stage) }];
+    }
+    return [
+      {
+        id,
+        issue: sp.issue,
+        after: sp.after,
+        stage: t ? deskStage(t.stage) : "queued",
+        ...(sp.title ? { title: sp.title } : {}),
+        ...(t?.stage === "cancelled" ? { cancelled: true } : {}),
+      },
+    ];
+  });
 }
 
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
@@ -106,8 +120,10 @@ export function WaveWindow(p: WaveWindowProps) {
   const waiting = (p.coordinatorState ?? s?.coordinator?.state) === "awaiting_input";
   const mine = p.me !== null && s?.owner === p.me;
   const tasks = s ? dagNodes(s) : [];
-  const pct = wavePct(tasks.map((t) => t.stage));
-  const merged = tasks.filter((t) => t.stage === "merged").length;
+  // Cancelled tasks never run, so they stay out of the rail and the progress maths.
+  const live = tasks.filter((t) => !t.cancelled);
+  const pct = wavePct(live.map((t) => t.stage));
+  const merged = live.filter((t) => t.stage === "merged").length;
   // Count unresolved decisions from the store, not state.open_decisions: a resolved decision can linger in the
   // retained state until the supervisor re-publishes it (D0 fixup, "ghost" decisions).
   const openDecisions = Object.values(p.wave.decisions).filter((d) => !d.resolved).length;
@@ -147,7 +163,7 @@ export function WaveWindow(p: WaveWindowProps) {
         aria-valuemax={100}
         aria-label={`${id} progress`}
       >
-        {tasks.map((t) => (
+        {live.map((t) => (
           <span
             key={t.id}
             className={`rail-seg st-${t.stage}`}
@@ -160,7 +176,7 @@ export function WaveWindow(p: WaveWindowProps) {
       <div className="rail-meta">
         <span className="rail-pct">{pct}%</span>
         <span>
-          {merged} of {tasks.length} merged
+          {merged} of {live.length} merged
         </span>
         <span>
           {plural(openDecisions, "decision")} · {plural(s.gates.length, "gate")}
@@ -175,6 +191,7 @@ export function WaveWindow(p: WaveWindowProps) {
       {...p.frame}
       id={id}
       title={title}
+      label={id}
       accent={accent}
       width={WAVE_W}
       actions={actions}

@@ -3,7 +3,8 @@
  * `wavePct`, plus the mapping from volleyd's wave-state stages
  * (wave-state.schema.json `$defs/stage`) onto that set. The two parallel
  * reviews collapse into `review`; `blocked` and `awaiting_decision` both need
- * a human, so both show as `decision`.
+ * a human, so both show as `decision`. A cancelled task never runs: the wave
+ * window marks it in the graph and leaves it out of the progress rail.
  */
 import type { Stage } from "../../store/types";
 
@@ -26,7 +27,8 @@ export const DESK_STAGES: readonly DeskStage[] = [
   "decision",
 ];
 
-const FROM_VOLLEYD: Record<Stage, DeskStage> = {
+/** Exported so a test can check every schema stage has an explicit entry. */
+export const FROM_VOLLEYD: Record<Stage, DeskStage> = {
   queued: "queued",
   implement: "implement",
   spec_review: "review",
@@ -36,7 +38,7 @@ const FROM_VOLLEYD: Record<Stage, DeskStage> = {
   done: "merged",
   blocked: "decision",
   awaiting_decision: "decision",
-  // A cancelled task never progresses; it reads as not started.
+  // Not started and never will be; the wave window flags it as cancelled on top of this.
   cancelled: "queued",
 };
 

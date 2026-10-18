@@ -19,6 +19,7 @@ describe("App (demo mode)", () => {
       (n) => n.textContent,
     );
     expect(waveNames).toEqual(["status-chip", "ci-speed", "leaderboard"]);
+    expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
     expect(container.querySelectorAll(".world .dag")).toHaveLength(3);
     expect(screen.getByRole("region", { name: "status-chip-t1-fixup-1" })).toBeInTheDocument();
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();

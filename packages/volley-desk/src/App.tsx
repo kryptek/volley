@@ -16,6 +16,7 @@ import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
 const AGENT_W = 460;
+// A guess: waves with 4+ parallel tasks run taller. D6 replaces this placeholder layout.
 const WAVE_H = 440;
 const AGENT_H = 220;
 const GAP = 36;
@@ -23,7 +24,11 @@ const CGAP = 96;
 
 const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
 
-/** Earliest start among a wave's agents (registry `started_at`, else first sighting). */
+/**
+ * Earliest start among a wave's agents (registry `started_at`, else first
+ * sighting). Wave state has no start time; App keeps the earliest value ever
+ * seen per wave so the age does not jump when early agents leave the store.
+ */
 function waveStartedAt(agents: readonly AgentView[]): number | null {
   const starts = agents
     .map((a) => Date.parse(a.registry?.started_at ?? "") || a.bornAt)
@@ -65,6 +70,13 @@ export default function App() {
   const [me] = useState(() => meFromSearch(window.location.search));
 
   const groups = agentsByWave(state);
+  const firstStart = useRef<Record<string, number>>({});
+  const startedAt = (id: string): number | null => {
+    const t = waveStartedAt(groups[id] ?? []);
+    const prev = firstStart.current[id];
+    if (t !== null && (prev === undefined || t < prev)) firstStart.current[id] = t;
+    return firstStart.current[id] ?? null;
+  };
   const waveIds = [
     ...Object.keys(state.waves),
     ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
@@ -126,7 +138,7 @@ export default function App() {
                 wave={wave}
                 me={me}
                 coordinatorState={owner ? state.coordinators[owner]?.state : undefined}
-                startedAt={waveStartedAt(groups[id] ?? [])}
+                startedAt={startedAt(id)}
                 frame={place(id)}
               />
             );

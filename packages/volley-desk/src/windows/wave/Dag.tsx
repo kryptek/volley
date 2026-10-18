@@ -13,6 +13,8 @@ export interface DagNode {
   title?: string;
   after: string[];
   stage: DeskStage;
+  /** Cancelled by a plan change: drawn faded, labelled `cancelled`, kept out of progress. */
+  cancelled?: boolean;
 }
 
 export interface DagLayout {
@@ -110,7 +112,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
           <g
             key={t.id}
             transform={`translate(${t.x},${t.y})`}
-            className={`dag-node st-${t.stage}`}
+            className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}`}
             data-col={t.col}
           >
             {t.title && <title>{`${t.id} · ${t.title}`}</title>}
@@ -119,7 +121,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
               {t.id}
             </text>
             <text x="10" y="34" className="dag-stage">
-              {STAGE_LABEL[t.stage]}
+              {t.cancelled ? "cancelled" : STAGE_LABEL[t.stage]}
             </text>
             <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
               #{t.issue}

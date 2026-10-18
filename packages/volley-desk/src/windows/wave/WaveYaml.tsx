@@ -5,6 +5,17 @@
  */
 import type { PipelineStep, WaveStatePayload } from "../../store/types";
 
+/**
+ * Task ids in wave-file order: the wave state's `tasks` array (ordered), then
+ * any spec-only ids. Not `Object.keys(spec.tasks)`: integer-like ids such as
+ * "10" and "2" would enumerate first, in numeric order.
+ */
+export function taskOrder(wave: WaveStatePayload): string[] {
+  const ids = [...new Set(wave.tasks.map((t) => t.id))];
+  const seen = new Set(ids);
+  return [...ids, ...Object.keys(wave.spec?.tasks ?? {}).filter((id) => !seen.has(id))];
+}
+
 const flow = (steps: readonly PipelineStep[]): string =>
   `[${steps.map((s) => (Array.isArray(s) ? flow(s) : s)).join(", ")}]`;
 
@@ -13,6 +24,7 @@ const v = (s: string) => <span className="y-v">{s}</span>;
 
 export function WaveYaml({ wave }: { wave: WaveStatePayload }) {
   const spec = wave.spec;
+  const specTasks = spec?.tasks ?? {};
   return (
     <pre className="yaml" aria-label="Wave file">
       {k("wave")}: {v(wave.wave)}
@@ -32,21 +44,30 @@ export function WaveYaml({ wave }: { wave: WaveStatePayload }) {
         </>
       )}
       {k("tasks")}:{"\n"}
-      {Object.entries(spec?.tasks ?? {}).map(([id, t]) => (
-        <span key={id}>
-          {"  "}
-          {k(id)}: {"{ "}
-          {k("issue")}: {v(String(t.issue))}
-          {t.after.length ? (
-            <>
-              , {k("after")}: [{v(t.after.join(", "))}]
-            </>
-          ) : null}
-          {" }"}
-          {t.title && <span className="y-c"> # {t.title}</span>}
-          {"\n"}
-        </span>
-      ))}
+      {taskOrder(wave).map((id) => {
+        const t = specTasks[id];
+        if (!t) return null;
+        return (
+          <span key={id}>
+            {"  "}
+            {k(id)}: {"{ "}
+            {k("issue")}: {v(String(t.issue))}
+            {t.after.length ? (
+              <>
+                , {k("after")}: [{v(t.after.join(", "))}]
+              </>
+            ) : null}
+            {" }"}
+            {t.title && (
+              <span className="y-c">
+                {"  # "}
+                {t.title}
+              </span>
+            )}
+            {"\n"}
+          </span>
+        );
+      })}
     </pre>
   );
 }

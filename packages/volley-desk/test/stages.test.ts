@@ -5,6 +5,7 @@ import type { Stage } from "../src/store/types";
 import {
   DESK_STAGES,
   type DeskStage,
+  FROM_VOLLEYD,
   STAGE_LABEL,
   STAGE_WEIGHT,
   deskStage,
@@ -15,8 +16,14 @@ const schemaPath = path.resolve(__dirname, "../../../spec/schemas/wave-state.sch
 const schemaStages: Stage[] = JSON.parse(readFileSync(schemaPath, "utf8")).$defs.stage.enum;
 
 describe("deskStage", () => {
-  it.each(schemaStages)("maps the wave-state enum value %s onto the desk stage set", (s) => {
-    expect(DESK_STAGES).toContain(deskStage(s));
+  it.each(schemaStages)("has an explicit desk stage for the wave-state enum value %s", (s) => {
+    // Explicit entry, not the runtime fallback: a stage added to the schema must be mapped on purpose.
+    expect(Object.hasOwn(FROM_VOLLEYD, s)).toBe(true);
+    expect(DESK_STAGES).toContain(FROM_VOLLEYD[s]);
+  });
+
+  it("maps exactly the schema's stages", () => {
+    expect(Object.keys(FROM_VOLLEYD).sort()).toEqual([...schemaStages].sort());
   });
 
   it("collapses the parallel reviews and maps terminal and human-wait stages", () => {

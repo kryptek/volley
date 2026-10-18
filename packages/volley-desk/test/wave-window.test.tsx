@@ -106,6 +106,8 @@ describe("WaveWindow", () => {
     expect(yaml).toHaveTextContent("T3: { issue: 104, after: [T1, T2] }");
     expect(yaml).toHaveTextContent("T0: { issue: 101 }");
     expect(yaml).toHaveTextContent("# Detail page badge");
+    // Two spaces before the inline comment, as in the prototype (toHaveTextContent normalises whitespace).
+    expect(yaml.textContent).toContain("}  # Detail page badge");
     expect(yaml).toHaveTextContent(
       "pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]",
     );
@@ -122,8 +124,73 @@ describe("WaveWindow", () => {
   });
 
   it("prefers the store's coordinator state over the supervisor's snapshot", () => {
-    const { container } = renderWave({ coordinatorState: "awaiting_input" });
+    const { container, unmount } = renderWave({ coordinatorState: "awaiting_input" });
     expect(container.querySelector(".clawd")).toHaveClass("clawd--wait");
+    unmount();
+    // The store has seen the coordinator resume while the retained snapshot still says it waits.
+    const r = renderWave({ wave: wave("awaiting_input"), coordinatorState: "working" });
+    expect(r.container.querySelector(".clawd")).not.toHaveClass("clawd--wait");
+  });
+
+  it("is a region named after the wave", () => {
+    renderWave();
+    expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
+  });
+
+  it("leaves cancelled tasks out of the progress and marks them in the graph", () => {
+    const w = wave();
+    const s = w.state as WaveStatePayload;
+    s.status = "complete";
+    s.tasks = [
+      { id: "T0", issue: 101, stage: "done", agents: {} },
+      { id: "T1", issue: 102, stage: "done", agents: {} },
+      { id: "T2", issue: 103, stage: "cancelled", agents: {} },
+      { id: "T3", issue: 104, stage: "done", agents: {} },
+      // Removed by a plan change: no longer in the spec.
+      { id: "T4", issue: 105, stage: "cancelled", agents: {} },
+    ];
+    const { container } = renderWave({ wave: w });
+    expect(container.querySelector(".rail-pct")).toHaveTextContent("100%");
+    expect(screen.getByText("3 of 3 merged")).toBeInTheDocument();
+    expect(container.querySelectorAll(".rail-seg")).toHaveLength(3);
+    const nodes = [...container.querySelectorAll(".dag-node")];
+    expect(nodes.map((n) => n.querySelector(".dag-id")?.textContent)).toEqual([
+      "T0",
+      "T1",
+      "T2",
+      "T3",
+    ]);
+    expect(nodes[2]).toHaveClass("st-cancelled");
+    expect(nodes[2]).not.toHaveClass("st-queued");
+    expect(nodes[2]).toHaveTextContent("cancelled");
+  });
+
+  it("orders tasks by the wave state's task list, not object key order", () => {
+    const w = wave();
+    const s = w.state as WaveStatePayload;
+    s.tasks = [
+      { id: "T9", issue: 1, stage: "done", agents: {} },
+      { id: "10", issue: 2, stage: "queued", agents: {} },
+      { id: "2", issue: 3, stage: "queued", agents: {} },
+    ];
+    s.spec = {
+      version: 1,
+      release_branch: s.release_branch,
+      // Integer-like keys enumerate first in JS, whatever the file order was.
+      tasks: {
+        T9: { issue: 1, after: [] },
+        "10": { issue: 2, after: ["T9"] },
+        "2": { issue: 3, after: ["T9"] },
+      },
+    };
+    const { container } = renderWave({ wave: w });
+    const ids = [...container.querySelectorAll(".rail-seg")].map(
+      (n) => n.getAttribute("title")?.split(" ")[0],
+    );
+    expect(ids).toEqual(["T9", "10", "2"]);
+    const yaml = screen.getByLabelText("Wave file").textContent ?? "";
+    expect(yaml.indexOf("T9:")).toBeLessThan(yaml.indexOf("10:"));
+    expect(yaml.indexOf("10:")).toBeLessThan(yaml.indexOf("2:"));
   });
 
   it("fires the chat and gear callbacks with the wave id", () => {

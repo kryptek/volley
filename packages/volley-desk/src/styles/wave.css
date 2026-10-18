@@ -69,6 +69,12 @@
 .dag-node.st-queued rect {
   stroke-dasharray: 4 4;
 }
+.dag-node.st-cancelled {
+  opacity: 0.45;
+}
+.dag-node.st-cancelled rect {
+  stroke-dasharray: 2 4;
+}
 .dag-node.st-implement rect,
 .dag-node.st-review rect,
 .dag-node.st-fixup rect {
