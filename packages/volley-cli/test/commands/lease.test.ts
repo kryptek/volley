@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -547,5 +547,95 @@ describe("volley lease without a supervisor", () => {
     } finally {
       await tb.close();
     }
+  });
+});
+
+describe("volley lease against a broker that requires credentials", () => {
+  const CREDS = { username: "coordinator", password: "s3cret" };
+  let tb: TestBroker;
+  let work: string;
+  beforeEach(async () => {
+    tb = await startTestBroker({ credentials: CREDS });
+    work = mkdtempSync(join(tmpdir(), "volley-lease-auth-"));
+  });
+  afterEach(async () => {
+    await tb.close();
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  const marker = () => join(work, "ran");
+  const runArgv = (...flags: string[]) => [
+    "lease",
+    "run",
+    "--pool",
+    "p",
+    "--broker-url",
+    tb.url,
+    ...flags,
+    "--",
+    "sh",
+    "-c",
+    `touch '${marker()}'; exit 5`,
+  ];
+
+  it("run: refused credentials fail closed: exit 1, the command never runs unleased", async () => {
+    const r = await runCli({
+      argv: runArgv(),
+      env: { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "wrong" },
+    });
+    expect(r.exitCode).toBe(1);
+    expect(existsSync(marker())).toBe(false);
+    expect(r.stderr).toContain("refused");
+    expect(r.stderr).not.toContain("running without a lease");
+  });
+
+  it("run --coordinator: reads $VOLLEY_AUTH_DIR/coordinator.json (as the coordinator hooks do)", async () => {
+    writeFileSync(join(work, "coordinator.json"), JSON.stringify(CREDS));
+    const r = await runCli({ argv: runArgv("--coordinator"), env: { VOLLEY_AUTH_DIR: work } });
+    // Connected: no supervisor on this broker, so it runs unleased with the usual warning.
+    expect(r.stderr).toContain("no live volleyd; running without a lease");
+    expect(r.exitCode).toBe(5);
+    expect(existsSync(marker())).toBe(true);
+  });
+
+  it("run --coordinator: VOLLEY_AUTH_* wins over coordinator.json", async () => {
+    writeFileSync(join(work, "coordinator.json"), JSON.stringify({ ...CREDS, password: "stale" }));
+    const r = await runCli({
+      argv: runArgv("--coordinator"),
+      env: {
+        VOLLEY_AUTH_DIR: work,
+        VOLLEY_AUTH_USERNAME: "coordinator",
+        VOLLEY_AUTH_PASSWORD: "s3cret",
+      },
+    });
+    expect(r.exitCode).toBe(5);
+  });
+
+  it("run --coordinator: never reads .volley/agent.json in the project dir", async () => {
+    writeFileSync(join(work, "coordinator.json"), JSON.stringify(CREDS));
+    mkdirSync(join(work, ".volley"));
+    writeFileSync(
+      join(work, ".volley", "agent.json"),
+      JSON.stringify({
+        agent_id: "w1-t1-implementer-1",
+        namespace: "default",
+        broker_url: tb.url,
+        broker: { username: "w1-t1-implementer-1", password: "agent-pw" },
+      }),
+    );
+    const r = await runCli({
+      argv: runArgv("--coordinator", "--project-dir", work, "--holder", "coordinator-ab12"),
+      env: { VOLLEY_AUTH_DIR: work },
+    });
+    expect(r.exitCode).toBe(5);
+  });
+
+  it("run --coordinator: a malformed coordinator.json is an error, not an anonymous connect", async () => {
+    writeFileSync(join(work, "coordinator.json"), "{not json");
+    const r = await runCli({ argv: runArgv("--coordinator"), env: { VOLLEY_AUTH_DIR: work } });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.exitCode).not.toBe(5);
+    expect(existsSync(marker())).toBe(false);
+    expect(r.stderr).toContain("coordinator.json");
   });
 });

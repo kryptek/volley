@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
+import pkg from "../package.json";
 import { type Command, type CommandArgs, EXIT, type ExitCode, realIO } from "./io";
 
-const VERSION = "0.1.0-dev";
+const VERSION = pkg.version;
 
 const USAGE = `Usage: volleyd <command> [options]
 

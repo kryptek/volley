@@ -161,10 +161,11 @@ For each event printed, by `type`:
   The task resumes and the answer reaches its next stage.
 - **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
 - **`alarm_raised`**, **`task_cancelled`**, **`wave_stopped`**: tell the user what happened and where to look (`volleyd status "$WAVE"`).
-- **`wave_complete`** (when volleyd records it): every task is settled; go to Step 6. Until volleyd detects merges it will not, so the loop's real exit is your own check: every task's PR is merged (`volleyd status "$WAVE"`, `gh pr view <pr> --json state`). Then go to Step 6.
+- **`stage_entered` with `data.stage` = `done`** (`data.merged: true`): volleyd saw the task's PR merged into the release branch. Informational; its dependents are admitted on their own (see **Merges and dependents**).
+- **`wave_complete`**: every task is settled; go to Step 6. Before acting on it (and if it never arrives), confirm with your own check: every task is `done` or `cancelled` in `volleyd status "$WAVE"`, and every PR is merged (`gh pr view <pr> --json state`).
 - Anything else (spawns, stage changes, leases): informational.
 
-**Merges and dependents.** volleyd never merges and does not yet detect a merge, so nothing moves a task to `done` after its PR lands. Merge-ready gates appear only once volleyd's pipeline stage machine is in place; until then a task's stage stops at `implement` when its agent finishes, and you review and merge its PR as in the legacy path. Either way a task with `after:` on it stays `queued`. After each merge, look at `volleyd status "$WAVE"`: for every queued task whose dependencies are now all merged, start it yourself with `volleyd spawn "$WAVE" <task>` (spawns outside admission).
+**Merges and dependents.** volleyd never merges, but it checks every `merge_ready` task's PR about once a minute. When the PR is merged into the release branch the task moves to `done` (`stage_entered {stage: "done", merged: true}`), and every queued task whose `after:` dependencies are now all `done` is admitted and spawned by volleyd itself, through normal admission. **Do not start dependents yourself**: `volleyd spawn "$WAVE" <task>` bypasses admission and would race volleyd's own spawn of the same task. A PR closed unmerged raises a `pr_closed_unmerged` alarm, and one merged at a different head than the gate saw still counts but raises `merged_unverified_head`; a PR merged into some other branch does not count. `volleyd spawn` is only for a task you deliberately want to start outside admission (say, to retry one volleyd has given up on); check `volleyd status "$WAVE"` first that nothing is already running for it.
 
 After acting on everything printed, advance the cursor to the last `seq` you handled, then loop back to 1 when the backgrounded `volley sub` exits:
 
@@ -519,7 +520,7 @@ Rules:
 
 ## Conformance with Volley v0.1
 
-Per design doc §7.5, the dispatched agents are conforming Volley agents and MUST satisfy:
+Per SPEC §11 (Conformance), the dispatched agents are conforming Volley agents and MUST satisfy:
 
 - **MUST** register on startup before publishing any other channel (spawn brief: vol_register is step 1).
 - **MUST** publish a terminal `status` (`done` | `blocked` | `failed`) before clean exit (spawn brief: "ON TERMINAL COMPLETION").
@@ -527,6 +528,6 @@ Per design doc §7.5, the dispatched agents are conforming Volley agents and MUS
 - **MUST** refuse unknown `schema_version` major versions — built into `parseEnvelope` per Plan 2.
 - **SHOULD** publish progress milestones at meaningful checkpoints (spawn brief: tests-green / mvn-verify-done / diff-ready).
 - **SHOULD** include `parent_id` if spawned by another Volley agent (spawn brief: parent_id is the coordinator's agent_id).
-- **MAY** subscribe to its own mailbox and respond to steering messages (not in v0.1 spawn brief — defer to v0.2 if the dispatch-issues UX wants it).
+- **MAY** subscribe to its own mailbox and respond to steering messages. On the volleyd path the `volley-hooks` drain does it (persistent session, ack, injected into the session); legacy-path briefs do not ask for it.
 
 This skill itself (the coordinator) is also a conforming Volley agent: it registers via Prerequisites step 4 and inherits the same MUST clauses.

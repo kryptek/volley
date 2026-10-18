@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { BrokerConnectOptions } from "volley-mcp/broker";
 import {
   type BrokerAuth,
-  MOSQUITTO_ETC_DIRS,
   authFromEnv,
+  coordinatorAuthPath,
+  readCoordinatorAuth,
   resolveBrokerAuth,
 } from "volley-mcp/config";
 import { VolleyError } from "volley-mcp/errors";
@@ -45,49 +46,8 @@ function loudly<T>(fn: () => T): T {
   }
 }
 
-/**
- * `$VOLLEY_AUTH_DIR/coordinator.json` (written by `volley auth init --coordinator-file`); without
- * VOLLEY_AUTH_DIR, the CLI's default `<mosquitto etc dir>/volley/coordinator.json`.
- */
-export function coordinatorAuthPath(env: Env): string | null {
-  if (env.VOLLEY_AUTH_DIR !== undefined) return join(env.VOLLEY_AUTH_DIR, "coordinator.json");
-  const etc = MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
-  return etc === undefined ? null : join(etc, "volley", "coordinator.json");
-}
-
-function readCoordinatorFile(env: Env): BrokerAuth | null {
-  const path = coordinatorAuthPath(env);
-  if (path === null || !existsSync(path)) return null;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch (e) {
-    throw new CredentialsError(
-      `${path}: cannot read coordinator credentials — ${(e as Error).message}`,
-    );
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    throw new CredentialsError(
-      `${path}: malformed coordinator credentials — ${(e as Error).message}`,
-    );
-  }
-  const c = raw as { username?: unknown; password?: unknown } | null;
-  if (
-    typeof c !== "object" ||
-    c === null ||
-    typeof c.username !== "string" ||
-    c.username === "" ||
-    typeof c.password !== "string"
-  ) {
-    throw new CredentialsError(
-      `${path}: must hold a non-empty string username and a string password`,
-    );
-  }
-  return { username: c.username, password: c.password };
-}
+/** Re-exported for the hooks' callers; the CLI's `volley lease --coordinator` reads the same file. */
+export { coordinatorAuthPath };
 
 /**
  * The hooks' broker credentials. Agent mode: exactly as the MCP server sharing the worktree
@@ -98,7 +58,7 @@ function readCoordinatorFile(env: Env): BrokerAuth | null {
  */
 export function resolveHooksAuth(target: AuthTarget, env: Env): BrokerAuth | null {
   if (target.mode === "agent") return loudly(() => resolveBrokerAuth(env, target.projectDir));
-  return loudly(() => authFromEnv(env)) ?? readCoordinatorFile(env);
+  return loudly(() => authFromEnv(env) ?? readCoordinatorAuth(env));
 }
 
 /** The connect options for `target`, credentials included — every hook connect goes through it. */

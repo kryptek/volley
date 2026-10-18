@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import pkg from "../package.json";
 import { toToolError } from "./errors";
 import type { ServerState } from "./state";
 import { volListAgents } from "./tools/list-agents";
@@ -22,7 +23,7 @@ interface McpToolResponse {
 
 /** Build the MCP server with all seven Volley tools bound to the given ServerState. */
 export function createServer(state: ServerState): McpServer {
-  const server = new McpServer({ name: "volley-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "volley-mcp", version: pkg.version });
 
   /**
    * Wraps a typed tool function for MCP registration. The input is typed as `unknown`

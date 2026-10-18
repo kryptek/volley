@@ -77,12 +77,20 @@ export function leaseCli(env: Record<string, string | undefined>): string {
 
 export function wrapCommand(
   command: string,
-  o: { pool: string; holder: string; brokerUrl: string; projectDir?: string; cli: string },
+  o: {
+    pool: string;
+    holder: string;
+    brokerUrl: string;
+    projectDir?: string;
+    coordinator?: boolean;
+    cli: string;
+  },
 ): string {
   const dir = o.projectDir !== undefined ? ` --project-dir ${shellQuote(o.projectDir)}` : "";
+  const coord = o.coordinator === true ? " --coordinator" : "";
   return (
     `${o.cli} lease run --pool ${shellQuote(o.pool)} --holder ${shellQuote(o.holder)}` +
-    ` --broker-url ${shellQuote(o.brokerUrl)}${dir}` +
+    ` --broker-url ${shellQuote(o.brokerUrl)}${dir}${coord}` +
     ` -- "\${SHELL:-/bin/sh}" -c ${shellQuote(command)}`
   );
 }
@@ -127,7 +135,10 @@ export async function handle(ctx: HookContext): Promise<HookResult | null> {
         holder: identity.agentId,
         brokerUrl: identity.brokerUrl,
         // Agent mode: the CLI reads broker credentials from the same .volley/agent.json.
-        ...(identity.mode === "agent" ? { projectDir: identity.projectDir } : {}),
+        // Coordinator mode: from VOLLEY_AUTH_* or coordinator.json, as these hooks do.
+        ...(identity.mode === "agent"
+          ? { projectDir: identity.projectDir }
+          : { coordinator: true }),
         cli: leaseCli(ctx.env),
       }),
     },

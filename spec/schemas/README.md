@@ -23,10 +23,11 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
 | `admission.schema.json` | `_system/admission` | section 4.6.7 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
+| `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | section 4.6 |
 
 ## Validating a payload
 
-The authoritative validator is the Phase 4 script `bun run validate:schemas`, which loads every schema with `ajv` + `ajv-formats` properly wired in. For a one-off check with `ajv-cli`:
+The authoritative validator is `bun run validate:schemas`, which loads every schema with `ajv` + `ajv-formats` properly wired in. For a one-off check with `ajv-cli`:
 
 ```bash
 bunx ajv-cli validate \

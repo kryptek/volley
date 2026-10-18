@@ -4,12 +4,13 @@ import { constants } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
-import { type BrokerAuth, loadConfig } from "volley-mcp/config";
+import { type BrokerAuth, authFromEnv, loadConfig, readCoordinatorAuth } from "volley-mcp/config";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { VolleyError } from "volley-mcp/errors";
 import { isValidAgentId } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
-import { connectAsClient } from "../connect";
+import { connectAsClient, openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -63,7 +64,8 @@ run      Wait for a lease, run the command, release the lease when it exits (or 
          "lease granted after N s" to stderr; exits with the command's exit code. It never waits
          on a supervisor that is gone: if no volleyd is live (now, or at any 30 s check while
          queued), the pool is not or no longer configured, or the request goes unanswered, it
-         warns and runs the command unleased. If this process dies, the broker releases the lease.
+         warns and runs the command unleased. A broker that refuses the credentials is an error
+         (exit 1, the command does not run). If this process dies, the broker releases the lease.
 acquire  Wait for a lease and print {"pool","lease_id","holder","waited_s"}; release it later.
 release  Release a held lease, or cancel a queued request.
 status   Print every pool's holders, queue and reasons.
@@ -75,6 +77,9 @@ Options:
   --lease-id <id>        Lease id (default: <holder>.<random>)
   --timeout <seconds>    Give up waiting after N seconds (exit 124); default: wait as long as it takes
   --project-dir <dir>    Where .volley/agent.json is (identity + broker credentials); default: cwd
+  --coordinator          Connect with the coordinator's credentials: VOLLEY_AUTH_*, else
+                         $VOLLEY_AUTH_DIR/coordinator.json (never .volley/agent.json). The
+                         coordinator hooks pass it.
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
   --password <pw>        Broker password (env: VOLLEY_AUTH_PASSWORD)
@@ -88,6 +93,7 @@ const OPTIONS = {
   "lease-id": { type: "string" },
   timeout: { type: "string" },
   "project-dir": { type: "string" },
+  coordinator: { type: "boolean" },
   "broker-url": { type: "string" },
   username: { type: "string" },
   password: { type: "string" },
@@ -222,9 +228,24 @@ function resolve(
     leaseId,
     timeoutMs: timeout !== undefined ? parsePositiveInt(timeout, "--timeout") * 1000 : undefined,
     brokerUrl: resolveBrokerUrl(str(values["broker-url"]), env),
-    auth: resolveAuth({ username: str(values.username), password: str(values.password) }, env, dir),
+    auth:
+      values.coordinator === true && values.username === undefined
+        ? coordinatorAuth(values.password, env)
+        : resolveAuth({ username: str(values.username), password: str(values.password) }, env, dir),
     json: values.json === true,
   };
+}
+
+/**
+ * `--coordinator` credentials, resolved as the coordinator hooks resolve theirs: `VOLLEY_AUTH_*`,
+ * else `coordinator.json`. A malformed file throws (a usage error) instead of going anonymous.
+ */
+function coordinatorAuth(
+  password: string | boolean | undefined,
+  env: Record<string, string | undefined>,
+): BrokerAuth | null {
+  if (password !== undefined) throw new Error("--password requires --username");
+  return authFromEnv(env) ?? readCoordinatorAuth(env);
 }
 
 /** The agent id from `<dir>/.volley/agent.json`, or undefined when there is no such file. */
@@ -445,7 +466,19 @@ async function run(
   const will = releaseWill(r.pool, leaseId, r.holder);
   // Installed for the whole run: an unleased command is forwarded our signals too.
   const traps = trapSignals();
-  const first = await connectAsClient(r.brokerUrl, io, r.auth, will);
+  let first: VolleyBroker | null = null;
+  try {
+    first = await openClient(r.brokerUrl, r.auth, will);
+  } catch (e) {
+    reportConnectError(io, e);
+    if (e instanceof VolleyError && e.code === "AUTH_FAILED") {
+      // Fail closed: a refused login is a setup error, not an outage. Running unleased would
+      // hide it and defeat the pool.
+      io.stderr("volley lease: not running the command without a lease; fix the credentials\n");
+      traps.remove();
+      return EXIT.ERROR;
+    }
+  }
   if (first === null) {
     io.stderr("volley lease: broker unreachable; running without a lease\n");
     try {

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import pkg from "../package.json";
 import { startLifecycle } from "../src/lifecycle";
 import { createServer } from "../src/server";
 import type { ServerState } from "../src/state";
@@ -30,6 +31,10 @@ describe("createServer (MCP wiring)", () => {
     await client.close();
     await state.broker.disconnect();
     await tb.close();
+  });
+
+  it("reports the package version to MCP clients", () => {
+    expect(client.getServerVersion()).toEqual({ name: "volley-mcp", version: pkg.version });
   });
 
   it("exposes exactly the seven v0.1 tools", async () => {

@@ -155,17 +155,20 @@ Mosquitto's stock install ships with a config that doesn't accept connections ou
 bun packages/volley-cli/src/cli.ts auth init
 ```
 
-It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew (edit the two paths on Intel or Linux, or pass `--dir`). On **Linux** run it as root so it can write `/etc/mosquitto` and hand the files to the `mosquitto` user the broker runs as: `sudo bun packages/volley-cli/src/cli.ts auth init --dir /etc/mosquitto/volley` (if you made the files another way, `sudo chown -R mosquitto: /etc/mosquitto/volley`, or the broker will not start). Then install the config and start the service:
+It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew. The config has three machine-specific paths (`password_file`, `acl_file`, `persistence_location`); the Intel and Linux install commands below rewrite all three for you. On **Linux** run it as root so it can write `/etc/mosquitto` and hand the files to the `mosquitto` user the broker runs as: `sudo bun packages/volley-cli/src/cli.ts auth init --dir /etc/mosquitto/volley` (if you made the files another way, `sudo chown -R mosquitto: /etc/mosquitto/volley`, or the broker will not start). Then install the config and start the service:
 
 ```sh
 # macOS (Apple Silicon):
 cp examples/mosquitto-localhost.conf /opt/homebrew/etc/mosquitto/mosquitto.conf
 
-# macOS (Intel):
-cp examples/mosquitto-localhost.conf /usr/local/etc/mosquitto/mosquitto.conf
+# macOS (Intel): same layout under /usr/local
+sed 's|/opt/homebrew/|/usr/local/|' examples/mosquitto-localhost.conf \
+  > /usr/local/etc/mosquitto/mosquitto.conf
 
-# Linux (apt / yum / dnf):
-sudo cp examples/mosquitto-localhost.conf /etc/mosquitto/mosquitto.conf
+# Linux (apt / yum / dnf): config in /etc/mosquitto, persistence in /var/lib/mosquitto
+sed -e 's|/opt/homebrew/etc/mosquitto/|/etc/mosquitto/|' \
+    -e 's|/opt/homebrew/var/mosquitto/|/var/lib/mosquitto/|' examples/mosquitto-localhost.conf \
+  | sudo tee /etc/mosquitto/mosquitto.conf > /dev/null
 
 brew services start mosquitto      # macOS
 sudo systemctl start mosquitto      # Linux
@@ -177,7 +180,7 @@ You now have a broker with two listeners on `127.0.0.1`:
 
 > 🔄 **Upgrading from an earlier Volley setup?** The WebSocket listener (`:9001`) was added with the v0.1.2 dashboard. If your installed `mosquitto.conf` predates that, re-copy `examples/mosquitto-localhost.conf` and `brew services restart mosquitto`. Verify with `lsof -nP -iTCP:9001 -sTCP:LISTEN` — you should see `mosquitto … (LISTEN)`. Without it, the dashboard browser console will hang on `mqtt.connect('ws://localhost:9001')` and you'll see no agents.
 
-> 💾 **Queued mailbox messages and persistence.** Mailbox messages for an agent that is offline wait on the broker in that agent's persistent session ([SPEC §4.4](spec/SPEC.md#44-mailbox-message-types)). mosquitto only flushes its persistence DB every `autosave_interval` seconds (1800 by default), so the bundled config sets `autosave_interval 30` and `autosave_on_changes false`. If you run your own config, add both lines. volleyd's journal remains the source of truth; this only narrows how far the broker's copy can lag behind. Persistent sessions expire after 7 days by default. The hooks drain client (forthcoming) will read the expiry from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the env fallback; nothing reads either one yet. A changed value applies to **new connections only**: an existing session keeps the expiry it was created with until its client reconnects.
+> 💾 **Queued mailbox messages and persistence.** Mailbox messages for an agent that is offline wait on the broker in that agent's persistent session ([SPEC §4.4](spec/SPEC.md#44-mailbox-message-types)). mosquitto only flushes its persistence DB every `autosave_interval` seconds (1800 by default), so the bundled config sets `autosave_interval 30` and `autosave_on_changes false`. If you run your own config, add both lines. volleyd's journal remains the source of truth; this only narrows how far the broker's copy can lag behind. Persistent sessions expire after 7 days by default. The hooks drain client (`packages/volley-hooks`) reads the expiry from the runtime tunable `mailbox.session_expiry_s` in volleyd's retained config, with `VOLLEY_SESSION_EXPIRY_S` as the env fallback; volleyd's own mailbox session uses the same tunable. A changed value applies to **new connections only**: an existing session keeps the expiry it was created with until its client reconnects.
 
 > 🔐 **Why a password on localhost?** Agents run with permission prompts skipped and obey their mailbox. A localhost broker is reachable by every local process, and by **any web page you visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent from steering another. Details, identities and ACL rules: [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md). Upgrading from the anonymous config? Run `volley auth init`, re-copy the config, restart mosquitto, then give each client its credentials (steps 4 and 7).
 
@@ -394,7 +397,7 @@ Currently a private repo; external contributions aren't open yet. If you found t
 
 ## License
 
-Apache 2.0. See [`LICENSE`](LICENSE).
+Apache 2.0. See [`LICENSE`](LICENSE). Exception: the vendored React Bits components in `packages/volley-desk/src/rb/` keep their upstream licence (MIT + Commons Clause); see [`packages/volley-desk/THIRD_PARTY_NOTICES.md`](packages/volley-desk/THIRD_PARTY_NOTICES.md).
 
 ---
 

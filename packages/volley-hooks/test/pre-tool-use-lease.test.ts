@@ -1,5 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,6 +13,7 @@ import {
   fixture,
   makeWorkdir,
   publishEnvelope,
+  publishRegistry,
   runHook,
 } from "./helpers/hooks";
 
@@ -102,6 +104,33 @@ describe("pre-tool-use-lease hook", () => {
 
   it("ignores tools other than Bash", async () => {
     expect(await hook("mvn verify", { tool_name: "Read" })).toBeNull();
+  });
+
+  it("coordinator mode: the wrapper asks the CLI for coordinator credentials, not the cwd's identity file", async () => {
+    const coordDir = makeWorkdir();
+    await publishRegistry(client, "coordinator-ab12", "default", {
+      capabilities: [],
+      cwd: coordDir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    const input = fixture("pre-tool-use-bash.json", coordDir, {
+      tool_input: { command: "mvn -q verify", description: "x" },
+    });
+    const run = await runHook("pre-tool-use-lease", input, {
+      cwd: coordDir,
+      env: {
+        VOLLEY_HOOKS_COORDINATOR: "1",
+        VOLLEY_BROKER_URL: broker.url,
+        VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+      },
+    });
+    expect(run.exitCode).toBe(0);
+    const cmd = (
+      JSON.parse(run.stdout) as { hookSpecificOutput: { updatedInput: { command: string } } }
+    ).hookSpecificOutput.updatedInput.command;
+    expect(cmd).toContain(" lease run --pool 'backend-it' --holder 'coordinator-ab12' ");
+    expect(cmd).toContain(" --coordinator ");
+    expect(cmd).not.toContain("--project-dir");
   });
 
   it("never puts a pool name from the broker into the command unless it is a valid pool id", async () => {
