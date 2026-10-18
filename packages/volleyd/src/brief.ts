@@ -6,7 +6,13 @@ import { mintScriptToken } from "./fence";
 import { SpawnError } from "./spawn-error";
 
 /** The roles volleyd spawns; each has `briefs/<role>.md.tmpl`. */
-export const ROLES = ["implementer", "spec_reviewer", "quality_reviewer", "fixup"] as const;
+export const ROLES = [
+  "implementer",
+  "spec_reviewer",
+  "quality_reviewer",
+  "fixup",
+  "rebase",
+] as const;
 export type Role = (typeof ROLES)[number];
 
 export const isRole = (r: string): r is Role => (ROLES as readonly string[]).includes(r);

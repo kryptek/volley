@@ -477,7 +477,7 @@ describe("daemon screen tails", () => {
     await daemon.tickScreens();
     expect(host.screenReads).toHaveLength(reads + 1);
 
-    await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+    await pub(buildTopic(NS, ID, "status"), "failed", "status", { reason: "x" });
     await until(() => journal().some((e) => e.type === "agent_retired"));
     expect(await env.retained(SCREEN)).toBeNull();
     clock += 60_000;
@@ -511,7 +511,7 @@ describe("daemon screen tails", () => {
 
     // Retire completes while the read is still hung (well before its 3 s hard timeout).
     const t0 = Date.now();
-    await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+    await pub(buildTopic(NS, ID, "status"), "failed", "status", { reason: "x" });
     await until(() => journal().some((e) => e.type === "agent_retired"), 1_500);
     expect(Date.now() - t0).toBeLessThan(1_500);
     expect(await env.retained(SCREEN)).toBeNull();

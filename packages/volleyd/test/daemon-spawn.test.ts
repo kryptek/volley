@@ -68,6 +68,37 @@ describe("daemon spawn loop", () => {
       .on(["volley", "auth", "add-agent"], (argv) => ({
         stdout: JSON.stringify({ username: argv[3], password: "pw" }),
       }));
+    // The implementer's claimed artifacts (T6 verifies them before retiring it): pushed, one PR
+    // for its branch against the release branch, CI green on the head, release branch current.
+    const wt = join(env.home, "wt", "w1", "T1-implementer");
+    const head = "1111111111111111111111111111111111111111";
+    fake
+      .on(["git", "-C", wt, "rev-parse"], { stdout: `${head}\n` })
+      .on(["git", "-C", wt, "merge-base"], { stdout: `${head}\n` })
+      .on(["gh", "pr", "list"], {
+        stdout: JSON.stringify([
+          {
+            number: 7,
+            url: "https://github.com/example/repo/pull/7",
+            headRefName: "w1/T1-implementer-1",
+            baseRefName: "release/w1",
+            headRefOid: head,
+          },
+        ]),
+      })
+      .on(["gh", "run", "list"], {
+        stdout: JSON.stringify([
+          {
+            databaseId: 1,
+            name: "CI",
+            status: "completed",
+            conclusion: "success",
+            headSha: head,
+            url: "https://github.com/example/repo/actions/runs/1",
+          },
+        ]),
+      })
+      .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
     host = fakeHost(fake);
     // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
     host.onLaunch = () => {
@@ -156,6 +187,15 @@ describe("daemon spawn loop", () => {
       terminal: { summary: "ok" },
       result: { summary: "ok" },
     });
+    // Retired only after its artifacts were verified; `[implement]` then ends at the gate.
+    const order = journal().map((e) => e.type);
+    expect(order.indexOf("artifact_verified")).toBeLessThan(order.indexOf("agent_retired"));
+    await until(() => journal().some((e) => e.data.stage === "merge_ready"));
+    const gated = (await env.retained("volley/_waves/w1/state")) as {
+      payload: { gates: string[]; tasks: { evidence_path?: string }[] };
+    };
+    expect(gated.payload.gates).toEqual(["T1"]);
+    expect(existsSync(gated.payload.tasks[0]?.evidence_path as string)).toBe(true);
     expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([
       ["volley", "auth", "rm-agent", ID],
     ]);

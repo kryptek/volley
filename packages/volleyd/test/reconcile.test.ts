@@ -15,7 +15,12 @@ import type { WaveRecord } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { NS } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
-import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
+import {
+  AGENT,
+  ARTIFACTS_OK,
+  type SupervisedEnv,
+  makeSupervisedEnv,
+} from "./helpers/supervised-env";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const STALE_MS = 600_000;
@@ -177,21 +182,21 @@ describe("daemon: restart reconciliation", () => {
   const reconciled = (): JournalEvent[] => s.journal().filter((e) => e.type === "reconciled");
 
   it("a consistent task journals drift: [] and its agent is supervised again", async () => {
-    s = await makeSupervisedEnv();
+    s = await makeSupervisedEnv({ exec: ARTIFACTS_OK });
     await s.daemon.stop();
     second = await s.restart({ reconcile: probes() });
     await second.reconciled();
     expect(reconciled()).toHaveLength(1);
     expect(reconciled()[0]).toMatchObject({ task: "T1", data: { agent_id: AGENT, drift: [] } });
     expect(reconciled()[0]?.data.action).toBeUndefined();
-    // Re-supervised: its done status is consumed and it is retired.
+    // Re-supervised: its done status is consumed (verified by the pipeline) and it is retired.
     await s.status("done", { summary: "ok" });
     await s.until(() => s.journal().some((e) => e.type === "agent_retired"));
     expect(second).toBeDefined();
   });
 
   it("an agent that finished while the daemon was down, with a green PR → mark_done_verified", async () => {
-    s = await makeSupervisedEnv();
+    s = await makeSupervisedEnv({ exec: ARTIFACTS_OK });
     await s.daemon.stop();
     await s.status("done", { summary: "ok" });
     const pr = {

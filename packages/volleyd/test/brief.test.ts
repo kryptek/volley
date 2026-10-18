@@ -54,6 +54,31 @@ describe("brief templates", () => {
     },
   );
 
+  it("reviewers and the fixup carry the pipeline's result contract", () => {
+    const render = (role: (typeof ROLES)[number]) =>
+      renderBrief(loadTemplate(role), { ...VARS, role });
+    for (const role of ["spec_reviewer", "quality_reviewer"] as const) {
+      const b = render(role);
+      expect(b).toContain('vol_publish(channel="result", type="review"');
+      expect(b).toContain(".volley/review.md");
+      expect(b).toMatch(/`P1` blocks the merge/);
+    }
+    expect(render("fixup")).toContain('vol_publish(channel="result", type="fixup"');
+    expect(render("fixup")).toContain(".volley/findings.md");
+    expect(render("rebase")).toContain(".volley/rebase.md");
+  });
+
+  it("the quality reviewer reviews the diff only; pipeline roles say what their worktree is cut from", () => {
+    const render = (role: (typeof ROLES)[number]) =>
+      renderBrief(loadTemplate(role), { ...VARS, role });
+    const q = render("quality_reviewer");
+    expect(q).not.toMatch(/Read `ISSUE\.md`/);
+    expect(q).toMatch(/the diff only/);
+    for (const role of ["spec_reviewer", "quality_reviewer", "fixup", "rebase"] as const)
+      expect(render(role)).not.toMatch(/cut from `release/);
+    expect(render("spec_reviewer")).toMatch(/detached checkout of the PR head/);
+  });
+
   it("substitutes in one pass (placeholders inside values stay literal)", () => {
     const brief = renderBrief(loadTemplate("implementer"), VARS);
     expect(brief).toContain("Title with {{agent_id}} inside");

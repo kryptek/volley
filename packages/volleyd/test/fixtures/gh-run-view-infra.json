@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "name": "test",
+      "conclusion": "failure",
+      "steps": [{ "name": "Checkout", "conclusion": "failure" }]
+    }
+  ]
+}

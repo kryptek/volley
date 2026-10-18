@@ -105,6 +105,16 @@ export const DAEMON_DEFAULTS = {
   issue_fetch_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
+  /** Two review findings in one file at most this many lines apart are on the same hunk. */
+  review_hunk_lines: 10,
+  /** How often the pipeline re-checks CI on a head whose runs are still pending. */
+  ci_poll_ms: 60_000,
+  /** How long a head may have no CI run at all before the pipeline asks the owner. */
+  ci_none_grace_ms: 900_000,
+  /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */
+  pipeline_max_advances: 8,
+  /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
+  pipeline_io_ms: 30_000,
   /** How often the screen publisher checks which agents are due a capture. */
   screen_tick_ms: 1_000,
   /** Lines read per screen-tail capture (`cmux read-screen --lines`), before the chrome is cut. */

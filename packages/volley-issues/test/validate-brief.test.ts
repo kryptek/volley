@@ -33,11 +33,12 @@ function render(template: string): string {
 const templates = readdirSync(VOLLEYD_BRIEFS).filter((f) => f.endsWith(".md.tmpl"));
 
 describe("validate-brief.sh", () => {
-  it("finds volleyd's four role templates", () => {
+  it("finds volleyd's role templates", () => {
     expect(templates.sort()).toEqual([
       "fixup.md.tmpl",
       "implementer.md.tmpl",
       "quality_reviewer.md.tmpl",
+      "rebase.md.tmpl",
       "spec_reviewer.md.tmpl",
     ]);
   });

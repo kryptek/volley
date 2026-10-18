@@ -95,7 +95,8 @@
             "implementer": { "$ref": "#/$defs/agentId" },
             "spec_reviewer": { "$ref": "#/$defs/agentId" },
             "quality_reviewer": { "$ref": "#/$defs/agentId" },
-            "fixup": { "$ref": "#/$defs/agentId" }
+            "fixup": { "$ref": "#/$defs/agentId" },
+            "rebase": { "$ref": "#/$defs/agentId" }
           }
         },
         "waiting_on": { "type": "array", "items": { "type": "string", "minLength": 1 } },

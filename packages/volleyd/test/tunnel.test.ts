@@ -315,7 +315,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(await task("w1", "T1")).toMatchObject({ stage: "implement", host: "box" });
     expect((await task("w1", "T1"))?.why_waiting).toBeUndefined();
     expect(box.launches).toHaveLength(1);
-    // A terminal status still retires it normally.
+    // A terminal status still retires it normally (`failed`: a `done` is first verified, T6).
     await agent.publish(
       buildTopic(NS, "w1-t1-implementer-1", "status"),
       JSON.stringify(
@@ -323,8 +323,8 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
           agentId: "w1-t1-implementer-1",
           parentId: "volleyd",
           channel: "status",
-          type: "done",
-          payload: { summary: "ok" },
+          type: "failed",
+          payload: { reason: "x" },
         }),
       ),
       { qos: 1, retain: true },

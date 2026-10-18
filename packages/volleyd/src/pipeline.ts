@@ -1,0 +1,1513 @@
+import {
+  type ArtifactReport,
+  type CiRun,
+  type RebaseCheck,
+  artifactOutcome,
+  checkRebase,
+  verifyArtifacts,
+} from "./artifacts";
+import type { Role } from "./brief";
+import { DAEMON_DEFAULTS } from "./config-defaults";
+import type { DecisionInput, DecisionRecord } from "./decisions";
+import { type EvidenceInput, writeEvidence } from "./evidence";
+import type { ExecFn, ExecOptions, ExecResult } from "./exec";
+import type { WaveRecord } from "./reducer";
+import {
+  type Disagreement,
+  type FixupResult,
+  REVIEWER_ROLES,
+  type ReviewResult,
+  type ReviewerRole,
+  answerIsFine,
+  disagreementDecision,
+  findDisagreements,
+  fixupItems,
+  isReviewerRole,
+  parseFixupResult,
+  parseReviewResult,
+  renderFindingsMd,
+} from "./reviews";
+import type { JournalEvent, NewEvent, PipelineStage, TaskId, TaskStage, WaveId } from "./types";
+
+/**
+ * The pipeline: drives a task through its stage groups — implement → [spec_review ∥
+ * quality_review] → fixup → merge_ready by default — with every role's `done` checked before it
+ * counts. Three layers:
+ *
+ *   - `reducePipeline` folds journal events into a task's `TaskPipeline` (the reducer calls it),
+ *     so the pipeline's position survives a restart like everything else in the journal;
+ *   - `next(view, event)` is the pure interpreter: an observation in, actions out (journal an
+ *     event, spawn a role, verify artifacts, steer, open a decision, retire, check the release
+ *     branch, write the evidence and gate);
+ *   - `PipelineDriver` executes those actions through injected deps (the daemon wires its own).
+ *     Its git / gh calls are hard-timed-out and run beside the daemon's serial queue: their
+ *     results come back as events through `deps.enqueue`, so a hung network call never holds up
+ *     control ops or shutdown.
+ *
+ * volleyd never merges: no action merges, pushes or re-runs CI, and the only commands the
+ * driver runs are the read-only verbs of artifacts.ts (test/no-merge.test.ts holds this).
+ */
+
+/** Stage → the role that runs it. */
+export const STAGE_ROLE: Partial<Record<PipelineStage, Role>> = {
+  implement: "implementer",
+  spec_review: "spec_reviewer",
+  quality_review: "quality_reviewer",
+  fixup: "fixup",
+};
+
+const ROLE_STAGE: Record<Role, TaskStage> = {
+  implementer: "implement",
+  spec_reviewer: "spec_review",
+  quality_reviewer: "quality_review",
+  fixup: "fixup",
+  // The rebase is a fix-up of the branch; the closed stage enum has no stage of its own for it.
+  rebase: "fixup",
+};
+
+/** Roles whose `done` claims pushed commits on the PR branch (checked by artifacts.ts). */
+const PUBLISHING_ROLES: ReadonlySet<Role> = new Set(["implementer", "fixup", "rebase"]);
+
+/** One role's agent in the current step. */
+export interface RoleRun {
+  agent_id: string;
+  worktree?: string;
+  /** The ref the role's worktree was cut from (reviewers: the reviewed head). */
+  start?: string;
+  /** Pipeline steers sent to this run, by reason (each reason is steered at most once). */
+  steers: Partial<Record<SteerReason, number>>;
+  /** Its work was verified (publishing roles) or its review result recorded (reviewers). */
+  accepted: boolean;
+  /** The head its verification accepted (publishing roles). */
+  head?: string;
+  /** Its `agent_retired` status, once retired. */
+  retired?: string;
+  /** The fixup's reported result, kept from its retire so a later verification still has it. */
+  result?: FixupResult;
+  /** The PR moved past this run's verified head: re-verify the PR branch's head as it is now. */
+  adopt?: boolean;
+}
+
+export interface StoredReview {
+  round: number;
+  head: string;
+  result: ReviewResult;
+}
+
+/** A task's position in its pipeline, reduced from the journal. */
+export interface TaskPipeline {
+  /** Index into the task's stage groups; -1 until the implementer starts. */
+  step: number;
+  /** The roles of the current step. */
+  roles: Role[];
+  /** The current step is a rebase onto the moved release branch. */
+  rebasing: boolean;
+  runs: Partial<Record<Role, RoleRun>>;
+  /** The PR's head branch (the implementer's). */
+  branch?: string;
+  /** The latest verified head and its PR / CI runs. */
+  head?: string;
+  pr?: { number: number; url: string };
+  ci?: "green" | "none";
+  ci_runs?: CiRun[];
+  /** Review rounds started (the first review step is round 1; a re-review starts the next). */
+  round: number;
+  reviews: Partial<Record<ReviewerRole, StoredReview>>;
+  /** Every file each reviewer has flagged, over all rounds. */
+  flagged: Partial<Record<ReviewerRole, string[]>>;
+  /** Every fixup that ran, oldest first, with the review round it worked from. */
+  fixups: { round: number; from?: string; to: string; result?: FixupResult; worktree?: string }[];
+  rebases: { from?: string; to: string; touched: string[] }[];
+  /** Heads pushed to the PR outside the pipeline after a verification, re-verified (CI only). */
+  moves: { from: string; to: string; touched: string[] }[];
+  /** Reviewers to re-run because the last rebase touched files they flagged. */
+  rereview: ReviewerRole[];
+  /** The owner's answer to a `reviewers_disagree` decision, for the round it was asked in. */
+  disagreement?: { round: number; answer: string; by?: string };
+}
+
+export type SteerReason = "artifacts" | "result";
+
+/** What a pipeline decision is about; kept on the decision as `pipeline`. */
+export interface PipelineMarker {
+  on:
+    | "verify"
+    | "ci_failed"
+    | "ci_none"
+    | "review_result"
+    | "fixup_result"
+    | "agent_failed"
+    | "reviewers_disagree";
+  role?: Role;
+  head?: string;
+  /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
+  touched?: string[];
+}
+
+/** Decisions whose `respawn` answer replaces the role's run (the next advance spawns it). */
+const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
+  "agent_failed",
+  "review_result",
+  "fixup_result",
+]);
+
+/** Answers are free text: only an exact option (case and surrounding space aside) counts. */
+export const isAnswer = (answer: string, option: string): boolean =>
+  answer.trim().toLowerCase() === option;
+
+export const emptyPipeline = (): TaskPipeline => ({
+  step: -1,
+  roles: [],
+  rebasing: false,
+  runs: {},
+  round: 0,
+  reviews: {},
+  flagged: {},
+  fixups: [],
+  rebases: [],
+  moves: [],
+  rereview: [],
+});
+
+const isRole = (r: unknown): r is Role => typeof r === "string" && r in ROLE_STAGE;
+
+/**
+ * Fold one journal event into a task's pipeline. Pure; mutates and returns `p` (the reducer
+ * passes its own clone). `stages` is the task's stage groups; `decision` the record of a
+ * `decision_resolved` event.
+ */
+export function reducePipeline(
+  p: TaskPipeline,
+  ev: JournalEvent,
+  ctx: { stages: PipelineStage[][]; decision?: DecisionRecord },
+): TaskPipeline {
+  const d = ev.data;
+  const role = d.role;
+  switch (ev.type) {
+    case "agent_spawned":
+      if (!isRole(role)) break;
+      p.runs[role] = {
+        agent_id: d.agent_id as string,
+        ...(typeof d.worktree === "string" ? { worktree: d.worktree } : {}),
+        ...(typeof d.start === "string" ? { start: d.start } : {}),
+        steers: {},
+        accepted: false,
+      };
+      if (role === "implementer" && typeof d.branch === "string") p.branch = d.branch;
+      break;
+    case "stage_entered":
+      if (Array.isArray(d.roles)) {
+        p.step = d.step as number;
+        p.roles = (d.roles as unknown[]).filter(isRole);
+        p.rebasing = d.rebase === true;
+        p.rereview = [];
+        if (typeof d.review_round === "number") p.round = d.review_round;
+        for (const r of p.roles) delete p.runs[r];
+      } else if (d.stage === "implement") {
+        // Journaled by the spawn itself, after its agent_spawned: keep that run.
+        const i = ctx.stages.findIndex((g) => g.includes("implement"));
+        p.step = i >= 0 ? i : 0;
+        p.roles = ["implementer"];
+        p.rebasing = false;
+      }
+      break;
+    case "steering_sent": {
+      const reason = d.reason as SteerReason | undefined;
+      const run = isRole(role) ? p.runs[role] : undefined;
+      if (reason !== undefined && run !== undefined && run.agent_id === d.agent_id) {
+        run.steers[reason] = (run.steers[reason] ?? 0) + 1;
+      }
+      break;
+    }
+    case "artifact_verified": {
+      if (!isRole(role)) break;
+      const run = p.runs[role];
+      const from = p.head;
+      if (run !== undefined) {
+        run.accepted = true;
+        if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
+      }
+      if (typeof d.head_sha === "string") p.head = d.head_sha;
+      const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
+      if (pr !== undefined) {
+        p.pr = { number: pr.number, url: pr.url };
+        p.ci = pr.ci === "none" ? "none" : "green";
+      }
+      if (Array.isArray(d.ci_runs)) p.ci_runs = d.ci_runs as CiRun[];
+      if (d.adopted === true) {
+        // A head pushed outside the pipeline, re-verified: not another fixup or rebase.
+        if (run !== undefined) run.adopt = false;
+        if (from !== undefined && typeof d.head_sha === "string") {
+          const touched = Array.isArray(d.touched) ? (d.touched as string[]) : [];
+          p.moves.push({ from, to: d.head_sha, touched });
+        }
+      } else if (isReviewerRole(role) && d.review !== undefined) {
+        const result = d.review as ReviewResult;
+        p.reviews[role] = { round: p.round, head: run?.start ?? p.head ?? "", result };
+        p.flagged[role] = [
+          ...new Set([...(p.flagged[role] ?? []), ...result.findings.map((f) => f.file)]),
+        ];
+      } else if (role === "fixup" && typeof d.head_sha === "string") {
+        p.fixups.push({
+          round: p.round,
+          ...(run?.start !== undefined ? { from: run.start } : {}),
+          to: d.head_sha,
+          ...(d.result !== undefined
+            ? { result: d.result as FixupResult }
+            : run?.result !== undefined
+              ? { result: run.result }
+              : {}),
+          ...(run?.worktree !== undefined ? { worktree: run.worktree } : {}),
+        });
+      } else if (role === "rebase" && typeof d.head_sha === "string") {
+        const touched = Array.isArray(d.touched) ? (d.touched as string[]) : [];
+        p.rebases.push({
+          ...(run?.start !== undefined ? { from: run.start } : {}),
+          to: d.head_sha,
+          touched,
+        });
+        p.rereview = REVIEWER_ROLES.filter((r) =>
+          (p.flagged[r] ?? []).some((f) => touched.includes(f)),
+        );
+      }
+      break;
+    }
+    case "agent_retired": {
+      const run = isRole(role) ? p.runs[role] : undefined;
+      if (run !== undefined && run.agent_id === d.agent_id && d.status !== "superseded") {
+        run.retired = String(d.status);
+        // The retained result goes with the retire: a fixup verified later (CI pending at its
+        // done, a re-verify answer, an accepted no-CI head) still reports how it resolved things.
+        const result = role === "fixup" ? parseFixupResult(d.result) : null;
+        if (result !== null) run.result = result;
+      }
+      break;
+    }
+    case "alarm_raised": {
+      // The PR is no longer at the verified head: that role's acceptance no longer holds.
+      const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
+      if (run !== undefined) {
+        run.accepted = false;
+        run.adopt = true;
+      }
+      break;
+    }
+    case "decision_resolved": {
+      const m = (ctx.decision as { pipeline?: PipelineMarker } | undefined)?.pipeline;
+      const answer = String(d.answer ?? "");
+      if (m?.on === "reviewers_disagree")
+        p.disagreement = {
+          round: p.round,
+          answer,
+          ...(typeof d.by === "string" ? { by: d.by } : {}),
+        };
+      // A respawn replaces the run; advance spawns the role again (and retries a held spawn).
+      if (m !== undefined && RESPAWNABLE.has(m.on) && isRole(m.role) && isAnswer(answer, "respawn"))
+        delete p.runs[m.role];
+      break;
+    }
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The interpreter
+// ---------------------------------------------------------------------------------------------
+
+export interface PipelineView {
+  task: TaskId;
+  stages: PipelineStage[][];
+  stage: TaskStage;
+  release_branch: string;
+  p: TaskPipeline;
+}
+
+export type PipelineEvent =
+  /** Re-evaluate: a step's roles may all be accepted, a spawn may need retrying. */
+  | { kind: "advance" }
+  /** A role's agent published a terminal status; `result` is its retained `result` payload. */
+  | {
+      kind: "agent_done";
+      role: Role;
+      agent_id: string;
+      status: "done" | "failed";
+      result?: unknown;
+    }
+  /** Artifacts verified for `role`'s run `agent_id`; `waited_ms`: how long this head has had no CI run. */
+  | {
+      kind: "verified";
+      role: Role;
+      agent_id: string;
+      report: ArtifactReport;
+      result?: FixupResult;
+      waited_ms?: number;
+    }
+  /** Before the gate: the release branch checked at `head`; `diffstats` per fixup `from..to`. */
+  | { kind: "rebase_checked"; head: string; check: RebaseCheck; diffstats: Record<string, string> }
+  /** Before the gate: the PR's head is not the verified one (someone pushed after it). */
+  | { kind: "head_moved"; expected: string; actual: string }
+  /** At the gate: the PR as `gh pr view` reports it. */
+  | { kind: "merge_checked"; view: PrView }
+  /** A pipeline git / gh check failed (`timed_out`: the hard timeout fired). */
+  | {
+      kind: "io_failed";
+      what: "verify" | "check_rebase" | "check_merged";
+      role?: Role;
+      agent_id?: string;
+      message: string;
+      timed_out: boolean;
+    }
+  | { kind: "decision_resolved"; decision: DecisionRecord };
+
+export interface PrView {
+  state?: string;
+  mergedAt?: string | null;
+  mergeCommit?: { oid?: string } | null;
+  baseRefName?: string;
+  headRefOid?: string | null;
+}
+
+export interface SpawnStart {
+  /** The commit the role's worktree is cut from. */
+  ref: string;
+  /** Detached HEAD (reviewers: read-only), else a fresh branch from `ref`. */
+  detach: boolean;
+}
+
+export type PipelineAction =
+  | { kind: "journal"; event: NewEvent }
+  | { kind: "spawn"; role: Role; start?: SpawnStart; files: Record<string, string> }
+  | { kind: "verify"; role: Role; result?: FixupResult }
+  /** Journal an alarm once per driver (`key`): repeats of the same condition stay quiet. */
+  | { kind: "alarm"; key: string; event: NewEvent }
+  | { kind: "steer"; role: Role; agent_id: string; reason: SteerReason; text: string }
+  | {
+      kind: "decide";
+      decision: DecisionInput;
+      marker: PipelineMarker;
+      data?: Record<string, unknown>;
+    }
+  | { kind: "retire"; agent_id: string }
+  | { kind: "check_rebase" }
+  /** At the gate: has a human merged the PR? (volleyd only ever reads this.) */
+  | { kind: "check_merged" }
+  | { kind: "gate"; check: RebaseCheck; diffstats: Record<string, string> };
+
+/** Stages in which the pipeline does nothing for the task. */
+const IDLE: ReadonlySet<TaskStage> = new Set([
+  "queued",
+  "awaiting_decision",
+  "merge_ready",
+  "done",
+  "blocked",
+  "cancelled",
+]);
+
+/** The pure interpreter: what to do about `ev` given the task's current view. */
+export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
+  switch (ev.kind) {
+    case "advance":
+      return advance(v);
+    case "agent_done":
+      return onDone(v, ev);
+    case "verified":
+      return onVerified(v, ev);
+    case "rebase_checked":
+      if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.head !== v.p.head) return [];
+      return ev.check.behind === 0
+        ? [{ kind: "gate", check: ev.check, diffstats: ev.diffstats }]
+        : enterRebase(v);
+    case "head_moved":
+      return onHeadMoved(v, ev);
+    case "merge_checked":
+      return onMergeChecked(v, ev.view);
+    case "io_failed":
+      return onIoFailed(v, ev);
+    case "decision_resolved":
+      return onResolved(v, ev.decision);
+  }
+}
+
+/** The publishing role whose verification produced the current head. */
+export function headRole(p: TaskPipeline): Role | undefined {
+  return [...PUBLISHING_ROLES].find(
+    (r) => p.runs[r]?.accepted === true && p.runs[r]?.head === p.head,
+  );
+}
+
+function onHeadMoved(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "head_moved" }>,
+): PipelineAction[] {
+  const role = headRole(v.p);
+  if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.expected !== v.p.head) return [];
+  if (role === undefined) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "alarm_raised",
+        task: v.task,
+        data: { alarm: "pr_head_moved", role, expected: ev.expected, actual: ev.actual },
+      },
+    },
+    { kind: "verify", role },
+  ];
+}
+
+function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
+  const { pr, head } = v.p;
+  if (v.stage !== "merge_ready" || pr === undefined) return [];
+  if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
+    const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
+    const unverified = merged !== undefined && merged !== head;
+    return [
+      ...(unverified
+        ? [
+            {
+              kind: "journal" as const,
+              event: {
+                type: "alarm_raised" as const,
+                task: v.task,
+                data: { alarm: "merged_unverified_head", pr: pr.url, gated: head, merged },
+              },
+            },
+          ]
+        : []),
+      {
+        kind: "journal",
+        event: {
+          type: "artifact_verified",
+          task: v.task,
+          data: {
+            role: "merged",
+            pr: { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" },
+            head_sha: head,
+            ...(merged !== undefined ? { merged_head_sha: merged } : {}),
+            merge_sha: view.mergeCommit?.oid ?? null,
+            merged_at: view.mergedAt ?? null,
+          },
+        },
+      },
+      {
+        kind: "journal",
+        event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
+      },
+    ];
+  }
+  if (view.state === "CLOSED") {
+    return [
+      {
+        kind: "alarm",
+        key: `${v.task}/pr_closed_unmerged`,
+        event: {
+          type: "alarm_raised",
+          task: v.task,
+          data: { alarm: "pr_closed_unmerged", pr: pr.url },
+        },
+      },
+    ];
+  }
+  return [];
+}
+
+function onIoFailed(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "io_failed" }>,
+): PipelineAction[] {
+  const out: PipelineAction[] = [];
+  if (ev.what === "verify" && ev.role !== undefined) {
+    const run = v.p.runs[ev.role];
+    if (run === undefined || run.agent_id !== ev.agent_id || run.accepted) return [];
+    // Not verified yet. The agent's claim stands; a later tick re-checks it.
+    out.push(...retireIfLive(run));
+  }
+  // A timeout is the network's problem and resolves itself; anything else is worth one alarm.
+  if (!ev.timed_out) {
+    out.push({
+      kind: "alarm",
+      key: `${v.task}/pipeline_error/${ev.what}/${ev.message}`,
+      event: {
+        type: "alarm_raised",
+        task: v.task,
+        data: {
+          alarm: "pipeline_error",
+          check: ev.what,
+          ...(ev.role !== undefined ? { role: ev.role } : {}),
+          message: ev.message,
+        },
+      },
+    });
+  }
+  return out;
+}
+
+const retireIfLive = (run: RoleRun | undefined): PipelineAction[] =>
+  run !== undefined && run.retired === undefined
+    ? [{ kind: "retire", agent_id: run.agent_id }]
+    : [];
+
+function onDone(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "agent_done" }>,
+): PipelineAction[] {
+  const run = v.p.runs[ev.role];
+  // A stale agent (superseded, or already accepted): only make sure it is retired.
+  if (
+    run === undefined ||
+    run.agent_id !== ev.agent_id ||
+    run.accepted ||
+    v.stage === "cancelled"
+  ) {
+    return [{ kind: "retire", agent_id: ev.agent_id }];
+  }
+  if (ev.status === "failed") {
+    return [
+      { kind: "retire", agent_id: ev.agent_id },
+      {
+        kind: "decide",
+        marker: { on: "agent_failed", role: ev.role },
+        decision: {
+          kind: "agent_blocked",
+          task: v.task,
+          question: `${ev.agent_id} (${ev.role}) failed. Respawn the ${ev.role}, or cancel the task?`,
+          options: ["respawn", "cancel"],
+        },
+      },
+    ];
+  }
+  if (isReviewerRole(ev.role)) {
+    const review = parseReviewResult(ev.result);
+    if (review === null) {
+      if ((run.steers.result ?? 0) < 1) {
+        return [
+          {
+            kind: "steer",
+            role: ev.role,
+            agent_id: ev.agent_id,
+            reason: "result",
+            text: 'Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested" }) — then publish done again.',
+          },
+        ];
+      }
+      return [
+        { kind: "retire", agent_id: ev.agent_id },
+        {
+          kind: "decide",
+          marker: { on: "review_result", role: ev.role },
+          decision: {
+            kind: "agent_blocked",
+            task: v.task,
+            question: `${ev.agent_id} (${ev.role}) finished twice without a parseable review result. Respawn the reviewer, or skip this review?`,
+            options: ["respawn", "skip"],
+          },
+        },
+      ];
+    }
+    return [
+      {
+        kind: "journal",
+        event: {
+          type: "artifact_verified",
+          task: v.task,
+          data: { role: ev.role, agent_id: ev.agent_id, review, head_sha: run.start ?? v.p.head },
+        },
+      },
+      { kind: "retire", agent_id: ev.agent_id },
+    ];
+  }
+  if (ev.role === "fixup") {
+    const fixup = parseFixupResult(ev.result);
+    if (fixup !== null) return [{ kind: "verify", role: ev.role, result: fixup }];
+    // The evidence's "how each P1 was resolved" comes from this result: ask for it once.
+    if ((run.steers.result ?? 0) < 1) {
+      return [
+        {
+          kind: "steer",
+          role: ev.role,
+          agent_id: ev.agent_id,
+          reason: "result",
+          text: 'Your done arrived without a parseable fixup result. Publish it first — vol_publish(channel="result", type="fixup", payload={ "resolved": [{ "finding": "S1", "how": "<what you changed, or why not>" }] }) — then publish done again.',
+        },
+      ];
+    }
+    return [
+      { kind: "retire", agent_id: ev.agent_id },
+      {
+        kind: "decide",
+        marker: { on: "fixup_result", role: ev.role },
+        decision: {
+          kind: "agent_blocked",
+          task: v.task,
+          question: `${ev.agent_id} (fixup) finished twice without a parseable fixup result. skip: verify its pushed work anyway (its findings stay unresolved in the evidence); respawn: a fresh fixup; or cancel the task?`,
+          options: ["skip", "respawn", "cancel"],
+        },
+      },
+    ];
+  }
+  if (PUBLISHING_ROLES.has(ev.role)) return [{ kind: "verify", role: ev.role }];
+  return [{ kind: "retire", agent_id: ev.agent_id }];
+}
+
+function onVerified(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+): PipelineAction[] {
+  const run = v.p.runs[ev.role];
+  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
+    return [];
+  const out = artifactOutcome(v.task, ev.role, ev.report);
+  const head = ev.report.kind === "ok" ? ev.report.head : undefined;
+  switch (out.kind) {
+    case "missing": {
+      if (run.retired === undefined && (run.steers.artifacts ?? 0) < 1) {
+        return [
+          { kind: "journal", event: out.event },
+          {
+            kind: "steer",
+            role: ev.role,
+            agent_id: run.agent_id,
+            reason: "artifacts",
+            text: missingSteer(
+              ev.role,
+              out.detail,
+              v.p.branch ?? "the PR branch",
+              v.release_branch,
+            ),
+          },
+        ];
+      }
+      return [
+        { kind: "journal", event: out.event },
+        ...retireIfLive(run),
+        {
+          kind: "decide",
+          marker: { on: "verify", role: ev.role },
+          decision: {
+            kind: "agent_blocked",
+            task: v.task,
+            question: `${ev.role} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). Fix it by hand and answer re-verify, or cancel the task.`,
+            options: ["re-verify", "cancel"],
+          },
+        },
+      ];
+    }
+    case "ci_failed":
+      return [
+        ...retireIfLive(run),
+        {
+          kind: "decide",
+          marker: { on: "ci_failed", role: ev.role, ...(head !== undefined ? { head } : {}) },
+          decision: out.decision,
+          data: out.data,
+        },
+      ];
+    case "ci_pending": {
+      const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
+      if (out.state === "none" && grace) {
+        const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
+        return [
+          ...retireIfLive(run),
+          {
+            kind: "decide",
+            marker: {
+              on: "ci_none",
+              role: ev.role,
+              head: out.head,
+              ...(touched !== undefined ? { touched } : {}),
+            },
+            decision: {
+              kind: "ci_failed",
+              task: v.task,
+              question: `No CI run exists for ${out.head.slice(0, 12)} after ${Math.round((ev.waited_ms ?? 0) / 60_000)} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`,
+              ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
+              options: ["accept", "cancel"],
+            },
+          },
+        ];
+      }
+      // The pushed work is in place; CI is re-checked on later ticks. The agent is done.
+      return retireIfLive(run);
+    }
+    case "verified":
+      return [
+        {
+          kind: "journal",
+          event: {
+            ...out.event,
+            data: {
+              ...out.event.data,
+              agent_id: run.agent_id,
+              ...(ev.result !== undefined ? { result: ev.result } : {}),
+              ...(run.adopt === true ? { adopted: true } : {}),
+            },
+          },
+        },
+        ...retireIfLive(run),
+      ];
+  }
+}
+
+/** The missing-artifact steer: what this role publishes, and where. */
+function missingSteer(role: Role, detail: string, branch: string, release: string): string {
+  const what =
+    role === "implementer"
+      ? `Push \`${branch}\` and make sure an open PR from it targets \`${release}\` (gh pr create --base ${release})`
+      : role === "fixup"
+        ? `Publish your commits to the PR branch as \`.volley/findings.md\` says (git push origin HEAD:${branch})`
+        : `Publish the rebased branch as \`.volley/rebase.md\` says (its lease-guarded push to ${branch})`;
+  return `volleyd could not verify your work: ${detail}. ${what}, then publish done again.`;
+}
+
+function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
+  const m = (d as { pipeline?: PipelineMarker }).pipeline;
+  const answer = d.resolved?.answer ?? "";
+  if (m === undefined || d.task !== v.task) return [];
+  if (isAnswer(answer, "cancel")) {
+    return [
+      {
+        kind: "journal",
+        event: {
+          type: "task_cancelled",
+          task: v.task,
+          data: { by: d.resolved?.by, decision_id: d.decision_id },
+        },
+      },
+    ];
+  }
+  const role = m.role;
+  const run = role !== undefined ? v.p.runs[role] : undefined;
+  /** Not one of the options: ask again rather than guess (nothing destructive happens). */
+  const reask = (): PipelineAction[] => [
+    {
+      kind: "decide",
+      marker: m,
+      decision: {
+        kind: d.kind,
+        task: v.task,
+        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(/^".*?" is not one of [^.]*\. /, "")}`,
+        pointers: d.pointers,
+        ...(d.options !== undefined ? { options: d.options } : {}),
+      },
+    },
+  ];
+  switch (m.on) {
+    case "verify":
+    case "ci_failed":
+      // Anything but cancel re-verifies: the non-destructive default.
+      return role !== undefined ? [{ kind: "verify", role }] : [];
+    case "ci_none":
+      if (role === undefined || run === undefined) return [];
+      if (!isAnswer(answer, "accept")) return reask();
+      return [
+        {
+          kind: "journal",
+          event: {
+            type: "artifact_verified",
+            task: v.task,
+            data: {
+              role,
+              agent_id: run.agent_id,
+              head_sha: m.head,
+              branch: v.p.branch,
+              ...(v.p.pr !== undefined ? { pr: { ...v.p.pr, head_sha: m.head, ci: "none" } } : {}),
+              ci_runs: [],
+              ...(m.touched !== undefined ? { touched: m.touched } : {}),
+              ...(run.adopt === true ? { adopted: true } : {}),
+              accepted_by: d.resolved?.by,
+            },
+          },
+        },
+      ];
+    case "review_result":
+      if (role === undefined) return [];
+      // respawn: the reducer dropped the run; advance spawns it (retrying a held spawn).
+      if (isAnswer(answer, "respawn")) return [];
+      if (!isAnswer(answer, "skip")) return reask();
+      return [
+        {
+          kind: "journal",
+          event: {
+            type: "artifact_verified",
+            task: v.task,
+            data: {
+              role,
+              ...(run !== undefined ? { agent_id: run.agent_id } : {}),
+              review: {
+                findings: [],
+                verdict: "approve",
+                summary: `review skipped by ${d.resolved?.by}`,
+              },
+            },
+          },
+        },
+      ];
+    case "fixup_result":
+      if (role === undefined || isAnswer(answer, "respawn")) return [];
+      return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
+    case "agent_failed":
+      return isAnswer(answer, "respawn") ? [] : reask();
+    case "reviewers_disagree":
+      return [];
+  }
+}
+
+/** The spawn for `role` in the current step: reviewers at the head (detached), others from it. */
+function spawnFor(v: PipelineView, role: Role): PipelineAction {
+  const head = v.p.head;
+  if (role === "implementer") return { kind: "spawn", role, files: {} };
+  if (head === undefined) {
+    // Unreachable with today's wave grammar: a non-implementer role before any verified head.
+    return {
+      kind: "alarm",
+      key: `${v.task}/no_verified_head/${role}`,
+      event: { type: "alarm_raised", task: v.task, data: { alarm: "no_verified_head", role } },
+    };
+  }
+  const base = {
+    pr_branch: v.p.branch ?? "",
+    pr_url: v.p.pr?.url ?? "",
+    head,
+    release_branch: v.release_branch,
+  };
+  if (isReviewerRole(role)) {
+    return {
+      kind: "spawn",
+      role,
+      start: { ref: head, detach: true },
+      files: { "review.md": renderReviewMd(role, base) },
+    };
+  }
+  if (role === "fixup") {
+    const items = fixupItems(roundReviews(v.p), { notBlockers: answeredNotBlockers(v.p) });
+    return {
+      kind: "spawn",
+      role,
+      start: { ref: head, detach: false },
+      files: {
+        "findings.md": renderFindingsMd(items, base),
+        "findings.json": `${JSON.stringify(items, null, 2)}\n`,
+      },
+    };
+  }
+  return {
+    kind: "spawn",
+    role,
+    start: { ref: head, detach: false },
+    files: { "rebase.md": renderRebaseMd(base) },
+  };
+}
+
+/** The reviews of the latest round — what the next fixup works from. */
+const roundReviews = (p: TaskPipeline) => reviewsOfRound(p, p.round);
+
+function reviewsOfRound(
+  p: TaskPipeline,
+  round: number,
+): Partial<Record<ReviewerRole, ReviewResult>> {
+  const out: Partial<Record<ReviewerRole, ReviewResult>> = {};
+  for (const r of REVIEWER_ROLES) {
+    const rv = p.reviews[r];
+    if (rv !== undefined && rv.round === round) out[r] = rv.result;
+  }
+  return out;
+}
+
+function answeredNotBlockers(p: TaskPipeline) {
+  const answered = p.disagreement !== undefined && p.disagreement.round === p.round;
+  return answered && answerIsFine(p.disagreement?.answer ?? "")
+    ? findDisagreements(roundReviews(p))
+    : [];
+}
+
+function advance(v: PipelineView): PipelineAction[] {
+  const { p } = v;
+  // volleyd never merges; a gated task becomes done once a human has merged its PR.
+  if (v.stage === "merge_ready" && p.pr !== undefined) return [{ kind: "check_merged" }];
+  if (IDLE.has(v.stage) || p.step < 0) return [];
+  const pending: PipelineAction[] = [];
+  for (const r of p.roles) {
+    const run = p.runs[r];
+    // A spawn that has not happened yet (budget, admission, a refused launch): retry it.
+    if (run === undefined) pending.push(spawnFor(v, r));
+    // Retired without being accepted: its CI was pending. Re-check (the driver rate-limits).
+    else if (!run.accepted && run.retired === "done" && PUBLISHING_ROLES.has(r))
+      pending.push({ kind: "verify", role: r });
+  }
+  if (pending.length > 0 || p.roles.some((r) => p.runs[r]?.accepted !== true)) return pending;
+  if (p.rebasing) {
+    if (p.rereview.length > 0) {
+      const i = v.stages.findIndex((g) =>
+        g.some((s) => p.rereview.includes(STAGE_ROLE[s] as ReviewerRole)),
+      );
+      if (i >= 0) return enterStep(v, i, p.rereview);
+    }
+    return [{ kind: "check_rebase" }];
+  }
+  return enter(v, p.step + 1);
+}
+
+/** Enter stage group `i` (skipping what has nothing to do); the end of the pipeline is the gate. */
+function enter(v: PipelineView, i: number): PipelineAction[] {
+  const group = v.stages[i];
+  if (group === undefined || group.includes("merge_ready")) return [{ kind: "check_rebase" }];
+  const roles = group.flatMap((s) => (s === "implement" ? [] : [STAGE_ROLE[s] as Role]));
+  if (roles.length === 0) return enter(v, i + 1);
+  if (roles.includes("fixup")) {
+    const reviews = roundReviews(v.p);
+    const ds = findDisagreements(reviews);
+    const answered = v.p.disagreement !== undefined && v.p.disagreement.round === v.p.round;
+    if (ds.length > 0 && !answered) {
+      return [
+        {
+          kind: "decide",
+          marker: { on: "reviewers_disagree" },
+          decision: disagreementDecision(v.task, ds),
+        },
+      ];
+    }
+    // Nothing to fix: skip the fixup (it would only spend a spawn).
+    if (roles.length === 1 && fixupItems(reviews).length === 0) return enter(v, i + 1);
+  }
+  return enterStep(v, i, roles);
+}
+
+function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] {
+  const reviewing = roles.some(isReviewerRole);
+  const stage = ROLE_STAGE[roles[0] as Role];
+  // spawnFor reads the round the step starts (fixup: the round it fixes).
+  const after: PipelineView = { ...v, p: { ...v.p, round: reviewing ? v.p.round + 1 : v.p.round } };
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "stage_entered",
+        task: v.task,
+        data: {
+          stage,
+          step: i,
+          roles,
+          ...(roles.length > 1 ? { group: roles.map((r) => ROLE_STAGE[r]) } : {}),
+          ...(reviewing ? { review_round: after.p.round } : {}),
+        },
+      },
+    },
+    ...roles.map((r) => spawnFor(after, r)),
+  ];
+}
+
+function enterRebase(v: PipelineView): PipelineAction[] {
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "stage_entered",
+        task: v.task,
+        data: { stage: ROLE_STAGE.rebase, step: v.p.step, roles: ["rebase"], rebase: true },
+      },
+    },
+    spawnFor(v, "rebase"),
+  ];
+}
+
+interface BriefCtx {
+  pr_branch: string;
+  pr_url: string;
+  head: string;
+  release_branch: string;
+}
+
+/** `.volley/review.md`: what to review (the PR's diff at one head) and how to report. */
+function renderReviewMd(role: ReviewerRole, c: BriefCtx): string {
+  const what =
+    role === "spec_reviewer"
+      ? "the diff against the plan in `ISSUE.md`"
+      : "the diff itself (correctness, tests, error handling, readability)";
+  return [
+    "# What to review",
+    "",
+    `PR: ${c.pr_url} (branch \`${c.pr_branch}\`). This worktree is a detached checkout of exactly \`${c.head}\`.`,
+    "",
+    `Review ${what}:`,
+    "",
+    `    git diff origin/${c.release_branch}...${c.head}`,
+    "",
+    "Report through the result contract in your brief (`result` channel, type `review`) before your `done`.",
+    "",
+  ].join("\n");
+}
+
+/** `.volley/rebase.md`: bring the PR branch up to date with the release branch. */
+function renderRebaseMd(c: BriefCtx): string {
+  return [
+    "# Rebase",
+    "",
+    `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
+    "",
+    `    git fetch origin ${c.release_branch}`,
+    `    git rebase origin/${c.release_branch}`,
+    "    # resolve conflicts, keep the PR's intent; run the repository's gates",
+    `    git push --force-with-lease=${c.pr_branch}:${c.head} origin HEAD:${c.pr_branch}`,
+    "",
+    `That lease-guarded push to \`${c.pr_branch}\` is the one force-push this role may do. PR: ${c.pr_url}.`,
+    "",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The driver
+// ---------------------------------------------------------------------------------------------
+
+export interface PipelineDeps {
+  /** The fenced exec (read-only verbs only are used; the driver adds the hard timeout). */
+  exec: ExecFn;
+  /** The exec for one task's worktrees when they live elsewhere (a remote host); default `exec`. */
+  execFor?: (task: TaskId) => ExecFn;
+  /** $VOLLEYD_HOME: evidence goes to `<home>/waves/<wave>/evidence/`. */
+  home: string;
+  /** The wave's current record (re-read after every journal append). */
+  record: () => WaveRecord;
+  journal: (ev: NewEvent) => Promise<unknown>;
+  /** Start a role's agent (may refuse silently: the next advance retries). */
+  spawn: (
+    task: TaskId,
+    role: Role,
+    req: { start?: SpawnStart; files: Record<string, string> },
+  ) => Promise<unknown>;
+  steer: (
+    task: TaskId,
+    role: Role,
+    agentId: string,
+    text: string,
+    reason: SteerReason,
+  ) => Promise<unknown>;
+  /** Open a decision; `extra` facts (the `pipeline` marker) are kept on it. */
+  decide: (input: DecisionInput, extra: Record<string, unknown>) => Promise<unknown>;
+  retire: (agentId: string) => Promise<unknown>;
+  /**
+   * Run `fn` on the caller's serial queue (the daemon's). Git / gh checks run beside the queue
+   * and hand their results back through this, so the queue never waits on the network.
+   */
+  enqueue: (fn: () => Promise<void>) => Promise<void>;
+  now?: () => number;
+  log?: (line: string) => void;
+}
+
+/** A pipeline git / gh call that hit its hard timeout: "not verified yet", never an alarm. */
+class IoTimeout extends Error {}
+
+/**
+ * What the daemon checks before a pipeline role spawn (the implementer's spawn is admitted per
+ * task by the scheduler): the kill switch, the wave running, T5's admission verdict and the
+ * wave's spawn budget. Null: spawn now; a reason: hold it (the next tick asks again). Pure.
+ */
+export function roleSpawnHold(o: {
+  killSwitch: boolean;
+  running: boolean;
+  admission: number;
+  reasons?: string[];
+  used: number;
+  budget: number;
+}): string | null {
+  if (o.killSwitch) return "kill switch engaged";
+  if (!o.running) return "wave not running";
+  if (o.admission < 1) return `admission closed: ${(o.reasons ?? []).join(", ") || "no capacity"}`;
+  if (o.used >= o.budget) return `spawn budget exhausted (${o.used}/${o.budget})`;
+  return null;
+}
+
+/** Executes the interpreter's actions for one wave. Call it from one serial queue. */
+export class PipelineDriver {
+  /** Last level-triggered re-check per `<task>/<what>` (verify, check_rebase, check_merged). */
+  private readonly lastCheck = new Map<string, number>();
+  /** Alarms already journaled by this driver (each condition is alarmed once per process). */
+  private readonly alarmed = new Set<string>();
+  /** When each `<task>/<head>` was first seen with no CI run at all. */
+  private readonly noCiSince = new Map<string, number>();
+  /** Checks whose I/O is running beside the queue, by `<task>/<what>[/<agent>]`; one per key. */
+  private readonly inflight = new Set<string>();
+  /** Every check until its result has been folded back in (what `settled` waits for). */
+  private readonly chains = new Set<Promise<void>>();
+
+  constructor(
+    private readonly wave: WaveId,
+    private readonly deps: PipelineDeps,
+  ) {}
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  /** The task's fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */
+  private io(task: TaskId): ExecFn {
+    const exec = this.deps.execFor?.(task) ?? this.deps.exec;
+    return async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
+      const r = await exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
+      if (r.timedOut) throw new IoTimeout(`${argv.slice(0, 3).join(" ")} timed out`);
+      return r;
+    };
+  }
+
+  /** The task's view, or null when the task is not in the wave (or not running). */
+  view(task: TaskId): PipelineView | null {
+    const rec = this.deps.record();
+    const t = rec.state?.tasks.find((x) => x.id === task);
+    const wt = rec.wave?.tasks[task];
+    if (rec.state == null || t === undefined || wt === undefined) return null;
+    return {
+      task,
+      stages: wt.stages,
+      stage: t.stage,
+      release_branch: rec.state.release_branch,
+      p: rec.pipeline[task] ?? emptyPipeline(),
+    };
+  }
+
+  /** Handle one observation, then advance until the task settles. */
+  async handle(task: TaskId, ev: PipelineEvent): Promise<void> {
+    const v = this.view(task);
+    if (v === null) return;
+    await this.run(task, next(v, ev), ev.kind !== "advance");
+    // Each round of actions changes the record; a step's last acceptance enters the next step.
+    for (let i = 0; i < DAEMON_DEFAULTS.pipeline_max_advances; i++) {
+      const w = this.view(task);
+      if (w === null) return;
+      const acts = next(w, { kind: "advance" });
+      if (acts.length === 0) return;
+      const progressed = await this.run(task, acts, false);
+      if (!progressed) return;
+    }
+  }
+
+  /**
+   * The level-triggered tick for every task (retries spawns, re-checks pending CI, sees merges).
+   * One task's error is one `pipeline_error` alarm; the other tasks still get their tick.
+   */
+  async tick(): Promise<void> {
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      if (t.stage === "done" || t.stage === "cancelled") {
+        this.forget(t.id);
+        continue;
+      }
+      try {
+        await this.handle(t.id, { kind: "advance" });
+      } catch (e) {
+        await this.alarmError(t.id, "tick", e);
+      }
+    }
+  }
+
+  /** Resolves once no check is running beside the queue (tests; a graceful stop). */
+  async settled(): Promise<void> {
+    while (this.chains.size > 0) await Promise.all([...this.chains]);
+  }
+
+  /** Drop a finished task's rate-limit and no-CI bookkeeping (the maps stay bounded). */
+  private forget(task: TaskId): void {
+    for (const m of [this.lastCheck, this.noCiSince])
+      for (const k of m.keys()) if (k.startsWith(`${task}/`)) m.delete(k);
+  }
+
+  private async alarmError(task: TaskId, what: string, e: unknown): Promise<void> {
+    const message = e instanceof Error ? e.message : String(e);
+    this.deps.log?.(`pipeline ${this.wave}/${task} ${what}: ${message}`);
+    const key = `${task}/pipeline_error/${what}/${message}`;
+    if (this.alarmed.has(key)) return;
+    this.alarmed.add(key);
+    await this.deps
+      .journal({
+        type: "alarm_raised",
+        task,
+        data: { alarm: "pipeline_error", check: what, message },
+      })
+      .catch(() => {});
+  }
+
+  /**
+   * Run one check beside the queue (at most one per key), then fold its event back in on the
+   * queue. A rejection becomes an `io_failed` event (a timeout is flagged as such).
+   */
+  private beside(
+    task: TaskId,
+    key: string,
+    fail: Omit<Extract<PipelineEvent, { kind: "io_failed" }>, "kind" | "message" | "timed_out">,
+    check: () => Promise<PipelineEvent | null>,
+  ): void {
+    if (this.inflight.has(key)) return;
+    this.inflight.add(key);
+    const p: Promise<void> = check()
+      .then(
+        (ev) => ev,
+        (e: unknown): PipelineEvent => ({
+          kind: "io_failed",
+          ...fail,
+          message: e instanceof Error ? e.message : String(e),
+          timed_out: e instanceof IoTimeout,
+        }),
+      )
+      .then(async (ev) => {
+        // The I/O is done: the same check may start again (e.g. from this fold-back's advance).
+        this.inflight.delete(key);
+        if (ev === null) return;
+        await this.deps.enqueue(async () => {
+          try {
+            await this.handle(task, ev);
+          } catch (e) {
+            await this.alarmError(task, fail.what, e);
+          }
+        });
+      })
+      .catch((e: unknown) => this.deps.log?.(`pipeline ${this.wave}/${task}: ${String(e)}`))
+      .finally(() => this.chains.delete(p));
+    this.chains.add(p);
+  }
+
+  /** Execute actions; returns whether any changed state (so advancing again can make progress). */
+  private async run(
+    task: TaskId,
+    actions: PipelineAction[],
+    eventDriven: boolean,
+  ): Promise<boolean> {
+    let progressed = false;
+    for (const a of actions) {
+      switch (a.kind) {
+        case "journal":
+          await this.deps.journal(a.event);
+          progressed = true;
+          break;
+        case "alarm":
+          if (this.alarmed.has(a.key)) break;
+          this.alarmed.add(a.key);
+          await this.deps.journal(a.event);
+          progressed = true;
+          break;
+        case "spawn":
+          await this.deps.spawn(task, a.role, {
+            ...(a.start !== undefined ? { start: a.start } : {}),
+            files: a.files,
+          });
+          break;
+        case "steer": {
+          await this.deps.steer(task, a.role, a.agent_id, a.text, a.reason);
+          progressed = true;
+          break;
+        }
+        case "decide":
+          await this.deps.decide(a.decision, { ...(a.data ?? {}), pipeline: a.marker });
+          progressed = true;
+          break;
+        case "retire":
+          await this.deps.retire(a.agent_id);
+          progressed = true;
+          break;
+        case "verify": {
+          const agent = this.view(task)?.p.runs[a.role]?.agent_id;
+          if (agent === undefined) break;
+          // Rate-limit per agent: a new run of the role is checked at once.
+          const key = `${task}/verify/${agent}`;
+          if (this.inflight.has(key) || (!eventDriven && !this.due(key))) break;
+          this.lastCheck.set(key, this.now());
+          this.beside(task, key, { what: "verify", role: a.role, agent_id: agent }, () =>
+            this.verify(task, a.role, agent, a.result),
+          );
+          break;
+        }
+        case "check_rebase": {
+          const v = this.view(task);
+          const key = `${task}/check_rebase`;
+          if (v?.p.head === undefined || this.inflight.has(key)) break;
+          if (!eventDriven && !this.due(`${task}/check_rebase/${v.p.head}`)) break;
+          this.beside(task, key, { what: "check_rebase" }, () => this.gateCheck(v));
+          break;
+        }
+        case "check_merged": {
+          const v = this.view(task);
+          const key = `${task}/check_merged`;
+          if (v?.p.pr === undefined || this.inflight.has(key) || !this.due(key)) break;
+          this.beside(task, key, { what: "check_merged" }, () => this.mergeCheck(v));
+          break;
+        }
+        case "gate":
+          await this.gate(task, a.check, a.diffstats);
+          progressed = true;
+          break;
+      }
+    }
+    return progressed;
+  }
+
+  /** Level-triggered checks run at most once per `ci_poll_ms`. */
+  private due(key: string): boolean {
+    const now = this.now();
+    const last = this.lastCheck.get(key);
+    if (last !== undefined && now - last < DAEMON_DEFAULTS.ci_poll_ms) return false;
+    this.lastCheck.set(key, now);
+    return true;
+  }
+
+  /** The worktree whose HEAD is the PR head: the run that verified it, else the implementer's. */
+  private headWorktree(p: TaskPipeline): string | undefined {
+    const r = headRole(p);
+    return (r !== undefined ? p.runs[r]?.worktree : undefined) ?? p.runs.implementer?.worktree;
+  }
+
+  /** Beside the queue: verify `role`'s run `agentId` (a moved PR: its branch head as it is). */
+  private async verify(
+    task: TaskId,
+    role: Role,
+    agentId: string,
+    result?: FixupResult,
+  ): Promise<PipelineEvent | null> {
+    const v = this.view(task);
+    const run = v?.p.runs[role];
+    if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
+    if (v.p.branch === undefined) return null;
+    const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
+    const report = await verifyArtifacts(this.io(task), {
+      cwd: run.worktree,
+      branch: v.p.branch,
+      release_branch: v.release_branch,
+      ...(since !== undefined ? { since } : {}),
+      ...(run.adopt === true ? { adopt: true } : {}),
+    });
+    let waited: number | undefined;
+    if (report.kind === "ok" && report.ci.state === "none") {
+      const key = `${task}/${report.head}`;
+      const first = this.noCiSince.get(key) ?? this.now();
+      this.noCiSince.set(key, first);
+      waited = this.now() - first;
+    }
+    return {
+      kind: "verified",
+      role,
+      agent_id: agentId,
+      report,
+      ...(result !== undefined ? { result } : {}),
+      ...(waited !== undefined ? { waited_ms: waited } : {}),
+    };
+  }
+
+  /**
+   * Beside the queue, before the gate: the PR is still at the verified head (`gh pr view`), and
+   * the release branch has not moved past it; plus each fixup's diffstat for the evidence.
+   */
+  private async gateCheck(v: PipelineView): Promise<PipelineEvent> {
+    const { p } = v;
+    const io = this.io(v.task);
+    const head = p.head as string;
+    const cwd = this.headWorktree(p);
+    if (cwd === undefined) throw new Error("no worktree at the PR head");
+    if (p.pr !== undefined) {
+      const r = await io(
+        ["gh", "pr", "view", String(p.pr.number), "--json", "headRefOid,state,baseRefName"],
+        { cwd },
+      );
+      const pr = r.code === 0 ? parsePrView(r.stdout) : null;
+      if (pr === null) throw new Error(`gh pr view ${p.pr.number} failed: ${r.stderr.trim()}`);
+      if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
+        return { kind: "head_moved", expected: head, actual: pr.headRefOid };
+    }
+    const check = await checkRebase(io, {
+      cwd,
+      head,
+      release_branch: v.release_branch,
+    });
+    const diffstats: Record<string, string> = {};
+    if (check.behind === 0) {
+      for (const f of p.fixups) {
+        if (f.from === undefined || f.worktree === undefined) continue;
+        const r = await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+        // trimEnd only: the first line's leading space is part of git's column alignment.
+        if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
+      }
+    }
+    return { kind: "rebase_checked", head, check, diffstats };
+  }
+
+  /** Beside the queue, at the gate: the PR as GitHub has it now (read-only; volleyd never merges). */
+  private async mergeCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const pr = v.p.pr;
+    if (pr === undefined) return null;
+    const cwd = this.headWorktree(v.p);
+    const r = await this.io(v.task)(
+      [
+        "gh",
+        "pr",
+        "view",
+        String(pr.number),
+        "--json",
+        "state,mergedAt,mergeCommit,baseRefName,headRefOid",
+      ],
+      cwd !== undefined ? { cwd } : {},
+    );
+    const view = r.code === 0 ? parsePrView(r.stdout) : null;
+    return view === null ? null : { kind: "merge_checked", view };
+  }
+
+  /** Write the evidence package and enter merge_ready. volleyd never merges. */
+  private async gate(
+    task: TaskId,
+    check: RebaseCheck,
+    diffstats: Record<string, string>,
+  ): Promise<void> {
+    const rec = this.deps.record();
+    const v = this.view(task);
+    if (v === null) return;
+    const { p } = v;
+    const { head, pr } = p;
+    if (head === undefined || pr === undefined) return;
+    const fixups: EvidenceInput["fixups"] = p.fixups.map(({ worktree: _w, ...f }) => {
+      const stat = f.from !== undefined ? diffstats[`${f.from}..${f.to}`] : undefined;
+      return { ...f, ...(stat !== undefined ? { diffstat: stat } : {}) };
+    });
+    const ruled = p.disagreement;
+    const notBlockers: Disagreement[] =
+      ruled !== undefined && answerIsFine(ruled.answer)
+        ? findDisagreements(reviewsOfRound(p, ruled.round))
+        : [];
+    const input: EvidenceInput = {
+      wave: this.wave,
+      task,
+      issue: rec.wave?.tasks[task]?.issue ?? 0,
+      pr,
+      head,
+      branch: p.branch ?? "",
+      release_branch: v.release_branch,
+      ci: p.ci ?? "green",
+      ci_runs: p.ci_runs ?? [],
+      reviews: p.reviews,
+      fixups,
+      rebases: p.rebases,
+      moves: p.moves,
+      ...(notBlockers.length > 0
+        ? { not_blockers: notBlockers, ...(ruled?.by !== undefined ? { ruled_by: ruled.by } : {}) }
+        : {}),
+      release: check,
+      generated_at: new Date(this.now()).toISOString(),
+    };
+    const paths = writeEvidence(this.deps.home, input);
+    await this.deps.journal({
+      type: "artifact_verified",
+      task,
+      data: {
+        role: "gate",
+        evidence_path: paths.md,
+        evidence_json: paths.json,
+        head_sha: head,
+        pr: { number: pr.number, url: pr.url, head_sha: head, ci: p.ci ?? "green" },
+        release_sha: check.release_sha,
+        behind: check.behind,
+      },
+    });
+    await this.deps.journal({ type: "stage_entered", task, data: { stage: "merge_ready" } });
+  }
+}
+
+function parsePrView(text: string): PrView | null {
+  try {
+    const v = JSON.parse(text) as unknown;
+    return v !== null && typeof v === "object" ? (v as PrView) : null;
+  } catch {
+    return null;
+  }
+}

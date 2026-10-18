@@ -118,6 +118,8 @@ import type {
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
+import { PipelineDriver, type SpawnStart, roleSpawnHold } from "./pipeline";
+
 import { type Role, briefGatePath, isRole } from "./brief";
 import {
   type ClockSample,
@@ -283,6 +285,8 @@ interface Supervised {
   pendingReap?: PendingReap | undefined;
   /** `wall_time` of a `reaped` status a heartbeat suppressed: never accepted, even re-delivered. */
   suppressedReap?: string | undefined;
+  /** `wall_time` of the final status last handed to the pipeline (a re-delivery is ignored). */
+  finalSeen?: string | undefined;
   /** The latest status other than `reaped` (what liveness checks while a reap is suppressed). */
   liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
@@ -504,6 +508,8 @@ export class Daemon {
   private readonly spawning = new Set<string>();
   /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
   private readonly refused = new Map<string, { n: number; until: number }>();
+  /** Each wave's pipeline driver (T6), created on first use. */
+  private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
@@ -1100,6 +1106,15 @@ export class Daemon {
     for (const pool of all) await this.publishPool(pool);
   }
 
+  /** T5's admission pressure for a wave (the injected verdict in tests). */
+  private pressure(wave: WaveId): Admission {
+    return (
+      this.opts.admission?.(wave) ??
+      this.verdicts.get(wave) ??
+      (this.lastReading === null ? AWAITING_SAMPLE : OPEN_ADMISSION)
+    );
+  }
+
   /**
    * Admission: for each running wave (submission order), admit ready tasks within the admission
    * verdict, the hard ceiling (counted across all waves) and the wave's spawn budget. Limits are
@@ -1119,11 +1134,7 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
-      const pressure =
-        this.opts.admission?.(wave) ??
-        this.verdicts.get(wave) ??
-        (this.lastReading === null ? AWAITING_SAMPLE : OPEN_ADMISSION);
-      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, pressure), {
+      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
         live,
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
@@ -1141,6 +1152,16 @@ export class Daemon {
     if (this.opts.spawner !== undefined) {
       await this.resolveTrustedRepos();
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
+      // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
+      // Its git / gh checks run beside the queue; one wave's error never skips the others.
+      for (const wave of this.waves.keys()) {
+        if (this.waves.get(wave)?.record.state?.status !== "running") continue;
+        try {
+          await this.pipelineFor(wave).tick();
+        } catch (e) {
+          this.log(`pipeline ${wave}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
   }
 
@@ -1170,7 +1191,12 @@ export class Daemon {
    * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
    * serial queue and the queue never waits on a spawn's verification window.
    */
-  private async startSpawn(wave: WaveId, task: string, role: Role): Promise<SpawnResult> {
+  private async startSpawn(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    pipeline: { start?: SpawnStart; files?: Record<string, string> } = {},
+  ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
     if (log === undefined || w == null) throw new Error(`unknown wave '${wave}'`);
@@ -1203,7 +1229,7 @@ export class Daemon {
           .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
           .length + 1;
       const deps = this.spawnDeps(wave);
-      let req = { wave: w, task, role, attempt };
+      let req = { wave: w, task, role, attempt, ...pipeline };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
         req = { ...req, wave: r.wave };
@@ -1798,7 +1824,13 @@ export class Daemon {
       a.pendingReap = undefined;
       a.suppressedReap = undefined;
       a.liveStatus = type;
-      if (FINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
+      if (!FINAL_STATUS.has(type)) return;
+      // A re-delivery (same wall_time) of a final status already handed over is not a new claim.
+      const at = a.watch.state.status?.wall_time;
+      if (at !== undefined && at === a.finalSeen) return;
+      a.finalSeen = at;
+      // A `done` is a claim: the pipeline checks it before the agent is retired (T6).
+      void this.enqueue(() => this.onFinal(agentId, type));
     };
     watch.onStatus(check);
     if (watch.state.status !== null) check(watch.state.status.type);
@@ -1851,6 +1883,112 @@ export class Daemon {
         },
       },
     );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // -------------------------------------------------------------------------------------------
+
+  /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
+  private pipelineFor(wave: WaveId): PipelineDriver {
+    let d = this.pipelines.get(wave);
+    if (d !== undefined) return d;
+    const log = this.waves.get(wave) as WaveLog;
+    d = new PipelineDriver(wave, {
+      exec: this.host.exec,
+      // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
+      execFor: (task) => {
+        const t = log.record.wave?.tasks[task];
+        return t === undefined || t.host === "local"
+          ? this.host.exec
+          : this.remoteHost(wave, t).exec;
+      },
+      home: this.opts.home,
+      record: () => log.record,
+      journal: (ev) => this.append(wave, ev),
+      spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
+      steer: (task, role, agentId, text, reason) =>
+        this.deliverSteer(
+          wave,
+          task,
+          {
+            role,
+            agent_id: agentId,
+            namespace:
+              this.supervised.get(agentId)?.namespace ??
+              log.record.wave?.namespace ??
+              this.opts.namespace,
+          },
+          text,
+          DAEMON_AGENT_ID,
+          randomUUID(),
+          { reason },
+        ),
+      decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      retire: (agentId) => this.retire(agentId, "done"),
+      // Checks fold back in on the queue; after a stop there is nothing left to fold them into.
+      enqueue: async (fn) => {
+        if (this.running) await this.enqueue(fn);
+      },
+      log: (line) => this.log(line),
+    });
+    this.pipelines.set(wave, d);
+    return d;
+  }
+
+  /**
+   * A supervised agent's final status. `failed` (and an accepted `reaped`) retires it at once and
+   * tells the pipeline it failed; `done` goes to the pipeline, which verifies the claim (steering
+   * the agent while it is still live) and retires it.
+   */
+  private async onFinal(agentId: string, type: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    if (a === undefined) return;
+    if (type !== "done") await this.retire(agentId, type);
+    const raw = await this.broker
+      .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
+      .catch(() => null);
+    const result = raw !== null && raw !== "" ? parseEnvelope(raw)?.payload : undefined;
+    await this.pipelineFor(a.wave).handle(a.task, {
+      kind: "agent_done",
+      role: a.role,
+      agent_id: agentId,
+      status: type === "done" ? "done" : "failed",
+      ...(result !== undefined ? { result } : {}),
+    });
+  }
+
+  /**
+   * A pipeline role spawn, through the same lock, launch and verification as the implementer's,
+   * under T5's admission verdict, within the wave's spawn budget and only while the wave runs. A
+   * hold is silent: the pipeline's next tick asks again.
+   */
+  private pipelineSpawn(
+    wave: WaveId,
+    task: TaskId,
+    role: Role,
+    req: { start?: SpawnStart; files: Record<string, string> },
+  ): void {
+    const rec = this.waves.get(wave)?.record;
+    if (this.opts.spawner === undefined || rec?.wave == null) return;
+    const key = `${wave}/${task}/${role}`;
+    if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) return;
+    const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const hold = roleSpawnHold({
+      killSwitch: this.killSwitch,
+      running: rec.state?.status === "running",
+      admission: admission.allow,
+      reasons: admission.reasons,
+      used: spawnsUsed(rec),
+      budget: spawnBudget(rec.wave, this.config.effective(wave).spawn_budget_multiplier),
+    });
+    if (hold !== null) {
+      this.log(`spawn ${key}: held, ${hold}`);
+      return;
+    }
+    void this.startSpawn(wave, task, role, req).catch((e: unknown) => {
+      this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1932,7 +2070,8 @@ export class Daemon {
     clearTimeout(a.reapTimer);
     a.reapTimer = undefined;
     a.pendingReap = undefined;
-    void this.enqueue(() => this.retire(agentId, "reaped"));
+    // Through the pipeline, like `failed`: a reaped role opens its respawn / cancel decision.
+    void this.enqueue(() => this.onFinal(agentId, "reaped"));
     return true;
   }
 
@@ -2787,6 +2926,12 @@ export class Daemon {
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
     if (d.task === null) return { decision: d, already_resolved: false };
+    if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
+      const task = d.task;
+      void this.enqueue(() =>
+        this.pipelineFor(wave).handle(task, { kind: "decision_resolved", decision: d }),
+      );
+    }
     // The next stage's brief: every resolved decision of the task, in opening order. The
     // resolution is already journaled, so a failed write is logged, not reported as a failure.
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);

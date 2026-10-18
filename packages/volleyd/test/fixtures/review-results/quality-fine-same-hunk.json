@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "severity": "P3",
+      "file": "src/batch.ts",
+      "line": 45,
+      "text": "Short-circuit reads fine; maybe rename the flag."
+    }
+  ],
+  "verdict": "approve"
+}

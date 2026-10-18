@@ -141,6 +141,8 @@ export interface TaskAgents {
   spec_reviewer?: string;
   quality_reviewer?: string;
   fixup?: string;
+  /** The pipeline's rebase agent, when the release branch moved before the gate. */
+  rebase?: string;
 }
 
 export interface TaskState {

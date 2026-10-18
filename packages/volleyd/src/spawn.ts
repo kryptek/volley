@@ -55,6 +55,13 @@ export interface SpawnRequest {
   task: TaskId;
   role: Role;
   attempt: number;
+  /**
+   * A pipeline role's starting point (T6): its worktree is cut from this commit — detached for
+   * reviewers, a fresh branch otherwise — and is its own per attempt, so a re-run starts clean.
+   */
+  start?: { ref: string; detach: boolean };
+  /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
+  files?: Record<string, string>;
 }
 
 export interface SpawnDeps {
@@ -193,7 +200,12 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     namespace: req.wave.namespace ?? deps.namespace,
     repo,
     root: repo,
-    worktree: worktreePath(deps.tunables.worktree_root, req.wave.wave, req.task, req.role),
+    worktree: worktreePath(
+      deps.tunables.worktree_root,
+      req.wave.wave,
+      req.task,
+      req.start !== undefined ? `${req.role}-${req.attempt}` : req.role,
+    ),
   };
   try {
     // 0. Repo trust, before anything is created.
@@ -277,10 +289,16 @@ async function launchAttempt(
     repo: ctx.repo,
     path: ctx.worktree,
     branch,
-    base: req.wave.release_branch,
+    base: req.start?.ref ?? req.wave.release_branch,
+    ...(req.start?.detach === true ? { detach: true } : {}),
   });
 
-  await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
+  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
+  if (req.role !== "quality_reviewer")
+    await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
+  for (const [name, content] of Object.entries(req.files ?? {})) {
+    await host.writeFile(join(ctx.worktree, ".volley", name), content);
+  }
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const brief = renderBrief(loadTemplate(req.role, deps.briefsDir), {
@@ -369,6 +387,7 @@ async function launchAttempt(
         worktree: ctx.worktree,
         branch: wt.branch,
         worktree_reused: wt.reused,
+        ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         ...(ctx.lock !== undefined ? { lock: ctx.lock.path } : {}),

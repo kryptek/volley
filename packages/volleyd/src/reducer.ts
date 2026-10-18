@@ -1,4 +1,5 @@
 import { type DecisionRecord, parksTask } from "./decisions";
+import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import type {
   JournalEvent,
   TaskAgents,
@@ -37,6 +38,8 @@ export interface WaveRecord {
   decisions: Record<string, DecisionRecord>;
   /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
   steers: Record<TaskId, { seq: number; message_id: string }>;
+  /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
+  pipeline: Record<TaskId, TaskPipeline>;
 }
 
 /**
@@ -58,6 +61,7 @@ export function emptyRecord(): WaveRecord {
     overrides: {},
     decisions: {},
     steers: {},
+    pipeline: {},
   };
 }
 
@@ -236,6 +240,15 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       const status = WAVE_STATUS[ev.type];
       if (status !== undefined) state.status = status;
     }
+  }
+
+  if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {
+    const decision =
+      ev.type === "decision_resolved" ? next.decisions[ev.data.decision_id as string] : undefined;
+    next.pipeline[ev.task] = reducePipeline(next.pipeline[ev.task] ?? emptyPipeline(), ev, {
+      stages: next.wave.tasks[ev.task]?.stages ?? [],
+      ...(decision !== undefined ? { decision } : {}),
+    });
   }
 
   derive(state, next);

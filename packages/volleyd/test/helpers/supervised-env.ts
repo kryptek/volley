@@ -8,7 +8,7 @@ import { readJournalFile } from "../../src/journal";
 import { SYSTEM_WAVE } from "../../src/types";
 import type { JournalEvent } from "../../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
-import { fakeExec } from "./fake-exec";
+import { type FakeExec, fakeExec } from "./fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./fake-host";
 import { runCli } from "./run-cli";
 
@@ -52,7 +52,7 @@ export interface SupervisedEnvOptions {
   /** The wave's own `namespace:` (default: none, so its agents live in the daemon's, NS). */
   namespace?: string;
   /** Extra fake-exec replies (prefix, reply). */
-  exec?: [string[], { stdout?: string; code?: number }][];
+  exec?: [string[], Parameters<FakeExec["on"]>[1]][];
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -171,6 +171,52 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     },
   };
 }
+
+export const PR_HEAD = "abc123";
+
+/**
+ * Fake-exec replies under which the implementer's `done` verifies (T6): its worktree HEAD is on
+ * origin, one open PR for its branch targets release/w1, CI is green on that head, and the
+ * release branch has not moved.
+ */
+export const ARTIFACTS_OK: NonNullable<SupervisedEnvOptions["exec"]> = [
+  [
+    ["git"],
+    (argv) => ({
+      stdout: argv.includes("--show-toplevel") ? `${argv[2]}\n` : `${PR_HEAD}\n`,
+    }),
+  ],
+  [
+    ["gh", "pr", "list"],
+    {
+      stdout: JSON.stringify([
+        {
+          number: 7,
+          url: "https://example.test/pr/7",
+          headRefName: "w1/T1-implementer-1",
+          baseRefName: "release/w1",
+          headRefOid: PR_HEAD,
+        },
+      ]),
+    },
+  ],
+  [
+    ["gh", "run", "list"],
+    {
+      stdout: JSON.stringify([
+        {
+          databaseId: 1,
+          name: "CI",
+          status: "completed",
+          conclusion: "success",
+          headSha: PR_HEAD,
+          url: "https://example.test/runs/1",
+        },
+      ]),
+    },
+  ],
+  [["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD }) }],
+];
 
 /** The `_system` journal of an env. */
 export const systemJournal = (env: DaemonEnv): JournalEvent[] =>
