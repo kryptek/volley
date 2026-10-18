@@ -2,11 +2,13 @@
  * The window frame, ported from the prototype `windows.tsx` `Frame`: title
  * bar drag (pointer delta ÷ zoom scale), focus on any pointer-down, the
  * `win--born` entrance kept for 4 s, and `ResizeObserver` sizing via `onSize`.
- * Chromes here are `glass` and `solid`; the React Bits chromes and the
- * electric/star Needs-you effects plug in later through `chrome` and the
- * `wrapAttention` slot.
+ * Chromes here are `glass` and `solid`; the React Bits chromes plug in later
+ * through `chrome`. A window at attention tier `you` is wrapped in the pulse
+ * (the owner's default Needs-you effect); the electric/star effects plug in
+ * later through the `wrapAttention` slot.
  */
 import type React from "react";
+import "../styles/attention.css";
 import {
   type CSSProperties,
   type ReactNode,
@@ -22,9 +24,16 @@ export type Attention = "you" | "coordinator" | "info";
 /** How long a new window keeps its `win--born` class. */
 export const BORN_MS = 4000;
 
+/** The default Needs-you effect: a pulsing border (styles/attention.css). */
+export function pulse(framed: ReactNode): ReactNode {
+  return <div className="win-attn win-attn-pulse">{framed}</div>;
+}
+
 export interface FrameProps {
   id: string;
   title: ReactNode;
+  /** Accessible name for the window; defaults to `title` when that is a string. */
+  label?: string;
   accent: string;
   pos: { x: number; y: number };
   width: number;
@@ -32,7 +41,7 @@ export interface FrameProps {
   scale: number;
   chrome: Chrome;
   attn?: Attention;
-  /** Wraps the framed window when it needs attention (pulse, electric border, …). */
+  /** Wraps the framed window at tier `you`; defaults to `pulse` (electric/star in D7). */
   wrapAttention?: (framed: ReactNode) => ReactNode;
   actions?: ReactNode;
   footer?: ReactNode;
@@ -110,9 +119,9 @@ export function Frame(p: FrameProps) {
         } as CSSProperties
       }
       onPointerDownCapture={p.onFocus}
-      aria-label={typeof p.title === "string" ? p.title : undefined}
+      aria-label={p.label ?? (typeof p.title === "string" ? p.title : undefined)}
     >
-      {p.wrapAttention ? p.wrapAttention(inner) : inner}
+      {p.attn === "you" ? (p.wrapAttention ?? pulse)(inner) : inner}
     </section>
   );
 }
