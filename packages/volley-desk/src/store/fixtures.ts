@@ -436,10 +436,22 @@ function globals(now: number): DeskMessage[] {
     hard_ceiling: 12,
     spawn_budget_multiplier: 3,
     lease_pools: { "heavy-it": { capacity: 3, ttl_s: 3600 }, build: { capacity: 2, ttl_s: 1800 } },
-    admission: { memory_pressure_max_level: 2, hysteresis_samples: 3 },
+    admission: {
+      memory_pressure_max_level: 2,
+      cmux_ping_max_ms: 2000,
+      container_max: 20,
+      api_overload_window_s: 300,
+      api_overload_max: 3,
+      ci_queue_max: 10,
+      hysteresis_samples: 3,
+    },
     claim_after_s: 1800,
     heartbeat_alarm_s: 600,
     fallback_model: MODEL,
+    mailbox: { session_expiry_s: 604800 },
+    worktree_root: "~/.volley/worktrees",
+    spawn_timeout_s: 120,
+    wake_grace_s: 60,
   };
   const since = iso(now - 20 * 60_000);
   const heavy = {

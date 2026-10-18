@@ -3,8 +3,9 @@
  * every topic the Desk renders on connect and surfaces each delivery as a
  * `DeskMessage` for the reducer. Unlike the dashboard client it passes a
  * zero-length payload through as `envelope: null` — that is how a supervisor
- * clears a retained topic (SPEC §4.6) — and it reconnects by default, since
- * the Desk stays open for hours.
+ * clears a retained topic (SPEC §4.6) — flags retained replays, and it
+ * reconnects by default, since the Desk stays open for hours (the store
+ * resyncs on each reconnect; see `attachClient` in `context.tsx`).
  */
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import type { DeskMessage, Envelope } from "./types";
@@ -45,6 +46,9 @@ export const DESK_SUBSCRIPTIONS = [
 
 const REQUIRED = ["schema_version", "agent_id", "channel", "type"] as const;
 
+/** The protocol major this client speaks; others are rejected (SPEC §3.1). */
+const SCHEMA_MAJOR = "0";
+
 /** Parse a payload: `null` for a cleared topic, `undefined` for one to drop. */
 export function parsePayload(raw: Uint8Array | string): Envelope | null | undefined {
   const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
@@ -60,6 +64,10 @@ export function parsePayload(raw: Uint8Array | string): Envelope | null | undefi
   const obj = parsed as Record<string, unknown>;
   if (REQUIRED.some((f) => typeof obj[f] !== "string")) {
     console.warn("volley-desk: envelope missing a required field");
+    return undefined;
+  }
+  if ((obj.schema_version as string).split(".")[0] !== SCHEMA_MAJOR) {
+    console.warn(`volley-desk: unsupported schema_version ${obj.schema_version as string}`);
     return undefined;
   }
   return obj as Envelope;
@@ -105,10 +113,15 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         const instance = mqtt.connect(options.url, connectOptions);
         client = instance;
 
-        instance.on("message", (topic, payload) => {
+        instance.on("message", (topic, payload, packet) => {
           const envelope = parsePayload(payload);
           if (envelope === undefined) return;
-          const msg: DeskMessage = { topic, envelope, receivedAt: Date.now() };
+          const msg: DeskMessage = {
+            topic,
+            envelope,
+            receivedAt: Date.now(),
+            retained: packet.retain,
+          };
           for (const h of messageHandlers) h(msg);
         });
         instance.on("error", (err) => {
@@ -117,21 +130,26 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         instance.on("close", () => {
           for (const h of disconnectHandlers) h();
         });
-        // mqtt.js re-subscribes on reconnect (`resubscribe` defaults on), so
-        // only the first connect subscribes explicitly.
-        let first = true;
+        // mqtt.js re-subscribes on reconnect (`resubscribe` defaults on) the
+        // filters that were granted, so we subscribe explicitly until one
+        // SUBSCRIBE succeeds. Connect handlers run on every (re)connect after
+        // that; each reconnect is followed by a replay of every retained topic.
+        let subscribed = false;
         instance.on("connect", () => {
-          if (!first) {
+          if (subscribed) {
             for (const h of connectHandlers) h();
             return;
           }
-          first = false;
           subscribe(instance)
             .then(() => {
+              subscribed = true;
               for (const h of connectHandlers) h();
               resolve();
             })
-            .catch(reject);
+            .catch((err: Error) => {
+              for (const h of errorHandlers) h(err);
+              reject(err);
+            });
         });
         instance.once("error", (err) => {
           if (!instance.connected) reject(err);

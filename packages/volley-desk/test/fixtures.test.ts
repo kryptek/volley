@@ -1,6 +1,17 @@
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import addFormats from "ajv-formats";
+import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { NARRATION_POOL, demoReviewer, demoState, isDemoMode, tick } from "../src/store/fixtures";
-import { UNASSIGNED, agentsByWave, reduceAll } from "../src/store/reducer";
+import {
+  NARRATION_POOL,
+  demoMessages,
+  demoReviewer,
+  demoState,
+  isDemoMode,
+  tick,
+} from "../src/store/fixtures";
+import { UNASSIGNED, agentsByWave, reduceAll, routeTopic } from "../src/store/reducer";
 
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
@@ -91,5 +102,47 @@ describe("isDemoMode", () => {
     expect(isDemoMode("", { VITE_VOLLEY_DEMO: "1" })).toBe(true);
     expect(isDemoMode("?demo=0", {})).toBe(false);
     expect(isDemoMode("", {})).toBe(false);
+  });
+});
+
+describe("fixtures — schema validity", () => {
+  const SCHEMAS = path.resolve(__dirname, "../../../spec/schemas");
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  for (const f of readdirSync(SCHEMAS).filter((n) => n.endsWith(".schema.json"))) {
+    ajv.addSchema(JSON.parse(readFileSync(path.join(SCHEMAS, f), "utf8")), f);
+  }
+
+  /** Topic → schema, as `scripts/validate-schemas.ts` maps example prefixes. */
+  function schemaFor(topic: string): string | null {
+    const route = routeTopic(topic);
+    switch (route?.kind) {
+      case "registry":
+        return "registry.schema.json";
+      case "agent":
+        return `${route.channel}.schema.json`;
+      case "wave":
+        return "wave-state.schema.json";
+      case "decision":
+        return "decision.schema.json";
+      case "config":
+        return "config.schema.json";
+      case "lease":
+        return "lease-pool.schema.json";
+      default:
+        return null; // admission: no schema yet
+    }
+  }
+
+  it("every demo envelope validates against its T1 schema", () => {
+    const failures: string[] = [];
+    for (const m of [...demoMessages(NOW), ...demoReviewer(NOW)]) {
+      const schema = schemaFor(m.topic);
+      if (schema === null || m.envelope === null) continue;
+      const validate = ajv.getSchema(schema);
+      if (!validate) throw new Error(`missing schema ${schema}`);
+      if (!validate(m.envelope)) failures.push(`${m.topic}: ${ajv.errorsText(validate.errors)}`);
+    }
+    expect(failures).toEqual([]);
   });
 });

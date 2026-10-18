@@ -6,8 +6,10 @@ import {
   UNASSIGNED,
   agentsByWave,
   initialState,
+  pruneUnconfirmed,
   reduce,
   reduceAll,
+  resync,
 } from "../src/store/reducer";
 import type { DeskMessage, DeskState, Envelope } from "../src/store/types";
 
@@ -134,7 +136,8 @@ describe("reducer — agent channels", () => {
     expect(a?.status?.type).toBe("working");
     expect(a?.narration).toBe("RED test written");
     expect(a?.progress).toBe(40);
-    expect(a?.heartbeat).toBe(Date.parse("2026-10-18T14:05:00.000Z"));
+    // A live heartbeat is timed by local receipt, not the sender's clock (SPEC §3.1).
+    expect(a?.heartbeat).toBe(1_000);
     expect(a?.feed.map((f) => f.envelope.type)).toEqual([
       "registered",
       "working",
@@ -271,5 +274,115 @@ describe("reducer — machine-global topics", () => {
     const before = apply(WAVE);
     const after = reduce(before, msg("volley/_meta/tap/x", example("status-working")));
     expect(after).toBe(before);
+  });
+});
+
+const retained = (m: DeskMessage): DeskMessage => ({ ...m, retained: true });
+
+describe("reducer — retained replay", () => {
+  const ID = "w1-t1-implementer-1";
+  const STARTED = Date.parse("2026-05-14T01:38:00.000Z");
+  const NOW = Date.parse("2026-10-18T15:00:00.000Z");
+
+  it("a retained registry entry is not a birth; its times come from the envelope", () => {
+    const s = apply(retained(registryFor(ID, NOW)));
+    expect(s.agents[ID]?.bornAt).toBe(STARTED);
+    expect(s.agents[ID]?.lastSeen).toBe(STARTED);
+  });
+
+  it("a live registry entry is born at receipt", () => {
+    const s = apply(registryFor(ID, NOW));
+    expect(s.agents[ID]?.bornAt).toBe(NOW);
+    expect(s.agents[ID]?.lastSeen).toBe(NOW);
+  });
+
+  it("does not re-append or refresh on a retained delivery already in the feed", () => {
+    const status = { ...example("status-working"), agent_id: ID };
+    const first = apply(
+      retained(registryFor(ID, NOW)),
+      retained(msg(`volley/default/${ID}/status`, status, NOW)),
+    );
+    const again = reduceAll(first, [
+      retained(registryFor(ID, NOW + 60_000)),
+      retained(msg(`volley/default/${ID}/status`, status, NOW + 60_000)),
+    ]);
+    expect(again.agents[ID]?.feed.map((f) => f.envelope.type)).toEqual(["registered", "working"]);
+    expect(again.agents[ID]?.lastSeen).toBe(first.agents[ID]?.lastSeen);
+  });
+
+  it("resync drops retained-derived state and keeps live-only parts", () => {
+    const topic = "volley/_waves/w1/decisions/w1-t2-merge_conflict-1";
+    const before = apply(
+      WAVE,
+      msg(topic, example("decision-merge-conflict")),
+      msg("volley/_waves/_config", example("config-effective")),
+      msg("volley/_system/leases/backend-it", example("lease-pool-backend-it")),
+      registryFor(ID),
+      msg(`volley/default/${ID}/status`, { ...example("status-working"), agent_id: ID }),
+      progress(ID, "narration", { progress: 40, msg: "RED test written" }),
+      msg(`volley/default/${ID}/progress`, example("progress-heartbeat"), 2_000),
+      msg(`volley/default/${ID}/screen`, example("screen-agent-tail")),
+    );
+    const s = resync(before);
+    expect(s.waves).toEqual({});
+    expect(s.coordinators).toEqual({});
+    expect(s.config).toBeNull();
+    expect(s.leases).toEqual({});
+    expect(s.admission).toBeNull();
+    const a = s.agents[ID];
+    expect(a).toMatchObject({ registered: false, registry: null, status: null, screen: null });
+    expect(a).toMatchObject({ narration: "RED test written", progress: 40, heartbeat: 2_000 });
+    expect(a?.feed).toEqual(before.agents[ID]?.feed);
+    expect(s.unconfirmed).toEqual([ID]);
+
+    // The replay rebuilds what is still retained; the cleared decision stays gone.
+    const replayed = reduceAll(s, [
+      retained(WAVE),
+      retained(registryFor(ID, 9_000)),
+      retained(msg(`volley/default/${ID}/status`, { ...example("status-working"), agent_id: ID })),
+    ]);
+    expect(replayed.waves.w1?.decisions).toEqual({});
+    expect(replayed.agents[ID]).toMatchObject({ registered: true, wave: "w1", task: "T1" });
+    expect(replayed.agents[ID]?.feed).toHaveLength(before.agents[ID]?.feed.length ?? -1);
+    expect(replayed.unconfirmed).toEqual([]);
+  });
+
+  it("prunes agents whose registry entry did not come back after a resync", () => {
+    const gone = "w1-t2-implementer-1";
+    const s = reduceAll(resync(apply(registryFor(ID), registryFor(gone))), [
+      retained(registryFor(ID)),
+    ]);
+    const pruned = pruneUnconfirmed(s);
+    expect(Object.keys(pruned.agents)).toEqual([ID]);
+    expect(pruned.unconfirmed).toBeUndefined();
+  });
+});
+
+describe("reducer — review fixups", () => {
+  const ID = "w1-t1-implementer-1";
+
+  it("a screen envelope does not supply the agent's parent", () => {
+    const tail = { ...example("screen-agent-tail"), parent_id: "volleyd-parent" };
+    const s = apply(
+      msg(`volley/default/${ID}/screen`, tail),
+      msg(`volley/default/${ID}/progress`, example("progress-heartbeat")),
+    );
+    expect(s.agents[ID]?.parentId).toBe("coordinator-ab12");
+  });
+
+  it("sorts an agent whose task was dropped after the wave's current tasks", () => {
+    const next = example("wave-state-running");
+    const payload = next.payload as { tasks: { id: string }[] };
+    const s0 = apply(
+      WAVE,
+      registryFor("w1-t1-spec_reviewer-1"),
+      registryFor("w1-t3-implementer-1"),
+    );
+    payload.tasks = payload.tasks.filter((t) => t.id !== "T1");
+    const s = reduce(s0, msg("volley/_waves/w1/state", next));
+    expect(agentsByWave(s).w1?.map((a) => a.id)).toEqual([
+      "w1-t3-implementer-1",
+      "w1-t1-spec_reviewer-1",
+    ]);
   });
 });

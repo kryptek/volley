@@ -6,6 +6,12 @@
  * `agent_id`: a mailbox envelope names its sender and a screen envelope names
  * the supervisor that captured it (SPEC §4.6.6). A cleared retained topic
  * (`envelope: null`) removes what that topic held.
+ *
+ * Retained replays (`retained: true`, on page load and after every reconnect)
+ * are not news: their times come from the envelope, not local receipt, and a
+ * replay of an envelope already in an agent's feed is not appended again.
+ * After a reconnect the store calls `resync` first, so topics cleared while
+ * the Desk was offline do not linger.
  */
 import {
   type AgentView,
@@ -109,6 +115,54 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
   }
 }
 
+// ------------------------------------------------------------------ resync
+
+/**
+ * Forget everything that retained topics hold, ahead of the replay that
+ * follows a reconnect: waves (with their decisions), config, leases,
+ * admission, and each agent's registry, status and screen. Live-only parts —
+ * feed, narration, progress, heartbeat, attention — are kept. Agents that were
+ * registered become `unconfirmed` until their registry entry is replayed.
+ */
+export function resync(state: DeskState): DeskState {
+  const agents: Record<string, AgentView> = {};
+  const unconfirmed = new Set(state.unconfirmed ?? []);
+  for (const a of Object.values(state.agents)) {
+    if (a.registered) unconfirmed.add(a.id);
+    agents[a.id] = {
+      ...a,
+      wave: UNASSIGNED,
+      task: null,
+      role: null,
+      registered: false,
+      registry: null,
+      status: null,
+      screen: null,
+    };
+  }
+  return {
+    ...state,
+    waves: {},
+    agents,
+    coordinators: {},
+    config: null,
+    leases: {},
+    admission: null,
+    unconfirmed: [...unconfirmed],
+  };
+}
+
+/** Drop agents still `unconfirmed` once the post-reconnect replay has settled. */
+export function pruneUnconfirmed(state: DeskState): DeskState {
+  if (state.unconfirmed === undefined) return state;
+  const { unconfirmed, ...rest } = state;
+  const agents = { ...state.agents };
+  for (const id of unconfirmed) {
+    if (agents[id] && !agents[id].registered) delete agents[id];
+  }
+  return withCoordinators({ ...rest, agents });
+}
+
 // ------------------------------------------------------------------ agents
 
 function newAgent(id: string, waves: Record<string, WaveView>, at: number): AgentView {
@@ -141,9 +195,33 @@ function pushFeed(a: AgentView, topic: string, envelope: Envelope, receivedAt: n
   return feed.length > FEED_LIMIT ? feed.slice(feed.length - FEED_LIMIT) : feed;
 }
 
+/** A retained replay of an envelope the agent's feed already holds. */
+function isReplay(a: AgentView | undefined, m: DeskMessage, env: Envelope): boolean {
+  return (
+    m.retained === true &&
+    a !== undefined &&
+    a.feed.some(
+      (f) =>
+        f.topic === m.topic &&
+        f.envelope.type === env.type &&
+        f.envelope.wall_time === env.wall_time,
+    )
+  );
+}
+
 function envTime(env: Envelope, fallback: number): number {
   const t = Date.parse(env.wall_time ?? "");
   return Number.isNaN(t) ? fallback : t;
+}
+
+/** When a delivery was current: receipt for a live publish, `wall_time` for a retained replay. */
+function seenAt(m: DeskMessage, env: Envelope): number {
+  return m.retained ? envTime(env, m.receivedAt) : m.receivedAt;
+}
+
+/** `lastSeen` never moves backwards (a replay can be older than live traffic). */
+function touch(prev: AgentView, at: number): number {
+  return Math.max(prev.lastSeen, at);
 }
 
 function record(payload: unknown): Record<string, unknown> {
@@ -164,8 +242,12 @@ function reduceRegistry(state: DeskState, id: string, m: DeskMessage): DeskState
     delete agents[id];
     return { ...state, agents };
   }
-  const prev = agents[id] ?? newAgent(id, state.waves, m.receivedAt);
+  const at = seenAt(m, env);
+  const existing = agents[id];
+  const replay = isReplay(existing, m, env);
+  const prev = existing ?? newAgent(id, state.waves, at);
   const registry = record(env.payload) as RegistryPayload;
+  const started = Date.parse(registry.started_at ?? "");
   agents[id] = {
     ...prev,
     namespace: str(env.namespace) ?? prev.namespace,
@@ -173,11 +255,12 @@ function reduceRegistry(state: DeskState, id: string, m: DeskMessage): DeskState
     registered: true,
     registry,
     model: str(registry.model) ?? prev.model,
-    lastSeen: m.receivedAt,
-    bornAt: prev.bornAt ?? m.receivedAt,
-    feed: pushFeed(prev, m.topic, env, m.receivedAt),
+    lastSeen: replay ? prev.lastSeen : touch(prev, at),
+    bornAt: prev.bornAt ?? (m.retained && !Number.isNaN(started) ? started : at),
+    feed: replay ? prev.feed : pushFeed(prev, m.topic, env, m.receivedAt),
   };
-  return { ...state, agents };
+  const unconfirmed = state.unconfirmed?.filter((u) => u !== id);
+  return { ...state, agents, ...optional("unconfirmed", unconfirmed) };
 }
 
 function reduceAgent(
@@ -194,26 +277,33 @@ function reduceAgent(
     if (channel === "status") return putAgent(state, { ...existing, status: null });
     return state;
   }
-  const prev = existing ?? newAgent(id, state.waves, m.receivedAt);
+  const at = seenAt(m, env);
+  const replay = isReplay(existing, m, env);
+  const prev = existing ?? newAgent(id, state.waves, at);
+  // mailbox and screen envelopes name another agent (sender / supervisor), not this one's parent.
+  const foreign = channel === "mailbox" || channel === "screen";
   const base: AgentView = {
     ...prev,
     namespace: prev.namespace ?? route.namespace,
-    parentId: prev.parentId ?? (channel === "mailbox" ? null : (env.parent_id ?? null)),
+    parentId: prev.parentId ?? (foreign ? null : (env.parent_id ?? null)),
   };
   if (channel === "screen") {
     return putAgent(state, {
       ...base,
       screen: env.payload as ScreenPayload,
-      lastSeen: m.receivedAt,
+      lastSeen: touch(prev, at),
     });
   }
-  const next: AgentView = { ...base, feed: pushFeed(prev, m.topic, env, m.receivedAt) };
+  const next: AgentView = {
+    ...base,
+    feed: replay ? prev.feed : pushFeed(prev, m.topic, env, m.receivedAt),
+  };
   if (channel === "mailbox" || channel === "result") {
-    if (channel === "result") next.lastSeen = m.receivedAt;
+    if (channel === "result" && !replay) next.lastSeen = touch(prev, at);
     return putAgent(state, next);
   }
   const payload = record(env.payload);
-  next.lastSeen = m.receivedAt;
+  if (!replay) next.lastSeen = touch(prev, at);
   const narration = str(payload.msg);
   if (narration !== undefined) next.narration = narration;
   if (typeof payload.progress === "number") next.progress = payload.progress;
@@ -222,7 +312,8 @@ function reduceAgent(
     return putAgent(state, next);
   }
   // progress: hook activity events (SPEC §4.3)
-  if (env.type === "heartbeat") next.heartbeat = envTime(env, m.receivedAt);
+  // Heartbeats are never retained; local receipt avoids cross-machine clock skew.
+  if (env.type === "heartbeat") next.heartbeat = at;
   if (env.type === "awaiting_input") {
     next.attentionObserved = true;
     next.attention = {
@@ -375,7 +466,7 @@ export function agentsByWave(state: DeskState): Record<string, AgentView[]> {
   for (const [id, list] of Object.entries(groups)) {
     const tasks = state.waves[id]?.state?.tasks.map((t) => t.id) ?? [];
     const order = (a: AgentView) =>
-      (a.task ? tasks.indexOf(a.task) : tasks.length) * 10 +
+      (a.task && tasks.includes(a.task) ? tasks.indexOf(a.task) : tasks.length) * 10 +
       (a.role ? ROLE_ORDER.indexOf(a.role) : ROLE_ORDER.length);
     list.sort((x, y) => order(x) - order(y) || x.id.localeCompare(y.id));
   }

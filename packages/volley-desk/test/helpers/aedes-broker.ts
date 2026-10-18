@@ -4,6 +4,8 @@ import Aedes from "aedes";
 export interface TestBroker {
   url: string;
   port: number;
+  /** Destroy a connected client's socket without a DISCONNECT, as a network drop would. */
+  dropClient: (clientId: string) => void;
   close: () => Promise<void>;
 }
 
@@ -28,6 +30,14 @@ export async function startTestBroker(): Promise<TestBroker> {
   return {
     url: `mqtt://127.0.0.1:${port}`,
     port,
+    dropClient: (clientId) => {
+      const { clients } = aedes as unknown as {
+        clients: Record<string, { conn?: { destroy(): void } }>;
+      };
+      const c = clients[clientId];
+      if (!c?.conn) throw new Error(`no connected client ${clientId}`);
+      c.conn.destroy();
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         aedes.close(() => {

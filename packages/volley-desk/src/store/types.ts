@@ -22,11 +22,14 @@ export interface Envelope {
 /**
  * One MQTT delivery. `envelope: null` is a cleared retained topic (zero-length
  * payload, SPEC §4.6); `receivedAt` is the local receipt time in ms.
+ * `retained` is set for the broker's replay of a retained topic (on subscribe
+ * or reconnect), as opposed to a live publish.
  */
 export interface DeskMessage {
   topic: string;
   envelope: Envelope | null;
   receivedAt: number;
+  retained?: boolean;
 }
 
 // ------------------------------------------------------------- agent topics
@@ -232,7 +235,12 @@ export interface AgentView {
   attentionObserved: boolean;
   feed: FeedEntry[];
   screen: ScreenPayload | null;
-  /** Local receipt time of the agent's first registry entry (the window's `born`). */
+  /**
+   * When the agent was born, for the window's `born` entrance: local receipt
+   * time of a live registry entry, or the registry's `started_at` (else its
+   * `wall_time`) for a retained replay, so agents that already existed at page
+   * load or reconnect are not "just spawned".
+   */
   bornAt: number | null;
 }
 
@@ -262,4 +270,10 @@ export interface DeskState {
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */
   admission: Record<string, unknown> | null;
+  /**
+   * Agents that were registered before the last reconnect `resync` and whose
+   * retained registry entry has not come back yet; `pruneUnconfirmed` drops
+   * them once the replay has settled.
+   */
+  unconfirmed?: string[];
 }

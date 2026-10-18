@@ -1,9 +1,10 @@
 /**
  * React Bits allow-list check. The Desk may only use the free React Bits
  * components the approved prototype uses; each is installed from the shadcn
- * registry into `src/rb/<Name>/` (see README "React Bits"). Any directory or
- * file under `src/rb/` whose name is not on this list fails the check, so a
- * Pro component or an unreviewed addition can't slip in.
+ * registry into `src/rb/<Name>/` (see README "React Bits"). Any top-level
+ * entry of `src/rb/` (directory or file) whose name is not on this list fails
+ * the check, so a Pro component or an unreviewed addition can't slip in. Files
+ * inside an allowed component's folder are its own helpers and aren't checked.
  *
  * Usage: bun run scripts/check-react-bits.ts [rb-dir]   (default: src/rb)
  */

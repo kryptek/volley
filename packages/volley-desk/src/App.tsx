@@ -132,7 +132,7 @@ export default function App() {
         <span className="proto">{demo ? "Demo · sample data" : connection}</span>
         <div className="topbar-mid">
           <span>
-            <b>{Object.keys(state.waves).length}</b> waves
+            <b>{Object.values(state.waves).filter((w) => w.state !== null).length}</b> waves
           </span>
           <span>
             <b>{agents.filter((a) => a.status?.type === "working").length}</b> agents working
@@ -175,11 +175,14 @@ function PlaceholderWave({
             ))}
           </ul>
           <div className="dim">
-            {Object.keys(wave.decisions).length} open decisions · {s.gates.length} gates
+            {Object.values(wave.decisions).filter((d) => !d.resolved).length} open decisions ·{" "}
+            {s.gates.length} gates
           </div>
         </>
-      ) : (
+      ) : id === UNASSIGNED ? (
         <div className="dim">{count} agents with no wave</div>
+      ) : (
+        <div className="dim">waiting for wave state</div>
       )}
     </Frame>
   );
