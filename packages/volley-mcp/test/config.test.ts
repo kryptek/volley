@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { generateAgentId, loadConfig } from "../src/config";
+import { generateAgentId, loadConfig, resolveBrokerAuth } from "../src/config";
 
 describe("generateAgentId", () => {
   it("derives a conforming id from the cwd basename plus a 4-char suffix", () => {
@@ -207,5 +207,72 @@ describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
     expect(loadConfig({ VOLLEY_AGENT_ID: "coordinator" }, cwd).agentId).toMatch(
       /^coordinator-[a-z0-9]{4}$/,
     );
+  });
+});
+
+describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)", () => {
+  let cwd: string;
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "volley-auth-"));
+  });
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+  const writeIdentity = (body: unknown) => {
+    mkdirSync(join(cwd, ".volley"), { recursive: true });
+    writeFileSync(join(cwd, ".volley", "agent.json"), JSON.stringify(body));
+  };
+
+  it("carries no credentials when neither env nor identity file sets them", () => {
+    expect(loadConfig({}, cwd).auth).toBeUndefined();
+    expect(resolveBrokerAuth({}, cwd)).toBeNull();
+  });
+
+  it("VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD land on the config", () => {
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "s3cret" };
+    expect(loadConfig(env, cwd).auth).toEqual({ username: "coordinator", password: "s3cret" });
+    expect(resolveBrokerAuth(env, cwd)).toEqual({ username: "coordinator", password: "s3cret" });
+  });
+
+  it("a username without a password is passed through (brokers may not require one)", () => {
+    expect(loadConfig({ VOLLEY_AUTH_USERNAME: "desk" }, cwd).auth).toEqual({ username: "desk" });
+  });
+
+  it("refuses a password without a username", () => {
+    expect(() => loadConfig({ VOLLEY_AUTH_PASSWORD: "s3cret" }, cwd)).toThrow(
+      /VOLLEY_AUTH_PASSWORD is set but VOLLEY_AUTH_USERNAME is not/,
+    );
+  });
+
+  it("the identity file broker block wins over VOLLEY_AUTH_*", () => {
+    writeIdentity({
+      agent_id: "w1-t1-implementer-1",
+      broker: { username: "w1-t1-implementer-1", password: "minted" },
+    });
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "s3cret" };
+    const want = { username: "w1-t1-implementer-1", password: "minted" };
+    expect(loadConfig(env, cwd).auth).toEqual(want);
+    expect(resolveBrokerAuth(env, cwd)).toEqual(want);
+  });
+
+  it("an identity file without a broker block falls back to VOLLEY_AUTH_*", () => {
+    writeIdentity({ agent_id: "w1-t1-implementer-1" });
+    expect(loadConfig({ VOLLEY_AUTH_USERNAME: "coordinator" }, cwd).auth).toEqual({
+      username: "coordinator",
+    });
+  });
+
+  it("rejects a malformed broker block, naming the file", () => {
+    for (const broker of [
+      "user:pass",
+      { username: "", password: "x" },
+      { username: "a" },
+      { username: "a", password: 1 },
+    ]) {
+      writeIdentity({ agent_id: "w1-t1-implementer-1", broker });
+      expect(() => loadConfig({}, cwd)).toThrow(
+        new RegExp(`${join(cwd, ".volley", "agent.json")}: broker`),
+      );
+    }
   });
 });

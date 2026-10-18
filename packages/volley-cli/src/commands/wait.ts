@@ -1,8 +1,15 @@
 import { parseArgs } from "node:util";
+import type { BrokerAuth } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isValidAgentId } from "volley-mcp/topics";
-import { parseCsv, parsePositiveInt, resolveBrokerUrl, resolveNamespace } from "../args";
+import {
+  parseCsv,
+  parsePositiveInt,
+  resolveAuth,
+  resolveBrokerUrl,
+  resolveNamespace,
+} from "../args";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -22,6 +29,8 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
       args: argv,
       options: {
         "broker-url": { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
         namespace: { type: "string" },
         "agent-id": { type: "string" },
         "terminal-states": { type: "string" },
@@ -53,6 +62,7 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
 
   let namespace: string;
   let brokerUrl: string;
+  let auth: BrokerAuth | null;
   let timeoutSec: number;
   const terminalStatesArg = parsed.values["terminal-states"] as string | undefined;
   const terminalStates =
@@ -60,6 +70,13 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
   try {
     namespace = resolveNamespace(parsed.values.namespace as string | undefined, env);
     brokerUrl = resolveBrokerUrl(parsed.values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: parsed.values.username as string | undefined,
+        password: parsed.values.password as string | undefined,
+      },
+      env,
+    );
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
   } catch (e) {
     io.stderr(`volley wait: ${e instanceof Error ? e.message : String(e)}\n`);
@@ -72,7 +89,7 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
 
   const topic = buildTopic(namespace, agentId, "status");
 
-  const broker = await connectAsClient(brokerUrl, io);
+  const broker = await connectAsClient(brokerUrl, io, auth);
   if (broker === null) return EXIT.ERROR;
   try {
     // One subscription, kept open for the whole wait. The broker delivers the current
@@ -125,6 +142,8 @@ Optional:
   --timeout <seconds>      Give up after N seconds (default: 3600)
   --namespace <ns>         Volley namespace (env: VOLLEY_NAMESPACE; default: default)
   --broker-url <url>       MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --username <user>        Broker username (env: VOLLEY_AUTH_USERNAME)
+  --password <pw>          Broker password (env: VOLLEY_AUTH_PASSWORD)
   --help                   Show this help
 
 Output:

@@ -9,7 +9,7 @@
 // across transports.
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type VolleyMqttClient, createMqttClient } from "../src/lib/mqtt-client";
+import { AuthFailedError, type VolleyMqttClient, createMqttClient } from "../src/lib/mqtt-client";
 import type { ParsedEnvelope } from "../src/lib/parse-envelope";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 
@@ -129,3 +129,35 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+describe("createMqttClient credentials", () => {
+  let broker: TestBroker;
+  let client: VolleyMqttClient | null = null;
+
+  beforeEach(async () => {
+    broker = await startTestBroker({ credentials: { username: "desk", password: "right" } });
+  });
+
+  afterEach(async () => {
+    if (client) {
+      await client.disconnect();
+      client = null;
+    }
+    await broker.close();
+  });
+
+  it("connects with the right username/password", async () => {
+    client = createMqttClient({ url: broker.url, auth: { username: "desk", password: "right" } });
+    await client.connect();
+  });
+
+  it("rejects connect() with AuthFailedError on refused credentials", async () => {
+    client = createMqttClient({ url: broker.url, auth: { username: "desk", password: "wrong" } });
+    await expect(client.connect()).rejects.toBeInstanceOf(AuthFailedError);
+  });
+
+  it("rejects an anonymous connect to an auth-only broker with AuthFailedError", async () => {
+    client = createMqttClient({ url: broker.url });
+    await expect(client.connect()).rejects.toMatchObject({ code: "AUTH_FAILED" });
+  });
+});

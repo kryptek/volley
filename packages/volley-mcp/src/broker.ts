@@ -37,6 +37,23 @@ export interface BrokerConnectOptions {
   sessionExpirySeconds?: number;
   /** MQTT protocol version. Default 4 (v3.1.1). */
   protocolVersion?: 4 | 5;
+  /** Broker credentials (SPEC §11.5). Omit both to connect anonymously. */
+  username?: string;
+  password?: string;
+}
+
+/** CONNACK codes meaning "credentials refused": MQTT 3.1.1 (4, 5) and MQTT 5 (134, 135). */
+const AUTH_REFUSED_CODES = new Set([4, 5, 134, 135]);
+
+/** Printed with every AUTH_FAILED — points at where credentials come from. */
+export const AUTH_HINT =
+  "Hint: create broker identities with `volley auth init`, then set VOLLEY_AUTH_USERNAME / " +
+  "VOLLEY_AUTH_PASSWORD (or the `broker` block in .volley/agent.json).";
+
+function authFailed(url: string, username: string | undefined): VolleyError {
+  const who =
+    username !== undefined ? `the credentials for user "${username}"` : "anonymous access";
+  return new VolleyError("AUTH_FAILED", `broker at ${url} refused ${who}. ${AUTH_HINT}`);
 }
 
 /** Default v5 session expiry for persistent consumers: 7 days (tunable `mailbox.session_expiry_s`). */
@@ -191,6 +208,8 @@ export class VolleyBroker {
             }
           : {}),
         ...(will !== undefined ? { will } : {}),
+        ...(opts.username !== undefined ? { username: opts.username } : {}),
+        ...(opts.password !== undefined ? { password: opts.password } : {}),
       };
       this.client = await Promise.race([
         connectClient(opts.url, options, (client) => {
@@ -220,6 +239,10 @@ export class VolleyBroker {
       clearTimeout(timer);
       this.resetConnectionState();
       if (e instanceof VolleyError) throw e;
+      const code = (e as { code?: unknown } | null)?.code;
+      if (typeof code === "number" && AUTH_REFUSED_CODES.has(code)) {
+        throw authFailed(opts.url, opts.username);
+      }
       throw new VolleyError(
         "BROKER_DOWN",
         `cannot connect to broker at ${opts.url}: ${e instanceof Error ? e.message : String(e)}`,

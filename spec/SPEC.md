@@ -404,6 +404,7 @@ A supervisor that spawns an agent usually needs to know the agent's id *before* 
 - Uniqueness is the supervisor's responsibility. The RECOMMENDED form is `<wave>-<task>-<role>-<attempt>`, lowercased (e.g. `w1-t1-implementer-1`); a supervisor retry increments `<attempt>` so a dead agent's retained topics are never overwritten by its successor.
 - An assigned identity is the one exception to §2.2's unique-id-per-process-start rule. A restart of the MCP server in the same working directory (a harness reconnect, a crash and restart) reuses the assigned id and starts a new session in the §5.3 sense; supervisors MUST tolerate a fresh `spawning` after a terminal status on an assigned id. The file pins one id to one working directory, so do not run two agent sessions there at once.
 - Supervisors SHOULD keep the file out of commits by adding `.volley/` to the repository's `info/exclude` (`git rev-parse --git-path info/exclude`) when the working directory is a git worktree.
+- `broker` (`{ "username", "password" }`, both strings) carries broker credentials minted for this agent by the supervisor, conventionally with `username` equal to `agent_id` so an ACL can pin the agent to its own topics (§11.5). Every client that runs with the identity (MCP server, CLI, hooks) MUST prefer it over `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. The file then holds a secret: supervisors SHOULD create it mode `0600` and revoke the credentials when the agent retires.
 - `wave`, `task` and `role` are informational for tools that read the file (hooks, the supervisor itself); the MCP server does not interpret them.
 
 ---
@@ -469,6 +470,7 @@ Conforming implementations MUST return one of the following error codes on failu
 | `SCHEMA_VERSION_MISMATCH` | Envelope `schema_version` major version is unsupported. |
 | `NOT_REGISTERED` | An operation requiring prior registration was attempted before `vol_register`. |
 | `RESERVED_TOPIC_WRITE` | Attempt to publish to a reserved namespace from user space. |
+| `AUTH_FAILED` | Broker refused the connection's credentials, or anonymous access (MQTT CONNACK 4/5, MQTT 5 reason 0x86/0x87). Distinct from `BROKER_DOWN` so a client can tell "fix your credentials" from "start your broker". |
 
 ---
 
@@ -518,12 +520,12 @@ A conforming Volley implementation MUST satisfy all MUST-level requirements in t
 
 - Be an MQTT v3.1.1 or v5 broker, or equivalent (transport-agnostic — see §1)
 - Support retained messages, wildcard subscriptions (`+`, `#`), QoS 1, and LWT
-- Permit anonymous localhost connections (deployment MAY require auth elsewhere)
+- Accept the clients a deployment admits, anonymous or authenticated (§11.5). The reference localhost deployment requires authentication on every listener (`examples/mosquitto-auth/`), because any local process and any web page (through a WebSocket listener) can reach a localhost broker
 
 ### 11.5 Conforming brokers MAY
 
-- Require username/password or mTLS authentication (clients MUST honor `VOLLEY_AUTH_*` env vars when set)
-- Enforce ACLs on reserved namespaces
+- Require username/password or mTLS authentication. Clients MUST honor `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` when set, and the `broker` block of an assigned identity (§6.5), which takes precedence over them. A refused CONNECT is `AUTH_FAILED` (§9) and MUST NOT echo the password
+- Enforce ACLs on reserved namespaces and per-agent channels. The reference ACL (`examples/mosquitto-auth/acl.conf`) lets an agent write only its own channels and registry entry plus lease requests, lets steering clients write any mailbox, and reserves `volley/_waves/*` (including `_waves/_config`) for the supervisor. A denied publish is dropped silently by MQTT 3.1.1 brokers, so a client cannot rely on a publish error to detect it
 
 ---
 
