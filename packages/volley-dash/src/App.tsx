@@ -1,10 +1,9 @@
-import { Dashboard } from "./components/Dashboard";
+import { LoginGate } from "./components/LoginGate";
 
 /**
- * Top-level app shell. Phase 0 is scaffold-only — Phase 1 wires the MQTT
- * data layer + reducer context provider here, Phase 2 fills out the visual
- * tree underneath `<Dashboard />`.
+ * Top-level app shell. The broker requires credentials, so the dashboard
+ * mounts behind the LoginGate, which renders `<Dashboard />` once signed in.
  */
 export function App(): JSX.Element {
-  return <Dashboard />;
+  return <LoginGate />;
 }

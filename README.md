@@ -149,7 +149,13 @@ That's it. Everything else in the spec is a refinement.
 brew install mosquitto
 ```
 
-Mosquitto's stock install ships with a config that doesn't accept connections out of the box. Replace it with the localhost-anonymous config bundled in this repo, then start the service:
+Mosquitto's stock install ships with a config that doesn't accept connections out of the box. Replace it with the localhost config bundled in this repo. That config **requires a username and password on both listeners**, so first create the broker identities (run from your clone of this repo, step 3; `bun install` first):
+
+```sh
+bun packages/volley-cli/src/cli.ts auth init
+```
+
+It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew (edit the two paths on Intel or Linux, or pass `--dir`). On **Linux** run it as root so it can write `/etc/mosquitto` and hand the files to the `mosquitto` user the broker runs as: `sudo bun packages/volley-cli/src/cli.ts auth init --dir /etc/mosquitto/volley` (if you made the files another way, `sudo chown -R mosquitto: /etc/mosquitto/volley`, or the broker will not start). Then install the config and start the service:
 
 ```sh
 # macOS (Apple Silicon):
@@ -173,7 +179,9 @@ You now have a broker with two listeners on `127.0.0.1`:
 
 > 💾 **Queued mailbox messages and persistence.** Mailbox messages for an agent that is offline wait on the broker in that agent's persistent session ([SPEC §4.4](spec/SPEC.md#44-mailbox-message-types)). mosquitto only flushes its persistence DB every `autosave_interval` seconds (1800 by default), so the bundled config sets `autosave_interval 30` and `autosave_on_changes false`. If you run your own config, add both lines. volleyd's journal remains the source of truth; this only narrows how far the broker's copy can lag behind. Persistent sessions expire after 7 days by default. The hooks drain client (forthcoming) will read the expiry from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the env fallback; nothing reads either one yet. A changed value applies to **new connections only**: an existing session keeps the expiry it was created with until its client reconnects.
 
-> ⚠️ **Security note.** The bundled config is **localhost-only and anonymous on purpose** — safe because nothing outside your machine can reach the listener. **If you plan to expose your broker on a network**, that config is not safe. You'll want to enable TLS, add password authentication, and probably ACLs. Start at the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/) and the [`mosquitto.conf(5)` reference](https://mosquitto.org/man/mosquitto-conf-5.html). Don't copy a "works on my laptop" config to a public host.
+> 🔐 **Why a password on localhost?** Agents run with permission prompts skipped and obey their mailbox. A localhost broker is reachable by every local process, and by **any web page you visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent from steering another. Details, identities and ACL rules: [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md). Upgrading from the anonymous config? Run `volley auth init`, re-copy the config, restart mosquitto, then give each client its credentials (steps 4 and 7).
+
+> ⚠️ **Security note.** The bundled config is **localhost-only**. **If you plan to expose your broker on a network**, you additionally need TLS (`mqtts://` / `wss://`); passwords over plain MQTT are readable on the wire. Start at the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/) and the [`mosquitto.conf(5)` reference](https://mosquitto.org/man/mosquitto-conf-5.html). Don't copy a "works on my laptop" config to a public host.
 
 ### 3. Clone and install Volley
 
@@ -195,9 +203,18 @@ claude mcp add-json -s user volley '{
   "args": ["run", "<absolute-path-to-this-repo>/packages/volley-mcp/src/index.ts"],
   "env": {
     "VOLLEY_AGENT_ID": "coordinator",
-    "VOLLEY_NAMESPACE": "default"
+    "VOLLEY_NAMESPACE": "default",
+    "VOLLEY_AUTH_USERNAME": "coordinator",
+    "VOLLEY_AUTH_PASSWORD": "<coordinator password from step 2>"
   }
 }'
+```
+
+The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. Export the same identity in your shell profile too:
+
+```sh
+export VOLLEY_AUTH_USERNAME=coordinator
+export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
 ```
 
 Then **quit Claude Code completely (Cmd-Q) and reopen it.** MCP registration is read at startup.
@@ -240,7 +257,7 @@ Launch the browser dashboard:
 volley dash
 ```
 
-That spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client.
+That spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client. On first load it asks you to sign in: use the `desk` identity from step 2 (stored in that browser's localStorage; a refused login shows the form again).
 
 ![Volley dashboard — agent grid](docs/images/dashboard-grid.png)
 

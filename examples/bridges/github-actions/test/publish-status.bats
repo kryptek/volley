@@ -38,6 +38,7 @@ EOF
 
   # Clear Volley overrides so defaults apply.
   unset VOLLEY_BROKER_URL || true
+  unset VOLLEY_AUTH_USERNAME VOLLEY_AUTH_PASSWORD || true
   unset VOLLEY_NAMESPACE || true
 }
 
@@ -182,6 +183,24 @@ EOF
   echo "$envelope" | grep -q '"channel":"status"'
   echo "$envelope" | grep -q '"type":"working"'
   echo "$envelope" | grep -q '"payload":{}'
+}
+
+@test "fallback passes VOLLEY_AUTH_* to mosquitto_pub as -u/-P" {
+  rm "$TEST_TMPDIR/volley"
+  cat >"$TEST_TMPDIR/mosquitto_pub" <<EOF
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >"$CAPTURE.args"
+exit 0
+EOF
+  chmod +x "$TEST_TMPDIR/mosquitto_pub"
+
+  export VOLLEY_AUTH_USERNAME="coordinator"
+  export VOLLEY_AUTH_PASSWORD="s3cret"
+  run "$SCRIPT" working
+  [[ "$status" -eq 0 ]]
+  args="$(_captured_args)"
+  [[ "$(echo "$args" | awk '/^-u$/{getline; print}')" == "coordinator" ]]
+  [[ "$(echo "$args" | awk '/^-P$/{getline; print}')" == "s3cret" ]]
 }
 
 @test "fallback rejects mqtts:// with exit 2 (TLS requires the volley CLI)" {

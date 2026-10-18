@@ -9,6 +9,14 @@ export interface VolleyConfig {
   namespace: string;
   agentId: string;
   parentId: string | null;
+  /** Broker credentials; absent means connect anonymously. */
+  auth?: BrokerAuth;
+}
+
+/** MQTT username/password for brokers that require authentication (SPEC §11.5). */
+export interface BrokerAuth {
+  username: string;
+  password?: string;
 }
 
 /**
@@ -39,6 +47,7 @@ interface AssignedIdentity {
   namespace?: string;
   parentId?: string | null;
   brokerUrl?: string;
+  auth?: BrokerAuth;
 }
 
 /**
@@ -98,7 +107,51 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
     }
     identity.brokerUrl = file.broker_url;
   }
+  if (file.broker !== undefined) {
+    const broker = file.broker as Record<string, unknown> | null;
+    if (
+      typeof broker !== "object" ||
+      broker === null ||
+      Array.isArray(broker) ||
+      typeof broker.username !== "string" ||
+      broker.username.length === 0 ||
+      typeof broker.password !== "string"
+    ) {
+      throw new Error(
+        `${path}: broker must be an object with a non-empty string username and a string password`,
+      );
+    }
+    identity.auth = { username: broker.username, password: broker.password };
+  }
   return identity;
+}
+
+/**
+ * Credentials from `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. A username alone is
+ * allowed (some brokers check only the username); a password alone is a configuration error.
+ */
+function authFromEnv(env: Record<string, string | undefined>): BrokerAuth | null {
+  const username = env.VOLLEY_AUTH_USERNAME;
+  const password = env.VOLLEY_AUTH_PASSWORD;
+  if (username === undefined || username === "") {
+    if (password !== undefined && password !== "") {
+      throw new Error("VOLLEY_AUTH_PASSWORD is set but VOLLEY_AUTH_USERNAME is not");
+    }
+    return null;
+  }
+  return password !== undefined ? { username, password } : { username };
+}
+
+/**
+ * Broker credentials for a client running in `cwd`: the identity file's `broker` block wins,
+ * then `VOLLEY_AUTH_*`, else null (anonymous). Shared by every client that connects with the
+ * agent's identity (MCP server, CLI, hooks), so they all resolve credentials the same way.
+ */
+export function resolveBrokerAuth(
+  env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+): BrokerAuth | null {
+  return readAssignedIdentity(cwd)?.auth ?? authFromEnv(env);
 }
 
 /**
@@ -139,5 +192,7 @@ export function loadConfig(
     throw new Error(`VOLLEY_PARENT_ID "${parentId}" does not match the agent id grammar`);
   }
 
-  return { brokerUrl, namespace, agentId, parentId };
+  const auth = identity?.auth ?? authFromEnv(env);
+
+  return { brokerUrl, namespace, agentId, parentId, ...(auth !== null ? { auth } : {}) };
 }

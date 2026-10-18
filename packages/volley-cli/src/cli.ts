@@ -14,10 +14,13 @@ Subcommands:
   list     Enumerate agents registered on the broker
   dash     Launch the Volley dashboard (Vite)
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
+  auth     Manage broker credentials (init, add-agent, rm-agent)
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     Volley namespace (env: VOLLEY_NAMESPACE; default: default)
+  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; .volley/agent.json "broker" wins over env)
+  --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD; prefer the env var, argv is visible in ps)
   --help               Show this help and exit
   --version            Print version and exit
 
@@ -53,6 +56,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/dash")).dash as Subcommand;
     case "notify":
       return (await import("./commands/notify")).notify as Subcommand;
+    case "auth":
+      return (await import("./commands/auth")).auth as Subcommand;
     default:
       return null;
   }

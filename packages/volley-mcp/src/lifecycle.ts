@@ -12,7 +12,8 @@ import { buildTopic } from "./topics";
  *  3. auto-register with default capabilities=[] and cwd=process.cwd() so the
  *     server is SPEC §6.3-compliant by default — agents/skills can re-call
  *     vol_register later to update capabilities/model/cwd (idempotent).
- * Throws VolleyError(BROKER_DOWN) if the broker is unreachable.
+ * Throws VolleyError(BROKER_DOWN) if the broker is unreachable, or
+ * VolleyError(AUTH_FAILED) if it refuses `config.auth` (or anonymous access).
  */
 export async function startLifecycle(config: VolleyConfig): Promise<ServerState> {
   const statusTopic = buildTopic(config.namespace, config.agentId, "status");
@@ -31,6 +32,7 @@ export async function startLifecycle(config: VolleyConfig): Promise<ServerState>
     agentId: config.agentId,
     willTopic: statusTopic,
     willPayload: JSON.stringify(willEnvelope),
+    ...(config.auth !== undefined ? config.auth : {}),
   });
 
   const spawning = buildEnvelope({

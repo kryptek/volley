@@ -680,3 +680,41 @@ describe("VolleyBroker shared filters (one connection, many local subscribers)",
     expect(Date.now() - t0).toBeLessThan(1000);
   });
 });
+
+describe("VolleyBroker authentication", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker({ credentials: { username: "desk", password: "right" } });
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("connects with the right username/password", async () => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-aaaa", username: "desk", password: "right" });
+    expect(b.connected).toBe(true);
+    await b.disconnect();
+  });
+
+  it("throws AUTH_FAILED with the volley auth init hint on a wrong password", async () => {
+    const b = new VolleyBroker();
+    const err = await b
+      .connect({ url: tb.url, agentId: "agent-aaaa", username: "desk", password: "wrong" })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "AUTH_FAILED" });
+    const message = (err as Error).message;
+    expect(message).toContain('"desk"');
+    expect(message).toContain("volley auth init");
+    expect(message).not.toContain("wrong"); // never echo the password
+    expect(b.connected).toBe(false);
+  });
+
+  it("throws AUTH_FAILED (not BROKER_DOWN) for an anonymous connect to an auth-only broker", async () => {
+    const b = new VolleyBroker();
+    await expect(b.connect({ url: tb.url, agentId: "agent-aaaa" })).rejects.toMatchObject({
+      code: "AUTH_FAILED",
+      message: expect.stringContaining("VOLLEY_AUTH_USERNAME"),
+    });
+  });
+});

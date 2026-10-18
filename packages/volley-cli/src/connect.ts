@@ -1,4 +1,5 @@
 import { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { VolleyError } from "volley-mcp/errors";
 import { randomSuffix } from "volley-mcp/util";
 import type { IO } from "./io";
@@ -15,11 +16,16 @@ export const MOSQUITTO_INSTALL_HINT =
  *
  * On failure, prints a human-readable diagnostic (plus the mosquitto install hint on
  * BROKER_DOWN) to stderr and returns `null` — the caller treats null as "give up, the
- * user has already been told." This keeps every subcommand from duplicating the
+ * user has already been told." AUTH_FAILED messages carry their own `volley auth` hint.
+ * This keeps every subcommand from duplicating the
  * BROKER_DOWN translation AND avoids a re-throw that the top-level handler would
  * double-print.
  */
-export async function connectAsClient(brokerUrl: string, io: IO): Promise<VolleyBroker | null> {
+export async function connectAsClient(
+  brokerUrl: string,
+  io: IO,
+  auth: BrokerAuth | null = null,
+): Promise<VolleyBroker | null> {
   const broker = new VolleyBroker();
   const clientId = `cli-${randomSuffix(8)}`;
   try {
@@ -29,6 +35,7 @@ export async function connectAsClient(brokerUrl: string, io: IO): Promise<Volley
     await broker.connect({
       url: brokerUrl,
       agentId: clientId, // VolleyBroker uses this in the underlying MQTT clientId.
+      ...(auth ?? {}),
     });
     return broker;
   } catch (e) {
