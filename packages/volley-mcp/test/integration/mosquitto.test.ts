@@ -48,36 +48,42 @@ describe.skipIf(!RUN)("volley-mcp against real mosquitto", () => {
 });
 
 describe.skipIf(!RUN)("persistent mailbox sessions against real mosquitto (MQTT v5)", () => {
-  it("queues an offline QoS 1 message for a v5 session with sessionExpirySeconds and drains it on reconnect", async () => {
-    // Unique per run so a session left behind by an earlier run cannot interfere.
-    const suffix = randomBytes(4).toString("hex");
-    const topic = `volley/integration/mosq-${suffix}/mailbox`;
-    const opts = {
-      url: BROKER_URL,
-      agentId: `mosq-${suffix}`,
-      clientId: `volley-mosq-${suffix}-hooks`,
-      cleanSession: false,
-      protocolVersion: 5 as const,
-      sessionExpirySeconds: 60,
-    };
+  it.each([
+    ["an explicit sessionExpirySeconds", { sessionExpirySeconds: 60 }],
+    ["the default session expiry", {}],
+  ])(
+    "queues an offline QoS 1 message for a v5 session with %s and drains it on reconnect",
+    async (_label, expiry) => {
+      // Unique per run so a session left behind by an earlier run cannot interfere.
+      const suffix = randomBytes(4).toString("hex");
+      const topic = `volley/integration/mosq-${suffix}/mailbox`;
+      const opts = {
+        url: BROKER_URL,
+        agentId: `mosq-${suffix}`,
+        clientId: `volley-mosq-${suffix}-hooks`,
+        cleanSession: false,
+        protocolVersion: 5 as const,
+        ...expiry,
+      };
 
-    const consumer = new VolleyBroker();
-    await consumer.connect(opts);
-    expect(await consumer.drainQueued(topic, { idleMs: 200 })).toEqual([]);
-    await consumer.disconnect();
+      const consumer = new VolleyBroker();
+      await consumer.connect(opts);
+      expect(await consumer.drainQueued(topic, { idleMs: 200 })).toEqual([]);
+      await consumer.disconnect();
 
-    const pub = new VolleyBroker();
-    await pub.connect({ url: BROKER_URL, agentId: `mosq-pub-${suffix}` });
-    await pub.publish(topic, "queued-while-offline", { qos: 1, retain: false });
-    await pub.disconnect();
+      const pub = new VolleyBroker();
+      await pub.connect({ url: BROKER_URL, agentId: `mosq-pub-${suffix}` });
+      await pub.publish(topic, "queued-while-offline", { qos: 1, retain: false });
+      await pub.disconnect();
 
-    await consumer.connect(opts);
-    const got = await consumer.drainQueued(topic, { idleMs: 300 });
-    expect(got).toEqual([{ topic, payload: "queued-while-offline" }]);
-    await consumer.disconnect();
+      await consumer.connect(opts);
+      const got = await consumer.drainQueued(topic, { idleMs: 300 });
+      expect(got).toEqual([{ topic, payload: "queued-while-offline" }]);
+      await consumer.disconnect();
 
-    // Expire the session now instead of leaving it on the broker for 60 s.
-    await consumer.connect({ ...opts, cleanSession: true });
-    await consumer.disconnect();
-  });
+      // Discard the session now instead of leaving it on the broker until it expires.
+      await consumer.connect({ ...opts, cleanSession: true });
+      await consumer.disconnect();
+    },
+  );
 });

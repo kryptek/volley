@@ -29,15 +29,18 @@ export interface BrokerConnectOptions {
    */
   cleanSession?: boolean;
   /**
-   * MQTT v5 `sessionExpiryInterval` for a persistent session; ignored on v4, where a
-   * persistent session lives until the broker's own expiry policy removes it. Applies
-   * to NEW connections only: an existing session keeps the expiry it was created with
-   * until the client reconnects.
+   * MQTT v5 `sessionExpiryInterval` for a persistent session (default
+   * `DEFAULT_SESSION_EXPIRY_S`); ignored on v4, where a persistent session lives until
+   * the broker's own expiry policy removes it. Applies to NEW connections only: an
+   * existing session keeps the expiry it was created with until the client reconnects.
    */
   sessionExpirySeconds?: number;
   /** MQTT protocol version. Default 4 (v3.1.1). */
   protocolVersion?: 4 | 5;
 }
+
+/** Default v5 session expiry for persistent consumers: 7 days (tunable `mailbox.session_expiry_s`). */
+export const DEFAULT_SESSION_EXPIRY_S = 7 * 24 * 60 * 60;
 
 export interface BrokerMessage {
   topic: string;
@@ -155,8 +158,12 @@ export class VolleyBroker {
         reconnectPeriod: 0,
         clean: !persistent,
         protocolVersion,
-        ...(protocolVersion === 5 && persistent && opts.sessionExpirySeconds !== undefined
-          ? { properties: { sessionExpiryInterval: opts.sessionExpirySeconds } }
+        ...(protocolVersion === 5 && persistent
+          ? {
+              properties: {
+                sessionExpiryInterval: opts.sessionExpirySeconds ?? DEFAULT_SESSION_EXPIRY_S,
+              },
+            }
           : {}),
         ...(will !== undefined ? { will } : {}),
       };

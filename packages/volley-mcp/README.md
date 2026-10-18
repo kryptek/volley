@@ -54,11 +54,28 @@ Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — you 
 | `vol_subscribe` | Block until N messages arrive on a topic pattern, or timeout. The synchronous wait primitive. |
 | `vol_list_agents` | Enumerate registered agents from `volley/_system/registry/+`. Filterable by namespace; `reaped` agents excluded by default. |
 | `vol_tap` | Wildcard subscription with debug-tuned defaults (longer timeout, larger collect cap). For "what's flying past on the broker?" introspection. |
-| `vol_send_mailbox` | Deliver a `mailbox` message to another agent. Type one of `steering | cancel | nudge | query`. |
+| `vol_send_mailbox` | Deliver a `mailbox` message to another agent. Type one of `steering | cancel | nudge | query | ack`. Returns `message_id`, which is the envelope's `correlation_id` (generated unless you pass one; required for `ack`). Optional `payload.seq` / `payload.supersedes`. With `wait_ack_ms`, it also waits for the recipient's `ack` and returns `acked` / `acked_by`. `delivered` only means the broker sent PUBACK. |
 
 All seven satisfy the SPEC §10 reserved-name list. Three more names (`vol_subscribe_async`, `vol_recv`, `vol_unsubscribe`) are reserved for v0.2+ async paths and **MUST NOT** be redefined by conforming v0.1 implementations.
 
 For the full input schemas, see [`src/server.ts`](src/server.ts) (Zod-defined) or call `tools/list` over the MCP wire.
+
+### Mailbox delivery
+
+Mailbox messages are QoS 1 and **not retained**. The broker only holds one for a recipient that has a persistent session subscribed to its mailbox. The MCP server's own connection is a clean session with a random clientId suffix, and the server does not read its own mailbox, so a recipient needs a separate drain client. `VolleyBroker` supports one:
+
+```ts
+await broker.connect({
+  url, agentId,
+  clientId: `volley-${agentId}-hooks`, // required with cleanSession:false; used verbatim
+  cleanSession: false,
+  protocolVersion: 5,                   // 4 (default) also works; expiry is v5-only
+  sessionExpirySeconds: 604800,         // default DEFAULT_SESSION_EXPIRY_S (7 days)
+});
+const queued = await broker.drainQueued(`volley/${ns}/${agentId}/mailbox`, { idleMs: 250 });
+```
+
+`drainQueued` subscribes at QoS 1, collects until no message has arrived for `idleMs`, and keeps the subscription, so the broker goes on queueing while the client is away. Each persistent consumer needs its own clientId, because a same-clientId connect kicks the older client off. Without a `clientId`, `cleanSession: false` throws `IMPL_CLIENT_ID_REQUIRED`. Callers read the session expiry from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the fallback. **A changed value applies to new connections only**: an existing session keeps the expiry it was created with until its client reconnects. See SPEC §4.4 for the ack protocol.
 
 ---
 
@@ -128,7 +145,7 @@ bun run test:integration     # opt-in — real mosquitto required (sets VOLLEY_I
 bun run typecheck            # tsc --noEmit
 ```
 
-The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883`. Locally: `brew services start mosquitto`. Without `VOLLEY_INTEGRATION=1` it self-skips.
+The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883` (or `VOLLEY_BROKER_URL`). It also covers MQTT v5 persistent sessions, which the Aedes unit-test broker does not support. Locally: `brew services start mosquitto`. Without `VOLLEY_INTEGRATION=1` it self-skips.
 
 To iterate on a single test:
 
