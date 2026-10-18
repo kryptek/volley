@@ -1,6 +1,6 @@
 # volley-skill — the /volley Claude Code slash command
 
-This is the Claude Code skill bundle for [Volley](../../README.md). Installed, it adds the `/volley` slash command to your Claude Code sessions, wrapping the seven `volley-mcp` tools with the agent-handling UX from the design doc §6.
+This is the Claude Code skill bundle for [Volley](../../README.md). Installed, it adds the `/volley` slash command to your Claude Code sessions, wrapping the seven `volley-mcp` tools with human-friendly agent-handling commands.
 
 ## Prerequisites
 

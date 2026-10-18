@@ -81,8 +81,11 @@ volley dash                          # dev server, opens browser at http://local
 volley dash --no-open                # dev server, don't open browser
 volley dash --build                  # production build + preview (http://localhost:4173)
 volley dash --broker-url ws://host:9001  # point at a non-default broker
+volley dash --host 0.0.0.0           # serve on the LAN (a phone opens http://<LAN IP>:5174)
 volley dash --legacy                 # the classic dashboard (packages/volley-dash, :5173)
 ```
+
+On first load the Desk asks for broker credentials: sign in as the `desk` identity from `volley auth init`. With `--host` and no `--broker-url`, the Desk connects to port 9001 on the host it was loaded from, so a phone reaches this machine's broker, once mosquitto also has a WebSocket listener on the LAN address: the example conf binds `127.0.0.1` only. That listener exposes the broker to the LAN, so keep `allow_anonymous false` with the `volley auth` accounts, and note that `ws://` carries the password in cleartext. Open the page by IP, since Vite refuses other host names. See the Desk's [LAN use](../volley-desk/README.md#lan-use). `--build` drops `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD` from its environment, because Vite would inline them into the bundle.
 
 `--legacy` launches the classic [`volley-dash`](../volley-dash/) dashboard (status grid + event feed + per-agent drawer) instead. It is deprecated and will be removed in a later release; every other flag works with it.
 
@@ -184,7 +187,14 @@ volley lease status                                        # every pool: holders
   a courtesy to the machine, never a reason an agent's build cannot run. While queued it checks
   every 30 s: if volleyd went away, the pool was removed (or dropped the request), or volleyd never
   queued the request after 3 re-sends, it prints a `WARNING` and runs the command unleased.
-  `acquire` fails (exit `1`) instead.
+  `acquire` fails (exit `1`) instead. **A refused login is not an outage**: when the broker answers
+  but rejects the credentials (`AUTH_FAILED`), `run` exits `1` without running the command, so a
+  credentials mistake surfaces instead of silently defeating the pool.
+- **Credentials**: `--username`/`--password`, else `<--project-dir or cwd>/.volley/agent.json`'s
+  `broker` block, else `VOLLEY_AUTH_*`. With `--coordinator` (what the coordinator-mode hook passes)
+  it resolves them as the coordinator hooks do: `VOLLEY_AUTH_*`, else
+  `$VOLLEY_AUTH_DIR/coordinator.json` (from `volley auth init --coordinator-file`), and never reads
+  an identity file. A malformed `coordinator.json` is an error, not an anonymous connect.
 - The [volley-hooks](../volley-hooks/README.md) PreToolUse lease hook wraps matching `Bash`
   commands in `volley lease run` automatically.
 
@@ -386,6 +396,8 @@ Optional:
   --build                 Run vite build + preview the production bundle
   --port <N>              Override Vite's port (dev default: 5174, 5173 with --legacy;
                           --build: Vite preview's 4173)
+  --host <addr>           Listen on <addr> (e.g. 0.0.0.0) for a phone or another
+                          machine; see LAN use above
   --broker-url <url>      MQTT broker URL passed to the Desk via
                           VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open / --no-open      Open the browser on start (default: --open in dev mode)

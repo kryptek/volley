@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
+import pkg from "../package.json";
 import { parseGlobal } from "./args";
 import { EXIT, type ExitCode } from "./exit-codes";
 import { type IO, realIO } from "./io";
 
-const VERSION = "0.1.0-dev";
+const VERSION = pkg.version;
 
 const USAGE = `Usage: volley <subcommand> [options]
 

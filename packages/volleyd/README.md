@@ -11,12 +11,13 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release.** This package has the wave file, journal, reducer, scheduler, fence,
-> config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop and
-> the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
-> admission, and it spawns each admitted task's implementer (worktree, identity, cmux launch,
-> hook-signal verification, per-worktree lock, retire). The reviewer/fixup pipeline stages and
-> recovery come in later tasks of the volleyd epic.
+> **Status: pre-release (v0.2.0).** This package has the wave file, journal, reducer, scheduler,
+> fence, config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop
+> and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
+> admission. It spawns each admitted task's agents (worktree, identity, cmux launch, hook-signal
+> verification, per-worktree lock, retire), drives them through the review pipeline to a
+> merge-ready gate and notices the merge, recovers stalled agents, applies mid-wave plan changes,
+> publishes screen tails, and can run agents on a second machine over ssh + tmux.
 
 ---
 
@@ -274,6 +275,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `op` | Fields | `result` |
 |---|---|---|
 | `run` | `wave_yaml`, `source?` | the new wave state |
+| `diff` | `wave`, `wave_yaml`, `source?` | the structural diff between the wave's current plan and the file, plus `plan: { version, diff, unchanged }`; submits nothing |
 | `status` | `wave?` | one wave state, or `{ waves: [...] }` |
 | `config_get` | `path?`, `wave?` | the value (the full retained payload when neither is given) |
 | `config_set` | `patch`, `by` (SPEC §4.6.4) | `{ version }`, plus `applied` / `rejected: [{ path, reason }]` |
@@ -284,6 +286,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
+| `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
@@ -966,18 +969,38 @@ CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
     branch --list | merge-base | show
-  gh issue view · gh pr view | list | checks · gh run list | view | watch · gh api (GET only)
-  cmux new-workspace | list-workspaces | send | send-key | read-screen | ping
-  claude (any arguments)
+    worktree add needs -b <branch> or --detach (never checks out an existing branch), and the
+    new branch is never main/master (in any case); fetch takes a remote name or a network URL
+    (https, ssh, git, user@host:path — never a local path) and its refspecs only write
+    refs/remotes/…
+  gh issue view · gh pr view | list | checks · gh run list | view | watch ·
+    gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
+    segment; no request headers)
+  cmux — exact argv shapes only, because cmux types into an agent's shell:
+    new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
+      with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
+    send --workspace <ref> <text>   text: TYPED_TEXT only
+    send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
+    list-workspaces · ping
+  claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
+    which the launch commands above run
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]
-  launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
+  launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
+    full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
     memory_pressure (no arguments: report only) · docker info --format {{json .}}
 
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+
+TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
+  with its token, checked by identity like consent tokens:
+    LAUNCH_COMMAND   with a LaunchToken (`sealLaunchScript`: volleyd rendered that launch.sh)
+    `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
+                     minted when an approved model_switch decision is acted on); <id> is a
+                     MODEL_ID, the wave-file schema's `model` pattern
 
 SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -991,12 +1014,22 @@ SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
 REMOTE (one step of a RemoteScript; the same DENY list applies first):
   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
   gh issue view
-  tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only) |
-    capture-pane | send-keys | has-session — kill-session = CONSENT; no tmux global options
-  mkdir -p <path>… · cat <path>… · chmod <octal> <path>… · nc -z 127.0.0.1 <port>
+  tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
+    the LaunchToken sealed for <dir>) | capture-pane | has-session |
+    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
+    kill-session = CONSENT; no tmux global options
+  mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
+    nc -z 127.0.0.1 <port>
+  cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+    `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
-    077, and only to the files volleyd writes: an absolute path inside a `.volley/` directory
-    or ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`
+    077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
+    (agent.json, brief.md, launch.sh, review.md, findings.md, findings.json, rebase.md —
+    spelled exactly, directly inside `.volley/`, so no write there is a git config, HEAD,
+    gitfile or hook, or a case variant of launch.sh), an absolute path ending in `/ISSUE.md`
+    or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh` (what the
+    tmux session runs) is written whole, never appended, and its content must be exactly
+    `renderLaunchScript` of valid values (LAUNCH_SCRIPT_VARS)
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json

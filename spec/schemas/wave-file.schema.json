@@ -32,7 +32,8 @@
     "model": {
       "type": "string",
       "minLength": 1,
-      "description": "Default model for every agent in the wave."
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\\[[A-Za-z0-9]{1,16}\\])?$",
+      "description": "Default model for every agent in the wave. One word as /model and claude --model take it (e.g. claude-opus-5-5, opus, claude-x[1m], us.anthropic.claude-x-v1:0): the authority fence's MODEL_ID."
     },
     "namespace": {
       "$ref": "#/$defs/id",
@@ -111,7 +112,11 @@
           "description": "Task ids that must reach done before this task may start."
         },
         "pipeline": { "$ref": "#/$defs/pipeline" },
-        "model": { "type": "string", "minLength": 1 },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\\[[A-Za-z0-9]{1,16}\\])?$"
+        },
         "host": {
           "default": "local",
           "description": "Where the task's agents run: local (the supervisor's own host), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one).",

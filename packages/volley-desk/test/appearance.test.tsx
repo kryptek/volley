@@ -172,6 +172,35 @@ describe("Appearance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Arrange & fit now" }));
     expect(onArrange).toHaveBeenCalledTimes(1);
   });
+
+  it("sets how long finished agents stay on the canvas", () => {
+    render(<Harness />);
+    const grace = screen.getByRole("spinbutton", { name: /Hide finished agents after/ });
+    expect(grace).toHaveValue(10);
+    // Typing is a draft: backspacing 10 → 1 → "" → 45 hides nothing on the way.
+    fireEvent.change(grace, { target: { value: "1" } });
+    fireEvent.change(grace, { target: { value: "" } });
+    expect(grace).toHaveValue(null);
+    expect(latest.finishedGraceMin).toBe(10);
+    fireEvent.change(grace, { target: { value: "45" } });
+    expect(latest.finishedGraceMin).toBe(10);
+    fireEvent.blur(grace);
+    expect(latest.finishedGraceMin).toBe(45);
+    expect(stored().finishedGraceMin).toBe(45);
+    // Enter commits too.
+    fireEvent.change(grace, { target: { value: "30" } });
+    fireEvent.keyDown(grace, { key: "Enter" });
+    expect(latest.finishedGraceMin).toBe(30);
+    // An invalid or empty draft is dropped and the field shows the saved value again.
+    fireEvent.change(grace, { target: { value: "-3" } });
+    fireEvent.blur(grace);
+    expect(latest.finishedGraceMin).toBe(30);
+    expect(grace).toHaveValue(30);
+    fireEvent.change(grace, { target: { value: "" } });
+    fireEvent.blur(grace);
+    expect(latest.finishedGraceMin).toBe(30);
+    expect(grace).toHaveValue(30);
+  });
 });
 
 describe("App look (demo mode)", () => {

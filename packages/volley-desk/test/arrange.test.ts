@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { FIT_MIN_SCALE } from "../src/canvas/useViewport";
 import {
   ARRANGE_MAX_SCALE,
+  ARRANGE_MIN_SCALE,
   type Box,
   CGAP,
   type Cluster,
@@ -73,11 +75,43 @@ describe("layoutCluster", () => {
 });
 
 describe("arrange", () => {
-  it("tries every agent-column count 1..3 and every row count 1..clusters", () => {
+  it("tries agent-column counts 1..max(3, most agents in a cluster) and every row count", () => {
     const all = candidates(clusters, screen);
+    // wave-a has 4 agents
     expect(all.map((c) => [c.cols, c.rows])).toEqual(
-      [1, 2, 3].flatMap((c) => [1, 2, 3].map((r) => [c, r])),
+      [1, 2, 3, 4].flatMap((c) => [1, 2, 3].map((r) => [c, r])),
     );
+  });
+
+  it("spreads one big cluster across the viewport's aspect instead of a tall strip (owner finding b)", () => {
+    const kids = Array.from({ length: 14 }, (_, i) => box(`k${i}`, 460, 470));
+    const one: Cluster = { main: box("w", 620, 440), kids };
+    const wide = { width: 1920, height: 1080 };
+    const r = arrange([one], wide);
+    if (!r) throw new Error("no arrangement");
+    const columns = new Set(kids.map((k) => r.place[k.id]?.x)).size;
+    expect(columns).toBeGreaterThan(3);
+    // Beats the best a 3-column cap could do.
+    const capped = Math.min(
+      (wide.width - 48) / layoutCluster(one, 3).w,
+      (wide.height - 174) / layoutCluster(one, 3).h,
+    );
+    expect(r.view.s).toBeGreaterThan(capped);
+  });
+
+  it("zooms out far enough to show everything, however many windows (owner finding b)", () => {
+    const many: Cluster[] = Array.from({ length: 30 }, (_, w) => ({
+      main: box(`w${w}`, 620, 440),
+      kids: Array.from({ length: 4 }, (_, i) => box(`w${w}k${i}`, 460, 470)),
+    }));
+    const r = arrange(many, screen);
+    if (!r) throw new Error("no arrangement");
+    const all = many.flatMap((c) => [c.main, ...c.kids]);
+    const right = Math.max(...all.map((b) => (r.place[b.id]?.x ?? 0) + b.w));
+    const bottom = Math.max(...all.map((b) => (r.place[b.id]?.y ?? 0) + b.h));
+    expect(r.view.s).toBeLessThan(0.2);
+    expect(right * r.view.s).toBeLessThanOrEqual(vw + 0.5);
+    expect(bottom * r.view.s).toBeLessThanOrEqual(vh + 0.5);
   });
 
   it("every candidate's size and scale match its placement (brute force)", () => {
@@ -134,11 +168,12 @@ describe("arrange", () => {
     expect(arrange([cl], big)?.place).toEqual(layoutCluster(cl, 1).at);
   });
 
-  it("caps the scale at 1.1 and floors it at 0.2", () => {
+  it("caps the scale at 1.1 and floors it at the fit minimum", () => {
     const small = arrange([{ main: box("w", 100, 100), kids: [] }], screen);
     expect(small?.view.s).toBe(ARRANGE_MAX_SCALE);
-    const huge = arrange([{ main: box("w", 100_000, 100_000), kids: [] }], screen);
-    expect(huge?.view.s).toBe(0.2);
+    const huge = arrange([{ main: box("w", 1_000_000, 1_000_000), kids: [] }], screen);
+    expect(huge?.view.s).toBe(ARRANGE_MIN_SCALE);
+    expect(ARRANGE_MIN_SCALE).toBe(FIT_MIN_SCALE);
   });
 
   it("returns null with nothing to arrange", () => {

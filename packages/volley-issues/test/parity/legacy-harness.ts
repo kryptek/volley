@@ -12,7 +12,7 @@ export interface LegacyDetection {
 /**
  * Simulates the legacy claude-peers + ScheduleWakeup polling loop:
  * polls the agent's retained status topic every `pollIntervalMs` milliseconds
- * (default 270000 = 270s, matching the design doc's stated cadence). Returns
+ * (default 270000 = 270s, the legacy coordinator's real polling cadence). Returns
  * when a terminal status is observed.
  *
  * NOTE: This is a SIMULATION — the real legacy loop is in the dispatch-issues

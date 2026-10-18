@@ -44,7 +44,7 @@ async function runOne(
 }
 
 describe("parity test — 4 legacy vs 4 volley", () => {
-  it("Volley median latency < 5s; writes parity-report.md", async () => {
+  it("Volley median latency < 5s (UPDATE_PARITY=1 rewrites parity-report.md)", async () => {
     const tb = await startTestBroker();
     try {
       // 8 scenarios — same shape; the harness is what differs.
@@ -73,7 +73,7 @@ describe("parity test — 4 legacy vs 4 volley", () => {
       }));
       const summary = summarize(results);
 
-      // Acceptance criteria (design doc §8.5).
+      // Acceptance criteria: Volley wakes a coordinator in under 5 s (median), 10 s (max).
       expect(summary.volley.median).toBeLessThan(5000);
       expect(summary.volley.max).toBeLessThan(10000);
       // The whole point of Volley: legacy median is bounded above by its poll
@@ -88,9 +88,12 @@ describe("parity test — 4 legacy vs 4 volley", () => {
       // comment above.
       expect(summary.legacy.median).toBeGreaterThan(500);
 
-      // Write the report. Path: repo-root/packages/volley-issues/parity-report.md
-      const reportPath = new URL("../../parity-report.md", import.meta.url);
-      writeReport(reportPath.pathname, renderReport(results, summary));
+      // The committed report is refreshed only on request (`bun run parity:update`, at tag
+      // time); a plain test run must not rewrite a tracked file.
+      if (process.env.UPDATE_PARITY === "1") {
+        const reportPath = new URL("../../parity-report.md", import.meta.url);
+        writeReport(reportPath.pathname, renderReport(results, summary));
+      }
     } finally {
       await tb.close();
     }

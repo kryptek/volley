@@ -27,27 +27,41 @@ export async function connectAsClient(
   auth: BrokerAuth | null = null,
   will?: { topic: string; payload: string },
 ): Promise<VolleyBroker | null> {
+  try {
+    return await openClient(brokerUrl, auth, will);
+  } catch (e) {
+    reportConnectError(io, e);
+    return null;
+  }
+}
+
+/** `connectAsClient` without the diagnostics: throws the connect error for the caller to judge. */
+export async function openClient(
+  brokerUrl: string,
+  auth: BrokerAuth | null = null,
+  will?: { topic: string; payload: string },
+): Promise<VolleyBroker> {
   const broker = new VolleyBroker();
   const clientId = `cli-${randomSuffix(8)}`;
-  try {
-    // No status LWT: the CLI is not a conforming Volley agent (SPEC §7 says agents MUST set
-    // an LWT; the CLI does not — it's a transient tool, not a tracked participant). A caller
-    // may still arm a non-retained will (`volley lease` releases its lease that way).
-    await broker.connect({
-      url: brokerUrl,
-      agentId: clientId, // VolleyBroker uses this in the underlying MQTT clientId.
-      ...(will !== undefined
-        ? { willTopic: will.topic, willPayload: will.payload, willRetain: false }
-        : {}),
-      ...(auth ?? {}),
-    });
-    return broker;
-  } catch (e) {
-    if (e instanceof VolleyError && e.code === "BROKER_DOWN") {
-      io.stderr(`volley: ${e.message}\n${MOSQUITTO_INSTALL_HINT}\n`);
-    } else {
-      io.stderr(`volley: ${e instanceof Error ? e.message : String(e)}\n`);
-    }
-    return null;
+  // No status LWT: the CLI is not a conforming Volley agent (SPEC §7 says agents MUST set
+  // an LWT; the CLI does not — it's a transient tool, not a tracked participant). A caller
+  // may still arm a non-retained will (`volley lease` releases its lease that way).
+  await broker.connect({
+    url: brokerUrl,
+    agentId: clientId, // VolleyBroker uses this in the underlying MQTT clientId.
+    ...(will !== undefined
+      ? { willTopic: will.topic, willPayload: will.payload, willRetain: false }
+      : {}),
+    ...(auth ?? {}),
+  });
+  return broker;
+}
+
+/** The stderr diagnostic for a failed connect (plus the mosquitto install hint on BROKER_DOWN). */
+export function reportConnectError(io: IO, e: unknown): void {
+  if (e instanceof VolleyError && e.code === "BROKER_DOWN") {
+    io.stderr(`volley: ${e.message}\n${MOSQUITTO_INSTALL_HINT}\n`);
+  } else {
+    io.stderr(`volley: ${e instanceof Error ? e.message : String(e)}\n`);
   }
 }

@@ -12,7 +12,7 @@
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDeskKeys } from "./a11y/keys";
 import {
   type Attn,
@@ -44,10 +44,11 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
+import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
-import { UNASSIGNED, agentsByWave } from "./store/reducer";
+import { UNASSIGNED, agentsByWave, finishedAgents } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
@@ -83,6 +84,20 @@ function waveStartedAt(agents: readonly AgentView[]): number | null {
     .map((a) => Date.parse(a.registry?.started_at ?? "") || a.bornAt)
     .filter((t): t is number => typeof t === "number" && Number.isFinite(t));
   return starts.length ? Math.min(...starts) : null;
+}
+
+/**
+ * Why an urgent `/stop` must not interrupt `a`, or undefined when it may.
+ * volleyd presses Escape in whoever holds `tasks[].agents[role]` now, and an
+ * agent keeps its role after the slot moves on to a new agent (the reducer is
+ * sticky), so a stale window would interrupt the slot's new agent instead.
+ */
+function interruptBlocker(state: DeskState, a: AgentView): string | undefined {
+  if (a.wave === UNASSIGNED || !a.task) return undefined; // the transport says "no wave task"
+  if (!a.role) return `${a.id} has no role on ${a.task}`;
+  const holder = state.waves[a.wave]?.state?.tasks.find((t) => t.id === a.task)?.agents[a.role];
+  if (holder === a.id) return undefined;
+  return `${a.id} no longer holds the ${a.role} slot on ${a.task}${holder ? ` (now ${holder})` : ""}`;
 }
 
 type Pos = { x: number; y: number };
@@ -167,19 +182,49 @@ export default function App() {
   const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
-  const ctxOpts = { now, me, gateSince, offline };
+  const ctxOpts = { now, me, identity, gateSince, offline };
   const ctx = ctxFrom(state, ctxOpts);
   const [settings, setSettings] = useState<string | null>(null);
+  // config_set goes to volleyd's mailbox in its own namespace and is answered on ours there.
+  const daemonNs = state.agents[DAEMON_AGENT_ID]?.namespace ?? "default";
+  const configTransport = useMemo(
+    () =>
+      writer && identity && !demo
+        ? createConfigTransport(writer, { identity, namespace: daemonNs })
+        : null,
+    [writer, identity, demo, daemonNs],
+  );
   // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
   const settingsWaveGone = settings !== null && !state.waves[settings];
   useEffect(() => {
     if (settingsWaveGone) setSettings(null);
   }, [settingsWaveGone]);
 
-  const groups = agentsByWave(state);
+  // ------------------------------------------------------------ look (D7)
+  const [saved, setLook] = useLook();
+  const webgl = useWebGL();
+  // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
+  const look = degradeLook(saved, webgl);
+  const [lookOpen, setLookOpen] = useState(false);
+  const [toast, say, closeToast] = useToast();
+
+  const allGroups = agentsByWave(state);
+  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
+  const finished = finishedAgents(state, now, look.finishedGraceMin * 60_000);
+  const finishedCount = Object.values(allGroups).reduce(
+    (n, l) => n + l.filter((a) => finished.has(a.id)).length,
+    0,
+  );
+  const finishedHidden = look.showFinished ? 0 : finishedCount;
+  const groups =
+    finishedHidden === 0
+      ? allGroups
+      : Object.fromEntries(
+          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !finished.has(a.id))]),
+        );
   const firstStart = useRef<Record<string, number>>({});
   const startedAt = (id: string): number | null => {
-    const t = waveStartedAt(groups[id] ?? []);
+    const t = waveStartedAt(allGroups[id] ?? []);
     const prev = firstStart.current[id];
     if (t !== null && (prev === undefined || t < prev)) firstStart.current[id] = t;
     return firstStart.current[id] ?? null;
@@ -214,7 +259,8 @@ export default function App() {
   ];
   const visible = waveIds.filter((id) => !hidden.has(id));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
-  const coordsShown = coordsOpen && waveList.length > 0;
+  // Also shown with no wave while there are finished agents, so the toggle stays reachable.
+  const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
   const rects: Rect[] = [
     ...visible.flatMap(clusterOf),
     ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(waveList.length))] : []),
@@ -225,14 +271,6 @@ export default function App() {
     fitted.current = true;
     fitTo(rects);
   });
-
-  // ------------------------------------------------------------ look (D7)
-  const [saved, setLook] = useLook();
-  const webgl = useWebGL();
-  // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
-  const look = degradeLook(saved, webgl);
-  const [lookOpen, setLookOpen] = useState(false);
-  const [toast, say, closeToast] = useToast();
 
   // ------------------------------------------------------- arrange & fit
   const autoArrange = look.autoArrange;
@@ -412,6 +450,7 @@ export default function App() {
               coordinators={coordinators}
               needsYou={notWorking}
               me={me}
+              identity={identity}
               hidden={hidden}
               frame={place(COORDS_ID)}
               onToggle={toggle}
@@ -422,6 +461,12 @@ export default function App() {
               fitTo={fitTo}
               clusterOf={clusterOf}
               onClose={() => setCoordsOpen(false)}
+              finished={{
+                hidden: finishedHidden,
+                shown: look.showFinished,
+                graceMin: look.finishedGraceMin,
+                onToggle: () => setLook({ showFinished: !look.showFinished }),
+              }}
             />
           )}
           {visible.map((id) => {
@@ -443,6 +488,7 @@ export default function App() {
                 key={id}
                 wave={wave}
                 me={me}
+                identity={identity}
                 coordinatorState={coordinator?.state}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
@@ -481,37 +527,46 @@ export default function App() {
             );
           })}
           {visible.flatMap((id) =>
-            (groups[id] ?? []).map((a) => (
-              // Keyed by bornAt: a window that existed before its registry entry
-              // re-mounts with `born` when the entry arrives.
-              <AgentWindow
-                key={`${a.id}:${a.bornAt ?? ""}`}
-                agent={a}
-                wave={state.waves[id]}
-                accent={accentOf(id)}
-                frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
-                narrationFx={look.narr}
-                attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
-                onChat={toggleSteer}
-                steerOpen={steerOpen === a.id}
-                steer={
-                  steerOpen === a.id &&
-                  steering.panel({
-                    target: {
-                      agentId: a.id,
-                      namespace: a.namespace ?? "default",
+            (groups[id] ?? []).map((a) => {
+              const blocked = interruptBlocker(state, a);
+              return (
+                // Keyed by bornAt: a window that existed before its registry entry
+                // re-mounts with `born` when the entry arrives.
+                <AgentWindow
+                  key={`${a.id}:${a.bornAt ?? ""}`}
+                  agent={a}
+                  wave={state.waves[id]}
+                  accent={accentOf(id)}
+                  frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
+                  narrationFx={look.narr}
+                  attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                  onChat={toggleSteer}
+                  steerOpen={steerOpen === a.id}
+                  steer={
+                    steerOpen === a.id &&
+                    steering.panel({
+                      target: {
+                        agentId: a.id,
+                        namespace: a.namespace ?? "default",
+                        coordinator: false,
+                        ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
+                        ...(a.task ? { task: a.task } : {}),
+                        ...(a.role ? { role: a.role } : {}),
+                        ...(blocked !== undefined ? { noInterrupt: blocked } : {}),
+                      },
+                      label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
                       coordinator: false,
-                      ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
-                      ...(a.task ? { task: a.task } : {}),
-                    },
-                    label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
-                    coordinator: false,
-                    copy: a.task && a.wave !== UNASSIGNED ? { wave: a.wave, task: a.task } : null,
-                    onClose: () => setSteerOpen(null),
-                  })
-                }
-              />
-            )),
+                      // `volleyd steer` resolves the same slot, so a stale agent gets no command.
+                      copy:
+                        a.task && a.wave !== UNASSIGNED && blocked === undefined
+                          ? { wave: a.wave, task: a.task, ...(a.role ? { role: a.role } : {}) }
+                          : null,
+                      onClose: () => setSteerOpen(null),
+                    })
+                  }
+                />
+              );
+            }),
           )}
         </World>
       </div>
@@ -559,11 +614,11 @@ export default function App() {
       <DeskToast toast={toast} onClose={closeToast} />
 
       {settings !== null && state.waves[settings] && (
-        // No config transport until the Desk signs in with broker credentials: read-only.
+        // Read-only until the Desk has signed in (and in demo mode, which has no volleyd).
         <SettingsModal
           wave={state.waves[settings]}
           config={state.config}
-          transport={null}
+          transport={configTransport}
           onClose={() => setSettings(null)}
         />
       )}

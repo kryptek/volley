@@ -173,3 +173,19 @@
     box-shadow: 0 0 0 2px rgba(255, 122, 89, 0.55);
   }
 }
+
+/* The coordinators window's "show finished" toggle. */
+.coord-finished {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--mute);
+  cursor: pointer;
+}
+.coord-finished input {
+  accent-color: #6ee7f9;
+  margin: 0;
+}

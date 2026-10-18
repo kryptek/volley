@@ -37,7 +37,8 @@ init --dir /etc/mosquitto/volley`. The distro broker starts as root and drops to
 user *before* it opens `password_file`, so run as root `init` hands the directory and both files
 to that user (a broker that cannot read them exits with `Unable to open pwfile`). If you created
 the files some other way: `sudo chown -R mosquitto: /etc/mosquitto/volley`.
-`examples/mosquitto-localhost.conf` already contains those lines for Apple Silicon Homebrew:
+`examples/mosquitto-localhost.conf` already contains those lines for Apple Silicon Homebrew (the
+root README's install commands rewrite them, and `persistence_location`, for Intel and Linux):
 
 ```
 allow_anonymous false

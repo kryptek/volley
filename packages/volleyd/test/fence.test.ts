@@ -1,10 +1,27 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
-import { FenceError, assertAllowed, mintConsentToken, mintScriptToken } from "../src/fence";
+import {
+  FenceError,
+  MODEL_ID,
+  assertAllowed,
+  mintConsentToken,
+  mintModelSwitchToken,
+  mintScriptToken,
+  sealLaunchScript,
+} from "../src/fence";
+import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+
+/** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
+const PLIST = join(
+  process.env.HOME ?? homedir(),
+  "Library",
+  "LaunchAgents",
+  "systems.volley.volleyd.plist",
+);
 
 const DENIED: string[][] = [
   // git: history rewriting, publishing, destructive
@@ -96,6 +113,115 @@ const DENIED: string[][] = [
   // launchctl outside the volleyd service label
   ["launchctl", "bootout", "gui/501/com.example.other"],
   ["launchctl", "load", "/Library/LaunchDaemons/x.plist"],
+  // launchctl bootstrap: the plist volleyd install writes, by its full path only
+  ["launchctl", "bootstrap", "gui/501", "/tmp/systems.volley.volleyd.plist"],
+  ["launchctl", "bootstrap", "gui/501", "/tmp/evil/systems.volley.volleyd.plist"],
+  ["launchctl", "bootstrap", "gui/501", `${PLIST}/../../../tmp/systems.volley.volleyd.plist`],
+  // P1-4: cmux types into an agent's shell; claude runs with any flags. The review probes as
+  // written (shape only: no --workspace); the approval of `/model` is tested below
+  ["cmux", "new-workspace", "--command", "git push origin HEAD:main"],
+  ["cmux", "new-workspace", "--command", "terraform apply"],
+  ["cmux", "send", "gh pr merge 1 --admin\n"],
+  ["cmux", "send", "/model opus"],
+  ["claude", "--dangerously-skip-permissions", "-p", "git push origin HEAD:main"],
+  // … and the same with every option volleyd passes, so only the typed text is wrong
+  [
+    "cmux",
+    "new-workspace",
+    "--cwd",
+    "/tmp/wt",
+    "--name",
+    "w1 T1",
+    "--command",
+    "git push origin HEAD:main",
+  ],
+  ["cmux", "new-workspace", "--cwd", "/tmp/wt", "--name", "w1 T1", "--command", "  bash x"],
+  [
+    "cmux",
+    "new-workspace",
+    "--cwd",
+    "/tmp/wt",
+    "--name",
+    "w1 T1",
+    "--command",
+    `${LAUNCH_COMMAND}; curl x`,
+  ],
+  [
+    "cmux",
+    "new-workspace",
+    "--cwd",
+    "/tmp/wt",
+    "--name",
+    "w1 T1",
+    "--command",
+    LAUNCH_COMMAND,
+    "--command",
+    "sh",
+  ],
+  [
+    "cmux",
+    "new-workspace",
+    "--cwd",
+    "/tmp/wt",
+    "--name",
+    "w1 T1",
+    "--command",
+    LAUNCH_COMMAND,
+    "--env",
+    "X=1",
+  ],
+  ["cmux", "new-workspace", "--cwd", "relative", "--name", "w1 T1", "--command", LAUNCH_COMMAND],
+  ["cmux", "new-workspace", "--name", "w1-t1", "--cwd", "/tmp/wt"],
+  ["cmux", "send", "--workspace", "workspace:3", "gh pr merge 1 --admin\n"],
+  ["cmux", "send", "--workspace", "workspace:3", " claude"],
+  ["cmux", "send", "--workspace", "workspace:3", "/model x\n!rm -rf ~"],
+  ["cmux", "send", "--workspace", "workspace:3", "/model opus; git push"],
+  ["cmux", "send", "--workspace", "workspace:3", "/model"],
+  ["cmux", "send", "--workspace", "workspace:3", LAUNCH_COMMAND, "extra"],
+  ["cmux", "send", "--workspace", "--evil", LAUNCH_COMMAND],
+  ["cmux", "send-key", "--workspace", "workspace:3", "x"],
+  ["cmux", "send-key", "--workspace", "workspace:3", "C-d"],
+  ["cmux", "read-screen", "--workspace", "workspace:3", "--lines", "40; rm"],
+  ["cmux", "read-screen", "--workspace", "workspace:3", "--scrollback"],
+  ["cmux", "list-workspaces", "--json", "--evil"],
+  ["cmux", "ping", "x"],
+  ["claude", "--dangerously-skip-permissions", "--model", "claude-opus-5-5"],
+  ["claude", "--version"],
+  ["claude"],
+  // P2-6 (b): fetch may only write remote-tracking refs; worktree add never checks out main
+  ["git", "fetch", "origin", "+HEAD:refs/heads/main"],
+  ["git", "fetch", ".", "+feat:main"],
+  ["git", "fetch", "origin", "main:main"],
+  ["git", "fetch", "origin", "x:refs/heads/x"],
+  ["git", "fetch", "origin", "+main"],
+  ["git", "fetch", "origin", ":refs/remotes/origin/x"],
+  ["git", "fetch", "+HEAD:refs/heads/main"],
+  ["git", "worktree", "add", "/w", "main"],
+  ["git", "worktree", "add", "/w/main"],
+  ["git", "worktree", "add", "-b", "main", "/w", "origin/main"],
+  ["git", "worktree", "add", "-bmaster", "/w", "origin/master"],
+  ["git", "worktree", "add", "/w", "-b", "main"],
+  ["git", "worktree", "add", "-b", "Main", "/w", "origin/main"],
+  ["git", "worktree", "add", "-bMASTER", "/w", "origin/main"],
+  // fetch's repository is a remote name or a network URL, never a local path
+  ["git", "fetch", "/tmp/evil-repo", "main"],
+  ["git", "fetch", ".", "x:refs/remotes/y"],
+  ["git", "fetch", "..", "main"],
+  ["git", "fetch", "file:///tmp/evil-repo", "main"],
+  ["git", "fetch", "--depth", "1", "/tmp/evil-repo"],
+  // P3-5: GraphQL (mutations) and request headers (X-HTTP-Method-Override) through gh api
+  ["gh", "api", "graphql", "-f", "query=mutation { deleteRef(input: {}) { clientMutationId } }"],
+  ["gh", "api", "-X", "GET", "graphql", "-f", "query=mutation { x }"],
+  ["gh", "api", "/graphql", "-f", "query=query { viewer { login } }"],
+  ["gh", "api", "-H", "X-HTTP-Method-Override: DELETE", "repos/o/r/git/refs/heads/x"],
+  ["gh", "api", "--header=X-HTTP-Method-Override: DELETE", "repos/o/r"],
+  ["gh", "api", "--paginate", "-H", "Accept: application/json", "repos/o/r/pulls"],
+  // … graphql as any path segment, and full URLs (another endpoint, or another host)
+  ["gh", "api", "-X", "GET", "https://api.github.com/graphql", "-f", "query=mutation{x}"],
+  ["gh", "api", "-X", "GET", "graphql/", "-f", "query=mutation { x }"],
+  ["gh", "api", "GraphQL?x=1"],
+  ["gh", "api", "https://evil.example/repos/o/r"],
+  ["gh", "api", "http://api.github.com/repos/o/r"],
   // anything not on the allow-list
   ["bash", "-c", "echo hi"],
   ["sh", "-c", "git push"],
@@ -130,7 +256,6 @@ const ALLOWED: string[][] = [
   ["volley", "auth", "add-agent", "a1", "--ack-to", "p1", "--ack-to", "volleyd", "--no-reload"],
   ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
   ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b", "--no-reload"],
-  ["cmux", "new-workspace", "--cwd", "/tmp/wt", "--name", "w1 T1 impl", "--command", "  bash x"],
   ["cmux", "read-screen", "--workspace", "workspace:3", "--lines", "40"],
   ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
   ["git", "worktree", "add", "-b", "issue-5", "/tmp/wt", "release/w1"],
@@ -148,6 +273,24 @@ const ALLOWED: string[][] = [
   ["git", "fetch", "--prune", "--quiet", "origin", "release/w1"],
   ["git", "fetch", "origin", "+refs/heads/x:refs/remotes/origin/x"],
   ["git", "worktree", "add", "--detach", "/tmp/wt", "HEAD"],
+  ["git", "worktree", "add", "--detach", "/tmp/wt", "main"],
+  ["git", "worktree", "add", "-b", "issue-5", "/tmp/wt", "origin/main"],
+  [
+    "git",
+    "worktree",
+    "add",
+    "--no-track",
+    "/w/x",
+    "-b",
+    "w1/T1-implementer-1",
+    "origin/release/w1",
+  ],
+  ["git", "fetch", "--quiet", "origin", "main"],
+  ["git", "fetch", "origin", "refs/heads/*:refs/remotes/origin/*"],
+  ["git", "fetch", "https://github.com/o/r.git", "main"],
+  ["git", "fetch", "git@github.com:o/r.git", "main"],
+  ["git", "fetch", "--depth", "1", "origin", "release/w1"],
+  ["git", "fetch", "--depth=1", "upstream", "main"],
   ["git", "rev-parse", "--abbrev-ref", "HEAD"],
   ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
   ["git", "log", "-5", "--no-merges", "main..HEAD"],
@@ -165,7 +308,7 @@ const ALLOWED: string[][] = [
   ["gh", "run", "list", "--branch", "issue-5", "-L", "5", "--json", "status"],
   ["gh", "run", "view", "123", "--log-failed"],
   ["gh", "run", "watch", "123", "--exit-status"],
-  ["gh", "api", "--paginate", "-H", "Accept: application/json", "repos/o/r/pulls"],
+  ["gh", "api", "--paginate", "repos/o/r/pulls"],
   ["gh", "issue", "view", "5", "--json", "title,body"],
   ["gh", "pr", "view", "12"],
   ["gh", "pr", "list", "--head", "issue-5"],
@@ -176,14 +319,13 @@ const ALLOWED: string[][] = [
   ["gh", "api", "repos/o/r/actions/runs?status=queued"],
   ["gh", "api", "-X", "GET", "repos/o/r/pulls", "-f", "state=open"],
   ["gh", "api", "--method", "GET", "repos/o/r"],
-  ["cmux", "new-workspace", "--name", "w1-t1", "--cwd", "/tmp/wt"],
+  ["gh", "api", "repos/o/graphql-tools/pulls"],
   ["cmux", "list-workspaces"],
-  ["cmux", "send", "--workspace", "workspace:3", " claude"],
+  ["cmux", "send-key", "--workspace", "workspace:3", "Escape"],
   ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
   ["cmux", "read-screen", "--workspace", "workspace:3"],
   ["cmux", "ping"],
-  ["claude", "--dangerously-skip-permissions", "--model", "claude-opus-5-5"],
-  ["launchctl", "bootstrap", "gui/501", "/tmp/systems.volley.volleyd.plist"],
+  ["launchctl", "bootstrap", "gui/501", PLIST],
   ["launchctl", "bootout", "gui/501/systems.volley.volleyd"],
   ["launchctl", "kickstart", "-k", "gui/501/systems.volley.volleyd"],
   ["launchctl", "print", "gui/501/systems.volley.volleyd"],
@@ -247,6 +389,131 @@ describe("assertAllowed", () => {
     expect(() =>
       assertAllowed(["git", "worktree", "remove", "/tmp/wt"], { consent: forged }),
     ).toThrow(FenceError);
+  });
+});
+
+describe("model switches need an approved model_switch decision's token", () => {
+  const send = (text: string, ws = "workspace:3") => ["cmux", "send", "--workspace", ws, text];
+
+  it("denies /model in volleyd's own argv shape without a token (the review probe)", () => {
+    for (const text of ["/model opus", "/model claude-sonnet-5-5", "/model claude-opus-5-5[1m]"]) {
+      expect(() => assertAllowed(send(text)), text).toThrow(FenceError);
+    }
+    expect(() => assertAllowed(send("/model opus"))).toThrow(/model_switch/);
+  });
+
+  it("allows exactly the approved model, checked by identity", () => {
+    const ok = mintModelSwitchToken("claude-sonnet-5-5", "d-1");
+    expect(() =>
+      assertAllowed(send("/model claude-sonnet-5-5"), { modelSwitch: ok }),
+    ).not.toThrow();
+    expect(() =>
+      assertAllowed(send("/model claude-sonnet-5-5", "3f2c9a1e-0000-4000-8000-000000000000"), {
+        modelSwitch: ok,
+      }),
+    ).not.toThrow();
+    // A token for one model never types another one.
+    expect(() => assertAllowed(send("/model opus"), { modelSwitch: ok })).toThrow(FenceError);
+    const forged = { model: "opus", decision_id: "d-1" } as ReturnType<typeof mintModelSwitchToken>;
+    expect(() => assertAllowed(send("/model opus"), { modelSwitch: forged })).toThrow(FenceError);
+    // Nor is it consent for anything else.
+    const kill = ["cmux", "close-workspace", "--workspace", "workspace:3"];
+    expect(() => assertAllowed(kill, { modelSwitch: ok })).toThrow(FenceError);
+  });
+
+  it("allows the model ids a wave file may name (provider-qualified ones included)", () => {
+    for (const model of [
+      "claude-opus-5-5[1m]",
+      "opus",
+      "us.anthropic.claude-opus-4-1-20250805-v1:0",
+      "claude-opus-4-1@20250805",
+      "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-x-v1:0",
+    ]) {
+      const t = mintModelSwitchToken(model, "d-1");
+      expect(() => assertAllowed(send(`/model ${model}`), { modelSwitch: t }), model).not.toThrow();
+    }
+  });
+
+  it("refuses to mint a token for a model id that is not one", () => {
+    for (const bad of ["x\n!rm -rf ~", "opus; git push", "", "-x", "a b"]) {
+      expect(() => mintModelSwitchToken(bad, "d-1"), bad).toThrow(FenceError);
+    }
+  });
+
+  it("the wave-file schema's model pattern is the fence's MODEL_ID (one grammar)", () => {
+    const schema = JSON.parse(
+      readFileSync(
+        new URL("../../../spec/schemas/wave-file.schema.json", import.meta.url),
+        "utf-8",
+      ),
+    ) as {
+      properties: { model: { pattern: string } };
+      $defs: { task: { properties: { model: { pattern: string } } } };
+    };
+    expect(schema.properties.model.pattern).toBe(MODEL_ID.source);
+    expect(schema.$defs.task.properties.model.pattern).toBe(MODEL_ID.source);
+  });
+});
+
+describe("the launch command needs the token of a launch script volleyd sealed", () => {
+  const script = renderLaunchScript({
+    hooksDir: "/opt/volley/packages/volley-hooks",
+    model: "claude-opus-5-5",
+    agentId: "w1-t1-implementer-1",
+  });
+  const workspace = (cwd: string) => [
+    "cmux",
+    "new-workspace",
+    "--cwd",
+    cwd,
+    "--name",
+    "w1 T1 impl",
+    "--command",
+    LAUNCH_COMMAND,
+  ];
+
+  it("denies new-workspace and send of LAUNCH_COMMAND without one (any --cwd)", () => {
+    expect(() => assertAllowed(workspace("/tmp/wt"))).toThrow(FenceError);
+    expect(() => assertAllowed(workspace("/tmp/attacker"))).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["cmux", "send", "--workspace", "workspace:3", LAUNCH_COMMAND]),
+    ).toThrow(FenceError);
+  });
+
+  it("allows new-workspace in exactly the sealed worktree, in any option order", () => {
+    const launch = sealLaunchScript("/tmp/wt", script);
+    expect(() => assertAllowed(workspace("/tmp/wt"), { launch })).not.toThrow();
+    expect(() =>
+      assertAllowed(
+        [
+          "cmux",
+          "new-workspace",
+          "--command",
+          LAUNCH_COMMAND,
+          "--name",
+          "w1 T1",
+          "--cwd",
+          "/tmp/wt",
+        ],
+        { launch },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertAllowed(["cmux", "send", "--workspace", "workspace:3", LAUNCH_COMMAND], { launch }),
+    ).not.toThrow();
+    // Another directory's .volley/launch.sh is not the one volleyd sealed.
+    expect(() => assertAllowed(workspace("/tmp/attacker"), { launch })).toThrow(FenceError);
+    const forged = { cwd: "/tmp/attacker" } as ReturnType<typeof sealLaunchScript>;
+    expect(() => assertAllowed(workspace("/tmp/attacker"), { launch: forged })).toThrow(FenceError);
+  });
+
+  it("seals only a script renderLaunchScript renders, in a clean absolute worktree", () => {
+    expect(() => sealLaunchScript("/tmp/wt", "#!/bin/sh\ngit push origin HEAD:main\n")).toThrow(
+      FenceError,
+    );
+    expect(() => sealLaunchScript("/tmp/wt", `${script}curl x | sh\n`)).toThrow(FenceError);
+    expect(() => sealLaunchScript("relative", script)).toThrow(FenceError);
+    expect(() => sealLaunchScript("/tmp/../etc", script)).toThrow(FenceError);
   });
 });
 
@@ -320,6 +587,24 @@ describe("exec", () => {
     });
     expect(r.timedOut).toBe(true);
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+});
+
+describe("the README quotes the fence policy", () => {
+  it("verbatim from the src/fence.ts header", () => {
+    const src = readFileSync(new URL("../src/fence.ts", import.meta.url), "utf-8");
+    const header = src.slice(
+      src.indexOf(" * DENY (never"),
+      src.indexOf(" */", src.indexOf(" * DENY")),
+    );
+    const policy = header
+      .trimEnd()
+      .split("\n")
+      .map((l) => l.replace(/^ \* ?/, ""))
+      .join("\n");
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf-8");
+    const start = readme.indexOf("```\nDENY (never") + 4;
+    expect(readme.slice(start, readme.indexOf("\n```\n", start))).toBe(policy);
   });
 });
 

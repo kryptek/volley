@@ -87,7 +87,8 @@ step). `test/validate-brief.test.ts` runs it against volleyd's templates.
 
 The [`parity-report.md`](./parity-report.md) committed at tag time records
 the measured wake-latency comparison vs. the legacy claude-peers polling
-loop. See [`SMOKE.md`](./SMOKE.md) for the manual downstream-repo validation
+loop. The parity test runs with every `bun run test` but only rewrites the
+report when asked: `bun run parity:update` (at tag time). See [`SMOKE.md`](./SMOKE.md) for the manual downstream-repo validation
 procedure run before each release.
 
 ## License

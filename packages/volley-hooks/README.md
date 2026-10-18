@@ -109,7 +109,10 @@ cannot even send any — an unreadable or malformed `agent.json` or `coordinator
   (that would block the tool call) and never 0 (that would look like success).
 
 The next successful connect removes `hooks-error.json`. The lease wrapper (`volley lease run`)
-resolves its own credentials the CLI's way (`.volley/agent.json`, then `VOLLEY_AUTH_*`).
+resolves its own credentials the same way: agent mode passes `--project-dir` (the identity file,
+then `VOLLEY_AUTH_*`), coordinator mode passes `--coordinator` (`VOLLEY_AUTH_*`, then
+`coordinator.json`). A broker that refuses them makes the wrapped command fail (exit 1); it never
+runs unleased on an auth error.
 
 ## What each hook publishes
 
@@ -219,10 +222,15 @@ cd x && mvn -q verify
       --broker-url '<url>' --project-dir '<project>' -- "${SHELL:-/bin/sh}" -c 'cd x && mvn -q verify'
 ```
 
+In coordinator mode the wrapper carries `--coordinator` instead of `--project-dir`, so the CLI
+uses the coordinator's credentials (see [Broker credentials](#broker-credentials)), never an identity
+file in whatever directory the session happens to be in.
+
 plus `additionalContext` "command queued for a backend-it lease". `volley lease run` waits for the
 lease *inside* the Bash tool call — the agent sees the wait (`queued … granted after 42 s`), and no
 hook timeout is involved — then runs the original command and releases the lease when it exits. It
-fails open: with no live volleyd or an unconfigured pool it runs the command unleased. Pool names
+fails open: with no live volleyd, an unreachable broker or an unconfigured pool it runs the
+command unleased (but not when the broker refuses the credentials). Pool names
 come from a retained broker topic, so a name that is not a valid pool id is ignored, and every
 value spliced into the wrapped command is shell-quoted. A command
 that is already wrapped, matches no pool, or arrives while no pools are configured passes through

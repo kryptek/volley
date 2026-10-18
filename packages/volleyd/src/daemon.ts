@@ -67,6 +67,7 @@ import {
   writeDecisionsFile,
 } from "./decisions";
 import { type ExecFn, exec as realExec } from "./exec";
+import { mintModelSwitchToken } from "./fence";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -2697,7 +2698,8 @@ export class Daemon {
         host: a.host,
         workspace: a.workspace,
         watch: a.watch,
-        model,
+        // The decision approved this switch: the fence types `/model` only with its token.
+        token: mintModelSwitchToken(model, decisionId),
         timeoutMs:
           this.opts.recoveryTimeouts?.modelSwitchVerifyMs ?? DAEMON_DEFAULTS.model_switch_verify_ms,
       });

@@ -13,7 +13,7 @@ import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
 import type { CoordinatorState, WaveView } from "../../store/types";
 import { Clawd } from "../wave/Clawd";
-import { IconBtn, dagNodes } from "../wave/WaveWindow";
+import { IconBtn, dagNodes, isMine } from "../wave/WaveWindow";
 import { accentFor } from "../wave/accent";
 import { wavePct } from "../wave/stages";
 import "../../styles/attention.css";
@@ -41,6 +41,8 @@ export interface CoordinatorsWindowProps {
   /** The title chip's count: waves whose coordinator is not working (as in the prototype). */
   needsYou: number;
   me: string | null;
+  /** The Desk's broker identity: a wave it claimed is mine too. */
+  identity?: string | null | undefined;
   hidden: ReadonlySet<string>;
   frame: Omit<
     FrameProps,
@@ -53,6 +55,8 @@ export interface CoordinatorsWindowProps {
   fitTo?: (rects: readonly Rect[]) => void;
   clusterOf?: (wave: string) => Rect[];
   onClose: () => void;
+  /** The "show finished" toggle: agents that finished more than `graceMin` ago are hidden. */
+  finished?: { hidden: number; shown: boolean; graceMin: number; onToggle: () => void };
 }
 
 function pctOf(w: WaveView): number {
@@ -92,7 +96,7 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
           const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
           const accent = accentFor(w.id);
           const hidden = p.hidden.has(w.id);
-          const mine = p.me !== null && w.state?.owner === p.me;
+          const mine = isMine(w.state?.owner, p.me, p.identity);
           const ended = ENDED_LABEL[w.state?.status ?? ""];
           return (
             <li
@@ -130,6 +134,19 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
         Hidden waves keep running. A wave that needs you still counts in the top bar and raises a
         notification while hidden.
       </p>
+      {p.finished && (
+        <label className="coord-finished">
+          <input type="checkbox" checked={p.finished.shown} onChange={p.finished.onToggle} /> Show
+          finished agents
+          {!p.finished.shown && p.finished.hidden > 0 && (
+            <span className="dim">
+              {" "}
+              · {p.finished.hidden} finished more than {p.finished.graceMin} min ago{" "}
+              {p.finished.hidden === 1 ? "is" : "are"} hidden
+            </span>
+          )}
+        </label>
+      )}
     </Frame>
   );
 }

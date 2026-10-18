@@ -11,6 +11,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import pkg from "../package.json";
 import { AgentCard } from "../src/components/AgentCard";
 import { AgentDrawer } from "../src/components/AgentDrawer";
 import { AgentGrid } from "../src/components/AgentGrid";
@@ -60,6 +61,11 @@ describe("Phase 0 component scaffolding", () => {
       expect(screen.getByTestId("brand-mark")).toBeInTheDocument();
       expect(screen.getByTestId("namespace-tabs")).toBeInTheDocument();
       expect(screen.getByTestId("search-input")).toBeInTheDocument();
+    });
+
+    it("shows the package version next to the wordmark", () => {
+      render(<TopBar />);
+      expect(screen.getByText(`v${pkg.version}`)).toBeInTheDocument();
     });
   });
 

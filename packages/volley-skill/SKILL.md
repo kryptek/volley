@@ -6,7 +6,7 @@ user_invocable: true
 
 # /volley
 
-The Volley protocol's Claude Code interface. The volley-mcp server (see `packages/volley-mcp/`) gives this session seven tools for talking to an MQTT broker; this slash exposes them with human-friendly formatting and the agent-handling UX described in the Volley design doc §6.
+The Volley protocol's Claude Code interface. The volley-mcp server (see `packages/volley-mcp/`) gives this session seven tools for talking to an MQTT broker; this slash exposes them with human-friendly formatting and agent-handling commands.
 
 ## Usage
 

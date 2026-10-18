@@ -18,6 +18,8 @@ describe("useLook", () => {
       narr: "decrypt",
       tethers: true,
       autoArrange: true,
+      showFinished: false,
+      finishedGraceMin: 10,
     });
     const { result } = renderHook(() => useLook());
     expect(result.current[0]).toEqual(LOOK0);
@@ -32,6 +34,7 @@ describe("useLook", () => {
     act(() => result.current[1]({ bg: "Silk", dim: 0.45 }));
     act(() => result.current[1]({ chrome: "spotlight", attn: "electric", narr: "shiny" }));
     act(() => result.current[1]({ tethers: false, autoArrange: false }));
+    act(() => result.current[1]({ showFinished: true, finishedGraceMin: 30 }));
     const want = {
       bg: "Silk",
       dim: 0.45,
@@ -40,6 +43,8 @@ describe("useLook", () => {
       narr: "shiny",
       tethers: false,
       autoArrange: false,
+      showFinished: true,
+      finishedGraceMin: 30,
     };
     expect(result.current[0]).toEqual(want);
     expect(stored()).toEqual(want);
@@ -66,6 +71,8 @@ describe("useLook", () => {
         narr: "loud",
         tethers: "yes",
         autoArrange: null,
+        showFinished: 1,
+        finishedGraceMin: -5,
       }),
     );
     expect(loadLook()).toEqual(LOOK0);

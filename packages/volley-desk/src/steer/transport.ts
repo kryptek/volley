@@ -14,11 +14,14 @@
  * Urgent (`/stop`, or Urgent mode) first asks the daemon to interrupt the
  * session: a mailbox `query` to `volley/<ns>/volleyd/mailbox` with
  * `payload: { op: "steer", urgent: true, escape_only: true, wait_ack_ms: 0,
- * wave, task, by }`. `escape_only` makes volleyd press Escape (its interrupt
- * hook) and deliver nothing, so once it answers the Desk publishes its own
- * message and the agent gets exactly one. The outcome is reported as an
- * `interrupt` event (`interrupted: false` with a reason when volleyd has no
- * interrupt wired, refused, did not answer, or the target has no wave task);
+ * wave, task, role, by }`. `role` names the target agent's pipeline role, so
+ * volleyd interrupts that agent rather than the task's current stage's.
+ * `escape_only` makes volleyd press Escape (its interrupt hook) and deliver
+ * nothing, so once it answers the Desk publishes its own message and the agent
+ * gets exactly one. The outcome is reported as an `interrupt` event
+ * (`interrupted: false` with a reason when volleyd has no interrupt wired,
+ * refused, did not answer, interrupted some other agent, or the target has no
+ * wave task or no longer holds its role slot, `SteerTarget.noInterrupt`);
  * the message is delivered either way. `control()` sends any other op
  * (`claim`) the same way and resolves with the daemon's ack on the Desk's own
  * mailbox.
@@ -46,6 +49,14 @@ export interface SteerTarget {
   coordinator: boolean;
   wave?: string | undefined;
   task?: string | undefined;
+  /** The agent's pipeline role in `task` (`tasks[].agents`): who volleyd interrupts. */
+  role?: string | undefined;
+  /**
+   * Why this agent must not be interrupted (it no longer holds its role slot,
+   * so volleyd would press Escape in the slot's new agent): urgent sends skip
+   * the interrupt and report this reason.
+   */
+  noInterrupt?: string | undefined;
 }
 
 /** The PromptBar's commands (names carry the slash, so picking one inserts `/stop `). */
@@ -161,6 +172,7 @@ export function createSteerTransport(
   const interrupt = async (
     target: SteerTarget,
   ): Promise<{ interrupted: boolean; reason?: string }> => {
+    if (target.noInterrupt !== undefined) return { interrupted: false, reason: target.noInterrupt };
     if (target.wave === undefined || target.task === undefined)
       return { interrupted: false, reason: "no wave task to interrupt" };
     const r = await control(
@@ -171,11 +183,18 @@ export function createSteerTransport(
         wait_ack_ms: 0,
         wave: target.wave,
         task: target.task,
+        ...(target.role !== undefined ? { role: target.role } : {}),
       },
       `Interrupt ${target.agentId} (Escape)`,
     );
     if (!r.ok) return { interrupted: false, reason: r.error ?? "volleyd refused the interrupt" };
-    return (r.result as { interrupted?: unknown } | undefined)?.interrupted === true
+    const result = (r.result ?? {}) as { interrupted?: unknown; agent_id?: unknown };
+    if (typeof result.agent_id === "string" && result.agent_id !== target.agentId)
+      return {
+        interrupted: false,
+        reason: `volleyd interrupted ${result.agent_id}, not ${target.agentId}`,
+      };
+    return result.interrupted === true
       ? { interrupted: true }
       : { interrupted: false, reason: "volleyd has no interrupt for this agent" };
   };
@@ -282,7 +301,8 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/** The `volleyd steer` line the read-only panel offers to copy. */
-export function copySteerCommand(wave: string, task: string, text: string): string {
-  return `volleyd steer ${wave} ${task} ${shellQuote(text)}`;
+/** The `volleyd steer` line the read-only panel offers to copy; `role` picks the task's agent. */
+export function copySteerCommand(wave: string, task: string, text: string, role?: string): string {
+  const to = role !== undefined ? ` --role ${role}` : "";
+  return `volleyd steer ${wave} ${task} ${shellQuote(text)}${to}`;
 }

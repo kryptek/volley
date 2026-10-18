@@ -21,7 +21,7 @@ export interface PanelSpec {
   label: string;
   coordinator: boolean;
   /** Wave and task for the read-only `volleyd steer` command. */
-  copy?: { wave: string; task: string } | null;
+  copy?: { wave: string; task: string; role?: string | undefined } | null;
   /** Why there is nobody to message (with `target: null`). */
   readOnlyReason?: string | undefined;
   onClose: () => void;

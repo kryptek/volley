@@ -1,5 +1,8 @@
 import type { ExecFn } from "../exec";
-import type { ConsentToken } from "../fence";
+import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
+
+/** The fence tokens typed text needs (src/fence.ts TYPED_TEXT): a sealed launch, a switch. */
+export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch">;
 
 /** Where and how one agent's worktree is cut. */
 export interface WorktreeSpec {
@@ -28,6 +31,8 @@ export interface LaunchSpec {
   /** Workspace title, e.g. `<wave> <task> <role>`. */
   name: string;
   command: string;
+  /** The sealed `.volley/launch.sh` in `cwd` (sealLaunchScript): the fence starts it only so. */
+  launch?: LaunchToken;
 }
 
 /**
@@ -50,8 +55,8 @@ export interface Host {
   readScreen(workspace: string, lines: number): Promise<string | null>;
   /** Press one key (e.g. `Enter`, `Escape`) in the workspace. */
   sendKeys(workspace: string, key: string): Promise<void>;
-  /** Type text into the workspace (no trailing Enter). */
-  sendText(workspace: string, text: string): Promise<void>;
+  /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
+  sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
   /** Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`. */
   close(workspace: string, consent: ConsentToken): Promise<void>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
