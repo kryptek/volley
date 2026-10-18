@@ -140,6 +140,11 @@ and work while the daemon is down; use the wave `_system` for global events (`co
   Unadmitted ready tasks show the reasons in `why_waiting`, e.g. `hard ceiling reached: 2/2 live agents`.
 - **Restart**: the daemon reopens every journal under `$VOLLEYD_HOME/waves/`, re-publishes each
   wave's state, and resumes admission.
+- **One daemon per home**: `$VOLLEYD_HOME/volleyd.lock` (holding the pid) is taken before any
+  journal is opened; a lock whose pid is gone is replaced. A second daemon is also refused while
+  the broker shows a live `volleyd` status in the namespace.
+- **Broker loss is fatal**: if the broker connection drops, `volleyd daemon` exits 1 and launchd's
+  `KeepAlive` restarts it, which resumes the persistent session and restores every wave.
 
 ---
 
@@ -156,7 +161,15 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
 own mailbox with `type: "ack"`, the same `correlation_id`, and
-`payload: { text, acked_type: "query", op, ok, error?, result?, applied?, rejected? }`.
+`payload: { text: "ACKED", acked_type: "query", op, ok, error?, result?, applied?, rejected? }`
+— `ACKED` means received (SPEC §4.4); the outcome is `ok` / `applied` / `error`. A query without a
+`correlation_id` is dropped (an ack must carry one). A redelivered request (same sender and
+`correlation_id`) is answered again from memory, not re-run.
+
+The daemon keeps its mailbox in a **persistent MQTT session** (`clean: false`, stable clientId
+`volley-volleyd-daemon-<ns>`, MQTT 5 with `mailbox.session_expiry_s`), so a request sent while it
+is restarting is delivered when it comes back. Mailbox messages are never retained: the daemon
+clears a stray retained message on its mailbox at startup instead of executing it.
 
 | `op` | Fields | `result` |
 |---|---|---|
@@ -180,10 +193,12 @@ The daemon validates `config.yaml` on load (a bad value fails startup naming the
 the effective global config retained on `volley/_waves/_config`, and every subsystem reads
 tunables through the store — no tunable is a constant anywhere else (`test/no-constants.test.ts`).
 
-`volleyd config set` (or any client sending `config_set`) is validated against the schema — an
-unknown key or out-of-bounds value rejects the whole patch — then written to `config.yaml`
+`volleyd config set` (or any client sending `config_set`) is validated against
+`config-set-request.schema.json` and the merged result against the config schema — an unknown
+key, an out-of-bounds value or an empty sub-object rejects the whole patch; a patch may set one
+field of an existing object, e.g. `lease_pools.build.ttl_s` — then written to `config.yaml`
 atomically, journaled as `config_changed { by, patch, previous, version }` in the `_system`
-journal, re-published with `version + 1`, and applied **without a restart**:
+journal (mirrored live on `volley/_waves/_system/events`), re-published with `version + 1`, and applied **without a restart**:
 
 | Tunable | Takes effect | In-flight work |
 |---|---|---|
@@ -220,19 +235,31 @@ DENY (never, consent or not):
 CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
   git worktree remove · cmux close-workspace
 
-ALLOW:
+ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
-    branch --list | merge-base | show   (diff/show without --output / --ext-diff)
+    branch --list | merge-base | show
   gh issue view · gh pr view | list | checks · gh run list | view | watch · gh api (GET only)
   cmux new-workspace | list-workspaces | send | send-key | read-screen | ping
   claude (any arguments)
-  launchctl bootstrap | bootout | kickstart | print — only for the systems.volley.volleyd service
+  launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
+    systems.volley.volleyd service
+
+OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
+GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,
+`--exec`, `--receive-pack`, `--config`, `--output`, `--ext-diff`, `--textconv`,
+`gh api --hostname`, `--input`, `-F`. Bundled short flags and git global options other than `-C`/`--no-pager`
+(`-c`, `--config-env`, `--exec-path`) are denied, as are subcommand aliases and `fetch`
+transport-helper URLs (`ext::…`).
 ```
 
-Anything else is denied — including shells (`bash -c`, `sh -c`), `env`/`sudo` wrappers, and git
-global options other than `-C`/`--no-pager` (git config such as `-c alias.x=!…` can turn any
-subcommand into an arbitrary command). `gh api` counts as a write when it sends fields (`-f`,
-`-F`, `--input`) without an explicit `-X GET`.
+Anything else is denied — including shells (`bash -c`, `sh -c`), `env`/`sudo` wrappers, a path
+as the program (`/tmp/x/git`), and git global options other than `-C`/`--no-pager` (git config
+such as `-c alias.x=!…` can turn any subcommand into an arbitrary command). Each allowed git and
+gh subcommand accepts only the options listed for it in `src/fence.ts`; an option that takes a
+value must have it attached (`--depth=1`) or as a next argument that does not start with `-`, so
+the fence and the tool always agree on where an option starts. `gh api` counts as a write when
+it sends fields (`-f`) without an explicit `-X GET`. The wave-file schema also forbids a leading
+`-` in `repo` and `release_branch`, so neither can ever be read as an option.
 
 volleyd never merges, never pushes, never touches infrastructure: it stops at merge-ready and a
 human merges.

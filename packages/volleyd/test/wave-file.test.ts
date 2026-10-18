@@ -73,6 +73,26 @@ describe("parseWaveFile", () => {
     expect(errs).toEqual(["tasks.T3.after[1]: unknown task 'T9'"]);
   });
 
+  it("rejects an after target that is only an Object prototype name", () => {
+    for (const name of ["toString", "constructor", "hasOwnProperty"]) {
+      const errs = errorsOf(`${HEADER}tasks:\n  A: { issue: 1, after: [${name}] }\n`);
+      expect(errs).toEqual([`tasks.A.after[0]: unknown task '${name}'`]);
+    }
+  });
+
+  it("rejects a repo or release_branch that would read as a command-line option", () => {
+    const branch = errorsOf(
+      `${HEADER.replace("release/w1", '"--upload-pack=sh"')}tasks:\n  T1: { issue: 1 }\n`,
+    );
+    expect(branch).toHaveLength(1);
+    expect(branch[0]).toMatch(/^release_branch: /);
+    const repo = errorsOf(
+      `${HEADER.replace("example-org/example-repo", '"-uq"')}tasks:\n  T1: { issue: 1 }\n`,
+    );
+    expect(repo).toHaveLength(1);
+    expect(repo[0]).toMatch(/^repo: /);
+  });
+
   it("rejects a duplicate task id", () => {
     const errs = errorsOf(`${HEADER}tasks:\n  T1: { issue: 1 }\n  T1: { issue: 2 }\n`);
     expect(errs).toEqual(["tasks.T1: duplicate task id 'T1'"]);

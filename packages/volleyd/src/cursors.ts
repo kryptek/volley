@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ID_PATTERN } from "volley-mcp/topics";
-import { readJournalFile } from "./journal";
+import { readJournalFile, writeFileAtomic } from "./journal";
 import { type JournalEvent, SYSTEM_WAVE } from "./types";
 
 /**
@@ -67,8 +67,6 @@ export function ackCursor(
     throw new CursorError(`seq ${seq} is past the end of the ${wave} journal (last ${last})`);
   if (seq <= previous) return { previous, seq: previous };
   mkdirSync(join(dir, "cursors"), { recursive: true });
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ seq, acked_at: now.toISOString() }));
-  renameSync(tmp, file);
+  writeFileAtomic(file, JSON.stringify({ seq, acked_at: now.toISOString() }));
   return { previous, seq };
 }

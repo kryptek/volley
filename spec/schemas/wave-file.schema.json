@@ -20,12 +20,14 @@
     "repo": {
       "type": "string",
       "minLength": 1,
-      "description": "Repository the wave's tasks work in."
+      "pattern": "^[^-]",
+      "description": "Repository the wave's tasks work in. Must not start with '-', so it can never be read as a command-line option."
     },
     "release_branch": {
       "type": "string",
       "minLength": 1,
-      "description": "Branch the wave's worktrees are cut from and its PRs target."
+      "pattern": "^(?!-)[^\\s~^:?*\\[\\\\]+$",
+      "description": "Branch the wave's worktrees are cut from and its PRs target. A git ref name: no leading '-' (never read as an option), no whitespace or ~^:?*[\\."
     },
     "model": {
       "type": "string",

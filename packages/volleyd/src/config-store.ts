@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
-import type { Journal } from "./journal";
+import { type Journal, writeFileAtomic } from "./journal";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type { ConfigPayload, Tunables, TunablesPatch, WaveId } from "./types";
 
@@ -22,6 +22,8 @@ export class ConfigError extends Error {
 }
 
 export interface ConfigChange {
+  /** Seq of the `config_changed` event in the `_system` journal. */
+  seq: number;
   version: number;
   by: string;
   at: string;
@@ -54,6 +56,17 @@ function pick(source: unknown, shape: unknown): unknown {
   const out: Plain = {};
   for (const k of Object.keys(shape)) out[k] = pick(source[k], shape[k]);
   return out;
+}
+
+/** Every plain sub-object of `patch` that sets no key — a no-op that must not bump the version. */
+function emptyObjects(patch: unknown, path = ""): PathError[] {
+  if (!isPlain(patch)) return [];
+  return Object.entries(patch).flatMap(([k, v]) => {
+    const p = path === "" ? k : `${path}.${k}`;
+    if (isPlain(v) && Object.keys(v).length === 0)
+      return [{ path: p, reason: "must set at least 1 key" }];
+    return emptyObjects(v, p);
+  });
 }
 
 function errorsFor(ref: string, value: unknown): PathError[] {
@@ -112,7 +125,8 @@ export class ConfigStore {
         ]);
       }
       layer = (parsed ?? {}) as TunablesPatch;
-      const errors = errorsFor(TUNABLES, layer);
+      // The file is a patch over the defaults: what must be valid is the merged result.
+      const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(CONFIG_DEFAULTS, layer) : layer);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
     return new ConfigStore({ ...opts, now: opts.now ?? (() => new Date()) }, layer);
@@ -141,11 +155,11 @@ export class ConfigStore {
     const eff = this.effective(wave);
     if (path === undefined || path === "") return eff;
     const [head, ...rest] = path.split(".");
-    if (head === undefined || !(head in CONFIG_DEFAULTS)) {
+    if (head === undefined || !Object.hasOwn(CONFIG_DEFAULTS, head)) {
       throw new ConfigError("get", [{ path, reason: `unknown config path '${path}'` }]);
     }
     let v: unknown = eff[head as keyof Tunables];
-    for (const seg of rest) v = isPlain(v) ? v[seg] : undefined;
+    for (const seg of rest) v = isPlain(v) && Object.hasOwn(v, seg) ? v[seg] : undefined;
     return v;
   }
 
@@ -164,15 +178,18 @@ export class ConfigStore {
   }
 
   /**
-   * Apply a partial tunables patch from `by`. The patch is rejected as a whole if it has an
-   * unknown key or an out-of-bounds value (or would make the merged config invalid). On success:
-   * write config.yaml atomically, journal `config_changed`, bump `version`, notify listeners.
+   * Apply a partial tunables patch from `by`. The patch is rejected as a whole if it is empty,
+   * sets an empty sub-object, or would leave the config invalid (an unknown key, an out-of-bounds
+   * value, a new lease pool without `capacity`). Validation runs on the merged result, so a patch
+   * may set one field of an existing object (`lease_pools.build.ttl_s`). On success: write
+   * config.yaml atomically, journal `config_changed`, bump `version`, notify listeners.
    */
   applyPatch(patch: TunablesPatch, by: string): PatchResult {
-    const rejected = errorsFor(TUNABLES, patch);
-    if (rejected.length === 0 && Object.keys(patch).length === 0) {
+    const rejected: PathError[] = [];
+    if (!isPlain(patch)) rejected.push(...errorsFor(TUNABLES, patch));
+    else if (Object.keys(patch).length === 0)
       rejected.push({ path: "(root)", reason: "patch must set at least 1 key" });
-    }
+    else rejected.push(...emptyObjects(patch));
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(CONFIG_DEFAULTS, nextLayer);
     if (rejected.length === 0) rejected.push(...errorsFor(TUNABLES, nextGlobal));
@@ -180,9 +197,7 @@ export class ConfigStore {
 
     const previous = pick(this.global, patch) as Record<string, unknown>;
     mkdirSync(join(this.file, ".."), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, stringify(nextLayer));
-    renameSync(tmp, this.file);
+    writeFileAtomic(this.file, stringify(nextLayer));
 
     const version = this.version + 1;
     const ev = this.system.append(
@@ -194,7 +209,7 @@ export class ConfigStore {
     this.version = version;
     this.updatedAt = ev.at;
     this.updatedBy = by;
-    const change: ConfigChange = { version, by, at: ev.at, patch, previous };
+    const change: ConfigChange = { seq: ev.seq, version, by, at: ev.at, patch, previous };
     for (const l of this.listeners) l(change);
     return { applied: true, rejected: [], version };
   }

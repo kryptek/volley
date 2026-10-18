@@ -63,7 +63,7 @@ export function parseWaveFile(text: string, source?: string): Wave {
   const unknown: PathError[] = [];
   for (const id of ids) {
     (w.tasks[id]?.after ?? []).forEach((dep, i) => {
-      if (!(dep in w.tasks)) {
+      if (!Object.hasOwn(w.tasks, dep)) {
         unknown.push({ path: `tasks.${id}.after[${i}]`, reason: `unknown task '${dep}'` });
       }
     });

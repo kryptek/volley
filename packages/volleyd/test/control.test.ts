@@ -1,9 +1,14 @@
+import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
-import { ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
-import { Daemon } from "../src/daemon";
+import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
+import { Daemon, daemonClientId } from "../src/daemon";
+import { SYSTEM_WAVE } from "../src/types";
 import { startTestBroker } from "./helpers/aedes-broker";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
@@ -66,11 +71,14 @@ describe("volleyd daemon + control channel", () => {
     await t.start();
     const sub = new VolleyBroker();
     await sub.connect({ url: t.broker.url, agentId: "test-events" });
-    const collected = sub.subscribeCollect(waveEventsTopic(WAVE), 6, 3000);
-    await new Promise((r) => setTimeout(r, 100));
+    const got: { payload: string }[] = [];
+    // subscribeStream resolves after SUBACK, so nothing published after it can be missed.
+    const unsubscribe = await sub.subscribeStream(waveEventsTopic(WAVE), (m) => got.push(m));
     expect((await runCli(["run", EXAMPLE], t.env)).exitCode).toBe(0);
-    const msgs = (await collected).map((m) => JSON.parse(m.payload));
+    await waitFor(() => got.length >= 6);
+    await unsubscribe();
     await sub.disconnect();
+    const msgs = got.map((m) => JSON.parse(m.payload));
     expect(msgs.map((m) => m.type)).toEqual([
       "wave_submitted",
       "task_queued",
@@ -106,11 +114,95 @@ describe("volleyd daemon + control channel", () => {
     expect(dup.stderr).toContain(`wave '${WAVE}' already submitted`);
   });
 
-  it("refuses to start a second daemon while one is live", async () => {
+  it("refuses a second daemon on the same home before opening any journal", async () => {
     await t.start();
-    await expect(
-      Daemon.start({ brokerUrl: t.broker.url, namespace: NS, home: t.home, tickMs: 0 }),
-    ).rejects.toThrow(/already running/);
+    expect((await runCli(["run", EXAMPLE], t.env)).exitCode).toBe(0);
+    // The live daemon is mid-write: a partial line with no newline yet.
+    const journal = join(t.home, "waves", WAVE, "journal.jsonl");
+    appendFileSync(journal, '{"seq":99,"at":"2026-');
+    const before = readFileSync(journal, "utf-8");
+    await expect(Daemon.start(t.options())).rejects.toThrow(/already running/);
+    expect(readFileSync(journal, "utf-8")).toBe(before); // not truncated
+  });
+
+  it("refuses a second daemon on another home while one is live on the broker", async () => {
+    await t.start();
+    const other = mkdtempSync(join(tmpdir(), "volleyd-home2-"));
+    try {
+      await expect(Daemon.start(t.options({ home: other }))).rejects.toThrow(
+        /already running \(retained/,
+      );
+      // The refused daemon did not take over the live one's session.
+      expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a stale home lock left by a dead process", async () => {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(t.home, "volleyd.lock"), "999999999\n");
+    await t.start();
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
+  });
+
+  it("exits (closed resolves) when the broker drops its connection, freeing the home", async () => {
+    const d = await t.start();
+    expect(t.broker.dropClient(daemonClientId(NS))).toBe(true);
+    const reason = await Promise.race([
+      d.closed,
+      new Promise<null>((r) => setTimeout(() => r(null), 3000)),
+    ]);
+    expect(reason?.message).toMatch(/broker connection lost/);
+    // The LWT marked it dead and the lock is free: a restart comes straight back.
+    expect(((await t.retained(`volley/${NS}/volleyd/status`)) as { type: string }).type).toBe(
+      "reaped",
+    );
+    await t.start();
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
+  });
+
+  it("delivers a config_set sent while the daemon is down on its next start (persistent session)", async () => {
+    const d = await t.start();
+    d._crashForTest();
+    await waitFor(async () => {
+      const s = (await t.retained(`volley/${NS}/volleyd/status`)) as { type: string } | null;
+      return s?.type === "reaped";
+    });
+
+    const sender = new VolleyBroker();
+    await sender.connect({ url: t.broker.url, agentId: "test-sender" });
+    const acks: { payload: string }[] = [];
+    const unsubscribe = await sender.subscribeStream(`volley/${NS}/test-sender/mailbox`, (m) =>
+      acks.push(m),
+    );
+    const correlationId = randomUUID();
+    const req = buildEnvelope({
+      agentId: "test-sender",
+      parentId: null,
+      channel: "mailbox",
+      type: "query",
+      correlationId,
+      payload: { op: "config_set", text: "while down", patch: { hard_ceiling: 4 }, by: "tester" },
+    });
+    await sender.publish(`volley/${NS}/volleyd/mailbox`, JSON.stringify(req), {
+      qos: 1,
+      retain: false,
+    });
+
+    await t.start();
+    await waitFor(() => acks.length >= 1);
+    await unsubscribe();
+    await sender.disconnect();
+    const ack = JSON.parse(acks[0]?.payload as string);
+    expect(ack).toMatchObject({
+      type: "ack",
+      correlation_id: correlationId,
+      payload: { text: "ACKED", acked_type: "query", ok: true, applied: true },
+    });
+    expect(schemaErrors("mailbox.schema.json", ack)).toEqual([]);
+    const cfg = (await t.retained(CONFIG_TOPIC)) as { payload: { hard_ceiling: number } };
+    expect(cfg.payload.hard_ceiling).toBe(4);
   });
 
   it("validates locally before contacting the daemon", async () => {
@@ -136,6 +228,83 @@ describe("volleyd daemon + control channel", () => {
     } finally {
       await client.close();
     }
+  });
+
+  it("acks every answer as ACKED with the request's correlation_id, schema-valid", async () => {
+    await t.start();
+    const r = await rawRequest({ op: "pause", text: "x" }, randomUUID());
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ payload: { text: "ACKED", ok: false } });
+    expect(schemaErrors("mailbox.schema.json", r[0])).toEqual([]);
+  });
+
+  it("drops a query without a correlation_id instead of sending an invalid ack", async () => {
+    await t.start();
+    expect(await rawRequest({ op: "status", text: "x" }, undefined)).toEqual([]);
+  });
+
+  it("answers a redelivered request (same correlation_id) without running it twice", async () => {
+    await t.start();
+    const id = randomUUID();
+    const body = { op: "config_set", text: "x", patch: { hard_ceiling: 5 }, by: "tester" };
+    const first = await rawRequest(body, id);
+    const second = await rawRequest(body, id);
+    expect(first[0]).toMatchObject({ payload: { applied: true, result: { version: 2 } } });
+    expect(second[0]).toMatchObject({ payload: { applied: true, result: { version: 2 } } });
+    const cfg = (await t.retained(CONFIG_TOPIC)) as { payload: { version: number } };
+    expect(cfg.payload.version).toBe(2);
+  });
+
+  it("never executes a stray retained message on its mailbox", async () => {
+    const raw = new VolleyBroker();
+    await raw.connect({ url: t.broker.url, agentId: "test-raw" });
+    const req = buildEnvelope({
+      agentId: "test-raw",
+      parentId: null,
+      channel: "mailbox",
+      type: "query",
+      correlationId: randomUUID(),
+      payload: { op: "config_set", text: "x", patch: { hard_ceiling: 7 }, by: "tester" },
+    });
+    await raw.publish(`volley/${NS}/volleyd/mailbox`, JSON.stringify(req), {
+      qos: 1,
+      retain: true,
+    });
+    await raw.disconnect();
+    const d = await t.start();
+    await d.stop();
+    await t.start();
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
+    const cfg = (await t.retained(CONFIG_TOPIC)) as { payload: { version: number } };
+    expect(cfg.payload.version).toBe(1);
+  });
+
+  it("mirrors config_changed from the _system journal to volley/_waves/_system/events", async () => {
+    await t.start();
+    const sub = new VolleyBroker();
+    await sub.connect({ url: t.broker.url, agentId: "test-sys-events" });
+    const got: { payload: string }[] = [];
+    const unsubscribe = await sub.subscribeStream(waveEventsTopic(SYSTEM_WAVE), (m) => got.push(m));
+    const r = await runCli(["config", "set", "hard_ceiling", "3", "--by", "tester"], t.env);
+    expect(r.exitCode).toBe(0);
+    await waitFor(() => got.length >= 1);
+    await unsubscribe();
+    await sub.disconnect();
+    const ev = JSON.parse(got[0]?.payload as string);
+    expect(ev).toMatchObject({
+      type: "config_changed",
+      payload: {
+        wave: SYSTEM_WAVE,
+        seq: 1,
+        data: {
+          by: "tester",
+          patch: { hard_ceiling: 3 },
+          previous: { hard_ceiling: 12 },
+          version: 2,
+        },
+      },
+    });
+    expect(schemaErrors("wave-event.schema.json", ev)).toEqual([]);
   });
 
   it("ignores malformed mailbox messages and keeps serving", async () => {
@@ -165,3 +334,50 @@ describe("volleyd daemon + control channel", () => {
     expect(r.stderr).toMatch(/volleyd status: .*connect/);
   });
 });
+
+/** Poll `cond` until true (or fail after `ms`). */
+async function waitFor(cond: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!(await cond())) {
+    if (Date.now() > until) throw new Error("waitFor: condition not met");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/**
+ * Send one raw control query to the daemon and collect what comes back on the sender's mailbox:
+ * the acks (all of them, so a second ack would show) within a short window after the first.
+ */
+async function rawRequest(
+  payload: Record<string, unknown>,
+  correlationId: string | undefined,
+): Promise<Record<string, unknown>[]> {
+  const sender = new VolleyBroker();
+  const agentId = "test-raw-sender";
+  await sender.connect({ url: t.broker.url, agentId });
+  const got: { payload: string }[] = [];
+  const unsubscribe = await sender.subscribeStream(`volley/${NS}/${agentId}/mailbox`, (m) =>
+    got.push(m),
+  );
+  try {
+    const req = buildEnvelope({
+      agentId,
+      parentId: null,
+      channel: "mailbox",
+      type: "query",
+      ...(correlationId !== undefined ? { correlationId } : {}),
+      payload,
+    });
+    await sender.publish(`volley/${NS}/volleyd/mailbox`, JSON.stringify(req), {
+      qos: 1,
+      retain: false,
+    });
+    // A later status round trip through the same serial queue proves the request was handled.
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
+    await new Promise((r) => setTimeout(r, 50));
+    return got.map((m) => JSON.parse(m.payload));
+  } finally {
+    await unsubscribe();
+    await sender.disconnect();
+  }
+}

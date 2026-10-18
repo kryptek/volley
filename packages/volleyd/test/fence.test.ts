@@ -1,6 +1,8 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import { FenceError, assertAllowed, mintConsentToken } from "../src/fence";
 
@@ -22,6 +24,32 @@ const DENIED: string[][] = [
   ["git", "diff", "--output=/tmp/x"],
   ["git", "worktree", "prune"],
   ["git"],
+  // git: options that execute commands or write files, on otherwise-allowed subcommands
+  ["git", "fetch", "--upload-pack=sh -c 'touch /tmp/pwned' #", "/some/repo"],
+  ["git", "fetch", "--upload-pack", "sh", "/some/repo"],
+  ["git", "fetch", "-u", "sh", "/some/repo"],
+  ["git", "fetch", "--exec=sh", "/some/repo"],
+  ["git", "fetch", "--receive-pack=sh", "origin"],
+  ["git", "fetch", "ext::sh -c touch% /tmp/pwned"],
+  ["git", "fetch", "origin", "--", "--upload-pack=sh"],
+  ["git", "-c", "core.sshCommand=sh", "fetch", "origin"],
+  ["git", "--config-env=core.pager=X", "log"],
+  ["git", "--exec-path=/tmp/evil", "status"],
+  ["git", "fetch", "--config=core.sshCommand=sh", "origin"],
+  ["git", "worktree", "add", "-B", "main", "/tmp/wt"],
+  ["git", "worktree", "add", "--force", "/tmp/wt", "x"],
+  ["git", "log", "--output=/tmp/x"],
+  ["git", "log", "--ext-diff", "-p"],
+  ["git", "show", "--textconv", "HEAD:x"],
+  ["git", "diff", "--ext-diff"],
+  ["git", "rev-parse", "--git-path=x", "--local-env-vars"],
+  ["git", "status", "--unknown-flag"],
+  ["git", "branch", "--list", "--edit-description"],
+  ["git", "merge-base", "--exec", "x"],
+  ["git", "fetch", "-uq", "sh"],
+  // git: subcommand aliases resolve through config, so only exact allowed names pass
+  ["git", "st"],
+  ["git", "fetchx", "origin"],
   // gh: merging, workflow dispatch, writes through the API
   ["gh", "pr", "merge", "12"],
   ["gh", "pr", "create"],
@@ -34,6 +62,17 @@ const DENIED: string[][] = [
   ["gh", "api", "repos/o/r/issues", "--input", "body.json"],
   ["gh", "issue", "close", "5"],
   ["gh", "repo", "delete", "o/r"],
+  // gh: options outside each subcommand's allow-list
+  ["gh", "pr", "view", "12", "--web"],
+  ["gh", "issue", "view", "5", "--unknown"],
+  ["gh", "api", "--hostname", "evil.example", "user"],
+  ["gh", "api", "--hostname=evil.example", "user"],
+  ["gh", "api", "-F", "x=@/etc/passwd", "repos/o/r"],
+  ["gh", "api", "--field", "x=@/etc/passwd", "repos/o/r"],
+  ["gh", "run", "watch", "123", "--bogus"],
+  ["gh", "pr", "list", "--app", "x"],
+  ["gh", "--repo", "o/r", "pr", "view"],
+  ["gh", "-R", "o/r", "pr", "merge", "1"],
   // infrastructure tooling
   ["terraform", "plan"],
   ["terraform", "apply", "-auto-approve"],
@@ -61,6 +100,11 @@ const DENIED: string[][] = [
   ["bash", "-c", "echo hi"],
   ["sh", "-c", "git push"],
   ["/bin/rm", "-rf", "/"],
+  // argv[0] must be a bare program name: a path could point at any binary
+  ["/tmp/evil/git", "status"],
+  ["/usr/bin/git", "status"],
+  ["./claude", "anything"],
+  ["bin/gh", "pr", "view"],
   ["sudo", "git", "status"],
   ["env", "git", "push"],
   ["curl", "https://example.com"],
@@ -79,7 +123,28 @@ const ALLOWED: string[][] = [
   ["git", "show", "HEAD:README.md"],
   ["git", "-C", "/tmp/repo", "status"],
   ["git", "--no-pager", "log"],
-  ["/usr/bin/git", "status"],
+  ["git", "-C", "/tmp/repo", "--no-pager", "log", "-n", "5", "--format=%H %s"],
+  ["git", "fetch", "--prune", "--quiet", "origin", "release/w1"],
+  ["git", "fetch", "origin", "+refs/heads/x:refs/remotes/origin/x"],
+  ["git", "worktree", "add", "--detach", "/tmp/wt", "HEAD"],
+  ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+  ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+  ["git", "log", "-5", "--no-merges", "main..HEAD"],
+  ["git", "log", "--format=%H", "-n5"],
+  ["git", "diff", "--name-only", "main...HEAD", "--", "src/a.ts"],
+  ["git", "status", "--porcelain=v1", "-z"],
+  ["git", "branch", "--list", "--format=%(refname:short)", "issue-*"],
+  ["git", "merge-base", "--is-ancestor", "HEAD", "origin/main"],
+  ["git", "show", "--stat", "--format=%H", "HEAD"],
+  ["gh", "issue", "view", "5", "-R", "o/r", "--json", "body", "--jq", ".body"],
+  ["gh", "issue", "view", "5", "--repo=o/r", "--comments"],
+  ["gh", "pr", "view", "12", "--json", "state,mergeable"],
+  ["gh", "pr", "list", "--state", "open", "--base", "release/w1", "--limit", "50"],
+  ["gh", "pr", "checks", "12", "--required"],
+  ["gh", "run", "list", "--branch", "issue-5", "-L", "5", "--json", "status"],
+  ["gh", "run", "view", "123", "--log-failed"],
+  ["gh", "run", "watch", "123", "--exit-status"],
+  ["gh", "api", "--paginate", "-H", "Accept: application/json", "repos/o/r/pulls"],
   ["gh", "issue", "view", "5", "--json", "title,body"],
   ["gh", "pr", "view", "12"],
   ["gh", "pr", "list", "--head", "issue-5"],
@@ -154,14 +219,36 @@ describe("assertAllowed", () => {
 });
 
 describe("exec", () => {
+  // A throwaway repo, so these tests do not depend on running inside a git checkout.
+  let repo: string;
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), "volleyd-exec-"));
+    const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "ignore" });
+    git("init", "-q");
+    for (let i = 0; i < 20; i++) {
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        `c${i}`,
+      );
+    }
+  });
+  afterAll(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
   it("refuses a denied command before spawning anything", async () => {
     await expect(exec(["git", "push", "origin", "HEAD"])).rejects.toBeInstanceOf(FenceError);
   });
 
   it("runs an allowed command and captures its output", async () => {
-    const r = await exec(["git", "rev-parse", "--is-inside-work-tree"], {
-      cwd: new URL(".", import.meta.url).pathname,
-    });
+    const r = await exec(["git", "rev-parse", "--is-inside-work-tree"], { cwd: repo });
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe("true");
   });
@@ -169,7 +256,7 @@ describe("exec", () => {
   it("survives a child that exits without reading its stdin (no EPIPE crash)", async () => {
     for (let i = 0; i < 5; i++) {
       const r = await exec(["git", "rev-parse", "--is-inside-work-tree"], {
-        cwd: new URL(".", import.meta.url).pathname,
+        cwd: repo,
         input: "x".repeat(4 * 1024 * 1024),
       });
       expect(r.code).toBe(0);
@@ -177,10 +264,30 @@ describe("exec", () => {
   });
 
   it("reports a non-zero exit without throwing", async () => {
-    const r = await exec(["git", "rev-parse", "--verify", "no-such-ref-xyz"], {
-      cwd: new URL(".", import.meta.url).pathname,
-    });
+    const r = await exec(["git", "rev-parse", "--verify", "no-such-ref-xyz"], { cwd: repo });
     expect(r.code).not.toBe(0);
+  });
+
+  it("caps captured output and flags it as truncated", async () => {
+    const r = await exec(["git", "log", "--oneline"], { cwd: repo, maxOutputBytes: 10 });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toHaveLength(10);
+    expect(r.truncated).toBe(true);
+    const full = await exec(["git", "log", "--oneline"], { cwd: repo });
+    expect(full.truncated).toBeUndefined();
+  });
+
+  it("settles a timed-out command after the kill grace, even if a grandchild holds the pipes", async () => {
+    // git hands the transport to GIT_SSH_COMMAND, which outlives SIGTERM/SIGKILL sent to git.
+    const started = Date.now();
+    const r = await exec(["git", "fetch", "ssh://example.invalid/x"], {
+      cwd: repo,
+      env: { ...process.env, GIT_SSH_COMMAND: "sh -c 'sleep 5' --" },
+      timeoutMs: 200,
+      killGraceMs: 200,
+    });
+    expect(r.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 });
 

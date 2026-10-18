@@ -18,9 +18,9 @@ const JOURNAL_FILE = "journal.jsonl";
 const SNAPSHOT_FILE = "snapshot.json";
 
 /**
- * Parse a JSONL journal. A trailing line without a newline is a write torn by a crash and is
- * ignored; so is any line that fails to parse at the very end. A corrupt line in the middle is a
- * real error and throws.
+ * Parse a JSONL journal. A trailing fragment without a newline is a write torn by a crash and is
+ * ignored (`Journal.open` truncates it). Every complete (newline-terminated) line must parse: a
+ * corrupt one throws, naming its 1-based line number in the file.
  */
 export function readJournalFile(path: string): JournalEvent[] {
   if (!existsSync(path)) return [];
@@ -28,15 +28,29 @@ export function readJournalFile(path: string): JournalEvent[] {
   const lines = text.split("\n");
   // The element after the last "\n" is "" for a clean file, or the torn tail.
   lines.pop();
-  return lines
-    .filter((l) => l.trim() !== "")
-    .map((l, i) => {
-      try {
-        return JSON.parse(l) as JournalEvent;
-      } catch (e) {
-        throw new Error(`${path}: corrupt journal line ${i + 1}: ${(e as Error).message}`);
-      }
-    });
+  const events: JournalEvent[] = [];
+  lines.forEach((l, i) => {
+    if (l.trim() === "") return;
+    try {
+      events.push(JSON.parse(l) as JournalEvent);
+    } catch (e) {
+      throw new Error(`${path}: corrupt journal line ${i + 1}: ${(e as Error).message}`);
+    }
+  });
+  return events;
+}
+
+/** Replace `path` atomically and durably: write a tmp file, fsync it, rename it over `path`. */
+export function writeFileAtomic(path: string, data: string): void {
+  const tmp = `${path}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
 }
 
 /**
@@ -103,15 +117,7 @@ export class Journal {
 
   /** Atomically persist a reducer snapshot (write tmp, fsync, rename). */
   writeSnapshot(record: WaveRecord): void {
-    const tmp = join(this.dir, `${SNAPSHOT_FILE}.tmp`);
-    const fd = openSync(tmp, "w");
-    try {
-      writeSync(fd, JSON.stringify({ seq: record.seq, record }));
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmp, join(this.dir, SNAPSHOT_FILE));
+    writeFileAtomic(join(this.dir, SNAPSHOT_FILE), JSON.stringify({ seq: record.seq, record }));
   }
 
   readSnapshot(): { seq: number; record: WaveRecord } | null {

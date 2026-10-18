@@ -44,4 +44,14 @@ export const DAEMON_DEFAULTS = {
   probe_ms: 1_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
+  /** How often the daemon checks its broker connection; a lost connection makes it exit. */
+  watchdog_ms: 1_000,
+  /** How long a mailbox drain waits before re-arming (only bounds a wait; no latency cost). */
+  mailbox_idle_ms: 30_000,
+  /** Recently answered control requests remembered for QoS 1 redelivery dedupe. */
+  dedupe_max: 256,
+  /** After an exec timeout's SIGTERM, wait this long before SIGKILL. */
+  exec_kill_grace_ms: 5_000,
+  /** Cap on captured stdout and stderr per exec (each), in bytes. */
+  exec_output_max_bytes: 4 * 1024 * 1024,
 } as const;

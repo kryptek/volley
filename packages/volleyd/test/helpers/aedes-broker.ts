@@ -4,6 +4,8 @@ import Aedes from "aedes";
 export interface TestBroker {
   url: string;
   port: number;
+  /** Close a connected client from the broker side (a broker restart or network drop). */
+  dropClient: (clientId: string) => boolean;
   close: () => Promise<void>;
 }
 
@@ -20,6 +22,13 @@ export async function startTestBroker(): Promise<TestBroker> {
   return {
     url: `mqtt://127.0.0.1:${port}`,
     port,
+    dropClient: (clientId) => {
+      // Aedes's typings omit its live client map.
+      const clients = (aedes as unknown as { clients: Record<string, { close(): void }> }).clients;
+      const client = clients[clientId];
+      client?.close();
+      return client !== undefined;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         aedes.close(() => {

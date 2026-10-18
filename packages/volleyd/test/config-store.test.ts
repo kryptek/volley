@@ -59,6 +59,12 @@ describe("ConfigStore layering", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });
 
+  it("rejects Object prototype names as config paths", () => {
+    for (const p of ["constructor", "toString", "__proto__", "hasOwnProperty.x"]) {
+      expect(() => open().get(p)).toThrow(/unknown config path/);
+    }
+  });
+
   it("fails load on an out-of-bounds file value, naming the path", () => {
     writeFileSync(join(home, "config.yaml"), "hard_ceiling: 500\n");
     let err: unknown;
@@ -160,5 +166,41 @@ describe("applyPatch", () => {
     const r = open().applyPatch({}, "x");
     expect(r.applied).toBe(false);
     expect(r.rejected[0]?.reason).toMatch(/at least 1/);
+  });
+
+  it("sets one field of an existing lease pool without restating capacity", () => {
+    const c = open();
+    expect(c.applyPatch({ lease_pools: { build: { capacity: 2 } } }, "x").applied).toBe(true);
+    const r = c.applyPatch({ lease_pools: { build: { ttl_s: 600 } } } as never, "x");
+    expect(r).toEqual({ applied: true, rejected: [], version: 3 });
+    expect(c.get("lease_pools.build")).toMatchObject({ capacity: 2, ttl_s: 600 });
+    // The written file still loads.
+    expect(open().get("lease_pools.build")).toMatchObject({ capacity: 2, ttl_s: 600 });
+  });
+
+  it("still requires capacity for a new lease pool", () => {
+    const r = open().applyPatch({ lease_pools: { build: { ttl_s: 600 } } } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([
+      { path: "lease_pools.build", reason: "must have required property 'capacity'" },
+    ]);
+  });
+
+  it("rejects an empty sub-object as a no-op, without bumping the version", () => {
+    const c = open();
+    const r = c.applyPatch({ admission: {} }, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([{ path: "admission", reason: "must set at least 1 key" }]);
+    expect(c.retainedPayload().version).toBe(1);
+    expect(Journal.open(join(home, "waves", SYSTEM_WAVE)).readAll()).toEqual([]);
+  });
+
+  it("reports the journal seq of each change to listeners", () => {
+    const c = open();
+    const seqs: number[] = [];
+    c.onChange((ch) => seqs.push(ch.seq));
+    c.applyPatch({ hard_ceiling: 2 }, "x");
+    c.applyPatch({ hard_ceiling: 3 }, "x");
+    expect(seqs).toEqual([1, 2]);
   });
 });

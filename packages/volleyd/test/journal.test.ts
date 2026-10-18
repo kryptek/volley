@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -56,6 +56,13 @@ describe("Journal", () => {
     ).toEqual([1, 2, 3, 4]);
   });
 
+  it("names the real file line of a corrupt entry, counting blank lines", () => {
+    const j = Journal.open(dir);
+    for (const e of fresh.slice(0, 2)) j.append(e);
+    appendFileSync(join(dir, "journal.jsonl"), "\n\nnot json\n");
+    expect(() => readJournalFile(join(dir, "journal.jsonl"))).toThrow(/corrupt journal line 5:/);
+  });
+
   it("readAfter returns only the tail", () => {
     const j = Journal.open(dir);
     for (const e of fresh.slice(0, 5)) j.append(e);
@@ -75,6 +82,23 @@ describe("WaveLog", () => {
     const restored = WaveLog.open(dir, { snapshotEvery: 4 });
     expect(restored.record).toEqual(full);
     expect(restored.record.seq).toBe(fresh.length);
+  });
+
+  it("restores from the snapshot and replays only the tail after it", () => {
+    const log = WaveLog.open(dir, { snapshotEvery: 4 });
+    for (const e of fresh) log.append(e);
+    const full = log.record;
+
+    // Rewrite a pre-snapshot line (seq 1): a full replay now differs, a snapshot restore doesn't.
+    const file = join(dir, "journal.jsonl");
+    const lines = readFileSync(file, "utf-8").split("\n");
+    const first = JSON.parse(lines[0] as string);
+    first.data.wave.repo = "~/repos/rewritten";
+    lines[0] = JSON.stringify(first);
+    writeFileSync(file, lines.join("\n"));
+    expect(replay(readJournalFile(file))).not.toEqual(full);
+
+    expect(WaveLog.open(dir, { snapshotEvery: 4 }).record).toEqual(full);
   });
 
   it("restores from journal alone when there is no snapshot", () => {

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_TOPIC, ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { Journal } from "../src/journal";
+import { readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE, type WaveState } from "../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
@@ -23,8 +23,9 @@ afterEach(async () => {
   await t.cleanup();
 });
 
-const systemEvents = () => Journal.open(join(t.home, "waves", SYSTEM_WAVE)).readAll();
-const waveEvents = (wave: string) => Journal.open(join(t.home, "waves", wave)).readAll();
+// readJournalFile, not Journal.open: opening would truncate a torn tail of the live daemon's file.
+const systemEvents = () => readJournalFile(join(t.home, "waves", SYSTEM_WAVE, "journal.jsonl"));
+const waveEvents = (wave: string) => readJournalFile(join(t.home, "waves", wave, "journal.jsonl"));
 const admitted = (wave: string) =>
   waveEvents(wave)
     .filter((e) => e.type === "task_admitted")

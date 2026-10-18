@@ -1,4 +1,13 @@
-import { existsSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -14,6 +23,7 @@ import {
 } from "./control";
 import { Journal, WaveLog } from "./journal";
 import { type Admission, activeTasks, admit, ready, spawnBudget, spawnsUsed } from "./scheduler";
+import { toPathErrors, validator } from "./schemas";
 import type { JournalEvent, NewEvent, TunablesPatch, WaveId, WaveState } from "./types";
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
@@ -28,15 +38,106 @@ export interface DaemonOptions {
   /** Spawn admission verdict per wave. T5 supplies the pressure-based one; default is open. */
   admission?: (wave: WaveId) => Admission;
   log?: (line: string) => void;
+  /**
+   * MQTT protocol for the daemon's persistent session. Default 5, so `mailbox.session_expiry_s`
+   * applies; 4 keeps the session until the broker's own expiry policy (and is what the
+   * in-process test broker speaks).
+   */
+  protocolVersion?: 4 | 5;
 }
+
+/**
+ * The daemon's MQTT clientId. Stable, so its persistent session (and mailbox subscription)
+ * survives restarts and the broker queues control requests sent while it is down (SPEC §4.4).
+ */
+export const daemonClientId = (namespace: string) =>
+  `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
+const LOCK_FILE = "volleyd.lock";
+
+/**
+ * Take the exclusive `$VOLLEYD_HOME/volleyd.lock` (holding our pid) before touching any journal,
+ * so a second daemon on the same home never opens — or truncates — a live daemon's files. A lock
+ * whose pid is gone is stale and replaced. Returns the release function.
+ */
+function acquireHomeLock(home: string): () => void {
+  mkdirSync(home, { recursive: true });
+  const file = join(home, LOCK_FILE);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number;
+    try {
+      fd = openSync(file, "wx");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      let pid = Number.NaN;
+      try {
+        pid = Number.parseInt(readFileSync(file, "utf-8"), 10);
+      } catch {}
+      if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) {
+        throw new Error(`volleyd already running (pid ${pid} holds ${file})`);
+      }
+      try {
+        unlinkSync(file);
+      } catch {}
+      continue;
+    }
+    try {
+      writeSync(fd, `${process.pid}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      try {
+        unlinkSync(file);
+      } catch {}
+    };
+  }
+  throw new Error(`volleyd: cannot take ${file}`);
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Refuse to start while another daemon's retained status is live. Uses its own clean connection
+ * with a random clientId: connecting with the daemon's fixed clientId would evict a live daemon.
+ */
+async function assertNotRunning(opts: DaemonOptions): Promise<void> {
+  const topic = buildTopic(opts.namespace, DAEMON_AGENT_ID, "status");
+  const probe = new VolleyBroker();
+  await probe.connect({ url: opts.brokerUrl, agentId: `${DAEMON_AGENT_ID}-probe` });
+  try {
+    const prior = await probe.queryRetained(topic, DAEMON_DEFAULTS.probe_ms);
+    const priorType = prior !== null ? parseEnvelope(prior)?.type : undefined;
+    if (priorType !== undefined && LIVE_STATUS.has(priorType)) {
+      throw new Error(`volleyd already running (retained ${topic} is '${priorType}')`);
+    }
+  } finally {
+    await probe.disconnect();
+  }
+}
+
+type Reply = Omit<ControlResponse, "text" | "acked_type" | "op">;
+
 /**
  * The volleyd daemon: registers as agent `volleyd` (LWT armed), owns every wave journal, answers
- * control requests on its mailbox, and publishes retained wave state + the event mirror after
- * every journal append. All work (control ops, ticks) runs through one serial queue.
+ * control requests on its mailbox — kept in a persistent MQTT session on a stable clientId, so
+ * requests sent while it is down are delivered on the next start — and publishes retained wave
+ * state + the event mirror after every journal append. All work (control ops, ticks) runs
+ * through one serial queue. A lost broker connection is fatal (`closed`): the service manager
+ * restarts the process, which is simpler and safer than re-arming everything in-process.
  */
 export class Daemon {
   private readonly broker = new VolleyBroker();
@@ -47,9 +148,24 @@ export class Daemon {
   private readonly log: (line: string) => void;
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
-  private unsubscribe: (() => Promise<void>) | undefined;
+  private watchdog: ReturnType<typeof setInterval> | undefined;
+  private running = false;
+  /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
+  private readonly answered = new Map<string, ControlResponse>();
+  private resolveClosed!: (e: Error) => void;
+  /**
+   * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
+   * broker connection. The process should exit non-zero so the service manager restarts it;
+   * a restart resumes the persistent session and restores every wave from its journal.
+   */
+  readonly closed: Promise<Error> = new Promise((r) => {
+    this.resolveClosed = r;
+  });
 
-  private constructor(private readonly opts: DaemonOptions) {
+  private constructor(
+    private readonly opts: DaemonOptions,
+    private readonly releaseLock: () => void,
+  ) {
     this.log = opts.log ?? (() => {});
     this.config = ConfigStore.load({
       home: opts.home,
@@ -63,10 +179,26 @@ export class Daemon {
     }
   }
 
+  /**
+   * Start a daemon: take the home lock, refuse if another daemon is live on the broker, and only
+   * then load config and journals and connect.
+   */
   static async start(opts: DaemonOptions): Promise<Daemon> {
-    const d = new Daemon(opts);
-    await d.connect();
-    return d;
+    const release = acquireHomeLock(opts.home);
+    let d: Daemon | undefined;
+    try {
+      await assertNotRunning(opts);
+      d = new Daemon(opts, release);
+      await d.connect();
+      return d;
+    } catch (e) {
+      if (d !== undefined) {
+        d.halt();
+        await d.broker.disconnect().catch(() => {});
+      }
+      release();
+      throw e;
+    }
   }
 
   private get statusTopic(): string {
@@ -93,20 +225,23 @@ export class Daemon {
     await this.broker.publish(topic, JSON.stringify(env), { qos: 1, retain });
   }
 
+  private get mailboxTopic(): string {
+    return buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "mailbox");
+  }
+
   private async connect(): Promise<void> {
     const { namespace } = this.opts;
     await this.broker.connect({
       url: this.opts.brokerUrl,
       agentId: DAEMON_AGENT_ID,
+      clientId: daemonClientId(namespace),
+      cleanSession: false,
+      sessionExpirySeconds: this.config.get("mailbox.session_expiry_s") as number,
+      protocolVersion: this.opts.protocolVersion ?? 5,
       willTopic: this.statusTopic,
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
     });
-    const prior = await this.broker.queryRetained(this.statusTopic, DAEMON_DEFAULTS.probe_ms);
-    const priorType = prior !== null ? parseEnvelope(prior)?.type : undefined;
-    if (priorType !== undefined && LIVE_STATUS.has(priorType)) {
-      await this.broker.disconnect();
-      throw new Error(`volleyd already running (retained ${this.statusTopic} is '${priorType}')`);
-    }
+    this.running = true;
 
     await this.publish(this.statusTopic, this.envelope("status", "spawning", {}), true);
     await this.publish(
@@ -123,17 +258,21 @@ export class Daemon {
     );
     await this.publish(this.statusTopic, this.envelope("status", "registered", {}), true);
 
-    this.unsubscribe = await this.broker.subscribeStream(
-      buildTopic(namespace, DAEMON_AGENT_ID, "mailbox"),
-      ({ payload }) => {
-        void this.enqueue(() => this.onMailbox(payload));
-      },
-    );
-
     this.config.onChange((c) => {
       this.log(`config v${c.version} by ${c.by}: ${JSON.stringify(c.patch)}`);
-      // Hot-apply: re-publish config and every wave's effective_config, then re-run admission.
+      // Mirror the _system journal event, then hot-apply: re-publish config and every wave's
+      // effective_config, then re-run admission.
       void this.enqueue(async () => {
+        await this.publish(
+          waveEventsTopic(SYSTEM_WAVE),
+          this.envelope("_waves/events", "config_changed", {
+            wave: SYSTEM_WAVE,
+            seq: c.seq,
+            at: c.at,
+            data: { by: c.by, patch: c.patch, previous: c.previous, version: c.version },
+          }),
+          false,
+        );
         await this.publishConfig();
         for (const wave of this.waves.keys()) await this.publishState(wave);
         await this.tickNow();
@@ -143,6 +282,13 @@ export class Daemon {
     await this.publishConfig();
     for (const wave of this.waves.keys()) await this.publishState(wave);
     await this.tick();
+
+    // Mailbox messages are never retained (SPEC §4.1); clear a stray retained one so it cannot be
+    // replayed on every subscribe. Then drain: on a resumed session this first returns what the
+    // broker queued while the daemon was down.
+    await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
+    void this.mailboxLoop();
+
     await this.publish(
       this.statusTopic,
       this.envelope("status", "working", { waves: this.waves.size }),
@@ -151,16 +297,53 @@ export class Daemon {
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) this.timer = setInterval(() => void this.tick(), tickMs);
+    this.watchdog = setInterval(() => {
+      if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
+    }, DAEMON_DEFAULTS.watchdog_ms);
     this.log(`volleyd up: ${this.waves.size} wave(s), broker ${this.opts.brokerUrl}`);
+  }
+
+  /** Hand each mailbox message to the serial queue, one at a time, until the daemon stops. */
+  private async mailboxLoop(): Promise<void> {
+    while (this.running) {
+      let msgs: { payload: string }[];
+      try {
+        msgs = await this.broker.drainQueued(this.mailboxTopic, {
+          idleMs: DAEMON_DEFAULTS.mailbox_idle_ms,
+          maxMessages: 1,
+        });
+      } catch (e) {
+        if (this.running) this.fail(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
+      for (const m of msgs) void this.enqueue(() => this.onMailbox(m.payload));
+    }
+  }
+
+  /** Stop timers and the mailbox loop; nothing is published. */
+  private halt(): void {
+    this.running = false;
+    clearInterval(this.timer);
+    clearInterval(this.watchdog);
+  }
+
+  /** Die on our own: drop the dead connection, free the home lock, resolve `closed`. */
+  private fail(reason: Error): void {
+    if (!this.running) return;
+    this.log(`fatal: ${reason.message}`);
+    this.halt();
+    this.broker.simulateCrash(); // the socket is already gone; this resets the client state
+    this.releaseLock();
+    this.resolveClosed(reason);
   }
 
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
-    clearInterval(this.timer);
+    this.halt();
     await this.enqueue(async () => {});
+    // The mailbox subscription is kept: it lives in the persistent session, so requests sent
+    // while the daemon is down are queued for the next start.
     if (this.broker.connected) {
-      await this.unsubscribe?.();
-      this.unsubscribe = undefined;
       await this.publish(
         this.statusTopic,
         this.envelope("status", "done", { reason: "shutdown" }),
@@ -168,6 +351,14 @@ export class Daemon {
       );
       await this.broker.disconnect();
     }
+    this.releaseLock();
+  }
+
+  /** Test helper: die like a killed process — no terminal status, no DISCONNECT (LWT fires). */
+  _crashForTest(): void {
+    this.halt();
+    this.broker.simulateCrash();
+    this.releaseLock();
   }
 
   /** Run `fn` after everything already queued; errors are logged, never break the queue. */
@@ -280,32 +471,38 @@ export class Daemon {
   private async onMailbox(raw: string): Promise<void> {
     const req = parseEnvelope(raw);
     if (req === null || req.type !== "query" || !isValidAgentId(req.agent_id)) return;
+    // An ack MUST carry the request's correlation_id (SPEC §4.4); without one there is no
+    // answer the sender could match, so the request is dropped.
+    if (req.correlation_id === null) {
+      this.log(`dropped control query from ${req.agent_id}: no correlation_id`);
+      return;
+    }
+    const key = `${req.agent_id}/${req.correlation_id}`;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     const op = typeof payload.op === "string" ? payload.op : "";
-    let res: Omit<ControlResponse, "text" | "acked_type" | "op">;
-    try {
-      res = await this.handle(op, payload, req);
-    } catch (e) {
-      res = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    let reply = this.answered.get(key);
+    if (reply === undefined) {
+      let res: Reply;
+      try {
+        res = await this.handle(op, payload, req);
+      } catch (e) {
+        res = { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      // "ACKED" means received, not obeyed (SPEC §4.4); the outcome is in ok/applied/error.
+      reply = { text: "ACKED", acked_type: "query", op, ...res };
+      this.answered.set(key, reply);
+      if (this.answered.size > DAEMON_DEFAULTS.dedupe_max) {
+        this.answered.delete(this.answered.keys().next().value as string);
+      }
     }
-    const reply: ControlResponse = {
-      text: res.ok ? "ACKED" : "REJECTED",
-      acked_type: "query",
-      op,
-      ...res,
-    };
     await this.publish(
       buildTopic(this.opts.namespace, req.agent_id, "mailbox"),
-      this.envelope("mailbox", "ack", reply, req.correlation_id ?? undefined),
+      this.envelope("mailbox", "ack", reply, req.correlation_id),
       false,
     );
   }
 
-  private async handle(
-    op: string,
-    p: Record<string, unknown>,
-    req: Envelope,
-  ): Promise<Omit<ControlResponse, "text" | "acked_type" | "op">> {
+  private async handle(op: string, p: Record<string, unknown>, req: Envelope): Promise<Reply> {
     switch (op) {
       case "status": {
         if (typeof p.wave === "string") {
@@ -331,13 +528,21 @@ export class Daemon {
         };
       }
       case "config_set": {
-        if (req.correlation_id === null)
-          return { ok: false, error: "config_set requires a correlation_id" };
-        const by = typeof p.by === "string" && p.by.length > 0 ? p.by : req.agent_id;
-        const patch = (
-          typeof p.patch === "object" && p.patch !== null ? p.patch : {}
-        ) as TunablesPatch;
-        const r = this.config.applyPatch(patch, by);
+        // The whole request must match config-set-request.schema.json (text, by, a non-empty
+        // patch); patch errors are reported relative to the patch, like applyPatch's.
+        const check = validator("config-set-request.schema.json");
+        if (!check(req)) {
+          const rejected = toPathErrors(check.errors).map((e) => ({
+            ...e,
+            path: e.path.startsWith("payload.patch.")
+              ? e.path.slice("payload.patch.".length)
+              : e.path === "payload.patch"
+                ? "(root)"
+                : e.path,
+          }));
+          return { ok: false, applied: false, rejected };
+        }
+        const r = this.config.applyPatch(p.patch as TunablesPatch, p.by as string);
         return {
           ok: r.applied,
           applied: r.applied,
@@ -351,9 +556,7 @@ export class Daemon {
   }
 
   /** `run`: validate the wave file again (the daemon is authoritative), journal it, queue tasks. */
-  private async submit(
-    p: Record<string, unknown>,
-  ): Promise<Omit<ControlResponse, "text" | "acked_type" | "op">> {
+  private async submit(p: Record<string, unknown>): Promise<Reply> {
     if (typeof p.wave_yaml !== "string")
       return { ok: false, error: "run requires payload.wave_yaml" };
     let wave: ReturnType<typeof parseWaveFile>;
