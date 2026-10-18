@@ -4,19 +4,22 @@
  * visible wave window with its agents in task order) with their measured
  * sizes, and gets back every window's world position plus the view that fits
  * them. Each cluster packs its agents shortest-column-first to the right of
- * the wave window; for 1–3 agent columns and every row count, clusters are
- * laid out in rows and the placement with the largest fitting scale wins.
+ * the wave window; for 1 to max(3, the most agents in a cluster) agent
+ * columns and every row count, clusters are laid out in rows and the
+ * placement with the largest fitting scale wins, so one big cluster spreads
+ * to the viewport's aspect instead of a tall strip.
  */
-import type { View } from "../canvas/useViewport";
+import { FIT_MIN_SCALE, type View } from "../canvas/useViewport";
 
 /** Gap between windows inside a cluster. */
 export const GAP = 36;
 /** Gap between clusters. */
 export const CGAP = 96;
 export const ARRANGE_MAX_SCALE = 1.1;
-/** Lowest scale arrange will set (below the wheel-zoom minimum, as in the prototype). */
-export const ARRANGE_MIN_SCALE = 0.2;
-const MAX_COLS = 3;
+/** Lowest scale arrange will set (below the wheel-zoom minimum): the fit minimum. */
+export const ARRANGE_MIN_SCALE = FIT_MIN_SCALE;
+/** Agent columns always tried; a cluster with more agents also tries up to one column each. */
+const MIN_MAX_COLS = 3;
 /** A candidate must beat the best so far by this much to replace it. */
 const EPS = 0.005;
 
@@ -82,7 +85,8 @@ function fitArea(screen: Screen) {
 export function candidates(clusters: readonly Cluster[], screen: Screen): Candidate[] {
   const { vw, vh } = fitArea(screen);
   const out: Candidate[] = [];
-  for (let c = 1; c <= MAX_COLS; c++) {
+  const maxCols = Math.max(MIN_MAX_COLS, ...clusters.map((cl) => cl.kids.length));
+  for (let c = 1; c <= maxCols; c++) {
     const lays = clusters.map((cl) => layoutCluster(cl, c));
     for (let rows = 1; rows <= lays.length; rows++) {
       const per = Math.ceil(lays.length / rows);

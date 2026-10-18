@@ -441,8 +441,11 @@ describe("Desk steering end to end (live store)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
     const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
     expect(within(panel).getByText(/Read-only/)).toBeInTheDocument();
+    // The command names the agent's role, so it reaches this agent and not the stage's (P2-7).
     expect(
-      within(panel).getByRole("button", { name: /^Copy "volleyd steer w1 T1/ }),
+      within(panel).getByRole("button", {
+        name: /^Copy "volleyd steer w1 T1 .* --role implementer"$/,
+      }),
     ).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "Post a progress update now" }));
     expect(b.published).toHaveLength(0);

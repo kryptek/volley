@@ -148,6 +148,42 @@ describe("volley dash", () => {
     expect(io.readStdout()).toContain("--legacy");
   });
 
+  it("--build never inlines dev-only Desk credentials into the bundle (P3-14)", async () => {
+    const io = makeBufferIO();
+    const { spawn, calls } = recordingSpawn(0);
+    const env = { VITE_VOLLEY_BROKER_USERNAME: "desk", VITE_VOLLEY_BROKER_PASSWORD: "s3cret" };
+    expect(await dash({ argv: ["--build"], env, io, spawn })).toBe(0);
+    expect(calls).toHaveLength(2);
+    for (const c of calls) {
+      expect(c.opts.env).not.toHaveProperty("VITE_VOLLEY_BROKER_PASSWORD");
+      expect(c.opts.env).not.toHaveProperty("VITE_VOLLEY_BROKER_USERNAME");
+    }
+    expect(io.readStderr()).toMatch(/VITE_VOLLEY_BROKER_PASSWORD/);
+  });
+
+  it("the dev server keeps dev-only Desk credentials (never bundled)", async () => {
+    const io = makeBufferIO();
+    const { spawn, calls } = recordingSpawn(0);
+    const env = { VITE_VOLLEY_BROKER_USERNAME: "desk", VITE_VOLLEY_BROKER_PASSWORD: "s3cret" };
+    expect(await dash({ argv: [], env, io, spawn })).toBe(0);
+    expect(calls[0]?.opts.env.VITE_VOLLEY_BROKER_PASSWORD).toBe("s3cret");
+  });
+
+  it("--host serves the Desk on the LAN; the broker follows the page's host (P3-14)", async () => {
+    const io = makeBufferIO();
+    const { spawn, calls } = recordingSpawn(0);
+    expect(await dash({ argv: ["--host", "0.0.0.0", "--no-open"], env: {}, io, spawn })).toBe(0);
+    expect(calls[0]?.args).toEqual(["run", "dev", "--", "--host", "0.0.0.0"]);
+    // No localhost broker URL: a phone opening http://<laptop>:5174 connects to ws://<laptop>:9001.
+    expect(calls[0]?.opts.env).not.toHaveProperty("VITE_VOLLEY_BROKER_URL");
+
+    const io2 = makeBufferIO();
+    const rec = recordingSpawn(0);
+    const argv = ["--host", "0.0.0.0", "--broker-url", "ws://broker.lan:9001", "--no-open"];
+    expect(await dash({ argv, env: {}, io: io2, spawn: rec.spawn })).toBe(0);
+    expect(rec.calls[0]?.opts.env.VITE_VOLLEY_BROKER_URL).toBe("ws://broker.lan:9001");
+  });
+
   it("--open --no-open exits 2 with a mutual-exclusion stderr and does not spawn", async () => {
     const io = makeBufferIO();
     const { spawn, fn } = recordingSpawn();

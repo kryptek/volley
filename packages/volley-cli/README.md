@@ -81,8 +81,11 @@ volley dash                          # dev server, opens browser at http://local
 volley dash --no-open                # dev server, don't open browser
 volley dash --build                  # production build + preview (http://localhost:4173)
 volley dash --broker-url ws://host:9001  # point at a non-default broker
+volley dash --host 0.0.0.0           # serve on the LAN (a phone opens http://<this-machine>:5174)
 volley dash --legacy                 # the classic dashboard (packages/volley-dash, :5173)
 ```
+
+On first load the Desk asks for broker credentials: sign in as the `desk` identity from `volley auth init`. With `--host` and no `--broker-url`, the Desk connects to port 9001 on the host it was loaded from, so a phone reaches this machine's broker. `--build` drops `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD` from its environment, because Vite would inline them into the bundle.
 
 `--legacy` launches the classic [`volley-dash`](../volley-dash/) dashboard (status grid + event feed + per-agent drawer) instead. It is deprecated and will be removed in a later release; every other flag works with it.
 

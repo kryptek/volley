@@ -44,7 +44,13 @@ type AgentChannel = (typeof AGENT_CHANNELS)[number];
 const TERMINAL_STATUS = new Set(["done", "failed", "reaped"]);
 
 /** Order agents within a wave the way the prototype stacks them. */
-const ROLE_ORDER: readonly Role[] = ["implementer", "fixup", "spec_reviewer", "quality_reviewer"];
+const ROLE_ORDER: readonly Role[] = [
+  "implementer",
+  "fixup",
+  "rebase",
+  "spec_reviewer",
+  "quality_reviewer",
+];
 
 export type Route =
   | { kind: "registry"; agentId: string }
@@ -468,7 +474,9 @@ function reduceDecision(state: DeskState, wave: string, id: string, m: DeskMessa
 // ------------------------------------------------------------- coordinators
 
 /**
- * Coordinator state per wave owner. The owner's own topics win when they say
+ * Coordinator state per wave owner. A wave the Desk itself owns (it claimed
+ * it, so the owner is `state.self`) is coordinated by the person at this Desk:
+ * `working`. Otherwise the owner's own topics win when they say
  * something (a terminal status → `gone`, an outstanding `awaiting_input`, or
  * a `resumed`); otherwise the supervisor's `coordinator` view from the wave
  * state is used; otherwise a known agent is `working` and an unseen one `gone`.
@@ -493,7 +501,10 @@ function withCoordinators(state: DeskState): DeskState {
       ...optional("workspace", workspace),
     };
     let view: CoordinatorView;
-    if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
+    if (id === state.self) {
+      // The Desk claimed the wave: the person at this Desk coordinates it (it has no agent).
+      view = { id, waves: [w.id], state: "working" };
+    } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
       view = { id, waves: [w.id], state: "gone", ...fallbacks };
     } else if (a?.attention) {
       view = {
@@ -525,6 +536,21 @@ function withCoordinators(state: DeskState): DeskState {
 }
 
 // --------------------------------------------------------------- selectors
+
+/**
+ * Agents that finished (`done`, `failed` or `reaped`) at least `graceMs` ago,
+ * by the status's time (`wall_time` for a retained replay): the Desk hides
+ * them unless the user asks to see finished agents.
+ */
+export function finishedAgents(state: DeskState, now: number, graceMs: number): Set<string> {
+  const out = new Set<string>();
+  for (const a of Object.values(state.agents)) {
+    if (a.status && TERMINAL_STATUS.has(a.status.type) && now - a.status.at >= graceMs) {
+      out.add(a.id);
+    }
+  }
+  return out;
+}
 
 /**
  * Agents grouped by wave id (every known wave, plus `UNASSIGNED`), ordered by

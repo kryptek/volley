@@ -13,7 +13,7 @@ import { useState } from "react";
 import { BG_NO_WEBGL_NOTE, needsWebGL } from "./Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "./backgrounds";
 import { ATTN_LABEL, CHROME_LABEL, NARR_LABEL } from "./options";
-import { DIM_MAX, type Look } from "./useLook";
+import { DIM_MAX, FINISHED_GRACE_MAX_MIN, type Look, isGraceMin } from "./useLook";
 import "../styles/look.css";
 
 function Segments<K extends string>({
@@ -134,6 +134,23 @@ export function Appearance({
       <button type="button" className="btn" onClick={onArrange}>
         Arrange &amp; fit now
       </button>
+      <label className="check" htmlFor="look-finished-grace">
+        Hide finished agents after{" "}
+        <input
+          id="look-finished-grace"
+          className="look-num mono"
+          type="number"
+          min={0}
+          max={FINISHED_GRACE_MAX_MIN}
+          step={1}
+          value={look.finishedGraceMin}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            if (e.target.value !== "" && isGraceMin(v)) setLook({ finishedGraceMin: v });
+          }}
+        />{" "}
+        min
+      </label>
       <div className="lbl">“Needs you” effect</div>
       <Segments
         label="Needs you effect"

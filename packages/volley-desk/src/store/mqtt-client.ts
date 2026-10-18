@@ -7,6 +7,8 @@
  * reconnects by default, since the Desk stays open for hours (the store
  * resyncs on each reconnect; see `attachClient` in `context.tsx`). With broker
  * credentials (T14, the `desk` identity) it can also `publish` (steering, D4).
+ * A broker that refuses the credentials (or an anonymous client) surfaces as an
+ * `AuthFailedError`, from `connect()` and from `onError` on a later reconnect.
  */
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import type { DeskMessage, Envelope } from "./types";
@@ -15,6 +17,25 @@ import type { DeskMessage, Envelope } from "./types";
 export interface BrokerCredentials {
   username: string;
   password: string;
+}
+
+/** CONNACK codes meaning "credentials refused": MQTT 3.1.1 (4, 5) and MQTT 5 (134, 135). */
+const AUTH_REFUSED_CODES = new Set([4, 5, 134, 135]);
+
+/** The broker refused the credentials (SPEC §9 AUTH_FAILED). */
+export class AuthFailedError extends Error {
+  readonly code = "AUTH_FAILED";
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthFailedError";
+  }
+}
+
+function asAuthFailure(err: Error): Error {
+  const code = (err as Error & { code?: unknown }).code;
+  return typeof code === "number" && AUTH_REFUSED_CODES.has(code)
+    ? new AuthFailedError(err.message)
+    : err;
 }
 
 export interface CreateMqttClientOptions {
@@ -138,7 +159,8 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
           };
           for (const h of messageHandlers) h(msg);
         });
-        instance.on("error", (err) => {
+        instance.on("error", (raw) => {
+          const err = asAuthFailure(raw);
           for (const h of errorHandlers) h(err);
         });
         instance.on("close", () => {
@@ -166,7 +188,7 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
             });
         });
         instance.once("error", (err) => {
-          if (!instance.connected) reject(err);
+          if (!instance.connected) reject(asAuthFailure(err));
         });
       });
     },

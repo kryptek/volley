@@ -1,7 +1,8 @@
 /**
  * Desk store provider. Live mode connects to the broker over WebSocket
- * (`VITE_VOLLEY_BROKER_URL`, default `ws://localhost:9001` — mosquitto's
- * WebSocket listener) and folds every delivery through the reducer; demo mode
+ * (`VITE_VOLLEY_BROKER_URL`, default port 9001 on the host that served the
+ * page — mosquitto's WebSocket listener, so a phone on the LAN reaches the
+ * same broker as the laptop) and folds every delivery through the reducer; demo mode
  * (`?demo=1` / `VITE_VOLLEY_DEMO=1`) starts from the fixtures and runs their
  * simulation instead, with no broker at all.
  *
@@ -20,7 +21,8 @@
  * as that identity, which becomes its `identity` (the sender of everything it
  * publishes, whose mailbox carries the answers) and `writer` is the client.
  * Without credentials the connection is anonymous and read-only. Demo mode
- * writes to a simulated client instead.
+ * writes to a simulated client instead. A broker that refuses the credentials
+ * calls `onAuthFailed` (the sign-in gate, `auth/SignInGate.tsx`, asks again).
  */
 import {
   type ReactNode,
@@ -36,11 +38,30 @@ import type { OfflineSpan } from "../attention";
 import { DEMO_IDENTITY, createDemoSteerClient } from "../steer/demoClient";
 import type { SteerClient } from "../steer/transport";
 import { demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
-import { type BrokerCredentials, type DeskMqttClient, createMqttClient } from "./mqtt-client";
+import {
+  AuthFailedError,
+  type BrokerCredentials,
+  type DeskMqttClient,
+  createMqttClient,
+} from "./mqtt-client";
 import { initialState, pruneUnconfirmed, reduceAll, resync } from "./reducer";
 import type { DeskMessage, DeskState } from "./types";
 
 export const DEFAULT_BROKER_URL = "ws://localhost:9001";
+
+/** mosquitto's WebSocket listener on the host that served the page (`localhost` outside a browser). */
+export function defaultBrokerUrl(hostname: string | undefined): string {
+  if (!hostname) return DEFAULT_BROKER_URL;
+  return `ws://${hostname.includes(":") ? `[${hostname}]` : hostname}:9001`;
+}
+
+/** The broker URL the live Desk connects to: the prop, else `VITE_VOLLEY_BROKER_URL`, else the page host's. */
+export function resolveBrokerUrl(urlProp?: string): string {
+  const fromEnv = viteEnv().VITE_VOLLEY_BROKER_URL;
+  if (urlProp !== undefined) return urlProp;
+  if (typeof fromEnv === "string" && fromEnv !== "") return fromEnv;
+  return defaultBrokerUrl(typeof window === "undefined" ? undefined : window.location.hostname);
+}
 const TICK_MS = 2600;
 const REVIEWER_AFTER_MS = 22_000;
 /** Coalesce a retained-message burst into one render. */
@@ -205,7 +226,7 @@ export function attachClient(
 
 const DeskContext = createContext<DeskContextValue | null>(null);
 
-function viteEnv(): Record<string, unknown> {
+export function viteEnv(): Record<string, unknown> {
   return (import.meta as { env?: Record<string, unknown> }).env ?? {};
 }
 
@@ -216,6 +237,7 @@ export function DeskStoreProvider({
   auth: authProp,
   clientFactory,
   settleMs = SETTLE_MS,
+  onAuthFailed,
 }: {
   children: ReactNode;
   demo?: boolean;
@@ -225,11 +247,14 @@ export function DeskStoreProvider({
   clientFactory?: (url: string, auth?: BrokerCredentials) => DeskMqttClient;
   /** How long a (re)connect's retained replay is given to arrive (tests shorten it). */
   settleMs?: number;
+  /** The broker refused the credentials (connect or a later reconnect); the reason. */
+  onAuthFailed?: (message: string) => void;
 }) {
   const demo = demoProp ?? isDemoMode(window.location.search, viteEnv());
-  const brokerUrl = demo
-    ? null
-    : (urlProp ?? (viteEnv().VITE_VOLLEY_BROKER_URL as string | undefined) ?? DEFAULT_BROKER_URL);
+  const brokerUrl = demo ? null : resolveBrokerUrl(urlProp);
+  // A ref, not an effect dependency: a new callback must not reconnect.
+  const onAuthFailedRef = useRef(onAuthFailed);
+  onAuthFailedRef.current = onAuthFailed;
   const [auth] = useState(() =>
     demo
       ? null
@@ -296,14 +321,27 @@ export function DeskStoreProvider({
       });
     };
     const detach = attachClient(client, dispatch, { settleMs }, setConnection, onSettling);
+    let refused = false;
+    const refuse = (err: AuthFailedError) => {
+      if (refused) return;
+      refused = true;
+      setConnection("disconnected");
+      if (onAuthFailedRef.current) onAuthFailedRef.current(err.message);
+      else console.warn("volley-desk: the broker refused the credentials", err);
+    };
+    const offError = client.onError((err) => {
+      if (err instanceof AuthFailedError) refuse(err);
+    });
     setLiveWriter(auth ? client : null);
     setLiveConnected(false);
     setConnection("connecting");
     client.connect().catch((err: unknown) => {
+      if (err instanceof AuthFailedError) return refuse(err);
       console.warn("volley-desk: broker connect failed", err);
       setConnection("disconnected");
     });
     return () => {
+      offError();
       detach();
       setLiveWriter(null);
       void client.disconnect();

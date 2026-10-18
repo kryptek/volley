@@ -7,6 +7,11 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
 const DEFAULT_BROKER_URL = "ws://localhost:9001";
+/** Dev-only Desk sign-in variables: Vite inlines `VITE_*` into a built bundle, so a build drops them. */
+const DEV_ONLY_CREDENTIALS = [
+  "VITE_VOLLEY_BROKER_USERNAME",
+  "VITE_VOLLEY_BROKER_PASSWORD",
+] as const;
 
 /**
  * Injectable child-process surface — production calls `node:child_process.spawn`;
@@ -45,6 +50,7 @@ export async function dash({
         build: { type: "boolean" },
         legacy: { type: "boolean" },
         port: { type: "string" },
+        host: { type: "string" },
         "broker-url": { type: "string" },
         open: { type: "boolean" },
         "no-open": { type: "boolean" },
@@ -83,7 +89,16 @@ export async function dash({
     port = Number.parseInt(portStr, 10);
   }
 
-  const brokerUrl = (parsed.values["broker-url"] as string | undefined) ?? DEFAULT_BROKER_URL;
+  const host = parsed.values.host as string | undefined;
+  if (host === "") {
+    io.stderr("volley dash: --host needs an address, e.g. --host 0.0.0.0\n");
+    return EXIT.USAGE;
+  }
+  // Served on the LAN without --broker-url, the Desk connects to port 9001 on the host its page
+  // came from, so a phone reaches the laptop's broker instead of its own localhost.
+  const explicitBroker = parsed.values["broker-url"] as string | undefined;
+  const pageHostBroker = host !== undefined && pkg === "volley-desk";
+  const brokerUrl = explicitBroker ?? (pageHostBroker ? undefined : DEFAULT_BROKER_URL);
 
   // Default: open in dev, don't open in build. Explicit flags override.
   let shouldOpen = !buildMode;
@@ -97,14 +112,22 @@ export async function dash({
   }
 
   const cwd = resolve(repoRoot, "packages", pkg);
-  const childEnv: Record<string, string | undefined> = {
-    ...env,
-    VITE_VOLLEY_BROKER_URL: brokerUrl,
-  };
+  const childEnv: Record<string, string | undefined> = { ...env };
+  if (brokerUrl !== undefined) childEnv.VITE_VOLLEY_BROKER_URL = brokerUrl;
+  if (buildMode) {
+    const dropped = DEV_ONLY_CREDENTIALS.filter((k) => childEnv[k] !== undefined);
+    for (const k of dropped) delete childEnv[k];
+    if (dropped.length > 0) {
+      io.stderr(
+        `volley dash: --build ignores ${dropped.join(", ")} (Vite would inline it into the bundle); sign in from the browser instead\n`,
+      );
+    }
+  }
 
   // Vite-level passthrough args (forwarded after `--` so bun's `run` doesn't eat them).
   const viteArgs: string[] = [];
   if (port !== null) viteArgs.push("--port", String(port));
+  if (host !== undefined) viteArgs.push("--host", host);
   if (shouldOpen) viteArgs.push("--open");
 
   // `bun run <script>` in the package directory runs its Vite; bun forwards
@@ -200,8 +223,16 @@ Options:
   --build              Run vite build + preview the production bundle
   --port <N>           Override Vite's port (dev default: 5174, 5173 with --legacy;
                        --build: Vite preview's 4173)
+  --host <addr>        Listen on <addr> (e.g. 0.0.0.0) to open the Desk from a
+                       phone or another machine; without --broker-url the
+                       Desk then connects to port 9001 on the host it was
+                       loaded from
   --broker-url <url>   MQTT broker URL passed to the Desk via
                        VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
+
+The Desk asks for broker credentials on first load (the desk identity from
+volley auth init). VITE_VOLLEY_BROKER_USERNAME/PASSWORD skip that in dev mode
+only; --build drops them so no password is inlined into the bundle.
   --open               Open browser on start (default in dev mode)
   --no-open            Don't open browser
   --help               Show this help

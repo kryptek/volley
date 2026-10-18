@@ -1,7 +1,14 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { World } from "../src/canvas/World";
-import { MAX_SCALE, MIN_SCALE, type Rect, type View, useViewport } from "../src/canvas/useViewport";
+import {
+  FIT_MIN_SCALE,
+  MAX_SCALE,
+  MIN_SCALE,
+  type Rect,
+  type View,
+  useViewport,
+} from "../src/canvas/useViewport";
 
 let api: ReturnType<typeof useViewport>;
 
@@ -114,6 +121,21 @@ describe("useViewport — zoomAt / fitTo", () => {
     expect(view().s).toBeCloseTo(s);
     expect(view().x + 100 * s).toBeCloseTo((1200 - 1160 * s) / 2);
     expect(view().y + 100 * s).toBeCloseTo(70 + (730 - 560 * s) / 2);
+  });
+
+  it("fitTo zooms out below the wheel minimum so everything fits (owner finding b)", () => {
+    render(<Harness initial={{ x: 0, y: 0, s: 1 }} />);
+    act(() => api.fitTo([{ x: 0, y: 0, w: 12_000, h: 6_000 }]));
+    const s = Math.min(1200 / (12_000 + 80), 730 / (6_000 + 80));
+    expect(s).toBeLessThan(MIN_SCALE);
+    expect(view().s).toBeCloseTo(s);
+    expect(view().s).toBeGreaterThanOrEqual(FIT_MIN_SCALE);
+    // From there the wheel zooms back in smoothly instead of snapping up to the minimum,
+    // and zooming out stays put rather than going lower than the fit.
+    act(() => api.zoomAt(1.1));
+    expect(view().s).toBeCloseTo(s * 1.1);
+    act(() => api.zoomAt(0.5));
+    expect(view().s).toBeCloseTo(s * 1.1);
   });
 
   it("fitTo caps the scale at 1.1 and ignores an empty list", () => {

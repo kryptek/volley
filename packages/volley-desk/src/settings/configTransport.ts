@@ -7,9 +7,9 @@
  * `{ applied, rejected: [{ path, reason }], result: { version } }`.
  *
  * The transport takes the smallest client it needs (publish + the delivery
- * stream), so the Desk's broker client can back it once it signs in with
- * broker credentials; without one the settings modal stays read-only and
- * offers `copyCommand` instead.
+ * stream): the App builds it on the Desk's broker client once it has signed
+ * in, in volleyd's namespace (its registry entry); without one the settings
+ * modal stays read-only and offers `copyCommand` instead.
  */
 import type { DeskMessage, Envelope } from "../store/types";
 
@@ -130,7 +130,13 @@ export function createConfigTransport(
         // Listen before publishing so a fast answer is not missed.
         off = client.onMessage((m) => {
           const env = m.envelope;
-          if (m.topic === replies && env?.type === "ack" && env.correlation_id === correlationId) {
+          // Only volleyd's answer counts: anyone may write the Desk's mailbox (SPEC §4.4).
+          if (
+            m.topic === replies &&
+            env?.type === "ack" &&
+            env.correlation_id === correlationId &&
+            env.agent_id === DAEMON_AGENT_ID
+          ) {
             done(toAck(env.payload));
           }
         });

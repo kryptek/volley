@@ -8,8 +8,10 @@
  * drags within `SLIDER_COMMIT_MS` of each other coalesce into one config_set
  * carrying the settled value.
  *
- * Writes need broker credentials: without a transport the modal is read-only
- * and each row offers its exact `volleyd config set` line to copy. The wave
+ * Writes need broker credentials: without a transport the modal sends nothing;
+ * a global row still takes a new value as a draft and offers the exact
+ * `volleyd config set` line that sets it to copy (nothing to copy until the
+ * value differs from the current one). The wave
  * scope is read-only too — volleyd applies config_set to the global config,
  * and per-wave values come from the wave file's `config:` block.
  */
@@ -177,6 +179,8 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
   const values: Tunables | null =
     scope === "global" ? config : (wave.state?.effective_config ?? null);
   const writable = transport !== null && scope === "global";
+  /** No transport: a global row drafts a value for its copyable command instead of sending. */
+  const draftOnly = transport === null && scope === "global";
   const rows = schemaRows(CONFIG_SCHEMA, values);
 
   const dropDraft = (path: string) => setDrafts(({ [path]: _, ...rest }) => rest);
@@ -250,6 +254,12 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
 
   /** The user let go of a value: send it now, or after `delay` unless another follows. */
   const commit = (row: SchemaRow, value: unknown, delay: number) => {
+    if (draftOnly) {
+      editing.current.delete(row.path);
+      if (Object.is(value, valueAt(values, row.path))) dropDraft(row.path);
+      else setDrafts((d) => ({ ...d, [row.path]: value }));
+      return;
+    }
     if (!transport || !writable) return;
     const path = row.path;
     editing.current.delete(path);
@@ -298,7 +308,7 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
             rightIcon={null}
             rangeColor={accent}
             trackColor="rgba(255,255,255,.12)"
-            disabled={!writable || current === undefined}
+            disabled={!(writable || draftOnly) || current === undefined}
             onChange={(v) => {
               editing.current.add(row.path);
               setDrafts((d) => ({ ...d, [row.path]: v }));
@@ -310,7 +320,7 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
           <TextControl
             row={row}
             value={shown}
-            disabled={!writable || current === undefined}
+            disabled={!(writable || draftOnly) || current === undefined}
             onCommit={(v) => commit(row, v, 0)}
           />
         )}
@@ -318,8 +328,13 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
         {writable ? (
           <AckLine s={acks[row.path]} />
         ) : (
-          scope === "global" &&
-          current !== undefined && <CopyLine command={copyCommand(row.path, current)} />
+          draftOnly &&
+          current !== undefined &&
+          (Object.hasOwn(drafts, row.path) && !Object.is(shown, current) ? (
+            <CopyLine command={copyCommand(row.path, shown)} />
+          ) : (
+            <div className="cfg-hint">Pick a new value to copy its command.</div>
+          ))
         )}
       </div>
     );
@@ -378,7 +393,8 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
         ) : (
           !transport && (
             <p className="modal-note">
-              Read-only: the Desk has no broker credentials. Copy a command to change a value.
+              Read-only: the Desk has no broker credentials. Pick a new value, then copy its command
+              and run it in a terminal.
             </p>
           )
         )}

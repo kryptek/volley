@@ -5,13 +5,14 @@ import {
   FEED_LIMIT,
   UNASSIGNED,
   agentsByWave,
+  finishedAgents,
   initialState,
   pruneUnconfirmed,
   reduce,
   reduceAll,
   resync,
 } from "../src/store/reducer";
-import type { DeskMessage, DeskState, Envelope } from "../src/store/types";
+import { type DeskMessage, type DeskState, type Envelope, ROLES } from "../src/store/types";
 
 const EXAMPLES = path.resolve(__dirname, "../../../spec/examples/valid");
 
@@ -84,6 +85,55 @@ describe("reducer — wave state", () => {
       model: "claude-opus-4-7",
       bornAt: 5_000,
     });
+  });
+
+  it("knows every pipeline role the wave-state schema has, including rebase (P2-8)", () => {
+    const schema = JSON.parse(
+      readFileSync(path.resolve(__dirname, "../../../spec/schemas/wave-state.schema.json"), "utf8"),
+    ) as { $defs: { task: { properties: { agents: { properties: Record<string, unknown> } } } } };
+    expect([...ROLES].sort()).toEqual(
+      Object.keys(schema.$defs.task.properties.agents.properties).sort(),
+    );
+    const wave = example("wave-state-running");
+    const payload = wave.payload as { tasks: { id: string; agents: Record<string, string> }[] };
+    const t1 = payload.tasks.find((t) => t.id === "T1");
+    if (!t1) throw new Error("fixture lost T1");
+    t1.agents.rebase = "w1-t1-rebase-1";
+    const s = apply(msg("volley/_waves/w1/state", wave), registryFor("w1-t1-rebase-1"));
+    expect(s.agents["w1-t1-rebase-1"]).toMatchObject({ wave: "w1", task: "T1", role: "rebase" });
+    expect(agentsByWave(s).w1?.map((a) => a.id)).toContain("w1-t1-rebase-1");
+  });
+
+  it("lists agents that finished (done, failed, reaped) longer ago than the grace", () => {
+    const status = (id: string, type: string, at: number) =>
+      msg(
+        `volley/default/${id}/status`,
+        {
+          schema_version: "0.1",
+          agent_id: id,
+          channel: "status",
+          type,
+          wall_time: new Date(at).toISOString(),
+          payload: {},
+        },
+        at,
+      );
+    const now = Date.parse("2026-10-18T14:00:00.000Z");
+    const MIN = 60_000;
+    const s = apply(
+      status("old-done", "done", now - 11 * MIN),
+      status("old-failed", "failed", now - 30 * MIN),
+      status("old-reaped", "reaped", now - 60 * MIN),
+      status("fresh-done", "done", now - 2 * MIN),
+      status("old-blocked", "blocked", now - 60 * MIN),
+      status("working", "working", now - 60 * MIN),
+    );
+    expect([...finishedAgents(s, now, 10 * MIN)].sort()).toEqual([
+      "old-done",
+      "old-failed",
+      "old-reaped",
+    ]);
+    expect(finishedAgents(s, now, 0).has("fresh-done")).toBe(true);
   });
 
   it("assigns an agent that registered before its wave state arrived", () => {
@@ -222,6 +272,16 @@ describe("reducer — coordinator attention", () => {
     const resumed = reduce(waiting, progress("coordinator-ab12", "resumed", { seq: 109 }));
     expect(resumed.coordinators["coordinator-ab12"]?.state).toBe("working");
     expect(resumed.coordinators["coordinator-ab12"]?.question).toBeUndefined();
+  });
+
+  it("a wave the Desk claimed has this Desk as its working coordinator (P2-11)", () => {
+    const wave = example("wave-state-running");
+    const claimed = msg("volley/_waves/w1/state", {
+      ...wave,
+      payload: { ...(wave.payload as object), owner: "desk" },
+    });
+    const s = reduceAll({ ...initialState(), self: "desk" }, [claimed]);
+    expect(s.coordinators.desk).toMatchObject({ state: "working", waves: ["w1"] });
   });
 
   it("falls back to the supervisor's view when the owner has not been observed", () => {

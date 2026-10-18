@@ -4,7 +4,10 @@
  * - **you** — the wave's coordinator is `awaiting_input` or `gone` (reaped,
  *   or silent for longer than `claim_after_s`, the same rule `volleyd claim`
  *   uses); an open decision on a wave this browser owns; a stuck agent
- *   (`blocked`, or awaiting input) with no live coordinator.
+ *   (`blocked`, or awaiting input) with no live coordinator. A wave the Desk
+ *   claimed (owner = the Desk's `identity`) has no coordinator session: the
+ *   person here coordinates it, so its decisions, gates and stuck agents are
+ *   theirs.
  * - **coordinator** — an open decision or a merge-ready gate on a wave with a
  *   live coordinator, or a stuck agent with one. Items left unresolved for
  *   `escalate_after_min` are promoted to **you**.
@@ -46,6 +49,8 @@ export interface AttentionCtx {
   now: number;
   /** This browser's coordinator agent id (`?me=`). */
   me?: string | null;
+  /** The Desk's broker identity: a wave it owns, it claimed. */
+  identity?: string | null;
   config?: ConfigPayload | null;
   coordinators?: Record<string, CoordinatorView>;
   agents?: Record<string, AgentView>;
@@ -118,6 +123,10 @@ function tunables(w: WaveView | undefined, ctx: AttentionCtx) {
 
 const mins = (ms: number) => Math.max(0, Math.round(ms / 60_000));
 
+/** The Desk claimed this wave: the person at this Desk is its coordinator. */
+const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
+  !!ctx.identity && w?.state?.owner === ctx.identity;
+
 /**
  * The wave's coordinator: the store's view (owner topics, else the
  * supervisor's), with a `working` coordinator silent for longer than
@@ -128,6 +137,7 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
   const s = w.state;
   const id = s?.owner ?? s?.coordinator?.agent_id ?? null;
   if (!id) return { id: null, state: "gone" };
+  if (claimedHere(w, ctx)) return { id, state: "working" };
   const view = ctx.coordinators?.[id];
   const sup = s?.coordinator?.agent_id === id ? s.coordinator : undefined;
   const a = ctx.agents?.[id];
@@ -214,8 +224,12 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   }
   const decisions = openDecisions(w);
   const first = decisions[0];
-  if (first && ctx.me && s.owner === ctx.me) {
+  if (first && ((ctx.me && s.owner === ctx.me) || claimedHere(w, ctx))) {
     return { tier: "you", reason: `Decision: ${first.question}` };
+  }
+  const gate = s.gates[0];
+  if (gate !== undefined && claimedHere(w, ctx)) {
+    return { tier: "you", reason: `Merge-ready gate: ${gate} is waiting on you` };
   }
   const items = [
     ...decisions.map((d) => ({ reason: `Decision: ${d.question}`, since: parseTime(d.opened_at) })),
@@ -233,7 +247,11 @@ function parseTime(t: string | undefined): number | undefined {
 }
 
 export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: AttentionCtx): Attn {
-  const live = w?.state && a.wave !== UNASSIGNED ? coordinatorFor(w, ctx).state !== "gone" : false;
+  // Nobody but the person here handles a wave the Desk claimed.
+  const live =
+    w?.state && a.wave !== UNASSIGNED && !claimedHere(w, ctx)
+      ? coordinatorFor(w, ctx).state !== "gone"
+      : false;
   const mine = !!ctx.me && w?.state?.owner === ctx.me;
   // Stuck: a blocked status, or an outstanding awaiting_input from a still-running agent's hooks.
   const stuck =
@@ -293,6 +311,7 @@ export function tierFor(
 export interface CtxOpts {
   now: number;
   me?: string | null;
+  identity?: string | null;
   gateSince?: Record<string, number>;
   offline?: readonly OfflineSpan[];
 }

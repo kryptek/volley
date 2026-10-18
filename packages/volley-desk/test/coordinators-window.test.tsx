@@ -69,6 +69,23 @@ function setup(over: Partial<CoordinatorsWindowProps> = {}) {
 
 const row = (id: string) => screen.getByRole("listitem", { name: id });
 
+describe("CoordinatorsWindow show finished", () => {
+  it("toggles finished agents and says how many are hidden", () => {
+    const onToggleFinished = vi.fn();
+    setup({ finished: { hidden: 3, shown: false, graceMin: 10, onToggle: onToggleFinished } });
+    const box = screen.getByRole("checkbox", { name: /Show finished agents/ });
+    expect(box).not.toBeChecked();
+    expect(screen.getByText(/3 finished more than 10 min ago are hidden/)).toBeInTheDocument();
+    fireEvent.click(box);
+    expect(onToggleFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it("shown, the box is checked", () => {
+    setup({ finished: { hidden: 0, shown: true, graceMin: 10, onToggle: () => {} } });
+    expect(screen.getByRole("checkbox", { name: /Show finished agents/ })).toBeChecked();
+  });
+});
+
 describe("CoordinatorsWindow", () => {
   it("renders one row per wave with the prototype's three state labels", () => {
     setup();

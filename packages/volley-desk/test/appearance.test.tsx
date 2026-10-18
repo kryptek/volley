@@ -172,6 +172,17 @@ describe("Appearance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Arrange & fit now" }));
     expect(onArrange).toHaveBeenCalledTimes(1);
   });
+
+  it("sets how long finished agents stay on the canvas", () => {
+    render(<Harness />);
+    const grace = screen.getByRole("spinbutton", { name: /Hide finished agents after/ });
+    expect(grace).toHaveValue(10);
+    fireEvent.change(grace, { target: { value: "45" } });
+    expect(latest.finishedGraceMin).toBe(45);
+    expect(stored().finishedGraceMin).toBe(45);
+    fireEvent.change(grace, { target: { value: "-3" } });
+    expect(latest.finishedGraceMin).toBe(45);
+  });
 });
 
 describe("App look (demo mode)", () => {

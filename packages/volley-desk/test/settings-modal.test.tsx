@@ -363,29 +363,39 @@ describe("SettingsModal", () => {
     expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
   });
 
-  it("without credentials the control is disabled and the copy command is exact", async () => {
+  it("without credentials a row drafts a new value and copies the command that sets it (P3-14)", async () => {
     const writeText = vi.fn(async () => {});
     setClipboard({ writeText });
+    const f = fakeClient();
     setup(null);
     fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
 
+    // Until the value changes there is nothing to copy: re-setting the current value does nothing.
     const row = rowOf("Hard ceiling");
-    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
-    fireEvent.keyDown(slider("Hard ceiling"), { key: "ArrowRight" });
-    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
-    expect(within(row).getByText("volleyd config set hard_ceiling 12")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Copy command" })).not.toBeInTheDocument();
+    expect(within(row).getByText(/Pick a new value to copy its command/)).toBeInTheDocument();
+    expect(screen.queryByText("volleyd config set hard_ceiling 12")).not.toBeInTheDocument();
+
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+    expect(within(row).getByText("volleyd config set hard_ceiling 13")).toBeInTheDocument();
     fireEvent.click(within(row).getByRole("button", { name: "Copy command" }));
     await flush();
-    expect(writeText).toHaveBeenCalledWith("volleyd config set hard_ceiling 12");
+    expect(writeText).toHaveBeenCalledWith("volleyd config set hard_ceiling 13");
     expect(within(row).getByRole("button", { name: "Copy command" })).toHaveTextContent("Copied");
+    expect(f.published).toHaveLength(0);
 
-    expect(screen.getByRole("textbox", { name: "Worktree root" })).toBeDisabled();
-    expect(
-      within(rowOf("build pool capacity")).getByText(
-        "volleyd config set lease_pools.build.capacity 2",
-      ),
-    ).toBeInTheDocument();
+    const root = screen.getByRole("textbox", { name: "Worktree root" });
+    fireEvent.change(root, { target: { value: "/srv/wt" } });
+    fireEvent.keyDown(root, { key: "Enter" });
+    expect(screen.getByText("volleyd config set worktree_root /srv/wt")).toBeInTheDocument();
+
+    // Back to the current value: nothing to copy again.
+    press("Hard ceiling", "ArrowLeft");
+    await settle();
+    expect(within(row).queryByRole("button", { name: "Copy command" })).not.toBeInTheDocument();
   });
 
   it("the wave scope shows the wave's effective config, read-only, and never writes", async () => {
@@ -418,11 +428,13 @@ describe("SettingsModal", () => {
     setExecCommand(exec);
     setup(null);
     fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowLeft");
+    await settle();
     const row = within(rowOf("Hard ceiling"));
     fireEvent.click(row.getByRole("button", { name: "Copy command" }));
     await flush();
     expect(exec).toHaveBeenCalledWith("copy");
-    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 12");
+    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 11");
     expect(row.getByRole("button", { name: "Copy command" })).toHaveTextContent("Copied");
   });
 
@@ -431,11 +443,13 @@ describe("SettingsModal", () => {
     setExecCommand(() => false);
     setup(null);
     fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowLeft");
+    await settle();
     const row = within(rowOf("Hard ceiling"));
     fireEvent.click(row.getByRole("button", { name: "Copy command" }));
     await flush();
     expect(row.getByRole("button", { name: "Copy command" })).toHaveTextContent("Select and copy");
-    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 12");
+    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 11");
   });
 
   it("closes on Done, Escape, the close button and a scrim click", () => {
@@ -495,6 +509,32 @@ describe("createConfigTransport", () => {
     });
     await expect(sent).resolves.toEqual({ applied: true, version: 9, rejected: [] });
     expect(f.handlers.size).toBe(0);
+  });
+
+  it("accepts the answer only from volleyd (SPEC §4.4 MUST, P2-9)", async () => {
+    const f = fakeClient();
+    const t = createConfigTransport(f.client, { identity: "desk" });
+    let settled = false;
+    const sent = t.send({ hard_ceiling: 3 }).then((a) => {
+      settled = true;
+      return a;
+    });
+    await flush();
+    const id = f.published[0]?.envelope.correlation_id as string;
+    const answer = (agent_id: string, version: number): Envelope => ({
+      schema_version: "0.1",
+      agent_id,
+      channel: "mailbox",
+      type: "ack",
+      wall_time: "2026-10-18T12:00:01.000Z",
+      correlation_id: id,
+      payload: { ok: true, applied: true, rejected: [], result: { version } },
+    });
+    // Anyone may write the Desk's mailbox; a forged answer must not settle the request.
+    await f.deliver("volley/default/desk/mailbox", answer("impl-a1", 99));
+    expect(settled).toBe(false);
+    await f.deliver("volley/default/desk/mailbox", answer("volleyd", 9));
+    await expect(sent).resolves.toEqual({ applied: true, version: 9, rejected: [] });
   });
 
   it("reports a daemon error and an unanswered request", async () => {
@@ -558,7 +598,7 @@ describe("App wiring", () => {
     expect(screen.getByRole("radio", { name: "This wave (ci-speed)" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
-    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
+    expect(within(rowOf("Hard ceiling")).getByText(/Pick a new value/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -575,6 +615,97 @@ describe("App wiring", () => {
     expect(screen.getByRole("dialog")).toHaveFocus();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(gear).toHaveFocus();
+  });
+
+  it("signed in, the global scope writes config_set to volleyd's mailbox in its namespace (P1-3)", async () => {
+    const handlers = new Set<(m: DeskMessage) => void>();
+    const connected = new Set<() => void>();
+    const published: { topic: string; envelope: Envelope }[] = [];
+    const client: DeskMqttClient = {
+      connect: async () => {
+        for (const h of connected) h();
+      },
+      disconnect: async () => {},
+      publish: async (topic, payload) => {
+        published.push({ topic, envelope: JSON.parse(payload) as Envelope });
+      },
+      onMessage: (h) => {
+        handlers.add(h);
+        return () => handlers.delete(h);
+      },
+      onConnect: (h) => {
+        connected.add(h);
+        return () => connected.delete(h);
+      },
+      onDisconnect: () => () => {},
+      onError: () => () => {},
+    };
+    const deliver = (topic: string, envelope: Envelope) =>
+      act(async () => {
+        for (const h of handlers) h({ topic, envelope, receivedAt: Date.now() });
+      });
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        auth={{ username: "desk", password: "pw" }}
+        clientFactory={() => client}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+    await deliver("volley/_system/registry/volleyd", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      parent_id: null,
+      namespace: "ops",
+      channel: "_system/registry",
+      type: "registered",
+      wall_time: "2026-10-18T12:00:00.000Z",
+      payload: { capabilities: ["supervises-waves"], started_at: "2026-10-18T12:00:00.000Z" },
+    });
+    await deliver("volley/_waves/_config", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "_waves/config",
+      type: "config",
+      wall_time: "2026-10-18T12:00:00.000Z",
+      payload: config,
+    });
+    await deliver("volley/_waves/status-chip/state", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "_waves/state",
+      type: "wave_state",
+      wall_time: "2026-10-18T12:00:00.000Z",
+      payload: wave().state,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Settings for status-chip" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(screen.queryByText(/read-only/i)).not.toBeInTheDocument();
+    expect(slider("Hard ceiling")).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.change(screen.getByRole("textbox", { name: "Fallback model" }), {
+      target: { value: "claude-haiku-5-5" },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Fallback model" }), { key: "Enter" });
+    await flush();
+    const req = published.find((p) => p.topic === "volley/ops/volleyd/mailbox");
+    expect(req?.envelope).toMatchObject({
+      agent_id: "desk",
+      type: "query",
+      payload: { op: "config_set", patch: { fallback_model: "claude-haiku-5-5" }, by: "desk" },
+    });
+    // volleyd answers on the Desk's own mailbox in that namespace.
+    await deliver("volley/ops/desk/mailbox", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "mailbox",
+      type: "ack",
+      wall_time: "2026-10-18T12:00:01.000Z",
+      correlation_id: req?.envelope.correlation_id as string,
+      payload: { ok: true, applied: true, rejected: [], result: { version: 8 } },
+    });
+    expect(await screen.findByText("applied · v8")).toBeInTheDocument();
   });
 
   it("does not reopen the modal by itself when its wave goes away and comes back", async () => {
