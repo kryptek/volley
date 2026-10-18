@@ -1,0 +1,15 @@
+{"seq":1,"at":"2026-10-20T09:00:00.000Z","type":"wave_submitted","data":{"wave":{"wave":"2026-10-20-example","version":1,"repo":"~/repos/example","release_branch":"release/2026-10-20-example","model":"claude-opus-5-5","pipeline":["implement",["spec_review","quality_review"],"fixup","merge_ready"],"stages":[["implement"],["spec_review","quality_review"],["fixup"],["merge_ready"]],"tasks":{"T0":{"id":"T0","issue":101,"after":[],"pipeline":["implement",["spec_review","quality_review"],"fixup","merge_ready"],"stages":[["implement"],["spec_review","quality_review"],["fixup"],["merge_ready"]],"model":"claude-opus-5-5","files":[]},"T1":{"id":"T1","issue":102,"after":["T0"],"pipeline":["implement",["spec_review","quality_review"],"fixup","merge_ready"],"stages":[["implement"],["spec_review","quality_review"],["fixup"],["merge_ready"]],"model":"claude-opus-5-5","files":[]},"T2":{"id":"T2","issue":103,"after":["T0"],"pipeline":["implement",["spec_review","quality_review"],"fixup","merge_ready"],"stages":[["implement"],["spec_review","quality_review"],["fixup"],["merge_ready"]],"model":"claude-opus-5-5","files":[]},"T3":{"id":"T3","issue":104,"after":["T1","T2"],"pipeline":["implement","merge_ready"],"stages":[["implement"],["merge_ready"]],"model":"claude-opus-5-5","files":[]}},"task_order":["T0","T1","T2","T3"],"heavy_pools":[],"config":{}},"owner":"coordinator-ab12"}}
+{"seq":2,"at":"2026-10-20T09:01:00.000Z","type":"task_queued","task":"T0","data":{"issue":101}}
+{"seq":3,"at":"2026-10-20T09:02:00.000Z","type":"task_queued","task":"T1","data":{"issue":102}}
+{"seq":4,"at":"2026-10-20T09:03:00.000Z","type":"task_queued","task":"T2","data":{"issue":103}}
+{"seq":5,"at":"2026-10-20T09:04:00.000Z","type":"task_queued","task":"T3","data":{"issue":104}}
+{"seq":6,"at":"2026-10-20T09:05:00.000Z","type":"task_admitted","task":"T0","data":{}}
+{"seq":7,"at":"2026-10-20T09:06:00.000Z","type":"agent_spawned","task":"T0","data":{"role":"implementer","agent_id":"2026-10-20-example-t0-implementer-1"}}
+{"seq":8,"at":"2026-10-20T09:07:00.000Z","type":"agent_registered","task":"T0","data":{"agent_id":"2026-10-20-example-t0-implementer-1","model":"claude-opus-5-5"}}
+{"seq":9,"at":"2026-10-20T09:08:00.000Z","type":"stage_entered","task":"T0","data":{"stage":"implement"}}
+{"seq":10,"at":"2026-10-20T09:09:00.000Z","type":"artifact_verified","task":"T0","data":{"pr":{"number":7,"url":"https://github.com/example-org/example-repo/pull/7","ci":"green"}}}
+{"seq":11,"at":"2026-10-20T09:10:00.000Z","type":"stage_entered","task":"T0","data":{"stage":"merge_ready"}}
+{"seq":12,"at":"2026-10-20T09:11:00.000Z","type":"decision_opened","data":{"decision_id":"d1","kind":"agent_blocked"}}
+{"seq":13,"at":"2026-10-20T09:12:00.000Z","type":"stage_entered","task":"T0","data":{"stage":"done"}}
+{"seq":14,"at":"2026-10-20T09:13:00.000Z","type":"decision_resolved","data":{"decision_id":"d1"}}
+{"seq":15,"at":"2026-10-20T09:14:00.000Z","type":"task_admitted","task":"T1","data":{}}

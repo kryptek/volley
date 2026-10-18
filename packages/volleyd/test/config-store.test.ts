@@ -1,0 +1,164 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "../src/config-defaults";
+import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
+import { Journal } from "../src/journal";
+import { SYSTEM_WAVE } from "../src/types";
+import { envelope, schemaErrors } from "./helpers/schema";
+
+let home: string;
+const now = () => new Date("2026-10-18T12:00:00.000Z");
+const open = () =>
+  ConfigStore.load({ home, system: Journal.open(join(home, "waves", SYSTEM_WAVE)), now });
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "volleyd-config-"));
+});
+afterEach(() => {
+  rmSync(home, { recursive: true, force: true });
+});
+
+describe("volleydHome", () => {
+  it("is $VOLLEYD_HOME, else ~/.volley/volleyd", () => {
+    expect(volleydHome({ VOLLEYD_HOME: "/x/y" })).toBe("/x/y");
+    expect(volleydHome({ HOME: "/home/u" })).toBe("/home/u/.volley/volleyd");
+  });
+});
+
+describe("ConfigStore layering", () => {
+  it("uses built-in defaults when there is no config.yaml", () => {
+    const c = open();
+    expect(c.effective()).toEqual(CONFIG_DEFAULTS);
+    expect(c.get("hard_ceiling")).toBe(12);
+  });
+
+  it("layers defaults ← config.yaml ← per-wave overrides", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "hard_ceiling: 8\nadmission:\n  ci_queue_max: 4\nlease_pools:\n  build: { capacity: 2, match: [vite build] }\n",
+    );
+    const c = open();
+    c.setWaveOverrides("w1", { hard_ceiling: 3, lease_pools: { build: { capacity: 1 } } });
+
+    expect(c.get("hard_ceiling")).toBe(8);
+    expect(c.get("hard_ceiling", "w1")).toBe(3);
+    expect(c.get("hard_ceiling", "w2")).toBe(8);
+    // Nested objects merge key by key; untouched keys keep the lower layer's value.
+    expect(c.get("admission.ci_queue_max", "w1")).toBe(4);
+    expect(c.get("admission.hysteresis_samples", "w1")).toBe(3);
+    expect(c.get("lease_pools.build", "w1")).toEqual({ capacity: 1, match: ["vite build"] });
+    expect(c.effective("w1").spawn_budget_multiplier).toBe(3);
+
+    c.clearWave("w1");
+    expect(c.get("hard_ceiling", "w1")).toBe(8);
+  });
+
+  it("rejects an unknown path in get()", () => {
+    expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
+  });
+
+  it("fails load on an out-of-bounds file value, naming the path", () => {
+    writeFileSync(join(home, "config.yaml"), "hard_ceiling: 500\n");
+    let err: unknown;
+    try {
+      open();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("config.yaml");
+    expect((err as ConfigError).errors).toEqual([
+      { path: "hard_ceiling", reason: "must be <= 100" },
+    ]);
+  });
+
+  it("fails load on an unknown key and on malformed YAML", () => {
+    writeFileSync(join(home, "config.yaml"), "hard_ceilin: 5\n");
+    expect(() => open()).toThrow(/hard_ceilin: unknown key/);
+    writeFileSync(join(home, "config.yaml"), "hard_ceiling: [\n");
+    expect(() => open()).toThrow(ConfigError);
+  });
+});
+
+describe("retained _config payload", () => {
+  it("validates against config.schema.json and carries version/updated_by", () => {
+    const c = open();
+    const p = c.retainedPayload();
+    expect(schemaErrors("config.schema.json", envelope("_waves/_config", "config", p))).toEqual([]);
+    expect(p.version).toBe(1);
+    expect(p.updated_by).toBe(DEFAULTS_AUTHOR);
+    expect(p.updated_at).toBe("2026-10-18T12:00:00.000Z");
+    expect(p.hard_ceiling).toBe(12);
+  });
+
+  it("derives version and updated_by from the _system journal across restarts", () => {
+    const c = open();
+    expect(c.applyPatch({ hard_ceiling: 5 }, "coordinator-ab12").applied).toBe(true);
+    expect(c.applyPatch({ claim_after_s: 900 }, "desk").applied).toBe(true);
+    const again = open();
+    const p = again.retainedPayload();
+    expect(p.version).toBe(3);
+    expect(p.updated_by).toBe("desk");
+    expect(p.hard_ceiling).toBe(5);
+    expect(p.claim_after_s).toBe(900);
+    expect(schemaErrors("config.schema.json", envelope("_waves/_config", "config", p))).toEqual([]);
+  });
+});
+
+describe("applyPatch", () => {
+  it("writes config.yaml, journals config_changed with by/previous, bumps version", () => {
+    const c = open();
+    const changes: number[] = [];
+    c.onChange((ch) => changes.push(ch.version));
+    const r = c.applyPatch({ hard_ceiling: 2, admission: { ci_queue_max: 5 } }, "coordinator-ab12");
+    expect(r).toEqual({ applied: true, rejected: [], version: 2 });
+    expect(changes).toEqual([2]);
+    expect(c.get("hard_ceiling")).toBe(2);
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).toContain("hard_ceiling: 2");
+
+    const ev = Journal.open(join(home, "waves", SYSTEM_WAVE)).readAll();
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({
+      seq: 1,
+      type: "config_changed",
+      data: {
+        by: "coordinator-ab12",
+        patch: { hard_ceiling: 2, admission: { ci_queue_max: 5 } },
+        previous: { hard_ceiling: 12, admission: { ci_queue_max: 10 } },
+        version: 2,
+      },
+    });
+    expect(typeof ev[0]?.at).toBe("string");
+  });
+
+  it("rejects unknown keys and out-of-bounds values as a whole, changing nothing", () => {
+    const c = open();
+    let notified = false;
+    c.onChange(() => {
+      notified = true;
+    });
+    const r = c.applyPatch(
+      { hard_ceiling: 2, bogus: 1, admission: { container_max: -1 } } as never,
+      "x",
+    );
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual(
+      expect.arrayContaining([
+        { path: "bogus", reason: "unknown key" },
+        { path: "admission.container_max", reason: "must be >= 0" },
+      ]),
+    );
+    expect(c.get("hard_ceiling")).toBe(12);
+    expect(c.retainedPayload().version).toBe(1);
+    expect(notified).toBe(false);
+    expect(Journal.open(join(home, "waves", SYSTEM_WAVE)).readAll()).toEqual([]);
+  });
+
+  it("rejects an empty patch", () => {
+    const r = open().applyPatch({}, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected[0]?.reason).toMatch(/at least 1/);
+  });
+});
