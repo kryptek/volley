@@ -125,6 +125,13 @@
           "default": 600,
           "description": "Seconds without a hook heartbeat (while working and alive) before a hooks_silent alarm."
         },
+        "idle_grace_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400,
+          "default": 180,
+          "description": "Seconds an agent may sit idle (its turn ended, no terminal status) before it is nudged once; still idle another grace later opens an agent_stalled decision."
+        },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
           "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."
@@ -158,7 +165,8 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 3600,
-          "description": "Grace period after a detected host sleep/wake before liveness alarms resume."
+          "default": 120,
+          "description": "Seconds after a detected host sleep/wake during which liveness alarms are held and reaped statuses are re-verified: a reap is accepted only if no heartbeat arrives within it."
         },
         "screen_tail_interval_s": {
           "type": "integer",

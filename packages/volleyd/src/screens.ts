@@ -6,6 +6,8 @@
  *   trust_dialog   Claude Code's folder-trust prompt     → decision repo_untrusted
  *   update_prompt  a shell/tool "update? [Y/n]" prompt   → Enter, then one relaunch
  *   login          Claude Code asking for a login        → decision unknown_screen
+ *   credit_exhausted  a usage-limit / credit prompt     → decision unknown_screen (pre-hook);
+ *                  on a silent registered agent: decision model_switch (liveness.ts, recovery.ts)
  *   working        Claude Code is up (hooks silent)      → decision unknown_screen
  *   shell_prompt   a bare shell prompt, nothing typed    → decision unknown_screen (after an
  *                  answered update prompt: the one place the launch command is typed again)
@@ -16,6 +18,7 @@ export type ScreenClass =
   | "trust_dialog"
   | "update_prompt"
   | "login"
+  | "credit_exhausted"
   | "working"
   | "shell_prompt"
   | "empty"
@@ -46,6 +49,18 @@ const PATTERNS: [ScreenClass, RegExp[]][] = [
       /would you like to (update|check for updates)/i,
       /update (now|available)[^\n]*\[y\/n\]/i,
       /\[y\/n\][^\n]*update/i,
+    ],
+  ],
+  // Before `working`: the credit prompt is drawn above Claude Code's own status bar.
+  [
+    "credit_exhausted",
+    [
+      /claude usage limit reached/i,
+      /you(?:'|’)ve hit your (?:usage )?limit/i,
+      /\/upgrade to increase your usage limit/i,
+      /credit balance is too low/i,
+      /out of (?:usage )?credits/i,
+      /stop and wait for (?:the )?limit to reset/i,
     ],
   ],
   ["working", [/esc to interrupt/i, /bypass permissions on/i, /welcome to claude code/i, /⏵⏵/]],
