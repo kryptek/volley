@@ -16,7 +16,8 @@ import { contextOf, fixture, makeWorkdir, publishEnvelope, runHook, tick } from 
  */
 const URL = process.env.VOLLEY_AUTH_BROKER_URL;
 const RUN = process.env.VOLLEY_INTEGRATION === "1" && URL !== undefined;
-const BROKER_URL = URL ?? "mqtt://localhost:1884";
+// Only read inside the suite, which RUN gates on URL being set: there is no default broker.
+const BROKER_URL = URL as string;
 
 const AGENT = "w1-t1-implementer-1";
 const OTHER = "w1-t2-implementer-1";

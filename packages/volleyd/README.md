@@ -520,8 +520,11 @@ model_verified }`.
 ### Pre-hook screen table
 
 Screens are read only in the window before the hooks run (afterwards the hooks are the source of
-truth). When no SessionStart heartbeat arrived in time, the screen is captured to
-`$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
+truth). When no SessionStart heartbeat arrived in time, a local worktree's
+`.volley/hooks-error.json` written during this launch is checked first: it means the broker
+refused the hooks' credentials (or the hooks could not read them), so decision
+`hooks_auth_failed` opens with the username, and the screen is not read. Otherwise the screen is
+captured to `$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
 
 | Screen | Action |
 |---|---|

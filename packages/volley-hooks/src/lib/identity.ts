@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { isValidAgentId, isValidNamespace } from "volley-mcp/topics";
-import { isAuthFailed } from "./auth";
+import { CredentialsError, isAuthFailed } from "./auth";
 import type { Env, HookInput } from "./hook-io";
 import { writeFileAtomic } from "./seq";
 
@@ -29,11 +29,22 @@ export function projectDirOf(input: HookInput, env: Env): string {
 
 /**
  * The supervisor-assigned identity in `<dir>/.volley/agent.json`, resolved exactly as the MCP
- * server resolves it (file beats env). Null when the file is absent or unusable — a hook never
- * fails a session over it. No I/O beyond reading the file.
+ * server resolves it (file beats env). Null when the file is absent. A file that exists but is
+ * unreadable or malformed throws `CredentialsError` (loud: it holds this agent's credentials,
+ * and treating it as absent would leave the agent silently dark). No I/O beyond the file.
  */
 export function readAgentIdentity(dir: string, env: Env): HookIdentity | null {
-  if (!existsSync(join(dir, ".volley", "agent.json"))) return null;
+  const stateDir = join(dir, ".volley");
+  const path = join(stateDir, "agent.json");
+  if (!existsSync(path)) return null;
+  try {
+    readFileSync(path);
+  } catch (e) {
+    throw new CredentialsError(
+      `${path}: cannot read identity file — ${(e as Error).message}`,
+      stateDir,
+    );
+  }
   try {
     const config = loadConfig(env, dir);
     return {
@@ -43,10 +54,10 @@ export function readAgentIdentity(dir: string, env: Env): HookIdentity | null {
       parentId: config.parentId,
       brokerUrl: config.brokerUrl,
       projectDir: dir,
-      stateDir: join(dir, ".volley"),
+      stateDir,
     };
-  } catch {
-    return null;
+  } catch (e) {
+    throw new CredentialsError((e as Error).message, stateDir);
   }
 }
 

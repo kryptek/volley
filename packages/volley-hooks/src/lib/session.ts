@@ -42,7 +42,7 @@ export function mqttVersion(env: Env): 4 | 5 {
  * rejects with `VolleyError` `AUTH_FAILED` (runHook makes it loud).
  */
 export async function connectBroker(
-  target: ConnectTarget & Pick<HookIdentity, "stateDir">,
+  target: ConnectTarget,
   env: Env,
   extra: Partial<BrokerConnectOptions> = {},
   broker?: VolleyBroker,

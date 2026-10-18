@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { BrokerConnectOptions } from "volley-mcp/broker";
-import { type BrokerAuth, resolveBrokerAuth } from "volley-mcp/config";
+import {
+  type BrokerAuth,
+  MOSQUITTO_ETC_DIRS,
+  authFromEnv,
+  resolveBrokerAuth,
+} from "volley-mcp/config";
 import { VolleyError } from "volley-mcp/errors";
 import type { Env } from "./hook-io";
 import type { HookIdentity } from "./identity";
@@ -10,38 +15,64 @@ import { writeFileAtomic } from "./seq";
 /** Who a connection speaks for, as far as credentials go. */
 export type AuthTarget = Pick<HookIdentity, "mode" | "projectDir">;
 
-/** Everything a connect needs: credentials plus where to connect and as whom. */
-export type ConnectTarget = AuthTarget & Pick<HookIdentity, "brokerUrl" | "agentId">;
+/** Everything a connect needs: credentials, where to connect and as whom, and the state dir. */
+export type ConnectTarget = AuthTarget & Pick<HookIdentity, "brokerUrl" | "agentId" | "stateDir">;
 
 export const CONNECT_TIMEOUT_MS = 3000;
 
 /**
- * Where `volley auth` keeps its files when VOLLEY_AUTH_DIR is unset (mirrors the CLI's
- * default): the first mosquitto config directory that exists, plus `volley/`.
+ * The hooks cannot even try to authenticate: an identity or credentials file is unreadable or
+ * malformed, or `VOLLEY_AUTH_*` is inconsistent. Code `AUTH_FAILED`, so it takes the same loud
+ * path as a refused CONNACK (stderr line, `hooks-error.json`, exit 1) and is never cached as a
+ * registry miss. `stateDir`, when set, is where the error file goes.
  */
-const MOSQUITTO_ETC_DIRS = [
-  "/opt/homebrew/etc/mosquitto",
-  "/usr/local/etc/mosquitto",
-  "/etc/mosquitto",
-];
+export class CredentialsError extends VolleyError {
+  readonly stateDir: string | undefined;
+  constructor(message: string, stateDir?: string) {
+    super("AUTH_FAILED", message);
+    this.name = "CredentialsError";
+    this.stateDir = stateDir;
+  }
+}
 
-/** `$VOLLEY_AUTH_DIR/coordinator.json` (written by `volley auth init --coordinator-file`). */
+/** Run a credential resolution; any plain error it throws becomes a `CredentialsError`. */
+function loudly<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof VolleyError && e.code === "AUTH_FAILED") throw e;
+    throw new CredentialsError((e as Error).message);
+  }
+}
+
+/**
+ * `$VOLLEY_AUTH_DIR/coordinator.json` (written by `volley auth init --coordinator-file`); without
+ * VOLLEY_AUTH_DIR, the CLI's default `<mosquitto etc dir>/volley/coordinator.json`.
+ */
 export function coordinatorAuthPath(env: Env): string | null {
-  const dir = env.VOLLEY_AUTH_DIR ?? MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
-  if (dir === undefined) return null;
-  return env.VOLLEY_AUTH_DIR !== undefined
-    ? join(dir, "coordinator.json")
-    : join(dir, "volley", "coordinator.json");
+  if (env.VOLLEY_AUTH_DIR !== undefined) return join(env.VOLLEY_AUTH_DIR, "coordinator.json");
+  const etc = MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
+  return etc === undefined ? null : join(etc, "volley", "coordinator.json");
 }
 
 function readCoordinatorFile(env: Env): BrokerAuth | null {
   const path = coordinatorAuthPath(env);
   if (path === null || !existsSync(path)) return null;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (e) {
+    throw new CredentialsError(
+      `${path}: cannot read coordinator credentials — ${(e as Error).message}`,
+    );
+  }
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, "utf-8"));
+    raw = JSON.parse(text);
   } catch (e) {
-    throw new Error(`${path}: malformed coordinator credentials — ${(e as Error).message}`);
+    throw new CredentialsError(
+      `${path}: malformed coordinator credentials — ${(e as Error).message}`,
+    );
   }
   const c = raw as { username?: unknown; password?: unknown } | null;
   if (
@@ -51,22 +82,23 @@ function readCoordinatorFile(env: Env): BrokerAuth | null {
     c.username === "" ||
     typeof c.password !== "string"
   ) {
-    throw new Error(`${path}: must hold a non-empty string username and a string password`);
+    throw new CredentialsError(
+      `${path}: must hold a non-empty string username and a string password`,
+    );
   }
   return { username: c.username, password: c.password };
 }
 
 /**
  * The hooks' broker credentials. Agent mode: exactly as the MCP server sharing the worktree
- * resolves them (the identity file's `broker` block, then `VOLLEY_AUTH_*`). Coordinator mode
- * (no identity file): `VOLLEY_AUTH_*`, else `$VOLLEY_AUTH_DIR/coordinator.json`, so an
- * installed session needs no secret in settings.json. Null means connect anonymously.
+ * resolves them (the identity file's `broker` block, then `VOLLEY_AUTH_*`). Coordinator mode:
+ * `VOLLEY_AUTH_*`, else `$VOLLEY_AUTH_DIR/coordinator.json`, so an installed session needs no
+ * secret in settings.json; the directory's identity file is never read. Null means connect
+ * anonymously. Unusable credentials throw `CredentialsError`.
  */
 export function resolveHooksAuth(target: AuthTarget, env: Env): BrokerAuth | null {
-  // Coordinator mode means the directory has no identity file, so this is `VOLLEY_AUTH_*` alone.
-  const auth = resolveBrokerAuth(env, target.projectDir);
-  if (auth !== null || target.mode === "agent") return auth;
-  return readCoordinatorFile(env);
+  if (target.mode === "agent") return loudly(() => resolveBrokerAuth(env, target.projectDir));
+  return loudly(() => authFromEnv(env)) ?? readCoordinatorFile(env);
 }
 
 /** The connect options for `target`, credentials included — every hook connect goes through it. */
@@ -97,8 +129,10 @@ export interface HooksError {
   code: "AUTH_FAILED";
   at: string;
   hook_event: string;
-  /** The username the broker refused; null for an anonymous connect. */
+  /** The username the broker refused; null for an anonymous connect or unusable credentials. */
   username: string | null;
+  /** Why no credentials could be sent (a `CredentialsError`); absent for a refused CONNACK. */
+  detail?: string;
 }
 
 export function writeHooksError(stateDir: string, err: HooksError): void {

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { type Server, type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,16 +94,19 @@ describe("no .volley/agent.json → silent no-op", () => {
     expect(connections).toBe(before);
   });
 
-  it("a malformed agent.json is a no-op too", async () => {
+  it("a malformed agent.json is not a no-op: it is loud (exit 1) and opens no socket", async () => {
     const dir = makeWorkdir();
     mkdirSync(join(dir, ".volley"));
     writeFileSync(join(dir, ".volley", "agent.json"), "{not json");
+    const before = connections;
     const run = await runHook("stop", fixture("stop.json", dir), {
       cwd: dir,
       env: { VOLLEY_BROKER_URL: url },
     });
-    expect(run.exitCode).toBe(0);
+    expect(run.exitCode).toBe(1);
     expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("agent.json");
+    expect(connections).toBe(before);
   });
 
   it("garbage on stdin is a no-op", async () => {
@@ -142,6 +145,25 @@ describe("identity resolution", () => {
 
   it("returns null without the file", () => {
     expect(readAgentIdentity(makeWorkdir(), {})).toBeNull();
+  });
+
+  it("throws AUTH_FAILED when the file exists but is unusable (never treated as absent)", () => {
+    const dir = makeWorkdir();
+    mkdirSync(join(dir, ".volley"));
+    writeFileSync(join(dir, ".volley", "agent.json"), "{not json");
+    expect(() => readAgentIdentity(dir, {})).toThrow(join(dir, ".volley", "agent.json"));
+    try {
+      readAgentIdentity(dir, {});
+    } catch (e) {
+      expect(e).toMatchObject({ code: "AUTH_FAILED", stateDir: join(dir, ".volley") });
+    }
+  });
+
+  it("hookEnv pins VOLLEY_AUTH_DIR to an empty temp dir (never the host's coordinator.json)", () => {
+    const dir = hookEnv().VOLLEY_AUTH_DIR as string;
+    expect(dir.startsWith(tmpdir())).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
+    expect(hookEnv({ VOLLEY_AUTH_DIR: "/x" }).VOLLEY_AUTH_DIR).toBe("/x");
   });
 
   it("prefers CLAUDE_PROJECT_DIR over the input cwd", () => {

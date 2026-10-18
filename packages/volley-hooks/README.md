@@ -68,8 +68,10 @@ packages/volley-hooks/scripts/install.sh --uninstall  # remove only the volley-h
 | coordinator | no `agent.json` and `VOLLEY_HOOKS_COORDINATOR=1` | the newest retained registry entry whose `payload.cwd` is the project dir and whose retained status is not `done`/`failed`/`reaped` (the MCP server auto-registers at startup); looked up once a minute (a miss is cached the same way), refreshed on `SessionStart`. At startup an entry older than the session is a previous session's: the hook looks again a few times for this session's own entry and adopts none if it does not appear | `~/.volley/hooks/<hash of project dir>/` |
 | none | neither | nothing: exit 0, empty stdout, no socket | — |
 
-The project dir is `$CLAUDE_PROJECT_DIR`, falling back to the hook input's `cwd`. A malformed
-`agent.json` is treated as absent (the MCP server reports it).
+The project dir is `$CLAUDE_PROJECT_DIR`, falling back to the hook input's `cwd`. An
+`agent.json` that exists but is unreadable or malformed is **not** treated as absent (and never
+falls back to coordinator mode): it holds the agent's credentials, so the hook fails loudly, as
+below, with the error file in `<project>/.volley/`.
 
 ## Broker credentials
 
@@ -89,13 +91,20 @@ looked for where `volley auth` keeps its files by default (`<mosquitto etc dir>/
 `volley auth init` run as root hands that directory to the broker's user; point
 `VOLLEY_AUTH_DIR` at a copy you can read, or use `VOLLEY_AUTH_*`.
 
-**A refused CONNECT is loud.** Every other error is swallowed (a hook never fails the session),
-but when the broker refuses the credentials (`AUTH_FAILED`) the hook:
+In coordinator mode the directory's `agent.json` is never read for credentials.
+
+**A refused CONNECT is loud, and so are unusable credentials.** Every other error is swallowed
+(a hook never fails the session), but when the broker refuses the credentials, or the hook
+cannot even send any — an unreadable or malformed `agent.json` or `coordinator.json`, or
+`VOLLEY_AUTH_PASSWORD` without `VOLLEY_AUTH_USERNAME` — the hook (code `AUTH_FAILED` either way):
 
 - writes one stderr line: `volley-hooks <event>: AUTH_FAILED for <username|anonymous> at <broker url> — <hint>`,
+  or, for unusable credentials, `volley-hooks <event>: AUTH_FAILED — <file and reason> — <hint>`,
 - writes `<state dir>/hooks-error.json` `{ "code": "AUTH_FAILED", "at", "hook_event", "username" }`
+  (`username` is null for unusable credentials, which also add `detail`: the reason)
   (volleyd reads it at a spawn's registration timeout and opens a `hooks_auth_failed` decision
   instead of classifying the screen),
+- never caches the failure as "no coordinator here": the next hook tries (and fails loudly) again,
 - exits **1**: a non-blocking error, so Claude Code shows the stderr line to the operator. Never 2
   (that would block the tool call) and never 0 (that would look like success).
 
@@ -255,7 +264,7 @@ connections only (SPEC §4.4).
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
 `resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model),
-`hooks-error.json` (the last refused CONNECT, until the next successful one) and, for
+`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests
@@ -263,9 +272,25 @@ coordinators, `identity.json` (registry lookup cache, hit or miss). For agents t
 `bun run test` runs every hook as a subprocess against an in-process Aedes broker (MQTT 3.1.1, so
 the hooks run with `VOLLEY_HOOKS_MQTT_VERSION=4` there). `bun run test:integration` covers the
 default MQTT 5 drain session against a disposable mosquitto; it needs `VOLLEY_BROKER_URL` set
-explicitly and never falls back to a default broker. `test/integration/mosquitto-acl.test.ts`
-(also opt-in) starts its own mosquitto on a random port with a generated password file and the
-shipped `examples/mosquitto-auth/acl.conf`, and runs the hooks as a minted agent.
+explicitly and never falls back to a default broker. Subprocess hooks get an empty temp
+`VOLLEY_AUTH_DIR` by default, so no test reads the host's real `coordinator.json`.
+
+`test/integration/mosquitto-acl.test.ts` (also opt-in) starts no broker: it needs
+`VOLLEY_INTEGRATION=1` and `VOLLEY_AUTH_BROKER_URL` pointing at a PRIVATE mosquitto (never the
+live 1883/9001) set up as volley-mcp's `test/integration/mosquitto-auth.conf` and
+`auth-fixture.sh` describe (a generated password file plus the shipped
+`examples/mosquitto-auth/acl.conf`), and runs the hooks as a minted agent against it. CI's
+`test-integration-auth` job runs it against a docker mosquitto; locally:
+
+```sh
+# from packages/volley-hooks
+d=$(mktemp -d); P=$((20000 + RANDOM % 20000))
+sh ../volley-mcp/test/integration/auth-fixture.sh "$d" ../../examples/mosquitto-auth/acl.conf
+sed -e "s#/tmp/volley-auth#$d#" -e "s#^listener 1884#listener $P 127.0.0.1#" \
+  ../volley-mcp/test/integration/mosquitto-auth.conf > "$d/mosquitto.conf"
+mosquitto -c "$d/mosquitto.conf" -d
+VOLLEY_INTEGRATION=1 VOLLEY_AUTH_BROKER_URL=mqtt://127.0.0.1:$P bun x vitest run test/integration/mosquitto-acl.test.ts
+```
 
 ## Harness findings
 

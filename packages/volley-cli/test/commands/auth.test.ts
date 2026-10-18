@@ -204,6 +204,17 @@ describe("volley auth", () => {
       expect(statSync(join(dir, "coordinator.json")).mode & 0o777).toBe(0o600);
     });
 
+    it("as root with --coordinator-file, warns that the coordinator's hooks cannot read the file", async () => {
+      const deps = fakeDeps();
+      deps.brokerOwner = () => ({ uid: 101, gid: 102 });
+      const r = await run(["init", "--dir", dir, "--coordinator-file"], deps);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`${join(dir, "coordinator.json")} is now readable only by root`);
+      expect(r.stdout).toContain("VOLLEY_AUTH_DIR");
+      const plain = await run(["init", "--dir", mkdtempSync(join(tmpdir(), "va-"))], deps);
+      expect(plain.stdout).not.toContain("readable only by root");
+    });
+
     it("--coordinator-file is only for init", async () => {
       await run(["init", "--dir", dir]);
       const r = await run(["add-agent", "w1-t1-implementer-1", "--dir", dir, "--coordinator-file"]);

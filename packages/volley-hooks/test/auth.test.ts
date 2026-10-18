@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -75,17 +75,71 @@ describe("resolveHooksAuth — coordinator mode", () => {
     ).toBeNull();
   });
 
-  it("a malformed coordinator file throws, naming the path", () => {
+  const resolveIn = (env: Record<string, string>) => () =>
+    resolveHooksAuth({ mode: "coordinator", projectDir }, env);
+
+  it("a malformed coordinator file throws AUTH_FAILED (loud, never a cached miss), naming the path", () => {
     const dir = authDir("{not json");
-    expect(() =>
-      resolveHooksAuth({ mode: "coordinator", projectDir }, { VOLLEY_AUTH_DIR: dir }),
-    ).toThrow(join(dir, "coordinator.json"));
+    expect(resolveIn({ VOLLEY_AUTH_DIR: dir })).toThrow(join(dir, "coordinator.json"));
+    expect(resolveIn({ VOLLEY_AUTH_DIR: dir })).toThrow(/malformed/);
+    expect(captured(resolveIn({ VOLLEY_AUTH_DIR: dir }))).toMatchObject({ code: "AUTH_FAILED" });
     const noUser = authDir({ password: "x" });
-    expect(() =>
-      resolveHooksAuth({ mode: "coordinator", projectDir }, { VOLLEY_AUTH_DIR: noUser }),
-    ).toThrow(/username/);
+    expect(resolveIn({ VOLLEY_AUTH_DIR: noUser })).toThrow(/username/);
+    expect(captured(resolveIn({ VOLLEY_AUTH_DIR: noUser }))).toMatchObject({
+      code: "AUTH_FAILED",
+    });
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "an unreadable coordinator file throws AUTH_FAILED, reported as unreadable (not malformed)",
+    () => {
+      const dir = authDir({ username: "coordinator", password: "c" });
+      chmodSync(join(dir, "coordinator.json"), 0o000);
+      const e = captured(resolveIn({ VOLLEY_AUTH_DIR: dir }));
+      expect(e).toMatchObject({ code: "AUTH_FAILED" });
+      expect((e as Error).message).toContain(join(dir, "coordinator.json"));
+      expect((e as Error).message).toMatch(/cannot read/);
+      expect((e as Error).message).not.toMatch(/malformed/);
+    },
+  );
+
+  it("VOLLEY_AUTH_PASSWORD without VOLLEY_AUTH_USERNAME throws AUTH_FAILED", () => {
+    expect(captured(resolveIn({ VOLLEY_AUTH_PASSWORD: "x" }))).toMatchObject({
+      code: "AUTH_FAILED",
+    });
+  });
+
+  it("never reads the directory's agent.json (a malformed one cannot break coordinator auth)", () => {
+    const dir = makeWorkdir();
+    mkdirSync(join(dir, ".volley"), { recursive: true });
+    writeFileSync(join(dir, ".volley", "agent.json"), "{bad");
+    const target = { mode: "coordinator" as const, projectDir: dir };
+    expect(resolveHooksAuth(target, ENV_AUTH)).toEqual({
+      username: "from-env",
+      password: "env-pw",
+    });
+    const env = { VOLLEY_AUTH_DIR: authDir({ username: "coordinator", password: "file-pw" }) };
+    expect(resolveHooksAuth(target, env)).toEqual({ username: "coordinator", password: "file-pw" });
   });
 });
+
+describe("resolveHooksAuth — agent mode credential errors are loud", () => {
+  it("an invalid broker block throws AUTH_FAILED", () => {
+    const dir = makeWorkdir({ agent_id: AGENT, broker: { password: "no-user" } });
+    expect(captured(() => resolveHooksAuth({ mode: "agent", projectDir: dir }, {}))).toMatchObject({
+      code: "AUTH_FAILED",
+    });
+  });
+});
+
+function captured(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  throw new Error("expected a throw");
+}
 
 describe("connectOpts", () => {
   it("adds the resolved credentials to every connect", () => {
@@ -95,6 +149,7 @@ describe("connectOpts", () => {
       projectDir: dir,
       brokerUrl: "mqtt://x",
       agentId: AGENT,
+      stateDir: join(dir, ".volley"),
     };
     expect(connectOpts(target, {}, { cleanSession: false })).toEqual({
       url: "mqtt://x",
@@ -109,7 +164,13 @@ describe("connectOpts", () => {
   it("anonymous: no username/password keys at all", () => {
     const dir = makeWorkdir({ agent_id: AGENT });
     const opts = connectOpts(
-      { mode: "agent", projectDir: dir, brokerUrl: "mqtt://x", agentId: AGENT },
+      {
+        mode: "agent",
+        projectDir: dir,
+        brokerUrl: "mqtt://x",
+        agentId: AGENT,
+        stateDir: join(dir, ".volley"),
+      },
       {},
     );
     expect(opts).not.toHaveProperty("username");

@@ -1,4 +1,11 @@
-import { type ConnectTarget, isAuthFailed, resolveHooksAuth, writeHooksError } from "./auth";
+import {
+  type ConnectTarget,
+  CredentialsError,
+  type HooksError,
+  isAuthFailed,
+  resolveHooksAuth,
+  writeHooksError,
+} from "./auth";
 import {
   type HookIdentity,
   coordinatorBrokerUrl,
@@ -44,7 +51,7 @@ export interface HookResult {
 
 /** Who the hook was connecting as, recorded before any connect so a refusal can be reported. */
 export interface HookTrace {
-  target?: ConnectTarget & Pick<HookIdentity, "stateDir">;
+  target?: ConnectTarget;
 }
 
 /** Returns text to inject as `additionalContext`, a structured result, or null. */
@@ -177,30 +184,46 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * A refused CONNACK: one stderr line (Claude Code shows it to the operator on exit 1) and
- * `<stateDir>/hooks-error.json` for the supervisor. Never throws.
+ * A refused CONNACK, or credentials that could not even be sent (`CredentialsError`): one
+ * stderr line (Claude Code shows it to the operator on exit 1) and `<stateDir>/hooks-error.json`
+ * for the supervisor. Never throws.
  */
-export function reportAuthFailed(event: string, trace: HookTrace, env: Env): string {
+export function reportAuthFailed(
+  event: string,
+  trace: HookTrace,
+  env: Env,
+  error?: unknown,
+): string {
   const t = trace.target;
+  const unusable = error instanceof CredentialsError ? error : null;
   let username: string | null = null;
-  try {
-    if (t !== undefined) username = resolveHooksAuth(t, env)?.username ?? null;
-  } catch {
-    // unreadable credentials cannot have been sent
-  }
-  const hint =
-    t?.mode === "coordinator"
-      ? "set VOLLEY_AUTH_*, or write $VOLLEY_AUTH_DIR/coordinator.json with `volley auth init --coordinator-file`"
-      : "run volley auth add-agent, or check the .volley/agent.json broker block / VOLLEY_AUTH_*";
-  const line = `volley-hooks ${event}: AUTH_FAILED for ${username ?? "anonymous"} at ${t?.brokerUrl ?? "the broker"} — ${hint}\n`;
-  if (t !== undefined) {
+  if (unusable === null) {
     try {
-      writeHooksError(t.stateDir, {
-        code: "AUTH_FAILED",
-        at: new Date().toISOString(),
-        hook_event: event,
-        username,
-      });
+      if (t !== undefined) username = resolveHooksAuth(t, env)?.username ?? null;
+    } catch {
+      // unreadable credentials cannot have been sent
+    }
+  }
+  const coordinator = unusable?.stateDir === undefined && t?.mode === "coordinator";
+  const hint = coordinator
+    ? "set VOLLEY_AUTH_*, or write $VOLLEY_AUTH_DIR/coordinator.json with `volley auth init --coordinator-file`"
+    : "run volley auth add-agent, or check the .volley/agent.json broker block / VOLLEY_AUTH_*";
+  const what =
+    unusable !== null
+      ? unusable.message
+      : `for ${username ?? "anonymous"} at ${t?.brokerUrl ?? "the broker"}`;
+  const line = `volley-hooks ${event}: AUTH_FAILED ${unusable !== null ? "— " : ""}${what} — ${hint}\n`;
+  const stateDir = unusable?.stateDir ?? t?.stateDir;
+  if (stateDir !== undefined) {
+    const record: HooksError = {
+      code: "AUTH_FAILED",
+      at: new Date().toISOString(),
+      hook_event: event,
+      username,
+      ...(unusable !== null ? { detail: unusable.message } : {}),
+    };
+    try {
+      writeHooksError(stateDir, record);
     } catch {
       // the stderr line still reaches the operator
     }
@@ -229,7 +252,7 @@ export async function runHook(event: string, handler: HookHandler): Promise<void
     out = await invokeHook(event, handler, await readStdin(), env, after, trace);
   } catch (e) {
     if (isAuthFailed(e)) {
-      const line = reportAuthFailed(event, trace, env);
+      const line = reportAuthFailed(event, trace, env, e);
       runAfterEmit(after, false);
       process.stderr.write(line, () => process.exit(1));
       return;

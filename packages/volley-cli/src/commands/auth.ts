@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { isValidAgentId } from "volley-mcp/topics";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -63,13 +64,6 @@ export const RESERVED_AGENT_IDS = [
 
 /** The shipped ACL; the CLI runs from source (no build step), so it is a repo-relative path. */
 const BUNDLED_ACL = new URL("../../../../examples/mosquitto-auth/acl.conf", import.meta.url);
-
-/** Where Homebrew / distro packages keep mosquitto.conf; the first that exists gets a `volley/` dir. */
-const MOSQUITTO_ETC_DIRS = [
-  "/opt/homebrew/etc/mosquitto",
-  "/usr/local/etc/mosquitto",
-  "/etc/mosquitto",
-];
 
 function run(cmd: string, args: string[]): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
@@ -258,6 +252,7 @@ export async function auth(
     }
 
     const minted: [string, string][] = [];
+    let coordinatorPassword: string | null = null;
     for (const [i, user] of FIXED_IDENTITIES.entries()) {
       const password = deps.generatePassword();
       // `-c` truncates, so only for a new file; `-b` upserts, which keeps minted agents.
@@ -271,6 +266,7 @@ export async function auth(
         return EXIT.ERROR;
       }
       minted.push([user, password]);
+      if (user === "coordinator") coordinatorPassword = password;
     }
     chmodSync(passwdFile, 0o600);
     // The coordinator's hooks read their credentials from here (never from settings.json).
@@ -279,10 +275,9 @@ export async function auth(
     const wroteCoordinator =
       parsed.values["coordinator-file"] === true || existsSync(coordinatorFile);
     if (wroteCoordinator) {
-      const password = minted.find(([user]) => user === "coordinator")?.[1] as string;
-      writeFileSync(coordinatorFile, `${JSON.stringify({ username: "coordinator", password })}\n`, {
-        mode: 0o600,
-      });
+      if (coordinatorPassword === null) throw new Error("no coordinator identity was minted");
+      const creds = { username: "coordinator", password: coordinatorPassword };
+      writeFileSync(coordinatorFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
       chmodSync(coordinatorFile, 0o600);
     }
     const owner = deps.brokerOwner();
@@ -302,6 +297,12 @@ export async function auth(
           ? [`Wrote ${coordinatorFile} (mode 0600): the coordinator's hook credentials.`]
           : []),
         ...(owner !== null ? [`Handed ${dir} to the broker's user (uid ${owner.uid}).`] : []),
+        ...(wroteCoordinator && owner !== null
+          ? [
+              `Note: ${coordinatorFile} is now readable only by root, not by your coordinator session's hooks:`,
+              "  copy it to a directory you own and point VOLLEY_AUTH_DIR at it, or set VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD.",
+            ]
+          : []),
         "",
         "Broker identities (passwords are shown ONCE; store them now):",
         ...minted.map(([user, password]) => `  ${user.padEnd(12)} ${password}`),
