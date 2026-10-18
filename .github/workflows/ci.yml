@@ -147,6 +147,12 @@ jobs:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
         run: bunx vitest run test/integration/mosquitto-auth.test.ts
+      - name: Run hooks auth + ACL integration tests
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-acl.test.ts
       - name: Broker log
         if: failure()
         run: docker logs mosquitto-auth

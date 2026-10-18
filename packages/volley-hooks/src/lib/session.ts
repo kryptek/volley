@@ -1,11 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerConnectOptions, VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import { type ConnectTarget, clearHooksError, connectOpts } from "./auth";
 import type { Env } from "./hook-io";
-import { type HookIdentity, type RegistryCandidate, registryCandidates } from "./identity";
+import {
+  type HookIdentity,
+  type RegistryCandidate,
+  coordinatorStateDir,
+  registryCandidates,
+} from "./identity";
 import { nextSeq, writeFileAtomic } from "./seq";
 
 // volley-mcp/broker pulls in mqtt; it is imported lazily so a hook with no identity
@@ -14,7 +20,6 @@ const loadBroker = () => import("volley-mcp/broker");
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
 const CONFIG_TTL_MS = 60_000;
-const CONNECT_TIMEOUT_MS = 3000;
 
 export interface SessionDeps {
   /** Injectable for tests. */
@@ -31,10 +36,21 @@ export function mqttVersion(env: Env): 4 | 5 {
   return env.VOLLEY_HOOKS_MQTT_VERSION === "4" ? 4 : 5;
 }
 
-async function connectClean(url: string, agentId: string): Promise<VolleyBroker> {
-  const broker = new (await loadBroker()).VolleyBroker();
-  await broker.connect({ url, agentId, connectTimeoutMs: CONNECT_TIMEOUT_MS });
-  return broker;
+/**
+ * Every broker connection the hooks open goes through here: credentials resolved for `target`
+ * (auth.ts), and a successful connect clears `<stateDir>/hooks-error.json`. A refused CONNACK
+ * rejects with `VolleyError` `AUTH_FAILED` (runHook makes it loud).
+ */
+export async function connectBroker(
+  target: ConnectTarget,
+  env: Env,
+  extra: Partial<BrokerConnectOptions> = {},
+  broker?: VolleyBroker,
+): Promise<VolleyBroker> {
+  const b = broker ?? new (await loadBroker()).VolleyBroker();
+  await b.connect(connectOpts(target, env, extra));
+  clearHooksError(target.stateDir);
+  return b;
 }
 
 /**
@@ -42,8 +58,19 @@ async function connectClean(url: string, agentId: string): Promise<VolleyBroker>
  * first, each with its retained status type. The registry is read until it goes quiet
  * (not for a fixed total), so a large or remote registry is read in full.
  */
-export async function lookupRegistry(brokerUrl: string, dir: string): Promise<RegistryCandidate[]> {
-  const broker = await connectClean(brokerUrl, "volley-hooks");
+export async function lookupRegistry(
+  brokerUrl: string,
+  dir: string,
+  env: Env,
+): Promise<RegistryCandidate[]> {
+  const target = {
+    mode: "coordinator" as const,
+    projectDir: dir,
+    brokerUrl,
+    agentId: "volley-hooks",
+    stateDir: coordinatorStateDir(dir, env),
+  };
+  const broker = await connectBroker(target, env);
   try {
     const records = await broker.drainQueued("volley/_system/registry/+", {
       idleMs: 150,
@@ -96,7 +123,7 @@ export async function resolveSessionExpiry(
     }
   }
   if (!cached) {
-    const broker = await connectClean(identity.brokerUrl, identity.agentId);
+    const broker = await connectBroker(identity, env);
     try {
       const raw = await broker.queryRetained(CONFIG_TOPIC, 300);
       const payload = raw === null ? null : parseEnvelope(raw)?.payload;
@@ -128,17 +155,17 @@ export async function connectDrain(
   deps: SessionDeps = {},
 ): Promise<VolleyBroker> {
   const sessionExpirySeconds = await resolveSessionExpiry(identity, env);
-  const broker = deps.createBroker?.() ?? new (await loadBroker()).VolleyBroker();
-  await broker.connect({
-    url: identity.brokerUrl,
-    agentId: identity.agentId,
-    clientId: hooksClientId(identity.agentId),
-    cleanSession: false,
-    sessionExpirySeconds,
-    protocolVersion: mqttVersion(env),
-    connectTimeoutMs: CONNECT_TIMEOUT_MS,
-  });
-  return broker;
+  return connectBroker(
+    identity,
+    env,
+    {
+      clientId: hooksClientId(identity.agentId),
+      cleanSession: false,
+      sessionExpirySeconds,
+      protocolVersion: mqttVersion(env),
+    },
+    deps.createBroker?.(),
+  );
 }
 
 export type ActivityState = "working" | "idle" | "awaiting_input";
@@ -340,10 +367,10 @@ export class HookSession {
 }
 
 /** A clean (non-persistent) session for hooks that do not drain. */
-export async function openSession(identity: HookIdentity, hookEvent: string): Promise<HookSession> {
-  return new HookSession(
-    identity,
-    await connectClean(identity.brokerUrl, identity.agentId),
-    hookEvent,
-  );
+export async function openSession(
+  identity: HookIdentity,
+  hookEvent: string,
+  env: Env,
+): Promise<HookSession> {
+  return new HookSession(identity, await connectBroker(identity, env), hookEvent);
 }

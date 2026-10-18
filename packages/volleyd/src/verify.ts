@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
@@ -13,8 +14,9 @@ import { type ScreenClass, classifyScreen, modelFromScreen } from "./screens";
  *     re-publish; the MCP server's own auto-registration carries no model_source).
  *
  * Expected sequence: MCP auto-registration (no model) → hooks registry re-publish (+ model) →
- * status flipped to `working` → SessionStart heartbeat. Only if that does not arrive in time is
- * the terminal's screen read and classified (screens.ts).
+ * status flipped to `working` → SessionStart heartbeat. If that does not arrive in time, the hooks'
+ * own error file is consulted first (a broker that refused their credentials is not a screen
+ * problem); only then is the terminal's screen read and classified (screens.ts).
  */
 
 /** Model sources that prove the SessionStart hook ran. */
@@ -162,7 +164,9 @@ export type VerifyResult =
       /** Whether the screen was read (only for the `unknown` model fallback). */
       screen_read: boolean;
     }
-  | { kind: "timeout"; screen: string | null; screen_class: ScreenClass };
+  | { kind: "timeout"; screen: string | null; screen_class: ScreenClass }
+  /** The broker refused the hooks' CONNECT (`<worktree>/.volley/hooks-error.json`). */
+  | { kind: "hooks_auth_failed"; username: string | null; hook_event: string; at: string };
 
 export interface VerifyInput {
   watch: AgentWatch;
@@ -171,6 +175,34 @@ export interface VerifyInput {
   expectedModel: string;
   timeoutMs: number;
   screenLines: number;
+  /**
+   * `<worktree>/.volley/hooks-error.json`, when the worktree is on this host (volley-hooks writes
+   * it on AUTH_FAILED and clears it on the next successful connect).
+   */
+  hooksErrorPath?: string;
+  /** Epoch ms of the launch: an older error file is left over from an earlier session. */
+  launchedAt?: number;
+}
+
+/** The hooks' AUTH_FAILED record at `path`, if it is there and from this launch. */
+export function readHooksError(
+  path: string,
+  since = 0,
+): { username: string | null; hook_event: string; at: string } | null {
+  let e: { code?: unknown; at?: unknown; hook_event?: unknown; username?: unknown };
+  try {
+    e = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (e?.code !== "AUTH_FAILED" || typeof e.at !== "string") return null;
+  const at = Date.parse(e.at);
+  if (Number.isNaN(at) || at < since) return null;
+  return {
+    username: typeof e.username === "string" ? e.username : null,
+    hook_event: typeof e.hook_event === "string" ? e.hook_event : "",
+    at: e.at,
+  };
 }
 
 /**
@@ -180,6 +212,9 @@ export interface VerifyInput {
 export async function verifyRegistration(v: VerifyInput): Promise<VerifyResult> {
   const ok = await v.watch.waitFor(hookSignalsArrived, v.timeoutMs);
   if (!ok) {
+    const refused =
+      v.hooksErrorPath !== undefined ? readHooksError(v.hooksErrorPath, v.launchedAt) : null;
+    if (refused !== null) return { kind: "hooks_auth_failed", ...refused };
     const screen = await v.host.readScreen(v.workspace, v.screenLines);
     return { kind: "timeout", screen, screen_class: classifyScreen(screen) };
   }

@@ -24,7 +24,6 @@ const CONFIG_TOPIC = "volley/_waves/_config";
 /** Pool definitions are cached this long, so a pool change reaches the hook within a minute. */
 const POOLS_TTL_MS = 60_000;
 const READ_MS = 300;
-const CONNECT_TIMEOUT_MS = 3000;
 
 /** A command already running under the lease wrapper (ours, or one the agent typed). */
 const WRAPPED = /(^|[\s'"/])(volley|cli\.ts['"]?)\s+lease\s+run\s/;
@@ -97,14 +96,9 @@ async function lookupPools(ctx: HookContext): Promise<Pools> {
   } catch {
     // no usable cache
   }
-  const { VolleyBroker } = await import("volley-mcp/broker");
-  const broker = new VolleyBroker();
+  const { connectBroker } = await import("../lib/session");
   let pools: Pools = {};
-  await broker.connect({
-    url: ctx.identity.brokerUrl,
-    agentId: ctx.identity.agentId,
-    connectTimeoutMs: CONNECT_TIMEOUT_MS,
-  });
+  const broker = await connectBroker(ctx.identity, ctx.env);
   try {
     const raw = await broker.queryRetained(CONFIG_TOPIC, READ_MS);
     const payload = raw === null ? null : parseEnvelope(raw)?.payload;

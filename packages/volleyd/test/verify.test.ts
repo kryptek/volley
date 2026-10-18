@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -329,6 +329,38 @@ describe("verify through hook signals (Aedes)", () => {
     expect(d?.data).toMatchObject({ kind: "unknown_screen", screen_class: "login" });
     const pointer = (d?.data.pointers as { screen?: string }).screen as string;
     expect(readFileSync(pointer, "utf-8")).toBe(screen("login.txt"));
+  });
+
+  /** What volley-hooks writes when the broker refuses its CONNECT (runHook's AUTH_FAILED path). */
+  const writeHooksError = (at: string, username: string | null) =>
+    writeFileSync(
+      join(env.worktree, ".volley", "hooks-error.json"),
+      `${JSON.stringify({ code: "AUTH_FAILED", at, hook_event: "SessionStart", username })}\n`,
+    );
+
+  it("hooks-error.json at the timeout → hooks_auth_failed decision with the username, no screen read", async () => {
+    const out = await spawnWith(
+      async () => writeHooksError(new Date().toISOString(), "w1-t1-implementer-1"),
+      [screen("working.txt")],
+    );
+    expect(out).toMatchObject({ kind: "decision", decision: "hooks_auth_failed" });
+    expect(env.host.screenReads).toEqual([]);
+    const d = env.events.find((e) => e.type === "decision_opened");
+    expect(d?.data).toMatchObject({
+      kind: "hooks_auth_failed",
+      agent_id: "w1-t1-implementer-1",
+      username: "w1-t1-implementer-1",
+    });
+    expect(d?.data.question).toContain("AUTH_FAILED");
+    expect(types()).not.toContain("agent_registered");
+  });
+
+  it("a hooks-error.json older than the launch is stale: the screen is classified as before", async () => {
+    const out = await spawnWith(
+      async () => writeHooksError(new Date(Date.now() - 3_600_000).toISOString(), "old-user"),
+      [screen("login.txt")],
+    );
+    expect(out).toMatchObject({ kind: "decision", decision: "unknown_screen" });
   });
 });
 

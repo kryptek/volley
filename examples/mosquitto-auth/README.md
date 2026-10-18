@@ -93,6 +93,7 @@ in as `coordinator`. Treat the coordinator password as operator-level.
 | `volley-mcp` (coordinator session) | `VOLLEY_AUTH_USERNAME=coordinator`, `VOLLEY_AUTH_PASSWORD=…` in the MCP registration's `env` block |
 | the coordinator's **shell** (`volley wait` / `volley sub` in `/volley-issues` and `/wait`, `mosquitto_pub` cleanup) | the same two variables exported in your shell profile: the MCP `env` block reaches only the MCP server, not the session's Bash tool. Use `mosquitto_pub -u "$VOLLEY_AUTH_USERNAME" -P "$VOLLEY_AUTH_PASSWORD" …` |
 | GitHub Actions bridge (`examples/bridges/github-actions/`) | `VOLLEY_AUTH_*` from repo secrets |
+| volley-hooks in a coordinator session | `VOLLEY_AUTH_*`, else `$VOLLEY_AUTH_DIR/coordinator.json` written by `volley auth init --coordinator-file`, so `settings.json` holds no password |
 | `volley-mcp` / hooks in a dispatched agent | the `broker` block of `.volley/agent.json` in the agent's cwd (beats `VOLLEY_AUTH_*`), so the agent needs no env |
 | `volley` CLI | `--username/--password`, then `.volley/agent.json` `broker`, then `VOLLEY_AUTH_*` |
 | `volley dash` | sign-in form on first load (stored in the browser's localStorage) |
