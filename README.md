@@ -333,6 +333,7 @@ spec/                     The protocol — wire format, conformance, error codes
 packages/volley-mcp/      Reference MCP server. The seven vol_* tools.
 packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` and `volley notify` subcommands.
 packages/volley-dash/     Browser dashboard (Vite + React + Tailwind + shadcn/ui + GSAP). Subscribes via WebSocket; no backend.
+packages/volley-desk/     The Desk: infinite canvas of live wave and agent windows (Vite + React 19 + React Bits). In progress; `?demo=1` runs it on sample data.
 packages/volley-skill/    The /volley Claude Code slash command.
 packages/volley-wait/     The /wait Claude Code slash command (event-driven block on a topic).
 packages/volley-issues/   The /volley-issues dispatch skill.
