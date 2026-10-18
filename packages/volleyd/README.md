@@ -11,11 +11,11 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: foundation (pre-release).** This package has the wave file, journal, reducer,
-> scheduler, fence, config store, daemon skeleton, CLI and launchd service. Spawning agents,
-> leases and pressure-based admission, the pipeline stages, decisions and recovery come in later
-> tasks of the volleyd epic. Until then a submitted wave is journaled and its first tasks are
-> *admitted*, but nothing is spawned: tasks stay `queued` with `why_waiting: "admitted: awaiting spawn"`.
+> **Status: pre-release.** This package has the wave file, journal, reducer, scheduler, fence,
+> config store, daemon, CLI and launchd service, heavy-operation leases and load-aware spawn
+> admission. Spawning agents, the pipeline stages, decisions and recovery come in later tasks of
+> the volleyd epic. Until then a submitted wave is journaled and its first tasks are *admitted*,
+> but nothing is spawned: tasks stay `queued` with `why_waiting: "admitted: awaiting spawn"`.
 
 ---
 
@@ -25,6 +25,8 @@ coordinator session.
 - [The wave file](#the-wave-file)
 - [CLI](#cli)
 - [How it works](#how-it-works)
+- [Leases](#leases)
+- [Spawn admission](#spawn-admission)
 - [Topics and the control channel](#topics-and-the-control-channel)
 - [Configuration](#configuration)
 - [The authority fence](#the-authority-fence)
@@ -105,10 +107,12 @@ config.hard_ceiling: must be <= 100
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
+| `volleyd admission [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts. |
 
 Commands that talk to the daemon fail fast with `volleyd not running` (exit 1, within ~1 s) when
 the daemon's retained status is missing or terminal. `events`/`ack` read `$VOLLEYD_HOME` directly
-and work while the daemon is down; use the wave `_system` for global events (`config_changed`).
+and work while the daemon is down; use the wave `_system` for global events (`config_changed`,
+`lease_*`).
 
 ---
 
@@ -148,6 +152,61 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 
 ---
 
+## Leases
+
+A bare concurrency cap is the wrong tool: six agents editing files is fine, six running
+integration suites with containers is not. Heavy commands therefore take a lease from a
+machine-global **pool** (`lease_pools` in the config: `capacity`, optional `ttl_s`, and the
+`match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to wrap matching Bash
+commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+
+- **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
+  SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
+  lease already held or queued is a no-op; `release` of a queued request cancels it.
+- **Grants** are FIFO, never past the pool's *current* capacity. The pool state is re-published
+  retained after every request, with `reasons` such as `queued: 3/3 backend-it leases held`.
+- **A lease ends** on release, on TTL expiry (`ttl_s` of the request, else the pool's, else
+  1 hour; `renew` restarts it — `volley lease run` renews at half the TTL), or when the holder's
+  retained `status` turns `reaped`, `done` or `failed`.
+- **Hot config, never preempt**: a capacity increase grants queued requests on the next tick; a
+  decrease stops granting until holders release; a removed pool keeps its holders, reports
+  capacity 0 with `pool <p> removed from config: new requests rejected`, rejects new acquires and
+  disappears when its last holder releases. Pools are machine-global, so capacity always comes
+  from the global config; a wave's `config.lease_pools.<pool>.ttl_s` override applies to leases its
+  own agents take.
+- **Durable**: every grant/release/expiry is journaled as `lease_requested`, `lease_granted`,
+  `lease_released` or `lease_expired` in the `_system` journal (mirrored on
+  `volley/_waves/_system/events`); a restart replays it, so held leases survive. Requests sent
+  while the daemon is down wait in its persistent session.
+
+## Spawn admission
+
+Every tick (10 s) the daemon samples machine pressure through the fence (`src/pressure/*`) and
+computes a pure verdict (`src/admission.ts`, `decide(samples, state, config) → { allow, reasons }`)
+that the scheduler applies on top of the hard ceiling and spawn budget:
+
+| Signal | Measured by | Over when (`admission.*`) |
+|---|---|---|
+| `memory_pressure` | `sysctl -n kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical); `memory_pressure`'s free percentage as fallback | level > `memory_pressure_max_level` |
+| `cmux_ping` | wall time of `cmux ping` (a ping that hangs counts as the time waited) | ms > `cmux_ping_max_ms` |
+| `containers` | `docker info --format {{json .}}` → `ContainersRunning` | > `container_max` |
+| `api_overload` | agents' progress (via the hooks): `awaiting_input` with `quota_auto_resume_*`, `idle` text matching `overloaded\|rate limit\|usage limit` | count in the last `api_overload_window_s` > `api_overload_max` |
+| `ci_queue` | `gh api repos/{owner}/{repo}/actions/runs?status=queued` in the wave's repo → `total_count` | > `ci_queue_max` |
+
+- **Throttle starts only**: an over signal sets `allow` to 0; nothing running is touched.
+- **Hysteresis**: after a breach a signal must be clear for `hysteresis_samples` consecutive
+  samples (`recovering: cmux ping clear for 1/3 samples`) before the allowance rises again.
+- **Unknown never throttles**: a tool that is missing (Linux has no memory-pressure sysctl, no
+  cmux, docker or gh) makes its signal `unknown`.
+- **Reasons everywhere**: the verdict's reasons become `why_waiting` on the wave's ready tasks
+  (`memory pressure critical (level 4 > max 2)`), joined by the ceiling/budget reasons, and are
+  published retained on `volley/_system/admission` (`spec/schemas/admission.schema.json`) with
+  every signal's value and threshold. `volleyd admission` prints it.
+- **Hot**: thresholds are read from the config store per wave (`config:` overrides apply); a
+  `config_set` re-decides the last sample with the new thresholds immediately.
+
+---
+
 ## Topics and the control channel
 
 | Topic | Retained | What |
@@ -157,6 +216,9 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 | `volley/_waves/<wave>/state` | yes | Full `wave_state` snapshot (with `effective_config`), after every change. |
 | `volley/_waves/<wave>/events` | no | Live mirror of each journal event. The journal is the record. |
 | `volley/_waves/_config` | yes | Effective global config + `version` / `updated_at` / `updated_by`. |
+| `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `held`, FIFO `queue`, `reasons`. |
+| `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
+| `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -177,6 +239,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `status` | `wave?` | one wave state, or `{ waves: [...] }` |
 | `config_get` | `path?`, `wave?` | the value (the full retained payload when neither is given) |
 | `config_set` | `patch`, `by` (SPEC §4.6.4) | `{ version }`, plus `applied` / `rejected: [{ path, reason }]` |
+| `admission` | — | the retained admission summary (null before the first sample) |
 
 Later tasks add `pause`, `resume`, `stop`, `steer`, `resolve` and `claim`.
 
@@ -211,8 +274,10 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
 
-This foundation consumes `hard_ceiling` and `spawn_budget_multiplier`; the other rows describe
-the contract the subsystems that read them (leases, monitors, decisions, spawning) follow.
+The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
+`lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
+that read them (monitors, decisions, spawning) follow. [`config.example.yaml`](config.example.yaml)
+lists every key with its default and example pools, commented out.
 
 ---
 
@@ -243,6 +308,8 @@ ALLOW (program by bare name only — never a path):
   claude (any arguments)
   launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
+  pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
+    memory_pressure (no arguments: report only) · docker info --format {{json .}}
 
 OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
 GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,

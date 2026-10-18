@@ -6,7 +6,7 @@
 
 A small, fast CLI that lets shell scripts, cron jobs, CI runners, and any non-LLM process participate in Volley's coordination protocol — alongside Claude Code, Codex, and other MCP-driven agents.
 
-If you can write a bash one-liner, you can be a Volley agent. The seven subcommands cover everything: announce a status, watch for terminal states, subscribe to a stream, list who's around, launch a dashboard, surface agent transitions as system notifications, and manage broker credentials.
+If you can write a bash one-liner, you can be a Volley agent. The eight subcommands cover everything: announce a status, watch for terminal states, subscribe to a stream, list who's around, launch a dashboard, surface agent transitions as system notifications, manage broker credentials, and wait for a heavy-operation lease.
 
 ---
 
@@ -17,6 +17,7 @@ If you can write a bash one-liner, you can be a Volley agent. The seven subcomma
 - [`volley dash`](#volley-dash)
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
+- [`volley lease`](#volley-lease)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -55,6 +56,7 @@ volley --help
 | `volley dash`   | Launch the browser dashboard (Vite dev server). See [`volley dash`](#volley-dash) below. |
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
 | `volley auth`   | Manage the broker's password file: `init` the fixed identities, mint/revoke per-agent credentials. See [`volley auth`](#volley-auth) below. |
+| `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 
 Each has its own `--help`:
 
@@ -141,6 +143,38 @@ volley auth rm-agent w1-t1-implementer-1  # revoke on retire (succeeds if alread
 - `mosquitto_passwd` receives each generated password on its command line, so it is briefly visible in `ps` while that child runs.
 
 Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/volley`, e.g. `/opt/homebrew/etc/mosquitto/volley`). `init` refuses to overwrite an existing `passwd` without `--force` (which rotates every fixed identity). `--no-reload` skips the signal; the reload goes to every `mosquitto` process you own, so a root-owned systemd broker needs `sudo systemctl reload mosquitto` (the command warns when it cannot signal).
+
+---
+
+## `volley lease`
+
+Heavy operations (integration-test suites, builds, browsers) share machine-global **lease pools**
+that `volleyd` hands out FIFO up to each pool's capacity (SPEC §4.6.5; pools are the daemon's
+`lease_pools` config). Wrap a command and it waits its turn:
+
+```sh
+volley lease run --pool backend-it -- mvn -q verify
+# volley lease: queued for a backend-it lease (queued: 3/3 backend-it leases held)
+# volley lease: backend-it lease granted after 42 s
+# ...mvn output...                   exit code = mvn's; the lease is released on exit or SIGINT/SIGTERM
+
+volley lease acquire --pool build --lease-id nightly-1     # {"pool":"build","lease_id":"nightly-1","holder":"lease-x1y2z3","waited_s":0}
+volley lease release --pool build --lease-id nightly-1 --holder lease-x1y2z3
+volley lease status                                        # every pool: holders, queue, reasons
+```
+
+- **Holder** = `--holder`, else the `agent_id` in `<--project-dir or cwd>/.volley/agent.json`, else a
+  random `lease-xxxxxx` (`acquire` prints it so `release` can name it). The supervisor only accepts
+  requests whose holder is the sender, and frees a holder's leases when its `status` turns
+  `reaped`/`done`/`failed`.
+- `run` renews the lease at half its TTL while the command runs, and forwards SIGINT/SIGTERM to it.
+  A signal during the wait cancels the queued request (exit `128 + signal`); `--timeout <s>` gives
+  up with `124`.
+- **`run` fails open**: with the broker unreachable, no live `volleyd`, or a pool that is not
+  configured, it warns on stderr and runs the command unleased — a lease is a courtesy to the
+  machine, never a reason an agent's build cannot run. `acquire` fails (exit `1`) instead.
+- The [volley-hooks](../volley-hooks/README.md) PreToolUse lease hook wraps matching `Bash`
+  commands in `volley lease run` automatically.
 
 ---
 

@@ -54,4 +54,14 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** TTL of a lease whose request names none, in a pool that sets none. */
+  lease_default_ttl_s: 3600,
+  /** Kill a pressure sampler (sysctl, docker, gh) after this long; its signal is then unknown. */
+  sampler_timeout_ms: 5_000,
+  /**
+   * `memory_pressure` fallback (no sysctl level): free percentage at or below which the level is
+   * 4 (critical) or 2 (warn). Heuristic thresholds, not tunables.
+   */
+  memory_free_critical_pct: 10,
+  memory_free_warn_pct: 20,
 } as const;

@@ -15,6 +15,7 @@ Commands:
   events      Print journal events after a named cursor
   ack         Advance a named journal cursor
   config      Get or set supervisor config (volleyd config get|set)
+  admission   Show the spawn admission verdict and its reasons
 
 Global flags (daemon/install/run/status/config):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -37,6 +38,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   events: async () => (await import("./commands/events")).events,
   ack: async () => (await import("./commands/ack")).ack,
   config: async () => (await import("./commands/config")).config,
+  admission: async () => (await import("./commands/admission")).admission,
 };
 
 export async function main(args: CommandArgs): Promise<ExitCode> {

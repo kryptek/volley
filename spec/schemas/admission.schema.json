@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/admission.schema.json",
+  "title": "Volley Spawn Admission Summary",
+  "description": "Retained load-aware spawn admission verdict, published by a supervisor to volley/_system/admission after every pressure sample. See spec section 4.6.7.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/admission" },
+        "type": { "const": "admission" },
+        "payload": {
+          "type": "object",
+          "required": ["sampled_at", "allow", "throttled", "reasons", "signals"],
+          "properties": {
+            "sampled_at": { "type": "string", "format": "date-time" },
+            "allow": {
+              "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }],
+              "description": "How many more agents pressure allows to start now; null means pressure sets no limit (the hard ceiling and spawn budget still apply)."
+            },
+            "throttled": { "type": "boolean", "description": "True when allow is 0." },
+            "reasons": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Why starts are throttled, one human-readable line per signal (e.g. 'memory pressure critical (level 4 > max 2)'). Empty when not throttled."
+            },
+            "signals": {
+              "type": "object",
+              "propertyNames": {
+                "enum": ["memory_pressure", "cmux_ping", "containers", "api_overload", "ci_queue"]
+              },
+              "additionalProperties": { "$ref": "#/$defs/signal" }
+            },
+            "waves": {
+              "type": "object",
+              "description": "Per-wave verdicts (a wave's config: overrides and its repo's CI queue apply), keyed by wave id.",
+              "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+              "additionalProperties": {
+                "type": "object",
+                "required": ["allow", "reasons"],
+                "properties": {
+                  "allow": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+                  "reasons": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "signal": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "enum": ["clear", "over", "recovering", "unknown"],
+          "description": "over: past its threshold now; recovering: clear, but not yet for hysteresis_samples consecutive samples; unknown: could not be measured (never throttles)."
+        },
+        "value": { "type": "number", "description": "The measured value (level, ms, count)." },
+        "max": {
+          "type": "number",
+          "description": "The configured threshold the value is compared with."
+        },
+        "clean_samples": { "type": "integer", "minimum": 0 },
+        "error": { "type": "string", "maxLength": 500, "description": "Why the signal is unknown." }
+      }
+    }
+  }
+}

@@ -20,9 +20,12 @@ export const DAEMON_AGENT_ID = "volleyd";
 export const CONFIG_TOPIC = "volley/_waves/_config";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
+export const ADMISSION_TOPIC = "volley/_system/admission";
+export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
+export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 
 /** Ops handled in this release; later tasks add pause/resume/stop/steer/resolve/claim. */
-export type ControlOp = "run" | "status" | "config_get" | "config_set";
+export type ControlOp = "run" | "status" | "config_get" | "config_set" | "admission";
 
 export interface ControlResponse {
   text: string;

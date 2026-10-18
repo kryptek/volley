@@ -20,6 +20,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
 | `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
+| `admission.schema.json` | `_system/admission` | section 4.6.7 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
 
 ## Validating a payload
