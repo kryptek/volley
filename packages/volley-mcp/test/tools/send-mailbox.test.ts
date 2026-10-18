@@ -4,6 +4,8 @@ import type { ServerState } from "../../src/state";
 import { volSendMailbox } from "../../src/tools/send-mailbox";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 describe("vol_send_mailbox", () => {
   let tb: TestBroker;
   let sender: ServerState;
@@ -76,5 +78,125 @@ describe("vol_send_mailbox", () => {
         payload: { text: "x" },
       }),
     ).rejects.toMatchObject({ code: "INVALID_AGENT_ID" });
+  });
+  it("embeds a fresh correlation_id in the envelope and returns it as message_id", async () => {
+    sender.registered = true;
+    const collecting = sender.broker.subscribeCollect("volley/test/worker-cccc/mailbox", 1, 3000);
+    await new Promise((r) => setTimeout(r, 100));
+    const res = await volSendMailbox(sender, {
+      to_agent_id: "worker-cccc",
+      type: "steering",
+      payload: { text: "rebase first", seq: 7, supersedes: "22222222-2222-4222-8222-222222222222" },
+    });
+    const [msg] = await collecting;
+    const env = JSON.parse(msg?.payload ?? "{}");
+    expect(res.message_id).toMatch(UUID);
+    expect(env.correlation_id).toBe(res.message_id);
+    expect(env.payload.seq).toBe(7);
+    expect(env.payload.supersedes).toBe("22222222-2222-4222-8222-222222222222");
+    expect(res).not.toHaveProperty("acked");
+  });
+
+  it("preserves a caller-supplied correlation_id and returns it as message_id", async () => {
+    sender.registered = true;
+    const collecting = sender.broker.subscribeCollect("volley/test/worker-cccc/mailbox", 1, 3000);
+    await new Promise((r) => setTimeout(r, 100));
+    const res = await volSendMailbox(sender, {
+      to_agent_id: "worker-cccc",
+      type: "query",
+      payload: { text: "status?" },
+      correlation_id: "33333333-3333-4333-8333-333333333333",
+    });
+    const [msg] = await collecting;
+    expect(JSON.parse(msg?.payload ?? "{}").correlation_id).toBe(
+      "33333333-3333-4333-8333-333333333333",
+    );
+    expect(res.message_id).toBe("33333333-3333-4333-8333-333333333333");
+  });
+
+  it("with wait_ack_ms, resolves acked:true + acked_by when the recipient acks the message id", async () => {
+    sender.registered = true;
+    const recipient = await startLifecycle({
+      brokerUrl: tb.url,
+      namespace: "test",
+      agentId: "worker-dddd",
+      parentId: null,
+    });
+    recipient.registered = true;
+    // Simulated recipient: ack whatever steering message lands in its mailbox.
+    const acking = recipient.broker
+      .subscribeUntil("volley/test/worker-dddd/mailbox", () => true, 3000)
+      .then(async (msg) => {
+        const env = JSON.parse(msg?.payload ?? "{}");
+        await volSendMailbox(recipient, {
+          to_agent_id: env.agent_id,
+          type: "ack",
+          payload: { text: "ACKED", acked_type: env.type },
+          correlation_id: env.correlation_id,
+        });
+      });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const res = await volSendMailbox(sender, {
+      to_agent_id: "worker-dddd",
+      type: "steering",
+      payload: { text: "stop after the current test" },
+      wait_ack_ms: 500,
+    });
+    await acking;
+    expect(res).toMatchObject({ delivered: true, acked: true, acked_by: "worker-dddd" });
+
+    await recipient.broker.disconnect();
+  });
+
+  it("with wait_ack_ms and no ack, resolves acked:false after the wait", async () => {
+    sender.registered = true;
+    const t0 = Date.now();
+    const res = await volSendMailbox(sender, {
+      to_agent_id: "worker-eeee",
+      type: "steering",
+      payload: { text: "anyone home?" },
+      wait_ack_ms: 500,
+    });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(450);
+    expect(res.acked).toBe(false);
+    expect(res).not.toHaveProperty("acked_by");
+  });
+
+  it("ignores an ack for a different message id", async () => {
+    sender.registered = true;
+    const waiting = volSendMailbox(sender, {
+      to_agent_id: "worker-ffff",
+      type: "steering",
+      payload: { text: "x" },
+      wait_ack_ms: 500,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const other = await startLifecycle({
+      brokerUrl: tb.url,
+      namespace: "test",
+      agentId: "worker-ffff",
+      parentId: null,
+    });
+    other.registered = true;
+    await volSendMailbox(other, {
+      to_agent_id: "coordinator-aaaa",
+      type: "ack",
+      payload: { text: "ACKED", acked_type: "steering" },
+      correlation_id: "44444444-4444-4444-8444-444444444444",
+    });
+    expect((await waiting).acked).toBe(false);
+    await other.broker.disconnect();
+  });
+
+  it("rejects an ack without a correlation_id (it has nothing to acknowledge)", async () => {
+    sender.registered = true;
+    await expect(
+      volSendMailbox(sender, {
+        to_agent_id: "worker-bbbb",
+        type: "ack",
+        payload: { text: "ACKED", acked_type: "steering" },
+      }),
+    ).rejects.toMatchObject({ code: "IMPL_CORRELATION_ID_REQUIRED" });
   });
 });

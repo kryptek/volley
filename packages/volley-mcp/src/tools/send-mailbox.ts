@@ -1,21 +1,36 @@
 import { randomUUID } from "node:crypto";
-import { buildEnvelope } from "../envelope";
+import { buildEnvelope, parseEnvelope } from "../envelope";
 import { VolleyError } from "../errors";
 import type { ServerState } from "../state";
 import { buildTopic, isValidAgentId } from "../topics";
 
 export interface SendMailboxInput {
   to_agent_id: string;
-  type: "steering" | "cancel" | "nudge" | "query";
-  payload: { text: string; [k: string]: unknown };
+  type: "steering" | "cancel" | "nudge" | "query" | "ack";
+  payload: {
+    text: string;
+    /** Monotonic per sender, so a recipient can order and de-duplicate (SPEC §4.4). */
+    seq?: number;
+    /** Message id (correlation_id) of an earlier message this one replaces. */
+    supersedes?: string;
+    [k: string]: unknown;
+  };
+  /** Becomes the message id. Generated when omitted; required for `ack` (the id being acked). */
   correlation_id?: string | null;
+  /** Wait this long after publishing for the recipient's `ack` of this message id. */
+  wait_ack_ms?: number;
 }
 
 export interface SendMailboxResult {
+  /** The envelope's `correlation_id` — the id a recipient references in its `ack`. */
   message_id: string;
   /** True when the broker acknowledged receipt (PUBACK). Does not mean the recipient
    *  has processed the message — QoS 1 delivers to the broker, not to the subscriber. */
   delivered: boolean;
+  /** Present only when `wait_ack_ms` was given: whether an `ack` arrived within the wait. */
+  acked?: boolean;
+  /** The `agent_id` of the acking envelope, when `acked` is true. */
+  acked_by?: string;
 }
 
 /**
@@ -36,6 +51,14 @@ export async function volSendMailbox(
       `to_agent_id "${input.to_agent_id}" does not match the agent id grammar`,
     );
   }
+  if (input.type === "ack" && (input.correlation_id ?? null) === null) {
+    throw new VolleyError(
+      "IMPL_CORRELATION_ID_REQUIRED",
+      "an ack must carry the correlation_id of the message it acknowledges",
+    );
+  }
+  // The id goes into the envelope BEFORE publishing so the recipient can ack it.
+  const messageId = input.correlation_id ?? randomUUID();
   const topic = buildTopic(state.config.namespace, input.to_agent_id, "mailbox");
   const envelope = buildEnvelope({
     agentId: state.config.agentId,
@@ -43,9 +66,32 @@ export async function volSendMailbox(
     channel: "mailbox",
     type: input.type,
     payload: input.payload,
-    correlationId: input.correlation_id ?? null,
+    correlationId: messageId,
   });
-  // mailbox is QoS 1, not retained (SPEC.md §4.1). publishAsync resolves on PUBACK.
-  await state.broker.publish(topic, JSON.stringify(envelope), { qos: 1, retain: false });
-  return { message_id: randomUUID(), delivered: true };
+  // Subscribe to our own mailbox before publishing, so an ack that races back cannot
+  // land before the subscription exists (MQTT orders SUBSCRIBE ahead of PUBLISH).
+  const ackWait =
+    input.wait_ack_ms === undefined
+      ? null
+      : state.broker.subscribeUntil(
+          buildTopic(state.config.namespace, state.config.agentId, "mailbox"),
+          (raw) => {
+            const env = parseEnvelope(raw);
+            return env?.type === "ack" && env.correlation_id === messageId;
+          },
+          input.wait_ack_ms,
+        );
+  try {
+    // mailbox is QoS 1, not retained (SPEC.md §4.1). publishAsync resolves on PUBACK.
+    await state.broker.publish(topic, JSON.stringify(envelope), { qos: 1, retain: false });
+  } catch (e) {
+    ackWait?.catch(() => {});
+    throw e;
+  }
+  if (ackWait === null) return { message_id: messageId, delivered: true };
+  const ack = await ackWait;
+  const ackedBy = ack === null ? undefined : parseEnvelope(ack.payload)?.agent_id;
+  return ackedBy === undefined
+    ? { message_id: messageId, delivered: true, acked: false }
+    : { message_id: messageId, delivered: true, acked: true, acked_by: ackedBy };
 }
