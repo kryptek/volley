@@ -23,9 +23,11 @@ import {
   type Envelope,
   type LeasePoolPayload,
   ROLES,
+  type Receipts,
   type RegistryPayload,
   type Role,
   type ScreenPayload,
+  type SteeringReceipts,
   type WaveStatePayload,
   type WaveView,
 } from "./types";
@@ -93,8 +95,10 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
   switch (route.kind) {
     case "registry":
       return withCoordinators(reduceRegistry(state, route.agentId, m));
-    case "agent":
-      return withCoordinators(reduceAgent(state, route, m));
+    case "agent": {
+      const s = withReceipts(state, route, m);
+      return ownsNoAgent(s, route, m) ? s : withCoordinators(reduceAgent(s, route, m));
+    }
     case "wave":
       return withCoordinators(reduceWave(state, route.wave, m));
     case "decision":
@@ -330,6 +334,78 @@ function reduceAgent(
     next.attention = null;
   }
   return putAgent(state, next);
+}
+
+// ---------------------------------------------------------------- receipts
+
+/** Message ids kept per receipt kind; the oldest are dropped first. */
+export const RECEIPT_LIMIT = 500;
+
+type AgentRoute = Extract<Route, { kind: "agent" }>;
+
+/**
+ * Delivery receipts (D4): a mailbox `ack` (SPEC §4.4) or any other mailbox
+ * message correlated to an earlier one (a reply), both only on the Desk's own
+ * mailbox (answers go to the sender's mailbox) and never the Desk's own echo;
+ * and a `progress` `steering_acked` (§4.3) on the recipient's own topic. Each
+ * is keyed by the message id and the answering agent. Neither channel is
+ * retained, so local receipt time is the time. Live `resumed` / `working`
+ * signals (a coordinator working again) are kept per agent; a retained replay
+ * after a reconnect is not a signal.
+ */
+function withReceipts(state: DeskState, route: AgentRoute, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (!env) return state;
+  if (
+    m.retained !== true &&
+    ((route.channel === "progress" && env.type === "resumed") ||
+      (route.channel === "status" && env.type === "working"))
+  ) {
+    const prev = state.steering ?? emptyReceipts();
+    return {
+      ...state,
+      steering: { ...prev, signals: { ...prev.signals, [route.agentId]: m.receivedAt } },
+    };
+  }
+  const id = str(env.correlation_id);
+  if (id === undefined) return state;
+  if (route.channel === "mailbox") {
+    if (state.self === undefined || route.agentId !== state.self || env.agent_id === state.self)
+      return state;
+    const kind = env.type === "ack" ? "acks" : "replies";
+    return addReceipt(state, kind, id, env.agent_id, m.receivedAt);
+  }
+  if (route.channel === "progress" && env.type === "steering_acked") {
+    return addReceipt(state, "applied", id, route.agentId, m.receivedAt);
+  }
+  return state;
+}
+
+const emptyReceipts = (): SteeringReceipts => ({ acks: {}, applied: {}, replies: {}, signals: {} });
+
+function addReceipt(
+  state: DeskState,
+  kind: "acks" | "applied" | "replies",
+  id: string,
+  by: string,
+  at: number,
+): DeskState {
+  const prev = state.steering ?? emptyReceipts();
+  const map: Receipts = { ...prev[kind], [id]: { ...prev[kind][id], [by]: at } };
+  const ids = Object.keys(map);
+  if (ids.length > RECEIPT_LIMIT) delete map[ids[0] as string];
+  return { ...state, steering: { ...prev, [kind]: map } };
+}
+
+/**
+ * Mailbox traffic that is not an agent: the Desk's own mailbox (answers to
+ * what it sent), and an ack to an unknown recipient — an ack goes to a
+ * message's sender, which is often a CLI, the daemon or the Desk.
+ */
+function ownsNoAgent(state: DeskState, route: AgentRoute, m: DeskMessage): boolean {
+  if (route.channel !== "mailbox" || !m.envelope) return false;
+  if (route.agentId === state.self) return true;
+  return m.envelope.type === "ack" && !state.agents[route.agentId];
 }
 
 function putAgent(state: DeskState, a: AgentView): DeskState {

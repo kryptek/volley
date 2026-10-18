@@ -1096,14 +1096,22 @@ export class Daemon {
     return undefined;
   }
 
-  /** `stop`'s interrupt: the configured one, else Escape into the agent's workspace. */
-  private async interruptAgent(agentId: string): Promise<void> {
-    if (this.opts.interrupt !== undefined) return this.opts.interrupt(agentId);
-    if (this.opts.spawner === undefined) return;
+  /**
+   * Interrupt an agent's session: the configured hook, else Escape into the agent's workspace.
+   * Resolves false when there is nothing to interrupt with; rejects when the interrupt failed.
+   */
+  private async interruptAgent(agentId: string): Promise<boolean> {
+    if (this.opts.interrupt !== undefined) {
+      await this.opts.interrupt(agentId);
+      return true;
+    }
+    if (this.opts.spawner === undefined) return false;
     const ws =
       this.supervised.get(agentId)?.workspace ??
       this.spawnedRecord((e) => e.data.agent_id === agentId)?.workspace;
-    if (typeof ws === "string") await this.host.sendKeys(ws, "Escape");
+    if (typeof ws !== "string") return false;
+    await this.host.sendKeys(ws, "Escape");
+    return true;
   }
 
   /** Where a task's `.volley/decisions.md` goes (its worktree once it has one). */
@@ -2027,6 +2035,16 @@ export class Daemon {
     return cancelled;
   }
 
+  /** `steer --urgent`'s interrupt; false when none is wired or it failed (never rejects). */
+  private async tryInterrupt(agentId: string): Promise<boolean> {
+    try {
+      return await this.interruptAgent(agentId);
+    } catch (e) {
+      this.log(`interrupt ${agentId} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
   /** The kill switch: stop every wave, then refuse `run` until `resume --all`. Anyone may pull it. */
   private async stopAll(by: string): Promise<HandlerResult> {
     // Engage (and journal) the switch first: a crash part-way through still refuses `run` after
@@ -2075,7 +2093,11 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     if (typeof p.task !== "string") return { ok: false, error: "steer requires payload.task" };
-    if (typeof p.text !== "string" || p.text.trim() === "")
+    // `escape_only` interrupts the session and delivers nothing: the caller (the Desk) publishes
+    // its own mailbox message after the answer, so the agent never gets a second steer.
+    const escapeOnly = p.escape_only === true;
+    const urgent = escapeOnly || p.urgent === true;
+    if (!escapeOnly && (typeof p.text !== "string" || p.text.trim() === ""))
       return { ok: false, error: "steer requires a non-empty payload.text" };
     const refused = guardMutation(w.log.record.state as WaveState, by, "steer");
     if (refused !== null) return { ok: false, error: refused };
@@ -2094,6 +2116,23 @@ export class Daemon {
           : `unknown task '${p.task}' in wave '${w.wave}'`,
       };
     }
+    // Urgent: interrupt (Escape) before delivering, so the message lands in a stopped session.
+    const interrupted = urgent ? await this.tryInterrupt(target.agent_id) : undefined;
+    if (escapeOnly) {
+      this.log(`steer --escape-only ${w.wave}/${p.task} → ${target.agent_id} by ${by}`);
+      return {
+        ok: true,
+        result: {
+          wave: w.wave,
+          task: p.task,
+          agent_id: target.agent_id,
+          role: target.role,
+          escape_only: true,
+          interrupted,
+        },
+      };
+    }
+    if (typeof p.text !== "string") return { ok: false, error: "steer requires payload.text" };
     const { seq, supersedes } = nextSteer(w.log.record, p.task);
     const messageId = randomUUID();
     const waitMs =
@@ -2144,6 +2183,7 @@ export class Daemon {
       delivery: "delivered",
       received: false,
       acked: false,
+      ...(interrupted !== undefined ? { interrupted } : {}),
     };
     if (heard === null) return { ok: true, result };
     return {
