@@ -67,6 +67,7 @@ import { type Role, briefGatePath, isRole } from "./brief";
 import { HOOKS_DIR } from "./launch";
 import { type AgentProbe, FINAL_STATUS, lockPath } from "./locks";
 import { retireAgent } from "./retire";
+import { ScreenPublisher } from "./screen-publisher";
 import {
   type SpawnDecision,
   type SpawnDeps,
@@ -84,7 +85,10 @@ export interface DaemonOptions {
   namespace: string;
   /** $VOLLEYD_HOME — journals live under `<home>/waves/<wave>/`, config at `<home>/config.yaml`. */
   home: string;
-  /** Admission/monitor tick interval; 0 disables the timer (tests drive `tick()`). */
+  /**
+   * Admission/monitor tick interval; 0 disables the admission and screen timers (tests drive
+   * `tick()` / `tickScreens()`).
+   */
   tickMs?: number;
   /** Spawn admission verdict per wave. T5 supplies the pressure-based one; default is open. */
   admission?: (wave: WaveId) => Admission;
@@ -115,6 +119,10 @@ export interface DaemonOptions {
    * worktree; otherwise (or before any spawn) `<home>/waves/<wave>/tasks/<task>`.
    */
   taskDir?: (wave: WaveId, task: TaskId) => string;
+  /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
+  now?: () => number;
+  /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
+  screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
 }
 
 /** How the daemon spawns agents. Every field has a production default. */
@@ -273,6 +281,7 @@ export class Daemon {
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
   private watchdog: ReturnType<typeof setInterval> | undefined;
+  private screenTimer: ReturnType<typeof setInterval> | undefined;
   private running = false;
   /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
   private readonly spawning = new Set<string>();
@@ -284,6 +293,8 @@ export class Daemon {
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
   private readonly deferred = new Set<string>();
+  /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
+  private readonly screens: ScreenPublisher;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -302,6 +313,16 @@ export class Daemon {
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
     this.config = ConfigStore.load({ home: opts.home, system: this.system });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
+    this.screens = new ScreenPublisher({
+      publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+      ...opts.screenTimeouts,
+      onStale: (agentId) => {
+        const a = this.supervised.get(agentId);
+        if (a !== undefined) void this.enqueue(() => this.publishState(a.wave));
+      },
+      log: this.log,
+    });
     for (const log of loadWaves(opts.home)) {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
@@ -448,7 +469,10 @@ export class Daemon {
     );
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
-    if (tickMs > 0) this.timer = setInterval(() => void this.tick(), tickMs);
+    if (tickMs > 0) {
+      this.timer = setInterval(() => void this.tick(), tickMs);
+      this.screenTimer = setInterval(() => void this.tickScreens(), DAEMON_DEFAULTS.screen_tick_ms);
+    }
     this.watchdog = setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
@@ -493,6 +517,8 @@ export class Daemon {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
+    clearInterval(this.screenTimer);
+    this.screens.clear();
     for (const a of this.supervised.values()) {
       clearTimeout(a.reapTimer);
       void a.watch.close();
@@ -551,6 +577,11 @@ export class Daemon {
     const run = this.queue.then(fn);
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /** Capture the screens of supervised agents that are due (beside the serial queue). */
+  tickScreens(): Promise<void> {
+    return this.screens.tick();
   }
 
   /** One admission tick, queued behind in-flight work. */
@@ -855,6 +886,15 @@ export class Daemon {
         else void this.enqueue(() => this.retire(agentId, "reaped"));
       }, graceMs);
     };
+    const host = this.host;
+    this.screens.track({
+      agentId,
+      namespace: watch.namespace,
+      workspace: outcome.workspace,
+      host,
+      source: host.name === "local" ? "cmux" : "tmux",
+      intervalS: () => this.config.effective(wave).screen_tail_interval_s,
+    });
     const check = (type: string) => {
       if (this.supervised.get(agentId) !== a) return;
       if (type === "reaped") {
@@ -877,6 +917,9 @@ export class Daemon {
     clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
+    // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
+    // Bounded: untrack waits only for a publish in flight, never for a (possibly hung) read.
+    await this.screens.untrack(agentId);
     const resultRaw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
       .catch(() => null);
@@ -990,6 +1033,11 @@ export class Daemon {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
       if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
+    }
+    for (const t of state.tasks) {
+      if (Object.values(t.agents).some((id) => id !== undefined && this.screens.isStale(id))) {
+        t.screen_stale = true;
+      }
     }
     return state;
   }
