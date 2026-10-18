@@ -9,12 +9,7 @@
     },
     {
       "type": "object",
-      "required": [
-        "channel",
-        "type",
-        "payload",
-        "correlation_id"
-      ],
+      "required": ["channel", "type", "payload", "correlation_id"],
       "properties": {
         "channel": {
           "const": "_system/auth"
@@ -28,9 +23,7 @@
         },
         "payload": {
           "type": "object",
-          "required": [
-            "op"
-          ],
+          "required": ["op"],
           "properties": {
             "op": {
               "enum": [
@@ -47,21 +40,10 @@
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
             },
             "role": {
-              "enum": [
-                "admin",
-                "steer",
-                "watch",
-                "supervisor",
-                "peer"
-              ]
+              "enum": ["admin", "steer", "watch", "supervisor", "peer"]
             },
             "kind": {
-              "enum": [
-                "human",
-                "device",
-                "machine",
-                "service"
-              ]
+              "enum": ["human", "device", "machine", "service"]
             },
             "label": {
               "type": "string",
@@ -97,12 +79,7 @@
                 }
               },
               "then": {
-                "required": [
-                  "op",
-                  "name",
-                  "role",
-                  "reply_key"
-                ],
+                "required": ["op", "name", "role", "reply_key"],
                 "properties": {}
               }
             },
@@ -115,11 +92,7 @@
                 }
               },
               "then": {
-                "required": [
-                  "op",
-                  "name",
-                  "reply_key"
-                ],
+                "required": ["op", "name", "reply_key"],
                 "properties": {}
               }
             },
@@ -132,10 +105,7 @@
                 }
               },
               "then": {
-                "required": [
-                  "op",
-                  "name"
-                ],
+                "required": ["op", "name"],
                 "properties": {}
               }
             },
@@ -148,18 +118,10 @@
                 }
               },
               "then": {
-                "required": [
-                  "op",
-                  "role",
-                  "label",
-                  "reply_key"
-                ],
+                "required": ["op", "role", "label", "reply_key"],
                 "properties": {
                   "role": {
-                    "enum": [
-                      "steer",
-                      "watch"
-                    ]
+                    "enum": ["steer", "watch"]
                   }
                 }
               }
@@ -173,12 +135,7 @@
                 }
               },
               "then": {
-                "required": [
-                  "op",
-                  "token",
-                  "label",
-                  "reply_key"
-                ],
+                "required": ["op", "token", "label", "reply_key"],
                 "properties": {}
               }
             }
@@ -190,11 +147,7 @@
   "$defs": {
     "reply_key": {
       "type": "object",
-      "required": [
-        "kty",
-        "n",
-        "e"
-      ],
+      "required": ["kty", "n", "e"],
       "properties": {
         "kty": {
           "const": "RSA"

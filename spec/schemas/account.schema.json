@@ -4,9 +4,7 @@
   "title": "Volley Account Registry",
   "description": "The account registry file ($VOLLEY_AUTH_DIR/accounts.json) that `volley auth add|rotate|revoke|redeem` maintain and `account_list` returns (with last_seen added). Not an envelope; it never holds a password. See spec section 4.6.9.",
   "type": "object",
-  "required": [
-    "accounts"
-  ],
+  "required": ["accounts"],
   "additionalProperties": false,
   "properties": {
     "accounts": {
@@ -19,12 +17,7 @@
   "$defs": {
     "account": {
       "type": "object",
-      "required": [
-        "name",
-        "role",
-        "kind",
-        "created"
-      ],
+      "required": ["name", "role", "kind", "created"],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -33,21 +26,10 @@
           "description": "The broker username (agent-id grammar; never a fixed identity, a reserved id or redeem-*)."
         },
         "role": {
-          "enum": [
-            "admin",
-            "steer",
-            "watch",
-            "supervisor",
-            "peer"
-          ]
+          "enum": ["admin", "steer", "watch", "supervisor", "peer"]
         },
         "kind": {
-          "enum": [
-            "human",
-            "device",
-            "machine",
-            "service"
-          ]
+          "enum": ["human", "device", "machine", "service"]
         },
         "created": {
           "type": "string",
