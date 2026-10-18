@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { decisionTopic, renderDecisionsMd } from "../src/decisions";
+import { decisionPayload, decisionTopic, renderDecisionsMd } from "../src/decisions";
 import { ready } from "../src/scheduler";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
@@ -266,6 +266,60 @@ describe("decision lifecycle", () => {
     const list = await client.request("decisions", { wave: "2026-10-20-example", all: true });
     expect(list.error).toBeUndefined();
     expect((list.result as { decisions: unknown[] }).decisions).toEqual([]);
+  });
+});
+
+describe("decisionPayload", () => {
+  it("publishes the decision.schema.json fields only, never the daemon's bookkeeping", () => {
+    const rec = {
+      decision_id: "remote_repo_missing-abc",
+      wave: "w1",
+      task: "T1",
+      kind: "remote_repo_missing" as const,
+      question: "Clone it?",
+      options: ["retry", "cancel"],
+      pointers: {},
+      opened_at: "2026-10-18T10:00:00.000Z",
+      host: "box",
+      target: "dev@box",
+      repo: "/srv/repo",
+      // internal facts kept on the record
+      agent_id: "w1-t1-implementer-1",
+      class: "agent_stalled",
+      role: "implementer",
+      pipeline: { stage: "fixup" },
+      resume_stage: "queued" as const,
+      parks: true,
+      rationale: "x",
+    };
+    const p = decisionPayload(rec);
+    expect(Object.keys(p).sort()).toEqual(
+      [
+        "decision_id",
+        "host",
+        "kind",
+        "opened_at",
+        "options",
+        "pointers",
+        "question",
+        "repo",
+        "target",
+        "task",
+        "wave",
+      ].sort(),
+    );
+    expect(
+      schemaErrors("decision.schema.json", {
+        schema_version: "0.1",
+        agent_id: "volleyd",
+        parent_id: null,
+        wall_time: "2026-10-18T10:00:00.000Z",
+        channel: "_waves/decisions",
+        type: "decision_opened",
+        payload: p,
+        correlation_id: null,
+      }),
+    ).toEqual([]);
   });
 });
 

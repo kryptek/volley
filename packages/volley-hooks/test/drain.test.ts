@@ -113,6 +113,37 @@ describe("mailbox drain (post-tool-use)", () => {
     await acksB.stop();
   });
 
+  it("acks only what mailbox.schema.json allows: a known type and a UUID message id", async () => {
+    const acks = await collect(client, `volley/${NS}/coord-a/mailbox`);
+    const ok = await send("coord-a", "a normal steer");
+    await send("coord-a", "an unknown type", { type: "shout" });
+    await publishEnvelope(client, MAILBOX, {
+      agentId: "coord-a",
+      parentId: null,
+      channel: "mailbox",
+      type: "steering",
+      payload: { text: "a non-UUID id" },
+      correlationId: "not-a-uuid",
+    });
+    await tick(100);
+    const run = await postToolUse();
+    expect(run.exitCode).toBe(0);
+    // Every message is still injected; only the schema-valid one is acked.
+    const ctx = (JSON.parse(run.stdout) as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(ctx).toContain("a normal steer");
+    expect(ctx).toContain("an unknown type");
+    expect(ctx).toContain("a non-UUID id");
+    await tick(200);
+    expect(
+      acks.envelopes.map((e) => [
+        e.correlation_id,
+        (e.payload as { acked_type: string }).acked_type,
+      ]),
+    ).toEqual([[ok, "steering"]]);
+    await acks.stop();
+  });
+
   it("supersedes marks the older block and only the live one is injected", async () => {
     const id1 = await send("coord-a", "use approach A", { seq: 1 });
     await tick(50);

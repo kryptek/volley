@@ -100,6 +100,18 @@ export async function openDrainSession(
 
 const steeringPath = (identity: HookIdentity) => join(identity.stateDir, "STEERING.md");
 
+/** mailbox.schema.json `acked_type`: the message types an ack may name. */
+const ACKABLE_TYPES = new Set(["steering", "cancel", "nudge", "query"]);
+/** An ack's `correlation_id` is a UUID (mailbox.schema.json). */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether `m` gets an ack: a type the ack schema can name, under a UUID message id. Anything
+ * else is still stored and injected, just never acked with a schema-invalid envelope.
+ */
+const ackable = (m: MailMessage): m is MailMessage & { id: string } =>
+  m.id !== null && UUID.test(m.id) && ACKABLE_TYPES.has(m.type);
+
 /** Publish the SPEC §4.4 `ack` to the sender's mailbox. */
 function ack(session: HookSession, m: MailMessage & { id: string }): Promise<void> {
   return session.publish(
@@ -160,7 +172,7 @@ export async function processMail(
     }
     const withId = { ...m, id: m.id ?? `local-${randomUUID()}` };
     if (m.id !== null && hasBlock(path, m.id)) {
-      await ack(session, withId);
+      if (ackable(m)) await ack(session, withId);
       continue;
     }
     appendBlock(path, {
@@ -172,7 +184,7 @@ export async function processMail(
       text: m.text,
     });
     if (m.supersedes !== null) markSuperseded(path, m.supersedes, withId.id, m.from);
-    if (m.id !== null) await ack(session, withId);
+    if (ackable(m)) await ack(session, withId);
   }
 
   const inject = undeliveredDirectives(path);
