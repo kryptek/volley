@@ -137,6 +137,8 @@ export interface SpawnEnv {
   host: FakeHost;
   events: NewEvent[];
   openDecisions: string[];
+  /** Topics the spawn cleared with an empty retained payload (a superseded attempt's). */
+  cleared: string[];
   deps: SpawnDeps;
   request: (over?: Partial<SpawnRequest>) => SpawnRequest;
   /** The worktree a T1 implementer spawn uses. */
@@ -183,6 +185,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
   const host = fakeHost(fake);
   const events: NewEvent[] = [];
   const openDecisions: string[] = [];
+  const cleared: string[] = [];
   const deps: SpawnDeps = {
     host,
     home,
@@ -204,6 +207,10 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     probe: { status: async () => null, registered: async () => false, lastHeartbeat: () => null },
     watch: o.watch ?? (async (ns, id) => fakeWatch(ns, id)),
     briefGate: null,
+    clearRetained: async (topic) => {
+      cleared.push(topic);
+    },
+    relaunchSettleMs: 50,
   };
   return {
     dir,
@@ -214,6 +221,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     host,
     events,
     openDecisions,
+    cleared,
     deps,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),
     worktree: join(dir, "wt", "w1", "T1-implementer"),

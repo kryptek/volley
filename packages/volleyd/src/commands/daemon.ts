@@ -3,6 +3,7 @@ import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { Daemon, type SpawnerOptions } from "../daemon";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
+import { ghIssueBody } from "../overlap";
 
 const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>] [--no-spawn] [--no-mint]
 
@@ -50,6 +51,9 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       ...target,
       home: volleydHome(env),
       ...(spawner !== undefined ? { spawner } : {}),
+      issueBody: ghIssueBody,
+      // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
+      // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
       log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
     });
   } catch (e) {

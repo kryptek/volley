@@ -14,10 +14,17 @@ import {
 import { type IssueData, fetchIssue, renderIssueMd } from "./issue";
 import { LAUNCH_COMMAND, launchScriptPath, renderLaunchScript } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
+import { retainedTopics } from "./retire";
+import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
 import type { NewEvent, TaskId, Tunables, Wave, WaveTask } from "./types";
-import { type AgentWatch, type VerifyResult, verifyRegistration } from "./verify";
+import {
+  type AgentWatch,
+  type VerifyResult,
+  hookSignalsArrived,
+  verifyRegistration,
+} from "./verify";
 import { branchName, expandHome, worktreePath } from "./worktree";
 
 /**
@@ -29,7 +36,8 @@ import { branchName, expandHome, worktreePath } from "./worktree";
  * The journal's event types are the closed wave-event enum, so the steps map onto it:
  *   refusals (SPAWN_LOCKED, SPAWN_BRIEF_REJECTED, ISSUE_MISMATCH, …) → alarm_raised { code }
  *   a launch (worktree, issue, credentials, workspace)            → agent_spawned
- *   the one relaunch after an update prompt (spawn_recovered)      → agent_spawned { recovered_from }
+ *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
+ *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
  *   hook signals verified                                           → agent_registered
  *   repo_untrusted / model_switch / unknown_screen                  → decision_opened
  */
@@ -66,9 +74,37 @@ export interface SpawnDeps {
   /** `$VOLLEYD_HOME/brief-gate` when present. */
   briefGate: string | null;
   briefsDir?: string;
+  /** Publish an empty retained payload (clears a superseded attempt's records). Default: none. */
+  clearRetained?: (topic: string) => Promise<void>;
+  /**
+   * Open a decision through the daemon's decision store (published retained, notify bridge).
+   * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
+   */
+  openDecision?: (d: SpawnDecision) => Promise<string>;
+  /** Resolve an open decision. Default: journal `decision_resolved` on the spawn's task. */
+  resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
+  /** After Enter on an update prompt, how long the original launch may take to continue. */
+  relaunchSettleMs?: number;
 }
 
 export type DecisionKind = "repo_untrusted" | "model_switch" | "unknown_screen";
+
+/** A decision a spawn opens; `id` is the base id (the store may suffix a re-opened one). */
+export interface SpawnDecision {
+  kind: DecisionKind;
+  id: string;
+  task: TaskId;
+  question: string;
+  options: string[];
+  pointers: { screen?: string };
+  /** Extra facts kept on the decision (`repo` for repo_untrusted, `agent_id`, models). */
+  data: Record<string, unknown>;
+}
+
+/** The open decision opened under `base` (or a re-opened `base-<n>`), if any. */
+export function openDecisionFor(open: readonly string[], base: string): string | undefined {
+  return open.find((id) => id === base || id.startsWith(`${base}-`));
+}
 
 export type SpawnOutcome =
   | {
@@ -78,6 +114,8 @@ export type SpawnOutcome =
       model: string | null;
       modelVerified: boolean;
       watch: AgentWatch;
+      /** Whether broker credentials were minted for it (retire revokes them). */
+      minted: boolean;
     }
   | {
       kind: "decision";
@@ -86,6 +124,7 @@ export type SpawnOutcome =
       agentId: string;
       workspace: string;
       watch: AgentWatch;
+      minted: boolean;
       screen?: string;
     };
 
@@ -134,26 +173,20 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
   try {
     // 0. Repo trust, before anything is created.
     ctx.root = await repoRoot(deps.host.exec, repo);
-    const decisionId = trustDecisionId(ctx.root);
+    const open = openDecisionFor(deps.openDecisions, trustDecisionId(ctx.root));
     const trusted = isRepoTrusted(readClaudeJson(deps.claudeJsonPath), ctx.root);
     if (!trusted) {
-      if (deps.openDecisions.includes(decisionId)) {
-        return { kind: "decision", decision: "repo_untrusted", decisionId, opened: false };
+      if (open !== undefined) {
+        return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
-      await openDecision(ctx, "repo_untrusted", decisionId, {
+      const decisionId = await openDecision(ctx, "repo_untrusted", trustDecisionId(ctx.root), {
         question: trustQuestion(ctx.root),
         options: ["trust", "cancel"],
         data: { repo: ctx.root },
       });
       return { kind: "decision", decision: "repo_untrusted", decisionId, opened: true };
     }
-    if (deps.openDecisions.includes(decisionId)) {
-      await deps.journal({
-        type: "decision_resolved",
-        task: req.task,
-        data: { decision_id: decisionId, answer: "trusted", by: "claude-trust-dialog" },
-      });
-    }
+    if (open !== undefined) await resolveDecision(ctx, open, "trusted", "claude-trust-dialog");
 
     // 1. Lock first.
     const agentId = agentIdFor(req.wave.wave, req.task, req.role, req.attempt);
@@ -204,7 +237,7 @@ async function launchAttempt(
   attempt: number,
   agentId: string,
   issue: IssueData,
-  recovered?: { from: string; reason: string },
+  recovered?: { from: string; reason: string; workspace: string },
 ): Promise<Launched> {
   const { req, deps, task } = ctx;
   const { host } = deps;
@@ -265,11 +298,19 @@ async function launchAttempt(
     const watch = await deps.watch(ctx.namespace, agentId);
     let workspace: string;
     try {
-      ({ workspace } = await host.launch({
-        cwd: ctx.worktree,
-        name: `${req.wave.wave} ${req.task} ${req.role}`,
-        command: LAUNCH_COMMAND,
-      }));
+      if (recovered !== undefined) {
+        // The relaunch reuses the workspace (never a second session in one worktree): its shell
+        // is back at a bare prompt, so the launch command is typed there.
+        workspace = recovered.workspace;
+        await host.sendText(workspace, LAUNCH_COMMAND);
+        await host.sendKeys(workspace, "Enter");
+      } else {
+        ({ workspace } = await host.launch({
+          cwd: ctx.worktree,
+          name: `${req.wave.wave} ${req.task} ${req.role}`,
+          command: LAUNCH_COMMAND,
+        }));
+      }
     } catch (e) {
       await watch.close();
       throw e;
@@ -304,7 +345,10 @@ async function launchAttempt(
   }
 }
 
-/** Step 6: verify through the hook signals; on an update prompt press Enter and relaunch once. */
+/**
+ * Step 6: verify through the hook signals. On an update prompt: press Enter, and relaunch once
+ * in the same workspace only if its shell is then back at a bare prompt.
+ */
 async function verifyAndRecover(
   ctx: Ctx,
   first: Launched,
@@ -312,7 +356,7 @@ async function verifyAndRecover(
 ): Promise<SpawnOutcome> {
   const { deps, task } = ctx;
   let cur = first;
-  for (let relaunched = false; ; relaunched = true) {
+  for (let recovered = false; ; recovered = true) {
     const result = await verifyRegistration({
       watch: cur.watch,
       host: deps.host,
@@ -325,49 +369,88 @@ async function verifyAndRecover(
 
     const screen = saveScreen(ctx, cur.agentId, result.screen);
     if (result.screen_class === "trust_dialog") {
-      const decisionId = trustDecisionId(ctx.root);
-      if (!deps.openDecisions.includes(decisionId)) {
-        await openDecision(ctx, "repo_untrusted", decisionId, {
+      const decisionId =
+        openDecisionFor(deps.openDecisions, trustDecisionId(ctx.root)) ??
+        (await openDecision(ctx, "repo_untrusted", trustDecisionId(ctx.root), {
           question: trustQuestion(ctx.root),
           options: ["trust", "cancel"],
           screen,
           data: { repo: ctx.root, agent_id: cur.agentId },
-        });
-      }
+        }));
       return decision(cur, "repo_untrusted", decisionId, screen);
     }
-    if (result.screen_class === "update_prompt" && !relaunched) {
-      await deps.host.sendKeys(cur.workspace, "Enter");
+    if (result.screen_class === "update_prompt" && !recovered) {
       try {
-        cur = await relaunch(ctx, cur, issue);
+        cur = await answerUpdatePrompt(ctx, cur, issue);
       } catch (e) {
+        await cur.watch.close();
         await refuse(ctx, e);
         throw e;
       }
       continue;
     }
-    const decisionId = decisionIdFor("unknown_screen", cur.agentId);
-    await openDecision(ctx, "unknown_screen", decisionId, {
-      question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
-      options: ["relaunch", "cancel"],
-      screen,
-      data: { agent_id: cur.agentId, screen_class: result.screen_class },
-    });
+    const decisionId = await openDecision(
+      ctx,
+      "unknown_screen",
+      decisionIdFor("unknown_screen", cur.agentId),
+      {
+        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
+        options: ["relaunch", "cancel"],
+        screen,
+        data: { agent_id: cur.agentId, screen_class: result.screen_class },
+      },
+    );
     return decision(cur, "unknown_screen", decisionId, screen);
   }
 }
 
-/** The one relaunch after an update prompt: attempt+1, new identity, same lock and worktree. */
+/**
+ * Enter on the update prompt, then: the original launch continued (its hook signals arrive, or
+ * the screen is anything but a bare shell) → keep verifying it; the shell is back at a bare
+ * prompt (the prompt ate the launch command) → the one relaunch, typed into the same workspace.
+ */
+async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Promise<Launched> {
+  const { host } = ctx.deps;
+  await host.sendKeys(cur.workspace, "Enter");
+  const settle = ctx.deps.relaunchSettleMs ?? DAEMON_DEFAULTS.relaunch_settle_ms;
+  if (await cur.watch.waitFor(hookSignalsArrived, settle)) return cur;
+  const after = await host.readScreen(cur.workspace, DAEMON_DEFAULTS.screen_lines);
+  if (classifyScreen(after) !== "shell_prompt") return cur;
+  return relaunch(ctx, cur, issue);
+}
+
+/**
+ * The one relaunch after an update prompt: the first attempt is retired as `superseded`
+ * (credentials revoked, retained records cleared, lock kept), then attempt+1 gets a new identity
+ * in the same worktree, lock and workspace.
+ */
 async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
-  if (prev.minted) await revokeCredentials(deps.host.exec, prev.agentId);
+  const revoked = prev.minted ? await revokeCredentials(deps.host.exec, prev.agentId) : null;
+  if (deps.clearRetained !== undefined) {
+    for (const topic of retainedTopics(ctx.namespace, prev.agentId))
+      await deps.clearRetained(topic);
+  }
   const attempt = prev.attempt + 1;
   const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);
+  await deps.journal({
+    type: "agent_retired",
+    task: req.task,
+    data: {
+      agent_id: prev.agentId,
+      role: req.role,
+      status: "superseded",
+      superseded_by: agentId,
+      credentials_revoked: revoked,
+      lock_released: false,
+    },
+  });
   ctx.lock?.update({ attempt, agent_id: agentId });
   return launchAttempt(ctx, attempt, agentId, issue, {
     from: prev.agentId,
     reason: "update_prompt",
+    workspace: prev.workspace,
   });
 }
 
@@ -391,12 +474,16 @@ async function registered(
     },
   });
   if (r.model_mismatch) {
-    const decisionId = decisionIdFor("model_switch", cur.agentId);
-    await openDecision(ctx, "model_switch", decisionId, {
-      question: `Needs you: ${cur.agentId} runs ${r.model ?? "an unknown model"}, the wave asks for ${task.model}. Keep it running?`,
-      options: ["keep", "cancel"],
-      data: { agent_id: cur.agentId, model: r.model, expected_model: task.model },
-    });
+    const decisionId = await openDecision(
+      ctx,
+      "model_switch",
+      decisionIdFor("model_switch", cur.agentId),
+      {
+        question: `Needs you: ${cur.agentId} runs ${r.model ?? "an unknown model"}, the wave asks for ${task.model}. Keep it running?`,
+        options: ["keep", "cancel"],
+        data: { agent_id: cur.agentId, model: r.model, expected_model: task.model },
+      },
+    );
     return decision(cur, "model_switch", decisionId);
   }
   return {
@@ -406,6 +493,7 @@ async function registered(
     model: r.model,
     modelVerified: r.model_verified,
     watch: cur.watch,
+    minted: cur.minted,
   };
 }
 
@@ -422,6 +510,7 @@ function decision(
     agentId: cur.agentId,
     workspace: cur.workspace,
     watch: cur.watch,
+    minted: cur.minted,
     ...(screen !== undefined ? { screen } : {}),
   };
 }
@@ -430,6 +519,7 @@ export function decisionIdFor(kind: DecisionKind, agentId: string): string {
   return `${kind}-${createHash("sha256").update(agentId).digest("hex").slice(0, 12)}`;
 }
 
+/** Open a decision (the daemon's store when wired, else the journal); resolves with its id. */
 async function openDecision(
   ctx: Ctx,
   kind: DecisionKind,
@@ -440,21 +530,41 @@ async function openDecision(
     screen?: string | undefined;
     data?: Record<string, unknown>;
   },
-): Promise<void> {
+): Promise<string> {
+  const pointers = d.screen !== undefined ? { screen: d.screen } : {};
+  if (ctx.deps.openDecision !== undefined) {
+    return ctx.deps.openDecision({
+      kind,
+      id: decisionId,
+      task: ctx.req.task,
+      question: d.question,
+      options: d.options,
+      pointers,
+      data: d.data ?? {},
+    });
+  }
   await ctx.deps.journal({
     type: "decision_opened",
     task: ctx.req.task,
     data: {
       decision_id: decisionId,
       kind,
-      wave: ctx.req.wave.wave,
-      task: ctx.req.task,
       question: d.question,
       options: d.options,
-      pointers: d.screen !== undefined ? { screen: d.screen } : {},
+      pointers,
       opened_at: new Date().toISOString(),
       ...d.data,
     },
+  });
+  return decisionId;
+}
+
+async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string): Promise<void> {
+  if (ctx.deps.resolveDecision !== undefined) return ctx.deps.resolveDecision(id, answer, by);
+  await ctx.deps.journal({
+    type: "decision_resolved",
+    task: ctx.req.task,
+    data: { decision_id: id, answer, by, at: new Date().toISOString() },
   });
 }
 

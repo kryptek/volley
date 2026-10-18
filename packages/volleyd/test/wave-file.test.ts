@@ -110,6 +110,11 @@ describe("parseWaveFile", () => {
     expect(errs).toEqual(["tasks.T1: duplicate task id 'T1'"]);
   });
 
+  it("rejects task ids that differ only in case (they would share an agent id)", () => {
+    const errs = errorsOf(`${HEADER}tasks:\n  T1: { issue: 1 }\n  t1: { issue: 2 }\n`);
+    expect(errs).toEqual(["tasks.t1: task id 't1' differs from 'T1' only in case"]);
+  });
+
   it("rejects a dependency cycle, naming the loop", () => {
     const errs = errorsOf(
       `${HEADER}tasks:\n  T1: { issue: 1, after: [T3] }\n  T2: { issue: 2, after: [T1] }\n  T3: { issue: 3, after: [T2] }\n`,

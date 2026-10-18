@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { DeskStoreProvider } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
-import type { DeskMessage, Envelope } from "../src/store/types";
+import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
 
 describe("App (demo mode)", () => {
   it("renders a wave window per demo wave, an agent window per agent, and the top-bar counts", () => {
@@ -14,7 +14,8 @@ describe("App (demo mode)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5);
+    // 3 waves + 5 agents + the coordinators window.
+    expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5 + 1);
     // Agent windows use .t-name too; wave windows are the ones with a dependency graph.
     const waveNames = [...container.querySelectorAll(".world .win")]
       .filter((w) => w.querySelector(".dag"))
@@ -25,6 +26,45 @@ describe("App (demo mode)", () => {
     expect(container.querySelectorAll(".world .dag")).toHaveLength(3);
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("3 waves");
+  });
+});
+
+describe("App attention (demo mode)", () => {
+  it("pulses the waves that need you, shows their banners, the pill and the coordinators window", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    const win = (name: string) => screen.getByRole("region", { name });
+    expect(win("status-chip")).toHaveClass("win--attn-you");
+    expect(win("status-chip").querySelector(".win-attn-pulse")).not.toBeNull();
+    expect(win("status-chip")).toHaveTextContent(
+      "Needs you: the coordinator is waiting for your answer",
+    );
+    expect(win("leaderboard")).toHaveClass("win--attn-you");
+    expect(win("leaderboard")).toHaveTextContent("Needs you: no coordinator for 34 min");
+    expect(win("ci-speed")).toHaveClass("win--attn-coordinator");
+    expect(win("Wave coordinators")).toBeInTheDocument();
+    expect(container.querySelector(".topbar .ny-pill")?.textContent).toMatch(/\d+ needs? you/);
+  });
+
+  it("frames the coordinators window in the initial view", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    const world = container.querySelector(".world") as HTMLElement;
+    const [, tx = "0", ty = "0", ts = "1"] =
+      /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(world.style.transform) ?? [];
+    const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    const left = Number(tx) + Number.parseFloat(coords.style.left) * Number(ts);
+    const top = Number(ty) + Number.parseFloat(coords.style.top) * Number(ts);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(left).toBeLessThan(window.innerWidth);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(top).toBeLessThan(window.innerHeight);
   });
 });
 
@@ -95,5 +135,191 @@ describe("App (live store)", () => {
     expect(await screen.findByText(/1 decision ·/)).toBeInTheDocument();
     expect(screen.getByText("waiting for wave state")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("1 waves");
+  });
+});
+
+// ---------------------------------------------------------------- live attention
+
+const T0 = Date.now();
+const iso = (ms: number) => new Date(ms).toISOString();
+
+function env(agent: string, channel: string, type: string, payload: object = {}): Envelope {
+  return {
+    schema_version: "0.1",
+    agent_id: agent,
+    namespace: "default",
+    wall_time: iso(T0),
+    channel,
+    type,
+    payload,
+  } as Envelope;
+}
+
+const msg = (topic: string, envelope: Envelope, retained: boolean): DeskMessage => ({
+  topic,
+  envelope,
+  receivedAt: Date.now(),
+  retained,
+});
+
+function waveState(status: WaveStatePayload["status"] = "running"): Envelope {
+  const payload: WaveStatePayload = {
+    wave: "w1",
+    version: 1,
+    owner: "coord-1",
+    repo: "example-org/example-repo",
+    release_branch: "release/w1",
+    status,
+    tasks: [{ id: "T1", issue: 1, stage: "implement", agents: { implementer: "impl-1" } }],
+    open_decisions: [],
+    gates: [],
+    updated_at: iso(T0),
+  };
+  return env("volleyd", "_waves/state", "wave_state", payload);
+}
+
+/** What the broker holds for a wave with a working coordinator and one implementer. */
+const retained = (coordStatus = "working", status: WaveStatePayload["status"] = "running") => [
+  msg("volley/_system/registry/coord-1", env("coord-1", "registry", "registered"), true),
+  msg("volley/default/coord-1/status", env("coord-1", "status", coordStatus), true),
+  msg("volley/_system/registry/impl-1", env("impl-1", "registry", "registered"), true),
+  msg("volley/default/impl-1/status", env("impl-1", "status", "working"), true),
+  msg("volley/_waves/w1/state", waveState(status), true),
+];
+
+/** A fake broker connection the test drives: deliveries, drops and reconnects. */
+function scriptedClient() {
+  const message = new Set<(m: DeskMessage) => void>();
+  const connect = new Set<() => void>();
+  const disconnect = new Set<() => void>();
+  const on =
+    <H,>(set: Set<H>) =>
+    (h: H) => {
+      set.add(h);
+      return () => {
+        set.delete(h);
+      };
+    };
+  const client: DeskMqttClient = {
+    connect: async () => {
+      for (const h of connect) h();
+    },
+    disconnect: async () => {},
+    onMessage: on(message),
+    onConnect: on(connect),
+    onDisconnect: on(disconnect),
+    onError: () => () => {},
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 40));
+  return {
+    factory: () => client,
+    /** Deliver each message in its own flush, as a slow replay would. */
+    async deliver(msgs: DeskMessage[]) {
+      for (const m of msgs) {
+        await act(async () => {
+          for (const h of message) h(m);
+          await tick();
+        });
+      }
+    },
+    async reconnect() {
+      await act(async () => {
+        for (const h of disconnect) h();
+        await tick();
+        for (const h of connect) h();
+      });
+    },
+  };
+}
+
+// Longer than a scripted replay (five deliveries, 40 ms apart), as SETTLE_MS is for a real one.
+const SETTLE = 400;
+const settle = () => act(() => new Promise((r) => setTimeout(r, SETTLE + 60)));
+
+describe("App attention (live store)", () => {
+  let notification: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    notification = vi.fn();
+    Object.defineProperty(notification, "permission", { value: "granted", configurable: true });
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      writable: true,
+      value: notification,
+    });
+    localStorage.setItem(
+      "volley-dash:notify",
+      JSON.stringify({ enabled: true, sound: false, on: ["blocked", "failed", "reaped"] }),
+    );
+  });
+  afterEach(() => {
+    (globalThis as { Notification?: unknown }).Notification = undefined;
+    localStorage.clear();
+  });
+
+  const mount = (c: ReturnType<typeof scriptedClient>) =>
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        clientFactory={c.factory}
+        settleMs={SETTLE}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+
+  it("stays quiet through a reconnect resync and replay, then notifies once per wave", async () => {
+    const c = scriptedClient();
+    mount(c);
+    await c.deliver(retained());
+    await settle();
+    // impl-1 waits for input while its coordinator works (coordinator tier); then
+    // the coordinator asks the owner something: the wave moves to you, live.
+    await c.deliver([
+      msg("volley/default/impl-1/progress", env("impl-1", "progress", "awaiting_input"), false),
+      msg(
+        "volley/default/coord-1/progress",
+        env("coord-1", "progress", "awaiting_input", { question: "Merge T1?" }),
+        false,
+      ),
+    ]);
+    expect(screen.getByRole("region", { name: "w1" })).toHaveClass("win--attn-you");
+    expect(notification).toHaveBeenCalledTimes(1);
+    notification.mockClear();
+
+    // Reconnect: resync drops the waves and coordinators, the replay rebuilds
+    // them one topic at a time, wave state last.
+    await c.reconnect();
+    await c.deliver(retained());
+    await settle();
+    expect(notification).not.toHaveBeenCalled();
+
+    // A real transition after settling still notifies: the coordinator answers
+    // nothing and exits, so the wave and impl-1 both need you, one notification.
+    await c.deliver([
+      msg("volley/default/coord-1/progress", env("coord-1", "progress", "resumed"), false),
+    ]);
+    await c.deliver([
+      msg("volley/default/coord-1/status", env("coord-1", "status", "done"), false),
+    ]);
+    await waitFor(() => expect(notification).toHaveBeenCalledTimes(1));
+    expect(notification).toHaveBeenCalledWith(
+      "Volley: w1 needs you",
+      expect.objectContaining({ tag: "wave:w1" }),
+    );
+  });
+
+  it("shows no banner and no claim for a finished wave whose coordinator is done", async () => {
+    const c = scriptedClient();
+    const { container } = mount(c);
+    await c.deliver(retained("done", "complete"));
+    await settle();
+    const w1 = screen.getByRole("region", { name: "w1" });
+    expect(w1.querySelector(".needs-you")).toBeNull();
+    expect(w1).not.toHaveClass("win--attn-you");
+    expect(container.querySelector(".topbar .ny-pill")).toBeNull();
+    const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    expect(within(coords).getByText("Complete")).toBeInTheDocument();
+    expect(within(coords).queryByText(/claim it/)).toBeNull();
   });
 });

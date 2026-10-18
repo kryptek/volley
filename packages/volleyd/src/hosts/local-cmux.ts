@@ -1,4 +1,5 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
@@ -21,9 +22,17 @@ export class LocalCmuxHost implements Host {
 
   async writeFile(path: string, content: string, mode?: number): Promise<void> {
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content, mode !== undefined ? { mode } : {});
-    // writeFile's mode applies only when it creates the file.
-    if (mode !== undefined) await chmod(path, mode);
+    if (mode === undefined) return writeFile(path, content);
+    // A fresh temp file created with `mode`, renamed over the target: the content is never
+    // readable under an existing file's older, more open mode (agent.json holds a password).
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(tmp, content, { mode, flag: "wx" });
+      await rename(tmp, path);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
   }
 
   async launch(spec: LaunchSpec): Promise<{ workspace: string }> {

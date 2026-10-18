@@ -205,3 +205,60 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+describe("attachClient settling", () => {
+  function fake() {
+    const connect = new Set<() => void>();
+    const disconnect = new Set<() => void>();
+    const on = (set: Set<() => void>) => (h: () => void) => {
+      set.add(h);
+      return () => {
+        set.delete(h);
+      };
+    };
+    const client: DeskMqttClient = {
+      connect: async () => {},
+      disconnect: async () => {},
+      onMessage: () => () => {},
+      onConnect: on(connect),
+      onDisconnect: on(disconnect),
+      onError: () => () => {},
+    };
+    const fire = (set: Set<() => void>) => {
+      for (const h of set) h();
+    };
+    return { client, up: () => fire(connect), down: () => fire(disconnect) };
+  }
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("settles after each connect's replay and unsettles on a disconnect", async () => {
+    const f = fake();
+    const settling: boolean[] = [];
+    const actions: string[] = [];
+    const detach = attachClient(
+      f.client,
+      (a) => actions.push(a.type),
+      { flushMs: 0, settleMs: 30 },
+      undefined,
+      (s) => settling.push(s),
+    );
+    f.up();
+    expect(settling).toEqual([]);
+    await wait(60);
+    expect(settling).toEqual([false]);
+    expect(actions).toEqual([]); // the first connect neither resyncs nor prunes
+
+    f.down();
+    expect(settling).toEqual([false, true]);
+    f.up();
+    expect(actions).toEqual(["resync"]);
+    f.down(); // dropped again before settling: no settle while offline
+    await wait(60);
+    expect(settling).toEqual([false, true, true]);
+    f.up();
+    await wait(60);
+    expect(settling).toEqual([false, true, true, false]);
+    expect(actions).toEqual(["resync", "resync", "prune"]);
+    detach();
+  });
+});

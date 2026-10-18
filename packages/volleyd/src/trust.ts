@@ -7,9 +7,11 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
 import { SpawnError } from "./spawn-error";
 
@@ -66,11 +68,40 @@ export function isRepoTrusted(claudeJson: Record<string, unknown> | null, root: 
   }
 }
 
+/** File identity used to detect a concurrent rewrite (Claude Code writes this file often). */
+const fileStamp = (path: string) => {
+  if (!existsSync(path)) return "absent";
+  const st = statSync(path);
+  return `${st.mtimeMs}:${st.size}:${st.ino}`;
+};
+
 /**
  * Record the owner's explicit `trust` answer: set `projects[root].hasTrustDialogAccepted` to
- * true and change nothing else in the file. Never called without that answer.
+ * true and change nothing else in the file. Never called without that answer. Claude Code
+ * rewrites `~/.claude.json` often, so the file is re-checked just before the rename and the
+ * whole read-modify-write is retried if it changed, rather than dropping that write.
+ * `hooks.beforeRename` is a test seam.
  */
-export function recordRepoTrust(claudeJsonPath: string, root: string): void {
+export function recordRepoTrust(
+  claudeJsonPath: string,
+  root: string,
+  hooks: { beforeRename?: () => void } = {},
+): void {
+  for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
+    const stamp = fileStamp(claudeJsonPath);
+    const tmp = writeTrusted(claudeJsonPath, root);
+    hooks.beforeRename?.();
+    if (fileStamp(claudeJsonPath) === stamp) {
+      renameSync(tmp, claudeJsonPath);
+      return;
+    }
+    unlinkSync(tmp);
+  }
+  throw new Error(`${claudeJsonPath} kept changing; trust not recorded`);
+}
+
+/** Write the updated file next to the original; returns the temp path. */
+function writeTrusted(claudeJsonPath: string, root: string): string {
   const cfg = readClaudeJson(claudeJsonPath) ?? {};
   const projects =
     typeof cfg.projects === "object" && cfg.projects !== null
@@ -92,7 +123,7 @@ export function recordRepoTrust(claudeJsonPath: string, root: string): void {
   } finally {
     closeSync(fd);
   }
-  renameSync(tmp, claudeJsonPath);
+  return tmp;
 }
 
 /** One `repo_untrusted` decision per repo root (a wave's spawns into it all park on it). */
