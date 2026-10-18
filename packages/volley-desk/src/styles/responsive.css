@@ -17,24 +17,6 @@
     padding: 6px 10px;
   }
 
-  /* Appearance: a bottom sheet that leaves the dock reachable below it. */
-  .look {
-    top: auto;
-    left: 8px;
-    right: 8px;
-    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-    width: auto;
-    max-height: 55vh;
-    border-radius: 14px 14px 10px 10px;
-  }
-  /* The sheet scrolls as a whole; its sections keep their height. */
-  .look > * {
-    flex-shrink: 0;
-  }
-  .look .bg-grid {
-    max-height: 180px;
-  }
-
   .steer,
   .prompt-bar {
     max-width: 100%;

@@ -2,7 +2,7 @@
 
 The Desk: an infinite canvas of live wave and agent windows, driven straight off the Volley MQTT topics. There's no backend: the browser subscribes to the broker over WebSocket. The approved interactive prototype is the visual and interaction spec, and this package ports it piece by piece.
 
-**Status:** `volley dash` opens the Desk. It ships the canvas (pan and zoom, touch and keyboard), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, steering (the chat glyphs) with delivery acks, settings, and the look (backgrounds, window styles, effects, tethers, the dock). It works at phone width, without WebGL, with reduced motion, and by keyboard and screen reader. The classic dashboard (`packages/volley-dash`) is deprecated and stays reachable as `volley dash --legacy` until it is removed.
+**Status:** `volley dash` opens the Desk. It ships the canvas (pan and zoom, touch and keyboard), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, steering (the chat glyphs) with delivery acks, the Settings window and a wave's settings, and the look (backgrounds, window styles, effects, tethers, the dock). It works at phone width, without WebGL, with reduced motion, and by keyboard and screen reader. The classic dashboard (`packages/volley-dash`) is deprecated and stays reachable as `volley dash --legacy` until it is removed.
 
 ## Run it
 
@@ -61,9 +61,9 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 | Arrow keys | Pan, while the canvas (the `Desk canvas` region) has focus |
 | `+` / `=`, `-` | Zoom in / out around the centre of the screen |
 | `f` | Arrange & fit |
-| Escape | Closes the top dialog: the settings modal, then the steering panel, then Appearance |
+| Escape | Closes the top dialog: a wave's settings or the Settings window, then the steering panel |
 
-`+`, `-` and `f` are ignored while typing in a text field, and keys with ⌘, Ctrl or Alt are left to the browser. The settings modal keeps Tab inside itself until it closes, and gives focus back to the gear.
+`+`, `-` and `f` are ignored while typing in a text field, and keys with ⌘, Ctrl or Alt are left to the browser. The Settings window and a wave's settings keep Tab inside themselves until they close, and give focus back to what opened them.
 
 ### Arrange & fit
 
@@ -71,13 +71,13 @@ Each visible wave forms a cluster: the wave window with its agents to the right,
 
 ### Finished agents
 
-Agents that finished (`done`, `failed` or `reaped`) more than 10 minutes ago leave the canvas, so a long-running Desk shows the work still in flight. **Show finished agents** at the foot of the coordinators window brings them back, and says how many are hidden. The grace period is set under Layout in the Appearance panel (0–1440 minutes). Both settings are saved per browser in the `volley-desk-look` localStorage entry. A hidden agent is still in the store, and still counts towards Needs you and notifications.
+Agents that finished (`done`, `failed` or `reaped`) more than 10 minutes ago leave the canvas, so a long-running Desk shows the work still in flight. **Show finished agents** at the foot of the coordinators window brings them back, and says how many are hidden. The same switch and the grace period (0–1440 minutes) are in Settings › General. Both settings are saved per browser in the `volley-desk-look` localStorage entry. A hidden agent is still in the store, and still counts towards Needs you and notifications.
 
-Auto-arrange is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
+Auto-arrange (Settings › General) is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
 
 ## Phone width
 
-Below 700 px (`NARROW_PX` in `useViewport.ts`) the Desk starts at scale 0.5 (offset 8, 70, as in the prototype), the top bar drops its counts but keeps the needs-you pill and its toggles, and every window is clamped to `min(460, 100vw - 24)`. The Appearance panel becomes a bottom sheet above the dock, so the dock stays reachable; the steering bar, the settings modal (one column) and the Needs-you actions (wrapping) fit the viewport. Rotating or resizing across the threshold switches layouts live.
+Below 700 px (`NARROW_PX` in `useViewport.ts`) the Desk starts at scale 0.5 (offset 8, 70, as in the prototype), the top bar drops its counts but keeps the needs-you pill and its toggles, and every window is clamped to `min(460, 100vw - 24)`. The Settings window puts its sections in a scrolling strip above the content; the steering bar, a wave's settings (one column) and the Needs-you actions (wrapping) fit the viewport. Rotating or resizing across the threshold switches layouts live.
 
 ## Without WebGL
 
@@ -85,11 +85,11 @@ On load the Desk asks a canvas for a WebGL context (`hasWebGL` in `look/Backgrou
 
 ## Reduced motion
 
-With `prefers-reduced-motion: reduce` the new-window entrance, the waiting Clawd's hop, the Needs-you pulse (a steady ring instead), the terminal caret, the tethers' flow and the arrange animation all stop (`styles/responsive.css` gathers the prototype's rules), and the narration line drops `DecryptedText` / `ShinyText` for plain text whatever the Appearance setting.
+With `prefers-reduced-motion: reduce` the new-window entrance, the waiting Clawd's hop, the Needs-you pulse (a steady ring instead), the terminal caret, the tethers' flow and the arrange animation all stop (`styles/responsive.css` gathers the prototype's rules), and the narration line drops `DecryptedText` / `ShinyText` for plain text whatever the narration setting (Settings › General).
 
 ## Accessibility
 
-Windows are `section`s named by their wave, task and role; the agent tabs are `tablist` / `tab` with `aria-selected`; progress bars are `progressbar`s with `aria-valuenow` (indeterminate until the agent reports progress); narration is `aria-live="polite"` and the Needs-you banners are `role="status"`; the dock is a labelled `nav`. The settings modal traps focus and owns the keyboard while open (only Escape, which closes it alone, reaches the Desk); the steering panel is a non-modal dialog, so it does not trap focus, and Escape closes it. `test/a11y.test.tsx` runs axe on the demo canvas (and with Appearance, a steering panel and the settings modal open) and checks WCAG AA text contrast (4.5:1) for `--ink`, `--mute` and `--dim` on every window chrome over the Desk ground; `--dim` was lightened from the prototype's `#6f7890` to `#7c859d` to pass.
+Windows are `section`s named by their wave, task and role; the agent tabs are `tablist` / `tab` with `aria-selected`; progress bars are `progressbar`s with `aria-valuenow` (indeterminate until the agent reports progress); narration is `aria-live="polite"` and the Needs-you banners are `role="status"`; the dock is a labelled `nav`. The Settings window and a wave's settings trap focus and own the keyboard while open (only Escape, which closes the top one alone, reaches the Desk); the steering panel is a non-modal dialog, so it does not trap focus, and Escape closes it. `test/a11y.test.tsx` runs axe on the demo canvas (and with a steering panel, a wave's settings and each Settings section open) and checks WCAG AA text contrast (4.5:1) for `--ink`, `--mute` and `--dim` on every window chrome over the Desk ground; `--dim` was lightened from the prototype's `#6f7890` to `#7c859d` to pass.
 
 ## Layout
 
@@ -123,9 +123,14 @@ src/windows/wave/NeedsYou   Needs-you / no-coordinator banners, agent attention 
 src/topbar/TopBar.tsx       top bar: counts, "N need you" pill, coordinators/notify/sound toggles
 src/notify/                 notification + chime on a move into "you" (volley-dash's settings key)
 src/styles/attention.css    pulse (default Needs-you effect), banners, coordinators, pill
-src/settings/               settings modal (wave gear): rows built from spec/schemas/config.schema.json
-                            (schemaRows), config_set requests + acks (configTransport), SettingsModal
-src/styles/settings.css     settings modal rules
+src/settings/SettingsWindow  Settings window (macOS System Settings style, from the dock): searchable
+                            sidebar (sections.ts: labels, tiles, keywords, account role), primitives
+                            (Group/Row/Seg/Toggle), General, Appearance, Supervisor, About; the
+                            Onboarding sections are placeholders
+src/settings/ConfigRows     volleyd config rows built from spec/schemas/config.schema.json (schemaRows),
+                            config_set requests + acks (configTransport); Supervisor = global scope,
+                            SettingsModal (wave gear) = that wave's effective config, read-only
+src/styles/settings.css     Settings window and wave settings rules
 src/steer/SteerPanel.tsx    steering panel: quick pills, PromptBar (/stop /wrap-up /pause /status,
                             Mailbox | Urgent), delivery steps, read-only copy fallback; ClaimButton
 src/steer/transport.ts      T0 mailbox envelopes as the Desk (seq + supersedes per target), the urgent
@@ -136,18 +141,16 @@ src/steer/demoClient.ts     demo-mode writer: simulated hook ack + steering_acke
 src/styles/steer.css        steering panel rules
 src/look/options.ts         chrome, Needs-you and narration option tables (labels, keys, types)
 src/look/useLook.ts         the look, persisted in localStorage `volley-desk-look`: bg, dim,
-                            chrome, attn, narr, tethers, autoArrange (defaults = prototype LOOK0)
+                            chrome, attn, narr, tethers, autoArrange, showFinished, finishedGraceMin
 src/look/backgrounds.ts     all 63 free React Bits backgrounds + None, each lazy (its own chunk)
 src/look/Background.tsx     background layer: error boundary → no-WebGL message, or a failed chunk
                             load → "Couldn’t load" + Retry; bg-dim overlay; WebGL detection
                             (hasWebGL, needsWebGL) and the degraded look (degradeLook)
-src/look/Appearance.tsx     Appearance panel: background search + list, dim, window style,
-                            auto-arrange, Needs-you effect, narration effect
 src/look/Tethers.tsx        SVG cubic per agent, wave window → agent, in the wave accent
-src/look/DeskDock.tsx       React Bits Dock (coordinators + needs-you badge, appearance, tethers,
-                            arrange & fit, auto-arrange, zoom in/out) and SwipeToast notices
+src/look/DeskDock.tsx       React Bits Dock (coordinators + needs-you badge, tethers, arrange & fit,
+                            zoom in/out, Settings) and SwipeToast notices
 src/windows/agent/Narration narration effect: DecryptedText | ShinyText | plain (plain under reduced motion)
-src/styles/look.css         background, tethers, chromes, dock and Appearance rules
+src/styles/look.css         background, tethers, chromes, dock and background-picker rules
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
 scripts/sync-react-bits-backgrounds.ts
@@ -195,11 +198,13 @@ The no-coordinator banner's **Claim this wave** sends `volleyd claim <wave>` as 
 
 ## Settings
 
-The gear on a wave window opens the settings modal. Its rows come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
+The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config) and About (version, licences). Claude accounts, Broker accounts, Machines and Setup & Security are listed (and searchable) but come with Onboarding. The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
 
-- **Global** shows the retained `volley/_waves/_config`. Once the Desk has signed in, a change sends one `config_set` request to the daemon's mailbox in volleyd's namespace (from its registry entry): `volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`. Only volleyd's answer on the Desk's own mailbox counts. A slider sends once the user lets go: presses and drags within 400 ms of each other become one request with the settled value. The row then shows the ack: `applied · v<version>`, the rejected paths with their reasons, `failed ·` for a refused publish or daemon error, or `no answer ·` when volleyd does not reply in time (the change may still have applied).
-- **This wave** shows the wave's `effective_config` and is read-only. volleyd applies `config_set` to the global config only. Per-wave values come from the wave file's `config:` block.
-- **Without broker credentials** (an anonymous sign-in) or in demo mode the modal sends nothing. A global row still takes a new value, and then offers the exact `volleyd config set <path> <value>` line that sets it to copy (nothing to copy until the value differs from the current one). Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand.
+The config rows (Supervisor, and a wave's gear) come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
+
+- **Settings › Supervisor** shows the retained `volley/_waves/_config`. Once the Desk has signed in, a change sends one `config_set` request to the daemon's mailbox in volleyd's namespace (from its registry entry): `volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`. Only volleyd's answer on the Desk's own mailbox counts. A slider sends once the user lets go: presses and drags within 400 ms of each other become one request with the settled value. The row then shows the ack: `applied · v<version>`, the rejected paths with their reasons, `failed ·` for a refused publish or daemon error, or `no answer ·` when volleyd does not reply in time (the change may still have applied).
+- **A wave's gear** shows that wave's `effective_config`, read-only, with a **Global settings…** link to Supervisor. volleyd applies `config_set` to the global config only. Per-wave values come from the wave file's `config:` block.
+- **Without broker credentials** (an anonymous sign-in) or in demo mode Supervisor sends nothing. A global row still takes a new value, and then offers the exact `volleyd config set <path> <value>` line that sets it to copy (nothing to copy until the value differs from the current one). Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand.
 
 ## React Bits
 

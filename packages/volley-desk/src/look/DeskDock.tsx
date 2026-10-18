@@ -1,14 +1,14 @@
 /**
  * The dock and transient notices, ported from the prototype `App.tsx`: a
- * React Bits `Dock` with the coordinators window (badge: what needs you),
- * Appearance, tethers, arrange & fit, auto-arrange and zoom in / out, and a
- * React Bits `SwipeToast` for one notice at a time (`useToast`).
+ * React Bits `Dock` with six items — the coordinators window (badge: what
+ * needs you), tethers, arrange & fit, zoom in / out and the Settings window
+ * (appearance and auto-arrange live there) — and a React Bits `SwipeToast`
+ * for one notice at a time (`useToast`).
  */
 import {
   FullScreenIcon,
   Link02Icon,
-  MagicWand01Icon,
-  PaintBoardIcon,
+  Settings02Icon,
   UserGroupIcon,
   ZoomInAreaIcon,
   ZoomOutAreaIcon,
@@ -30,14 +30,12 @@ export interface DeskDockProps {
   onToggleCoords: () => void;
   /** The dock badge: the "N need you" count. */
   needsYou: number;
-  lookOpen: boolean;
-  onToggleLook: () => void;
   tethers: boolean;
   onToggleTethers: () => void;
   onArrange: () => void;
-  autoArrange: boolean;
-  onToggleAutoArrange: () => void;
   onZoom: (factor: number) => void;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
 }
 
 export function dockItems(p: DeskDockProps): DockItemData[] {
@@ -50,12 +48,6 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
       ...(p.needsYou > 0 ? { badge: p.needsYou } : {}),
     },
     {
-      icon: icon(PaintBoardIcon),
-      label: "Appearance",
-      onClick: p.onToggleLook,
-      active: p.lookOpen,
-    },
-    {
       icon: icon(Link02Icon),
       label: p.tethers ? "Hide tethers" : "Show tethers",
       onClick: p.onToggleTethers,
@@ -63,14 +55,15 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
     },
     { separator: true },
     { icon: icon(FullScreenIcon), label: "Arrange & fit", onClick: p.onArrange },
-    {
-      icon: icon(MagicWand01Icon),
-      label: p.autoArrange ? "Auto-arrange: on" : "Auto-arrange: off",
-      onClick: p.onToggleAutoArrange,
-      active: p.autoArrange,
-    },
     { icon: icon(ZoomInAreaIcon), label: "Zoom in", onClick: () => p.onZoom(DOCK_ZOOM) },
     { icon: icon(ZoomOutAreaIcon), label: "Zoom out", onClick: () => p.onZoom(1 / DOCK_ZOOM) },
+    { separator: true },
+    {
+      icon: icon(Settings02Icon),
+      label: "Settings",
+      onClick: p.onToggleSettings,
+      active: p.settingsOpen,
+    },
   ];
 }
 

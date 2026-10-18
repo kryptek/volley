@@ -1,5 +1,6 @@
 /* Settings modal — ported from the prototype styles.css (modal, seg, cfg-*). */
-.modal .seg {
+.modal .seg,
+.mac-settings .seg {
   display: inline-flex;
   gap: 4px;
   padding: 3px;
@@ -7,7 +8,8 @@
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--line);
 }
-.modal .seg button {
+.modal .seg button,
+.mac-settings .seg button {
   border: 0;
   background: transparent;
   padding: 5px 10px;
@@ -59,12 +61,16 @@
   grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
   gap: 4px 24px;
 }
-.modal-body h3 {
+.modal-body .s-group {
+  margin-top: 12px;
+}
+.modal-body .s-group h3 {
   font-family: var(--f-display);
   font-size: 13px;
-  font-weight: 600;
-  margin: 14px 0 6px;
   color: var(--acc);
+}
+.modal-global {
+  margin-left: auto;
 }
 .cfg-row {
   display: flex;
@@ -143,4 +149,387 @@
 .btn--sm {
   padding: 3px 8px;
   font-size: 11.5px;
+}
+
+/* The config rows inside a Settings card (Supervisor, a wave's settings). */
+.s-card .cfg-row {
+  margin: 0;
+  padding: 10px 14px;
+}
+.s-card .cfg-row + .cfg-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* --------------------------------------------- Settings window (macOS style) */
+/* Ported from the prototype styles.css (.mac-settings, .ms-*, .s-*, .switch, .about). */
+.mac-settings {
+  width: min(940px, 100%);
+  height: min(640px, calc(100% - 32px));
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 40px 120px -30px #000, 0 0 0 0.5px rgba(0, 0, 0, 0.6);
+  background: #1e1f24;
+  outline: none;
+}
+.mac-settings .seg button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--ink);
+}
+.mac-settings fieldset {
+  margin: 0;
+  min-width: 0;
+}
+.seg--wrap {
+  flex-wrap: wrap;
+}
+.ms-side {
+  background: rgba(38, 39, 46, 0.92);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border-right: 1px solid rgba(0, 0, 0, 0.35);
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+.ms-traffic {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px 4px;
+}
+.ms-traffic i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: block;
+}
+.ms-traffic .r {
+  background: #ff5f57;
+}
+.ms-traffic .y {
+  background: #febc2e;
+}
+.ms-traffic .g {
+  background: #28c840;
+}
+.ms-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--mute);
+}
+.ms-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.ms-account {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 6px;
+}
+.avatar {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #6ee7f9, #8b5cf6);
+  color: #0b0d16;
+  font-weight: 700;
+  font-size: 13px;
+}
+.ms-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ms-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ms-list:last-of-type {
+  border-bottom: 0;
+}
+.ms-list button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.ms-list button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ms-list button.on {
+  background: #0a84ff;
+  color: #fff;
+}
+.ms-none {
+  padding: 0 8px;
+}
+.tile {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  flex: none;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.2);
+}
+.tile--lg {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.ms-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #1e1f24;
+}
+.ms-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ms-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  font-family: var(--f-ui);
+}
+.ms-close {
+  margin-left: auto;
+}
+.ms-body {
+  padding: 16px 20px 24px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ms-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+.s-group h3 {
+  margin: 0 0 6px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mute);
+}
+.s-card {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.s-foot {
+  margin: 6px 4px 0;
+  font-size: 11.5px;
+  color: var(--dim);
+  max-width: 70ch;
+}
+.s-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mute);
+}
+.s-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  min-height: 44px;
+}
+.s-row + .s-row,
+.s-pad + .s-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.s-row-l {
+  font-size: 13px;
+  min-width: 0;
+}
+.s-hint {
+  font-size: 11.5px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+.s-row-r {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  max-width: 100%;
+}
+.s-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 260px;
+}
+.s-slider > *:first-child {
+  flex: 1;
+}
+.s-slider input[type="range"] {
+  width: 100%;
+  accent-color: #0a84ff;
+}
+.s-val {
+  min-width: 48px;
+  text-align: right;
+  color: var(--mute);
+}
+.s-pad {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bg-grid--3 {
+  grid-template-columns: repeat(3, 1fr);
+  max-height: 220px;
+}
+.switch {
+  width: 38px;
+  height: 22px;
+  flex: none;
+  border-radius: 999px;
+  border: 0;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.18);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s;
+}
+.switch.on {
+  background: #34c759;
+}
+.switch.on i {
+  transform: translateX(16px);
+}
+.switch:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 2px;
+}
+.about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 0;
+  text-align: center;
+}
+.about p {
+  margin: 0;
+  max-width: 52ch;
+}
+.about-mark {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: 44px;
+  letter-spacing: -0.03em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch i {
+    transition: none;
+  }
+}
+/* Phone: the sidebar becomes a scrolling strip of sections above the content. */
+@media (max-width: 720px) {
+  .mac-settings {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: calc(100% - 24px);
+  }
+  .ms-side {
+    flex-direction: row;
+    overflow-x: auto;
+    align-items: center;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  }
+  .ms-traffic,
+  .ms-account {
+    display: none;
+  }
+  .ms-search {
+    flex: none;
+    width: 120px;
+  }
+  .ms-side nav {
+    display: flex;
+    gap: 4px;
+  }
+  .ms-list {
+    flex-direction: row;
+    border: 0;
+    padding: 0;
+  }
+  .ms-list button {
+    white-space: nowrap;
+  }
+  .ms-body {
+    padding: 12px 12px 20px;
+  }
+  .s-slider {
+    width: 160px;
+  }
+  .s-row {
+    flex-wrap: wrap;
+  }
+  .bg-grid--3 {
+    grid-template-columns: 1fr 1fr;
+  }
 }

@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { SLIDER_COMMIT_MS, SettingsModal } from "../src/settings/SettingsModal";
+import { LOOK0 } from "../src/look/useLook";
+import { SLIDER_COMMIT_MS } from "../src/settings/ConfigRows";
+import { SettingsModal } from "../src/settings/SettingsModal";
+import { SettingsWindow } from "../src/settings/SettingsWindow";
+import { Supervisor } from "../src/settings/Supervisor";
 import {
   type ConfigClient,
   type ConfigTransport,
@@ -90,15 +94,12 @@ function fakeClient() {
   return { client, published, deliver, ack, handlers };
 }
 
-function setup(transport: ConfigTransport | null, onClose = vi.fn()) {
-  const view = render(
-    <SettingsModal wave={wave()} config={config} transport={transport} onClose={onClose} />,
-  );
+/** Settings › Supervisor: the global config rows. */
+function setup(transport: ConfigTransport | null) {
+  const view = render(<Supervisor config={config} transport={transport} />);
   const retain = (next: ConfigPayload) =>
-    view.rerender(
-      <SettingsModal wave={wave()} config={next} transport={transport} onClose={onClose} />,
-    );
-  return { onClose, retain };
+    view.rerender(<Supervisor config={next} transport={transport} />);
+  return { retain };
 }
 
 const slider = (name: string) => screen.getByRole("slider", { name });
@@ -128,7 +129,7 @@ function setExecCommand(fn: ((cmd: string) => boolean) | undefined) {
   Object.defineProperty(document, "execCommand", { value: fn, configurable: true });
 }
 
-describe("SettingsModal", () => {
+describe("Settings › Supervisor (global config rows)", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   });
@@ -140,7 +141,6 @@ describe("SettingsModal", () => {
 
   it("builds its sections from the schema and shows the current global values", () => {
     setup(null);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     for (const h of ["Admission", "Leases", "Attention", "Recovery"]) {
       expect(screen.getByRole("heading", { name: h })).toBeInTheDocument();
     }
@@ -163,7 +163,6 @@ describe("SettingsModal", () => {
   it("moving the hard-ceiling slider sends config_set to the daemon's mailbox and shows the ack", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await flush();
     expect(f.published).toHaveLength(0);
@@ -197,7 +196,6 @@ describe("SettingsModal", () => {
   it("shows a rejected ack's reasons inline and returns the slider to the current value", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("build pool capacity", "ArrowLeft");
     await settle();
     const { envelope } = f.published[0] as (typeof f.published)[number];
@@ -222,7 +220,6 @@ describe("SettingsModal", () => {
   it("sends one config_set for a burst of key presses, with the value the user settled on", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight", 8);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SLIDER_COMMIT_MS - 1);
@@ -237,7 +234,6 @@ describe("SettingsModal", () => {
   it("shows the answer to the latest change of a row, not an older one that answers late", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     press("Hard ceiling", "ArrowRight");
@@ -257,7 +253,6 @@ describe("SettingsModal", () => {
   it("sends a revert to the retained value while the change away from it is in flight", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     press("Hard ceiling", "ArrowLeft");
@@ -280,7 +275,6 @@ describe("SettingsModal", () => {
   it("returning to the value in flight cancels the queued change and keeps that answer", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     press("Hard ceiling", "ArrowLeft");
@@ -295,7 +289,6 @@ describe("SettingsModal", () => {
   it("keeps a row's change in flight when the retained config changes another row", async () => {
     const f = fakeClient();
     const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     retain({ ...config, version: 8, claim_after_s: 900 });
@@ -314,7 +307,6 @@ describe("SettingsModal", () => {
   it("labels an unanswered request as unknown and keeps the value", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk", timeoutMs: 1000 }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     await act(async () => {
@@ -336,7 +328,6 @@ describe("SettingsModal", () => {
       },
     };
     setup(createConfigTransport(refusing, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
     expect(within(rowOf("Hard ceiling")).getByRole("alert")).toHaveTextContent(
@@ -347,7 +338,6 @@ describe("SettingsModal", () => {
 
   it("puts a multiplier's × right after the value", () => {
     setup(null);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     expect(within(rowOf("Spawn budget")).getByText("3×")).toBeInTheDocument();
     expect(within(rowOf("Claim after")).getByText("1800 s")).toBeInTheDocument();
   });
@@ -355,7 +345,6 @@ describe("SettingsModal", () => {
   it("sends a text tunable on Enter, empty meaning null when the schema allows it", async () => {
     const f = fakeClient();
     setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     const box = screen.getByRole("textbox", { name: "Fallback model" });
     fireEvent.change(box, { target: { value: "" } });
     fireEvent.keyDown(box, { key: "Enter" });
@@ -368,7 +357,6 @@ describe("SettingsModal", () => {
     setClipboard({ writeText });
     const f = fakeClient();
     setup(null);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
 
     // Until the value changes there is nothing to copy: re-setting the current value does nothing.
@@ -398,36 +386,16 @@ describe("SettingsModal", () => {
     expect(within(row).queryByRole("button", { name: "Copy command" })).not.toBeInTheDocument();
   });
 
-  it("the wave scope shows the wave's effective config, read-only, and never writes", async () => {
-    const f = fakeClient();
-    setup(createConfigTransport(f.client, { identity: "desk" }));
-    const waveScope = screen.getByRole("radio", { name: "This wave (status-chip)" });
-    expect(waveScope).toHaveAttribute("aria-checked", "true");
-    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "4");
-    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText(/wave file's/)).toHaveTextContent("config:");
-    fireEvent.keyDown(slider("Hard ceiling"), { key: "ArrowRight" });
-    await flush();
-    expect(f.published).toHaveLength(0);
-    expect(screen.queryByText(/^volleyd config set \w/)).not.toBeInTheDocument();
-  });
-
-  it("shows only a note while the wave has no effective config", () => {
-    const { state, ...rest } = wave();
-    const { effective_config: _, ...bare } = state as NonNullable<WaveView["state"]>;
-    const w: WaveView = { ...rest, state: bare };
-    render(<SettingsModal wave={w} config={config} transport={null} onClose={() => {}} />);
-    expect(screen.getByText("No effective config for this wave yet.")).toBeInTheDocument();
+  it("a missing global config shows a note and no rows", () => {
+    render(<Supervisor config={null} transport={null} />);
+    expect(screen.getByText("No config from volleyd yet.")).toBeInTheDocument();
     expect(screen.queryAllByRole("slider")).toHaveLength(0);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
-    expect(screen.getAllByRole("slider").length).toBeGreaterThan(0);
   });
 
   it("falls back to selecting the command and execCommand without the async Clipboard API", async () => {
     const exec = vi.fn(() => true);
     setExecCommand(exec);
     setup(null);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowLeft");
     await settle();
     const row = within(rowOf("Hard ceiling"));
@@ -442,7 +410,6 @@ describe("SettingsModal", () => {
     setClipboard({ writeText: vi.fn(async () => Promise.reject(new Error("denied"))) });
     setExecCommand(() => false);
     setup(null);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
     press("Hard ceiling", "ArrowLeft");
     await settle();
     const row = within(rowOf("Hard ceiling"));
@@ -452,22 +419,25 @@ describe("SettingsModal", () => {
     expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 11");
   });
 
-  it("closes on Done, Escape, the close button and a scrim click", () => {
-    const { onClose } = setup(null);
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-    fireEvent.pointerDown(screen.getByRole("dialog").parentElement as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(3);
-    // Focus moves into the dialog on open, so Escape works without a click first.
-    expect(screen.getByRole("dialog")).toHaveFocus();
-    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(4);
-  });
-
-  it("Escape in a text field drops its edit and keeps the modal open", async () => {
+  it("Escape in a text field drops its edit and keeps the Settings window open", async () => {
     const f = fakeClient();
-    const { onClose } = setup(createConfigTransport(f.client, { identity: "desk" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    const onClose = vi.fn();
+    render(
+      <SettingsWindow
+        initial="supervisor"
+        look={LOOK0}
+        setLook={() => {}}
+        notify={{ enabled: false, sound: true, on: [] }}
+        setNotify={() => {}}
+        webgl
+        identity="desk"
+        demo={false}
+        config={config}
+        transport={createConfigTransport(f.client, { identity: "desk" })}
+        onArrange={() => {}}
+        onClose={onClose}
+      />,
+    );
     const box = screen.getByRole("textbox", { name: "Fallback model" });
     fireEvent.change(box, { target: { value: "other-model" } });
     fireEvent.keyDown(box, { key: "Escape" });
@@ -476,6 +446,49 @@ describe("SettingsModal", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(box).toHaveValue("claude-sonnet-5-5");
     expect(f.published).toHaveLength(0);
+  });
+});
+
+describe("SettingsModal (a wave's settings)", () => {
+  const renderModal = (w = wave(), onClose = vi.fn(), onOpenGlobal = vi.fn()) => {
+    render(<SettingsModal wave={w} onClose={onClose} onOpenGlobal={onOpenGlobal} />);
+    return { onClose, onOpenGlobal };
+  };
+
+  it("shows the wave's effective config, read-only, with no scope switch", () => {
+    renderModal();
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "4");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("textbox", { name: "Fallback model" })).toBeDisabled();
+    expect(screen.getByText(/wave file's/)).toHaveTextContent("config:");
+    expect(screen.queryByText(/Pick a new value/)).not.toBeInTheDocument();
+  });
+
+  it("shows only a note while the wave has no effective config", () => {
+    const { state, ...rest } = wave();
+    const { effective_config: _, ...bare } = state as NonNullable<WaveView["state"]>;
+    renderModal({ ...rest, state: bare });
+    expect(screen.getByText("No effective config for this wave yet.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("slider")).toHaveLength(0);
+  });
+
+  it("links to the global config", () => {
+    const { onOpenGlobal } = renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Global settings…" }));
+    expect(onOpenGlobal).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes on Done, Escape, the close button and a scrim click", () => {
+    const { onClose } = renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.pointerDown(screen.getByRole("dialog").parentElement as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(3);
+    // Focus moves into the dialog on open, so Escape works without a click first.
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -587,7 +600,7 @@ describe("copyCommand", () => {
 });
 
 describe("App wiring", () => {
-  it("the wave window's gear opens the settings for that wave, read-only without credentials", () => {
+  it("the wave window's gear opens the settings for that wave; Supervisor is read-only without credentials", () => {
     render(
       <DeskStoreProvider demo>
         <App />
@@ -595,11 +608,11 @@ describe("App wiring", () => {
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
-    expect(screen.getByRole("radio", { name: "This wave (ci-speed)" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(screen.getByRole("dialog", { name: "Wave settings" })).toHaveTextContent("ci-speed");
+    fireEvent.click(screen.getByRole("button", { name: "Global settings…" }));
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
     expect(within(rowOf("Hard ceiling")).getByText(/Pick a new value/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -617,7 +630,7 @@ describe("App wiring", () => {
     expect(gear).toHaveFocus();
   });
 
-  it("signed in, the global scope writes config_set to volleyd's mailbox in its namespace (P1-3)", async () => {
+  it("signed in, Settings › Supervisor writes config_set to volleyd's mailbox in its namespace (P1-3)", async () => {
     const handlers = new Set<(m: DeskMessage) => void>();
     const connected = new Set<() => void>();
     const published: { topic: string; envelope: Envelope }[] = [];
@@ -680,8 +693,14 @@ describe("App wiring", () => {
       wall_time: "2026-10-18T12:00:00.000Z",
       payload: wave().state,
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Settings for status-chip" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    // The retained replay has reached the Desk once the wave window is up.
+    await screen.findByRole("button", { name: "Settings for status-chip" });
+    fireEvent.click(
+      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+        name: "Settings",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Supervisor" }));
     expect(screen.queryByText(/read-only/i)).not.toBeInTheDocument();
     expect(slider("Hard ceiling")).not.toHaveAttribute("aria-disabled", "true");
     fireEvent.change(screen.getByRole("textbox", { name: "Fallback model" }), {

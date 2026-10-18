@@ -118,38 +118,7 @@
   width: min(520px, calc(100vw - 32px));
 }
 
-/* ----------------------------------------------------------- appearance */
-.look {
-  position: fixed;
-  right: 16px;
-  top: 64px;
-  bottom: 100px;
-  z-index: 7;
-  width: min(340px, calc(100vw - 32px));
-  box-sizing: border-box;
-  overflow: auto;
-  background: rgba(10, 12, 20, 0.9);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.look-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-family: var(--f-display);
-  font-weight: 600;
-  font-size: 16px;
-}
-.look .lbl {
-  margin-bottom: 0;
-  justify-content: flex-start;
-}
+/* ------------------------------------------- backgrounds (Settings › Appearance) */
 .bg-current {
   font-size: 12.5px;
   color: var(--mute);
@@ -169,12 +138,10 @@
   font: inherit;
   font-size: 13px;
 }
-.look fieldset {
-  margin: 0;
-  min-width: 0;
-}
 .bg-grid {
   display: grid;
+  margin: 0;
+  min-width: 0;
   padding: 0;
   border: 0;
   grid-template-columns: 1fr 1fr;
@@ -204,51 +171,6 @@
   grid-column: 1 / -1;
   font-size: 12.5px;
   color: var(--dim);
-}
-.look input[type="range"] {
-  width: 100%;
-  accent-color: #6ee7f9;
-}
-.look-note {
-  font-size: 12px;
-  color: var(--dim);
-  margin: 4px 0 0;
-}
-.look .seg {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--line);
-}
-.look .seg--wrap {
-  flex-wrap: wrap;
-}
-.look .seg button {
-  border: 0;
-  background: transparent;
-  padding: 5px 10px;
-  border-radius: 7px;
-  font-size: 12.5px;
-  color: var(--mute);
-  cursor: pointer;
-}
-.look .seg button[aria-pressed="true"] {
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--ink);
-}
-.check {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  font-size: 13px;
-  color: var(--mute);
-  cursor: pointer;
-}
-.check input {
-  accent-color: #6ee7f9;
-  margin-top: 3px;
 }
 
 @media (prefers-reduced-motion: reduce) {
