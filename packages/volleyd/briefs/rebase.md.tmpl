@@ -1,0 +1,34 @@
+# Rebase for issue #{{issue}}: {{issue_title}}
+
+`{{release_branch}}` moved since this task's PR branched from it. Read `.volley/rebase.md`: it names the PR branch, the head this worktree starts at, and the exact commands. Rebase onto `origin/{{release_branch}}`, resolve conflicts keeping the PR's intent (`ISSUE.md`, {{issue_url}}), run the repository's gates, and publish the rebased branch with the lease-guarded push given there. Do not change behaviour beyond what the conflicts require.
+
+## Result contract
+
+Your `done` is checked: the PR branch on origin must equal this worktree's HEAD, the PR must still target `{{release_branch}}`, and CI must be green on the new head. Reviewers whose flagged files your rebase touched review again. Optionally publish `vol_publish(channel="result", type="rebase", payload={ "summary": "<conflicts and how you resolved them>" })`.
+
+## Rules
+
+- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from `{{release_branch}}`).
+- The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
+- Never push to or merge into `{{release_branch}}` or any default branch. The only force-push allowed is the `--force-with-lease` push to the PR branch in `.volley/rebase.md`.
+
+## Volley protocol (mandatory)
+
+You are agent `{{agent_id}}` in namespace `{{namespace}}`, supervised by volleyd (wave `{{wave}}`, task `{{task}}`, role `{{role}}`). Registration, heartbeats and mailbox delivery are handled for you by the session hooks: your identity is in `.volley/agent.json` and is already registered. Do not register again and never edit `.volley/`.
+
+**Narration.** The operator watches you live. Publish on the `progress` channel at least once a minute while you work, and before and after every long command:
+
+    vol_publish(channel="progress", type="narration", payload={ "progress": <0-100>, "msg": "<what you are doing right now>" })
+
+The field is literally `msg`. Pass `payload` as a JSON object, never a JSON string.
+
+**Steering.** A message from your mailbox is injected into your session as `[volley steering]`. When you act on one, reply in prose with an explicit `acknowledged: …` line saying what you will do differently, AND publish `vol_publish(channel="progress", type="steering_acked", correlation_id=<the message id>, payload={ "progress": <current>, "msg": "acknowledged: …" })`. A hook delivering the message is not an acknowledgement; only yours is.
+
+**Terminal status.** When you finish, publish one final `progress` tick at 100 with your one-line summary, then exactly once on channel `status`:
+
+- `type="done"`, payload `{ "summary": "<one line>", "pr_url": "<url, if you opened one>", "worktree": "{{worktree}}", "msg": "<one line>" }`
+- `type="blocked"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }` when only the owner can unblock you
+- `type="failed"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }`
+
+Never exit or go idle without the terminal status.
+{{extra}}

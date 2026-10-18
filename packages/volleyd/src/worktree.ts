@@ -45,17 +45,11 @@ export async function addWorktree(exec: ExecFn, spec: WorktreeSpec): Promise<Wor
       return { path: spec.path, branch, reused: true };
     }
   }
-  const r = await exec([
-    "git",
-    "-C",
-    spec.repo,
-    "worktree",
-    "add",
-    spec.path,
-    "-b",
-    spec.branch,
-    spec.base,
-  ]);
+  const r = await exec(
+    spec.detach === true
+      ? ["git", "-C", spec.repo, "worktree", "add", "--detach", spec.path, spec.base]
+      : ["git", "-C", spec.repo, "worktree", "add", spec.path, "-b", spec.branch, spec.base],
+  );
   if (r.code !== 0) {
     throw new SpawnError("WORKTREE_FAILED", `git worktree add failed: ${r.stderr.trim()}`, {
       path: spec.path,
@@ -63,7 +57,11 @@ export async function addWorktree(exec: ExecFn, spec: WorktreeSpec): Promise<Wor
     });
   }
   await excludeVolleyFiles(exec, spec.repo);
-  return { path: spec.path, branch: spec.branch, reused: false };
+  return {
+    path: spec.path,
+    branch: spec.detach === true ? `HEAD (detached at ${spec.base})` : spec.branch,
+    reused: false,
+  };
 }
 
 /** Append `EXCLUDE_LINES` to the repo's shared `info/exclude`, each at most once. */

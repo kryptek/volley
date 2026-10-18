@@ -4,6 +4,16 @@ Read `ISSUE.md` (the issue, {{issue_url}}) and review the implementation on this
 
 Report each finding with file and line. Your `done` summary says `approve` or `changes requested`.
 
+## Result contract
+
+Read `.volley/review.md` first: it names the PR, the exact head this detached worktree is at, and the diff to review. Before your `done`, publish your review as one retained result — volleyd reads it, and a `done` without it is sent back to you once:
+
+    vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1", "file": "src/x.ts", "line": 42, "text": "<what is wrong and why>" }], "verdict": "changes_requested" })
+
+- `severity`: `P1` blocks the merge, `P2` should be fixed, `P3` is a nit (also use `P3` for a hunk you checked and consider fine, with that as the text).
+- `file` is repo-relative; `line` is optional; `verdict` is `approve` or `changes_requested`.
+- No findings: `"findings": []` with `"verdict": "approve"`.
+
 ## Rules
 
 - Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from `{{release_branch}}`).

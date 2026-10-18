@@ -1,6 +1,14 @@
 # Fix-up for issue #{{issue}}: {{issue_title}}
 
-Read `ISSUE.md` (the issue, {{issue_url}}) and the review findings you were given, and address each one on this branch, test-first. Push `{{branch}}` when the gates are green; do not merge.
+Read `ISSUE.md` (the issue, {{issue_url}}) and the review findings you were given, and address each one on this branch, test-first. When the gates are green, push to the PR branch as `.volley/findings.md` says; do not merge.
+
+## Result contract
+
+`.volley/findings.md` lists every finding of both reviewers (ids `S1…` for spec, `Q1…` for quality) and the rule: apply every P1; apply a P2 or P3 only if the change is trivial. This worktree starts at the reviewed head on its own branch; publish your commits to the PR branch with the `git push origin HEAD:<pr branch>` line given there (a fast-forward, never a force-push). Before your `done`, publish how each finding was handled:
+
+    vol_publish(channel="result", type="fixup", payload={ "resolved": [{ "finding": "S1", "how": "<what you changed, or why not>" }] })
+
+volleyd then verifies the push, the PR and CI on the new head before anything moves on.
 
 ## Rules
 

@@ -63,6 +63,8 @@ import type { JournalEvent, NewEvent, TaskId, TunablesPatch, WaveId, WaveState }
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
+import { PipelineDriver, type SpawnStart } from "./pipeline";
+
 import { type Role, briefGatePath, isRole } from "./brief";
 import { HOOKS_DIR } from "./launch";
 import { type AgentProbe, FINAL_STATUS, lockPath } from "./locks";
@@ -278,6 +280,8 @@ export class Daemon {
   private readonly spawning = new Set<string>();
   /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
   private readonly refused = new Map<string, { n: number; until: number }>();
+  /** Each wave's pipeline driver (T6), created on first use. */
+  private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
@@ -594,6 +598,11 @@ export class Daemon {
     if (this.opts.spawner !== undefined) {
       await this.resolveTrustedRepos();
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
+      // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
+      for (const wave of this.waves.keys()) {
+        if (this.waves.get(wave)?.record.state?.status === "running")
+          await this.pipelineFor(wave).tick();
+      }
     }
   }
 
@@ -621,7 +630,12 @@ export class Daemon {
    * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
    * serial queue and the queue never waits on a spawn's verification window.
    */
-  private async startSpawn(wave: WaveId, task: string, role: Role): Promise<SpawnResult> {
+  private async startSpawn(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    pipeline: { start?: SpawnStart; files?: Record<string, string> } = {},
+  ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
     if (log === undefined || w == null) throw new Error(`unknown wave '${wave}'`);
@@ -649,7 +663,10 @@ export class Daemon {
           .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
           .length + 1;
       // spawnAgent journals its own refusals.
-      const res = await spawnAgent({ wave: w, task, role, attempt }, this.spawnDeps(wave));
+      const res = await spawnAgent(
+        { wave: w, task, role, attempt, ...pipeline },
+        this.spawnDeps(wave),
+      );
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
@@ -863,7 +880,8 @@ export class Daemon {
       }
       clearTimeout(a.reapTimer);
       a.reapTimer = undefined;
-      if (FINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
+      // A `done` is a claim: the pipeline checks it before the agent is retired (T6).
+      if (FINAL_STATUS.has(type)) void this.enqueue(() => this.onFinal(agentId, type));
     };
     watch.onStatus(check);
     if (watch.state.status !== null) check(watch.state.status.type);
@@ -913,6 +931,87 @@ export class Daemon {
         },
       },
     );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // -------------------------------------------------------------------------------------------
+
+  /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
+  private pipelineFor(wave: WaveId): PipelineDriver {
+    let d = this.pipelines.get(wave);
+    if (d !== undefined) return d;
+    const log = this.waves.get(wave) as WaveLog;
+    d = new PipelineDriver(wave, {
+      exec: this.host.exec,
+      home: this.opts.home,
+      record: () => log.record,
+      journal: (ev) => this.append(wave, ev),
+      spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
+      steer: (task, role, agentId, text, reason) =>
+        this.publishSteer(
+          wave,
+          task,
+          { role, agent_id: agentId },
+          text,
+          DAEMON_AGENT_ID,
+          randomUUID(),
+          {
+            reason,
+          },
+        ),
+      decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      retire: (agentId) => this.retire(agentId, "done"),
+    });
+    this.pipelines.set(wave, d);
+    return d;
+  }
+
+  /**
+   * A supervised agent's final status. `failed` retires it at once; `done` goes to the pipeline,
+   * which verifies the claim (steering the agent while it is still live) and retires it.
+   */
+  private async onFinal(agentId: string, type: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    if (a === undefined) return;
+    if (type !== "done") await this.retire(agentId, type);
+    const raw = await this.broker
+      .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
+      .catch(() => null);
+    const result = raw !== null && raw !== "" ? parseEnvelope(raw)?.payload : undefined;
+    await this.pipelineFor(a.wave).handle(a.task, {
+      kind: "agent_done",
+      role: a.role,
+      agent_id: agentId,
+      status: type === "done" ? "done" : "failed",
+      ...(result !== undefined ? { result } : {}),
+    });
+  }
+
+  /**
+   * A pipeline role spawn, through the same lock, launch and verification as the implementer's,
+   * within the wave's spawn budget and only while the wave runs. A refusal is silent: the
+   * pipeline's next tick asks again.
+   */
+  private pipelineSpawn(
+    wave: WaveId,
+    task: TaskId,
+    role: Role,
+    req: { start?: SpawnStart; files: Record<string, string> },
+  ): void {
+    const rec = this.waves.get(wave)?.record;
+    if (this.opts.spawner === undefined || this.killSwitch || rec?.wave == null) return;
+    if (rec.state?.status !== "running") return;
+    const key = `${wave}/${task}/${role}`;
+    if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) return;
+    const budget = spawnBudget(rec.wave, this.config.effective(wave).spawn_budget_multiplier);
+    if (spawnsUsed(rec) >= budget) {
+      this.log(`spawn ${key}: held, spawn budget exhausted (${spawnsUsed(rec)}/${budget})`);
+      return;
+    }
+    void this.startSpawn(wave, task, role, req).catch((e: unknown) => {
+      this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+    });
   }
 
   /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
@@ -1089,6 +1188,12 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     if (d.task === null) return { decision: d, already_resolved: false };
+    if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
+      const task = d.task;
+      void this.enqueue(() =>
+        this.pipelineFor(wave).handle(task, { kind: "decision_resolved", decision: d }),
+      );
+    }
     // The next stage's brief: every resolved decision of the task, in opening order. The
     // resolution is already journaled, so a failed write is logged, not reported as a failure.
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);
@@ -1655,6 +1760,56 @@ export class Daemon {
   }
 
   /**
+   * Publish one numbered `steering` (seq + supersedes) to an agent's mailbox and journal it.
+   * `extra` is kept on the journal event (the pipeline's steer `reason`).
+   */
+  private async publishSteer(
+    wave: WaveId,
+    task: TaskId,
+    target: { role: string; agent_id: string },
+    text: string,
+    by: string,
+    messageId: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    const log = this.waves.get(wave) as WaveLog;
+    const { seq, supersedes } = nextSteer(log.record, task);
+    await this.publish(
+      buildTopic(this.opts.namespace, target.agent_id, "mailbox"),
+      this.envelope(
+        "mailbox",
+        "steering",
+        {
+          text,
+          from_agent_id: DAEMON_AGENT_ID,
+          seq,
+          ...(supersedes !== undefined ? { supersedes } : {}),
+          wave,
+          task,
+          by,
+        },
+        messageId,
+      ),
+      false,
+    );
+    await this.append(wave, {
+      type: "steering_sent",
+      task,
+      data: {
+        agent_id: target.agent_id,
+        role: target.role,
+        type: "steering",
+        message_id: messageId,
+        seq,
+        ...(supersedes !== undefined ? { supersedes } : {}),
+        text,
+        by,
+        ...extra,
+      },
+    });
+  }
+
+  /**
    * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
    * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
    */
@@ -1688,38 +1843,7 @@ export class Daemon {
         ? Math.min(p.wait_ack_ms, DAEMON_DEFAULTS.steer_wait_ack_max_ms)
         : DAEMON_DEFAULTS.steer_wait_ack_ms;
     const heard = waitMs > 0 ? this.acks.wait(messageId, target.agent_id, waitMs) : null;
-    await this.publish(
-      buildTopic(this.opts.namespace, target.agent_id, "mailbox"),
-      this.envelope(
-        "mailbox",
-        "steering",
-        {
-          text: p.text,
-          from_agent_id: DAEMON_AGENT_ID,
-          seq,
-          ...(supersedes !== undefined ? { supersedes } : {}),
-          wave: w.wave,
-          task: p.task,
-          by,
-        },
-        messageId,
-      ),
-      false,
-    );
-    await this.append(w.wave, {
-      type: "steering_sent",
-      task: p.task,
-      data: {
-        agent_id: target.agent_id,
-        role: target.role,
-        type: "steering",
-        message_id: messageId,
-        seq,
-        ...(supersedes !== undefined ? { supersedes } : {}),
-        text: p.text,
-        by,
-      },
-    });
+    await this.publishSteer(w.wave, p.task, target, p.text, by, messageId);
     const result = {
       wave: w.wave,
       task: p.task,

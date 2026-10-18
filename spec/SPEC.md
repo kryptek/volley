@@ -311,6 +311,10 @@ Heavy operations (integration test suites, builds, browsers) are gated by machin
 
 `screen` is a reserved per-agent channel in addition to those in §4.1: QoS 0, **retained**, published by a supervisor *on the agent's behalf* (the envelope `agent_id` is the supervisor; the topic's `<agent_id>` segment names the agent). `payload: { lines (≤ 40 strings), captured_at, workspace, hash, source }` is the tail of the agent's terminal (`source` is the capture mechanism, e.g. `cmux`); publishers SHOULD skip captures whose `hash` is unchanged. The supervisor clears the topic when the agent is retired. Agents MUST NOT publish their own `screen` channel.
 
+#### 4.6.7 Pipeline results and the merge-ready gate
+
+A supervisor that reviews work before a human merges it MAY ask its review roles for a structured retained `result` (§4.1) published before their terminal `done`: `type: "review"` with `payload: { findings: [{ severity, file, line?, text }], verdict }`, where `severity` is `P1` (blocks the merge) \| `P2` \| `P3` and `verdict` is `approve` \| `changes_requested`, and `type: "fixup"` with `payload: { resolved: [{ finding, how }] }` (`review-result.schema.json`). A supervisor SHOULD treat an agent's `done` as a claim and verify it (pushed head, the PR for exactly that head branch, CI on exactly that head) before acting on it; a task whose claims are verified enters stage `merge_ready`, is listed in `gates`, and carries `evidence_path`, a supervisor-local file describing that head. The supervisor does not merge: a task leaves `merge_ready` for `done` only when the supervisor observes that a human merged its PR.
+
 ---
 
 ## 5. Lifecycle states

@@ -34,6 +34,7 @@ coordinator session.
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+- [The pipeline and the merge-ready gate](#the-pipeline-and-the-merge-ready-gate)
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
@@ -469,7 +470,9 @@ the decision store (retained on `volley/_waves/<wave>/decisions/<id>`, notify br
 
 ### Retire and cleanup
 
-When a supervised agent's `done` or `failed` status arrives, the daemon retires it. `reaped` (its
+When a supervised agent's `failed` status arrives, the daemon retires it; a `done` is first
+handed to the pipeline, which verifies the claim and retires the agent once it is checked (see
+below). `reaped` (its
 LWT) is retired only after `heartbeat_alarm_s` passes with no fresh status or heartbeat: a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
@@ -487,6 +490,70 @@ file just before its rename and retries rather than drop a concurrent Claude Cod
 Accepting the dialog by hand in any worktree of the repo works too: every tick re-checks the
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
+
+---
+
+## The pipeline and the merge-ready gate
+
+`done` from an agent is a claim. `src/pipeline.ts` drives each task through its `pipeline`
+(default `[implement, [spec_review, quality_review], fixup, merge_ready]`) and only moves on when
+the claim checks out. It is a pure interpreter, `next(view, event) → actions[]`, over a per-task
+`TaskPipeline` the reducer folds from the journal (step, role runs, verified head, reviews), so
+the position survives a restart; `PipelineDriver` executes the actions through the daemon.
+
+| Stage | Role(s) | Worktree | Accepted when |
+|---|---|---|---|
+| `implement` | `implementer` | `<task>-implementer`, branch from the release branch | artifacts verified |
+| `spec_review` ∥ `quality_review` | two fresh reviewers | each its own `--detach` worktree at the verified head | a parseable `review` result |
+| `fixup` | `fixup` | its own branch from the head; pushes `HEAD:<PR branch>` | artifacts verified |
+| (rebase) | `rebase` | its own branch from the head; lease-guarded push | artifacts verified |
+| `merge_ready` | — | — | evidence written; the task is a gate |
+
+**Artifact verification** (`src/artifacts.ts`, read-only verbs only): the role's local HEAD
+equals `origin/<PR branch>` after a `git fetch`; `gh pr list --head <branch>` has an open PR whose
+`headRefName` *equals* the branch (the CLI has returned another branch's PR) and whose base is the
+release branch; CI on exactly that head (`gh run list --commit <sha>`) is green. A missing
+artifact is journaled (`alarm_raised { alarm: "artifact_missing", missing: push|pr|base }`), the
+agent is steered once ("push + open PR, then publish done again") and re-waited; still missing →
+an `agent_blocked` decision. Success journals `artifact_verified { role, head_sha, pr, ci_runs }`.
+
+**CI** is never re-run. Red on the head → a `ci_failed` decision with the run URLs and failed
+job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
+"check the hosting provider's status page first". Pending CI is re-checked every
+`ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
+`ci_none_grace_ms` asks the owner (`accept` / `cancel`).
+
+**Reviews.** Reviewers publish `vol_publish(channel="result", type="review", payload={ findings:
+[{ severity: P1|P2|P3, file, line?, text }], verdict })` (`review-result.schema.json`). A `done`
+without a parseable result is steered once, then `agent_blocked` (`respawn` / `skip`). A P1 from
+one reviewer that the other rated P3 on the same hunk (same file, lines within
+`review_hunk_lines`) opens `reviewers_disagree` (`blocker` / `fine`; `fine` hands it to the fixup
+as a P3). The fixup gets `.volley/findings.md` + `.json` — every finding of the round, numbered
+`S1…`/`Q1…`, with the rule "every P1; P2/P3 only if trivial" — and reports
+`{ resolved: [{ finding, how }] }` (`type: "fixup"`). A round with no findings skips the fixup.
+
+**Rebase rule.** Before the gate the release branch is fetched and compared with the head's
+merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI green on it) and, if
+the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
+reviewer runs again (then the fixup, if it finds anything), and the check repeats.
+
+**Evidence package** at the gate: `$VOLLEYD_HOME/waves/<wave>/evidence/<task>.md` + `.json` —
+PR URL, head SHA, CI status and run links on that exact head, both reviews' findings and how each
+was resolved (unresolved P1s called out), each fixup's diffstat, the rebases, and "branch current
+with release branch: yes/no (behind by N)". Then `artifact_verified { role: "gate",
+evidence_path }` and `stage_entered merge_ready`: the task appears in the wave state's `gates`
+with its `evidence_path`.
+
+**volleyd never merges.** A human merges the PR. The pipeline polls the gated PR read-only
+(`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName`, every `ci_poll_ms`); once it is
+`MERGED` into the release branch it journals `artifact_verified { role: "merged", merge_sha }`
+and `stage_entered done`, which releases the task's dependents. A PR closed unmerged raises one
+`pr_closed_unmerged` alarm and stays at the gate. The fence denies `gh pr merge`, `git merge`,
+`git push` and `gh workflow run` anyway; `test/no-merge.test.ts` also holds the source and a full
+pipeline run (on an unfenced fake exec) to never build one.
+
+Role spawns go through the same lock, launch and verification as the implementer's, within the
+wave's spawn budget and only while the wave is running; a held spawn is retried on the next tick.
 
 ---
 

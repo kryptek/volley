@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/review-result.schema.json",
+  "title": "Volley Pipeline Result",
+  "description": "The retained result a supervised pipeline role publishes before its done status: a reviewer's findings (type review) or a fix-up's resolutions (type fixup). See spec section 4.6.7.",
+  "allOf": [
+    { "$ref": "result.schema.json" },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "review" },
+            "payload": { "$ref": "#/$defs/review" }
+          },
+          "required": ["type", "payload"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "fixup" },
+            "payload": { "$ref": "#/$defs/fixup" }
+          },
+          "required": ["type", "payload"]
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "severity": {
+      "enum": ["P1", "P2", "P3"],
+      "description": "P1 blocks the merge; P2 should be fixed; P3 is a nit."
+    },
+    "finding": {
+      "type": "object",
+      "required": ["severity", "file", "text"],
+      "properties": {
+        "severity": { "$ref": "#/$defs/severity" },
+        "file": { "type": "string", "minLength": 1, "description": "Repo-relative path." },
+        "line": { "type": "integer", "minimum": 1 },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["findings", "verdict"],
+      "properties": {
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "verdict": { "enum": ["approve", "changes_requested"] },
+        "summary": { "type": "string" }
+      }
+    },
+    "fixup": {
+      "type": "object",
+      "required": ["resolved"],
+      "properties": {
+        "resolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["finding", "how"],
+            "properties": {
+              "finding": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The finding as listed in .volley/findings.md (its id, e.g. S1 or Q2)."
+              },
+              "how": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+}

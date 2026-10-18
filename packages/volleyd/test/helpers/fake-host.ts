@@ -49,7 +49,8 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
       mkdirSync(spec.path, { recursive: true });
-      return { path: spec.path, branch: spec.branch, reused: false };
+      const branch = spec.detach === true ? `HEAD (detached at ${spec.base})` : spec.branch;
+      return { path: spec.path, branch, reused: false };
     },
     async writeFile(path, content, mode) {
       mkdirSync(dirname(path), { recursive: true });

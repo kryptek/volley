@@ -10,6 +10,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `mailbox.schema.json` | `mailbox` | section 4 |
 | `registry.schema.json` | `_system/registry/<id>` | section 6 |
 | `result.schema.json` | `result` | section 4 |
+| `review-result.schema.json` | `result` (pipeline roles: `review`, `fixup`) | section 4.6.7 |
 | `capability.schema.json` | `capability` | section 4 |
 | `control.schema.json` | `control` (reserved) | section 4 |
 | `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |

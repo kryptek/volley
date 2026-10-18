@@ -1,0 +1,337 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Role } from "../../src/brief";
+import { type DecisionRecord, openEvent, resolveEvent } from "../../src/decisions";
+import type { ExecFn, ExecResult } from "../../src/exec";
+import { assertAllowed } from "../../src/fence";
+import { agentIdFor } from "../../src/identity";
+import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
+import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
+import type { JournalEvent, NewEvent } from "../../src/types";
+import { parseWaveFile } from "../../src/wave-file";
+import { branchName } from "../../src/worktree";
+
+/**
+ * The pipeline driver on an in-memory journal and a scripted git/GitHub "world": no broker, no
+ * processes. Agents are simulated by `finish(role, …)`, which pushes a head (unless told not to)
+ * and reports a terminal status the way the daemon's supervisor would.
+ */
+
+/** The design's default pipeline. */
+export const DEFAULT_PIPELINE = "[implement, [spec_review, quality_review], fixup, merge_ready]";
+
+export const sha = (n: number) => n.toString(16).padStart(40, "0");
+
+export interface World {
+  /** HEAD per worktree. */
+  local: Record<string, string>;
+  /** Branch heads on origin. */
+  origin: Record<string, string>;
+  /** Open PRs. */
+  prs: {
+    number: number;
+    url: string;
+    headRefName: string;
+    baseRefName: string;
+    headRefOid: string;
+  }[];
+  /** CI per head (absent: no run). */
+  ci: Record<string, "green" | "red" | "running">;
+  releaseTip: string;
+  /** merge-base(head, releaseTip) per head (default: the release tip, i.e. current). */
+  mergeBase: Record<string, string>;
+  /** PR states by number for `gh pr view` (default OPEN). */
+  prState: Record<number, "OPEN" | "MERGED" | "CLOSED">;
+  /** `git diff --name-only a b` per `a..b`. */
+  diffNames: Record<string, string[]>;
+}
+
+export interface Spawned {
+  role: Role;
+  agent_id: string;
+  worktree: string;
+  start?: SpawnStart;
+  files: Record<string, string>;
+}
+
+export interface HarnessOptions {
+  pipeline?: string;
+  /** Enforce the real fence on every argv (default true). */
+  fence?: boolean;
+}
+
+export function pipelineHarness(o: HarnessOptions = {}) {
+  const home = mkdtempSync(join(tmpdir(), "volleyd-pipeline-"));
+  const wave = parseWaveFile(
+    [
+      "wave: w1",
+      "repo: /repo",
+      "release_branch: release/w1",
+      "model: claude-opus-5-5",
+      `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
+      "tasks:",
+      "  T1: { issue: 42 }",
+      "",
+    ].join("\n"),
+  );
+  let rec: WaveRecord = emptyRecord();
+  const events: JournalEvent[] = [];
+  let seq = 0;
+  const journal = async (ev: NewEvent) => {
+    const e: JournalEvent = { ...ev, seq: ++seq, at: new Date().toISOString() } as JournalEvent;
+    events.push(e);
+    rec = apply(rec, e);
+    return e;
+  };
+
+  const world: World = {
+    local: {},
+    origin: {},
+    prs: [],
+    ci: {},
+    releaseTip: sha(0xbea5e),
+    mergeBase: {},
+    prState: {},
+    diffNames: {},
+  };
+  const calls: string[][] = [];
+  const out = (stdout: string, code = 0): ExecResult => ({
+    code,
+    stdout,
+    stderr: "",
+    timedOut: false,
+  });
+  const exec: ExecFn = async (argv) => {
+    if (o.fence !== false) assertAllowed(argv);
+    calls.push([...argv]);
+    const a = [...argv];
+    if (a[0] === "git" && a[1] === "-C") {
+      const wt = a[2] as string;
+      const [verb, ...rest] = a.slice(3);
+      if (verb === "rev-parse" && rest[0] === "HEAD")
+        return out(`${world.local[wt] ?? ""}\n`, world.local[wt] ? 0 : 1);
+      if (verb === "rev-parse") {
+        const ref = (rest.at(-1) as string).replace("refs/remotes/origin/", "");
+        const head = ref === wave.release_branch ? world.releaseTip : world.origin[ref];
+        return head !== undefined ? out(`${head}\n`) : out("", 1);
+      }
+      if (verb === "fetch") return out("");
+      if (verb === "merge-base")
+        return out(`${world.mergeBase[rest[0] as string] ?? world.releaseTip}\n`);
+      if (verb === "log") return out("c1 upstream change\nc2 upstream change\n");
+      if (verb === "diff" && rest[0] === "--name-only")
+        return out(`${(world.diffNames[`${rest[1]}..${rest[2]}`] ?? []).join("\n")}\n`);
+      if (verb === "diff" && rest[0] === "--stat")
+        return out(" src/batch.ts | 4 ++--\n 1 file changed\n");
+      return out("");
+    }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "list") {
+      const branch = a[a.indexOf("--head") + 1];
+      return out(JSON.stringify(world.prs.filter((p) => p.headRefName === branch)));
+    }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "view") {
+      const n = Number(a[3]);
+      const state = world.prState[n] ?? "OPEN";
+      return out(
+        JSON.stringify({
+          state,
+          mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
+          mergeCommit: state === "MERGED" ? { oid: sha(0xa11) } : null,
+          baseRefName: wave.release_branch,
+        }),
+      );
+    }
+    if (a[0] === "gh" && a[1] === "run" && a[2] === "list") {
+      const head = a[a.indexOf("--commit") + 1] as string;
+      const state = world.ci[head];
+      if (state === undefined) return out("[]");
+      return out(
+        JSON.stringify([
+          {
+            databaseId: 900,
+            name: "CI",
+            workflowName: "CI",
+            status: state === "running" ? "in_progress" : "completed",
+            conclusion: state === "green" ? "success" : state === "red" ? "failure" : "",
+            headSha: head,
+            url: `https://github.com/example/repo/actions/runs/${head.slice(-4)}`,
+          },
+        ]),
+      );
+    }
+    if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
+      return out(
+        JSON.stringify({
+          jobs: [
+            {
+              name: "test",
+              conclusion: "failure",
+              steps: [{ name: "Run tests", conclusion: "failure" }],
+            },
+          ],
+        }),
+      );
+    }
+    return out("");
+  };
+
+  const spawns: Spawned[] = [];
+  const steers: { role: Role; agent_id: string; text: string; reason: string }[] = [];
+  const attempts: Record<string, number> = {};
+  const spawnAgent = async (role: Role, start?: SpawnStart, files: Record<string, string> = {}) => {
+    const attempt = (attempts[role] ?? 0) + 1;
+    attempts[role] = attempt;
+    const agent_id = agentIdFor("w1", "T1", role, attempt);
+    const worktree = `/wt/w1/T1-${role}-${attempt}`;
+    const branch = start?.detach ? "HEAD" : branchName("w1", "T1", role, attempt);
+    spawns.push({ role, agent_id, worktree, ...(start !== undefined ? { start } : {}), files });
+    if (start !== undefined) world.local[worktree] = start.ref;
+    await journal({
+      type: "agent_spawned",
+      task: "T1",
+      data: {
+        agent_id,
+        role,
+        attempt,
+        worktree,
+        branch,
+        ...(start !== undefined ? { start: start.ref } : {}),
+      },
+    });
+    if (role === "implementer" && attempt === 1)
+      await journal({ type: "stage_entered", task: "T1", data: { stage: "implement" } });
+    return agent_id;
+  };
+
+  let clock = Date.parse("2026-10-18T12:00:00.000Z");
+  const driver = new PipelineDriver("w1", {
+    now: () => clock,
+    exec,
+    home,
+    record: () => rec,
+    journal,
+    spawn: async (_task, role, req) => spawnAgent(role, req.start, req.files),
+    steer: async (task, role, agentId, text, reason) => {
+      steers.push({ role, agent_id: agentId, text, reason });
+      await journal({
+        type: "steering_sent",
+        task,
+        data: {
+          agent_id: agentId,
+          role,
+          type: "steering",
+          reason,
+          text,
+          seq: steers.length,
+          message_id: `m${steers.length}`,
+        },
+      });
+    },
+    decide: async (input, extra) => {
+      const r = openEvent(rec, input, new Date());
+      if ("error" in r) throw new Error(r.error);
+      await journal({ ...r.event, data: { ...extra, ...r.event.data } });
+    },
+    retire: async (agentId) => {
+      const role = Object.entries(rec.pipeline.T1?.runs ?? {}).find(
+        ([, run]) => run?.agent_id === agentId,
+      )?.[0];
+      await journal({
+        type: "agent_retired",
+        task: "T1",
+        data: { agent_id: agentId, role, status: "done" },
+      });
+    },
+  });
+
+  const run = (role: Role) => rec.pipeline.T1?.runs[role];
+  const PR_BRANCH = branchName("w1", "T1", "implementer", 1);
+
+  const h = {
+    home,
+    wave,
+    world,
+    calls,
+    events,
+    spawns,
+    steers,
+    driver,
+    exec,
+    PR_BRANCH,
+    record: () => rec,
+    /** Move the driver's clock (level-triggered re-checks are rate-limited by it). */
+    elapse(ms: number) {
+      clock += ms;
+    },
+    task: () => rec.state?.tasks.find((t) => t.id === "T1"),
+    run,
+    journal,
+    /** Submit the wave and start the implementer (what the daemon's admission + T4 spawn do). */
+    async start() {
+      await journal({ type: "wave_submitted", data: { wave, owner: "coord-1" } });
+      await journal({ type: "task_queued", task: "T1", data: { issue: 42 } });
+      await journal({ type: "task_admitted", task: "T1", data: {} });
+      return spawnAgent("implementer");
+    },
+    /** The implementer opens its PR once (the first push). */
+    openPr(head: string) {
+      world.prs.push({
+        number: 7,
+        url: "https://github.com/example/repo/pull/7",
+        headRefName: PR_BRANCH,
+        baseRefName: wave.release_branch,
+        headRefOid: head,
+      });
+    },
+    /**
+     * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,
+     * CI `ci` on it), and it reports `status` with `result`.
+     */
+    async finish(
+      role: Role,
+      o: {
+        head?: string;
+        push?: boolean;
+        ci?: "green" | "red" | "running";
+        result?: unknown;
+        status?: "done" | "failed";
+      } = {},
+    ) {
+      const r = run(role);
+      if (r === undefined) throw new Error(`no ${role} run`);
+      if (o.head !== undefined) {
+        world.local[r.worktree as string] = o.head;
+        if (o.push !== false) {
+          world.origin[PR_BRANCH] = o.head;
+          for (const pr of world.prs) if (pr.headRefName === PR_BRANCH) pr.headRefOid = o.head;
+        }
+        if (o.ci !== undefined) world.ci[o.head] = o.ci;
+      }
+      const ev: PipelineEvent = {
+        kind: "agent_done",
+        role,
+        agent_id: r.agent_id,
+        status: o.status ?? "done",
+        ...(o.result !== undefined ? { result: o.result } : {}),
+      };
+      await driver.handle("T1", ev);
+    },
+    /** Resolve an open decision and hand the resolution to the pipeline. */
+    async resolve(id: string, answer: string) {
+      const r = resolveEvent(rec, id, { answer, by: "coord-1" }, new Date());
+      if (!("event" in r)) throw new Error(`cannot resolve ${id}`);
+      await journal(r.event);
+      await driver.handle("T1", {
+        kind: "decision_resolved",
+        decision: rec.decisions[id] as DecisionRecord,
+      });
+    },
+    openDecisions: () =>
+      (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),
+    cleanup: () => rmSync(home, { recursive: true, force: true }),
+  };
+  return h;
+}
+
+export type Harness = ReturnType<typeof pipelineHarness>;

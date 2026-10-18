@@ -9,8 +9,10 @@ export interface WorktreeSpec {
   path: string;
   /** `<wave>/<task>-<role>-<attempt>`. */
   branch: string;
-  /** The wave's release branch the worktree is cut from. */
+  /** What the worktree is cut from: the wave's release branch, or a pipeline role's start commit. */
   base: string;
+  /** Check `base` out detached (`--detach`, no branch): reviewers' read-only worktrees. */
+  detach?: boolean;
 }
 
 export interface WorktreeResult {

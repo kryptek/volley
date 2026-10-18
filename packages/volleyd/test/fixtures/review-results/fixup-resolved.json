@@ -1,0 +1,6 @@
+{
+  "resolved": [
+    { "finding": "S1", "how": "Return early on an empty batch; test added." },
+    { "finding": "Q1", "how": "Stop retrying on 4xx; test added." }
+  ]
+}

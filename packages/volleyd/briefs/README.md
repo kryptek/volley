@@ -1,7 +1,7 @@
 # Agent briefs
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
-`fixup`. At spawn, `src/brief.ts` renders `<role>.md.tmpl` into the agent's
+`fixup`, `rebase`. At spawn, `src/brief.ts` renders `<role>.md.tmpl` into the agent's
 `.volley/brief.md`; `launch.sh` passes that file to `claude` as its prompt, so the brief never
 appears in an argv.
 
@@ -21,7 +21,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 
 ## The protocol block
 
-Every template ends with the same protocol block. Keep it in all four when you edit one:
+Every template ends with the same protocol block. Keep it in all five when you edit one:
 
 - **No registration step.** The session hooks register the agent (with its model), send
   heartbeats and deliver mailbox mail; the brief must never ask the agent to call `vol_register`.
@@ -33,6 +33,16 @@ Every template ends with the same protocol block. Keep it in all four when you e
 - **Terminal status**, exactly once: `done` / `blocked` / `failed` on the `status` channel.
 
 `test/brief.test.ts` checks each rendered template for these rules.
+
+## Pipeline inputs and the result contract
+
+Pipeline roles get their inputs as files the spawn writes into `.volley/` before launch:
+`review.md` (reviewers: the PR, the exact head of their detached worktree, the diff command),
+`findings.md` + `findings.json` (fixup: every finding, numbered `S1…`/`Q1…`, the trivial-only
+rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push).
+Reviewers and the fixup publish a retained `result` before `done` — `type: "review"` with
+`{ findings, verdict }`, `type: "fixup"` with `{ resolved: [{ finding, how }] }`
+(`spec/schemas/review-result.schema.json`); the templates spell out that contract.
 
 ## Repo extras and the brief gate
 

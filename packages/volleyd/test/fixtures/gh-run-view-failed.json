@@ -1,0 +1,14 @@
+{
+  "jobs": [
+    {
+      "name": "lint",
+      "conclusion": "success",
+      "steps": [{ "name": "Run biome", "conclusion": "success" }]
+    },
+    {
+      "name": "test",
+      "conclusion": "failure",
+      "steps": [{ "name": "Run tests", "conclusion": "failure" }]
+    }
+  ]
+}
