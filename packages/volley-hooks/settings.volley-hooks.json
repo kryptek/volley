@@ -1,0 +1,82 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/session-start.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/post-model-switch.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/user-prompt-submit.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/post-tool-use.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/stop.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/notification.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/pre-compact.ts\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -354,6 +354,7 @@ packages/volley-desk/     The Desk: infinite canvas of live wave and agent windo
 packages/volley-skill/    The /volley Claude Code slash command.
 packages/volley-wait/     The /wait Claude Code slash command (event-driven block on a topic).
 packages/volley-issues/   The /volley-issues dispatch skill.
+packages/volley-hooks/    Claude Code hooks: real model in the registry, mailbox drain + inject + ack, idle / awaiting-input, heartbeats.
 
 examples/bridges/         Adapters that publish external events (CI, webhooks, ...) onto Volley topics.
   github-actions/         GitHub Actions → mosquitto bridge script.

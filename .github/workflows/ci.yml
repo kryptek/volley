@@ -73,6 +73,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/volley-skill validate:skill
 
+  check-hooks-template:
+    name: Hooks template (every hook command resolves)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun --cwd packages/volley-hooks run check:template
+
   test-integration:
     name: Integration tests (mosquitto)
     runs-on: ubuntu-latest
@@ -94,6 +105,11 @@ jobs:
           (echo > /dev/tcp/127.0.0.1/1883) 2>/dev/null || { echo "mosquitto did not start in 30s"; exit 1; }
       - name: Run integration tests
         working-directory: packages/volley-mcp
+        run: bun run test:integration
+      - name: Run volley-hooks integration tests (MQTT 5 drain)
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_BROKER_URL: mqtt://127.0.0.1:1883
         run: bun run test:integration
       - name: Stop mosquitto
         if: always()

@@ -87,6 +87,17 @@
         "vitest": "^3.2.4",
       },
     },
+    "packages/volley-hooks": {
+      "name": "volley-hooks",
+      "version": "0.1.0-dev",
+      "dependencies": {
+        "volley-mcp": "workspace:*",
+      },
+      "devDependencies": {
+        "aedes": "^0.51.0",
+        "vitest": "^2.1.0",
+      },
+    },
     "packages/volley-issues": {
       "name": "volley-issues",
       "version": "0.1.0-dev",
@@ -1052,6 +1063,8 @@
     "volley-dash": ["volley-dash@workspace:packages/volley-dash"],
 
     "volley-desk": ["volley-desk@workspace:packages/volley-desk"],
+
+    "volley-hooks": ["volley-hooks@workspace:packages/volley-hooks"],
 
     "volley-issues": ["volley-issues@workspace:packages/volley-issues"],
 
