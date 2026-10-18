@@ -186,7 +186,7 @@ Receivers MUST accept envelopes containing unknown fields and MUST NOT error on 
 |---|---|---|---|
 | `status` | 1 | yes | Last-known lifecycle state of an agent (see §5). |
 | `progress` | 0 | no | Streaming progress events (e.g. `tests-green`, `mvn-verify-done`). Fire-and-forget. |
-| `mailbox` | 1 | no | Inbound requests / commands directed at this agent. Must-deliver. The topic's `<agent_id>` segment identifies the recipient; the envelope's `agent_id` (§3.1) identifies the sender. |
+| `mailbox` | 1 | no | Inbound requests / commands directed at this agent. Must-deliver. The topic's `<agent_id>` segment identifies the recipient; the envelope's `agent_id` (§3.1) identifies the sender. Not retained, so the broker only holds a message for a recipient with a persistent session (see §4.4); delivery is confirmed end-to-end by an `ack`, not by PUBACK. |
 | `control` | 1 | no | Reserved for agent control (`kill`, `pause`, `resume`, `nudge`). Reserved in v0.1; semantics deferred to v0.2+. |
 | `result` | 1 | yes | Final artifact pointer (PR URL, log path, deploy summary). |
 | `capability` | 1 | yes | Tools / models this agent advertises. |
@@ -218,8 +218,20 @@ The `mailbox` channel's `type` field is one of:
 - `cancel` — request the agent to abort its current task
 - `nudge` — a lightweight prod to re-evaluate or report status
 - `query` — a question expecting a response (typically correlated via `correlation_id`)
+- `ack` — the recipient's confirmation that it received a mailbox message (see below)
 
 This list matches the `type` enum in `spec/schemas/mailbox.schema.json`.
+
+**Message ids.** A mailbox message's `correlation_id` is its message id. Senders SHOULD set it to a fresh UUID unless they are deliberately correlating with an earlier message (a `query` reply, an `ack`); a message without one cannot be acked. The reference `vol_send_mailbox` generates it when the caller omits it and returns it as `message_id`.
+
+**Optional payload fields.** In addition to the required `text`:
+
+- `seq` — a non-negative integer, monotonic per sender, so a recipient can order messages and drop duplicates
+- `supersedes` — the message id of an earlier message from the same sender that this one replaces; a recipient that has not yet acted on the earlier message SHOULD act on this one instead
+
+**Acks.** A recipient acknowledges a message by publishing `type: "ack"` to the **sender's** mailbox (`volley/<ns>/<sender agent_id>/mailbox`) with `correlation_id` set to the acknowledged message id. `correlation_id` is REQUIRED on an `ack`. The payload SHOULD be `{ "text": "ACKED", "acked_type": "<type of the acknowledged message>" }`, plus `seq` when the acknowledged message carried one. A sender waiting for an ack MUST only accept one whose envelope `agent_id` is the recipient it addressed. An ack means *received*, not *obeyed*: acting on the message is reported through the agent's normal channels. Recipients MUST NOT ack an `ack`.
+
+**Delivery.** Because mailbox messages are not retained, the broker drops a message published while the recipient holds no subscription to its mailbox. An agent that honours its mailbox (§11.3) MUST therefore keep its mailbox subscription in a **persistent MQTT session** (a live subscription on a clean session still loses whatever arrives before it subscribes or while it reconnects): connect with `clean: false` (MQTT 3.1.1) or a non-zero session expiry interval (MQTT 5), with a stable clientId it owns exclusively, and subscribe at QoS 1. The broker then queues messages while the agent is offline and delivers them on its next connect. Two clients that connect with the same clientId kick each other off, so each persistent consumer of one agent (e.g. the MCP server and a hooks drain client) MUST use its own clientId, such as `volley-<agent_id>-mcp` vs `volley-<agent_id>-hooks`. A session expiry interval applies to new connections only: an existing persistent session keeps the expiry it was created with until the client reconnects. A sender that needs confirmation SHOULD wait for the `ack` rather than trust PUBACK, which only confirms receipt by the broker.
 
 ### 4.6 Supervisor topics (informative in 0.1)
 
@@ -498,7 +510,7 @@ A conforming Volley implementation MUST satisfy all MUST-level requirements in t
 
 ### 11.3 Conforming agents MAY
 
-- Subscribe to their own `mailbox` and respond to steering messages (§4.1)
+- Subscribe to their own `mailbox` and respond to steering messages (§4.1). An agent that does MUST keep a persistent subscription or drain on a stable clientId, and SHOULD `ack` each message it receives (§4.4)
 - Spawn sub-agents with `parent_id` set to their own `agent_id` (§3.2)
 - Define user channels under `_user/*` (§4.2)
 

@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DEFAULT_SESSION_EXPIRY_S, VolleyBroker } from "../../src/broker";
 import { shutdownLifecycle, startLifecycle } from "../../src/lifecycle";
 import type { ServerState } from "../../src/state";
 import { volListAgents } from "../../src/tools/list-agents";
@@ -43,4 +45,46 @@ describe.skipIf(!RUN)("volley-mcp against real mosquitto", () => {
     const list = await volListAgents(state, { namespace: "integration" });
     expect(list.agents.map((a) => a.agent_id)).toContain("mosq-aaaa");
   });
+});
+
+describe.skipIf(!RUN)("persistent mailbox sessions against real mosquitto (MQTT v5)", () => {
+  it.each([
+    ["an explicit sessionExpirySeconds", { sessionExpirySeconds: 60 }, 60],
+    ["the default session expiry", {}, DEFAULT_SESSION_EXPIRY_S],
+  ])(
+    "queues an offline QoS 1 message for a v5 session with %s and drains it on reconnect",
+    async (_label, expiry, expectedExpiry) => {
+      // Unique per run so a session left behind by an earlier run cannot interfere.
+      const suffix = randomBytes(4).toString("hex");
+      const topic = `volley/integration/mosq-${suffix}/mailbox`;
+      const opts = {
+        url: BROKER_URL,
+        agentId: `mosq-${suffix}`,
+        clientId: `volley-mosq-${suffix}-hooks`,
+        cleanSession: false,
+        protocolVersion: 5 as const,
+        ...expiry,
+      };
+
+      const consumer = new VolleyBroker();
+      await consumer.connect(opts);
+      expect(consumer.sessionExpiryInterval).toBe(expectedExpiry);
+      expect(await consumer.drainQueued(topic, { idleMs: 200 })).toEqual([]);
+      await consumer.disconnect();
+
+      const pub = new VolleyBroker();
+      await pub.connect({ url: BROKER_URL, agentId: `mosq-pub-${suffix}` });
+      await pub.publish(topic, "queued-while-offline", { qos: 1, retain: false });
+      await pub.disconnect();
+
+      await consumer.connect(opts);
+      const got = await consumer.drainQueued(topic, { idleMs: 300 });
+      expect(got).toEqual([{ topic, payload: "queued-while-offline" }]);
+      await consumer.disconnect();
+
+      // Discard the session now instead of leaving it on the broker until it expires.
+      await consumer.connect({ ...opts, cleanSession: true });
+      await consumer.disconnect();
+    },
+  );
 });
