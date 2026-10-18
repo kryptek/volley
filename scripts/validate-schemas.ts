@@ -15,6 +15,7 @@
  *   - `envelope-*.json` -> envelope.schema.json (envelope-level violations only)
  *   - `wave-*.json` -> wave-state.schema.json
  *   - `waveevent-*.json` -> wave-event.schema.json
+ *   - `wavefile-*.json` -> wave-file.schema.json (a file, not an envelope)
  *   - `decision-*.json` -> decision.schema.json
  *   - `lease-*.json` -> lease-pool.schema.json
  *   - `leasereq-*.json` -> lease-request.schema.json
@@ -44,6 +45,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   capability: "capability.schema.json",
   wave: "wave-state.schema.json",
   waveevent: "wave-event.schema.json",
+  wavefile: "wave-file.schema.json",
   decision: "decision.schema.json",
   lease: "lease-pool.schema.json",
   leasereq: "lease-request.schema.json",

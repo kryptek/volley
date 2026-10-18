@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/wave-file.schema.json",
+  "title": "Volley Wave File",
+  "description": "A wave definition submitted to a supervisor (volleyd run <wave.yaml>). Authored as YAML; this schema validates the parsed document. Not an envelope. Structural rules a schema cannot express (every after target names a task in this file; the after graph is acyclic; task ids are unique) are enforced by the supervisor's parser, which reports them with the same path-qualified errors. See spec section 4.6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wave", "repo", "release_branch", "model", "pipeline", "tasks"],
+  "properties": {
+    "wave": {
+      "$ref": "#/$defs/id",
+      "description": "Wave id (spec section 2.1 grammar); appears as a topic segment in volley/_waves/<wave>/*."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Wave file version; bumped on a versioned re-submission."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^-]",
+      "description": "Repository the wave's tasks work in. Must not start with '-', so it can never be read as a command-line option."
+    },
+    "release_branch": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!-)[^\\s~^:?*\\[\\\\]+$",
+      "description": "Branch the wave's worktrees are cut from and its PRs target. A git ref name: no leading '-' (never read as an option), no whitespace or ~^:?*[\\."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Default model for every agent in the wave."
+    },
+    "namespace": {
+      "$ref": "#/$defs/id",
+      "description": "Volley namespace the wave's agents register in (default: the supervisor's)."
+    },
+    "pipeline": { "$ref": "#/$defs/pipeline" },
+    "tasks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/taskId" },
+      "additionalProperties": { "$ref": "#/$defs/task" }
+    },
+    "heavy_pools": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" },
+      "description": "Lease pools (config lease_pools keys) this wave's heavy operations draw from."
+    },
+    "spawn_budget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Maximum agent spawns for the wave (retries and reviewers included); default spawn_budget_multiplier x task count."
+    },
+    "config": {
+      "$ref": "config.schema.json#/$defs/tunables",
+      "description": "Per-wave overrides of the supervisor tunables, layered over the global config."
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "taskId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+    "stageName": { "enum": ["implement", "spec_review", "quality_review", "fixup", "merge_ready"] },
+    "pipeline": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered pipeline stages; a nested array is a group of stages that run in parallel.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/stageName" },
+          {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/stageName" }
+          }
+        ]
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue"],
+      "properties": {
+        "issue": { "type": "integer", "minimum": 1, "description": "GitHub issue number." },
+        "title": { "type": "string" },
+        "after": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/taskId" },
+          "description": "Task ids that must reach done before this task may start."
+        },
+        "pipeline": { "$ref": "#/$defs/pipeline" },
+        "model": { "type": "string", "minLength": 1 },
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later."
+        }
+      }
+    }
+  }
+}

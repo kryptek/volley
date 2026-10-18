@@ -1,0 +1,23 @@
+{
+  "name": "volleyd",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "volleyd — durable wave supervisor daemon: wave files, journal, DAG scheduler, authority fence",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "volleyd": "./src/cli.ts" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.1",
+    "volley-mcp": "workspace:*",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.0",
+    "vitest": "^2.1.0"
+  }
+}
