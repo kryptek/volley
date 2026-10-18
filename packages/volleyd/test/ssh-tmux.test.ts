@@ -198,10 +198,10 @@ describe("SshTmuxHost", () => {
   it("sendKeys / sendText map to tmux send-keys (text literal, after --)", async () => {
     const r = remote();
     await r.host.sendKeys("w1-T1-implementer", "Enter");
-    await r.host.sendText("w1-T1-implementer", "-not an option");
+    await r.host.sendText("w1-T1-implementer", LAUNCH_COMMAND);
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
-      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "-not an option"],
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
     ]);
   });
 
@@ -330,15 +330,17 @@ describe("SshTmuxHost", () => {
     const r = remote((s) =>
       argvIs("cat", "/src/r/.volley/brief-extra.md")(s)
         ? { stdout: "notes\n" }
-        : argvIs("cat", "/none")(s)
+        : argvIs("cat", "/src/r/.volley/none.md")(s)
           ? { code: 1, stderr: "No such file" }
-          : argvIs("cat", "/down")(s)
+          : argvIs("cat", "/src/r/.volley/down.md")(s)
             ? { code: 255, stderr: "ssh: connect" }
             : undefined,
     );
     expect(await r.host.readFile("/src/r/.volley/brief-extra.md")).toBe("notes\n");
-    expect(await r.host.readFile("/none")).toBeNull();
-    await expect(r.host.readFile("/down")).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+    expect(await r.host.readFile("/src/r/.volley/none.md")).toBeNull();
+    await expect(r.host.readFile("/src/r/.volley/down.md")).rejects.toMatchObject({
+      code: "LAUNCH_FAILED",
+    });
     // readTrust over a failed ssh is not "untrusted" either.
     const down = remote(() => ({ code: 255, stderr: "ssh: connect" }));
     await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });

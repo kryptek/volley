@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { FenceError, mintConsentToken } from "../src/fence";
 import { LocalCmuxHost, parseWorkspaceRef } from "../src/hosts/local-cmux";
+import { LAUNCH_COMMAND } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
 import { fakeExec } from "./helpers/fake-exec";
 
@@ -38,17 +39,21 @@ describe("LocalCmuxHost", () => {
     const fake = fakeExec();
     const host = new LocalCmuxHost(fake.exec);
     await host.sendKeys("workspace:3", "Enter");
-    await host.sendText("workspace:3", "hello");
+    await host.sendText("workspace:3", "/model claude-sonnet-5-5");
     expect(fake.argvs()).toEqual([
       ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
-      ["cmux", "send", "--workspace", "workspace:3", "hello"],
+      ["cmux", "send", "--workspace", "workspace:3", "/model claude-sonnet-5-5"],
     ]);
   });
 
   it("launch maps to cmux new-workspace and returns the workspace ref", async () => {
     const fake = fakeExec().on(["cmux", "new-workspace"], { stdout: "OK workspace:12\n" });
     const host = new LocalCmuxHost(fake.exec);
-    const r = await host.launch({ cwd: "/wt/x", name: "w1 T1 implementer", command: "  bash x" });
+    const r = await host.launch({
+      cwd: "/wt/x",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+    });
     expect(r).toEqual({ workspace: "workspace:12" });
     expect(fake.calls[0]?.argv).toEqual([
       "cmux",
@@ -58,14 +63,14 @@ describe("LocalCmuxHost", () => {
       "--name",
       "w1 T1 implementer",
       "--command",
-      "  bash x",
+      LAUNCH_COMMAND,
     ]);
   });
 
   it("a failed launch is LAUNCH_FAILED", async () => {
     const fake = fakeExec().on(["cmux", "new-workspace"], { code: 1, stderr: "socket timeout" });
     const err = await new LocalCmuxHost(fake.exec)
-      .launch({ cwd: "/wt/x", name: "n", command: "c" })
+      .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND })
       .catch((e: unknown) => e);
     expect((err as SpawnError).code).toBe("LAUNCH_FAILED");
   });
