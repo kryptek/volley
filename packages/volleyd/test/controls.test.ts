@@ -193,6 +193,22 @@ describe("stop", () => {
     expect(task("B")?.why_waiting).toBe("wave stopped");
   });
 
+  it("stop skips agents already retired (their task.agents entry stays)", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "spec_reviewer", agent_id: "agent-a2" },
+    });
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a2", status: "done" },
+    });
+    const res = await client.request("stop", { wave: WAVE, by: "coord-a" });
+    expect((res.result as { cancelled: string[] }).cancelled).toEqual(["agent-a1"]);
+    expect(interrupted).toEqual(["agent-a1"]);
+  });
+
   it("stop --all engages the kill switch: every wave stops and run is refused until resume --all", async () => {
     expect((await client.request("run", { wave_yaml: yaml("w-other") })).ok).toBe(true);
     const res = await client.request("stop", { all: true, by: "operator" });

@@ -485,6 +485,18 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     });
   });
 
+  it("tunnel checks keep running while the wave is paused (a stale `up` must not let a reap through)", async () => {
+    box.tunnel = true;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await daemon.recordEvent("w1", { type: "wave_paused", data: { by: "test" } });
+    box.tunnel = false;
+    await recheck(); // waits for the box's tunnel to be checked again
+    expect(
+      journal("w1").some((e) => e.type === "alarm_raised" && e.data.code === "TUNNEL_DOWN"),
+    ).toBe(true);
+  });
+
   it("a forward that keeps failing is down even when something answers on the box's port", async () => {
     tunnelMode = "fail";
     box.tunnel = true; // e.g. the box's own mosquitto holds the port

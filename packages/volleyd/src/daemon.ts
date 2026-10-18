@@ -1295,6 +1295,9 @@ export class Daemon {
     }
     if (this.opts.spawner !== undefined) {
       await this.resolveTrustedRepos();
+      // Every wave, paused or stopped too: a running remote agent's reap waits on its tunnel's
+      // check, which must not go stale.
+      for (const wave of this.waves.keys()) this.checkTunnels(wave);
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
@@ -1346,7 +1349,6 @@ export class Daemon {
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
-    this.checkTunnels(wave);
     for (const id of rec.admitted) {
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
@@ -3731,8 +3733,15 @@ export class Daemon {
     const status = log.record.state?.status;
     if (status === "stopped" || status === "complete") return null;
     await this.append(wave, { type: "wave_stopped", data: { by } });
+    // task.agents keeps the last agent per role after it is retired: never cancel those.
+    const retired = new Set(
+      log.journal
+        .readAll()
+        .filter((e) => e.type === "agent_retired")
+        .map((e) => e.data.agent_id as string),
+    );
     const cancelled: string[] = [];
-    for (const a of runningAgents(log.record)) {
+    for (const a of runningAgents(log.record).filter((x) => !retired.has(x.agent_id))) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
@@ -3993,6 +4002,7 @@ export class Daemon {
         await this.resolveNow(wave.wave, d.decision_id, { answer: d.answer, by: d.by });
       } else await this.openDecisionNow(wave.wave, d.input, d.extra);
     }
+    this.evaluate(); // the new version's admission overrides, on the last sample
     await this.tickNow();
     this.log(`wave ${wave.wave} v${res.version}: ${JSON.stringify(res.diff)}`);
     return {

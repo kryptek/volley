@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -290,6 +292,24 @@ describe("volleyd daemon: pressure-based admission", () => {
     const set = await runCli(["config", "set", "admission.container_max", "30"], t.env);
     expect(set.exitCode).toBe(0);
     await daemon.tick();
+    expect((await state()).tasks[0]?.why_waiting).toBe("admitted: awaiting spawn");
+  });
+
+  it("a new wave version's admission override applies at once (no wait for the next tick)", async () => {
+    reading.samples.containers = s(25);
+    await t.start({ pressure: async () => reading });
+    expect((await runCli(["run", PARALLEL], t.env)).exitCode).toBe(0);
+    expect((await state()).tasks[0]?.why_waiting).toBe("25 containers running > max 20");
+
+    const v2 = join(t.home, "parallel-v2.yaml");
+    writeFileSync(
+      v2,
+      `${readFileSync(PARALLEL, "utf-8")}config: { admission: { container_max: 30 } }\n`,
+    );
+    const r = await runCli(["run", v2], t.env);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    // No daemon.tick(): resubmit itself re-decides the last sample with the wave's overrides.
     expect((await state()).tasks[0]?.why_waiting).toBe("admitted: awaiting spawn");
   });
 

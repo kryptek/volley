@@ -90,6 +90,19 @@ describe("reduce", () => {
     expect(emptyRecord().state).toBeNull();
   });
 
+  it("a config_changed event never touches a wave's overrides (they change only by wave_versioned)", () => {
+    const base = replay(events);
+    const seq = base.seq + 1;
+    const next = apply(base, {
+      seq,
+      at: "2026-10-20T12:00:00.000Z",
+      type: "config_changed",
+      data: { overrides: { hard_ceiling: 99 } },
+    });
+    expect(next.overrides).toEqual(base.overrides);
+    expect(next.state?.status).toBe(base.state?.status);
+  });
+
   it("applies wave status events", () => {
     const last = events.at(-1) as JournalEvent;
     const at = "2026-10-20T10:00:00.000Z";
