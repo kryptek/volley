@@ -23,7 +23,7 @@ bun install              # set up workspace symlinks
 bun run lint             # biome check .
 bun run format           # biome format --write .
 bun run typecheck        # root tsc + recurse into every workspace package
-bun run test             # bun run --filter='*' test — runs every package's test script
+bun run test             # scripts/*.test.ts (bun test), then every package's test script
 bun run validate:schemas # ajv-validates every spec/examples/{valid,invalid}/*.json against spec/schemas/
 bun run check:spec-refs  # SPEC heading numbering is contiguous; every "SPEC §x.y" in the repo resolves
 ```

@@ -203,8 +203,10 @@ function resolve(
   if (holder === undefined) {
     try {
       // Only a supervisor-assigned identity is stable enough to hold a lease; otherwise use a
-      // fresh id (acquire prints it, so a later release can name it).
-      holder = identityAgentId(env, dir) ?? `lease-${randomSuffix(6)}`;
+      // fresh id (acquire prints it, so a later release can name it). --coordinator never reads
+      // the identity file: it speaks for the coordinator, not for an agent in that worktree.
+      const assigned = values.coordinator === true ? undefined : identityAgentId(env, dir);
+      holder = assigned ?? `lease-${randomSuffix(6)}`;
     } catch {
       holder = `lease-${randomSuffix(6)}`;
     }

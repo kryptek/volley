@@ -192,6 +192,37 @@ describe("volley lease", () => {
     expect(sup.pools.p?.held).toEqual([]);
   });
 
+  it("run --coordinator: the default holder is a fresh id, never .volley/agent.json's", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "volley-lease-coord-"));
+    try {
+      mkdirSync(join(dir, ".volley"));
+      writeFileSync(
+        join(dir, ".volley", "agent.json"),
+        JSON.stringify({ agent_id: "w1-t1-implementer-1", namespace: "default" }),
+      );
+      const r = await runCli({
+        argv: [
+          "lease",
+          "run",
+          "--pool",
+          "p",
+          "--coordinator",
+          "--project-dir",
+          dir,
+          ...base(),
+          "--",
+          "true",
+        ],
+        env: { VOLLEY_AUTH_DIR: dir },
+      });
+      expect(r.exitCode).toBe(0);
+      await eventually(() => sup.requests.length === 2);
+      expect(sup.requests.every((q) => /^lease-[a-z0-9]{6}$/.test(q.holder))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("run: waits while the pool is full, says why, and runs once the holder releases", async () => {
     await sup.hold("p", "l-other", "agent-z");
     const run = runCli({
@@ -633,8 +664,7 @@ describe("volley lease against a broker that requires credentials", () => {
   it("run --coordinator: a malformed coordinator.json is an error, not an anonymous connect", async () => {
     writeFileSync(join(work, "coordinator.json"), "{not json");
     const r = await runCli({ argv: runArgv("--coordinator"), env: { VOLLEY_AUTH_DIR: work } });
-    expect(r.exitCode).not.toBe(0);
-    expect(r.exitCode).not.toBe(5);
+    expect(r.exitCode).toBe(2); // EXIT.USAGE
     expect(existsSync(marker())).toBe(false);
     expect(r.stderr).toContain("coordinator.json");
   });

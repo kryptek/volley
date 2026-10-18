@@ -37,7 +37,7 @@ Run \`volleyd <command> --help\` for per-command options.
 `;
 
 /**
- * Command table. Later tasks add one line each here (and their own file under commands/).
+ * Command table. A new command is one line here (and its own file under commands/).
  */
 const COMMANDS: Record<string, () => Promise<Command>> = {
   daemon: async () => (await import("./commands/daemon")).daemon,

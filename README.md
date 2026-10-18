@@ -391,7 +391,7 @@ MQTT's main downside is unfamiliarity in the LLM-tooling crowd. That's a docs pr
 
 ## Contributing
 
-Currently a private repo; external contributions aren't open yet. If you found this somehow and want to collaborate early, open an issue or reach out.
+Volley is pre-1.0 and the wire format can still change: open an issue before a large change, so it can be discussed against `spec/SPEC.md` first. Pull requests are welcome; keep `bun run lint`, `bun run typecheck` and `bun run test` green, and follow the scoped Conventional Commits style in `git log`.
 
 ---
 

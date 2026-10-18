@@ -4,8 +4,8 @@
  *
  * 1. The numbered headings in `spec/SPEC.md` are contiguous at every level (no §4.4 → §4.6 jump).
  * 2. Every section reference resolves to a heading: `§N.N` inside SPEC.md, and `SPEC §N.N`
- *    (plus any `§` that follows it in a list: `SPEC §3, §4.3`) or `spec section N.N` in every
- *    other tracked file.
+ *    (plus any `§` that follows it in a list: `SPEC §3, §4.3`; `§§` too), `SPEC N.N` or
+ *    `spec section N.N` in every other tracked file.
  * 3. No tracked file cites the design doc by section: it is local-only (gitignored), so a
  *    reader of the public repo cannot follow the reference.
  *
@@ -63,13 +63,19 @@ export function citedSections(text: string, isSpec: boolean): { ref: string; lin
       return;
     }
     for (const m of line.matchAll(
-      /SPEC(?:\.md)?\s+((?:§\s?\d+(?:\.\d+)*(?:\s*(?:,|and|\/|&)\s*)?)+)/g,
+      /SPEC(?:\.md)?\s+((?:§§?\s?\d+(?:\.\d+)*(?:\s*(?:,|and|\/|&)\s*)?)+)/g,
     )) {
       for (const r of (m[1] as string).matchAll(/§\s?(\d+(?:\.\d+)*)/g)) push(r[1] as string);
     }
+    for (const m of line.matchAll(/SPEC(?:\.md)?\s+(\d+\.\d+(?:\.\d+)*)/g)) push(m[1] as string);
     for (const m of line.matchAll(/spec section (\d+(?:\.\d+)*)/gi)) push(m[1] as string);
   });
   return refs;
+}
+
+/** A citation of the local-only design doc by section: `design doc §8.5`, `design doc section 8.5`. */
+export function citesDesignDoc(line: string): boolean {
+  return /design doc(?:'s)? (?:§|section\s+\d)|design §/i.test(line);
 }
 
 function trackedFiles(): string[] {
@@ -95,7 +101,7 @@ export function check(): string[] {
       if (!known.has(ref)) problems.push(`${f}:${line}: cites SPEC §${ref}, which does not exist`);
     }
     text.split("\n").forEach((l, i) => {
-      if (/design doc(?:'s)? §|design §/i.test(l)) {
+      if (citesDesignDoc(l)) {
         problems.push(`${f}:${i + 1}: cites the local-only design doc by section`);
       }
     });

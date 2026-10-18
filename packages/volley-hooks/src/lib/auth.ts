@@ -4,7 +4,6 @@ import type { BrokerConnectOptions } from "volley-mcp/broker";
 import {
   type BrokerAuth,
   authFromEnv,
-  coordinatorAuthPath,
   readCoordinatorAuth,
   resolveBrokerAuth,
 } from "volley-mcp/config";
@@ -45,9 +44,6 @@ function loudly<T>(fn: () => T): T {
     throw new CredentialsError((e as Error).message);
   }
 }
-
-/** Re-exported for the hooks' callers; the CLI's `volley lease --coordinator` reads the same file. */
-export { coordinatorAuthPath };
 
 /**
  * The hooks' broker credentials. Agent mode: exactly as the MCP server sharing the worktree

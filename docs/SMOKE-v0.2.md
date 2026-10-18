@@ -7,17 +7,24 @@ bottom, and record the results at the end. The narrower per-package checklists
 
 What it covers, in order:
 
-1. a password-protected broker on **private ports** (your everyday broker is never touched);
+1. a password-protected broker on **private ports**;
 2. `volley auth init`: the fixed identities and their files;
-3. the `volleyd` launchd service, then the daemon for the wave;
+3. the `volleyd` launchd service (fresh machines only), then the daemon for the wave;
 4. the coordinator's hooks;
 5. Desk sign-in on the laptop and on a phone over the LAN;
 6. a 3–4 issue wave with half its tasks on a second machine (ssh + tmux host);
-7. injected scenarios: kill an agent, orphan + claim, config change mid-wave, urgent steer,
+7. injected scenarios: kill an agent, urgent steer, orphan + claim, config change mid-wave,
    pause/resume;
 8. merge-ready gates, auto-admitted dependents, wave completion, cleanup.
 
 Each step says what to run and what you should see. Tick the box only when you saw it.
+
+**Your everyday setup is never touched.** Everything the smoke creates lives under one new
+directory, `$SMOKE`: the broker, its password and ACL files, volleyd's journals, the `volley` /
+`volleyd` links, the coordinator's hook and MCP settings. The smoke does not stop, restart,
+reinstall or signal your everyday broker, does not touch an installed volleyd service, and does
+not write to `~/.claude/settings.json`, your user-scope MCP config or anything on your `PATH`.
+Teardown (§8) prints what it will remove and asks before removing it.
 
 ---
 
@@ -35,26 +42,64 @@ Each step says what to run and what you should see. Tick the box only when you s
 - [ ] **A throwaway GitHub repo** you can open PRs and merge into, cloned on both machines, with
   3–4 small open issues. Make one depend on another (`Depends on: #<n>` in its body) and leave
   at least two independent. Push a release branch for the wave, e.g.
-  `release/<date>-smoke`.
-- [ ] This repo at the release head, `bun install` clean, and `volley` **and** `volleyd` on your
-  PATH (`volleyd` shells out to `volley auth add-agent` to mint agent credentials):
+  `release/<yyyy-mm-dd>-smoke`.
+- [ ] This repo at the release head, with `bun install` clean.
+- [ ] **The flags this smoke needs exist in this build.** Broker auth for volleyd
+  (`volley auth init --volleyd-file`, `$VOLLEYD_HOME/broker.json`) and the Desk's LAN flag
+  (`volley dash --host <addr>`) land in separate fixes for this release. From the repo root:
   ```sh
-  ln -sf "$PWD/packages/volley-cli/src/cli.ts" /usr/local/bin/volley
-  ln -sf "$PWD/packages/volleyd/src/cli.ts" /usr/local/bin/volleyd
-  volley --version && volleyd --version     # both print 0.2.0
+  bun packages/volley-cli/src/cli.ts auth --help | grep -- --volleyd-file    # prints the flag
+  bun packages/volley-cli/src/cli.ts dash --help | grep -- --host            # prints the flag
   ```
+  If either prints nothing, stop: this build is not ready for the smoke.
 
-Throughout, one shell block sets the smoke's private paths and ports. Paste it into **every**
-terminal you open for the smoke:
+One shell block sets the smoke's private paths and ports. **Edit the four marked lines once**,
+then paste it into **every** terminal you open for the smoke (laptop only):
 
 ```sh
-export SMOKE=$HOME/volley-smoke                     # everything the smoke creates lives here
-export BROKER_PORT=22883 WS_PORT=29001              # private: not 1883 / 9001
-export LAN_IP=$(ipconfig getifaddr en0)             # the laptop's Wi-Fi address
+export VOLLEY_REPO=/abs/path/to/volley                 # EDIT: this checkout
+export TEST_REPO=/abs/path/to/test-repo                # EDIT: the test repo's clone on the laptop
+export BOX=user@box.local                              # EDIT: the box's ssh target
+export WAVE=yyyy-mm-dd-smoke                           # EDIT: the wave id (same theme as the release branch)
+export SMOKE=$HOME/volley-smoke-v0.2                   # everything the smoke creates lives here
+export BROKER_PORT=22883 WS_PORT=29001                 # private: not 1883 / 9001
+export LAN_IP=$(ipconfig getifaddr en0)                # the laptop's Wi-Fi address
 export VOLLEY_BROKER_URL=mqtt://127.0.0.1:$BROKER_PORT
-export VOLLEY_AUTH_DIR=$SMOKE/auth                  # passwd, acl.conf, coordinator.json
-export VOLLEYD_HOME=$SMOKE/volleyd                  # journals, config.yaml, broker.json
+export VOLLEY_AUTH_DIR=$SMOKE/auth                     # passwd, acl.conf, coordinator.json
+export VOLLEYD_HOME=$SMOKE/volleyd                     # journals, config.yaml, broker.json
+export PATH=$SMOKE/bin:$PATH                           # the smoke's volley, volleyd and pkill
 ```
+
+- [ ] Create `$SMOKE` (once, in the first terminal). `mkdir` without `-p` fails if the directory
+  already exists: then it is left from an earlier smoke, so run that smoke's teardown (§8) or
+  choose another `SMOKE` path. It must be new, because teardown deletes it.
+  ```sh
+  mkdir -m 0700 "$SMOKE" && mkdir "$SMOKE/bin" "$SMOKE/data" "$VOLLEYD_HOME"
+  ```
+- [ ] Put this checkout's `volley` and `volleyd` on the smoke's `PATH` (`volleyd` shells out to
+  `volley auth add-agent` to mint agent credentials). The links live in `$SMOKE/bin`, so any
+  `volley` / `volleyd` you already have installed stays as it is:
+  ```sh
+  ln -s "$VOLLEY_REPO/packages/volley-cli/src/cli.ts" "$SMOKE/bin/volley"
+  ln -s "$VOLLEY_REPO/packages/volleyd/src/cli.ts" "$SMOKE/bin/volleyd"
+  volley --version && volleyd --version     # both print 0.2.0
+  ```
+- [ ] Keep `volley auth` from signalling your everyday broker. Every `volley auth` change reloads
+  the broker with `pkill -HUP -x mosquitto`, which reaches **every** mosquitto on the laptop and
+  makes your everyday broker re-read its password and ACL files mid-smoke. This shim, first on the
+  smoke's `PATH`, sends that one signal to the smoke broker only and passes any other `pkill`
+  through:
+  ```sh
+  cat > "$SMOKE/bin/pkill" <<EOF
+  #!/bin/sh
+  if [ "\$*" = "-HUP -x mosquitto" ]; then exec kill -HUP "\$(cat '$SMOKE/mosquitto.pid')"; fi
+  exec /usr/bin/pkill "\$@"
+  EOF
+  chmod +x "$SMOKE/bin/pkill"
+  command -v pkill                          # $SMOKE/bin/pkill
+  ```
+  volleyd (run from a smoke terminal) inherits this `PATH`, so the reloads it triggers go through
+  the shim too.
 
 ---
 
@@ -63,7 +108,6 @@ export VOLLEYD_HOME=$SMOKE/volleyd                  # journals, config.yaml, bro
 - [ ] Create the identities **before** the broker exists (mosquitto refuses to start without its
   password file):
   ```sh
-  mkdir -p "$SMOKE/data" "$VOLLEYD_HOME"
   volley auth init --dir "$VOLLEY_AUTH_DIR" --coordinator-file --volleyd-file --no-reload
   ```
   It prints three passwords **once** (`volleyd`, `desk`, `coordinator`): write them down.
@@ -81,6 +125,7 @@ export VOLLEYD_HOME=$SMOKE/volleyd                  # journals, config.yaml, bro
   allow_anonymous false
   password_file $VOLLEY_AUTH_DIR/passwd
   acl_file $VOLLEY_AUTH_DIR/acl.conf
+  pid_file $SMOKE/mosquitto.pid
   listener $BROKER_PORT 127.0.0.1
   listener $WS_PORT $LAN_IP
   protocol websockets
@@ -91,6 +136,7 @@ export VOLLEYD_HOME=$SMOKE/volleyd                  # journals, config.yaml, bro
   log_dest file $SMOKE/mosquitto.log
   EOF
   mosquitto -c "$SMOKE/mosquitto.conf" -d
+  cat "$SMOKE/mosquitto.pid"                        # the smoke broker's pid
   ```
 - [ ] Both listeners are up, and the broker refuses anonymous and wrong-password clients:
   ```sh
@@ -104,57 +150,86 @@ export VOLLEYD_HOME=$SMOKE/volleyd                  # journals, config.yaml, bro
   volley list                                       # exit 0, no agents yet
   ```
 
-`volley auth add-agent` (which volleyd runs for every spawn) reloads mosquitto with `pkill -HUP -x
-mosquitto`. That signal reaches **every** mosquitto on the laptop, including your everyday
-broker; each one only re-reads its own files, so this is harmless.
-
 ---
 
 ## 2. The volleyd service
 
-- [ ] The launchd plist carries no secret:
+The service label (`systems.volley.volleyd`) is fixed, so a second, smoke-only service cannot
+sit beside an installed one. The plist check runs everywhere; the install / restart / uninstall
+round trip runs **only on a machine with no volleyd service**, and the block below checks that
+for you. Your installed service, if you have one, is never stopped, replaced or removed.
+
+- [ ] The launchd plist carries no secret (`--dry-run` only prints it; nothing is written):
   ```sh
   volleyd install --dry-run | grep -i -E "password|AUTH"     # prints nothing
   ```
-- [ ] Install and load it, and check that it authenticated (its credentials come from
-  `$VOLLEYD_HOME/broker.json`):
+- [ ] Service round trip, fresh machines only. Paste the whole block; on a machine that already
+  has the service it prints one line and does nothing else:
   ```sh
-  volleyd install
-  volleyd status                                    # exit 0: the daemon answered
-  tail -n 20 "$VOLLEYD_HOME/volleyd.log"           # no AUTH_FAILED
+  if [ -e "$HOME/Library/LaunchAgents/systems.volley.volleyd.plist" ] ||
+     launchctl print "gui/$UID/systems.volley.volleyd" >/dev/null 2>&1; then
+    echo "volleyd service already installed: skipping the round trip (it is not touched)"
+  else
+    volleyd install && touch "$SMOKE/service-installed"
+    sleep 3; volleyd status; echo "status exit $?"                     # 0: the daemon answered
+    grep -c AUTH_FAILED "$VOLLEYD_HOME/volleyd.log"                     # 0 (creds from broker.json)
+    launchctl kickstart -k "gui/$UID/systems.volley.volleyd"
+    sleep 3; volleyd status; echo "status exit $?"                     # 0 again after the restart
+    volleyd uninstall && rm "$SMOKE/service-installed"                 # removes the smoke's own install
+  fi
   ```
-  **If you already run the volleyd service for real work, skip `install`** (it replaces the
-  installed service) and use the foreground daemon below for the whole smoke.
-- [ ] Restart it and see it come back: `launchctl kickstart -k gui/$UID/systems.volley.volleyd`,
-  then `volleyd status` again.
-- [ ] For the wave, run the daemon in the foreground instead, so it mints agents into the smoke's
-  password file (the plist does not carry `VOLLEY_AUTH_DIR`, so the service would mint into the
-  default `<mosquitto etc>/volley`):
+  If you skipped it, write "skipped (service already installed)" in Results.
+- [ ] For the wave, run the daemon in the foreground, so it uses the smoke's `VOLLEYD_HOME` and
+  mints agents into the smoke's password file (the plist does not carry `VOLLEY_AUTH_DIR`, so a
+  service would mint into the default `<mosquitto etc>/volley`). An everyday service you already
+  run is on your everyday broker and carries on unaffected:
   ```sh
-  volleyd uninstall
   volleyd daemon 2>&1 | tee "$SMOKE/volleyd-foreground.log"   # leave this terminal running
   ```
+  In another smoke terminal: `volleyd status` exits 0.
 
 ---
 
 ## 3. The coordinator's hooks
 
-- [ ] Install the coordinator hooks (they find their credentials in `$VOLLEY_AUTH_DIR/coordinator.json`,
-  so no password goes into `settings.json`):
+The coordinator session gets its hooks and its MCP server from files in `$SMOKE`, passed on the
+`claude` command line, so `~/.claude/settings.json` and your user-scope MCP config (which may
+hard-code your everyday broker's credentials) are left alone.
+
+- [ ] Write the coordinator's hook settings. The hooks find their credentials in
+  `$VOLLEY_AUTH_DIR/coordinator.json`, so no password goes into the file. If your user settings
+  already carry volley-hooks, those run in the smoke session anyway (with the smoke's environment),
+  so the smoke file stays empty to avoid running every hook twice:
   ```sh
-  packages/volley-hooks/scripts/install.sh --dry-run | grep -c volley-hooks   # > 0
-  packages/volley-hooks/scripts/install.sh
-  grep -c -i password ~/.claude/settings.json                                  # 0
+  if grep -q volley-hooks "$HOME/.claude/settings.json" 2>/dev/null; then
+    echo '{}' > "$SMOKE/coordinator-settings.json"
+    echo "reusing the volley-hooks in your user settings (not touched)"
+  else
+    CLAUDE_SETTINGS="$SMOKE/coordinator-settings.json" "$VOLLEY_REPO/packages/volley-hooks/scripts/install.sh"
+  fi
+  grep -c volley-hooks "$SMOKE/coordinator-settings.json"     # > 0, or 0 when reusing yours
+  grep -c -i password "$SMOKE/coordinator-settings.json"      # 0
   ```
-- [ ] Start the coordinator session in the test repo from a terminal that has the smoke block and
-  the `VOLLEY_AUTH_*` exports above. The volley MCP server must not hard-code
-  `VOLLEY_BROKER_URL` / `VOLLEY_AUTH_*` in its env block (or give the test repo a project-scope
-  `.mcp.json` with the smoke values).
+- [ ] Write the smoke's MCP config (mode 0600: it holds the coordinator password):
   ```sh
-  cd <test-repo> && claude
+  (umask 077 && cat > "$SMOKE/mcp.json" <<EOF
+  { "mcpServers": { "volley": {
+      "command": "bun",
+      "args": ["run", "$VOLLEY_REPO/packages/volley-mcp/src/index.ts"],
+      "env": { "VOLLEY_BROKER_URL": "$VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE": "default",
+               "VOLLEY_AUTH_USERNAME": "coordinator", "VOLLEY_AUTH_PASSWORD": "$VOLLEY_AUTH_PASSWORD" } } } }
+  EOF
+  )
+  ```
+- [ ] Start the coordinator session in the test repo, from a terminal that has the smoke block
+  and the `VOLLEY_AUTH_*` exports above:
+  ```sh
+  cd "$TEST_REPO" && claude --settings "$SMOKE/coordinator-settings.json" \
+    --mcp-config "$SMOKE/mcp.json" --strict-mcp-config
   ```
   The MCP server auto-registers the session (`vol_register` updates it); check
-  `volley list` shows `coordinator-xxxx` with the model you are actually running.
+  `volley list` shows `coordinator-xxxx` with the model you are actually running. Note its id:
+  `export OWNER=coordinator-xxxx` in your other smoke terminals.
 - [ ] Lease wrapping in coordinator mode: run a command that matches a lease pool (set one with
   `volleyd config set lease_pools '{ build: { capacity: 1, match: ["npm run build"] } }'`). The
   hook rewrites it to `volley lease run … --coordinator -- …`, and it waits for and gets a lease
@@ -167,11 +242,12 @@ broker; each one only re-reads its own files, so this is harmless.
 
 - [ ] Start the Desk reachable from the LAN, pointed at the private WebSocket listener:
   ```sh
-  volley dash --broker-url "ws://$LAN_IP:$WS_PORT" --host --no-open
+  cd "$VOLLEY_REPO" && volley dash --broker-url "ws://$LAN_IP:$WS_PORT" --host 0.0.0.0 --no-open
   ```
-  (Without a `--host` flag in your build: `cd packages/volley-desk && VITE_VOLLEY_BROKER_URL="ws://$LAN_IP:$WS_PORT" bun x vite --host`.)
-- [ ] **Laptop:** open `http://$LAN_IP:<port>/`. The sign-in form appears. A wrong password is
-  refused and not remembered; `desk` + its password connects, and a reload stays signed in.
+  It prints the URL it serves on (port 5174 unless you pass `--port`).
+- [ ] **Laptop:** open `http://$LAN_IP:5174/` (or the port it printed). The sign-in form appears.
+  A wrong password is refused and not remembered; `desk` + its password connects, and a reload
+  stays signed in.
 - [ ] **Phone:** open the same URL. Sign in as `desk`. The layout fits the phone width; panning,
   window focus and the coordinators window work by touch.
 - [ ] Both show the coordinator, and `volleyd` with its retained config.
@@ -180,17 +256,23 @@ broker; each one only re-reads its own files, so this is harmless.
 
 ## 5. A wave across two machines
 
-- [ ] Describe the box in volleyd's config (paths are on the box and must be absolute):
+- [ ] Describe the box in volleyd's config (paths are on the box and must be absolute; edit them):
   ```sh
-  volleyd config set hosts '{ box: { target: "<user>@<box>", repo: "/abs/path/test-repo",
-    volley_dir: "/abs/path/volley" } }'
+  volleyd config set hosts "{ box: { target: \"$BOX\", repo: \"/abs/path/on/box/test-repo\",
+    volley_dir: \"/abs/path/on/box/volley\" } }"
   ```
-- [ ] In the coordinator session, run `/volley-issues` for the 3–4 issues. It takes the volleyd
-  path (`volleyd status` exits 0), writes `.volley/waves/<wave>.yaml`, and submits it with
-  `--owner <coordinator id>`. Before it submits, add `host: box` to half the tasks in the wave
-  file (at least one independent task and the dependent one), then `volleyd validate` it.
+- [ ] In the coordinator session, run `/volley-issues` for the 3–4 issues with wave id `$WAVE`,
+  and tell it to **stop after writing the wave file** (before `volleyd run`). It takes the volleyd
+  path (`volleyd status` exits 0) and writes `.volley/waves/$WAVE.yaml`. Then, in a smoke
+  terminal, add `host: box` to half the tasks (at least one independent task and the dependent
+  one) and validate:
+  ```sh
+  cd "$TEST_REPO" && volleyd validate ".volley/waves/$WAVE.yaml"
+  ```
+  Tell the session to continue: it submits with `volleyd run .volley/waves/$WAVE.yaml --owner
+  <its coordinator id>`.
 - [ ] Spawns: local tasks get a cmux workspace each; box tasks get a tmux session
-  (`ssh <box> tmux ls` shows `<wave>-<task>-implementer`). Each agent's worktree has
+  (`ssh "$BOX" tmux ls` shows `$WAVE-<task>-implementer-1`). Each agent's worktree has
   `.volley/agent.json` (mode 0600; on the box with `broker_url mqtt://127.0.0.1:21883`, the
   reverse tunnel). `volley list` shows each agent under its assigned id with the real model;
   heartbeats flow (`volley sub --pattern 'volley/+/+/progress'`).
@@ -202,18 +284,26 @@ broker; each one only re-reads its own files, so this is harmless.
 
 ## 6. Injected scenarios
 
-Run them while agents are working. After each, note in Results what you saw.
+Run them while agents are working, in this order (the urgent-steer refusal needs the wave still
+owned by the coordinator, so it comes before the claim). After each, note in Results what you saw.
 
 ### Kill an agent
 
 - [ ] Kill one local agent's `claude` process (close its cmux workspace) and one box agent's
-  (`ssh <box> tmux kill-session -t =<wave>-<task>-<role>`).
+  (`ssh "$BOX" tmux kill-session -t "=$WAVE-<task>-<role>-<attempt>"`, the name `tmux ls` shows).
 - [ ] Within the keepalive window its status goes `reaped` (LWT). volleyd holds the reap for its
   grace, then retires the agent and opens an `agent_blocked` decision ("… failed. Respawn …, or
   cancel the task?"). The Desk raises it under **Needs you**; the coordinator loop sees
   `decision_opened`.
-- [ ] Resolve it with `respawn` (`volleyd resolve <id> respawn --wave <wave>` from the coordinator,
-  or from the Desk). A fresh agent spawns with the next attempt number and carries on.
+- [ ] Resolve it with `respawn` (`volleyd resolve <decision-id> respawn --wave "$WAVE"` from a
+  smoke terminal, or from the Desk). A fresh agent spawns with the next attempt number and
+  carries on.
+
+### Urgent steer on a coordinator-owned wave
+
+- [ ] While the coordinator still owns the wave, send an urgent `/stop` from the Desk to one of
+  its working agents. It is refused (only the owner may interrupt), and the refusal names the
+  owner (`$OWNER`). The agent is not interrupted.
 
 ### Orphan + claim
 
@@ -221,40 +311,49 @@ Run them while agents are working. After each, note in Results what you saw.
 - [ ] Exit the coordinator session (its status goes `done`/`reaped`, or it falls silent). Within
   `claim_after_s` the Desk shows **Needs you: no coordinator** for the wave.
 - [ ] Claim it from the Desk. The owner chip becomes `desk`, the **no coordinator** warning
-  clears, and `volleyd status <wave>` shows the new owner. `volleyd events` shows
-  `owner_claimed`. Agents still ack the new owner's steering ("Delivered by hook").
+  clears, and `volleyd status "$WAVE"` shows the new owner. The journal has the claim (the
+  `smoke` cursor is only read here, never acked, so no other reader's cursor moves):
+  ```sh
+  volleyd events "$WAVE" --cursor smoke | grep owner_claimed     # one line
+  ```
+  Agents still ack the new owner's steering ("Delivered by hook").
 - [ ] Restore: `volleyd config set claim_after_s 1800`.
+
+### Urgent steer on a Desk-owned wave
+
+- [ ] On the wave the Desk now owns, open a working agent's steering panel and send an
+  **urgent** steer. The agent is interrupted (Escape) and the message arrives. Delivery states go
+  Sent → Delivered by hook → Agent acknowledged, and the steer reached the agent you picked (check
+  its role in the result), not another stage's agent.
 
 ### Config change mid-wave
 
 - [ ] In the Desk settings modal, change a global tunable (e.g. `heartbeat_alarm_s` to 900) and a
-  wave-scoped one. Both apply without a restart: `volleyd config get heartbeat_alarm_s` and
-  `volleyd config get --wave <wave>` show them, the `_system` journal has `config_changed`, and
-  the Desk shows the new values. The reply came from `volleyd` (the modal reports it applied).
+  wave-scoped one. Both apply without a restart, the Desk shows the new values, and the reply came
+  from `volleyd` (the modal reports it applied):
+  ```sh
+  volleyd config get heartbeat_alarm_s                              # 900
+  volleyd config get --wave "$WAVE"                                 # the wave-scoped value
+  volleyd events _system --cursor smoke | grep config_changed       # one line per change
+  ```
 - [ ] An invalid value (e.g. `-1`) is rejected with the field named; nothing changes.
-
-### Urgent steer
-
-- [ ] On a wave the Desk owns (after the claim above), open a working agent's steering panel and
-  send an **urgent** steer. The agent is interrupted (Escape) and the message arrives. Delivery
-  states go Sent → Delivered by hook → Agent acknowledged, and the steer reached the agent you
-  picked (check its role in the result), not another stage's agent.
-- [ ] An urgent `/stop` from the Desk on a coordinator-owned wave is refused (only the owner may
-  interrupt); it names the owner.
 
 ### Pause / resume
 
-- [ ] `volleyd pause <wave> --by <owner>`: no new tasks are admitted (queued tasks say why);
+The wave's owner is `desk` since the claim:
+
+- [ ] `volleyd pause "$WAVE" --by desk`: no new tasks are admitted (queued tasks say why);
   running agents carry on.
-- [ ] `volleyd resume <wave> --by <owner>`: admission resumes.
+- [ ] `volleyd resume "$WAVE" --by desk`: admission resumes.
 - [ ] Optional kill switch: `volleyd stop --all`, then `volleyd run` is refused until
-  `volleyd resume --all`.
+  `volleyd resume --all` (and the stopped wave stays stopped until `volleyd resume "$WAVE" --by
+  desk`).
 
 ---
 
 ## 7. Gates, merges, completion
 
-- [ ] A task reaches `merge_ready`: its evidence package (`volleyd status <wave> --json` →
+- [ ] A task reaches `merge_ready`: its evidence package (`volleyd status "$WAVE" --json` →
   `tasks[].evidence_path`) has the PR, the head sha, CI on that exact head, both reviews and how
   each P1 was resolved.
 - [ ] Merge that PR into the release branch by hand. Within about a minute the task is `done`
@@ -262,24 +361,40 @@ Run them while agents are working. After each, note in Results what you saw.
   volleyd** (do not `volleyd spawn` it).
 - [ ] After the last merge the wave completes (`wave_complete`); the Desk shows it finished, and
   admission stops sampling CI for its repo.
-- [ ] `volleyd cleanup <wave>` lists what it would remove; `volleyd cleanup <wave> --yes` removes
-  the retired worktrees and workspaces on both machines, keeps the branches, and every minted
-  agent identity is revoked:
+- [ ] `volleyd cleanup "$WAVE"` lists what it would remove; `volleyd cleanup "$WAVE" --yes`
+  removes the retired worktrees and workspaces on both machines, keeps the branches, and every
+  identity minted for the wave (implementers, reviewers, fixups, rebases) is revoked:
   ```sh
-  grep -c -- "-implementer-" "$VOLLEY_AUTH_DIR/passwd"    # 0
+  grep -c "^$WAVE-" "$VOLLEY_AUTH_DIR/passwd"    # 0
   ```
 
 ---
 
 ## 8. Teardown
 
-```sh
-volleyd stop <wave> --by <owner> 2>/dev/null   # if anything is still running
-# stop the foreground daemon (Ctrl-C) and the Desk (Ctrl-C)
-kill "$(pgrep -f "mosquitto -c $SMOKE/mosquitto.conf")"
-packages/volley-hooks/scripts/install.sh --uninstall   # if you do not want the hooks installed
-rm -rf "$SMOKE"
-```
+Removes only what this smoke created, after showing you the list.
+
+1. Stop what is still running, each in its own terminal: the wave (`volleyd stop "$WAVE" --by
+   desk`, if anything is still running), then the foreground daemon (Ctrl-C), the Desk (Ctrl-C)
+   and the coordinator session (`/exit`).
+2. Review, then confirm. Run from a smoke terminal:
+   ```sh
+   echo "Will stop:   the smoke broker, pid $(cat "$SMOKE/mosquitto.pid") ($SMOKE/mosquitto.conf)"
+   [ -e "$SMOKE/service-installed" ] && echo "Will remove: the volleyd service the smoke installed in §2"
+   echo "Will delete: $SMOKE, containing:"; ls -A "$SMOKE"
+   printf 'Proceed? [y/N] '; read -r ok
+   if [ "$ok" = y ]; then
+     kill "$(cat "$SMOKE/mosquitto.pid")"
+     [ -e "$SMOKE/service-installed" ] && volleyd uninstall
+     rm -rf "$SMOKE"
+   fi
+   ```
+   (`service-installed` only exists if §2's round trip installed the service and stopped before
+   its own `uninstall`. If §2 printed "already installed", your service was never touched and
+   there is nothing to restore.)
+3. Left in place, because they are yours or the test repo's: the test repo's clones, branches and
+   `.volley/waves/` file on both machines, and the box's volley checkout. The tmux sessions and
+   worktrees on the box went with `volleyd cleanup`.
 
 ---
 
@@ -290,11 +405,11 @@ Record what you saw, step by step, with timings where a step has one, before tag
 ```
 RESULTS (<date>, release head <sha>):
   1. broker:
-  2. service:
+  2. service (round trip / skipped):
   3. hooks + lease:
   4. Desk laptop / phone:
   5. wave spawn (local / box):
-  6. kill / claim / config / urgent / pause:
+  6. kill / urgent refused / claim / urgent / config / pause:
   7. gates, merges, completion, cleanup:
   Issues found:
 ```
