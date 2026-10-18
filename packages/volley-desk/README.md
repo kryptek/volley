@@ -12,12 +12,12 @@ volley dash                         # = bun run dev in this package (see volley-
 cd packages/volley-desk
 bun run dev                         # http://localhost:5174 — live, ws://localhost:9001
 open "http://localhost:5174/?demo=1"   # demo mode: sample data, no broker
-volley dash --host 0.0.0.0          # serve on the LAN: open http://<this-machine>:5174 on a phone
+volley dash --host 0.0.0.0          # serve on the LAN: open http://<LAN IP>:5174 on a phone (see LAN use)
 ```
 
 | Setting | How |
 |---|---|
-| Broker | `VITE_VOLLEY_BROKER_URL=ws://host:9001 bun run dev` (default: port 9001, mosquitto's WebSocket listener, on the host the page was loaded from, so a phone that opens `http://<laptop>:5174` connects to `ws://<laptop>:9001`) |
+| Broker | `VITE_VOLLEY_BROKER_URL=ws://host:9001 bun run dev` (default: port 9001, mosquitto's WebSocket listener, on the host the page was loaded from, so a phone that opens `http://<laptop>:5174` connects to `ws://<laptop>:9001`, or `wss://` for a page served over https; see [LAN use](#lan-use)) |
 | Demo mode | `?demo=1` in the URL, or `VITE_VOLLEY_DEMO=1 bun run dev` |
 | Broker credentials | The sign-in form on first load (see [Sign-in](#sign-in)), stored in localStorage under `volley-desk:broker-auth` as `{"username":"desk","password":"…"}`. For local `bun run dev` only, `VITE_VOLLEY_BROKER_USERNAME=desk VITE_VOLLEY_BROKER_PASSWORD=… bun run dev` skips the form. Vite inlines `VITE_*` values into a built bundle, so `volley dash --build` drops both. |
 
@@ -26,6 +26,19 @@ volley dash --host 0.0.0.0          # serve on the LAN: open http://<this-machin
 The broker requires credentials (`examples/mosquitto-auth/`), so on first load the Desk asks for them before it connects: sign in as the `desk` identity that `volley auth init` printed. The username becomes the Desk's identity, the sender of everything it publishes; it must be a valid agent id. The credentials are kept in this browser's localStorage, so a reload signs straight in. If the broker refuses them (AUTH_FAILED), the Desk forgets the password and shows the form again with the broker's reason and the username filled in. An empty username connects anonymously, for a broker that still allows it; that Desk is read-only. Demo mode never asks.
 
 localStorage is readable by any script on the Desk's origin, the same trust boundary as the Desk itself.
+
+### LAN use
+
+`volley dash --host 0.0.0.0` serves the page on the LAN, but a phone also has to reach the broker, and `examples/mosquitto-localhost.conf` binds its WebSocket listener to `127.0.0.1`. Add a second WebSocket listener on the machine's LAN address:
+
+```conf
+listener 9001 192.0.2.10   # this machine's LAN IP (or no address for every interface)
+protocol websockets
+```
+
+- **Broker accounts are required.** That listener exposes the broker to everyone on the LAN. Keep `allow_anonymous false` and the `volley auth` password file and ACL (mosquitto's auth settings are global, so they cover the new listener too). Never open a LAN listener on an anonymous broker.
+- **Cleartext.** Over `ws://` the `desk` password and every message cross the network unencrypted. Use a trusted network, or put TLS in front (mosquitto `certfile`/`keyfile` on the listener, the page over https, so the Desk dials `wss://`).
+- **Open the page by IP** (`http://192.0.2.10:5174`). Vite refuses host names other than `localhost` and IP addresses.
 
 Demo mode never opens a broker connection. It starts from the prototype's sample state (3 waves, 5 agents), advances narration, heartbeats and terminal lines every 2.6 s, and spawns a spec reviewer after 22 s. All of this runs as Volley envelopes through the same reducer the live path uses.
 
@@ -161,6 +174,8 @@ Each wave and agent window gets a tier. **Needs you** (pulsing border): the wave
 The chat glyph on a wave window messages its coordinator session; on an agent window it steers that agent. Each message is a SPEC §4.4 mailbox envelope published by the browser as the Desk's broker identity (`desk`), with a fresh UUID `correlation_id` and a `seq` per target (in memory: it restarts at 1 on reload, where SPEC §4.4 asks for per-sender monotonic). `supersedes` chains `steering` only: a steering message supersedes the previous steering message to the same target, while a `nudge` or `cancel` supersedes nothing, so `/status` never retires a standing directive. `/stop` sends a `cancel`, `/wrap-up` and `/pause` are steering, `/status` is a `nudge`.
 
 `/stop` and Urgent mode first ask volleyd to interrupt the session (a mailbox `query` to `volleyd`: `op: "steer"`, `urgent: true`, `escape_only: true`, `wait_ack_ms: 0`, `wave`, `task`, and `role`, the agent's pipeline role, so volleyd interrupts that agent and not whichever agent drives the task's current stage). volleyd presses Escape through its interrupt hook and delivers nothing itself; once it answers, the Desk publishes its own message, so the agent gets exactly one. The panel then says **Interrupted (Escape), then delivered**, or **Delivered (not interrupted: …)** when volleyd has no interrupt wired, refuses, does not answer, reports that it interrupted a different agent, or the target has no wave task (a coordinator).
+
+**A stale window is never interrupted.** volleyd interrupts whoever holds the task's role slot now, and an agent window outlives its slot (a fixup round or model switch gives the slot to a new agent). So the Desk sends the interrupt only while the agent it shows still holds `tasks[].agents[role]`; otherwise `/stop` asks volleyd for nothing, delivers the `cancel` to that agent's own mailbox, and says **Delivered (not interrupted: <agent> no longer holds the <role> slot on <task> (now <agent>))**. The read-only copy command is withheld for the same reason, since `volleyd steer --role` reaches the slot's new agent.
 
 **volleyd refuses the Desk's interrupt on a wave a coordinator owns.** Urgent steering is a mutation, and volleyd accepts mutations only from the wave's owner, so on a coordinator-owned wave the panel reports **Delivered (not interrupted: …)** with volleyd's reason, and the message still goes out. Claim the wave first to interrupt its agents from the Desk.
 

@@ -38,6 +38,37 @@ function Segments<K extends string>({
   );
 }
 
+/**
+ * The finished-agent grace in minutes. Typing edits a draft, committed on blur
+ * or Enter, so backspacing `10` towards `45` never applies (and saves) `1` on
+ * the way; an empty or invalid draft is dropped for the saved value.
+ */
+function GraceInput({ value, onCommit }: { value: number; onCommit: (min: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const v = Number(draft);
+    if (draft.trim() !== "" && isGraceMin(v) && v !== value) onCommit(v);
+    setDraft(null);
+  };
+  return (
+    <input
+      id="look-finished-grace"
+      className="look-num mono"
+      type="number"
+      min={0}
+      max={FINISHED_GRACE_MAX_MIN}
+      step={1}
+      value={draft ?? value}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
 export function Appearance({
   look,
   setLook,
@@ -136,18 +167,9 @@ export function Appearance({
       </button>
       <label className="check" htmlFor="look-finished-grace">
         Hide finished agents after{" "}
-        <input
-          id="look-finished-grace"
-          className="look-num mono"
-          type="number"
-          min={0}
-          max={FINISHED_GRACE_MAX_MIN}
-          step={1}
+        <GraceInput
           value={look.finishedGraceMin}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            if (e.target.value !== "" && isGraceMin(v)) setLook({ finishedGraceMin: v });
-          }}
+          onCommit={(finishedGraceMin) => setLook({ finishedGraceMin })}
         />{" "}
         min
       </label>

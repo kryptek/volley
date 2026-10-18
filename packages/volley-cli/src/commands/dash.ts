@@ -112,8 +112,13 @@ export async function dash({
   }
 
   const cwd = resolve(repoRoot, "packages", pkg);
-  const childEnv: Record<string, string | undefined> = { ...env };
-  if (brokerUrl !== undefined) childEnv.VITE_VOLLEY_BROKER_URL = brokerUrl;
+  // The flag (or default) replaces an inherited VITE_VOLLEY_BROKER_URL; under --host without
+  // --broker-url it is dropped, since a stale shell export would defeat the page-host default.
+  const { VITE_VOLLEY_BROKER_URL: _inherited, ...inherited } = env;
+  const childEnv: Record<string, string | undefined> = {
+    ...inherited,
+    ...(brokerUrl !== undefined ? { VITE_VOLLEY_BROKER_URL: brokerUrl } : {}),
+  };
   if (buildMode) {
     const dropped = DEV_ONLY_CREDENTIALS.filter((k) => childEnv[k] !== undefined);
     for (const k of dropped) delete childEnv[k];
@@ -226,16 +231,24 @@ Options:
   --host <addr>        Listen on <addr> (e.g. 0.0.0.0) to open the Desk from a
                        phone or another machine; without --broker-url the
                        Desk then connects to port 9001 on the host it was
-                       loaded from
+                       loaded from (see LAN use below)
   --broker-url <url>   MQTT broker URL passed to the Desk via
                        VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
+  --open               Open browser on start (default in dev mode)
+  --no-open            Don't open browser
+  --help               Show this help
 
 The Desk asks for broker credentials on first load (the desk identity from
 volley auth init). VITE_VOLLEY_BROKER_USERNAME/PASSWORD skip that in dev mode
 only; --build drops them so no password is inlined into the bundle.
-  --open               Open browser on start (default in dev mode)
-  --no-open            Don't open browser
-  --help               Show this help
+
+LAN use (--host): the phone also needs the broker. examples/mosquitto-localhost.conf
+binds its WebSocket listener to 127.0.0.1, so add one on the LAN interface
+(listener 9001 <this-machine's LAN IP>, protocol websockets) and keep
+allow_anonymous false with the volley auth password file: the LAN can then
+reach your broker, and only broker accounts get in. ws:// sends the password
+in cleartext, so use a trusted network. Open the page by IP
+(http://<LAN IP>:5174); Vite refuses other host names.
 
 Exit codes:
   0    Vite exited cleanly

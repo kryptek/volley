@@ -42,14 +42,14 @@
   margin: 0;
   font-size: 12px;
 }
-.field {
+.signin .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
   color: var(--dim);
 }
-.field input {
+.signin .field input {
   font: inherit;
   font-size: 14px;
   color: var(--ink);

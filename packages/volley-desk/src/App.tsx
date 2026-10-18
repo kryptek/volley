@@ -86,6 +86,20 @@ function waveStartedAt(agents: readonly AgentView[]): number | null {
   return starts.length ? Math.min(...starts) : null;
 }
 
+/**
+ * Why an urgent `/stop` must not interrupt `a`, or undefined when it may.
+ * volleyd presses Escape in whoever holds `tasks[].agents[role]` now, and an
+ * agent keeps its role after the slot moves on to a new agent (the reducer is
+ * sticky), so a stale window would interrupt the slot's new agent instead.
+ */
+function interruptBlocker(state: DeskState, a: AgentView): string | undefined {
+  if (a.wave === UNASSIGNED || !a.task) return undefined; // the transport says "no wave task"
+  if (!a.role) return `${a.id} has no role on ${a.task}`;
+  const holder = state.waves[a.wave]?.state?.tasks.find((t) => t.id === a.task)?.agents[a.role];
+  if (holder === a.id) return undefined;
+  return `${a.id} no longer holds the ${a.role} slot on ${a.task}${holder ? ` (now ${holder})` : ""}`;
+}
+
 type Pos = { x: number; y: number };
 
 /** Rough coordinators window height for the initial fit: header + one row per wave + note. */
@@ -513,41 +527,46 @@ export default function App() {
             );
           })}
           {visible.flatMap((id) =>
-            (groups[id] ?? []).map((a) => (
-              // Keyed by bornAt: a window that existed before its registry entry
-              // re-mounts with `born` when the entry arrives.
-              <AgentWindow
-                key={`${a.id}:${a.bornAt ?? ""}`}
-                agent={a}
-                wave={state.waves[id]}
-                accent={accentOf(id)}
-                frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
-                narrationFx={look.narr}
-                attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
-                onChat={toggleSteer}
-                steerOpen={steerOpen === a.id}
-                steer={
-                  steerOpen === a.id &&
-                  steering.panel({
-                    target: {
-                      agentId: a.id,
-                      namespace: a.namespace ?? "default",
+            (groups[id] ?? []).map((a) => {
+              const blocked = interruptBlocker(state, a);
+              return (
+                // Keyed by bornAt: a window that existed before its registry entry
+                // re-mounts with `born` when the entry arrives.
+                <AgentWindow
+                  key={`${a.id}:${a.bornAt ?? ""}`}
+                  agent={a}
+                  wave={state.waves[id]}
+                  accent={accentOf(id)}
+                  frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
+                  narrationFx={look.narr}
+                  attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                  onChat={toggleSteer}
+                  steerOpen={steerOpen === a.id}
+                  steer={
+                    steerOpen === a.id &&
+                    steering.panel({
+                      target: {
+                        agentId: a.id,
+                        namespace: a.namespace ?? "default",
+                        coordinator: false,
+                        ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
+                        ...(a.task ? { task: a.task } : {}),
+                        ...(a.role ? { role: a.role } : {}),
+                        ...(blocked !== undefined ? { noInterrupt: blocked } : {}),
+                      },
+                      label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
                       coordinator: false,
-                      ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
-                      ...(a.task ? { task: a.task } : {}),
-                      ...(a.role ? { role: a.role } : {}),
-                    },
-                    label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
-                    coordinator: false,
-                    copy:
-                      a.task && a.wave !== UNASSIGNED
-                        ? { wave: a.wave, task: a.task, ...(a.role ? { role: a.role } : {}) }
-                        : null,
-                    onClose: () => setSteerOpen(null),
-                  })
-                }
-              />
-            )),
+                      // `volleyd steer` resolves the same slot, so a stale agent gets no command.
+                      copy:
+                        a.task && a.wave !== UNASSIGNED && blocked === undefined
+                          ? { wave: a.wave, task: a.task, ...(a.role ? { role: a.role } : {}) }
+                          : null,
+                      onClose: () => setSteerOpen(null),
+                    })
+                  }
+                />
+              );
+            }),
           )}
         </World>
       </div>

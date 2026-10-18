@@ -21,7 +21,7 @@
  * gets exactly one. The outcome is reported as an `interrupt` event
  * (`interrupted: false` with a reason when volleyd has no interrupt wired,
  * refused, did not answer, interrupted some other agent, or the target has no
- * wave task);
+ * wave task or no longer holds its role slot, `SteerTarget.noInterrupt`);
  * the message is delivered either way. `control()` sends any other op
  * (`claim`) the same way and resolves with the daemon's ack on the Desk's own
  * mailbox.
@@ -51,6 +51,12 @@ export interface SteerTarget {
   task?: string | undefined;
   /** The agent's pipeline role in `task` (`tasks[].agents`): who volleyd interrupts. */
   role?: string | undefined;
+  /**
+   * Why this agent must not be interrupted (it no longer holds its role slot,
+   * so volleyd would press Escape in the slot's new agent): urgent sends skip
+   * the interrupt and report this reason.
+   */
+  noInterrupt?: string | undefined;
 }
 
 /** The PromptBar's commands (names carry the slash, so picking one inserts `/stop `). */
@@ -166,6 +172,7 @@ export function createSteerTransport(
   const interrupt = async (
     target: SteerTarget,
   ): Promise<{ interrupted: boolean; reason?: string }> => {
+    if (target.noInterrupt !== undefined) return { interrupted: false, reason: target.noInterrupt };
     if (target.wave === undefined || target.task === undefined)
       return { interrupted: false, reason: "no wave task to interrupt" };
     const r = await control(

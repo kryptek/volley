@@ -49,18 +49,33 @@ import type { DeskMessage, DeskState } from "./types";
 
 export const DEFAULT_BROKER_URL = "ws://localhost:9001";
 
-/** mosquitto's WebSocket listener on the host that served the page (`localhost` outside a browser). */
-export function defaultBrokerUrl(hostname: string | undefined): string {
-  if (!hostname) return DEFAULT_BROKER_URL;
-  return `ws://${hostname.includes(":") ? `[${hostname}]` : hostname}:9001`;
+/**
+ * mosquitto's WebSocket listener on the host that served the page
+ * (`localhost` outside a browser). `location.hostname` already brackets an
+ * IPv6 literal (`[::1]`); a bare one is bracketed here. A page served over
+ * https gets `wss:`, since browsers block a `ws:` socket from it.
+ */
+export function defaultBrokerUrl(
+  page: { hostname: string; protocol?: string | undefined } | undefined,
+): string {
+  if (!page?.hostname) return DEFAULT_BROKER_URL;
+  const { hostname, protocol } = page;
+  const host = hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
+  return `${protocol === "https:" ? "wss" : "ws"}://${host}:9001`;
 }
 
 /** The broker URL the live Desk connects to: the prop, else `VITE_VOLLEY_BROKER_URL`, else the page host's. */
-export function resolveBrokerUrl(urlProp?: string): string {
-  const fromEnv = viteEnv().VITE_VOLLEY_BROKER_URL;
+export function resolveBrokerUrl(
+  urlProp?: string,
+  env: Record<string, unknown> = viteEnv(),
+  page: Parameters<typeof defaultBrokerUrl>[0] = typeof window === "undefined"
+    ? undefined
+    : window.location,
+): string {
+  const fromEnv = env.VITE_VOLLEY_BROKER_URL;
   if (urlProp !== undefined) return urlProp;
   if (typeof fromEnv === "string" && fromEnv !== "") return fromEnv;
-  return defaultBrokerUrl(typeof window === "undefined" ? undefined : window.location.hostname);
+  return defaultBrokerUrl(page);
 }
 const TICK_MS = 2600;
 const REVIEWER_AFTER_MS = 22_000;
@@ -325,6 +340,8 @@ export function DeskStoreProvider({
     const refuse = (err: AuthFailedError) => {
       if (refused) return;
       refused = true;
+      // Stop mqtt.js retrying the refused credentials every reconnectPeriod.
+      void client.disconnect();
       setConnection("disconnected");
       if (onAuthFailedRef.current) onAuthFailedRef.current(err.message);
       else console.warn("volley-desk: the broker refused the credentials", err);

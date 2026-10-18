@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SignInGate } from "../src/auth/SignInGate";
-import { CREDENTIALS_STORAGE_KEY, useDesk } from "../src/store/context";
+import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, useDesk } from "../src/store/context";
 import {
   AuthFailedError,
   type BrokerCredentials,
@@ -11,6 +11,9 @@ import {
 /** A fake broker client: `refuse` makes connect() reject as the broker would on CONNACK 4/5. */
 function factory(opts: { refuse?: boolean } = {}) {
   const calls: { url: string; auth: BrokerCredentials | undefined }[] = [];
+  /** Every client's `onError` handlers: a refusal on a later reconnect arrives here. */
+  const errorHandlers = new Set<(err: Error) => void>();
+  let disconnects = 0;
   const make = (url: string, auth?: BrokerCredentials): DeskMqttClient => {
     calls.push({ url, auth });
     const connected = new Set<() => void>();
@@ -19,7 +22,9 @@ function factory(opts: { refuse?: boolean } = {}) {
         if (opts.refuse) throw new AuthFailedError("Connection refused: Bad username or password");
         for (const h of connected) h();
       },
-      disconnect: async () => {},
+      disconnect: async () => {
+        disconnects++;
+      },
       publish: async () => {},
       onMessage: () => () => {},
       onConnect: (h) => {
@@ -27,10 +32,16 @@ function factory(opts: { refuse?: boolean } = {}) {
         return () => connected.delete(h);
       },
       onDisconnect: () => () => {},
-      onError: () => () => {},
+      onError: (h) => {
+        errorHandlers.add(h);
+        return () => errorHandlers.delete(h);
+      },
     };
   };
-  return { make, calls };
+  const error = (err: Error) => {
+    for (const h of [...errorHandlers]) h(err);
+  };
+  return { make, calls, error, disconnects: () => disconnects };
 }
 
 function Probe() {
@@ -111,6 +122,23 @@ describe("SignInGate (P1-2)", () => {
     expect(screen.queryByTestId("desk")).not.toBeInTheDocument();
   });
 
+  it("a refusal on a later reconnect (password rotated) forgets it and shows the form again", async () => {
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "desk", password: "old" }),
+    );
+    const f = factory();
+    gate(f);
+    await flush();
+    expect(screen.getByTestId("desk")).toHaveTextContent("connected:desk");
+    act(() => f.error(new AuthFailedError("Connection refused: Not authorized")));
+    await flush();
+    expect(screen.getByRole("alert")).toHaveTextContent(/Not authorized/);
+    expect(localStorage.getItem(CREDENTIALS_STORAGE_KEY)).toBeNull();
+    expect(screen.getByLabelText("Username")).toHaveValue("desk");
+    expect(screen.queryByTestId("desk")).not.toBeInTheDocument();
+  });
+
   it("an empty username connects anonymously (read-only) and is remembered", async () => {
     const f = factory();
     gate(f);
@@ -149,5 +177,35 @@ describe("SignInGate (P1-2)", () => {
     );
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.getByTestId("desk")).toHaveTextContent("demo:");
+  });
+});
+
+describe("DeskStoreProvider auth refusal on a later reconnect", () => {
+  it("reports it once, and stops the refused client reconnecting", async () => {
+    const f = factory();
+    const failed = vi.fn();
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://broker.test:9001"
+        auth={{ username: "desk", password: "old" }}
+        clientFactory={f.make}
+        onAuthFailed={failed}
+      >
+        <Probe />
+      </DeskStoreProvider>,
+    );
+    await flush();
+    expect(screen.getByTestId("desk")).toHaveTextContent("connected:desk");
+    act(() => {
+      f.error(new AuthFailedError("Connection refused: Not authorized"));
+      f.error(new AuthFailedError("Connection refused: Not authorized"));
+    });
+    await flush();
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(failed).toHaveBeenCalledWith("Connection refused: Not authorized");
+    // mqtt.js would otherwise keep retrying the bad credentials every reconnectPeriod.
+    expect(f.disconnects()).toBe(1);
+    expect(screen.getByTestId("desk")).toHaveTextContent("disconnected:desk");
   });
 });
