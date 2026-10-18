@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { type PlanDiff, formatDiff } from "../plan-diff";
 import { parseWaveFile } from "../wave-file";
@@ -14,10 +14,10 @@ Submit it as the wave's next version with \`volleyd run <wave.yaml>\`.
 
 export async function diff({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseDiff>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseDiff(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd diff: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;

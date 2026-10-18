@@ -92,6 +92,24 @@ export async function mintCredentials(
   });
 }
 
+/**
+ * Let minted agent `agentId` also ack `ackTo` (SPEC §4.4 acks go to the sender's mailbox):
+ * `volley auth grant <id> --ack-to <sender>…`, which rewrites only its ACL block, so the live
+ * agent keeps its password. Throws on failure.
+ */
+export async function grantAckTo(
+  exec: ExecFn,
+  agentId: string,
+  ackTo: readonly string[],
+): Promise<void> {
+  const argv = ["volley", "auth", "grant", agentId];
+  for (const s of new Set(ackTo)) argv.push("--ack-to", s);
+  const r = await exec(argv);
+  if (r.code !== 0) {
+    throw new Error(`volley auth grant exited ${r.code}: ${r.stderr.trim()}`);
+  }
+}
+
 /** Revoke an agent's credentials (`volley auth rm-agent`, safe to repeat). True on success. */
 export async function revokeCredentials(exec: ExecFn, agentId: string): Promise<boolean> {
   try {

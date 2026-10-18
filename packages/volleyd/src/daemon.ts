@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
 import {
@@ -25,6 +26,7 @@ import {
   decide,
   summaryPayload,
 } from "./admission";
+import { authFields } from "./broker-auth";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
@@ -81,7 +83,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import { revokeCredentials } from "./identity";
+import { grantAckTo, revokeCredentials } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -105,6 +107,7 @@ import type { WaveRecord } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type {
+  CoordinatorAttention,
   JournalEvent,
   NewEvent,
   TaskAgents,
@@ -180,16 +183,22 @@ import {
   type SpawnDeps,
   type SpawnOutcome,
   type SpawnResult,
+  openDecisionFor,
   spawnAgent,
 } from "./spawn";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
-import { type AgentWatch, watchAgent } from "./verify";
+import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import { expandHome, worktreePath } from "./worktree";
 
 export interface DaemonOptions {
   brokerUrl: string;
   namespace: string;
+  /**
+   * The `volleyd` identity's broker credentials (`daemonAuth`: `$VOLLEYD_HOME/broker.json`, else
+   * `VOLLEY_AUTH_*`), sent on every connect. Absent: anonymous (an open broker).
+   */
+  auth?: BrokerAuth;
   /** $VOLLEYD_HOME — journals live under `<home>/waves/<wave>/`, config at `<home>/config.yaml`. */
   home: string;
   /**
@@ -367,6 +376,15 @@ const GLOBAL = "";
  * The daemon's MQTT clientId. Stable, so its persistent session (and mailbox subscription)
  * survives restarts and the broker queues control requests sent while it is down (SPEC §4.4).
  */
+/** Agents the wave's journal retired (task.agents still names the last one per role). */
+const retiredAgents = (log: WaveLog): Set<string> =>
+  new Set(
+    log.journal
+      .readAll()
+      .filter((e) => e.type === "agent_retired")
+      .map((e) => e.data.agent_id as string),
+  );
+
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
@@ -383,6 +401,17 @@ const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
+
+/** Owner statuses that make its `coordinator.state` `gone`. */
+const OWNER_GONE = new Set(["reaped", "done", "failed"]);
+
+/** The wave_complete decision's id (one per wave). */
+const WAVE_COMPLETE_DECISION = "wave_complete";
+
+/** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
+const PROGRESS_FILTER = "volley/+/+/progress";
+/** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
+const MAILBOX_FILTER = `volley/+/${DAEMON_AGENT_ID}/mailbox`;
 
 /**
  * Take the exclusive `$VOLLEYD_HOME/volleyd.lock` (holding our pid) before touching any journal,
@@ -443,7 +472,11 @@ function pidAlive(pid: number): boolean {
 async function assertNotRunning(opts: DaemonOptions): Promise<void> {
   const topic = buildTopic(opts.namespace, DAEMON_AGENT_ID, "status");
   const probe = new VolleyBroker();
-  await probe.connect({ url: opts.brokerUrl, agentId: `${DAEMON_AGENT_ID}-probe` });
+  await probe.connect({
+    url: opts.brokerUrl,
+    agentId: `${DAEMON_AGENT_ID}-probe`,
+    ...authFields(opts.auth),
+  });
   try {
     const prior = await probe.queryRetained(topic, DAEMON_DEFAULTS.probe_ms);
     const priorType = prior !== null ? parseEnvelope(prior)?.type : undefined;
@@ -492,6 +525,22 @@ export class Daemon {
   private readonly publishedPools = new Set<string>();
   /** Arrival times (ms) of API overload / credit signals seen on agents' progress channels. */
   private apiSignals: number[] = [];
+  /** Agent watches fed from the one progress subscription, by progress topic. */
+  private readonly progressRoutes = new Map<
+    string,
+    Set<(m: { topic: string; payload: string }) => void>
+  >();
+  /** Digests of recent progress messages: a copy delivered twice is handled once. */
+  private readonly seenProgress = new Set<string>();
+  /** The latest status (type, wall_time) of every agent id, for a wave owner's `coordinator`. */
+  private readonly statusOf = new Map<string, { type: string; at: string }>();
+  /** What each agent's progress says about its attention (a wave owner's `coordinator`). */
+  private readonly attentionOf = new Map<
+    string,
+    Omit<CoordinatorAttention, "agent_id" | "last_seen">
+  >();
+  /** Mailbox topics (one per namespace) whose stray retained message this process cleared. */
+  private readonly clearedMailboxes = new Set<string>();
   private lastReading: PressureReading | null = null;
   private sampledAt: Date | null = null;
   /** Hysteresis state before the last sample, per wave (GLOBAL = machine-wide), for re-decides. */
@@ -661,6 +710,7 @@ export class Daemon {
       protocolVersion: this.opts.protocolVersion ?? 5,
       willTopic: this.statusTopic,
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
+      ...authFields(this.opts.auth),
     });
     this.running = true;
 
@@ -679,10 +729,11 @@ export class Daemon {
     );
     await this.publish(this.statusTopic, this.envelope("status", "registered", {}), true);
 
-    const progress = /^volley\/[^/]+\/([^/]+)\/progress$/;
+    // Every namespace's progress through ONE filter: a wave's agents may live in the wave's own
+    // namespace, and mosquitto delivers one copy per matching subscription.
     this.unsubscribers.push(
-      await this.broker.subscribeStream(buildTopic(namespace, "+", "progress"), (m) =>
-        this.onProgress(progress.exec(m.topic)?.[1], m.payload),
+      await this.broker.subscribeStream(PROGRESS_FILTER, (m) =>
+        this.onProgress(m.topic, m.payload),
       ),
     );
 
@@ -733,7 +784,15 @@ export class Daemon {
     // replayed on every subscribe. Then drain: on a resumed session this first returns what the
     // broker queued while the daemon was down. Lease requests are drained the same way.
     await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
+    this.clearedMailboxes.add(this.mailboxTopic);
     void this.mailboxLoop();
+    // A volleyd before the every-namespace drain held only its own namespace's filter, and the
+    // persistent session keeps it: beside the `+` drain it would deliver every message twice.
+    // Drop it; the drain (subscribed synchronously above) already covers the topic.
+    await (await this.broker.subscribeStream(this.mailboxTopic, () => {}))();
+    // Likewise its own-namespace progress filter: beside PROGRESS_FILTER it doubles the traffic.
+    const legacyProgress = buildTopic(this.opts.namespace, "+", "progress");
+    await (await this.broker.subscribeStream(legacyProgress, () => {}))();
     void this.leaseRequestLoop();
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
@@ -758,12 +817,22 @@ export class Daemon {
   }
 
   /**
-   * A message on some agent's progress channel: any of them is a sign of life (`claim`), and a
-   * SPEC §4.3 `steering_acked` settles the steer it names (`correlation_id` = the message id).
+   * A message on some agent's progress channel, in any namespace: it goes to that agent's watch
+   * (liveness, heartbeats), is a sign of life (`claim`), a SPEC §4.3 `steering_acked` settles the
+   * steer it names (`correlation_id` = the message id), and an API overload signal feeds
+   * admission. A copy the broker delivers twice is handled once.
    */
-  private onProgress(agent: string | undefined, raw: string): void {
-    if (agent === undefined || agent === DAEMON_AGENT_ID) return;
+  private onProgress(topic: string, raw: string): void {
+    const [, ns, agent] = topic.split("/");
+    if (ns === undefined || agent === undefined || ns.startsWith("_")) return;
+    if (!this.firstSighting(topic, raw)) return;
+    for (const deliver of [...(this.progressRoutes.get(topic) ?? [])]) {
+      deliver({ topic, payload: raw });
+    }
+    if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
+    if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
+    if (env !== null) this.noteAttention(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
@@ -773,9 +842,100 @@ export class Daemon {
     }
   }
 
-  /** Hand each mailbox message to the serial queue, one at a time, until the daemon stops. */
+  /**
+   * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
+   * question, session and workspace) until anything else but `idle` says it works again.
+   */
+  private noteAttention(agent: string, env: Envelope): void {
+    // Only wave owners have a `coordinator`: other agents' attention would just pile up.
+    if (env.type === "idle" || !this.ownsAWave(agent)) return;
+    const p = (
+      typeof env.payload === "object" && env.payload !== null ? env.payload : {}
+    ) as Record<string, unknown>;
+    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen"> =
+      env.type === "awaiting_input"
+        ? {
+            state: "awaiting_input",
+            ...(typeof p.question === "string" && p.question.trim() !== ""
+              ? { question: firstLines(p.question) }
+              : {}),
+            ...(typeof p.session_url === "string" && URL.canParse(p.session_url)
+              ? { session_url: p.session_url }
+              : {}),
+            ...(typeof p.workspace === "string" && p.workspace !== ""
+              ? { workspace: p.workspace }
+              : {}),
+          }
+        : { state: "working" };
+    const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
+    this.attentionOf.set(agent, next);
+    if (before !== JSON.stringify(next)) this.ownerChanged(agent);
+  }
+
+  private ownsAWave(agent: string): boolean {
+    for (const log of this.waves.values()) if (log.record.state?.owner === agent) return true;
+    return false;
+  }
+
+  /** An agent's status or attention changed: re-publish the waves it owns (`coordinator`). */
+  private ownerChanged(agent: string): void {
+    if (!this.running) return;
+    for (const [wave, log] of this.waves) {
+      if (log.record.state?.owner === agent) void this.enqueue(() => this.publishState(wave));
+    }
+  }
+
+  /** wave-state `coordinator` for `owner`; undefined until anything of it was seen. */
+  private coordinatorFor(owner: string): CoordinatorAttention | undefined {
+    const status = this.statusOf.get(owner);
+    const attention = this.attentionOf.get(owner);
+    if (status === undefined && attention === undefined) return undefined;
+    const seen = [
+      this.lastSeen.get(owner),
+      status !== undefined ? Date.parse(status.at) : undefined,
+    ]
+      .filter((t): t is number => t !== undefined && !Number.isNaN(t))
+      .sort((a, b) => b - a)[0];
+    const last_seen = new Date(seen ?? this.now()).toISOString();
+    if (status !== undefined && OWNER_GONE.has(status.type)) {
+      return { agent_id: owner, state: "gone", last_seen };
+    }
+    return { agent_id: owner, ...(attention ?? { state: "working" }), last_seen };
+  }
+
+  /** False for a progress message already handled (same topic and bytes); bounded memory. */
+  private firstSighting(topic: string, raw: string): boolean {
+    const key = createHash("sha256").update(topic).update("\n").update(raw).digest("base64");
+    if (this.seenProgress.has(key)) return false;
+    this.seenProgress.add(key);
+    if (this.seenProgress.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.seenProgress.delete(this.seenProgress.values().next().value as string);
+    }
+    return true;
+  }
+
+  /** An agent watch's progress subscription, served from the daemon's one progress filter. */
+  private readonly progressFeed: ProgressFeed = async (topic, deliver) => {
+    let routes = this.progressRoutes.get(topic);
+    if (routes === undefined) {
+      routes = new Set();
+      this.progressRoutes.set(topic, routes);
+    }
+    routes.add(deliver);
+    return async () => {
+      routes.delete(deliver);
+      if (routes.size === 0 && this.progressRoutes.get(topic) === routes) {
+        this.progressRoutes.delete(topic);
+      }
+    };
+  };
+
+  /**
+   * Hand each mailbox message (the daemon's mailbox in any namespace) to the serial queue, one at
+   * a time, until the daemon stops.
+   */
   private async mailboxLoop(): Promise<void> {
-    await this.drainLoop(this.mailboxTopic, (m) => this.onMailbox(m.payload));
+    await this.drainLoop(MAILBOX_FILTER, (m) => this.onMailbox(m.topic, m.payload));
   }
 
   /**
@@ -986,14 +1146,25 @@ export class Daemon {
   /**
    * Subscribe to every agent's status (a holder that turns reaped/done/failed loses its leases;
    * the retained statuses arrive on subscribe, so a holder that died while the daemon was down
-   * is caught too) and to every agent's progress (the hooks' API overload signals). Lease
-   * requests themselves are drained by `leaseRequestLoop`.
+   * is caught too). API overload signals come from the one progress subscription (`onProgress`);
+   * lease requests themselves are drained by `leaseRequestLoop`.
    */
   private async subscribeLeaseInputs(): Promise<void> {
     this.unsubscribers.push(
       await this.broker.subscribeStream("volley/+/+/status", (m) => {
         const holder = m.topic.split("/")[2] ?? "";
         const env = parseEnvelope(m.payload);
+        if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
+          const prev = this.statusOf.get(holder)?.type;
+          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder)) {
+            // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
+            this.statusOf.delete(holder);
+            this.attentionOf.delete(holder);
+          } else {
+            this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+          }
+          if (prev !== env.type) this.ownerChanged(holder);
+        }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
         // Checked in queue order, so an `acquire` from this holder still waiting in the queue
         // is applied first and then freed here.
@@ -1003,10 +1174,6 @@ export class Daemon {
           );
           if (holds) await this.runLeases({ kind: "holder_status", holder, status: env.type });
         });
-      }),
-      await this.broker.subscribeStream("volley/+/+/progress", (m) => {
-        const env = parseEnvelope(m.payload);
-        if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
       }),
     );
   }
@@ -1125,6 +1292,7 @@ export class Daemon {
   private async tickNow(): Promise<void> {
     await this.runLeases({ kind: "tick" });
     await this.monitor();
+    for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
@@ -1152,6 +1320,9 @@ export class Daemon {
     }
     if (this.opts.spawner !== undefined) {
       await this.resolveTrustedRepos();
+      // Every wave, paused or stopped too: a running remote agent's reap waits on its tunnel's
+      // check, which must not go stale.
+      for (const wave of this.waves.keys()) this.checkTunnels(wave);
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
@@ -1166,6 +1337,37 @@ export class Daemon {
     }
   }
 
+  /**
+   * A running wave whose every task is done or cancelled is complete: journal `wave_complete`
+   * (status `complete`; admission stops sampling its repo) and open the wave-level
+   * `wave_complete` decision, so the owner is told (the Desk, the notify bridge).
+   */
+  private async completeIfSettled(wave: WaveId): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const state = rec?.state;
+    if (rec === undefined || state == null || state.status !== "running") return;
+    if (state.tasks.length === 0) return;
+    if (!state.tasks.every((t) => t.stage === "done" || t.stage === "cancelled")) return;
+    const done = state.tasks.filter((t) => t.stage === "done").map((t) => t.id);
+    const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
+    // The decision first: once wave_complete is journaled the wave is no longer `running` and no
+    // later tick comes back here, so a failed open must leave the wave to retry.
+    if (rec.decisions[WAVE_COMPLETE_DECISION] === undefined) {
+      const merged = done.length > 0 ? ` merged into ${state.release_branch}` : "";
+      await this.openDecisionNow(wave, {
+        kind: "wave_complete",
+        task: null,
+        id: WAVE_COMPLETE_DECISION,
+        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
+        options: ["acknowledged"],
+      });
+    }
+    await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
+    this.log(
+      `wave ${wave} complete: done ${done.join(", ") || "-"}; cancelled ${cancelled.join(", ") || "-"}`,
+    );
+  }
+
   // -------------------------------------------------------------------------------------------
   // Spawning (T4): admitted tasks get an implementer; other roles are sequenced by the pipeline.
   // -------------------------------------------------------------------------------------------
@@ -1174,7 +1376,6 @@ export class Daemon {
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
-    this.checkTunnels(wave);
     for (const id of rec.admitted) {
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
@@ -1243,7 +1444,16 @@ export class Daemon {
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
-          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel),
+          (outcome) => {
+            this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
+            // Minted for the owner `deps` captured: a claim since then missed this agent (it was
+            // not supervised yet), so grant the current owner here.
+            const owner = this.waves.get(wave)?.record.state?.owner ?? null;
+            const a = this.supervised.get(outcome.agentId);
+            if (a?.minted === true && owner !== null && owner !== deps.owner) {
+              void this.grantAck(wave, outcome.agentId, a, owner);
+            }
+          },
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
       }
@@ -1458,7 +1668,7 @@ export class Daemon {
         return log.record.state?.open_decisions ?? [];
       },
       probe,
-      watch: (ns, id) => watchAgent(this.broker, ns, id),
+      watch: (ns, id) => watchAgent(this.broker, ns, id, Date.now, this.progressFeed),
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
@@ -1689,7 +1899,7 @@ export class Daemon {
     const { spec } = remote;
     const journal = deps.journal;
     const decisionId = `remote_repo_missing-${createHash("sha256").update(`${spec.target}:${spec.repo}`).digest("hex").slice(0, 12)}`;
-    const open = log.record.state?.open_decisions ?? [];
+    const openId = openDecisionFor(log.record.state?.open_decisions ?? [], decisionId);
     // An ssh failure is not a missing clone: it throws a transient LAUNCH_FAILED (backed off).
     const exists = await remote.repoExists().catch(async (e: unknown) => {
       const err =
@@ -1704,23 +1914,16 @@ export class Daemon {
       throw err;
     });
     if (!exists) {
-      if (!open.includes(decisionId)) {
-        await this.append(wave, {
-          type: "decision_opened",
+      // Through the decision store: retained topic (the Desk, notify) and the task parks.
+      if (openId === undefined) {
+        await this.openSpawnDecision(wave, {
+          kind: "remote_repo_missing",
+          id: decisionId,
           task,
-          data: {
-            decision_id: decisionId,
-            kind: "remote_repo_missing",
-            wave,
-            task,
-            question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-            options: ["retry", "cancel"],
-            pointers: {},
-            opened_at: new Date().toISOString(),
-            host: spec.name,
-            target: spec.target,
-            repo: spec.repo,
-          },
+          question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
+          options: ["retry", "cancel"],
+          pointers: {},
+          data: { host: spec.name, target: spec.target, repo: spec.repo },
         });
       }
       throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
@@ -1729,12 +1932,10 @@ export class Daemon {
         repo: spec.repo,
       });
     }
-    if (open.includes(decisionId)) {
-      await this.append(wave, {
-        type: "decision_resolved",
-        task,
-        data: { decision_id: decisionId, answer: "found", by: DAEMON_AGENT_ID },
-      });
+    // The clone appeared while the decision was still open: only a spawn that does not wait for
+    // the task to be queued gets here (a manual `volleyd spawn`, or a later pipeline role).
+    if (openId !== undefined) {
+      await this.resolveNow(wave, openId, { answer: "found", by: DAEMON_AGENT_ID });
     }
     const lockHome = join(this.opts.home, "hosts", spec.target);
     mkdirSync(lockHome, { recursive: true, mode: 0o700 });
@@ -2339,6 +2540,15 @@ export class Daemon {
     );
   }
 
+  /** Where an agent's channels live: where it was spawned (its wave's `namespace:`), else ours. */
+  private agentNamespace(wave: WaveId, agentId: string): string {
+    return (
+      this.supervised.get(agentId)?.namespace ??
+      this.waves.get(wave)?.record.wave?.namespace ??
+      this.opts.namespace
+    );
+  }
+
   /** Stop one task on the owner's answer: cancel its agent, interrupt it, journal the cancel. */
   private async cancelTask(
     wave: WaveId,
@@ -2349,7 +2559,7 @@ export class Daemon {
     const a = this.supervised.get(agentId);
     const messageId = randomUUID();
     await this.publish(
-      buildTopic(a?.namespace ?? this.opts.namespace, agentId, "mailbox"),
+      buildTopic(this.agentNamespace(wave, agentId), agentId, "mailbox"),
       this.envelope(
         "mailbox",
         "cancel",
@@ -2593,7 +2803,7 @@ export class Daemon {
   ): Promise<void> {
     const id = t.agent_id;
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
-    const watch = await watchAgent(this.broker, ns, id, this.now);
+    const watch = await watchAgent(this.broker, ns, id, this.now, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
     const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
     const role =
@@ -2830,6 +3040,17 @@ export class Daemon {
       const t = state.tasks.find((x) => x.id === a.task);
       if (why !== undefined && t !== undefined) t.why_waiting = why;
     }
+    // Nothing can move without an answer: every unsettled task is parked on a decision or
+    // queued behind one. Published only; internally the wave keeps running.
+    if (state.status === "running" && state.open_decisions.length > 0) {
+      const unsettled = state.tasks.filter((t) => t.stage !== "done" && t.stage !== "cancelled");
+      const stuck = (t: (typeof unsettled)[number]) =>
+        t.stage === "awaiting_decision" ||
+        (t.stage === "queued" && t.why_waiting?.startsWith("awaiting decision") === true);
+      if (unsettled.length > 0 && unsettled.every(stuck)) state.status = "awaiting_decision";
+    }
+    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner) : undefined;
+    if (coordinator !== undefined) state.coordinator = coordinator;
     return state;
   }
 
@@ -2927,6 +3148,20 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
+    if (d.kind === "remote_repo_missing" && d.task !== null) {
+      if (r.answer.trim().toLowerCase() === "cancel") {
+        await this.append(wave, {
+          type: "task_cancelled",
+          task: d.task,
+          data: { by: r.by, why: `no clone on the remote host (decision ${id})` },
+        });
+      } else {
+        // Any other answer requeues the task: the refusal's backoff must not delay the retry.
+        for (const key of this.refused.keys()) {
+          if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
+        }
+      }
+    }
     if (d.task === null) return { decision: d, already_resolved: false };
     if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
       const task = d.task;
@@ -2960,15 +3195,25 @@ export class Daemon {
   // Control ops
   // -------------------------------------------------------------------------------------------
 
-  private async onMailbox(raw: string): Promise<void> {
+  private async onMailbox(topic: string, raw: string): Promise<void> {
+    const ns = topic.split("/")[1] ?? "";
+    if (ns.startsWith("_")) return; // `+` also matches the reserved levels; no mailbox lives there
+    // Mailbox messages are never retained (SPEC §4.1): clear a stray one in each namespace once,
+    // so it is not replayed on every start (the daemon's own namespace is cleared in connect()).
+    if (!this.clearedMailboxes.has(topic)) {
+      this.clearedMailboxes.add(topic);
+      await this.broker.publish(topic, "", { qos: 1, retain: true });
+    }
     const req = parseEnvelope(raw);
     if (req === null || !isValidAgentId(req.agent_id)) return;
-    // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it.
+    // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it, in
+    // whichever namespace its wave put it.
     if (req.type === "ack") {
       if (req.correlation_id !== null) this.acks.received(req.correlation_id, req.agent_id);
       return;
     }
-    if (req.type !== "query") return;
+    // Control queries only from our own namespace: another daemon on this broker answers its own.
+    if (req.type !== "query" || ns !== this.opts.namespace) return;
     // An ack MUST carry the request's correlation_id (SPEC §4.4); without one there is no
     // answer the sender could match, so the request is dropped.
     if (req.correlation_id === null) {
@@ -2979,6 +3224,7 @@ export class Daemon {
     const correlationId = req.correlation_id;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     const op = typeof payload.op === "string" ? payload.op : "";
+    // The answer goes to the sender's mailbox in our namespace (where the request came from).
     const send = (reply: ControlResponse) =>
       this.publish(
         buildTopic(this.opts.namespace, req.agent_id, "mailbox"),
@@ -3036,6 +3282,12 @@ export class Daemon {
           return {
             ok: false,
             error: "claim needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID",
+          };
+        // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
+        if (!isValidAgentId(p.by))
+          return {
+            ok: false,
+            error: `"${p.by}" is not a valid agent id ([a-z0-9][a-z0-9_-]{0,62})`,
           };
         return this.claim(p, p.by);
       case "pause":
@@ -3348,7 +3600,9 @@ export class Daemon {
     const effect = planAnswer(log.record, d);
     if (effect.cancel !== undefined && d.task !== null) {
       const task = d.task;
-      for (const a of runningAgents(log.record).filter((x) => x.task === task)) {
+      for (const a of runningAgents(log.record, retiredAgents(log)).filter(
+        (x) => x.task === task,
+      )) {
         await this.cancelAgent(wave, a, by, {
           ...cancelPayload(wave, task, by),
           text: effect.cancel,
@@ -3409,8 +3663,48 @@ export class Daemon {
         data: { owner: by, previous: owner, why: verdict.why },
       });
       this.log(`wave ${w.wave} claimed by ${by} from ${owner ?? "-"}: ${verdict.why}`);
+      // Its live agents may now ack the new owner's steers; the grant runs beside the queue.
+      void this.extendAckGrants(w.wave, by);
     }
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
+  }
+
+  /**
+   * A wave changed owner: let each of its live agents with minted credentials ack the new owner
+   * too (`volley auth grant`, password kept). A failure is journaled as an alarm.
+   */
+  private async extendAckGrants(wave: WaveId, owner: string): Promise<void> {
+    for (const [agentId, a] of [...this.supervised]) {
+      if (a.wave !== wave || !a.minted) continue;
+      if (!(await this.grantAck(wave, agentId, a, owner))) return;
+    }
+  }
+
+  /** Let one minted agent ack `owner`; false once the daemon is stopping. */
+  private async grantAck(
+    wave: WaveId,
+    agentId: string,
+    a: Supervised,
+    owner: string,
+  ): Promise<boolean> {
+    try {
+      await grantAckTo(a.host.exec, agentId, [owner]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.log(`ack grant ${agentId} → ${owner}: ${message}`);
+      if (!this.running) return false;
+      await this.recordEvent(wave, {
+        type: "alarm_raised",
+        task: a.task,
+        data: {
+          code: "ACK_GRANT_FAILED",
+          message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
+          agent_id: agentId,
+          owner,
+        },
+      }).catch(() => {});
+    }
+    return true;
   }
 
   /** The owner's retained status and registry timestamps. */
@@ -3497,7 +3791,7 @@ export class Daemon {
     if (status === "stopped" || status === "complete") return null;
     await this.append(wave, { type: "wave_stopped", data: { by } });
     const cancelled: string[] = [];
-    for (const a of runningAgents(log.record)) {
+    for (const a of runningAgents(log.record, retiredAgents(log))) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
@@ -3514,7 +3808,7 @@ export class Daemon {
   ): Promise<void> {
     const messageId = randomUUID();
     await this.publish(
-      buildTopic(this.opts.namespace, a.agent_id, "mailbox"),
+      buildTopic(this.agentNamespace(wave, a.agent_id), a.agent_id, "mailbox"),
       this.envelope("mailbox", "cancel", payload, messageId),
       false,
     );
@@ -3683,10 +3977,7 @@ export class Daemon {
         ? Math.min(p.wait_ack_ms, DAEMON_DEFAULTS.steer_wait_ack_max_ms)
         : DAEMON_DEFAULTS.steer_wait_ack_ms;
     const heard = waitMs > 0 ? this.acks.wait(messageId, target.agent_id, waitMs) : null;
-    const namespace =
-      this.supervised.get(target.agent_id)?.namespace ??
-      w.log.record.wave?.namespace ??
-      this.opts.namespace;
+    const namespace = this.agentNamespace(w.wave, target.agent_id);
     await this.deliverSteer(w.wave, p.task, { ...target, namespace }, p.text, by, messageId);
     const result = {
       wave: w.wave,
@@ -3761,6 +4052,7 @@ export class Daemon {
         await this.resolveNow(wave.wave, d.decision_id, { answer: d.answer, by: d.by });
       } else await this.openDecisionNow(wave.wave, d.input, d.extra);
     }
+    this.evaluate(); // the new version's admission overrides, on the last sample
     await this.tickNow();
     this.log(`wave ${wave.wave} v${res.version}: ${JSON.stringify(res.diff)}`);
     return {
@@ -3808,6 +4100,11 @@ function journaledIssueFiles(events: readonly JournalEvent[]): Record<TaskId, st
     }
   }
   return out;
+}
+
+/** A coordinator's question as SPEC §4.3 publishes it: its first one or two lines. */
+function firstLines(text: string): string {
+  return text.trim().split("\n").slice(0, 2).join("\n");
 }
 
 /** A message quoted in a decision question: one line, at most `decision_text_max` characters. */

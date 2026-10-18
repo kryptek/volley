@@ -1,5 +1,11 @@
 import { parseArgs } from "node:util";
-import { type ControlOp, type ControlResponse, resolveTarget, withClient } from "./control";
+import {
+  type ControlOp,
+  type ControlResponse,
+  type ControlTarget,
+  resolveControlTarget,
+  withClient,
+} from "./control";
 import { type Command, type CommandArgs, EXIT, type ExitCode } from "./io";
 import { resolveCaller } from "./ownership";
 import type { WaveRecord } from "./reducer";
@@ -85,8 +91,10 @@ export function nextSteer(rec: WaveRecord, task: TaskId): { seq: number; superse
 /** Every agent currently working a task of the wave (admitted, not settled), deduplicated. */
 export function runningAgents(
   rec: WaveRecord,
+  retired: ReadonlySet<string>,
 ): { task: TaskId; role: keyof TaskAgents; agent_id: string }[] {
-  const seen = new Set<string>();
+  // task.agents keeps the last agent per role after it is retired: never count those.
+  const seen = new Set<string>(retired);
   const out: { task: TaskId; role: keyof TaskAgents; agent_id: string }[] = [];
   for (const id of activeTasks(rec)) {
     const t = rec.state?.tasks.find((x) => x.id === id);
@@ -212,7 +220,7 @@ export interface OpCommand {
 export function opCommand(spec: OpCommand): Command {
   return async ({ argv, env, io }: CommandArgs): Promise<ExitCode> => {
     let parsed: { values: Values; positionals: string[] };
-    let target: ReturnType<typeof resolveTarget>;
+    let target: ControlTarget;
     try {
       parsed = parseArgs({
         args: argv,
@@ -227,7 +235,7 @@ export function opCommand(spec: OpCommand): Command {
         strict: true,
         allowPositionals: true,
       }) as { values: Values; positionals: string[] };
-      target = resolveTarget(parsed.values, env);
+      target = resolveControlTarget(parsed.values, env);
     } catch (e) {
       io.stderr(
         `volleyd ${spec.name}: ${e instanceof Error ? e.message : String(e)}\n${spec.help}`,

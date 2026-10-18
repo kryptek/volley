@@ -40,6 +40,7 @@ import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
  *   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
  *     which the launch commands above run
  *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
+ *   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
  *   volley auth rm-agent <agent_id> [--no-reload]
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
@@ -829,22 +830,29 @@ const absPath = (p: string) => /^\/[^\n\r\0]*$/.test(p) && cleanPath(p);
 
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
-/** `volley auth add-agent|rm-agent <id>`: mint and revoke one agent's broker credentials. */
+/**
+ * `volley auth add-agent|grant|rm-agent <id>`: mint, extend the ack grant of (ACL only), and
+ * revoke one agent's broker credentials.
+ */
 function volley(args: string[]): Verdict {
   const [group, verb, id, ...rest] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
-  if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent")) return deny(name);
+  if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent" && verb !== "grant"))
+    return deny(name);
   if (id === undefined || !AGENT_ID.test(id)) return deny(`${name} (agent id)`);
+  let acks = 0;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--no-reload") continue;
     if (verb === "add-agent" && a === "--json") continue;
-    if (verb === "add-agent" && a === "--ack-to" && AGENT_ID.test(rest[i + 1] ?? "")) {
+    if (verb !== "rm-agent" && a === "--ack-to" && AGENT_ID.test(rest[i + 1] ?? "")) {
+      acks++;
       i++;
       continue;
     }
     return deny(`${name} ${a}`);
   }
+  if (verb === "grant" && acks === 0) return deny(`${name} (no --ack-to)`);
   return ALLOW;
 }
 

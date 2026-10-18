@@ -53,6 +53,25 @@
               }
             },
             "opened_at": { "type": "string", "format": "date-time" },
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing on a remote host: the host's name (wave file or the hosts tunable)."
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing on a remote host: its ssh destination. A repo_untrusted decision with a target is answered on that host."
+            },
+            "change": {
+              "enum": ["removed", "issue"],
+              "description": "plan_change: what the new wave version changed about the task (removed from the plan, or moved to another issue)."
+            },
+            "repo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing: the repo path the decision is about (on target, when set)."
+            },
             "resolved": {
               "type": "object",
               "required": ["answer", "by", "at"],

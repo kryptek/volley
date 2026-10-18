@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentIdFor, mintCredentials } from "../src/identity";
+import { agentIdFor, grantAckTo, mintCredentials } from "../src/identity";
 import { retireAgent } from "../src/retire";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
@@ -46,6 +46,26 @@ describe("mintCredentials", () => {
   });
 });
 
+describe("grantAckTo", () => {
+  it("runs the fenced volley auth grant <id> --ack-to … (the password is kept)", async () => {
+    const fake = fakeExec();
+    await grantAckTo(fake.exec, "w1-t1-implementer-1", ["coordinator-cd34"]);
+    expect(fake.calls[0]?.argv).toEqual([
+      "volley",
+      "auth",
+      "grant",
+      "w1-t1-implementer-1",
+      "--ack-to",
+      "coordinator-cd34",
+    ]);
+  });
+
+  it("a failing grant throws with its stderr", async () => {
+    const fake = fakeExec().on(["volley", "auth", "grant"], { code: 1, stderr: "not in passwd" });
+    await expect(grantAckTo(fake.exec, "w1", ["desk"])).rejects.toThrow("not in passwd");
+  });
+});
+
 describe("spawn identity", () => {
   let env: SpawnEnv;
   afterEach(() => env.cleanup());
@@ -68,7 +88,17 @@ describe("spawn identity", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(schemaErrors("agent-identity.schema.json", id)).toEqual([]);
     expect(env.host.fake.argvs(["volley", "auth", "add-agent"])).toEqual([
-      ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--ack-to", "volleyd", "--json"],
+      [
+        "volley",
+        "auth",
+        "add-agent",
+        "w1-t1-implementer-1",
+        "--ack-to",
+        "volleyd",
+        "--ack-to",
+        "desk",
+        "--json",
+      ],
     ]);
   });
 
@@ -87,6 +117,9 @@ describe("spawn identity", () => {
       "coordinator-ab12",
       "--ack-to",
       "volleyd",
+      // The Desk steers too: its acks (hooks' "Delivered by hook") go to the desk's mailbox.
+      "--ack-to",
+      "desk",
       "--json",
     ]);
   });

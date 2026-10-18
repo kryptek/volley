@@ -985,6 +985,7 @@ ALLOW (program by bare name only — never a path):
   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
     which the launch commands above run
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
+  volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the

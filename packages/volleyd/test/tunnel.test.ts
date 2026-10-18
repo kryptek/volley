@@ -485,6 +485,18 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     });
   });
 
+  it("tunnel checks keep running while the wave is paused (a stale `up` must not let a reap through)", async () => {
+    box.tunnel = true;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await daemon.recordEvent("w1", { type: "wave_paused", data: { by: "test" } });
+    box.tunnel = false;
+    await recheck(); // waits for the box's tunnel to be checked again
+    expect(
+      journal("w1").some((e) => e.type === "alarm_raised" && e.data.code === "TUNNEL_DOWN"),
+    ).toBe(true);
+  });
+
   it("a forward that keeps failing is down even when something answers on the box's port", async () => {
     tunnelMode = "fail";
     box.tunnel = true; // e.g. the box's own mosquitto holds the port
@@ -558,6 +570,47 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       repo,
     });
     expect(box.launches).toHaveLength(0);
+  });
+
+  it("remote_repo_missing goes through the decision store; `cancel` cancels the task", async () => {
+    box.tunnel = true;
+    box.repoExists = async () => false;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "decision_opened"));
+    const id = journal("w1").find((e) => e.type === "decision_opened")?.data.decision_id as string;
+    // Published retained like every decision (the Desk shows it; notify rings).
+    const retained = (await env.retained(`volley/_waves/w1/decisions/${id}`)) as {
+      payload: { kind: string; target: string; host: string };
+    } | null;
+    expect(retained?.payload).toMatchObject({
+      kind: "remote_repo_missing",
+      host: "box",
+      target: "dev@box",
+    });
+    expect((await task("w1", "T1"))?.stage).toBe("awaiting_decision");
+
+    await daemon.resolveDecision("w1", id, { answer: "cancel", by: "coord-a" });
+    expect(journal("w1").find((e) => e.type === "task_cancelled")).toMatchObject({
+      task: "T1",
+      data: { by: "coord-a" },
+    });
+    expect((await task("w1", "T1"))?.stage).toBe("cancelled");
+    expect(await env.retained(`volley/_waves/w1/decisions/${id}`)).toBeNull();
+    expect(box.launches).toHaveLength(0);
+  });
+  it("remote_repo_missing `retry` with the clone now present spawns at once (no backoff)", async () => {
+    box.tunnel = true;
+    box.repoExists = async () => false;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "decision_opened"));
+    const id = journal("w1").find((e) => e.type === "decision_opened")?.data.decision_id as string;
+    box.repoExists = async () => true;
+    await daemon.resolveDecision("w1", id, { answer: "retry", by: "coord-a" });
+    // Without advancing the clock: the refusal's 30 s backoff must not hold the retry back.
+    await daemon.tick();
+    await until(() => box.launches.length > 0, 3000);
+    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    expect(journal("w1").some((e) => e.type === "task_cancelled")).toBe(false);
   });
 });
 

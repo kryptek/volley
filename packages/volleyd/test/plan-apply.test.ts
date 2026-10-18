@@ -621,4 +621,25 @@ describe("daemon: volleyd run on a running wave, volleyd diff", () => {
       1,
     );
   });
+
+  it("a plan_change `stop` never cancels an agent already retired", async () => {
+    t = await makeDaemonEnv();
+    const daemon = await t.start();
+    expect((await runCli(["run", V1_FILE], t.env)).exitCode).toBe(0);
+    const ev = (type: string, data: Record<string, unknown>) =>
+      daemon.recordEvent("w-plan", { type, task: "T3", data } as never);
+    await ev("agent_spawned", { role: "implementer", agent_id: "w-plan-t3-implementer-1" });
+    await ev("agent_spawned", { role: "spec_reviewer", agent_id: "w-plan-t3-spec-1" });
+    // The reviewer finished; task.agents still names it.
+    await ev("agent_retired", { agent_id: "w-plan-t3-spec-1", status: "done" });
+    await ev("stage_entered", { stage: "implement" });
+    expect((await runCli(["run", V2_FILE], t.env)).exitCode).toBe(0);
+    const id = planDecisionId("w-plan", "T3", "removed", 2);
+    expect((await runCli(["resolve", id, "stop"], t.env)).exitCode).toBe(0);
+    const steered = daemon
+      .journalEvents("w-plan")
+      .filter((e) => e.type === "steering_sent")
+      .map((e) => e.data.agent_id);
+    expect(steered).toEqual(["w-plan-t3-implementer-1"]);
+  });
 });

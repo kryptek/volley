@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { ROLES } from "../brief";
 import { DAEMON_DEFAULTS } from "../config-defaults";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
 const HELP = `Usage: volleyd spawn <wave> <task> [--role <role>] [--json] [--broker-url <url>] [--namespace <ns>]
@@ -18,10 +18,10 @@ SPAWN_BRIEF_REJECTED, ISSUE_MISMATCH, CREDENTIALS_FAILED, … Exit 1 on a refusa
 
 export async function spawn({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseSpawn>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseSpawn(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd spawn: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;

@@ -47,6 +47,7 @@ function fakeDeps(): AuthDeps & {
       return `pw-${n}`;
     },
     brokerOwner: (): { uid: number; gid: number } | null => null,
+    invokingUser: (): ReturnType<AuthDeps["invokingUser"]> => null,
     chown(path: string, uid: number, gid: number) {
       deps.chowns.push([path, uid, gid]);
     },
@@ -65,7 +66,7 @@ describe("volley auth", () => {
 
   const run = async (argv: string[], deps = fakeDeps()) => {
     const io = makeBufferIO();
-    const code = await auth({ argv, env: {}, io }, deps);
+    const code = await auth({ argv, env: { VOLLEYD_HOME: join(dir, "volleyd-home") }, io }, deps);
     return { code, stdout: io.readStdout(), stderr: io.readStderr(), deps };
   };
 
@@ -167,7 +168,10 @@ describe("volley auth", () => {
 
     it("takes the directory from VOLLEY_AUTH_DIR", async () => {
       const io = makeBufferIO();
-      const code = await auth({ argv: ["init"], env: { VOLLEY_AUTH_DIR: dir }, io }, fakeDeps());
+      const code = await auth(
+        { argv: ["init"], env: { VOLLEY_AUTH_DIR: dir, VOLLEYD_HOME: join(dir, "vh") }, io },
+        fakeDeps(),
+      );
       expect(code).toBe(0);
       expect(existsSync(join(dir, "passwd"))).toBe(true);
     });
@@ -175,7 +179,11 @@ describe("volley auth", () => {
     it("--coordinator-file writes $VOLLEY_AUTH_DIR/coordinator.json (0600) with the coordinator password", async () => {
       const io = makeBufferIO();
       const code = await auth(
-        { argv: ["init", "--coordinator-file"], env: { VOLLEY_AUTH_DIR: dir }, io },
+        {
+          argv: ["init", "--coordinator-file"],
+          env: { VOLLEY_AUTH_DIR: dir, VOLLEYD_HOME: join(dir, "vh") },
+          io,
+        },
         fakeDeps(),
       );
       expect(code).toBe(0);
@@ -213,6 +221,116 @@ describe("volley auth", () => {
       expect(r.stdout).toContain("VOLLEY_AUTH_DIR");
       const plain = await run(["init", "--dir", mkdtempSync(join(tmpdir(), "va-"))], deps);
       expect(plain.stdout).not.toContain("readable only by root");
+    });
+
+    it("--volleyd-file writes $VOLLEYD_HOME/broker.json (0600, dir 0700) with the volleyd password", async () => {
+      const r = await run(["init", "--dir", dir, "--volleyd-file"]);
+      expect(r.code).toBe(0);
+      const home = join(dir, "volleyd-home");
+      const path = join(home, "broker.json");
+      expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+        username: "volleyd",
+        password: "pw-1",
+      });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(home).mode & 0o777).toBe(0o700);
+      expect(r.stdout).toContain(path);
+      expect(r.stdout).not.toContain("volleyd:              its config file");
+    });
+
+    it("without --volleyd-file writes no broker.json; --force rotates an existing one", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const path = join(dir, "volleyd-home", "broker.json");
+      expect(existsSync(path)).toBe(false);
+
+      await run(["init", "--dir", dir, "--force", "--volleyd-file"], deps); // pw-4..pw-6
+      writeFileSync(path, "{}");
+      const r = await run(["init", "--dir", dir, "--force"], deps); // pw-7..pw-9
+      expect(r.code).toBe(0);
+      // A stale file would lock the daemon out after the rotation.
+      expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+        username: "volleyd",
+        password: "pw-7",
+      });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    describe("--volleyd-file under sudo", () => {
+      const sudoRun = async (argv: string[], deps: ReturnType<typeof fakeDeps>, extra = {}) => {
+        const io = makeBufferIO();
+        // sudo resets HOME to root's: the file must still land in the invoking user's home.
+        const env = { HOME: join(dir, "roothome"), SUDO_UID: "501", SUDO_GID: "20", ...extra };
+        const code = await auth({ argv, env, io }, deps);
+        return { code, stdout: io.readStdout(), stderr: io.readStderr() };
+      };
+      const sudoDeps = () => {
+        const deps = fakeDeps();
+        deps.invokingUser = () => ({ uid: 501, gid: 20, home: join(dir, "userhome") });
+        return deps;
+      };
+
+      it("writes broker.json in the invoking user's home, owned by them, 0600", async () => {
+        const deps = sudoDeps();
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps);
+        expect(r.code).toBe(0);
+        const vh = join(dir, "userhome", ".volley", "volleyd");
+        const path = join(vh, "broker.json");
+        expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+          username: "volleyd",
+          password: "pw-1",
+        });
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+        expect(existsSync(join(dir, "roothome"))).toBe(false);
+        // Every directory init created, and the file, go to the invoking user.
+        expect(deps.chowns).toEqual([
+          [join(dir, "userhome"), 501, 20],
+          [join(dir, "userhome", ".volley"), 501, 20],
+          [vh, 501, 20],
+          [path, 501, 20],
+        ]);
+      });
+
+      it("--force without --volleyd-file rotates the invoking user's broker.json", async () => {
+        const deps = sudoDeps();
+        await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps); // pw-1..3
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--force"], deps); // pw-4..6
+        expect(r.code).toBe(0);
+        const path = join(dir, "userhome", ".volley", "volleyd", "broker.json");
+        expect(JSON.parse(readFileSync(path, "utf-8")).password).toBe("pw-4");
+        expect(deps.chowns.at(-1)).toEqual([path, 501, 20]);
+      });
+
+      it("an explicit VOLLEYD_HOME is honoured and still handed to the invoking user", async () => {
+        const deps = sudoDeps();
+        const vh = join(dir, "explicit");
+        const r = await sudoRun(["init", "--dir", join(dir, "etc"), "--volleyd-file"], deps, {
+          VOLLEYD_HOME: vh,
+        });
+        expect(r.code).toBe(0);
+        expect(deps.chowns).toEqual([
+          [vh, 501, 20],
+          [join(vh, "broker.json"), 501, 20],
+        ]);
+      });
+
+      it("as root with no sudo user, refuses --volleyd-file without VOLLEYD_HOME (nothing minted)", async () => {
+        const deps = fakeDeps();
+        deps.invokingUser = () => "root";
+        const etc = join(dir, "etc");
+        const r = await sudoRun(["init", "--dir", etc, "--volleyd-file"], deps);
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("VOLLEYD_HOME");
+        expect(deps.calls).toEqual([]);
+        expect(existsSync(join(etc, "passwd"))).toBe(false);
+      });
+    });
+
+    it("--volleyd-file is only for init", async () => {
+      await run(["init", "--dir", dir]);
+      const r = await run(["add-agent", "w1-t1-implementer-1", "--dir", dir, "--volleyd-file"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--volleyd-file");
     });
 
     it("--coordinator-file is only for init", async () => {
@@ -326,6 +444,51 @@ describe("volley auth", () => {
       // rm-agent drops the block along with the password.
       await run(["rm-agent", "w1-t1-implementer-1", "--dir", dir], deps);
       expect(readFileSync(join(dir, "acl.conf"), "utf-8")).toBe(bundled);
+    });
+
+    it("grant adds ack senders to a minted agent's block without touching its password", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      await run(
+        ["add-agent", "w1-t1-implementer-1", "--ack-to", "coordinator-ab12", "--dir", dir],
+        deps,
+      );
+      const passwdBefore = readFileSync(join(dir, "passwd"), "utf-8");
+      deps.reloads = 0;
+      deps.calls.length = 0;
+      const r = await run(
+        ["grant", "w1-t1-implementer-1", "--ack-to", "coordinator-cd34", "--dir", dir],
+        deps,
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(deps.calls).toEqual([]); // no mosquitto_passwd: the password is unchanged
+      expect(readFileSync(join(dir, "passwd"), "utf-8")).toBe(passwdBefore);
+      expect(r.deps.reloads).toBe(1);
+      const acl = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(acl.match(/user w1-t1-implementer-1/g)).toHaveLength(1);
+      expect(acl).toContain("topic write volley/+/coordinator-ab12/mailbox");
+      expect(acl).toContain("topic write volley/+/coordinator-cd34/mailbox");
+
+      // Idempotent: granting a sender twice lists it once.
+      await run(
+        ["grant", "w1-t1-implementer-1", "--ack-to", "coordinator-cd34", "--dir", dir],
+        deps,
+      );
+      const again = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(again.match(/coordinator-cd34/g)).toHaveLength(1);
+    });
+
+    it("grant refuses an agent that was never minted, and needs --ack-to", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const unknown = await run(["grant", "w9", "--ack-to", "desk", "--dir", dir], deps);
+      expect(unknown.code).toBe(1);
+      expect(unknown.stderr).toContain('"w9" is not in');
+      await run(["add-agent", "w1", "--dir", dir], deps);
+      const none = await run(["grant", "w1", "--dir", dir], deps);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain("--ack-to");
     });
 
     it("add-agent without --ack-to writes no ACL block", async () => {

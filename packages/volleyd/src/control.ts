@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
+import { authFields, controlAuth } from "./broker-auth";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
@@ -93,13 +95,17 @@ export class ControlClient {
     this.agentId = agentId;
   }
 
-  static async connect(brokerUrl: string, namespace: string): Promise<ControlClient> {
+  static async connect(
+    brokerUrl: string,
+    namespace: string,
+    auth?: BrokerAuth | null,
+  ): Promise<ControlClient> {
     if (!isValidNamespace(namespace)) {
       throw new Error(`namespace "${namespace}" does not match [a-z0-9][a-z0-9_-]{0,62}`);
     }
     const agentId = `volleyd-cli-${randomSuffix(6)}`;
     const broker = new VolleyBroker();
-    await broker.connect({ url: brokerUrl, agentId });
+    await broker.connect({ url: brokerUrl, agentId, ...authFields(auth) });
     return new ControlClient(broker, namespace, agentId);
   }
 
@@ -133,7 +139,12 @@ export class ControlClient {
       buildTopic(this.namespace, this.agentId, "mailbox"),
       ({ payload }) => {
         const env = parseEnvelope(payload);
-        if (env?.type === "ack" && env.correlation_id === correlationId) {
+        // SPEC §4.4: only the recipient (the daemon) may ack; anyone can write our mailbox.
+        if (
+          env?.type === "ack" &&
+          env.correlation_id === correlationId &&
+          env.agent_id === DAEMON_AGENT_ID
+        ) {
           resolveReply(env.payload as ControlResponse);
         }
       },
@@ -215,19 +226,36 @@ export function resolveTarget(
   };
 }
 
+/** Where a control client connects, and as whom. */
+export interface ControlTarget {
+  brokerUrl: string;
+  namespace: string;
+  /** The caller's credentials (`controlAuth`); null connects anonymously. */
+  auth: BrokerAuth | null;
+}
+
+/** `resolveTarget` plus the caller's broker credentials (`controlAuth`), for control commands. */
+export function resolveControlTarget(
+  values: { "broker-url"?: string | boolean | undefined; namespace?: string | boolean | undefined },
+  env: Record<string, string | undefined>,
+  cwd: string = process.cwd(),
+): ControlTarget {
+  return { ...resolveTarget(values, env), auth: controlAuth(env, cwd) };
+}
+
 /**
  * Connect a control client, run `fn`, always disconnect. Maps the failure modes to the CLI exit
  * table: broker down / daemon not running → 1, no answer → 124. `prefix` is e.g. `volleyd status`.
  */
 export async function withClient(
-  target: { brokerUrl: string; namespace: string },
+  target: ControlTarget,
   io: IO,
   prefix: string,
   fn: (client: ControlClient) => Promise<ExitCode>,
 ): Promise<ExitCode> {
   let client: ControlClient;
   try {
-    client = await ControlClient.connect(target.brokerUrl, target.namespace);
+    client = await ControlClient.connect(target.brokerUrl, target.namespace, target.auth);
   } catch (e) {
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;

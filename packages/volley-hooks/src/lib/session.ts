@@ -243,7 +243,14 @@ export async function ensureHarnessModel(
   );
 }
 
-/** The cmux workspace ref of the pane this hook runs in (`cmux identify`), if any. */
+/**
+ * The cmux workspace ref of the pane this hook runs in (`cmux identify`), if any.
+ *
+ * The one child process the hooks start. It runs outside volleyd's authority fence on purpose:
+ * the hooks are the agent's own harness (not the supervisor), the call is read-only, and its
+ * binary is cmux's own CMUX_BUNDLED_CLI_PATH (set by cmux in the pane's environment) or `cmux`
+ * on PATH. Bounded by a 1 s timeout; any failure just leaves the workspace unknown.
+ */
 function cmuxWorkspace(env: Env): string | undefined {
   if (env.CMUX_WORKSPACE_ID === undefined) return undefined;
   try {

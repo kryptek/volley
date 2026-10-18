@@ -21,6 +21,7 @@ export const DECISION_KINDS = [
   "hooks_auth_failed",
   "model_switch",
   "repo_untrusted",
+  "remote_repo_missing",
   "ci_failed",
   "wave_complete",
   "plan_change",
@@ -45,6 +46,13 @@ export interface DecisionPayload {
   pointers: DecisionPointers;
   opened_at: string;
   resolved?: { answer: string; by: string; at: string };
+  /** A remote host's decision (repo_untrusted, remote_repo_missing): its name and ssh target. */
+  host?: string;
+  target?: string;
+  /** The repo path it is about (repo_untrusted, remote_repo_missing). */
+  repo?: string;
+  /** plan_change: what the new wave version changed about the task. */
+  change?: string;
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -164,10 +172,35 @@ export function resolveEvent(
   };
 }
 
-/** The retained topic payload (decision.schema.json) for a decision record. */
+/**
+ * The retained topic payload (decision.schema.json) for a decision record: the schema's fields
+ * only. Facts the daemon keeps on the record for itself (agent_id, class, role, pipeline,
+ * resume_stage, …) stay in the journal.
+ */
 export function decisionPayload(d: DecisionRecord): DecisionPayload {
-  const { resume_stage: _s, rationale: _r, parks: _p, ...payload } = d;
-  return payload;
+  const x = d as DecisionRecord & {
+    host?: unknown;
+    target?: unknown;
+    repo?: unknown;
+    change?: unknown;
+  };
+  const str = (k: "host" | "target" | "repo" | "change") =>
+    typeof x[k] === "string" && x[k] !== "" ? { [k]: x[k] as string } : {};
+  return {
+    decision_id: d.decision_id,
+    wave: d.wave,
+    task: d.task,
+    kind: d.kind,
+    question: d.question,
+    ...(d.options !== undefined ? { options: d.options } : {}),
+    pointers: d.pointers,
+    opened_at: d.opened_at,
+    ...(d.resolved !== undefined ? { resolved: d.resolved } : {}),
+    ...str("host"),
+    ...str("target"),
+    ...str("repo"),
+    ...str("change"),
+  };
 }
 
 /** One-line human summary, used for the notify bridge and CLI output. */

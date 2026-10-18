@@ -10,7 +10,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { isValidAgentId } from "volley-mcp/topics";
@@ -37,7 +38,26 @@ export interface AuthDeps {
    */
   brokerOwner: () => { uid: number; gid: number } | null;
   chown: (path: string, uid: number, gid: number) => void;
+  /**
+   * When `volley auth` runs as root: the user who ran it through sudo (SUDO_UID / SUDO_GID,
+   * home from /etc/passwd), or "root" when there is no such user to hand files to. null when
+   * not root.
+   */
+  invokingUser: (
+    env: Record<string, string | undefined>,
+  ) => { uid: number; gid: number; home: string } | "root" | null;
 }
+
+/**
+ * Where volleyd keeps its state (volleyd's config-store.ts `volleydHome`, which this mirrors),
+ * for the user volleyd runs as: under sudo that is the invoking user, never root.
+ */
+function volleydHome(env: Record<string, string | undefined>, sudoHome?: string): string {
+  return env.VOLLEYD_HOME ?? join(sudoHome ?? env.HOME ?? homedir(), ".volley", "volleyd");
+}
+
+/** volleyd's broker credentials file in $VOLLEYD_HOME (volleyd's broker-auth.ts reads it). */
+export const VOLLEYD_BROKER_FILE = "broker.json";
 
 /** The identities every Volley deployment has; agents get their own via add-agent. */
 export const FIXED_IDENTITIES = ["volleyd", "desk", "coordinator"] as const;
@@ -103,6 +123,21 @@ export const realAuthDeps: AuthDeps = {
     return uid !== undefined && gid !== undefined ? { uid: Number(uid), gid: Number(gid) } : null;
   },
   chown: (path, uid, gid) => chownSync(path, uid, gid),
+  invokingUser: (env) => {
+    if (process.getuid?.() !== 0) return null;
+    const uid = Number(env.SUDO_UID);
+    const gid = Number(env.SUDO_GID);
+    if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid <= 0 || env.SUDO_GID === "") {
+      return "root";
+    }
+    const line = existsSync("/etc/passwd")
+      ? readFileSync("/etc/passwd", "utf-8")
+          .split("\n")
+          .find((l) => l.split(":")[2] === String(uid))
+      : undefined;
+    const home = line?.split(":")[5];
+    return home !== undefined && home !== "" ? { uid, gid, home } : "root";
+  },
 };
 
 const blockStart = (id: string) =>
@@ -138,6 +173,19 @@ function setAgentBlock(aclFile: string, id: string, ackTo: string[]): void {
     ].join("\n");
   }
   writeFileSync(aclFile, acl);
+}
+
+/** The senders agent `id`'s managed ACL block already grants (empty when it has none). */
+function agentAckTo(aclFile: string, id: string): string[] {
+  if (!existsSync(aclFile)) return [];
+  const acl = readFileSync(aclFile, "utf-8");
+  const start = acl.indexOf(`\n${blockStart(id)}\n`);
+  if (start === -1) return [];
+  const end = acl.indexOf(blockEnd(id), start);
+  const block = acl.slice(start, end === -1 ? undefined : end);
+  return [...block.matchAll(/^topic write volley\/\+\/([^/\s]+)\/mailbox$/gm)].map(
+    (m) => m[1] as string,
+  );
 }
 
 function hasUser(passwdFile: string, user: string): boolean {
@@ -194,6 +242,7 @@ export async function auth(
         json: { type: "boolean" },
         "no-reload": { type: "boolean" },
         "coordinator-file": { type: "boolean" },
+        "volleyd-file": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -209,7 +258,7 @@ export async function auth(
   }
 
   const [verb, agentId, ...extra] = parsed.positionals;
-  const takesId = verb === "add-agent" || verb === "rm-agent";
+  const takesId = verb === "add-agent" || verb === "rm-agent" || verb === "grant";
   if (
     (verb !== "init" && !takesId) ||
     (takesId && agentId === undefined) ||
@@ -230,9 +279,11 @@ export async function auth(
   const passwdFile = join(dir, "passwd");
   const aclFile = join(dir, "acl.conf");
   const skipReload = parsed.values["no-reload"] === true;
-  if (parsed.values["coordinator-file"] === true && verb !== "init") {
-    io.stderr("volley auth: --coordinator-file only applies to init\n");
-    return EXIT.USAGE;
+  for (const flag of ["coordinator-file", "volleyd-file"] as const) {
+    if (parsed.values[flag] === true && verb !== "init") {
+      io.stderr(`volley auth: --${flag} only applies to init\n`);
+      return EXIT.USAGE;
+    }
   }
 
   if (verb === "init") {
@@ -242,6 +293,20 @@ export async function auth(
         `volley auth: ${passwdFile} already exists; re-run with --force to rotate the fixed identities' passwords\n`,
       );
       return EXIT.ERROR;
+    }
+    // volleyd's credentials belong to the user volleyd runs as. Under sudo that is the invoking
+    // user; a root login with no such user must name the home explicitly.
+    const invoker = deps.invokingUser(env);
+    const sudoUser = typeof invoker === "object" && invoker !== null ? invoker : null;
+    if (
+      parsed.values["volleyd-file"] === true &&
+      invoker === "root" &&
+      env.VOLLEYD_HOME === undefined
+    ) {
+      io.stderr(
+        "volley auth: running as root with no sudo user, so whose volleyd home is unknown; set VOLLEYD_HOME to the home of the user volleyd runs as\n",
+      );
+      return EXIT.USAGE;
     }
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     // An existing ACL may carry the owner's edits and every agent's ack grants: keep it.
@@ -253,6 +318,7 @@ export async function auth(
 
     const minted: [string, string][] = [];
     let coordinatorPassword: string | null = null;
+    let volleydPassword: string | null = null;
     for (const [i, user] of FIXED_IDENTITIES.entries()) {
       const password = deps.generatePassword();
       // `-c` truncates, so only for a new file; `-b` upserts, which keeps minted agents.
@@ -267,6 +333,7 @@ export async function auth(
       }
       minted.push([user, password]);
       if (user === "coordinator") coordinatorPassword = password;
+      if (user === "volleyd") volleydPassword = password;
     }
     chmodSync(passwdFile, 0o600);
     // The coordinator's hooks read their credentials from here (never from settings.json).
@@ -279,6 +346,30 @@ export async function auth(
       const creds = { username: "coordinator", password: coordinatorPassword };
       writeFileSync(coordinatorFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
       chmodSync(coordinatorFile, 0o600);
+    }
+    // volleyd reads its credentials from here (never from the launchd plist); rotated the same way.
+    const volleydDir = volleydHome(env, sudoUser?.home);
+    const volleydFile = join(volleydDir, VOLLEYD_BROKER_FILE);
+    const wroteVolleyd = parsed.values["volleyd-file"] === true || existsSync(volleydFile);
+    if (wroteVolleyd) {
+      if (volleydPassword === null) throw new Error("no volleyd identity was minted");
+      const firstCreated = mkdirSync(volleydDir, { recursive: true, mode: 0o700 });
+      const creds = { username: "volleyd", password: volleydPassword };
+      writeFileSync(volleydFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
+      chmodSync(volleydFile, 0o600);
+      if (sudoUser !== null) {
+        // Root created these: hand every new directory and the file to the invoking user.
+        const created: string[] = [];
+        if (firstCreated !== undefined) {
+          for (let d = volleydDir; ; d = dirname(d)) {
+            created.unshift(d);
+            if (d === firstCreated || d === dirname(d)) break;
+          }
+        }
+        for (const path of [...created, volleydFile]) {
+          deps.chown(path, sudoUser.uid, sudoUser.gid);
+        }
+      }
     }
     const owner = deps.brokerOwner();
     if (owner !== null) {
@@ -295,6 +386,11 @@ export async function auth(
           : []),
         ...(wroteCoordinator
           ? [`Wrote ${coordinatorFile} (mode 0600): the coordinator's hook credentials.`]
+          : []),
+        ...(wroteVolleyd
+          ? [
+              `Wrote ${volleydFile} (mode 0600): volleyd's broker credentials (run volleyd as the user that owns it${sudoUser !== null ? `, uid ${sudoUser.uid}` : ""}).`,
+            ]
           : []),
         ...(owner !== null ? [`Handed ${dir} to the broker's user (uid ${owner.uid}).`] : []),
         ...(wroteCoordinator && owner !== null
@@ -317,7 +413,9 @@ export async function auth(
         "    AND exported in your shell profile (the volley CLI and mosquitto_pub run from the shell);",
         "    the hooks also read VOLLEY_AUTH_* or, failing that, coordinator.json (--coordinator-file)",
         "  - volley dash / Desk:   sign in as desk in the browser",
-        "  - volleyd:              its config file",
+        wroteVolleyd
+          ? `  - volleyd:              ${volleydFile} (written above)`
+          : "  - volleyd:              $VOLLEYD_HOME/broker.json (re-run with --force --volleyd-file), or VOLLEY_AUTH_* in its environment",
         "",
       ].join("\n"),
     );
@@ -340,17 +438,35 @@ export async function auth(
   }
   const ackTo = (parsed.values["ack-to"] as string[] | undefined) ?? [];
   const badSender = ackTo.find((s) => !isValidAgentId(s));
-  if (badSender !== undefined || (verb === "rm-agent" && ackTo.length > 0)) {
+  if (
+    badSender !== undefined ||
+    (verb === "rm-agent" && ackTo.length > 0) ||
+    (verb === "grant" && ackTo.length === 0)
+  ) {
     io.stderr(
       badSender !== undefined
         ? `volley auth: --ack-to "${badSender}" is not a valid agent id\n`
-        : "volley auth: --ack-to only applies to add-agent\n",
+        : verb === "grant"
+          ? "volley auth: grant needs at least one --ack-to <sender>\n"
+          : "volley auth: --ack-to only applies to add-agent and grant\n",
     );
     return EXIT.USAGE;
   }
   if (!existsSync(passwdFile)) {
     io.stderr(`volley auth: ${passwdFile} does not exist; run \`volley auth init\` first\n`);
     return EXIT.ERROR;
+  }
+
+  if (verb === "grant") {
+    // ACL only: the agent keeps its password (a live session must not be locked out), and may
+    // now also ack these senders (e.g. a coordinator that claimed its wave).
+    if (!hasUser(passwdFile, id)) {
+      io.stderr(`volley auth: "${id}" is not in ${passwdFile}; mint it with add-agent first\n`);
+      return EXIT.ERROR;
+    }
+    setAgentBlock(aclFile, id, [...new Set([...agentAckTo(aclFile, id), ...ackTo])]);
+    await reload(deps, io, skipReload);
+    return EXIT.OK;
   }
 
   if (verb === "add-agent") {
@@ -378,7 +494,7 @@ export async function auth(
   return EXIT.OK;
 }
 
-export const AUTH_HELP = `Usage: volley auth <init | add-agent <agent_id> | rm-agent <agent_id>> [options]
+export const AUTH_HELP = `Usage: volley auth <init | add-agent <agent_id> | grant <agent_id> | rm-agent <agent_id>> [options]
 
 Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
 (examples/mosquitto-auth/). Every change reloads mosquitto (SIGHUP).
@@ -389,13 +505,17 @@ Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
   volley auth add-agent <id>       Mint a random password for agent <id> (username = id).
                                    Prints only the password (or --json: the
                                    .volley/agent.json "broker" block).
+  volley auth grant <id> --ack-to <sender>…
+                                   Also let minted agent <id> ack <sender> (ACL only; the
+                                   password is unchanged). volleyd runs it when a wave
+                                   changes owner.
   volley auth rm-agent <id>        Revoke agent <id> (and its ACL block). Succeeds if
                                    <id> was never minted.
 
 Options:
   --dir <dir>     Where passwd and acl.conf live (env: VOLLEY_AUTH_DIR;
                   default: <mosquitto etc dir>/volley, e.g. /opt/homebrew/etc/mosquitto/volley)
-  --ack-to <id>   add-agent: let the agent write sender <id>'s mailbox, so its acks
+  --ack-to <id>   add-agent, grant: let the agent write sender <id>'s mailbox, so its acks
                   (SPEC §4.4) and query replies reach that sender. Repeatable;
                   typically the parent (coordinator) id. Without it the agent can
                   write no mailbox and its acks are dropped by the broker.
@@ -405,6 +525,11 @@ Options:
                   init: also write <dir>/coordinator.json (mode 0600) with the
                   coordinator's credentials, read by the coordinator's volley-hooks
                   (so no password goes in settings.json). Rotated by --force.
+  --volleyd-file  init: also write $VOLLEYD_HOME/broker.json (default
+                  ~/.volley/volleyd/broker.json, mode 0600) with volleyd's
+                  credentials, read by \`volleyd daemon\` (never put in the launchd
+                  plist). Rotated by --force. Under sudo it goes to the
+                  invoking user's home, owned by that user.
   --json          add-agent: print {"username","password"} instead of the bare password
   --no-reload     Do not signal the broker; reload it yourself before relying on the change
   -h, --help      Show this help and exit

@@ -52,7 +52,9 @@
                 "worktree_root",
                 "spawn_timeout_s",
                 "wake_grace_s",
-                "screen_tail_interval_s"
+                "idle_grace_s",
+                "screen_tail_interval_s",
+                "hosts"
               ]
             }
           ]

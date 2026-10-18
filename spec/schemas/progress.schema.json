@@ -60,7 +60,15 @@
             "screen_tail": { "type": "array", "items": { "type": "string" } },
             "question": {
               "type": "string",
-              "description": "awaiting_input: the first one or two lines of what the agent is asking."
+              "description": "awaiting_input: what the agent is asking. The harness hooks send the question paragraph whole (an excerpt of its end beyond 8192 characters); a supervisor's wave-state coordinator.question carries its first one or two lines."
+            },
+            "class": {
+              "type": "string",
+              "description": "awaiting_input: why the harness is waiting when it is not a question, e.g. credit (a provider usage limit; the harness resumes on its own when it resets)."
+            },
+            "completed": {
+              "type": "boolean",
+              "description": "idle: true when the harness reported the agent's task completed (notification agent_completed)."
             },
             "session_url": {
               "type": "string",

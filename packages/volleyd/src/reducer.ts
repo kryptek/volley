@@ -233,9 +233,6 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
-    case "config_changed":
-      if (ev.data.overrides !== undefined) next.overrides = ev.data.overrides as TunablesPatch;
-      break;
     default: {
       const status = WAVE_STATUS[ev.type];
       if (status !== undefined) state.status = status;

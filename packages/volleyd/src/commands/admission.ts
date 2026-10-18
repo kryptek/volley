@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import type { AdmissionSummary } from "../admission";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
 const HELP = `Usage: volleyd admission [--json] [--broker-url <url>] [--namespace <ns>]
@@ -12,10 +12,10 @@ Show the daemon's current load-aware spawn admission verdict: whether starts are
 
 export async function admission({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseAdmission>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseAdmission(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd admission: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;
