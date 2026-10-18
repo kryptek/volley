@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type AuthDeps, auth } from "../../src/commands/auth";
+import { aclBlock, tokenAclBlock } from "../../src/commands/auth-roles";
 import { makeBufferIO } from "../../src/io";
 
 /**
@@ -13,10 +15,13 @@ function fakeDeps(): AuthDeps & {
   calls: string[][];
   reloads: number;
   chowns: [string, number, number][];
+  stdin: string;
 } {
   let n = 0;
+  let h = 0;
   const deps = {
     calls: [] as string[][],
+    stdin: "",
     reloads: 0,
     chowns: [] as [string, number, number][],
     async passwd(args: string[]) {
@@ -46,6 +51,14 @@ function fakeDeps(): AuthDeps & {
       n++;
       return `pw-${n}`;
     },
+    // Deterministic "random" hex: 0…01, 0…02, … at the requested width.
+    randomHex(bytes: number) {
+      h++;
+      return h.toString(16).padStart(bytes * 2, "0");
+    },
+    async readStdin() {
+      return deps.stdin;
+    },
     brokerOwner: (): { uid: number; gid: number } | null => null,
     invokingUser: (): ReturnType<AuthDeps["invokingUser"]> => null,
     chown(path: string, uid: number, gid: number) {
@@ -54,6 +67,8 @@ function fakeDeps(): AuthDeps & {
   };
   return deps;
 }
+
+const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
 describe("volley auth", () => {
   let dir: string;
@@ -64,8 +79,8 @@ describe("volley auth", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const run = async (argv: string[], deps = fakeDeps()) => {
-    const io = makeBufferIO();
+  const run = async (argv: string[], deps = fakeDeps(), now = () => new Date(NOW)) => {
+    const io = makeBufferIO({ now });
     const code = await auth({ argv, env: { VOLLEYD_HOME: join(dir, "volleyd-home") }, io }, deps);
     return { code, stdout: io.readStdout(), stderr: io.readStderr(), deps };
   };
@@ -531,6 +546,314 @@ describe("volley auth", () => {
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("Error: boom");
       expect(r.stdout).toBe(""); // no password printed for an identity that does not exist
+    });
+  });
+
+  describe("accounts (roles)", () => {
+    const accounts = () =>
+      JSON.parse(readFileSync(join(dir, "accounts.json"), "utf-8")) as {
+        accounts: Record<string, unknown>[];
+      };
+    const acl = () => readFileSync(join(dir, "acl.conf"), "utf-8");
+    const passwdText = () => readFileSync(join(dir, "passwd"), "utf-8");
+    const initDeps = async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps); // pw-1..pw-3
+      deps.reloads = 0;
+      return deps;
+    };
+
+    it("add --role watch writes an account entry + passwd line and the watch ACL block", async () => {
+      const deps = await initDeps();
+      const r = await run(["add", "ops-alice", "--role", "watch", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("pw-4\n"); // the password, once
+      expect(passwdText()).toContain("ops-alice:hashed(pw-4)");
+      expect(accounts().accounts).toEqual([
+        {
+          name: "ops-alice",
+          role: "watch",
+          kind: "device",
+          created: "2026-10-18T12:00:00.000Z",
+        },
+      ]);
+      expect(acl()).toContain(aclBlock("ops-alice", "watch"));
+      expect(aclBlock("ops-alice", "watch")).not.toContain("topic write");
+      expect(deps.reloads).toBe(1);
+    });
+
+    it("each role gets its template", () => {
+      expect(aclBlock("a1", "admin")).toContain("topic write volley/_system/auth/ops/a1");
+      expect(aclBlock("a1", "admin")).toContain("topic write volley/+/+/mailbox");
+      expect(aclBlock("a1", "admin")).toContain("topic write volley/+/+/status");
+      expect(aclBlock("s1", "steer")).toContain("topic write volley/+/+/mailbox");
+      expect(aclBlock("s1", "steer")).not.toContain("volley/+/+/status");
+      expect(aclBlock("v1", "supervisor")).toContain("topic readwrite volley/#");
+      expect(aclBlock("m1", "peer")).toContain("topic write volley/_system/machines/m1\n");
+      expect(aclBlock("m1", "peer")).toContain("topic write volley/_system/machines/m1/#");
+      expect(aclBlock("m1", "peer")).not.toContain("mailbox");
+      for (const role of ["steer", "watch", "supervisor", "peer"] as const) {
+        expect(aclBlock("x", role)).not.toContain("_system/auth/ops");
+      }
+    });
+
+    it("add --json prints the credentials and the role; --kind overrides the default", async () => {
+      const deps = await initDeps();
+      const r = await run(
+        ["add", "laptop", "--role", "peer", "--kind", "machine", "--json", "--dir", dir],
+        deps,
+      );
+      expect(JSON.parse(r.stdout)).toEqual({ username: "laptop", password: "pw-4", role: "peer" });
+      expect(accounts().accounts[0]).toMatchObject({
+        name: "laptop",
+        role: "peer",
+        kind: "machine",
+      });
+    });
+
+    it("add refuses a missing/unknown role or kind, a taken name, and reserved names", async () => {
+      const deps = await initDeps();
+      await run(["add-agent", "w1-t1-implementer-1", "--dir", dir], deps);
+      await run(["add", "bob", "--role", "steer", "--dir", dir], deps);
+      const bad: string[][] = [
+        ["add", "carol"],
+        ["add", "carol", "--role", "agent"],
+        ["add", "carol", "--role", "root"],
+        ["add", "carol", "--role", "steer", "--kind", "robot"],
+        ["add", "Bad Name", "--role", "steer"],
+        ["add", "desk", "--role", "steer"],
+        ["add", "registry", "--role", "steer"],
+        ["add", "redeem-00000001", "--role", "steer"],
+      ];
+      for (const argv of bad) {
+        const r = await run([...argv, "--dir", dir], deps);
+        expect(r.code, argv.join(" ")).toBe(2);
+        expect(r.stdout).toBe("");
+      }
+      for (const name of ["bob", "w1-t1-implementer-1"]) {
+        const r = await run(["add", name, "--role", "watch", "--dir", dir], deps);
+        expect(r.code, name).toBe(1);
+        expect(r.stderr).toContain("already");
+      }
+      expect(accounts().accounts.map((a) => a.name)).toEqual(["bob"]);
+    });
+
+    it("rotate prints a new password once and keeps the role and ACL block", async () => {
+      const deps = await initDeps();
+      await run(["add", "bob", "--role", "steer", "--dir", dir], deps); // pw-4
+      const r = await run(["rotate", "bob", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("pw-5\n");
+      expect(passwdText()).toContain("bob:hashed(pw-5)");
+      expect(passwdText()).not.toContain("pw-4");
+      expect(acl()).toContain(aclBlock("bob", "steer"));
+      const unknown = await run(["rotate", "nobody", "--dir", dir], deps);
+      expect(unknown.code).toBe(1);
+      expect(unknown.stdout).toBe("");
+    });
+
+    it("revoke removes the passwd line, the account and its ACL block", async () => {
+      const deps = await initDeps();
+      await run(["add", "bob", "--role", "steer", "--dir", dir], deps);
+      await run(["add", "eve", "--role", "watch", "--dir", dir], deps);
+      deps.reloads = 0;
+      const r = await run(["revoke", "bob", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(passwdText()).not.toContain("bob:");
+      expect(acl()).not.toContain("account bob");
+      expect(acl()).toContain(aclBlock("eve", "watch"));
+      expect(accounts().accounts.map((a) => a.name)).toEqual(["eve"]);
+      expect(deps.reloads).toBe(1);
+      const again = await run(["revoke", "bob", "--dir", dir], deps);
+      expect(again.code).toBe(1);
+      expect(again.stderr).toContain("no account");
+    });
+
+    it("list --json prints the registry without passwords; plain list is a table", async () => {
+      const deps = await initDeps();
+      await run(["add", "bob", "--role", "steer", "--dir", dir], deps);
+      const r = await run(["list", "--json", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({
+        accounts: [
+          { name: "bob", role: "steer", kind: "device", created: "2026-10-18T12:00:00.000Z" },
+        ],
+      });
+      expect(r.stdout).not.toContain("pw-");
+      const table = await run(["list", "--dir", dir], deps);
+      expect(table.stdout).toMatch(/bob\s+steer\s+device/);
+    });
+
+    describe("one-time tokens", () => {
+      const tokens = () =>
+        JSON.parse(readFileSync(join(dir, "tokens.json"), "utf-8")) as {
+          tokens: Record<string, unknown>[];
+        };
+      const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+      // randomHex: the id is the 1st draw (4 bytes), the secret the 2nd (16 bytes).
+      const TOKEN = `vly_admin_00000001_${"2".padStart(32, "0")}`;
+
+      it("token prints a one-time admin token and stores only its hash", async () => {
+        const deps = await initDeps();
+        const r = await run(["token", "--dir", dir], deps);
+        expect(r.code).toBe(0);
+        expect(r.stdout).toContain(TOKEN);
+        expect(r.stdout).toContain("10 minutes");
+        const stored = JSON.stringify(tokens());
+        expect(stored).not.toContain(TOKEN);
+        expect(stored).not.toContain("2".padStart(32, "0"));
+        expect(tokens().tokens).toEqual([
+          {
+            id: "00000001",
+            kind: "admin",
+            role: "admin",
+            hash: sha256(TOKEN),
+            created: "2026-10-18T12:00:00.000Z",
+            expires_at: "2026-10-18T12:10:00.000Z",
+          },
+        ]);
+        // The token is also a short-lived broker login that may only publish a redeem request.
+        expect(passwdText()).toContain(`redeem-00000001:hashed(${TOKEN})`);
+        expect(acl()).toContain(tokenAclBlock("00000001"));
+        expect(tokenAclBlock("00000001")).toContain(
+          "user redeem-00000001\ntopic write volley/_system/auth/redeem\n",
+        );
+        expect(deps.reloads).toBe(1);
+      });
+
+      it("token --json prints the token, its broker login and expiry", async () => {
+        const deps = await initDeps();
+        const r = await run(["token", "--json", "--ttl", "60", "--dir", dir], deps);
+        expect(JSON.parse(r.stdout)).toEqual({
+          token: TOKEN,
+          username: "redeem-00000001",
+          expires_at: "2026-10-18T12:01:00.000Z",
+        });
+      });
+
+      it("redeem mints an admin account bound to the label and burns the token", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        deps.stdin = `${TOKEN}\n`;
+        const r = await run(["redeem", "--label", "Desk on mac", "--json", "--dir", dir], deps);
+        expect(r.code).toBe(0);
+        expect(JSON.parse(r.stdout)).toEqual({
+          username: "admin-00000001",
+          password: "pw-4",
+          role: "admin",
+          label: "Desk on mac",
+          token_id: "00000001",
+        });
+        expect(accounts().accounts).toEqual([
+          {
+            name: "admin-00000001",
+            role: "admin",
+            kind: "device",
+            created: "2026-10-18T12:00:00.000Z",
+            label: "Desk on mac",
+          },
+        ]);
+        expect(acl()).toContain(aclBlock("admin-00000001", "admin"));
+        // Burned: the login is gone and the entry records the redemption.
+        expect(passwdText()).not.toContain("redeem-00000001");
+        expect(acl()).not.toContain("redeem-00000001");
+        expect(tokens().tokens[0]).toMatchObject({ used_at: "2026-10-18T12:00:00.000Z" });
+
+        const again = await run(["redeem", "--label", "x", "--json", "--dir", dir], deps);
+        expect(again.code).toBe(1);
+        expect(again.stderr).toContain("already used");
+        expect(again.stdout).toBe("");
+      });
+
+      it("refuses an expired, unknown or forged token; an expired login is pruned", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        const later = () => new Date(NOW + 11 * 60_000);
+        deps.stdin = TOKEN;
+        const expired = await run(["redeem", "--label", "x", "--dir", dir], deps, later);
+        expect(expired.code).toBe(1);
+        expect(expired.stderr).toContain("expired");
+        expect(passwdText()).not.toContain("redeem-00000001");
+        expect(acl()).not.toContain("redeem-00000001");
+
+        await run(["token", "--dir", dir], deps); // id 00000003, secret …04
+        for (const forged of [
+          `vly_admin_00000003_${"5".padStart(32, "0")}`,
+          `vly_admin_0000000f_${"4".padStart(32, "0")}`,
+          "not-a-token",
+        ]) {
+          deps.stdin = forged;
+          const r = await run(["redeem", "--label", "x", "--dir", dir], deps);
+          expect(r.code, forged).toBe(1);
+          expect(r.stderr).toContain("invalid token");
+        }
+        expect(existsSync(join(dir, "accounts.json"))).toBe(false);
+      });
+
+      it("any later auth command prunes an expired token's broker login", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        await run(["list", "--dir", dir], deps, () => new Date(NOW + 11 * 60_000));
+        expect(passwdText()).not.toContain("redeem-00000001");
+        expect(acl()).not.toContain("redeem-00000001");
+      });
+
+      it("signin-link mints a sign-in token whose redemption yields that role", async () => {
+        const deps = await initDeps();
+        const r = await run(
+          [
+            "signin-link",
+            "--role",
+            "steer",
+            "--label",
+            "Phone",
+            "--ttl",
+            "300",
+            "--json",
+            "--dir",
+            dir,
+          ],
+          deps,
+        );
+        expect(r.code).toBe(0);
+        const signin = `vly_signin_00000001_${"2".padStart(32, "0")}`;
+        expect(JSON.parse(r.stdout)).toEqual({
+          token: signin,
+          username: "redeem-00000001",
+          expires_at: "2026-10-18T12:05:00.000Z",
+        });
+        expect(tokens().tokens[0]).toMatchObject({ kind: "signin", role: "steer", label: "Phone" });
+        deps.stdin = signin;
+        const red = await run(["redeem", "--label", "iPhone", "--json", "--dir", dir], deps);
+        expect(JSON.parse(red.stdout)).toMatchObject({ username: "steer-00000001", role: "steer" });
+        expect(acl()).toContain(aclBlock("steer-00000001", "steer"));
+        deps.stdin = signin;
+        expect((await run(["redeem", "--label", "x", "--dir", dir], deps)).code).toBe(1);
+      });
+
+      it("signin-link only issues steer or watch, and needs a label", async () => {
+        const deps = await initDeps();
+        for (const argv of [
+          ["signin-link", "--role", "admin", "--label", "x"],
+          ["signin-link", "--role", "supervisor", "--label", "x"],
+          ["signin-link", "--role", "steer"],
+        ]) {
+          const r = await run([...argv, "--dir", dir], deps);
+          expect(r.code, argv.join(" ")).toBe(2);
+        }
+      });
+    });
+
+    it("the integration fixture's role blocks are what `volley auth add` generates", () => {
+      const fixture = readFileSync(
+        new URL("../../../volley-mcp/test/integration/auth-fixture.sh", import.meta.url),
+        "utf-8",
+      );
+      expect(fixture).toContain(aclBlock("admin-test", "admin"));
+      expect(fixture).toContain(aclBlock("steer-test", "steer"));
+      expect(fixture).toContain(aclBlock("watch-test", "watch"));
+      expect(fixture).toContain(aclBlock("peer-test", "peer"));
+      expect(fixture).toContain(tokenAclBlock("0000abcd"));
     });
   });
 

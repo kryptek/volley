@@ -15,7 +15,7 @@ Subcommands:
   list     Enumerate agents registered on the broker
   dash     Launch the Volley Desk (Vite; --legacy: the old dashboard)
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
-  auth     Manage broker credentials (init, add-agent, rm-agent)
+  auth     Manage broker credentials (init, agents, accounts, one-time tokens)
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)
 
 Global flags:

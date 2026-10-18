@@ -17,6 +17,7 @@ import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { isValidAgentId } from "volley-mcp/topics";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { ACCOUNT_VERBS, type AccountFlags, type AccountVerb, accountVerb } from "./auth-accounts";
 
 export interface AuthArgs {
   argv: string[];
@@ -31,6 +32,10 @@ export interface AuthDeps {
   /** Ask the running broker to re-read its password and ACL files. */
   reload: () => Promise<{ ok: boolean; detail: string }>;
   generatePassword: () => string;
+  /** `bytes` random bytes as lowercase hex (one-time token ids and secrets). */
+  randomHex: (bytes: number) => string;
+  /** All of stdin (`redeem` reads its token there, never from argv). */
+  readStdin: () => Promise<string>;
   /**
    * The uid/gid the broker drops to when `volley auth` runs as root (distro mosquitto starts
    * as root, then opens password_file as the `mosquitto` user), or null when no hand-off is
@@ -114,6 +119,12 @@ export const realAuthDeps: AuthDeps = {
         };
   },
   generatePassword: () => randomBytes(24).toString("base64url"),
+  randomHex: (bytes) => randomBytes(bytes).toString("hex"),
+  readStdin: async () => {
+    const chunks: Buffer[] = [];
+    for await (const c of process.stdin) chunks.push(c as Buffer);
+    return Buffer.concat(chunks).toString("utf-8");
+  },
   brokerOwner: () => {
     if (process.getuid?.() !== 0 || !existsSync("/etc/passwd")) return null;
     const line = readFileSync("/etc/passwd", "utf-8")
@@ -243,6 +254,10 @@ export async function auth(
         "no-reload": { type: "boolean" },
         "coordinator-file": { type: "boolean" },
         "volleyd-file": { type: "boolean" },
+        role: { type: "string" },
+        kind: { type: "string" },
+        label: { type: "string" },
+        ttl: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -258,6 +273,55 @@ export async function auth(
   }
 
   const [verb, agentId, ...extra] = parsed.positionals;
+  if ((ACCOUNT_VERBS as readonly string[]).includes(verb ?? "")) {
+    if (extra.length > 0) {
+      io.stderr(AUTH_HELP);
+      return EXIT.USAGE;
+    }
+    for (const flag of ["ack-to", "force", "coordinator-file", "volleyd-file"] as const) {
+      if (parsed.values[flag] !== undefined) {
+        io.stderr(`volley auth: --${flag} does not apply to ${verb}\n`);
+        return EXIT.USAGE;
+      }
+    }
+    let dir: string;
+    try {
+      dir = resolveDir(parsed.values.dir as string | undefined, env);
+    } catch (e) {
+      io.stderr(`volley auth: ${e instanceof Error ? e.message : String(e)}\n`);
+      return EXIT.ERROR;
+    }
+    const str = (k: "role" | "kind" | "label" | "ttl") => parsed.values[k] as string | undefined;
+    const flags: AccountFlags = { json: parsed.values.json === true };
+    for (const k of ["role", "kind", "label", "ttl"] as const) {
+      const v = str(k);
+      if (v !== undefined) flags[k] = v;
+    }
+    const skip = parsed.values["no-reload"] === true;
+    return accountVerb(
+      {
+        dir,
+        passwdFile: join(dir, "passwd"),
+        aclFile: join(dir, "acl.conf"),
+        io,
+        passwd: (args) => passwd(deps, io, args),
+        reload: () => reload(deps, io, skip),
+        generatePassword: deps.generatePassword,
+        randomHex: deps.randomHex,
+        readStdin: deps.readStdin,
+        reserved: [...FIXED_IDENTITIES, ...RESERVED_AGENT_IDS],
+      },
+      verb as AccountVerb,
+      agentId,
+      flags,
+    );
+  }
+  for (const flag of ["role", "kind", "label", "ttl"] as const) {
+    if (parsed.values[flag] !== undefined) {
+      io.stderr(`volley auth: --${flag} only applies to the account verbs\n`);
+      return EXIT.USAGE;
+    }
+  }
   const takesId = verb === "add-agent" || verb === "rm-agent" || verb === "grant";
   if (
     (verb !== "init" && !takesId) ||
@@ -494,7 +558,7 @@ export async function auth(
   return EXIT.OK;
 }
 
-export const AUTH_HELP = `Usage: volley auth <init | add-agent <agent_id> | grant <agent_id> | rm-agent <agent_id>> [options]
+export const AUTH_HELP = `Usage: volley auth <verb> [args] [options]
 
 Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
 (examples/mosquitto-auth/). Every change reloads mosquitto (SIGHUP).
@@ -511,6 +575,21 @@ Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
                                    changes owner.
   volley auth rm-agent <id>        Revoke agent <id> (and its ACL block). Succeeds if
                                    <id> was never minted.
+
+Accounts (registry: <dir>/accounts.json; one managed ACL block per account):
+  volley auth add <name> --role <admin|steer|watch|supervisor|peer> [--kind <k>]
+                                   Create an account; prints its password ONCE (or --json).
+  volley auth rotate <name>        New password for an account; printed once.
+  volley auth revoke <name>        Remove the account, its password and its ACL block.
+  volley auth list [--json]        The accounts (never their passwords).
+  volley auth token [--ttl <s>]    A one-time admin token (vly_admin_…, 10 minutes, single
+                                   use, stored hashed in <dir>/tokens.json). Redeemed over
+                                   the control channel for an admin account bound to a device.
+  volley auth signin-link --role <steer|watch> --label <device> [--ttl <s>]
+                                   A one-time sign-in token for one device.
+  volley auth redeem --label <device> [--json]
+                                   Redeem a token read from STDIN (volleyd runs this): burns it
+                                   and creates an account with its role, printed once.
 
 Options:
   --dir <dir>     Where passwd and acl.conf live (env: VOLLEY_AUTH_DIR;
@@ -530,7 +609,12 @@ Options:
                   credentials, read by \`volleyd daemon\` (never put in the launchd
                   plist). Rotated by --force. Under sudo it goes to the
                   invoking user's home, owned by that user.
-  --json          add-agent: print {"username","password"} instead of the bare password
+  --json          add-agent: print {"username","password"} instead of the bare password;
+                  add/rotate/redeem/token/signin-link/list: machine-readable output
+  --role <role>   add, signin-link: the account's role
+  --kind <kind>   add: human | device | machine | service (default from the role)
+  --label <text>  signin-link, redeem: the device the account is for (1..64 chars)
+  --ttl <s>       token, signin-link: lifetime in seconds (default 600, at most 86400)
   --no-reload     Do not signal the broker; reload it yourself before relying on the change
   -h, --help      Show this help and exit
 
