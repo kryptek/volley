@@ -127,3 +127,28 @@ describe("shutdownLifecycle", () => {
     expect(state.broker.connected).toBe(false);
   });
 });
+
+describe("startLifecycle against a broker that requires credentials", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker({ credentials: { username: "life-cccc", password: "pw" } });
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("connects with config.auth", async () => {
+    const state = await startLifecycle({
+      ...cfg(tb, "life-cccc"),
+      auth: { username: "life-cccc", password: "pw" },
+    });
+    expect(state.broker.connected).toBe(true);
+    await shutdownLifecycle(state, "done");
+  });
+
+  it("surfaces AUTH_FAILED when config.auth is missing", async () => {
+    await expect(startLifecycle(cfg(tb, "life-cccc"))).rejects.toMatchObject({
+      code: "AUTH_FAILED",
+    });
+  });
+});

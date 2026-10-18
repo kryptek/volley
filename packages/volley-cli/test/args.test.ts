@@ -6,6 +6,7 @@ import {
   parseLifecycleEventCsv,
   parsePositiveInt,
   parseSurfaceCsv,
+  resolveAuth,
   resolveBrokerUrl,
   resolveNamespace,
   resolveWebhookUrl,
@@ -145,5 +146,33 @@ describe("resolveWebhookUrl", () => {
   it("throws on non-http(s) scheme", () => {
     expect(() => resolveWebhookUrl("file:///tmp/x", {})).toThrow(/http:\/\/ or https:\/\//);
     expect(() => resolveWebhookUrl("ftp://example.com", {})).toThrow(/http:\/\/ or https:\/\//);
+  });
+});
+
+describe("resolveAuth", () => {
+  const cwd = "/nonexistent-volley-cwd"; // no .volley/agent.json here
+  it("flags win over VOLLEY_AUTH_*", () => {
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "env-pw" };
+    expect(resolveAuth({ username: "desk", password: "flag-pw" }, env, cwd)).toEqual({
+      username: "desk",
+      password: "flag-pw",
+    });
+  });
+  it("--username alone takes the password from VOLLEY_AUTH_PASSWORD (the documented safe path)", () => {
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "env-pw" };
+    expect(resolveAuth({ username: "desk" }, env, cwd)).toEqual({
+      username: "desk",
+      password: "env-pw",
+    });
+    expect(resolveAuth({ username: "desk" }, {}, cwd)).toEqual({ username: "desk" });
+  });
+  it("falls back to VOLLEY_AUTH_*, then anonymous", () => {
+    expect(
+      resolveAuth({}, { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "p" }, cwd),
+    ).toEqual({ username: "coordinator", password: "p" });
+    expect(resolveAuth({}, {}, cwd)).toBeNull();
+  });
+  it("refuses --password without --username", () => {
+    expect(() => resolveAuth({ password: "p" }, {}, cwd)).toThrow(/--password requires --username/);
   });
 });
