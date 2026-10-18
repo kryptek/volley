@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": null,
+    "repo": "example-org/example-repo",
+    "release_branch": "release/2026-10-18-example",
+    "status": "running",
+    "tasks": [{ "id": "T1", "issue": 101, "stage": "reviewing", "agents": {} }],
+    "open_decisions": [],
+    "gates": [],
+    "updated_at": "2026-10-18T14:02:11.000Z"
+  }
+}

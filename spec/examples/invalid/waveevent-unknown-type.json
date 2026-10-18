@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/events",
+  "type": "something_happened",
+  "payload": { "wave": "w1", "seq": 18, "at": "2026-10-18T14:02:11.000Z" }
+}

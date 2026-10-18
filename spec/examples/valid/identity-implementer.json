@@ -1,0 +1,9 @@
+{
+  "agent_id": "w1-t1-implementer-1",
+  "namespace": "dispatch",
+  "parent_id": "coordinator-ab12",
+  "wave": "w1",
+  "task": "T1",
+  "role": "implementer",
+  "broker_url": "mqtt://localhost:1883"
+}

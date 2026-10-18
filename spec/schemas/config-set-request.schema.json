@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/config-set-request.schema.json",
+  "title": "Volley Supervisor config_set Request",
+  "description": "Control request sent to a supervisor's mailbox to change its effective config. See spec section 4.6.4. The patch is a partial object of the config.schema.json tunables; unknown keys and out-of-bounds values are rejected. Senders SHOULD include payload.text so the message is also a well-formed mailbox message.",
+  "allOf": [
+    {
+      "$ref": "envelope.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "const": "mailbox"
+        },
+        "type": {
+          "const": "query"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["op", "patch", "by"],
+          "properties": {
+            "op": {
+              "const": "config_set"
+            },
+            "text": {
+              "type": "string"
+            },
+            "patch": {
+              "allOf": [
+                {
+                  "$ref": "config.schema.json#/$defs/tunables"
+                },
+                {
+                  "type": "object",
+                  "minProperties": 1,
+                  "properties": {
+                    "version": false,
+                    "updated_at": false,
+                    "updated_by": false
+                  }
+                }
+              ]
+            },
+            "by": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

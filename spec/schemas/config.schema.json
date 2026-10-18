@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/config.schema.json",
+  "title": "Volley Supervisor Effective Config",
+  "description": "Retained effective global supervisor config published to volley/_waves/_config. See spec section 4.6.4. The tunable model lives in $defs/tunables (every key optional, every key bounded) so a wave file's config: overrides and a config_set patch can reference it; the retained topic requires every tunable to be present.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/_config" },
+        "type": { "const": "config" },
+        "payload": {
+          "allOf": [
+            { "$ref": "#/$defs/tunables" },
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Monotonic; bumped on every applied change."
+                },
+                "updated_at": { "type": "string", "format": "date-time" },
+                "updated_by": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "admission": {
+                  "required": [
+                    "memory_pressure_max_level",
+                    "cmux_ping_max_ms",
+                    "container_max",
+                    "api_overload_window_s",
+                    "api_overload_max",
+                    "ci_queue_max",
+                    "hysteresis_samples"
+                  ]
+                },
+                "mailbox": { "required": ["session_expiry_s"] }
+              },
+              "required": [
+                "version",
+                "updated_at",
+                "updated_by",
+                "hard_ceiling",
+                "spawn_budget_multiplier",
+                "lease_pools",
+                "admission",
+                "claim_after_s",
+                "heartbeat_alarm_s",
+                "fallback_model",
+                "mailbox",
+                "worktree_root",
+                "spawn_timeout_s",
+                "wake_grace_s"
+              ]
+            }
+          ]
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "tunables": {
+      "type": "object",
+      "description": "Every runtime-tunable supervisor setting. All keys optional here; additional keys are only the metadata fields of the retained topic (version, updated_at, updated_by).",
+      "properties": {
+        "version": true,
+        "updated_at": true,
+        "updated_by": true,
+        "hard_ceiling": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 12,
+          "description": "Runaway fuse: maximum concurrently live supervised agents across all waves."
+        },
+        "spawn_budget_multiplier": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 3,
+          "description": "Per-wave spawn budget = multiplier x task count (counts retries and reviewers)."
+        },
+        "lease_pools": {
+          "type": "object",
+          "description": "Heavy-operation lease pools, keyed by pool name (topic-segment grammar).",
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/leasePool" }
+        },
+        "admission": {
+          "type": "object",
+          "description": "Load-aware spawn admission thresholds.",
+          "additionalProperties": false,
+          "properties": {
+            "memory_pressure_max_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4,
+              "description": "Highest OS memory-pressure level (1 normal, 2 warn, 4 critical) at which spawns are still admitted."
+            },
+            "cmux_ping_max_ms": { "type": "integer", "minimum": 10, "maximum": 60000 },
+            "container_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "api_overload_window_s": { "type": "integer", "minimum": 10, "maximum": 86400 },
+            "api_overload_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "ci_queue_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "hysteresis_samples": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        "claim_after_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "default": 1800,
+          "description": "Seconds a wave owner may be gone before another coordinator may claim the wave."
+        },
+        "heartbeat_alarm_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 600,
+          "description": "Seconds without a hook heartbeat (while working and alive) before a hooks_silent alarm."
+        },
+        "fallback_model": {
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
+          "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."
+        },
+        "mailbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "session_expiry_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2592000,
+              "default": 604800,
+              "description": "MQTT v5 session expiry for persistent mailbox sessions (new connections only)."
+            }
+          }
+        },
+        "worktree_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Directory under which the supervisor creates agent worktrees (applies to later spawns)."
+        },
+        "spawn_timeout_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "Seconds to wait for a spawned agent's registration before retrying."
+        },
+        "wake_grace_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Grace period after a detected host sleep/wake before liveness alarms resume."
+        }
+      },
+      "additionalProperties": false
+    },
+    "leasePool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity"],
+      "properties": {
+        "capacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "ttl_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "match": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "description": "Regular expressions over a command line; a match requires a lease from this pool."
+        }
+      }
+    }
+  }
+}

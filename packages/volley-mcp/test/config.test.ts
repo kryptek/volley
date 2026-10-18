@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateAgentId, loadConfig } from "../src/config";
 
 describe("generateAgentId", () => {
@@ -93,5 +96,102 @@ describe("VOLLEY_AGENT_ID is a prefix; agent_id auto-suffixes", () => {
     const c = loadConfig({ VOLLEY_AGENT_ID: prefix58 }, "/x");
     expect(c.agentId).toMatch(new RegExp(`^${prefix58}-[a-z0-9]{4}$`));
     expect(c.agentId.length).toBe(63);
+  });
+});
+
+describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
+  let cwd: string;
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "volley-identity-"));
+    mkdirSync(join(cwd, ".volley"));
+  });
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+  const writeIdentity = (body: string) => writeFileSync(join(cwd, ".volley", "agent.json"), body);
+
+  it("uses the literal agent_id, namespace and parent_id from the file (no suffix)", () => {
+    writeIdentity(
+      JSON.stringify({
+        agent_id: "w1-t1-implementer-1",
+        namespace: "dispatch",
+        parent_id: "coordinator-ab12",
+      }),
+    );
+    const c = loadConfig({}, cwd);
+    expect(c.agentId).toBe("w1-t1-implementer-1");
+    expect(c.namespace).toBe("dispatch");
+    expect(c.parentId).toBe("coordinator-ab12");
+    expect(c.brokerUrl).toBe("mqtt://localhost:1883");
+  });
+
+  it("file wins over VOLLEY_AGENT_ID / VOLLEY_NAMESPACE / VOLLEY_PARENT_ID / VOLLEY_BROKER_URL", () => {
+    writeIdentity(
+      JSON.stringify({
+        agent_id: "w1-t1-implementer-1",
+        namespace: "dispatch",
+        parent_id: "coordinator-ab12",
+        broker_url: "mqtt://127.0.0.1:2883",
+      }),
+    );
+    const c = loadConfig(
+      {
+        VOLLEY_AGENT_ID: "coordinator",
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_PARENT_ID: "someone-else",
+        VOLLEY_BROKER_URL: "mqtt://localhost:1883",
+      },
+      cwd,
+    );
+    expect(c.agentId).toBe("w1-t1-implementer-1");
+    expect(c.namespace).toBe("dispatch");
+    expect(c.parentId).toBe("coordinator-ab12");
+    expect(c.brokerUrl).toBe("mqtt://127.0.0.1:2883");
+  });
+
+  it("keys absent from the file fall back to env, then defaults", () => {
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1" }));
+    const c = loadConfig({ VOLLEY_NAMESPACE: "example-dispatch" }, cwd);
+    expect(c.agentId).toBe("w1-t1-implementer-1");
+    expect(c.namespace).toBe("example-dispatch");
+    expect(c.parentId).toBeNull();
+  });
+
+  it("an explicit null parent_id in the file wins over VOLLEY_PARENT_ID", () => {
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", parent_id: null }));
+    expect(loadConfig({ VOLLEY_PARENT_ID: "coordinator-ab12" }, cwd).parentId).toBeNull();
+  });
+
+  it("throws a clear error naming the path when the file is malformed JSON", () => {
+    writeIdentity("{ not json");
+    expect(() => loadConfig({}, cwd)).toThrow(join(cwd, ".volley", "agent.json"));
+  });
+
+  it("throws when the file is not an object or lacks agent_id", () => {
+    writeIdentity("[]");
+    expect(() => loadConfig({}, cwd)).toThrow(/agent\.json/);
+    writeIdentity(JSON.stringify({ namespace: "dispatch" }));
+    expect(() => loadConfig({}, cwd)).toThrow(/agent_id/);
+  });
+
+  it("throws an INVALID_AGENT_ID error when agent_id violates the §2.2 grammar", () => {
+    writeIdentity(JSON.stringify({ agent_id: "W1-T1-Implementer" }));
+    expect(() => loadConfig({}, cwd)).toThrow(/INVALID_AGENT_ID/);
+    writeIdentity(JSON.stringify({ agent_id: "a".repeat(64) }));
+    expect(() => loadConfig({}, cwd)).toThrow(/INVALID_AGENT_ID/);
+  });
+
+  it("rejects an out-of-grammar namespace or parent_id in the file", () => {
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", namespace: "_system" }));
+    expect(() => loadConfig({}, cwd)).toThrow(/namespace/);
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", parent_id: "Bad Parent" }));
+    expect(() => loadConfig({}, cwd)).toThrow(/parent_id/);
+  });
+
+  it("a cwd without .volley/agent.json keeps the env-prefix behavior", () => {
+    rmSync(join(cwd, ".volley"), { recursive: true });
+    expect(loadConfig({ VOLLEY_AGENT_ID: "coordinator" }, cwd).agentId).toMatch(
+      /^coordinator-[a-z0-9]{4}$/,
+    );
   });
 });
