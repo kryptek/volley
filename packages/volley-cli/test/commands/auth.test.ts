@@ -375,6 +375,51 @@ describe("volley auth", () => {
       expect(readFileSync(join(dir, "acl.conf"), "utf-8")).toBe(bundled);
     });
 
+    it("grant adds ack senders to a minted agent's block without touching its password", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      await run(
+        ["add-agent", "w1-t1-implementer-1", "--ack-to", "coordinator-ab12", "--dir", dir],
+        deps,
+      );
+      const passwdBefore = readFileSync(join(dir, "passwd"), "utf-8");
+      deps.reloads = 0;
+      deps.calls.length = 0;
+      const r = await run(
+        ["grant", "w1-t1-implementer-1", "--ack-to", "coordinator-cd34", "--dir", dir],
+        deps,
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(deps.calls).toEqual([]); // no mosquitto_passwd: the password is unchanged
+      expect(readFileSync(join(dir, "passwd"), "utf-8")).toBe(passwdBefore);
+      expect(r.deps.reloads).toBe(1);
+      const acl = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(acl.match(/user w1-t1-implementer-1/g)).toHaveLength(1);
+      expect(acl).toContain("topic write volley/+/coordinator-ab12/mailbox");
+      expect(acl).toContain("topic write volley/+/coordinator-cd34/mailbox");
+
+      // Idempotent: granting a sender twice lists it once.
+      await run(
+        ["grant", "w1-t1-implementer-1", "--ack-to", "coordinator-cd34", "--dir", dir],
+        deps,
+      );
+      const again = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(again.match(/coordinator-cd34/g)).toHaveLength(1);
+    });
+
+    it("grant refuses an agent that was never minted, and needs --ack-to", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const unknown = await run(["grant", "w9", "--ack-to", "desk", "--dir", dir], deps);
+      expect(unknown.code).toBe(1);
+      expect(unknown.stderr).toContain('"w9" is not in');
+      await run(["add-agent", "w1", "--dir", dir], deps);
+      const none = await run(["grant", "w1", "--dir", dir], deps);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain("--ack-to");
+    });
+
     it("add-agent without --ack-to writes no ACL block", async () => {
       const deps = fakeDeps();
       await run(["init", "--dir", dir], deps);

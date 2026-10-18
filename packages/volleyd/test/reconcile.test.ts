@@ -274,21 +274,31 @@ describe("daemon: restart reconciliation", () => {
   it("a heartbeat seen while reconciling counts: no registry, status or lock, but alive → re_wait", async () => {
     s = await makeSupervisedEnv();
     await vanish();
-    // Retained so it reaches the reconcile watch as soon as it subscribes (before the probes end).
-    await s.agent.publish(
-      buildTopic(NS, AGENT, "progress"),
-      JSON.stringify({
-        ...buildEnvelope({
-          agentId: AGENT,
-          parentId: "volleyd",
-          channel: "progress",
-          type: "heartbeat",
-          payload: { source: "harness-hook", seq: 9, hook_event: "PostToolUse" },
-        }),
-      }),
-      { qos: 1, retain: true },
-    );
-    second = await s.restart({ reconcile: probes() });
+    // Progress is never retained (SPEC §4.1): the heartbeat arrives live, while the probes run
+    // (the reconcile watch is up before them).
+    const heartbeat = () =>
+      s.agent.publish(
+        buildTopic(NS, AGENT, "progress"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: AGENT,
+            parentId: "volleyd",
+            channel: "progress",
+            type: "heartbeat",
+            payload: { source: "harness-hook", seq: 9, hook_event: "PostToolUse" },
+          }),
+        ),
+        { qos: 1, retain: false },
+      );
+    const live: ReconcileProbes = {
+      ...probes(),
+      branch: async (_repo, branch) => {
+        await heartbeat();
+        await new Promise((r) => setTimeout(r, 100));
+        return { name: branch, exists: true, head: "abc123" };
+      },
+    };
+    second = await s.restart({ reconcile: live });
     await second.reconciled();
     expect(reconciled()[0]?.data).toMatchObject({ action: "re_wait" });
     expect(respawnDecisions()).toEqual([]);

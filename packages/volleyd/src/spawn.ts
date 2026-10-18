@@ -176,6 +176,8 @@ const secondsMs = (s: number) => s * 1000;
 
 /** The volleyd agent id, the parent of agents in a wave without an owner. */
 const SUPERVISOR = "volleyd";
+/** The Desk's fixed identity: it steers agents, so they ack to its mailbox. */
+const DESK = "desk";
 
 interface Ctx {
   req: SpawnRequest;
@@ -327,7 +329,9 @@ async function launchAttempt(
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
-    creds = await mintCredentials(host.exec, agentId, [parent, SUPERVISOR]);
+    // Everyone who may steer it: the owner (or volleyd), volleyd, and the Desk. A later owner
+    // (`claim`) is granted then (daemon.ts extendAckGrants).
+    creds = await mintCredentials(host.exec, agentId, [parent, SUPERVISOR, DESK]);
   }
   try {
     await writeAgentJson(host, ctx.worktree, {

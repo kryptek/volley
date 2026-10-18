@@ -324,7 +324,8 @@ describe("volleyd daemon: pressure-based admission", () => {
           parentId: null,
           channel: "progress",
           type: "idle",
-          payload: { text: "API Error: 529 Overloaded" },
+          // Each hook event carries its own seq (SPEC §4.3): four distinct messages.
+          payload: { source: "harness-hook", seq: i + 1, text: "API Error: 529 Overloaded" },
         });
         await agent.publish(`volley/${NS}/agent-a/progress`, JSON.stringify(env), {
           qos: 1,

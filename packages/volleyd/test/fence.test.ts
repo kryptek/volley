@@ -117,6 +117,9 @@ const DENIED: string[][] = [
   ["volley", "auth", "add-agent", "a1", "--ack-to", "--json"],
   ["volley", "auth", "rm-agent", "a1", "--json"],
   ["volley", "auth", "add-agent", "a1", "--force"],
+  ["volley", "auth", "grant", "a1"], // grant needs at least one --ack-to
+  ["volley", "auth", "grant", "a1", "--json"],
+  ["volley", "auth", "grant", "a1", "--ack-to", "Bad Id"],
   // a script path without a minted token
   ["/home/u/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
   [],
@@ -126,6 +129,7 @@ const ALLOWED: string[][] = [
   ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--ack-to", "volleyd", "--json"],
   ["volley", "auth", "add-agent", "a1", "--ack-to", "p1", "--ack-to", "volleyd", "--no-reload"],
   ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
+  ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b", "--no-reload"],
   ["cmux", "new-workspace", "--cwd", "/tmp/wt", "--name", "w1 T1 impl", "--command", "  bash x"],
   ["cmux", "read-screen", "--workspace", "workspace:3", "--lines", "40"],
   ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],

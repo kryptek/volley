@@ -82,7 +82,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import { revokeCredentials } from "./identity";
+import { grantAckTo, revokeCredentials } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -185,7 +185,7 @@ import {
 } from "./spawn";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
-import { type AgentWatch, watchAgent } from "./verify";
+import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import { expandHome, worktreePath } from "./worktree";
 
 export interface DaemonOptions {
@@ -390,6 +390,11 @@ const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
 
+/** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
+const PROGRESS_FILTER = "volley/+/+/progress";
+/** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
+const MAILBOX_FILTER = `volley/+/${DAEMON_AGENT_ID}/mailbox`;
+
 /**
  * Take the exclusive `$VOLLEYD_HOME/volleyd.lock` (holding our pid) before touching any journal,
  * so a second daemon on the same home never opens — or truncates — a live daemon's files. A lock
@@ -502,6 +507,15 @@ export class Daemon {
   private readonly publishedPools = new Set<string>();
   /** Arrival times (ms) of API overload / credit signals seen on agents' progress channels. */
   private apiSignals: number[] = [];
+  /** Agent watches fed from the one progress subscription, by progress topic. */
+  private readonly progressRoutes = new Map<
+    string,
+    Set<(m: { topic: string; payload: string }) => void>
+  >();
+  /** Digests of recent progress messages: a copy delivered twice is handled once. */
+  private readonly seenProgress = new Set<string>();
+  /** Mailbox topics (one per namespace) whose stray retained message this process cleared. */
+  private readonly clearedMailboxes = new Set<string>();
   private lastReading: PressureReading | null = null;
   private sampledAt: Date | null = null;
   /** Hysteresis state before the last sample, per wave (GLOBAL = machine-wide), for re-decides. */
@@ -690,10 +704,11 @@ export class Daemon {
     );
     await this.publish(this.statusTopic, this.envelope("status", "registered", {}), true);
 
-    const progress = /^volley\/[^/]+\/([^/]+)\/progress$/;
+    // Every namespace's progress through ONE filter: a wave's agents may live in the wave's own
+    // namespace, and mosquitto delivers one copy per matching subscription.
     this.unsubscribers.push(
-      await this.broker.subscribeStream(buildTopic(namespace, "+", "progress"), (m) =>
-        this.onProgress(progress.exec(m.topic)?.[1], m.payload),
+      await this.broker.subscribeStream(PROGRESS_FILTER, (m) =>
+        this.onProgress(m.topic, m.payload),
       ),
     );
 
@@ -744,7 +759,12 @@ export class Daemon {
     // replayed on every subscribe. Then drain: on a resumed session this first returns what the
     // broker queued while the daemon was down. Lease requests are drained the same way.
     await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
+    this.clearedMailboxes.add(this.mailboxTopic);
     void this.mailboxLoop();
+    // A volleyd before the every-namespace drain held only its own namespace's filter, and the
+    // persistent session keeps it: beside the `+` drain it would deliver every message twice.
+    // Drop it; the drain (subscribed synchronously above) already covers the topic.
+    await (await this.broker.subscribeStream(this.mailboxTopic, () => {}))();
     void this.leaseRequestLoop();
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
@@ -769,12 +789,21 @@ export class Daemon {
   }
 
   /**
-   * A message on some agent's progress channel: any of them is a sign of life (`claim`), and a
-   * SPEC §4.3 `steering_acked` settles the steer it names (`correlation_id` = the message id).
+   * A message on some agent's progress channel, in any namespace: it goes to that agent's watch
+   * (liveness, heartbeats), is a sign of life (`claim`), a SPEC §4.3 `steering_acked` settles the
+   * steer it names (`correlation_id` = the message id), and an API overload signal feeds
+   * admission. A copy the broker delivers twice is handled once.
    */
-  private onProgress(agent: string | undefined, raw: string): void {
-    if (agent === undefined || agent === DAEMON_AGENT_ID) return;
+  private onProgress(topic: string, raw: string): void {
+    const [, ns, agent] = topic.split("/");
+    if (ns === undefined || agent === undefined || ns.startsWith("_")) return;
+    if (!this.firstSighting(topic, raw)) return;
+    for (const deliver of [...(this.progressRoutes.get(topic) ?? [])]) {
+      deliver({ topic, payload: raw });
+    }
+    if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
+    if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
@@ -784,9 +813,39 @@ export class Daemon {
     }
   }
 
-  /** Hand each mailbox message to the serial queue, one at a time, until the daemon stops. */
+  /** False for a progress message already handled (same topic and bytes); bounded memory. */
+  private firstSighting(topic: string, raw: string): boolean {
+    const key = createHash("sha256").update(topic).update("\n").update(raw).digest("base64");
+    if (this.seenProgress.has(key)) return false;
+    this.seenProgress.add(key);
+    if (this.seenProgress.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.seenProgress.delete(this.seenProgress.values().next().value as string);
+    }
+    return true;
+  }
+
+  /** An agent watch's progress subscription, served from the daemon's one progress filter. */
+  private readonly progressFeed: ProgressFeed = async (topic, deliver) => {
+    let routes = this.progressRoutes.get(topic);
+    if (routes === undefined) {
+      routes = new Set();
+      this.progressRoutes.set(topic, routes);
+    }
+    routes.add(deliver);
+    return async () => {
+      routes.delete(deliver);
+      if (routes.size === 0 && this.progressRoutes.get(topic) === routes) {
+        this.progressRoutes.delete(topic);
+      }
+    };
+  };
+
+  /**
+   * Hand each mailbox message (the daemon's mailbox in any namespace) to the serial queue, one at
+   * a time, until the daemon stops.
+   */
   private async mailboxLoop(): Promise<void> {
-    await this.drainLoop(this.mailboxTopic, (m) => this.onMailbox(m.payload));
+    await this.drainLoop(MAILBOX_FILTER, (m) => this.onMailbox(m.topic, m.payload));
   }
 
   /**
@@ -997,8 +1056,8 @@ export class Daemon {
   /**
    * Subscribe to every agent's status (a holder that turns reaped/done/failed loses its leases;
    * the retained statuses arrive on subscribe, so a holder that died while the daemon was down
-   * is caught too) and to every agent's progress (the hooks' API overload signals). Lease
-   * requests themselves are drained by `leaseRequestLoop`.
+   * is caught too). API overload signals come from the one progress subscription (`onProgress`);
+   * lease requests themselves are drained by `leaseRequestLoop`.
    */
   private async subscribeLeaseInputs(): Promise<void> {
     this.unsubscribers.push(
@@ -1014,10 +1073,6 @@ export class Daemon {
           );
           if (holds) await this.runLeases({ kind: "holder_status", holder, status: env.type });
         });
-      }),
-      await this.broker.subscribeStream("volley/+/+/progress", (m) => {
-        const env = parseEnvelope(m.payload);
-        if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
       }),
     );
   }
@@ -1469,7 +1524,7 @@ export class Daemon {
         return log.record.state?.open_decisions ?? [];
       },
       probe,
-      watch: (ns, id) => watchAgent(this.broker, ns, id),
+      watch: (ns, id) => watchAgent(this.broker, ns, id, Date.now, this.progressFeed),
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
@@ -2350,6 +2405,15 @@ export class Daemon {
     );
   }
 
+  /** Where an agent's channels live: where it was spawned (its wave's `namespace:`), else ours. */
+  private agentNamespace(wave: WaveId, agentId: string): string {
+    return (
+      this.supervised.get(agentId)?.namespace ??
+      this.waves.get(wave)?.record.wave?.namespace ??
+      this.opts.namespace
+    );
+  }
+
   /** Stop one task on the owner's answer: cancel its agent, interrupt it, journal the cancel. */
   private async cancelTask(
     wave: WaveId,
@@ -2360,7 +2424,7 @@ export class Daemon {
     const a = this.supervised.get(agentId);
     const messageId = randomUUID();
     await this.publish(
-      buildTopic(a?.namespace ?? this.opts.namespace, agentId, "mailbox"),
+      buildTopic(this.agentNamespace(wave, agentId), agentId, "mailbox"),
       this.envelope(
         "mailbox",
         "cancel",
@@ -2603,7 +2667,7 @@ export class Daemon {
   ): Promise<void> {
     const id = t.agent_id;
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
-    const watch = await watchAgent(this.broker, ns, id, this.now);
+    const watch = await watchAgent(this.broker, ns, id, this.now, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
     const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
     const role =
@@ -2970,9 +3034,18 @@ export class Daemon {
   // Control ops
   // -------------------------------------------------------------------------------------------
 
-  private async onMailbox(raw: string): Promise<void> {
+  private async onMailbox(topic: string, raw: string): Promise<void> {
+    const ns = topic.split("/")[1] ?? "";
+    if (ns.startsWith("_")) return; // `+` also matches the reserved levels; no mailbox lives there
+    // Mailbox messages are never retained (SPEC §4.1): clear a stray one in each namespace once,
+    // so it is not replayed on every start (the daemon's own namespace is cleared in connect()).
+    if (!this.clearedMailboxes.has(topic)) {
+      this.clearedMailboxes.add(topic);
+      await this.broker.publish(topic, "", { qos: 1, retain: true });
+    }
     const req = parseEnvelope(raw);
     if (req === null || !isValidAgentId(req.agent_id)) return;
+    // Answers go to the sender's mailbox in the namespace the request came from.
     // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it.
     if (req.type === "ack") {
       if (req.correlation_id !== null) this.acks.received(req.correlation_id, req.agent_id);
@@ -2991,7 +3064,7 @@ export class Daemon {
     const op = typeof payload.op === "string" ? payload.op : "";
     const send = (reply: ControlResponse) =>
       this.publish(
-        buildTopic(this.opts.namespace, req.agent_id, "mailbox"),
+        buildTopic(ns, req.agent_id, "mailbox"),
         this.envelope("mailbox", "ack", reply, correlationId),
         false,
       );
@@ -3425,8 +3498,37 @@ export class Daemon {
         data: { owner: by, previous: owner, why: verdict.why },
       });
       this.log(`wave ${w.wave} claimed by ${by} from ${owner ?? "-"}: ${verdict.why}`);
+      // Its live agents may now ack the new owner's steers; the grant runs beside the queue.
+      void this.extendAckGrants(w.wave, by);
     }
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
+  }
+
+  /**
+   * A wave changed owner: let each of its live agents with minted credentials ack the new owner
+   * too (`volley auth grant`, password kept). A failure is journaled as an alarm.
+   */
+  private async extendAckGrants(wave: WaveId, owner: string): Promise<void> {
+    for (const [agentId, a] of [...this.supervised]) {
+      if (a.wave !== wave || !a.minted) continue;
+      try {
+        await grantAckTo(a.host.exec, agentId, [owner]);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        this.log(`ack grant ${agentId} → ${owner}: ${message}`);
+        if (!this.running) return;
+        await this.recordEvent(wave, {
+          type: "alarm_raised",
+          task: a.task,
+          data: {
+            code: "ACK_GRANT_FAILED",
+            message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
+            agent_id: agentId,
+            owner,
+          },
+        }).catch(() => {});
+      }
+    }
   }
 
   /** The owner's retained status and registry timestamps. */
@@ -3530,7 +3632,7 @@ export class Daemon {
   ): Promise<void> {
     const messageId = randomUUID();
     await this.publish(
-      buildTopic(this.opts.namespace, a.agent_id, "mailbox"),
+      buildTopic(this.agentNamespace(wave, a.agent_id), a.agent_id, "mailbox"),
       this.envelope("mailbox", "cancel", payload, messageId),
       false,
     );
@@ -3699,10 +3801,7 @@ export class Daemon {
         ? Math.min(p.wait_ack_ms, DAEMON_DEFAULTS.steer_wait_ack_max_ms)
         : DAEMON_DEFAULTS.steer_wait_ack_ms;
     const heard = waitMs > 0 ? this.acks.wait(messageId, target.agent_id, waitMs) : null;
-    const namespace =
-      this.supervised.get(target.agent_id)?.namespace ??
-      w.log.record.wave?.namespace ??
-      this.opts.namespace;
+    const namespace = this.agentNamespace(w.wave, target.agent_id);
     await this.deliverSteer(w.wave, p.task, { ...target, namespace }, p.text, by, messageId);
     const result = {
       wave: w.wave,

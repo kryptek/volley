@@ -149,6 +149,19 @@ function setAgentBlock(aclFile: string, id: string, ackTo: string[]): void {
   writeFileSync(aclFile, acl);
 }
 
+/** The senders agent `id`'s managed ACL block already grants (empty when it has none). */
+function agentAckTo(aclFile: string, id: string): string[] {
+  if (!existsSync(aclFile)) return [];
+  const acl = readFileSync(aclFile, "utf-8");
+  const start = acl.indexOf(`\n${blockStart(id)}\n`);
+  if (start === -1) return [];
+  const end = acl.indexOf(blockEnd(id), start);
+  const block = acl.slice(start, end === -1 ? undefined : end);
+  return [...block.matchAll(/^topic write volley\/\+\/([^/\s]+)\/mailbox$/gm)].map(
+    (m) => m[1] as string,
+  );
+}
+
 function hasUser(passwdFile: string, user: string): boolean {
   return readFileSync(passwdFile, "utf-8")
     .split("\n")
@@ -219,7 +232,7 @@ export async function auth(
   }
 
   const [verb, agentId, ...extra] = parsed.positionals;
-  const takesId = verb === "add-agent" || verb === "rm-agent";
+  const takesId = verb === "add-agent" || verb === "rm-agent" || verb === "grant";
   if (
     (verb !== "init" && !takesId) ||
     (takesId && agentId === undefined) ||
@@ -371,17 +384,35 @@ export async function auth(
   }
   const ackTo = (parsed.values["ack-to"] as string[] | undefined) ?? [];
   const badSender = ackTo.find((s) => !isValidAgentId(s));
-  if (badSender !== undefined || (verb === "rm-agent" && ackTo.length > 0)) {
+  if (
+    badSender !== undefined ||
+    (verb === "rm-agent" && ackTo.length > 0) ||
+    (verb === "grant" && ackTo.length === 0)
+  ) {
     io.stderr(
       badSender !== undefined
         ? `volley auth: --ack-to "${badSender}" is not a valid agent id\n`
-        : "volley auth: --ack-to only applies to add-agent\n",
+        : verb === "grant"
+          ? "volley auth: grant needs at least one --ack-to <sender>\n"
+          : "volley auth: --ack-to only applies to add-agent and grant\n",
     );
     return EXIT.USAGE;
   }
   if (!existsSync(passwdFile)) {
     io.stderr(`volley auth: ${passwdFile} does not exist; run \`volley auth init\` first\n`);
     return EXIT.ERROR;
+  }
+
+  if (verb === "grant") {
+    // ACL only: the agent keeps its password (a live session must not be locked out), and may
+    // now also ack these senders (e.g. a coordinator that claimed its wave).
+    if (!hasUser(passwdFile, id)) {
+      io.stderr(`volley auth: "${id}" is not in ${passwdFile}; mint it with add-agent first\n`);
+      return EXIT.ERROR;
+    }
+    setAgentBlock(aclFile, id, [...new Set([...agentAckTo(aclFile, id), ...ackTo])]);
+    await reload(deps, io, skipReload);
+    return EXIT.OK;
   }
 
   if (verb === "add-agent") {
@@ -409,7 +440,7 @@ export async function auth(
   return EXIT.OK;
 }
 
-export const AUTH_HELP = `Usage: volley auth <init | add-agent <agent_id> | rm-agent <agent_id>> [options]
+export const AUTH_HELP = `Usage: volley auth <init | add-agent <agent_id> | grant <agent_id> | rm-agent <agent_id>> [options]
 
 Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
 (examples/mosquitto-auth/). Every change reloads mosquitto (SIGHUP).
@@ -420,13 +451,17 @@ Manage the broker's password file (mosquitto_passwd) for Volley's ACLs
   volley auth add-agent <id>       Mint a random password for agent <id> (username = id).
                                    Prints only the password (or --json: the
                                    .volley/agent.json "broker" block).
+  volley auth grant <id> --ack-to <sender>…
+                                   Also let minted agent <id> ack <sender> (ACL only; the
+                                   password is unchanged). volleyd runs it when a wave
+                                   changes owner.
   volley auth rm-agent <id>        Revoke agent <id> (and its ACL block). Succeeds if
                                    <id> was never minted.
 
 Options:
   --dir <dir>     Where passwd and acl.conf live (env: VOLLEY_AUTH_DIR;
                   default: <mosquitto etc dir>/volley, e.g. /opt/homebrew/etc/mosquitto/volley)
-  --ack-to <id>   add-agent: let the agent write sender <id>'s mailbox, so its acks
+  --ack-to <id>   add-agent, grant: let the agent write sender <id>'s mailbox, so its acks
                   (SPEC §4.4) and query replies reach that sender. Repeatable;
                   typically the parent (coordinator) id. Without it the agent can
                   write no mailbox and its acks are dropped by the broker.

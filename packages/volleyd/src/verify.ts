@@ -51,14 +51,26 @@ export interface AgentWatch {
 export const hookSignalsArrived = (s: SignalState) => s.sessionStart && s.hookRegistry !== null;
 
 /**
- * Subscribe to one agent's registry entry, status and progress. Call before launching it, so no
- * signal can be missed. Messages from any other agent id are ignored.
+ * Subscribes `deliver` to one topic and returns its unsubscribe (`VolleyBroker.subscribeStream`'s
+ * shape). The daemon passes a feed off its single `volley/+/+/progress` subscription, so a
+ * watch adds no overlapping filter (mosquitto delivers one copy per matching subscription).
+ */
+export type ProgressFeed = (
+  topic: string,
+  deliver: (m: { topic: string; payload: string }) => void,
+) => Promise<() => Promise<void>>;
+
+/**
+ * Subscribe to one agent's registry entry, status and progress (through `progressFeed`, default a
+ * subscription of its own). Call before launching it, so no signal can be missed. Messages from
+ * any other agent id are ignored.
  */
 export async function watchAgent(
   broker: VolleyBroker,
   namespace: string,
   agentId: string,
   now: () => number = Date.now,
+  progressFeed: ProgressFeed = (topic, deliver) => broker.subscribeStream(topic, deliver),
 ): Promise<AgentWatch> {
   const state: SignalState = {
     hookRegistry: null,
@@ -100,7 +112,7 @@ export async function watchAgent(
   const unsubs = [
     await broker.subscribeStream(regTopic, onMessage),
     await broker.subscribeStream(statusTopic, onMessage),
-    await broker.subscribeStream(progressTopic, onMessage),
+    await progressFeed(progressTopic, onMessage),
   ];
   let closed = false;
   return {

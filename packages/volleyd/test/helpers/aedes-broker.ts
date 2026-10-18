@@ -6,6 +6,8 @@ export interface TestBroker {
   port: number;
   /** Close a connected client from the broker side (a broker restart or network drop). */
   dropClient: (clientId: string) => boolean;
+  /** The filters a client is subscribed to right now (SUBSCRIBE minus UNSUBSCRIBE), sorted. */
+  subscriptions: (clientId: string) => string[];
   close: () => Promise<void>;
 }
 
@@ -35,6 +37,15 @@ export async function startTestBroker(
           },
         },
   );
+  const subs = new Map<string, Set<string>>();
+  aedes.on("subscribe", (subscriptions, client) => {
+    const set = subs.get(client.id) ?? new Set<string>();
+    for (const sub of subscriptions) set.add(sub.topic);
+    subs.set(client.id, set);
+  });
+  aedes.on("unsubscribe", (unsubscriptions, client) => {
+    for (const topic of unsubscriptions) subs.get(client.id)?.delete(topic);
+  });
   const server = createServer(aedes.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -52,6 +63,7 @@ export async function startTestBroker(
       client?.close();
       return client !== undefined;
     },
+    subscriptions: (clientId) => [...(subs.get(clientId) ?? [])].sort(),
     close: () =>
       new Promise<void>((resolve, reject) => {
         aedes.close(() => {
