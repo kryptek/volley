@@ -1,11 +1,16 @@
 import { parseArgs } from "node:util";
 import { resolveTarget, withClient } from "../control";
+import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
+import { resolveCaller } from "../ownership";
 import type { WaveState } from "../types";
+import { formatDecision } from "./decisions";
 
-const HELP = `Usage: volleyd status [wave] [--json] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd status [wave] [--json] [--as <agent-id>] [--broker-url <url>] [--namespace <ns>]
 
-Print every wave the daemon owns (or one wave) from the daemon's live state.
+Print every wave the daemon owns (or one wave) from the daemon's live state, with open
+decisions and a "needs you" count on the waves the caller owns (--as, else VOLLEY_AGENT_ID,
+else the session registered for this directory).
 --json prints the wave-state payload(s) exactly as published on volley/_waves/<wave>/state.
 `;
 
@@ -36,7 +41,20 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     }
     const states =
       wave !== undefined ? [res.result as WaveState] : (res.result as { waves: WaveState[] }).waves;
-    io.stdout(states.length === 0 ? "no waves\n" : states.map(formatWave).join("\n"));
+    const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
+    let decisions: DecisionPayload[] = [];
+    let caller: string | null = null;
+    if (states.some((s) => s.open_decisions.length > 0)) {
+      const d = await client.request("decisions", wave !== undefined ? { wave } : {});
+      decisions = d.ok ? (d.result as { decisions: DecisionPayload[] }).decisions : [];
+      caller = (await resolveCaller(client, parsed.values.as, env)).id;
+    }
+    io.stdout(
+      (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
+        (states.length === 0
+          ? "no waves\n"
+          : states.map((s) => formatWave(s, { caller, decisions })).join("\n")),
+    );
     return EXIT.OK;
   });
 }
@@ -46,6 +64,7 @@ function parseStatus(argv: string[]) {
     args: argv,
     options: {
       json: { type: "boolean", default: false },
+      as: { type: "string" },
       "broker-url": { type: "string" },
       namespace: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -55,16 +74,28 @@ function parseStatus(argv: string[]) {
   });
 }
 
-/** Human-readable wave summary: a header line, then one line per task. */
-export function formatWave(s: WaveState): string {
+/**
+ * Human-readable wave summary: a header line, then one line per task, then its open decisions.
+ * The header gains `needs you: N` when `caller` owns the wave and N decisions are open.
+ */
+export function formatWave(
+  s: WaveState,
+  ctx: { caller?: string | null; decisions?: DecisionPayload[] } = {},
+): string {
+  const open = s.open_decisions.length;
+  const needs =
+    open > 0 && s.owner !== null && s.owner === ctx.caller ? `  needs you: ${open}` : "";
   const header =
     `${s.wave}  ${s.status}  v${s.version}  owner: ${s.owner ?? "-"}  ` +
-    `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${s.open_decisions.length}\n`;
+    `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}\n`;
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
     const pr = t.pr !== undefined ? `  PR #${t.pr.number}` : "";
     return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${t.stage.padEnd(14)}${pr}${why}\n`;
   });
-  return header + rows.join("");
+  const decisions = (ctx.decisions ?? [])
+    .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
+    .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
+  return header + rows.join("") + decisions.join("");
 }

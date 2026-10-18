@@ -3,6 +3,7 @@ import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { Daemon } from "../daemon";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
+import { ghIssueBody } from "../overlap";
 
 const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>]
 
@@ -38,6 +39,7 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     d = await Daemon.start({
       ...target,
       home: volleydHome(env),
+      issueBody: ghIssueBody,
       log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
     });
   } catch (e) {

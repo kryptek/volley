@@ -44,4 +44,10 @@ export const DAEMON_DEFAULTS = {
   probe_ms: 1_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
+  /** How long `steer` waits for the recipient's mailbox ack before reporting `delivered`. */
+  steer_wait_ack_ms: 30_000,
+  /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
+  issue_fetch_ms: 15_000,
+  /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
+  registry_scan_ms: 250,
 } as const;

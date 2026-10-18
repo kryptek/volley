@@ -21,8 +21,20 @@ export const CONFIG_TOPIC = "volley/_waves/_config";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 
-/** Ops handled in this release; later tasks add pause/resume/stop/steer/resolve/claim. */
-export type ControlOp = "run" | "status" | "config_get" | "config_set";
+/** Control ops the daemon answers. */
+export type ControlOp =
+  | "run"
+  | "status"
+  | "config_get"
+  | "config_set"
+  // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
+  | "decisions"
+  | "resolve"
+  | "claim"
+  | "pause"
+  | "resume"
+  | "stop"
+  | "steer";
 
 export interface ControlResponse {
   text: string;
@@ -36,6 +48,8 @@ export interface ControlResponse {
   /** config_set only (SPEC §4.6.4). */
   applied?: boolean;
   rejected?: PathError[];
+  /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
+  warnings?: string[];
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -137,6 +151,16 @@ export class ControlClient {
       clearTimeout(timer);
       await unsubscribe();
     }
+  }
+
+  /** Every retained registry entry (raw payloads), for caller auto-detection. */
+  async readRegistry(timeoutMs: number = DAEMON_DEFAULTS.registry_scan_ms): Promise<string[]> {
+    const msgs = await this.broker.subscribeCollect(
+      "volley/_system/registry/+",
+      Number.POSITIVE_INFINITY,
+      timeoutMs,
+    );
+    return msgs.map((m) => m.payload).filter((p) => p !== "");
   }
 
   async close(): Promise<void> {

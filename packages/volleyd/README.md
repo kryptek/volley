@@ -12,8 +12,9 @@ panes and coordinators can render it. It runs as a launchd service, so it outliv
 coordinator session.
 
 > **Status: foundation (pre-release).** This package has the wave file, journal, reducer,
-> scheduler, fence, config store, daemon skeleton, CLI and launchd service. Spawning agents,
-> leases and pressure-based admission, the pipeline stages, decisions and recovery come in later
+> scheduler, fence, config store, daemon skeleton, CLI and launchd service, plus decisions,
+> wave ownership, pause/stop and the kill switch, steering and overlap warnings. Spawning agents,
+> leases and pressure-based admission, the pipeline stages and recovery come in later
 > tasks of the volleyd epic. Until then a submitted wave is journaled and its first tasks are
 > *admitted*, but nothing is spawned: tasks stay `queued` with `why_waiting: "admitted: awaiting spawn"`.
 
@@ -26,6 +27,11 @@ coordinator session.
 - [CLI](#cli)
 - [How it works](#how-it-works)
 - [Topics and the control channel](#topics-and-the-control-channel)
+- [Decisions](#decisions)
+- [Ownership and claim](#ownership-and-claim)
+- [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
+- [Steering](#steering)
+- [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
@@ -98,13 +104,24 @@ config.hard_ceiling: must be <= 100
 | `volleyd daemon` | Run the supervisor in the foreground until SIGINT/SIGTERM. |
 | `volleyd install [--dry-run]` | Write `~/Library/LaunchAgents/systems.volley.volleyd.plist` and `launchctl bootstrap` it. |
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
-| `volleyd run <wave.yaml> [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. |
+| `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors. |
-| `volleyd status [wave] [--json]` | Wave state from the daemon. `--json` prints the exact `wave_state` payload. |
+| `volleyd status [wave] [--as <id>] [--json]` | Wave state from the daemon, with open decisions and `needs you: N` on waves the caller owns. `--json` prints the exact `wave_state` payload. |
+| `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
+| `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>]` | Answer a decision (owner only). |
+| `volleyd claim <wave>` | Take over a wave whose owner is gone. |
+| `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
+| `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
+| `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's agent; reports `acked` or `delivered`. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
+
+The mutating commands (`resolve`, `pause`, `resume`, `stop`, `steer`, `claim`) act as the caller's
+agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the newest top-level session registered for the
+current directory. `run` uses the same detection for the owner (`--owner` overrides it).
 
 Commands that talk to the daemon fail fast with `volleyd not running` (exit 1, within ~1 s) when
 the daemon's retained status is missing or terminal. `events`/`ack` read `$VOLLEYD_HOME` directly
@@ -152,6 +169,9 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 | `volley/_waves/<wave>/state` | yes | Full `wave_state` snapshot (with `effective_config`), after every change. |
 | `volley/_waves/<wave>/events` | no | Live mirror of each journal event. The journal is the record. |
 | `volley/_waves/_config` | yes | Effective global config + `version` / `updated_at` / `updated_by`. |
+| `volley/_waves/<wave>/decisions/<id>` | while open | Each open decision (`decision.schema.json`); cleared on resolve. |
+| `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision. |
+| `volley/_waves/_system/events` | no | Live mirror of `_system` journal events (the kill switch). |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -164,8 +184,95 @@ own mailbox with `type: "ack"`, the same `correlation_id`, and
 | `status` | `wave?` | one wave state, or `{ waves: [...] }` |
 | `config_get` | `path?`, `wave?` | the value (the full retained payload when neither is given) |
 | `config_set` | `patch`, `by` (SPEC §4.6.4) | `{ version }`, plus `applied` / `rejected: [{ path, reason }]` |
+| `decisions` | `wave?`, `all?` | `{ decisions: [decision payload] }` |
+| `resolve` | `decision_id`, `answer`, `by`, `wave?`, `rationale?` | `{ wave, decision_id, already_resolved, resolved, brief? }` |
+| `claim` | `wave`, `by` | `{ wave, owner, previous, why }` |
+| `pause` / `resume` | `wave` (or `all: true` for `resume`), `by` | `{ wave, status, changed }` / `{ kill_switch }` |
+| `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
+| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, acked, acked_by? }` |
 
-Later tasks add `pause`, `resume`, `stop`, `steer`, `resolve` and `claim`.
+`run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
+wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
+arrives or `wait_ack_ms` (default 30 s) passes — the wait never blocks other control requests.
+
+---
+
+## Decisions
+
+A decision is a question only a human (or the owning coordinator) can answer — reviewers
+disagree, a merge conflict, an agent blocked, a plan change. It is a journal event, not chat:
+
+- **Open** (`daemon.openDecision(wave, { kind, task, question, pointers, options? })`, used by
+  the pipeline and recovery subsystems): journals `decision_opened`, publishes the decision retained
+  on `volley/_waves/<wave>/decisions/<id>` (ids look like `d-k3x9q2ab`), and parks the task in
+  `awaiting_decision`. Its dependents wait with `why_waiting: "awaiting decision d-… (T2)"`;
+  independent tasks keep running. A `task: null` decision is wave-level and parks nothing.
+- **Notify bridge**: every open also publishes a `blocked`-typed progress envelope on the
+  daemon's own topic, so an existing `volley notify` rings with no new surface:
+
+  ```sh
+  volley notify --pattern 'volley/+/volleyd/progress'      # default --on includes blocked
+  ```
+
+- **Resolve** (`volleyd resolve d-… "<answer>" --rationale "<why>"`, owner only): journals
+  `decision_resolved { answer, by, at, rationale? }`, re-publishes the decision once with
+  `resolved` set and clears the retained topic, and puts the task back in the stage it was in.
+  The task's resolved decisions are written to `.volley/decisions.md` in its task directory
+  (`$VOLLEYD_HOME/waves/<wave>/tasks/<task>/` unless the spawner points it at the worktree) for
+  the next stage's brief. Resolving an unknown id is an error; resolving twice is a no-op.
+
+Open decisions survive a restart (they are re-published from the journal).
+
+## Ownership and claim
+
+Every wave has one **owner**, the coordinator agent id that submitted it — the single writer. It
+comes from `volleyd run --owner <id>`, else is auto-detected (`VOLLEY_AGENT_ID`, else the session
+registered for the caller's directory; printed as `owner: … (auto)`), else `null` (unowned).
+`resolve`, `pause`, `resume`, `stop`, `steer` and re-running the wave id require `by == owner`;
+anyone else is refused with the owner's id. An unowned wave accepts anyone.
+
+`volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
+is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,
+progress/heartbeat events — for `claim_after_s` (config, read at claim time, so a
+`volleyd config set claim_after_s …` applies to the next claim). Otherwise the claim is refused,
+naming the owner. A claim is journaled as `owner_claimed { owner, previous, why }`.
+
+## Pause, stop and the kill switch
+
+- `pause <wave>`: no new admissions; running agents continue. Held tasks show
+  `why_waiting: "wave paused"`. `resume <wave>` re-admits.
+- `stop <wave>`: journals `wave_stopped` (no new admissions), then sends a mailbox `cancel`
+  to every running agent of the wave (journaled as `steering_sent { type: "cancel" }`) and
+  interrupts its session through the daemon's `interrupt` hook (the spawner wires it to cmux).
+  A stopped wave can be resumed explicitly.
+- `stop --all` is the **kill switch**: every wave stops, the switch is journaled in `_system`
+  (so it survives restarts), and the daemon refuses `run` with `kill switch engaged` until
+  `resume --all`. Anyone may pull it; releasing it leaves stopped waves stopped.
+
+## Steering
+
+`volleyd steer <wave> <task> "<text>"` sends a mailbox `steering` envelope to the task's current
+agent (the current stage's role, else the implementer; `--role` picks one). Its `correlation_id`
+is the message id; `payload.seq` counts steers to that task (1, 2, …) and `payload.supersedes`
+names the previous steer, so the recipient can drop stale guidance. The steer is journaled as
+`steering_sent`. The command reports `acked by <agent>` when the recipient's mailbox `ack`
+(same `correlation_id`, sent to `volley/<ns>/volleyd/mailbox`) arrives within `--wait-ack-ms`
+(default 30000), else `delivered`.
+
+## Overlap warnings
+
+At submit the daemon reads each task issue's `Files` section (`## Files` / `### Files` heading or
+a `Files:` line; comma lists, brace expansion and package-relative entries are understood) via
+`gh issue view`, merges it into the task's `files` hint, and compares it with the unfinished
+tasks of every other running wave. Each shared path journals an `alarm_raised` event with
+`data.alarm: "overlap_warning"` (paths and both wave/task ids) and prints a line in the `run`
+output:
+
+```
+warning: overlap: w2/T4 and w1/T7 both touch packages/volleyd/src/daemon.ts
+```
+
+Overlap is advisory only; nothing is refused.
 
 ---
 

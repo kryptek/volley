@@ -15,8 +15,15 @@ Commands:
   events      Print journal events after a named cursor
   ack         Advance a named journal cursor
   config      Get or set supervisor config (volleyd config get|set)
+  decisions   List open decisions
+  resolve     Answer a decision (owner only)
+  claim       Take over a wave whose owner is gone
+  pause       Stop admitting new tasks in a wave
+  resume      Resume a wave, or release the kill switch (--all)
+  stop        Stop a wave and cancel its agents; --all is the kill switch
+  steer       Send mailbox steering to a task's agent and report the ack
 
-Global flags (daemon/install/run/status/config):
+Global flags (daemon/install/run/status/config and the wave controls):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     Volley namespace (env: VOLLEY_NAMESPACE; default: default)
 State directory: $VOLLEYD_HOME (default: ~/.volley/volleyd)
@@ -37,6 +44,13 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   events: async () => (await import("./commands/events")).events,
   ack: async () => (await import("./commands/ack")).ack,
   config: async () => (await import("./commands/config")).config,
+  decisions: async () => (await import("./commands/decisions")).decisions,
+  resolve: async () => (await import("./commands/resolve")).resolve,
+  claim: async () => (await import("./commands/claim")).claim,
+  pause: async () => (await import("./commands/pause")).pause,
+  resume: async () => (await import("./commands/resume")).resume,
+  stop: async () => (await import("./commands/stop")).stop,
+  steer: async () => (await import("./commands/steer")).steer,
 };
 
 export async function main(args: CommandArgs): Promise<ExitCode> {

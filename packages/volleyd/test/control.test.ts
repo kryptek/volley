@@ -125,10 +125,10 @@ describe("volleyd daemon + control channel", () => {
     await t.start();
     const client = await ControlClient.connect(t.broker.url, NS);
     try {
-      const unknown = await client.request("pause" as never, {});
+      const unknown = await client.request("frobnicate" as never, {});
       expect(unknown).toMatchObject({
         ok: false,
-        error: "unknown op 'pause'",
+        error: "unknown op 'frobnicate'",
         acked_type: "query",
       });
       const missing = await client.request("status", { wave: "nope" });
