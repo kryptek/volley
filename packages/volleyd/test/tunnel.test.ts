@@ -598,6 +598,20 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(await env.retained(`volley/_waves/w1/decisions/${id}`)).toBeNull();
     expect(box.launches).toHaveLength(0);
   });
+  it("remote_repo_missing `retry` with the clone now present spawns at once (no backoff)", async () => {
+    box.tunnel = true;
+    box.repoExists = async () => false;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "decision_opened"));
+    const id = journal("w1").find((e) => e.type === "decision_opened")?.data.decision_id as string;
+    box.repoExists = async () => true;
+    await daemon.resolveDecision("w1", id, { answer: "retry", by: "coord-a" });
+    // Without advancing the clock: the refusal's 30 s backoff must not hold the retry back.
+    await daemon.tick();
+    await until(() => box.launches.length > 0, 3000);
+    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    expect(journal("w1").some((e) => e.type === "task_cancelled")).toBe(false);
+  });
 });
 
 describe("TunnelSupervisor", () => {

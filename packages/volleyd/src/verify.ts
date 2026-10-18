@@ -109,6 +109,10 @@ export async function watchAgent(
     for (const w of [...waiters]) w();
   };
 
+  // The daemon also holds `volley/+/+/status` (leases, `coordinator`), so mosquitto delivers each
+  // status here twice. That is harmless: `state.status` is overwritten with the same value, and
+  // the daemon's status handler ignores a re-delivery by its wall_time (a final status is handed
+  // over once, a suppressed reap stays suppressed).
   const unsubs = [
     await broker.subscribeStream(regTopic, onMessage),
     await broker.subscribeStream(statusTopic, onMessage),

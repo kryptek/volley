@@ -101,7 +101,7 @@ export async function openDrainSession(
 const steeringPath = (identity: HookIdentity) => join(identity.stateDir, "STEERING.md");
 
 /** mailbox.schema.json `acked_type`: the message types an ack may name. */
-const ACKABLE_TYPES = new Set(["steering", "cancel", "nudge", "query"]);
+export const ACKABLE_TYPES = new Set(["steering", "cancel", "nudge", "query"]);
 /** An ack's `correlation_id` is a UUID (mailbox.schema.json). */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

@@ -376,6 +376,15 @@ const GLOBAL = "";
  * The daemon's MQTT clientId. Stable, so its persistent session (and mailbox subscription)
  * survives restarts and the broker queues control requests sent while it is down (SPEC §4.4).
  */
+/** Agents the wave's journal retired (task.agents still names the last one per role). */
+const retiredAgents = (log: WaveLog): Set<string> =>
+  new Set(
+    log.journal
+      .readAll()
+      .filter((e) => e.type === "agent_retired")
+      .map((e) => e.data.agent_id as string),
+  );
+
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
@@ -781,6 +790,9 @@ export class Daemon {
     // persistent session keeps it: beside the `+` drain it would deliver every message twice.
     // Drop it; the drain (subscribed synchronously above) already covers the topic.
     await (await this.broker.subscribeStream(this.mailboxTopic, () => {}))();
+    // Likewise its own-namespace progress filter: beside PROGRESS_FILTER it doubles the traffic.
+    const legacyProgress = buildTopic(this.opts.namespace, "+", "progress");
+    await (await this.broker.subscribeStream(legacyProgress, () => {}))();
     void this.leaseRequestLoop();
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
@@ -835,7 +847,8 @@ export class Daemon {
    * question, session and workspace) until anything else but `idle` says it works again.
    */
   private noteAttention(agent: string, env: Envelope): void {
-    if (env.type === "idle") return;
+    // Only wave owners have a `coordinator`: other agents' attention would just pile up.
+    if (env.type === "idle" || !this.ownsAWave(agent)) return;
     const p = (
       typeof env.payload === "object" && env.payload !== null ? env.payload : {}
     ) as Record<string, unknown>;
@@ -857,6 +870,11 @@ export class Daemon {
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
     if (before !== JSON.stringify(next)) this.ownerChanged(agent);
+  }
+
+  private ownsAWave(agent: string): boolean {
+    for (const log of this.waves.values()) if (log.record.state?.owner === agent) return true;
+    return false;
   }
 
   /** An agent's status or attention changed: re-publish the waves it owns (`coordinator`). */
@@ -1138,7 +1156,13 @@ export class Daemon {
         const env = parseEnvelope(m.payload);
         if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
           const prev = this.statusOf.get(holder)?.type;
-          this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder)) {
+            // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
+            this.statusOf.delete(holder);
+            this.attentionOf.delete(holder);
+          } else {
+            this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+          }
           if (prev !== env.type) this.ownerChanged(holder);
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
@@ -1326,7 +1350,8 @@ export class Daemon {
     if (!state.tasks.every((t) => t.stage === "done" || t.stage === "cancelled")) return;
     const done = state.tasks.filter((t) => t.stage === "done").map((t) => t.id);
     const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
-    await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
+    // The decision first: once wave_complete is journaled the wave is no longer `running` and no
+    // later tick comes back here, so a failed open must leave the wave to retry.
     if (rec.decisions[WAVE_COMPLETE_DECISION] === undefined) {
       const merged = done.length > 0 ? ` merged into ${state.release_branch}` : "";
       await this.openDecisionNow(wave, {
@@ -1337,6 +1362,7 @@ export class Daemon {
         options: ["acknowledged"],
       });
     }
+    await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
     this.log(
       `wave ${wave} complete: done ${done.join(", ") || "-"}; cancelled ${cancelled.join(", ") || "-"}`,
     );
@@ -1418,7 +1444,16 @@ export class Daemon {
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
-          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel),
+          (outcome) => {
+            this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
+            // Minted for the owner `deps` captured: a claim since then missed this agent (it was
+            // not supervised yet), so grant the current owner here.
+            const owner = this.waves.get(wave)?.record.state?.owner ?? null;
+            const a = this.supervised.get(outcome.agentId);
+            if (a?.minted === true && owner !== null && owner !== deps.owner) {
+              void this.grantAck(wave, outcome.agentId, a, owner);
+            }
+          },
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
       }
@@ -1897,6 +1932,8 @@ export class Daemon {
         repo: spec.repo,
       });
     }
+    // The clone appeared while the decision was still open: only a spawn that does not wait for
+    // the task to be queued gets here (a manual `volleyd spawn`, or a later pipeline role).
     if (openId !== undefined) {
       await this.resolveNow(wave, openId, { answer: "found", by: DAEMON_AGENT_ID });
     }
@@ -3111,16 +3148,19 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
-    if (
-      d.kind === "remote_repo_missing" &&
-      d.task !== null &&
-      r.answer.trim().toLowerCase() === "cancel"
-    ) {
-      await this.append(wave, {
-        type: "task_cancelled",
-        task: d.task,
-        data: { by: r.by, why: `no clone on the remote host (decision ${id})` },
-      });
+    if (d.kind === "remote_repo_missing" && d.task !== null) {
+      if (r.answer.trim().toLowerCase() === "cancel") {
+        await this.append(wave, {
+          type: "task_cancelled",
+          task: d.task,
+          data: { by: r.by, why: `no clone on the remote host (decision ${id})` },
+        });
+      } else {
+        // Any other answer requeues the task: the refusal's backoff must not delay the retry.
+        for (const key of this.refused.keys()) {
+          if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
+        }
+      }
     }
     if (d.task === null) return { decision: d, already_resolved: false };
     if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
@@ -3166,13 +3206,14 @@ export class Daemon {
     }
     const req = parseEnvelope(raw);
     if (req === null || !isValidAgentId(req.agent_id)) return;
-    // Answers go to the sender's mailbox in the namespace the request came from.
-    // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it.
+    // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it, in
+    // whichever namespace its wave put it.
     if (req.type === "ack") {
       if (req.correlation_id !== null) this.acks.received(req.correlation_id, req.agent_id);
       return;
     }
-    if (req.type !== "query") return;
+    // Control queries only from our own namespace: another daemon on this broker answers its own.
+    if (req.type !== "query" || ns !== this.opts.namespace) return;
     // An ack MUST carry the request's correlation_id (SPEC §4.4); without one there is no
     // answer the sender could match, so the request is dropped.
     if (req.correlation_id === null) {
@@ -3183,9 +3224,10 @@ export class Daemon {
     const correlationId = req.correlation_id;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     const op = typeof payload.op === "string" ? payload.op : "";
+    // The answer goes to the sender's mailbox in our namespace (where the request came from).
     const send = (reply: ControlResponse) =>
       this.publish(
-        buildTopic(ns, req.agent_id, "mailbox"),
+        buildTopic(this.opts.namespace, req.agent_id, "mailbox"),
         this.envelope("mailbox", "ack", reply, correlationId),
         false,
       );
@@ -3245,7 +3287,7 @@ export class Daemon {
         if (!isValidAgentId(p.by))
           return {
             ok: false,
-            error: `claim: "${p.by}" is not a valid agent id ([a-z0-9][a-z0-9_-]{0,62})`,
+            error: `"${p.by}" is not a valid agent id ([a-z0-9][a-z0-9_-]{0,62})`,
           };
         return this.claim(p, p.by);
       case "pause":
@@ -3558,7 +3600,9 @@ export class Daemon {
     const effect = planAnswer(log.record, d);
     if (effect.cancel !== undefined && d.task !== null) {
       const task = d.task;
-      for (const a of runningAgents(log.record).filter((x) => x.task === task)) {
+      for (const a of runningAgents(log.record, retiredAgents(log)).filter(
+        (x) => x.task === task,
+      )) {
         await this.cancelAgent(wave, a, by, {
           ...cancelPayload(wave, task, by),
           text: effect.cancel,
@@ -3632,24 +3676,35 @@ export class Daemon {
   private async extendAckGrants(wave: WaveId, owner: string): Promise<void> {
     for (const [agentId, a] of [...this.supervised]) {
       if (a.wave !== wave || !a.minted) continue;
-      try {
-        await grantAckTo(a.host.exec, agentId, [owner]);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        this.log(`ack grant ${agentId} → ${owner}: ${message}`);
-        if (!this.running) return;
-        await this.recordEvent(wave, {
-          type: "alarm_raised",
-          task: a.task,
-          data: {
-            code: "ACK_GRANT_FAILED",
-            message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
-            agent_id: agentId,
-            owner,
-          },
-        }).catch(() => {});
-      }
+      if (!(await this.grantAck(wave, agentId, a, owner))) return;
     }
+  }
+
+  /** Let one minted agent ack `owner`; false once the daemon is stopping. */
+  private async grantAck(
+    wave: WaveId,
+    agentId: string,
+    a: Supervised,
+    owner: string,
+  ): Promise<boolean> {
+    try {
+      await grantAckTo(a.host.exec, agentId, [owner]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.log(`ack grant ${agentId} → ${owner}: ${message}`);
+      if (!this.running) return false;
+      await this.recordEvent(wave, {
+        type: "alarm_raised",
+        task: a.task,
+        data: {
+          code: "ACK_GRANT_FAILED",
+          message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
+          agent_id: agentId,
+          owner,
+        },
+      }).catch(() => {});
+    }
+    return true;
   }
 
   /** The owner's retained status and registry timestamps. */
@@ -3735,15 +3790,8 @@ export class Daemon {
     const status = log.record.state?.status;
     if (status === "stopped" || status === "complete") return null;
     await this.append(wave, { type: "wave_stopped", data: { by } });
-    // task.agents keeps the last agent per role after it is retired: never cancel those.
-    const retired = new Set(
-      log.journal
-        .readAll()
-        .filter((e) => e.type === "agent_retired")
-        .map((e) => e.data.agent_id as string),
-    );
     const cancelled: string[] = [];
-    for (const a of runningAgents(log.record).filter((x) => !retired.has(x.agent_id))) {
+    for (const a of runningAgents(log.record, retiredAgents(log))) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }

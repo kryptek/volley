@@ -53,6 +53,8 @@ export interface SupervisedEnvOptions {
   namespace?: string;
   /** Extra fake-exec replies (prefix, reply). */
   exec?: [string[], Parameters<FakeExec["on"]>[1]][];
+  /** Runs when the implementer is launched (credentials minted, not yet supervised). */
+  onLaunch?: (daemon: Daemon) => void;
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -104,6 +106,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
 
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
   host.onLaunch = () => {
+    o.onLaunch?.(daemon);
     setTimeout(async () => {
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],

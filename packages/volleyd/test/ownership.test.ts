@@ -198,7 +198,7 @@ describe("wave ownership", () => {
     await agentStatus("coord-a", "reaped");
     const res = await client.request("claim", { wave: WAVE, by: "Alice" });
     expect(res.ok).toBe(false);
-    expect(res.error).toContain('"Alice" is not a valid agent id');
+    expect(res.error).toMatch(/^"Alice" is not a valid agent id/); // the CLI adds its own "claim:" prefix
     expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
     expect(daemon.journalEvents(WAVE).some((e) => e.type === "owner_claimed")).toBe(false);
   });

@@ -91,8 +91,10 @@ export function nextSteer(rec: WaveRecord, task: TaskId): { seq: number; superse
 /** Every agent currently working a task of the wave (admitted, not settled), deduplicated. */
 export function runningAgents(
   rec: WaveRecord,
+  retired: ReadonlySet<string>,
 ): { task: TaskId; role: keyof TaskAgents; agent_id: string }[] {
-  const seen = new Set<string>();
+  // task.agents keeps the last agent per role after it is retired: never count those.
+  const seen = new Set<string>(retired);
   const out: { task: TaskId; role: keyof TaskAgents; agent_id: string }[] = [];
   for (const id of activeTasks(rec)) {
     const t = rec.state?.tasks.find((x) => x.id === id);

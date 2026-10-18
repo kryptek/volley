@@ -32,6 +32,22 @@ describe("ack grants follow the wave's owner", () => {
     expect(s.host.fake.argvs(["volley", "auth", "add-agent"])).toHaveLength(1);
   });
 
+  it("an agent minted for the old owner while a claim landed is granted the new owner", async () => {
+    // The claim is journaled after the spawn captured the old owner and before supervision
+    // started, so the claim's own grant pass cannot see the agent yet.
+    s = await makeSupervisedEnv({
+      onLaunch: (daemon) =>
+        void daemon.recordEvent("w1", {
+          type: "owner_claimed",
+          data: { owner: "coord-new", previous: null, why: "test" },
+        }),
+    });
+    await s.until(() => s.host.fake.argvs(["volley", "auth", "grant"]).length > 0);
+    expect(s.host.fake.argvs(["volley", "auth", "grant"])).toEqual([
+      ["volley", "auth", "grant", AGENT, "--ack-to", "coord-new"],
+    ]);
+  });
+
   it("a failed grant is journaled as an alarm, and the claim still stands", async () => {
     s = await makeSupervisedEnv({
       exec: [[["volley", "auth", "grant"], { code: 1, stderr: "no passwd file" }]],

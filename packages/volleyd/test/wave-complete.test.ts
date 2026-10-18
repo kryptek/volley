@@ -86,6 +86,21 @@ describe("a wave completes", () => {
     expect(daemon.snapshot(WAVE)?.status).toBe("complete");
   });
 
+  it("a failed wave_complete decision open is retried on the next tick", async () => {
+    const d = daemon as unknown as { openDecisionNow: (...a: unknown[]) => Promise<unknown> };
+    const real = d.openDecisionNow.bind(daemon);
+    d.openDecisionNow = async () => {
+      throw new Error("broker publish failed");
+    };
+    await stage("A", "done");
+    await stage("B", "done");
+    await daemon.tick().catch(() => {});
+    d.openDecisionNow = real;
+    await daemon.tick();
+    expect(completions()).toHaveLength(1);
+    expect((await retainedState()).open_decisions).toHaveLength(1);
+  });
+
   it("a paused or stopped wave does not complete", async () => {
     expect((await client.request("pause", { wave: WAVE, by: "coord-a" })).ok).toBe(true);
     await stage("A", "done");
@@ -153,6 +168,29 @@ describe("coordinator attention", () => {
 
     await as("status", "reaped");
     await waitFor(async () => (await coordinator())?.state === "gone");
+  });
+
+  it("keeps no attention or finished status for agents that own no wave (bounded memory)", async () => {
+    const maps = daemon as unknown as {
+      statusOf: Map<string, unknown>;
+      attentionOf: Map<string, unknown>;
+    };
+    const from = async (agent: string, channel: string, type: string) => {
+      const env = buildEnvelope({ agentId: agent, parentId: null, channel, type, payload: {} });
+      await pub.publish(`volley/${NS}/${agent}/${channel}`, JSON.stringify(env), {
+        qos: 1,
+        retain: channel === "status",
+      });
+    };
+    await from("agent-x", "progress", "awaiting_input");
+    await from("agent-y", "status", "working");
+    await waitFor(() => maps.statusOf.has("agent-y"));
+    await from("agent-y", "status", "done");
+    await waitFor(() => !maps.statusOf.has("agent-y"));
+    // The owner's entries stay: its `coordinator` turns `gone`.
+    await as("status", "done");
+    await waitFor(async () => (await coordinator())?.state === "gone");
+    expect(maps.attentionOf.has("agent-x")).toBe(false);
   });
 
   it("is absent until anything of the owner was seen", async () => {

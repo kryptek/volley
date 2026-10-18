@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -140,8 +140,36 @@ describe("a wave's namespace", () => {
   });
 });
 
+describe("two daemons on one broker", () => {
+  it("each answers control queries only from its own namespace", async () => {
+    const otherHome = mkdtempSync(join(tmpdir(), "volleyd-ns-other-"));
+    daemon = await start();
+    const other = await Daemon.start({
+      brokerUrl: broker.url,
+      namespace: "other-ns",
+      home: otherHome,
+      tickMs: 0,
+      protocolVersion: 4,
+      pressure: NO_PRESSURE,
+      interrupt: async () => {},
+    });
+    try {
+      client = await ControlClient.connect(broker.url, NS);
+      const res = await client.request("run", { wave_yaml: yaml, owner: "coord-a" });
+      expect(res.error).toBeUndefined();
+      expect(existsSync(join(home, "waves", WAVE))).toBe(true);
+      // Give the other daemon every chance to (wrongly) pick the request up.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(existsSync(join(otherHome, "waves", WAVE))).toBe(false);
+    } finally {
+      await other.stop();
+      rmSync(otherHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("one progress subscription", () => {
-  it("the daemon subscribes volley/+/+/progress once and drains volley/+/volleyd/mailbox", async () => {
+  it("the daemon subscribes volley/+/+/progress once, drains volley/+/volleyd/mailbox and drops the legacy filters", async () => {
     // A session left by an earlier volleyd that drained only its own namespace's mailbox.
     const legacy = new VolleyBroker();
     await legacy.connect({
@@ -152,6 +180,7 @@ describe("one progress subscription", () => {
       protocolVersion: 4,
     });
     await legacy.drainQueued(`volley/${NS}/volleyd/mailbox`, { idleMs: 10, maxMessages: 1 });
+    await legacy.drainQueued(`volley/${NS}/+/progress`, { idleMs: 10, maxMessages: 1 });
     await legacy.disconnect();
 
     await withRunningAgent();
@@ -160,6 +189,9 @@ describe("one progress subscription", () => {
     );
     await waitFor(
       () => !broker.subscriptions(daemonClientId(NS)).includes(`volley/${NS}/volleyd/mailbox`),
+    );
+    await waitFor(
+      () => !broker.subscriptions(daemonClientId(NS)).includes(`volley/${NS}/+/progress`),
     );
     const progress = broker
       .subscriptions(daemonClientId(NS))
