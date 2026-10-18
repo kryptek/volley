@@ -30,6 +30,7 @@ import {
   NARROW_PX,
   type Rect,
   clampWindowWidth,
+  phoneMaxWidth,
   useViewport,
   useViewportWidth,
 } from "./canvas/useViewport";
@@ -92,8 +93,13 @@ const coordsH = (waves: number) => 150 + 66 * waves;
 /**
  * Placeholder layout: one row per wave, its agents in two columns to the
  * right; the coordinators window below the waves, as in the prototype.
+ * `clampW` gives a window's rendered width (clamped on a phone).
  */
-function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]>) {
+function placeholderLayout(
+  waveIds: string[],
+  groups: Record<string, AgentView[]>,
+  clampW: (w: number) => number,
+) {
   const at: Record<string, Pos> = {};
   let y = 0;
   for (const id of waveIds) {
@@ -101,7 +107,7 @@ function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]
     const kids = groups[id] ?? [];
     kids.forEach((a, k) => {
       at[a.id] = {
-        x: WAVE_W + GAP + (k % 2) * (AGENT_W + GAP),
+        x: clampW(WAVE_W) + GAP + (k % 2) * (clampW(AGENT_W) + GAP),
         y: y + Math.floor(k / 2) * (AGENT_H + GAP),
       };
     });
@@ -182,7 +188,9 @@ export default function App() {
     ...Object.keys(state.waves),
     ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
   ];
-  const layout = placeholderLayout(waveIds, groups);
+  /** A window's rendered width: the prototype width, clamped on a phone. */
+  const clampW = (w: number) => clampWindowWidth(w, vw);
+  const layout = placeholderLayout(waveIds, groups, clampW);
   const pos = (id: string): Pos => moved[id] ?? layout[id] ?? { x: 0, y: 0 };
   const move = (id: string) => (dx: number, dy: number) =>
     setMoved((m) => {
@@ -191,7 +199,11 @@ export default function App() {
     });
 
   const sizes = useRef<Record<string, { w: number; h: number }>>({});
-  const sizeOf = (id: string, w: number, h: number) => ({ id, ...(sizes.current[id] ?? { w, h }) });
+  // Until a window is measured it is its (clamped) default size.
+  const sizeOf = (id: string, w: number, h: number) => ({
+    id,
+    ...(sizes.current[id] ?? { w: clampW(w), h }),
+  });
   const rectOf = (id: string, w: number, h: number): Rect => {
     const { w: sw, h: sh } = sizeOf(id, w, h);
     return { ...pos(id), w: sw, h: sh };
@@ -205,7 +217,7 @@ export default function App() {
   const coordsShown = coordsOpen && waveList.length > 0;
   const rects: Rect[] = [
     ...visible.flatMap(clusterOf),
-    ...(coordsShown ? [{ ...pos(COORDS_ID), w: COORDS_W, h: coordsH(waveList.length) }] : []),
+    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(waveList.length))] : []),
   ];
   const fitted = useRef(false);
   useEffect(() => {
@@ -278,7 +290,7 @@ export default function App() {
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
     },
-    ...(narrow ? { maxWidth: clampWindowWidth(Number.POSITIVE_INFINITY, vw) } : {}),
+    ...(narrow ? { maxWidth: phoneMaxWidth(vw) } : {}),
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -348,7 +360,8 @@ export default function App() {
   const tethers: Tether[] = visible.flatMap((id) =>
     (groups[id] ?? []).map((a) => ({
       id: a.id,
-      wave: { ...pos(id), w: WAVE_W },
+      // The rendered width: on a phone the wave window is clamped.
+      wave: rectOf(id, WAVE_W, WAVE_H),
       agent: pos(a.id),
       accent: accentOf(id),
     })),

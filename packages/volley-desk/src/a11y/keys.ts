@@ -4,8 +4,9 @@
  * arrange & fit; Escape closes the top dialog (settings, then the steering
  * panel, then Appearance). Modified keys are left to the browser (⌘F is find)
  * and a key a control already handled (`preventDefault`, or stopped like the
- * settings field's Escape) does nothing here. `useFocusTrap` keeps Tab inside
- * a modal.
+ * settings field's Escape) does nothing here. Inside a modal dialog only
+ * Escape reaches the Desk: the canvas behind the scrim keeps still.
+ * `useFocusTrap` keeps Tab inside a modal.
  */
 import { type RefObject, useEffect, useRef } from "react";
 
@@ -35,6 +36,10 @@ export function isTyping(target: EventTarget | null): boolean {
   );
 }
 
+/** A modal dialog owns the keyboard: `f` and `+` / `-` must not act on the canvas behind it. */
+export const inModal = (target: EventTarget | null): boolean =>
+  target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+
 export interface DeskKeys {
   stageRef: RefObject<HTMLElement | null>;
   panBy: (dx: number, dy: number) => void;
@@ -62,7 +67,7 @@ export function useDeskKeys(keys: DeskKeys): void {
         if (k.closeTop()) e.preventDefault();
         return;
       }
-      if (isTyping(e.target)) return;
+      if (isTyping(e.target) || inModal(e.target)) return;
       const pan = PAN[e.key];
       if (pan) {
         if (e.target !== k.stageRef.current) return;

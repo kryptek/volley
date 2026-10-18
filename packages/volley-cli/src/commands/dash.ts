@@ -198,7 +198,8 @@ Options:
   --legacy             Launch the old dashboard (packages/volley-dash) instead;
                        deprecated, removed in a later release
   --build              Run vite build + preview the production bundle
-  --port <N>           Override Vite's port (default: 5174; 5173 with --legacy)
+  --port <N>           Override Vite's port (dev default: 5174, 5173 with --legacy;
+                       --build: Vite preview's 4173)
   --broker-url <url>   MQTT broker URL passed to the Desk via
                        VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open               Open browser on start (default in dev mode)

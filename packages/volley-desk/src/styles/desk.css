@@ -358,7 +358,7 @@ code {
   color: var(--ink);
 }
 
-@media (max-width: 700px) {
+@media (max-width: 699.98px) {
   .topbar-mid {
     display: none;
   }

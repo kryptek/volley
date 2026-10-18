@@ -337,7 +337,10 @@ export function SettingsModal({ wave, config, transport, onClose }: SettingsModa
         tabIndex={-1}
         style={{ "--acc": accent } as CSSProperties}
         onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
+          if (e.key !== "Escape") return;
+          // Claimed, so the Desk's window-level Escape doesn't close the next dialog down too.
+          e.preventDefault();
+          onClose();
         }}
       >
         {/* A div, not <header>: outside sectioning content a header is a second banner landmark. */}

@@ -108,6 +108,23 @@ describe("App without WebGL", () => {
     expect(container.querySelector(".bg-layer")).toHaveAttribute("data-bg", "GridMotion");
   });
 
+  it("keeps liquid glass when the browser has WebGL", () => {
+    localStorage.setItem(
+      LOOK_STORAGE_KEY,
+      JSON.stringify({ bg: "none", chrome: "liquid", autoArrange: false }),
+    );
+    // Only the up-front probe sees a WebGL context; everything after it gets the setup's null.
+    const ctx = { getExtension: () => ({ loseContext: () => {} }) };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementationOnce(
+      (() => ctx) as unknown as HTMLCanvasElement["getContext"],
+    );
+    const { container } = renderApp();
+    const inners = [...container.querySelectorAll(".world .win-inner")];
+    expect(inners.length).toBeGreaterThan(0);
+    for (const el of inners) expect(el).toHaveClass("chrome-liquid");
+    expect(container.querySelector(".world .win-glass")).not.toBeNull();
+  });
+
   it("the Appearance panel lists everything when WebGL is there", () => {
     render(
       <Appearance look={LOOK0} setLook={() => {}} onClose={() => {}} onArrange={() => {}} webgl />,

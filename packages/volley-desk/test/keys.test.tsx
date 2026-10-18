@@ -95,19 +95,50 @@ describe("keyboard: dialogs", () => {
     fireEvent.click(chat);
     expect(document.querySelector(".steer")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
-    expect(screen.getByRole("dialog", { name: "Wave settings" })).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "Wave settings" });
+    // The focus trap puts focus in the modal, so that is where a real Escape lands.
+    expect(dialog.contains(document.activeElement)).toBe(true);
 
-    fireEvent.keyDown(document.body, { key: "Escape" });
+    // In a browser React flushes the modal's close before the event reaches the
+    // window listener, which would then close the next dialog down too; so the
+    // modal must claim its Escape before the event leaves React's root.
+    let claimed: boolean | undefined;
+    const spy = (e: KeyboardEvent) => {
+      claimed = e.defaultPrevented;
+    };
+    document.addEventListener("keydown", spy);
+    const notCancelled = fireEvent.keyDown(document.activeElement as HTMLElement, {
+      key: "Escape",
+    });
+    document.removeEventListener("keydown", spy);
+    expect(claimed).toBe(true);
+    expect(notCancelled).toBe(false);
     expect(screen.queryByRole("dialog", { name: "Wave settings" })).toBeNull();
     expect(document.querySelector(".steer")).not.toBeNull();
     expect(screen.getByRole("complementary", { name: "Appearance" })).toBeInTheDocument();
 
-    fireEvent.keyDown(document.body, { key: "Escape" });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(document.querySelector(".steer")).toBeNull();
     expect(screen.getByRole("complementary", { name: "Appearance" })).toBeInTheDocument();
 
-    fireEvent.keyDown(document.body, { key: "Escape" });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(screen.queryByRole("complementary", { name: "Appearance" })).toBeNull();
+  });
+
+  it("f, + and - leave the canvas alone while the settings modal is open", () => {
+    vi.useFakeTimers();
+    const { container } = renderApp();
+    fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
+    const dialog = screen.getByRole("dialog", { name: "Wave settings" });
+    const v0 = view(container);
+    const btn = within(dialog).getAllByRole("radio")[0] as HTMLElement;
+    btn.focus();
+    for (const key of ["f", "+", "=", "-"]) {
+      fireEvent.keyDown(btn, { key });
+      fireEvent.keyDown(dialog, { key });
+    }
+    expect(view(container)).toEqual(v0);
+    expect(container.querySelector(".world--anim")).toBeNull();
   });
 
   it("traps focus in the settings modal", () => {

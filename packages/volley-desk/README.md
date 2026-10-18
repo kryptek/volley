@@ -27,7 +27,7 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 - Drag empty space to pan. A plain wheel or two-finger scroll also pans.
 - Zoom around the cursor with ⌘/Ctrl + wheel or a trackpad pinch. Scale is clamped to 0.3–1.6.
 - Drag a title bar to move a window. The move is divided by the zoom, so the window tracks the pointer. A pointer-down anywhere on a window brings it to the front.
-- Touch: one finger on empty canvas pans; two fingers pinch-zoom around their midpoint and pan with it. Lifting one finger carries on panning with the other, without a jump.
+- Touch: one finger on empty canvas pans; two fingers pinch-zoom around their midpoint and pan with it, on empty canvas or over a window (anywhere but its title bar, a slider or a text field). Lifting one finger carries on panning with the other, without a jump, if it is on empty canvas.
 
 ### Keyboard
 
@@ -61,7 +61,7 @@ With `prefers-reduced-motion: reduce` the new-window entrance, the waiting Clawd
 
 ## Accessibility
 
-Windows are `section`s named by their wave, task and role; the agent tabs are `tablist` / `tab` with `aria-selected`; progress bars are `progressbar`s with `aria-valuenow` (indeterminate until the agent reports progress); narration is `aria-live="polite"` and the Needs-you banners are `role="status"`; the dock is a labelled `nav`. `test/a11y.test.tsx` runs axe on the demo canvas (and with Appearance, a steering panel and the settings modal open) and checks WCAG AA text contrast (4.5:1) for `--ink`, `--mute` and `--dim` on every window chrome over the Desk ground; `--dim` was lightened from the prototype's `#6f7890` to `#7c859d` to pass.
+Windows are `section`s named by their wave, task and role; the agent tabs are `tablist` / `tab` with `aria-selected`; progress bars are `progressbar`s with `aria-valuenow` (indeterminate until the agent reports progress); narration is `aria-live="polite"` and the Needs-you banners are `role="status"`; the dock is a labelled `nav`. The settings modal traps focus and owns the keyboard while open (only Escape, which closes it alone, reaches the Desk); the steering panel is a non-modal dialog, so it does not trap focus, and Escape closes it. `test/a11y.test.tsx` runs axe on the demo canvas (and with Appearance, a steering panel and the settings modal open) and checks WCAG AA text contrast (4.5:1) for `--ink`, `--mute` and `--dim` on every window chrome over the Desk ground; `--dim` was lightened from the prototype's `#6f7890` to `#7c859d` to pass.
 
 ## Layout
 

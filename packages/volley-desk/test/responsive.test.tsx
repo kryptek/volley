@@ -2,7 +2,8 @@ import { act, fireEvent, render, renderHook, screen } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import App from "../src/App";
 import { World } from "../src/canvas/World";
-import { type View, clampWindowWidth, useNarrow, useViewport } from "../src/canvas/useViewport";
+import { type View, clampWindowWidth, phoneMaxWidth, useViewport } from "../src/canvas/useViewport";
+import { TETHER_WAVE_DY } from "../src/look/Tethers";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 
@@ -55,6 +56,25 @@ describe("phone width (< 700 px)", () => {
     expect(clampWindowWidth(430, 600)).toBe(430);
     // Wide screens keep the prototype widths.
     expect(clampWindowWidth(620, 1200)).toBe(620);
+    expect(phoneMaxWidth(390)).toBe(366);
+    expect(phoneMaxWidth(600)).toBe(460);
+  });
+
+  it("tethers start at the clamped wave window's right edge", () => {
+    setWidth(390);
+    const { container } = renderApp();
+    const paths = [...container.querySelectorAll<SVGPathElement>(".tethers path")];
+    expect(paths.length).toBeGreaterThan(0);
+    const wins = [...container.querySelectorAll<HTMLElement>(".world section.win")].map((w) => ({
+      right: Number.parseFloat(w.style.left) + Number.parseFloat(w.style.width),
+      top: Number.parseFloat(w.style.top),
+    }));
+    for (const p of paths) {
+      const m = (p.getAttribute("d") ?? "").match(/^M(-?[\d.]+),(-?[\d.]+) /);
+      if (!m) throw new Error(`unexpected path ${p.getAttribute("d")}`);
+      const [x1, y1] = [Number(m[1]), Number(m[2])];
+      expect(wins.some((w) => w.right === x1 && w.top + TETHER_WAVE_DY === y1)).toBe(true);
+    }
   });
 
   it("wide screens keep the counts and full widths; a resize to phone width collapses them", () => {
@@ -69,17 +89,6 @@ describe("phone width (< 700 px)", () => {
     expect(container.querySelector(".topbar .topbar-mid")).toBeNull();
     expect(Math.max(...winWidths(container))).toBe(366);
   });
-
-  it("useNarrow follows the window width", () => {
-    setWidth(390);
-    const { result } = renderHook(() => useNarrow());
-    expect(result.current).toBe(true);
-    act(() => {
-      setWidth(900);
-      window.dispatchEvent(new Event("resize"));
-    });
-    expect(result.current).toBe(false);
-  });
 });
 
 let api: ReturnType<typeof useViewport>;
@@ -88,7 +97,15 @@ function Stage({ initial }: { initial: View }) {
   return (
     <div data-testid="stage" ref={api.stageRef} {...api.stageHandlers}>
       <World view={api.view}>
-        <section className="win" data-testid="win" />
+        <section className="win" data-testid="win">
+          <div className="win-bar" data-testid="bar" />
+          <div className="win-body" data-testid="body">
+            <button type="button" data-testid="btn">
+              go
+            </button>
+            <input type="range" aria-label="level" data-testid="slider" />
+          </div>
+        </section>
       </World>
     </div>
   );
@@ -133,17 +150,81 @@ describe("touch: pan and two-finger pinch", () => {
     fireEvent.pointerUp(stage, t(1, 110, 105));
   });
 
-  it("a second finger landing on a window does not start a pinch", () => {
+  const t = (pointerId: number, clientX: number, clientY: number, pointerType = "touch") => ({
+    pointerId,
+    pointerType,
+    clientX,
+    clientY,
+  });
+
+  it("a pinch with one finger on a window body zooms like one on empty canvas", () => {
     render(<Stage initial={{ x: 0, y: 0, s: 0.5 }} />);
     const stage = screen.getByTestId("stage");
-    fireEvent.pointerDown(stage, { pointerId: 1, pointerType: "touch", clientX: 0, clientY: 0 });
-    fireEvent.pointerDown(screen.getByTestId("win"), {
-      pointerId: 2,
-      pointerType: "touch",
-      clientX: 100,
-      clientY: 0,
-    });
-    fireEvent.pointerMove(stage, { pointerId: 2, pointerType: "touch", clientX: 300, clientY: 0 });
-    expect(api.view.s).toBe(0.5);
+    const body = screen.getByTestId("body");
+    fireEvent.pointerDown(stage, t(1, 100, 100));
+    fireEvent.pointerDown(body, t(2, 200, 100));
+    // Touch pointers stay with the element they went down on; moves bubble to the stage.
+    fireEvent.pointerMove(body, t(2, 300, 100));
+    expect(api.view.s).toBeCloseTo(1);
+    expect((200 - api.view.x) / api.view.s).toBeCloseTo(150 / 0.5);
+    fireEvent.pointerUp(body, t(2, 300, 100));
+    fireEvent.pointerUp(stage, t(1, 100, 100));
+  });
+
+  it("a pinch with both fingers on a window zooms; one finger left on a window does not pan", () => {
+    render(<Stage initial={{ x: 0, y: 0, s: 0.5 }} />);
+    const body = screen.getByTestId("body");
+    fireEvent.pointerDown(body, t(1, 100, 100));
+    fireEvent.pointerMove(body, t(1, 130, 120));
+    expect(api.view).toEqual({ x: 0, y: 0, s: 0.5 });
+    fireEvent.pointerDown(body, t(2, 230, 120));
+    fireEvent.pointerMove(body, t(2, 330, 120));
+    expect(api.view.s).toBeCloseTo(1);
+    fireEvent.pointerUp(body, t(2, 330, 120));
+    const before = { ...api.view };
+    fireEvent.pointerMove(body, t(1, 160, 140));
+    expect(api.view).toEqual(before);
+    fireEvent.pointerUp(body, t(1, 160, 140));
+  });
+
+  it("a finger on a button in a window (a feed row) counts toward a pinch", () => {
+    render(<Stage initial={{ x: 0, y: 0, s: 0.5 }} />);
+    const stage = screen.getByTestId("stage");
+    const btn = screen.getByTestId("btn");
+    fireEvent.pointerDown(stage, t(1, 100, 100));
+    fireEvent.pointerDown(btn, t(2, 200, 100));
+    fireEvent.pointerMove(btn, t(2, 300, 100));
+    expect(api.view.s).toBeCloseTo(1);
+  });
+
+  it("title bars, sliders and the mouse on a window never count toward a pinch", () => {
+    render(<Stage initial={{ x: 0, y: 0, s: 0.5 }} />);
+    const stage = screen.getByTestId("stage");
+    for (const id of ["bar", "slider"]) {
+      const el = screen.getByTestId(id);
+      fireEvent.pointerDown(stage, t(1, 0, 0));
+      fireEvent.pointerDown(el, t(2, 100, 0));
+      fireEvent.pointerMove(el, t(2, 300, 0));
+      expect(api.view.s).toBe(0.5);
+      fireEvent.pointerUp(el, t(2, 300, 0));
+      fireEvent.pointerUp(stage, t(1, 0, 0));
+    }
+    const body = screen.getByTestId("body");
+    fireEvent.pointerDown(body, t(3, 10, 10, "mouse"));
+    fireEvent.pointerMove(body, t(3, 60, 60, "mouse"));
+    expect(api.view).toEqual({ x: 0, y: 0, s: 0.5 });
+    fireEvent.pointerUp(body, t(3, 60, 60, "mouse"));
+  });
+
+  it("a cancelled touch (the browser took it to scroll) leaves the pinch", () => {
+    render(<Stage initial={{ x: 0, y: 0, s: 0.5 }} />);
+    const stage = screen.getByTestId("stage");
+    const body = screen.getByTestId("body");
+    fireEvent.pointerDown(body, t(1, 100, 100));
+    fireEvent.pointerCancel(body, t(1, 100, 100));
+    fireEvent.pointerDown(stage, t(2, 200, 100));
+    fireEvent.pointerMove(stage, t(2, 220, 100));
+    // A plain one-finger pan, not a pinch against a stale finger.
+    expect(api.view).toEqual({ x: 20, y: 0, s: 0.5 });
   });
 });
