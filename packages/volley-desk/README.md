@@ -50,6 +50,9 @@ src/windows/wave/NeedsYou   Needs-you / no-coordinator banners, agent attention 
 src/topbar/TopBar.tsx       top bar: counts, "N need you" pill, coordinators/notify/sound toggles
 src/notify/                 notification + chime on a move into "you" (volley-dash's settings key)
 src/styles/attention.css    pulse (default Needs-you effect), banners, coordinators, pill
+src/settings/               settings modal (wave gear): rows built from spec/schemas/config.schema.json
+                            (schemaRows), config_set requests + acks (configTransport), SettingsModal
+src/styles/settings.css     settings modal rules
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
 ```
@@ -71,6 +74,13 @@ scripts/check-react-bits.ts allow-list check, run in CI
 ### Attention
 
 Each wave and agent window gets a tier. **Needs you** (pulsing border): the wave's coordinator is waiting for an answer or is gone (reaped, or silent for longer than `claim_after_s`), an open decision on a wave this browser owns (`?me=`), or a stuck agent with no live coordinator. **Coordinator handling** (amber ring): an open decision, a merge-ready gate or a stuck agent while the coordinator is live; after 15 minutes unresolved it becomes Needs you. (The Desk also reads `escalate_after_min` from the wave's `effective_config` or the retained config, but that key is not yet a SPEC §4.6.4 tunable, so volleyd never publishes it and 15 minutes always applies.) Coordinator silence counts only time the Desk was connected and settled, so a broker outage or a sleeping laptop does not make every coordinator look gone. A finished (`complete` / `stopped`) wave needs nobody: it shows Complete / Stopped in the coordinators window and no banner. **Info**: an open PR or a lease wait. The top-bar pill counts everything at Needs you. A browser notification and the chime fire when something moves into Needs you (one per wave: agents inside a wave that already needs you are covered by it), never while the store is settling after page load or a reconnect; the bell and speaker toggles share volley-dash's `volley-dash:notify` setting.
+## Settings
+
+The gear on a wave window opens the settings modal. Its rows come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
+
+- **Global** shows the retained `volley/_waves/_config`. A change sends one `config_set` request to the daemon's mailbox (`volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`). A slider sends once the user lets go: presses and drags within 400 ms of each other become one request with the settled value. The row then shows the ack: `applied · v<version>`, the rejected paths with their reasons, `failed ·` for a refused publish or daemon error, or `no answer ·` when volleyd does not reply in time (the change may still have applied).
+- **This wave** shows the wave's `effective_config` and is read-only. volleyd applies `config_set` to the global config only. Per-wave values come from the wave file's `config:` block.
+- **Without broker credentials** the modal is read-only, and each row offers its exact `volleyd config set <path> <value>` line to copy. Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand. The Desk has no sign-in yet, so this is the current state.
 
 ## React Bits
 
@@ -85,6 +95,7 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 | Component | Install command | Used by |
 |---|---|---|
 | StatusMark | `bunx --bun shadcn@latest add @react-bits/StatusMark-TS-CSS --path src/rb/StatusMark --yes` | agent window title (`src/windows/agent/AgentWindow.tsx`) |
+| ElasticSlider | `bunx --bun shadcn@latest add @react-bits/ElasticSlider-TS-CSS --path src/rb/ElasticSlider --yes` | settings rows (`src/settings/SettingsModal.tsx`) |
 
 **Allow-list.** Only the free components that the approved prototype uses are allowed. The list is in `scripts/check-react-bits.ts` (`REACT_BITS_ALLOW_LIST`). `bun run check:react-bits` fails when any entry under `src/rb/` is not on it, and CI runs it as the *React Bits allow-list* job. Pro components are never allowed.
 

@@ -22,6 +22,7 @@ import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
+import { SettingsModal } from "./settings/SettingsModal";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
@@ -133,6 +134,12 @@ export default function App() {
   const gateSince = useGateSince(state, settling);
   const ctxOpts = { now, me, gateSince, offline };
   const ctx = ctxFrom(state, ctxOpts);
+  const [settings, setSettings] = useState<string | null>(null);
+  // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
+  const settingsWaveGone = settings !== null && !state.waves[settings];
+  useEffect(() => {
+    if (settingsWaveGone) setSettings(null);
+  }, [settingsWaveGone]);
 
   const groups = agentsByWave(state);
   const firstStart = useRef<Record<string, number>>({});
@@ -299,6 +306,7 @@ export default function App() {
                     />
                   )
                 }
+                onSettings={setSettings}
               />
             );
           })}
@@ -333,6 +341,16 @@ export default function App() {
         notify={notify}
         setNotify={setNotify}
       />
+
+      {settings !== null && state.waves[settings] && (
+        // No config transport until the Desk signs in with broker credentials: read-only.
+        <SettingsModal
+          wave={state.waves[settings]}
+          config={state.config}
+          transport={null}
+          onClose={() => setSettings(null)}
+        />
+      )}
     </div>
   );
 }
