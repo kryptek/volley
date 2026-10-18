@@ -25,6 +25,8 @@ export const BORN_MS = 4000;
 export interface FrameProps {
   id: string;
   title: ReactNode;
+  /** Accessible name for the window; defaults to `title` when that is a string. */
+  label?: string;
   accent: string;
   pos: { x: number; y: number };
   width: number;
@@ -110,7 +112,7 @@ export function Frame(p: FrameProps) {
         } as CSSProperties
       }
       onPointerDownCapture={p.onFocus}
-      aria-label={typeof p.title === "string" ? p.title : undefined}
+      aria-label={p.label ?? (typeof p.title === "string" ? p.title : undefined)}
     >
       {p.wrapAttention ? p.wrapAttention(inner) : inner}
     </section>

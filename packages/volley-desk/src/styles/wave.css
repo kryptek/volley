@@ -1,0 +1,153 @@
+/*
+ * Wave window, ported from the prototype styles.css: the Claude glyph, the
+ * dependency graph, the wave file and the progress rail. The Needs-you banner
+ * rules arrive with the banners.
+ */
+
+/* Claude glyph */
+.clawd {
+  flex: none;
+  image-rendering: pixelated;
+}
+.clawd--wait {
+  animation: hop 1.1s ease-in-out infinite;
+}
+@keyframes hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-3px);
+  }
+}
+
+/* ----------------------------------------------------------- wave window */
+.wave-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dag-scroll {
+  overflow-x: auto;
+}
+.dag {
+  display: block;
+}
+.dag-edge {
+  fill: none;
+  stroke: rgba(214, 224, 255, 0.3);
+  stroke-width: 1.5;
+}
+.dag-node rect {
+  fill: rgba(255, 255, 255, 0.04);
+  stroke: rgba(214, 224, 255, 0.18);
+}
+.dag-id {
+  font: 600 13px var(--f-mono);
+}
+.dag-stage {
+  font: 11.5px var(--f-ui);
+  fill: var(--mute);
+}
+.dag-issue {
+  font: 11px var(--f-mono);
+  fill: var(--dim);
+}
+.dag-node.st-merged rect {
+  fill: rgba(74, 222, 128, 0.1);
+  stroke: rgba(74, 222, 128, 0.45);
+}
+.dag-node.st-merge_ready rect {
+  fill: rgba(110, 231, 249, 0.1);
+  stroke: rgba(110, 231, 249, 0.55);
+}
+.dag-node.st-decision rect {
+  fill: rgba(251, 191, 36, 0.1);
+  stroke: rgba(251, 191, 36, 0.6);
+}
+.dag-node.st-queued rect {
+  stroke-dasharray: 4 4;
+}
+.dag-node.st-cancelled {
+  opacity: 0.45;
+}
+.dag-node.st-cancelled rect {
+  stroke-dasharray: 2 4;
+}
+.dag-node.st-implement rect,
+.dag-node.st-review rect,
+.dag-node.st-fixup rect {
+  stroke: color-mix(in srgb, var(--acc) 60%, transparent);
+}
+.yaml {
+  margin: 0;
+  font: 11.5px / 1.6 var(--f-mono);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 170px;
+  white-space: pre;
+  color: #cfd6e6;
+}
+.y-k {
+  color: #8fb4ff;
+}
+.y-v {
+  color: #f0d58a;
+}
+.y-c {
+  color: var(--dim);
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rail-bar {
+  display: flex;
+  gap: 4px;
+  height: 8px;
+}
+.rail-seg {
+  flex: 1;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.rail-seg > span {
+  display: block;
+  height: 100%;
+  background: var(--acc);
+  border-radius: 4px;
+  transition: width 0.8s ease;
+}
+.rail-seg.st-merged > span {
+  background: var(--ok);
+}
+.rail-seg.st-decision > span {
+  background: var(--amber);
+}
+.rail-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--mute);
+}
+.rail-pct {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clawd--wait {
+    animation: none;
+  }
+}
