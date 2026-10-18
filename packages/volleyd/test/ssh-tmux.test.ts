@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExecOptions, ExecResult } from "../src/exec";
-import { type RemoteStep, mintConsentToken, mintScriptToken } from "../src/fence";
+import { type RemoteStep, mintConsentToken, mintScriptToken, sealLaunchScript } from "../src/fence";
 import { type RemoteHostSpec, SshTmuxHost, resolveRemoteHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
@@ -17,6 +17,16 @@ const SPEC: RemoteHostSpec = {
   volley_dir: "/home/dev/src/volley",
   tunnel: { remote_port: 21883, supervise: true },
 };
+/** A launch script volleyd would render, sealed for `cwd` (the fence starts it only so). */
+const sealed = (cwd: string) =>
+  sealLaunchScript(
+    cwd,
+    renderLaunchScript({
+      hooksDir: "/opt/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+    }),
+  );
 const SSH = [
   "ssh",
   "-T",
@@ -93,7 +103,7 @@ describe("SshTmuxHost", () => {
 
   it("a failed remote write throws", async () => {
     const r = remote((s) => (argvIs("base64")(s) ? { code: 1, stderr: "disk full" } : undefined));
-    await expect(r.host.writeFile("/x/.volley/y", "z")).rejects.toThrow(/disk full/);
+    await expect(r.host.writeFile("/x/.volley/brief.md", "z")).rejects.toThrow(/disk full/);
   });
 
   it("launch: tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'", async () => {
@@ -102,6 +112,7 @@ describe("SshTmuxHost", () => {
       cwd: "/home/dev/wt/w1/T1-implementer",
       name: "w1 T1 implementer",
       command: LAUNCH_COMMAND,
+      launch: sealed("/home/dev/wt/w1/T1-implementer"),
     });
     expect(ws).toEqual({ workspace: "w1-T1-implementer" });
     expect(r.steps().map((s) => s.argv)).toEqual([
@@ -128,6 +139,7 @@ describe("SshTmuxHost", () => {
       cwd: "/wt",
       name: "w1 T1 implementer",
       command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
     });
     expect(ws.workspace).toBe("w1-T1-implementer-2");
   });
@@ -141,7 +153,12 @@ describe("SshTmuxHost", () => {
           : undefined,
     );
     const err = await r.host
-      .launch({ cwd: "/wt", name: "w1 T1 implementer", command: LAUNCH_COMMAND })
+      .launch({
+        cwd: "/wt",
+        name: "w1 T1 implementer",
+        command: LAUNCH_COMMAND,
+        launch: sealed("/wt"),
+      })
       .catch((e: unknown) => e as SpawnError);
     expect(err).toMatchObject({ code: "LAUNCH_FAILED" });
     expect((err as Error).message).toContain("tmux: command not found");
@@ -198,10 +215,10 @@ describe("SshTmuxHost", () => {
   it("sendKeys / sendText map to tmux send-keys (text literal, after --)", async () => {
     const r = remote();
     await r.host.sendKeys("w1-T1-implementer", "Enter");
-    await r.host.sendText("w1-T1-implementer", "-not an option");
+    await r.host.sendText("w1-T1-implementer", LAUNCH_COMMAND, { launch: sealed("/wt") });
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
-      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "-not an option"],
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
     ]);
   });
 
@@ -330,15 +347,17 @@ describe("SshTmuxHost", () => {
     const r = remote((s) =>
       argvIs("cat", "/src/r/.volley/brief-extra.md")(s)
         ? { stdout: "notes\n" }
-        : argvIs("cat", "/none")(s)
+        : argvIs("cat", "/src/q/.volley/brief-extra.md")(s)
           ? { code: 1, stderr: "No such file" }
-          : argvIs("cat", "/down")(s)
+          : argvIs("cat", "/src/d/.volley/brief-extra.md")(s)
             ? { code: 255, stderr: "ssh: connect" }
             : undefined,
     );
     expect(await r.host.readFile("/src/r/.volley/brief-extra.md")).toBe("notes\n");
-    expect(await r.host.readFile("/none")).toBeNull();
-    await expect(r.host.readFile("/down")).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+    expect(await r.host.readFile("/src/q/.volley/brief-extra.md")).toBeNull();
+    await expect(r.host.readFile("/src/d/.volley/brief-extra.md")).rejects.toMatchObject({
+      code: "LAUNCH_FAILED",
+    });
     // readTrust over a failed ssh is not "untrusted" either.
     const down = remote(() => ({ code: 255, stderr: "ssh: connect" }));
     await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });

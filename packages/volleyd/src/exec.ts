@@ -44,6 +44,8 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
     ...(opts.script !== undefined ? { script: opts.script } : {}),
     ...(opts.remote !== undefined ? { remote: opts.remote } : {}),
+    ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
+    ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
   });
   if (opts.remote !== undefined && opts.input !== undefined) {
     throw new FenceError("ssh bash -s", "a raw input next to a fenced remote script");

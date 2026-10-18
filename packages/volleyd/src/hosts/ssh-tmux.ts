@@ -14,7 +14,7 @@ import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES } from "../worktree";
-import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "./host";
+import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
 export interface RemoteHostSpec {
@@ -138,7 +138,7 @@ export class SshTmuxHost implements RemoteHost {
   /** Run steps on the box as one fenced `bash -s` script. */
   run(
     steps: RemoteStep[],
-    opts: Pick<ExecOptions, "consent" | "timeoutMs"> = {},
+    opts: Pick<ExecOptions, "consent" | "timeoutMs" | "launch" | "modelSwitch"> = {},
   ): Promise<ExecResult> {
     return this.localExec(
       [
@@ -156,6 +156,8 @@ export class SshTmuxHost implements RemoteHost {
         remote: { steps },
         timeoutMs: opts.timeoutMs ?? DAEMON_DEFAULTS.remote_exec_timeout_ms,
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
+        ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
+        ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
       },
     );
   }
@@ -293,11 +295,10 @@ export class SshTmuxHost implements RemoteHost {
     const session = await this.freeSession(sessionName(spec.name)).catch((e: unknown) => {
       throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`);
     });
-    const r = await this.run([
-      {
-        argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND],
-      },
-    ]).catch((e: unknown) => {
+    const r = await this.run(
+      [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
+      spec.launch !== undefined ? { launch: spec.launch } : {},
+    ).catch((e: unknown) => {
       throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`);
     });
     if (r.code !== 0) {
@@ -334,8 +335,11 @@ export class SshTmuxHost implements RemoteHost {
     await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), key] }]);
   }
 
-  async sendText(workspace: string, text: string): Promise<void> {
-    await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), "-l", "--", text] }]);
+  async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
+    await this.run(
+      [{ argv: ["tmux", "send-keys", "-t", pane(workspace), "-l", "--", text] }],
+      tokens,
+    );
   }
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {

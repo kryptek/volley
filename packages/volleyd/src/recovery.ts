@@ -1,5 +1,6 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
+import type { ModelSwitchToken } from "./fence";
 import type { Host } from "./hosts/host";
 import type { JournalEvent, TaskId } from "./types";
 import { type AgentWatch, sameModel } from "./verify";
@@ -142,11 +143,12 @@ export async function switchModel(r: {
   host: Host;
   workspace: string;
   watch: AgentWatch;
-  model: string;
+  /** The approved switch (mintModelSwitchToken): the fence types `/model` only with it. */
+  token: ModelSwitchToken;
   timeoutMs: number;
 }): Promise<{ ok: boolean; registry: Record<string, unknown> | null }> {
   const before = r.watch.state.hookRegistryAt;
-  await r.host.sendText(r.workspace, `/model ${r.model}`);
+  await r.host.sendText(r.workspace, `/model ${r.token.model}`, { modelSwitch: r.token });
   await r.host.sendKeys(r.workspace, "Enter");
   const ok = await r.watch.waitFor((s) => {
     const reg = s.hookRegistry;
@@ -155,7 +157,7 @@ export async function switchModel(r: {
       s.hookRegistryAt !== before &&
       reg.model_source === "harness-hook" &&
       typeof reg.model === "string" &&
-      sameModel(reg.model, r.model)
+      sameModel(reg.model, r.token.model)
     );
   }, r.timeoutMs);
   return { ok, registry: r.watch.state.hookRegistry };

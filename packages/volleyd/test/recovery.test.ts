@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { registryTopic } from "volley-mcp/topics";
+import { mintModelSwitchToken } from "../src/fence";
 import {
   CREDIT_CLASS,
   LIMITED_CLASS,
@@ -171,7 +172,7 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
       host,
       workspace: "workspace:1",
       watch,
-      model: "claude-sonnet-5-5",
+      token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 2000,
     });
     expect(r.ok).toBe(true);
@@ -193,7 +194,7 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
       host,
       workspace: "workspace:1",
       watch,
-      model: "claude-sonnet-5-5",
+      token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 300,
     });
     expect(wrong.ok).toBe(false);
@@ -212,7 +213,7 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
       host,
       workspace: "workspace:1",
       watch,
-      model: "claude-sonnet-5-5",
+      token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 300,
     });
     expect(r.ok).toBe(false);
@@ -229,7 +230,7 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
       host,
       workspace: "workspace:1",
       watch,
-      model: "claude-sonnet-5-5",
+      token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 1000,
     });
     // The identical envelope again (same wall_time): a new object in the watch, the same entry.

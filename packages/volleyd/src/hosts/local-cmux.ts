@@ -6,7 +6,7 @@ import type { ExecFn } from "../exec";
 import type { ConsentToken } from "../fence";
 import { SpawnError } from "../spawn-error";
 import { addWorktree } from "../worktree";
-import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "./host";
+import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
 
 /**
  * The local host: worktrees on this machine, agents in cmux workspaces. Every command goes
@@ -37,16 +37,10 @@ export class LocalCmuxHost implements Host {
   }
 
   async launch(spec: LaunchSpec): Promise<{ workspace: string }> {
-    const r = await this.exec([
-      "cmux",
-      "new-workspace",
-      "--cwd",
-      spec.cwd,
-      "--name",
-      spec.name,
-      "--command",
-      spec.command,
-    ]).catch((e: unknown) => {
+    const r = await this.exec(
+      ["cmux", "new-workspace", "--cwd", spec.cwd, "--name", spec.name, "--command", spec.command],
+      spec.launch !== undefined ? { launch: spec.launch } : {},
+    ).catch((e: unknown) => {
       throw new SpawnError(
         "LAUNCH_FAILED",
         `cmux new-workspace: ${e instanceof Error ? e.message : String(e)}`,
@@ -75,8 +69,8 @@ export class LocalCmuxHost implements Host {
     await this.exec(["cmux", "send-key", "--workspace", workspace, key]);
   }
 
-  async sendText(workspace: string, text: string): Promise<void> {
-    await this.exec(["cmux", "send", "--workspace", workspace, text]);
+  async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
+    await this.exec(["cmux", "send", "--workspace", workspace, text], tokens);
   }
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {

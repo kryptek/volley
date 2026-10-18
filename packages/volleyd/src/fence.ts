@@ -1,5 +1,6 @@
-import { basename } from "node:path";
-import { shq } from "./launch";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
 
 /**
  * The authority fence: a code-level policy over every external command volleyd runs.
@@ -23,18 +24,38 @@ import { shq } from "./launch";
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
  *     branch --list | merge-base | show
- *   gh issue view · gh pr view | list | checks · gh run list | view | watch · gh api (GET only)
- *   cmux new-workspace | list-workspaces | send | send-key | read-screen | ping
- *   claude (any arguments)
+ *     worktree add needs -b <branch> or --detach (never checks out an existing branch), and the
+ *     new branch is never main/master (in any case); fetch takes a remote name or a network URL
+ *     (https, ssh, git, user@host:path — never a local path) and its refspecs only write
+ *     refs/remotes/…
+ *   gh issue view · gh pr view | list | checks · gh run list | view | watch ·
+ *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
+ *     segment; no request headers)
+ *   cmux — exact argv shapes only, because cmux types into an agent's shell:
+ *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
+ *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
+ *     send --workspace <ref> <text>   text: TYPED_TEXT only
+ *     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
+ *     list-workspaces · ping
+ *   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
+ *     which the launch commands above run
  *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
  *   volley auth rm-agent <agent_id> [--no-reload]
- *   launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
+ *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
+ *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
  *   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
  *     memory_pressure (no arguments: report only) · docker info --format {{json .}}
  *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+ *
+ * TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
+ *   with its token, checked by identity like consent tokens:
+ *     LAUNCH_COMMAND   with a LaunchToken (`sealLaunchScript`: volleyd rendered that launch.sh)
+ *     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
+ *                      minted when an approved model_switch decision is acted on); <id> is a
+ *                      MODEL_ID, the wave-file schema's `model` pattern
  *
  * SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
  *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -48,12 +69,22 @@ import { shq } from "./launch";
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
- *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only) |
- *     capture-pane | send-keys | has-session — kill-session = CONSENT; no tmux global options
- *   mkdir -p <path>… · cat <path>… · chmod <octal> <path>… · nc -z 127.0.0.1 <port>
+ *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
+ *     the LaunchToken sealed for <dir>) | capture-pane | has-session |
+ *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
+ *     kill-session = CONSENT; no tmux global options
+ *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
+ *     nc -z 127.0.0.1 <port>
+ *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+ *     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
- *     077, and only to the files volleyd writes: an absolute path inside a `.volley/` directory
- *     or ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`
+ *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
+ *     (agent.json, brief.md, launch.sh, review.md, findings.md, findings.json, rebase.md —
+ *     spelled exactly, directly inside `.volley/`, so no write there is a git config, HEAD,
+ *     gitfile or hook, or a case variant of launch.sh), an absolute path ending in `/ISSUE.md`
+ *     or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh` (what the
+ *     tmux session runs) is written whole, never appended, and its content must be exactly
+ *     `renderLaunchScript` of valid values (LAUNCH_SCRIPT_VARS)
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json
@@ -113,6 +144,56 @@ export function mintScriptToken(path: string): ScriptToken {
   return token;
 }
 
+const switches = new WeakSet<object>();
+
+/**
+ * Approval of one model switch: `/model <model>` is typed into an agent's terminal only with the
+ * token naming that model. Only `mintModelSwitchToken` creates one (checked by identity).
+ */
+export interface ModelSwitchToken {
+  readonly model: string;
+  readonly decision_id: string;
+}
+
+/** Callers: the daemon, acting on an approved model_switch decision (runModelSwitch) only. */
+export function mintModelSwitchToken(model: string, decisionId: string): ModelSwitchToken {
+  if (!MODEL_ID.test(model))
+    throw new FenceError(`/model ${JSON.stringify(model)}`, "not a model id");
+  const token = Object.freeze({ model, decision_id: decisionId });
+  switches.add(token);
+  return token;
+}
+
+const launches = new WeakSet<object>();
+
+/**
+ * Proof that the `.volley/launch.sh` in `cwd` is one volleyd rendered: LAUNCH_COMMAND (which runs
+ * it) is started there or typed only with one. Only `sealLaunchScript` creates one.
+ */
+export interface LaunchToken {
+  readonly cwd: string;
+}
+
+/**
+ * Seal the launch script volleyd is about to write to `<worktree>/.volley/launch.sh`: throws
+ * `FenceError` unless `worktree` is a clean absolute path and `content` is exactly what
+ * `renderLaunchScript` renders (LAUNCH_SCRIPT_VARS). Callers: spawn, before the write.
+ */
+export function sealLaunchScript(worktree: string, content: string): LaunchToken {
+  if (!absPath(worktree))
+    throw new FenceError("launch.sh", "the worktree is not a clean absolute path");
+  if (!isLaunchScript(content))
+    throw new FenceError("launch.sh", "only a script renderLaunchScript renders");
+  const token = Object.freeze({ cwd: worktree });
+  launches.add(token);
+  return token;
+}
+
+const sealedFor = (opts: FenceOptions, cwd?: string) =>
+  opts.launch !== undefined &&
+  launches.has(opts.launch) &&
+  (cwd === undefined || opts.launch.cwd === cwd);
+
 /**
  * One command of a remote script. `stdin` (base64 text) and `stdout` (a file to write, or with
  * `append` to append to) are for `base64 -d` only: that is how files reach a remote host.
@@ -136,6 +217,10 @@ export interface FenceOptions {
   script?: ScriptToken;
   /** For `ssh … bash -s` only: the remote script, which `exec` renders onto the child's stdin. */
   remote?: RemoteScript;
+  /** For starting or typing LAUNCH_COMMAND: the sealed launch script. */
+  launch?: LaunchToken;
+  /** For typing `/model <id>`: the approved switch. */
+  modelSwitch?: ModelSwitchToken;
 }
 
 type Verdict =
@@ -197,8 +282,61 @@ const DIFF_OUTPUT = [
   "-s",
 ];
 
-/** A positional that names a transport helper (`ext::…`, `fd::…`) can run a command. */
-const notTransport = (a: string) => !/^[A-Za-z0-9+.-]+::/.test(a);
+/** A git remote's name (`origin`): never a path (`.`, `/tmp/repo`) or a transport helper. */
+const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** A network URL: `https|ssh|git://<host>…` or scp-like `user@host:path` (no `file://`). */
+const NETWORK_URL =
+  /^(?:(?:https|ssh|git):\/\/[A-Za-z0-9_\[]|[A-Za-z0-9_][^\s:/@]*@[A-Za-z0-9_][^\s:/]*:)\S*$/;
+
+/**
+ * `git fetch [<repository>] [<refspec>…]`: the repository is a remote name or a network URL
+ * (never a local path or a transport helper); a refspec may write only remote-tracking refs, so
+ * `+HEAD:refs/heads/main`, `+feat:main` or `main:main` can never move a local branch.
+ */
+function fetchPositionals(args: readonly string[]): Verdict {
+  const valued = GIT_SPECS.fetch?.valued ?? [];
+  const pos: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (valued.includes(a)) i++;
+    else if (!a.startsWith("-") || a === "-") pos.push(a);
+  }
+  const [repo, ...refspecs] = pos;
+  if (repo !== undefined && !REMOTE_NAME.test(repo) && !NETWORK_URL.test(repo))
+    return deny(`git fetch ${repo} (a remote name or a network URL only)`);
+  for (const r of refspecs) {
+    const colon = r.indexOf(":");
+    const src = colon === -1 ? r : r.slice(0, colon);
+    const dst = colon === -1 ? undefined : r.slice(colon + 1);
+    const ok =
+      src !== "" &&
+      src !== "+" &&
+      (dst === undefined ? !src.startsWith("+") : dst.startsWith("refs/remotes/"));
+    if (!ok) return deny(`git fetch ${r} (refspecs write refs/remotes/ only)`);
+  }
+  return ALLOW;
+}
+
+const PROTECTED_BRANCHES = new Set(["main", "master"]);
+
+/**
+ * `git worktree add` must create its own branch (`-b <new>`, never main/master) or detach:
+ * without either, git checks out an existing branch (`add /w main`, or `add /w/main`, which
+ * DWIMs to the branch named like the directory), and commits would land on it.
+ */
+function worktreeAddBranch(args: readonly string[]): Verdict {
+  let branch: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === "-b") branch = args[++i];
+    else if (a.startsWith("-b") && a.length > 2) branch = a.slice(2);
+  }
+  if (branch === undefined && !args.includes("--detach"))
+    return deny("git worktree add (without -b <branch> or --detach)");
+  if (branch !== undefined && PROTECTED_BRANCHES.has(branch.toLowerCase()))
+    return deny(`git worktree add -b ${branch}`);
+  return ALLOW;
+}
 
 const GIT_SPECS: Record<string, OptSpec> = {
   "worktree add": {
@@ -208,7 +346,6 @@ const GIT_SPECS: Record<string, OptSpec> = {
   fetch: {
     flags: ["--prune", "-p", "--prune-tags", "--tags", "--no-tags", "--quiet", "-q", "--all"],
     valued: ["--depth"],
-    positional: notTransport,
   },
   "rev-parse": {
     flags: [
@@ -383,33 +520,42 @@ const GH_SPECS: Record<string, OptSpec> = {
     valued: ["--interval", "-i", "--repo", "-R"],
   },
   // No --input / -F / --field (request bodies and @file uploads), no --hostname (where the
-  // token is sent). The method is checked separately: GET only.
+  // token is sent), no -H / --header (X-HTTP-Method-Override turns a GET into a write). The
+  // method is checked separately: GET only; so is the endpoint: never graphql (mutations).
   api: {
     flags: ["--paginate", "--slurp", "--include", "-i", "--silent"],
-    valued: [
-      "-X",
-      "--method",
-      "-f",
-      "--raw-field",
-      "-H",
-      "--header",
-      "--jq",
-      "-q",
-      "--template",
-      "-t",
-      "--cache",
-    ],
+    valued: ["-X", "--method", "-f", "--raw-field", "--jq", "-q", "--template", "-t", "--cache"],
   },
 };
 
-const CMUX_ALLOW = new Set([
-  "new-workspace",
-  "list-workspaces",
-  "send",
-  "send-key",
-  "read-screen",
-  "ping",
-]);
+/**
+ * A model id (or alias) as `/model` and `claude --model` take it: `claude-opus-5-5`, `opus`,
+ * `claude-x[1m]`, provider-qualified ids (`us.anthropic.claude-x-v1:0`, `claude-x@20250805`, an
+ * ARN). One word, no shell syntax. The wave-file schema's `model` pattern is this regex's source
+ * (a test keeps the two equal), so `volleyd validate` refuses what the fence would.
+ */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\[[A-Za-z0-9]{1,16}\])?$/;
+
+/**
+ * TYPED_TEXT: why `text` may not be typed into an agent's terminal (cmux send, tmux send-keys
+ * -l), or null when it may. Only the launch command (a relaunch in a reused workspace) and an
+ * approved model switch, each with its token; anything else would be a shell command or a
+ * prompt in a permission-skipping session.
+ */
+function typedTextRefusal(text: string, opts: FenceOptions): string | null {
+  if (text === LAUNCH_COMMAND)
+    return sealedFor(opts) ? null : "launch command without a sealed launch.sh";
+  if (text.startsWith("/model ")) {
+    const t = opts.modelSwitch;
+    return t !== undefined && switches.has(t) && text === `/model ${t.model}`
+      ? null
+      : "/model without the token of an approved model_switch decision";
+  }
+  return "text volleyd never types";
+}
+
+/** The keys volleyd sends by name: submit, and interrupt. */
+const NAMED_KEYS = new Set(["Enter", "Escape"]);
 const DOCKER_DENY = new Set([
   "rm",
   "rmi",
@@ -446,7 +592,7 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
     return;
   }
   const prog = argv[0];
-  const verdicts = prog === "ssh" ? sshVerdicts(argv.slice(1), opts.remote) : [evaluate(argv)];
+  const verdicts = prog === "ssh" ? sshVerdicts(argv.slice(1), opts) : [evaluate(argv, opts)];
   for (const v of verdicts) {
     if (v.kind === "allow") continue;
     if (v.kind === "consent") {
@@ -457,7 +603,7 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
   }
 }
 
-function evaluate(argv: readonly string[]): Verdict {
+function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
   const [prog, ...args] = argv;
   if (prog === undefined || prog === "") return deny("(empty command)");
   // A bare name only: a path (`/tmp/evil/git`, `./claude`) could point at any binary.
@@ -468,9 +614,10 @@ function evaluate(argv: readonly string[]): Verdict {
     case "gh":
       return gh(args);
     case "cmux":
-      return cmux(args);
+      return cmux(args, opts);
     case "claude":
-      return ALLOW;
+      // Never with any arguments: claude starts only from `.volley/launch.sh` (see the header).
+      return deny("claude (only from .volley/launch.sh)");
     case "volley":
       return volley(args);
     case "launchctl":
@@ -564,13 +711,16 @@ function git(args: string[]): Verdict {
   if (sub === "worktree") {
     const spec = rest[0] === "add" ? GIT_SPECS["worktree add"] : undefined;
     if (spec === undefined) return deny(`git worktree ${rest[0] ?? ""}`.trim());
-    return checkArgs("git worktree add", rest.slice(1), spec);
+    const v = checkArgs("git worktree add", rest.slice(1), spec);
+    return v.kind === "allow" ? worktreeAddBranch(rest.slice(1)) : v;
   }
   if (sub === "branch" && !rest.includes("--list") && !rest.includes("-l")) {
     return deny("git branch (without --list)");
   }
   const spec = Object.hasOwn(GIT_SPECS, sub) ? GIT_SPECS[sub] : undefined;
-  return spec === undefined ? deny(`git ${sub}`) : checkArgs(`git ${sub}`, rest, spec);
+  if (spec === undefined) return deny(`git ${sub}`);
+  const v = checkArgs(`git ${sub}`, rest, spec);
+  return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
 function gh(args: string[]): Verdict {
@@ -578,7 +728,11 @@ function gh(args: string[]): Verdict {
   if (two === "pr merge" || two === "workflow run" || two === "repo delete")
     return deny(`gh ${two}`);
   if (args[0] === "api") {
-    const v = checkArgs("gh api", args.slice(1), GH_SPECS.api as OptSpec);
+    const v = checkArgs("gh api", args.slice(1), {
+      ...(GH_SPECS.api as OptSpec),
+      // A relative endpoint: a URL could name another endpoint (graphql) or another host.
+      positional: (a) => !a.includes("://") && !/(^|\/)graphql(\/|\?|$)/i.test(a),
+    });
     if (v.kind !== "allow") return v;
     const method = ghApiMethod(args.slice(1));
     return method === "GET" ? ALLOW : deny(`gh api -X ${method}`);
@@ -604,11 +758,74 @@ function ghApiMethod(args: string[]): string {
   return (method ?? (hasBody ? "POST" : "GET")).toUpperCase();
 }
 
-function cmux(args: string[]): Verdict {
-  const sub = args[0] ?? "";
+/** A cmux workspace ref (`workspace:3`, a UUID): one word, never an option. */
+const WORKSPACE_REF = /^[A-Za-z0-9][A-Za-z0-9:_-]*$/;
+
+/**
+ * cmux runs and types commands in an agent's shell, so every subcommand has an exact argv shape
+ * (see the header): the launch command of a sealed launch script is the only command a
+ * workspace starts with, and TYPED_TEXT (`typedTextRefusal`) the only text sent into one.
+ */
+function cmux(args: string[], opts: FenceOptions): Verdict {
+  const [sub = "", ...rest] = args;
   if (sub === "close-workspace") return { kind: "consent", verb: "cmux close-workspace" };
-  return CMUX_ALLOW.has(sub) ? ALLOW : deny(`cmux ${sub}`.trim());
+  const ws = rest[0] === "--workspace" && WORKSPACE_REF.test(rest[1] ?? "");
+  if (sub === "send" && ws && rest.length === 3) {
+    const why = typedTextRefusal(rest[2] ?? "", opts);
+    return why === null ? ALLOW : deny(`cmux send (${why})`);
+  }
+  const ok = (() => {
+    switch (sub) {
+      case "new-workspace":
+        return newWorkspaceAllowed(rest, opts);
+      case "send-key":
+        return ws && rest.length === 3 && NAMED_KEYS.has(rest[2] ?? "");
+      case "read-screen":
+        return (
+          ws &&
+          (rest.length === 2 ||
+            (rest.length === 4 && rest[2] === "--lines" && /^[0-9]{1,6}$/.test(rest[3] ?? "")))
+        );
+      case "list-workspaces":
+      case "ping":
+        return rest.length === 0;
+      default:
+        return false;
+    }
+  })();
+  return ok ? ALLOW : deny(`cmux ${sub}`.trim());
 }
+
+/**
+ * `cmux new-workspace`: `--cwd <dir> --name <name> --command LAUNCH_COMMAND`, each once, with the
+ * LaunchToken sealed for exactly <dir> (any other directory's launch.sh is not volleyd's).
+ */
+function newWorkspaceAllowed(args: readonly string[], fence: FenceOptions): boolean {
+  if (args.length !== 6) return false;
+  const opts = new Map<string, string>();
+  for (let i = 0; i < args.length; i += 2) {
+    const [k = "", v = ""] = [args[i], args[i + 1]];
+    if (opts.has(k) || v.startsWith("-")) return false;
+    opts.set(k, v);
+  }
+  const cwd = opts.get("--cwd") ?? "";
+  return (
+    opts.get("--command") === LAUNCH_COMMAND &&
+    opts.has("--name") &&
+    absPath(cwd) &&
+    sealedFor(fence, cwd)
+  );
+}
+
+/** No `..`, `.` or empty segment (after the leading `/`): the path is what it looks like. */
+const cleanPath = (p: string) =>
+  p
+    .replace(/^\//, "")
+    .split("/")
+    .every((s) => s !== "" && s !== "." && s !== "..");
+
+/** An absolute path (no newline: a heredoc delimiter could follow) that is what it looks like. */
+const absPath = (p: string) => /^\/[^\n\r\0]*$/.test(p) && cleanPath(p);
 
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
@@ -631,6 +848,11 @@ function volley(args: string[]): Verdict {
   return ALLOW;
 }
 
+/** The service plist `volleyd install` writes under `home` (`$HOME/Library/LaunchAgents`). */
+export const plistPath = (home: string) =>
+  join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+const plistFile = () => plistPath(process.env.HOME ?? homedir());
+
 function launchctl(args: string[]): Verdict {
   const [sub, ...rest] = args;
   const opts = rest.filter((a) => a.startsWith("-"));
@@ -641,7 +863,7 @@ function launchctl(args: string[]): Verdict {
       sub === "bootstrap" &&
       target.length === 2 &&
       /^gui\/[0-9]+$/.test(target[0] ?? "") &&
-      basename(target[1] ?? "") === `${SERVICE_LABEL}.plist`) ||
+      target[1] === plistFile()) ||
     ((sub === "bootout" || sub === "kickstart" || sub === "print") &&
       target.length === 1 &&
       new RegExp(`^gui/[0-9]+/${SERVICE_LABEL.replace(/\./g, "\\.")}$`).test(target[0] ?? ""));
@@ -683,7 +905,8 @@ const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
 export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
-function sshVerdicts(args: readonly string[], script: RemoteScript | undefined): Verdict[] {
+function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
+  const script = opts.remote;
   let mode: "T" | "N" | undefined;
   let reverse = false;
   let i = 0;
@@ -709,7 +932,7 @@ function sshVerdicts(args: readonly string[], script: RemoteScript | undefined):
   if (!isScript) return [deny("ssh (only `-T <target> bash -s` and the reverse tunnel)")];
   if (script === undefined || script.steps.length === 0)
     return [deny("ssh bash -s (without a fenced remote script)")];
-  return script.steps.map(remoteStep);
+  return script.steps.map((s) => remoteStep(s, opts));
 }
 
 const remoteDeny = (v: Verdict): Verdict =>
@@ -725,17 +948,109 @@ const TRUST_SWAP = ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON];
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
+/** The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts). */
+const VOLLEY_WRITES = new Set([
+  "agent.json",
+  "brief.md",
+  "launch.sh",
+  "review.md",
+  "findings.md",
+  "findings.json",
+  "rebase.md",
+]);
+/** … and the ones it reads there: those, and the repo's `.volley/brief-extra.md`. */
+const VOLLEY_READS = new Set([...VOLLEY_WRITES, "brief-extra.md"]);
+
+/**
+ * `<abs dir>/.volley/<name>` for one of `names` — spelled exactly and directly inside `.volley/`,
+ * so no write there is a git config, HEAD or gitfile, a hook, or a case variant of a name (which
+ * a case-insensitive file system opens as the same file) — or an absolute path ending in one of
+ * `endings`.
+ */
+function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly string[]) {
+  if (!absPath(path)) return false;
+  const segs = path.split("/");
+  if (segs.length >= 4 && segs.at(-2) === ".volley" && names.has(segs.at(-1) ?? "")) return true;
+  return endings.some((e) => path.endsWith(e));
+}
+
 /** The files volleyd writes on a remote host (worktree files, the shared exclude, the trust tmp). */
 function writablePath(path: string): boolean {
-  if (path === REMOTE_CLAUDE_JSON_TMP) return true;
   return (
-    REMOTE_PATH.test(path) &&
-    !path.split("/").includes("..") &&
-    (path.includes("/.volley/") || path.endsWith("/ISSUE.md") || path.endsWith("/info/exclude"))
+    path === REMOTE_CLAUDE_JSON_TMP ||
+    volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
 }
 
-function remoteStep(step: RemoteStep): Verdict {
+/** The files volleyd reads on a remote host (the brief, brief-extra, the exclude, the config). */
+function readablePath(path: string): boolean {
+  return path === REMOTE_CLAUDE_JSON || volleyPath(path, VOLLEY_READS, ["/info/exclude"]);
+}
+
+/** One single-quoted bash word as `shq` renders it. */
+const SHQ = "'(?:[^']|'\\\\'')*'";
+const unshq = (q: string) => q.slice(1, -1).replace(/'\\''/g, "'");
+const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
+const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
+const LAUNCH_EXEC = new RegExp(
+  `^exec claude .* --model (${SHQ}) --settings ${SHQ} --name (${SHQ}) `,
+);
+/** A remote host's launch.sh exports, in order: exactly what SshTmuxHost.launchEnv emits. */
+const LAUNCH_ENV_KEYS = ["VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE", "VOLLEY_AGENT_ID"];
+/** The broker as a remote agent sees it: the reverse tunnel's end on the box's loopback. */
+const TUNNEL_BROKER_URL = /^mqtt:\/\/127\.0\.0\.1:[0-9]{1,5}$/;
+
+/** The env block: none (local), or exactly the three keys for this agent through the tunnel. */
+function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean {
+  const keys = Object.keys(env);
+  if (keys.length === 0) return true;
+  return (
+    keys.length === LAUNCH_ENV_KEYS.length &&
+    keys.every((k, i) => k === LAUNCH_ENV_KEYS[i]) &&
+    TUNNEL_BROKER_URL.test(env.VOLLEY_BROKER_URL ?? "") &&
+    AGENT_ID.test(env.VOLLEY_NAMESPACE ?? "") &&
+    env.VOLLEY_AGENT_ID === agentId
+  );
+}
+
+/**
+ * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
+ * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
+ * volleyd writes) and env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win
+ * in bash and point every hook at other code). Parsed back into its values and re-rendered, so
+ * not one byte can differ from a script volleyd writes.
+ */
+function isLaunchScript(content: string): boolean {
+  const lines = content.split("\n");
+  const hooks = LAUNCH_HOOKS.exec(lines[4] ?? "");
+  const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
+  if (hooks === null || run === null) return false;
+  const env: Record<string, string> = {};
+  for (const line of lines.slice(5, -2)) {
+    const m = LAUNCH_EXPORT.exec(line);
+    if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
+    env[m[1] as string] = unshq(m[2] as string);
+  }
+  const vars = {
+    hooksDir: unshq(hooks[1] as string),
+    model: unshq(run[1] as string),
+    agentId: unshq(run[2] as string),
+    env,
+  };
+  return (
+    absPath(vars.hooksDir) &&
+    !vars.hooksDir.split("/").some((s) => s.toLowerCase() === ".volley") &&
+    MODEL_ID.test(vars.model) &&
+    AGENT_ID.test(vars.agentId) &&
+    launchEnvAllowed(env, vars.agentId) &&
+    renderLaunchScript(vars) === content
+  );
+}
+
+/** A write to a `.volley/launch.sh`: the file a tmux session's TMUX_LAUNCH_COMMAND runs. */
+const isLaunchScriptPath = (path: string) => path.endsWith("/.volley/launch.sh");
+
+function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
   if (step.cwd !== undefined && !REMOTE_PATH.test(step.cwd))
     return deny("remote cwd (not absolute)");
   const [prog, ...args] = step.argv;
@@ -752,15 +1067,20 @@ function remoteStep(step: RemoteStep): Verdict {
       step.stdout !== undefined &&
       writablePath(step.stdout) &&
       (step.append !== true || step.stdout !== REMOTE_CLAUDE_JSON_TMP);
-    return write
-      ? ALLOW
-      : deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
+    if (!write)
+      return deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
+    if (isLaunchScriptPath(step.stdout ?? "")) {
+      const content = Buffer.from(step.stdin ?? "", "base64").toString("utf-8");
+      if (step.append === true || !isLaunchScript(content))
+        return deny("remote launch.sh write (only a script renderLaunchScript renders)");
+    }
+    return ALLOW;
   }
   if (sameArgv(step.argv, TRUST_SWAP)) return ALLOW;
-  return remoteDeny(remoteCommand(prog, args));
+  return remoteDeny(remoteCommand(prog, args, opts));
 }
 
-function remoteCommand(prog: string | undefined, args: string[]): Verdict {
+function remoteCommand(prog: string | undefined, args: string[], opts: FenceOptions): Verdict {
   if (prog === undefined || prog === "") return deny("(empty command)");
   if (prog.includes("/")) return deny(`${prog} (programs are named, not pathed)`);
   const paths = (list: string[]) => list.length > 0 && list.every((a) => !a.startsWith("-"));
@@ -774,15 +1094,20 @@ function remoteCommand(prog: string | undefined, args: string[]): Verdict {
         : deny(`gh ${two}`.trim());
     }
     case "tmux":
-      return tmux(args);
+      return tmux(args, opts);
     case "mkdir":
       return args[0] === "-p" && paths(args.slice(1)) ? ALLOW : deny("mkdir (only -p <path>…)");
     case "cat":
-      return paths(args) ? ALLOW : deny("cat (only <path>…)");
-    case "chmod":
-      return /^[0-7]{3,4}$/.test(args[0] ?? "") && paths(args.slice(1))
+      return paths(args) && args.every(readablePath)
         ? ALLOW
-        : deny("chmod (only <octal> <path>…)");
+        : deny("cat (only the files volleyd reads)");
+    case "chmod":
+      // Three digits: no setuid, setgid or sticky bit; only on the files volleyd writes.
+      return /^[0-7]{3}$/.test(args[0] ?? "") &&
+        paths(args.slice(1)) &&
+        args.slice(1).every(writablePath)
+        ? ALLOW
+        : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -794,7 +1119,7 @@ function remoteCommand(prog: string | undefined, args: string[]): Verdict {
       return deny("base64 (only as a file write)");
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
-      const v = evaluate([prog, ...args]);
+      const v = evaluate([prog, ...args], opts);
       return v.kind === "allow" ? deny(`${prog} (not on the remote allow-list)`) : v;
     }
   }
@@ -810,7 +1135,7 @@ const TMUX_SPECS: Record<string, OptSpec> = {
   "has-session": { valued: ["-t"] },
 };
 
-function tmux(args: string[]): Verdict {
+function tmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
   if (sub === undefined || sub.startsWith("-")) return deny(`tmux ${sub ?? ""}`.trim());
   if (sub === "kill-session") {
@@ -818,19 +1143,36 @@ function tmux(args: string[]): Verdict {
     return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
   }
   if (sub === "send-keys") {
-    // `send-keys -t <target> [-l] [--] <key|text>…`: what follows the options is typed.
+    // `send-keys -t <target> <key>` (a named key) or `send-keys -t <target> -l -- <text>`:
+    // whatever follows the options is typed into the agent's shell, so only NAMED_KEYS and
+    // TYPED_TEXT. (Without -l, tmux types any argument that is not a key name as text.)
     const [t, target, ...tail] = rest;
     if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
-    const afterL = tail[0] === "-l" ? tail.slice(1) : tail;
-    const keys = afterL[0] === "--" ? afterL.slice(1) : afterL;
-    const quoted = afterL[0] === "--";
-    return keys.length > 0 && (quoted || keys.every((k) => !k.startsWith("-")))
-      ? ALLOW
-      : deny("tmux send-keys");
+    if (tail.length === 1 && NAMED_KEYS.has(tail[0] ?? "")) return ALLOW;
+    if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
+    const why = typedTextRefusal(tail[2] ?? "", opts);
+    return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
   }
   const spec = Object.hasOwn(TMUX_SPECS, sub) ? TMUX_SPECS[sub] : undefined;
   if (spec === undefined) return deny(`tmux ${sub}`);
-  return checkArgs(`tmux ${sub}`, rest, spec);
+  const v = checkArgs(`tmux ${sub}`, rest, spec);
+  return v.kind === "allow" && sub === "new-session" ? newSessionSealed(rest, opts) : v;
+}
+
+/**
+ * `tmux new-session … -c <dir> 'bash .volley/launch.sh'`: the command is required, and <dir> is
+ * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this).
+ */
+function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict {
+  let cwd: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === "-c") cwd = args[++i];
+    else if (a.startsWith("-c")) cwd = a.slice(2);
+  }
+  return args.at(-1) === TMUX_LAUNCH_COMMAND && cwd !== undefined && sealedFor(opts, cwd)
+    ? ALLOW
+    : deny("tmux new-session (only in the worktree of a sealed launch script)");
 }
 
 /**
