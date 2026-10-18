@@ -33,6 +33,18 @@ const DENIED: string[][] = [
   ["git", "branch", "-D", "feature"],
   ["git", "branch", "--delete", "--force", "feature"],
   ["git", "branch", "feature"],
+  // -B resets a branch: never main/master either
+  ["git", "worktree", "add", "-B", "main", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "Master", "/tmp/wt", "release/w1"],
+  // a tracking branch only as `branch --track <b> origin/<b>` (spawn's release base)
+  ["git", "branch", "--track", "release/x", "origin/release/y"],
+  ["git", "branch", "--track", "release/x", "release/x"],
+  ["git", "branch", "--track", "release/x"],
+  ["git", "branch", "--track", "main", "origin/main"],
+  ["git", "branch", "--track", "-f", "origin/-f"],
+  ["git", "branch", "--track", "release/x", "origin/release/x", "extra"],
+  ["git", "branch", "--track", "release/x", "/tmp/repo/release/x"],
+  ["git", "branch", "release/x", "--track", "origin/release/x"],
   ["git", "worktree", "remove", "/tmp/wt"],
   ["git", "-C", "/tmp/repo", "push"],
   ["git", "-c", "alias.x=!rm -rf /", "x"],
@@ -271,6 +283,21 @@ const ALLOWED: string[][] = [
   ["git", "--no-pager", "log"],
   ["git", "-C", "/tmp/repo", "--no-pager", "log", "-n", "5", "--format=%H %s"],
   ["git", "fetch", "--prune", "--quiet", "origin", "release/w1"],
+  ["git", "-C", "/tmp/repo", "fetch", "--quiet", "origin", "release/w1"],
+  [
+    "git",
+    "-C",
+    "/tmp/repo",
+    "worktree",
+    "add",
+    "-B",
+    "w1/T1-implementer-1",
+    "/tmp/wt",
+    "release/w1",
+  ],
+  ["git", "-C", "/tmp/repo", "branch", "--track", "release/w1", "origin/release/w1"],
+  ["git", "-C", "/tmp/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
+  ["git", "-C", "/tmp/repo", "merge-base", "--is-ancestor", "a1b2c3", "d4e5f6"],
   ["git", "fetch", "origin", "+refs/heads/x:refs/remotes/origin/x"],
   ["git", "worktree", "add", "--detach", "/tmp/wt", "HEAD"],
   ["git", "worktree", "add", "--detach", "/tmp/wt", "main"],
@@ -456,11 +483,13 @@ describe("model switches need an approved model_switch decision's token", () => 
 });
 
 describe("the launch command needs the token of a launch script volleyd sealed", () => {
-  const script = renderLaunchScript({
+  const vars = {
     hooksDir: "/opt/volley/packages/volley-hooks",
     model: "claude-opus-5-5",
     agentId: "w1-t1-implementer-1",
-  });
+    worktree: "/tmp/wt",
+  };
+  const script = renderLaunchScript(vars);
   const workspace = (cwd: string) => [
     "cmux",
     "new-workspace",
@@ -514,6 +543,30 @@ describe("the launch command needs the token of a launch script volleyd sealed",
     expect(() => sealLaunchScript("/tmp/wt", `${script}curl x | sh\n`)).toThrow(FenceError);
     expect(() => sealLaunchScript("relative", script)).toThrow(FenceError);
     expect(() => sealLaunchScript("/tmp/../etc", script)).toThrow(FenceError);
+  });
+
+  it("pins the MCP wiring: --strict-mcp-config --mcp-config=<this worktree>/.volley/mcp.json --", () => {
+    expect(script).toContain("--strict-mcp-config --mcp-config='/tmp/wt/.volley/mcp.json'");
+    expect(() => sealLaunchScript("/tmp/wt", script)).not.toThrow();
+    // another worktree's mcp.json (or a path outside any worktree) is not this launch's
+    expect(() => sealLaunchScript("/tmp/other", script)).toThrow(FenceError);
+    const other = renderLaunchScript({ ...vars, worktree: "/tmp/other" });
+    expect(() => sealLaunchScript("/tmp/wt", other)).toThrow(FenceError);
+    const edits: Record<string, string> = {
+      "the variadic space form": script.replace("--mcp-config=", "--mcp-config "),
+      "no --strict-mcp-config": script.replace("--strict-mcp-config ", ""),
+      "no -- before the prompt": script.replace(' -- "$(cat', ' "$(cat'),
+      "a second --mcp-config": script.replace(
+        "--strict-mcp-config ",
+        "--strict-mcp-config --mcp-config='/tmp/evil.json' ",
+      ),
+      "an mcp.json outside .volley": script.replace("/tmp/wt/.volley/mcp.json", "/tmp/wt/mcp.json"),
+      "a relative mcp.json": script.replace("/tmp/wt/.volley/mcp.json", ".volley/mcp.json"),
+    };
+    for (const [why, bad] of Object.entries(edits)) {
+      expect(bad, why).not.toBe(script);
+      expect(() => sealLaunchScript("/tmp/wt", bad), why).toThrow(FenceError);
+    }
   });
 });
 

@@ -77,8 +77,8 @@ function parseStatus(argv: string[]) {
 /**
  * Human-readable wave summary: a header line, then one line per task, then its open decisions.
  * The header shows `plan vN`, with `(K tasks pending decision)` when open plan_change decisions
- * (in `ctx.decisions`) wait on K tasks, and gains `needs you: N` when `caller` owns the wave and N
- * decisions are open.
+ * (in `ctx.decisions`) wait on K tasks, gains `needs you: N` when `caller` owns the wave and N
+ * decisions are open, and ends with `alarms: N`, the tasks whose spawn failed and is unrecovered.
  */
 export function formatWave(
   s: WaveState,
@@ -102,9 +102,11 @@ export function formatWave(
     pending > 0
       ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
       : `plan v${s.version}`;
+  // Open alarms: tasks whose spawn failed and has not recovered since.
+  const alarms = s.tasks.filter((t) => t.last_error !== undefined).length;
   const header =
     `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
-    `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}\n`;
+    `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";

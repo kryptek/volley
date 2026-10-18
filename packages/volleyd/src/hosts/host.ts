@@ -16,6 +16,11 @@ export interface WorktreeSpec {
   base: string;
   /** Check `base` out detached (`--detach`, no branch): reviewers' read-only worktrees. */
   detach?: boolean;
+  /**
+   * `base` is the wave's release branch: fetch it from origin first and cut from whichever of
+   * the local branch and `origin/<base>` is current (worktree.ts `resolveReleaseBase`).
+   */
+  releaseBase?: boolean;
 }
 
 export interface WorktreeResult {

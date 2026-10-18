@@ -267,12 +267,13 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `owner` | agent id \| null | Coordinator that owns the wave; `null` when orphaned. |
 | `repo`, `release_branch` | string | Where the wave's PRs land. |
 | `status` | enum | `running` \| `paused` \| `awaiting_decision` \| `complete` \| `stopped`. |
-| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, pr?, evidence_path?, screen_stale? }`. |
+| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, pr?, evidence_path?, screen_stale?, last_error?, attempt?, next_retry_at? }`. |
 | `tasks[].stage` | enum (closed) | `queued` \| `implement` \| `spec_review` \| `quality_review` \| `fixup` \| `merge_ready` \| `done` \| `blocked` \| `awaiting_decision` \| `cancelled`. |
 | `tasks[].agents` | object | Current agent id per role: `implementer?`, `spec_reviewer?`, `quality_reviewer?`, `fixup?`, `rebase?`. |
 | `tasks[].waiting_on`, `why_waiting` | string[], string | What the task is blocked on, and a human-readable reason (e.g. `tunnel down to <target>` while a remote host's broker tunnel is down). |
 | `tasks[].host` | string | The remote host the task's agents run on (its name from the wave file or the `hosts` tunable); absent for the supervisor's own host. Per task: every agent of a task runs on the same host. |
 | `tasks[].screen_stale` | boolean | `true` while the supervisor's screen capture for any of the task's agents is backed off (§4.6.6), so the retained `screen` topic may be out of date. Per task, not per agent; absent otherwise. |
+| `tasks[].last_error`, `attempt`, `next_retry_at` | object, integer, date-time \| null | While the task's latest spawn failed and none has succeeded since: `last_error` `{ code, message, at }`, `attempt` (failed attempts in a row) and `next_retry_at` (the supervisor's next automatic retry; `null` once it stopped retrying). Absent otherwise. |
 | `tasks[].pr` | object | `{ number, url, head_sha?, ci? }`; `ci` is `green` \| `red` \| `running` \| `none`. |
 | `open_decisions` | string[] | Ids of open decisions (§4.6.2). |
 | `gates` | string[] | Task ids that are merge-ready and await a human merge. |
@@ -289,7 +290,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 |---|---|---|
 | `decision_id`, `wave` | string | Identity. |
 | `task` | task id \| null | `null` for a wave-level decision. |
-| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change`. A `repo_untrusted` or `remote_repo_missing` decision carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. A `plan_change` decision carries `change`: `removed` (the new wave version dropped the task) \| `issue` (it moved the task to another issue). |
+| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `mcp_not_registered` \| `spawn_failed` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change`. A `repo_untrusted` or `remote_repo_missing` decision carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. A `plan_change` decision carries `change`: `removed` (the new wave version dropped the task) \| `issue` (it moved the task to another issue). |
 | `question` | string | What needs answering. |
 | `options` | string[] | Suggested answers (optional; free text is always allowed). |
 | `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
@@ -298,13 +299,13 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 #### 4.6.3 Wave events
 
-`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `stage_entered`, `decision_opened`, `lease_granted`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`.
+`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `spawn_failed`, `spawn_recovered`, `stage_entered`, `decision_opened`, `lease_granted`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`.
 
 #### 4.6.4 Supervisor config
 
 `volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits:
 
-`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `wake_grace_s`, `screen_tail_interval_s`, `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
+`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `spawn_retry_max_s`, `spawn_retry_max`, `wake_grace_s`, `screen_tail_interval_s`, `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
 
 Per-wave overrides use the same shape with every key optional (a wave file's `config:` block) and appear in the wave state as `effective_config`. The exception is `lease_pools`: pools are machine-global (§4.6.5), so a supervisor rejects a wave file that overrides them rather than accept an override it cannot apply.
 

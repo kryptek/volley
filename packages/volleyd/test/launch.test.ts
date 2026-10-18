@@ -1,9 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalCmuxHost } from "../src/hosts/local-cmux";
-import { HOOKS_DIR, LAUNCH_COMMAND, hooksSettingsPath, renderLaunchScript } from "../src/launch";
+import {
+  HOOKS_DIR,
+  LAUNCH_COMMAND,
+  MCP_ENTRY,
+  hooksSettingsPath,
+  mcpConfigPath,
+  renderLaunchScript,
+  renderMcpConfig,
+} from "../src/launch";
 import { spawnAgent } from "../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
 
@@ -12,6 +20,7 @@ describe("launch.sh", () => {
     hooksDir: "/opt/volley/packages/volley-hooks",
     model: "claude-opus-5-5",
     agentId: "w1-t1-implementer-1",
+    worktree: "/wt/w1/T1-implementer",
   });
 
   it("is a bash script that exports VOLLEY_HOOKS_DIR and passes the hooks via --settings", () => {
@@ -23,7 +32,25 @@ describe("launch.sh", () => {
     expect(script).toContain("--model 'claude-opus-5-5'");
     expect(script).toContain("--name 'w1-t1-implementer-1'");
     expect(script).toContain('"$(cat .volley/brief.md)"');
-    expect(script).not.toContain("--mcp-config");
+  });
+
+  it("wires volleyd's own MCP server: --strict-mcp-config, the = form, then --, the prompt last", () => {
+    const exec = script.split("\n").find((l) => l.startsWith("exec claude ")) as string;
+    expect(exec).toContain(" --strict-mcp-config ");
+    expect(exec).toContain(" --mcp-config='/wt/w1/T1-implementer/.volley/mcp.json' ");
+    // never the variadic space form, which would swallow the prompt
+    expect(exec).not.toMatch(/--mcp-config /);
+    expect(exec.endsWith(' -- "$(cat .volley/brief.md)"')).toBe(true);
+    expect(exec.indexOf("--strict-mcp-config")).toBeLessThan(exec.indexOf(" -- "));
+    expect(mcpConfigPath("/wt/w1/T1-implementer")).toBe("/wt/w1/T1-implementer/.volley/mcp.json");
+  });
+
+  it("mcp.json runs this checkout's volley-mcp and holds no credential", () => {
+    expect(MCP_ENTRY.endsWith("/packages/volley-mcp/src/index.ts")).toBe(true);
+    expect(existsSync(MCP_ENTRY)).toBe(true);
+    expect(JSON.parse(renderMcpConfig(MCP_ENTRY))).toEqual({
+      mcpServers: { volley: { command: "bun", args: ["run", MCP_ENTRY] } },
+    });
   });
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
@@ -39,6 +66,22 @@ describe("launch (local cmux host)", () => {
     env = await makeSpawnEnv();
     const fake = env.host.fake
       .on(["git", "-C", env.repo, "rev-parse", "--git-common-dir"], { stdout: ".git\n" })
+      // the release branch, local and on origin at the same commit
+      .on(["git", "-C", env.repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+        stdout: `${"a".repeat(40)}\n`,
+      })
+      .on(
+        [
+          "git",
+          "-C",
+          env.repo,
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          "refs/remotes/origin/release/w1",
+        ],
+        { stdout: `${"a".repeat(40)}\n` },
+      )
       .on(["cmux", "new-workspace"], { stdout: "OK workspace:7\n" });
     env.deps.host = new LocalCmuxHost(fake.exec);
     const out = await spawnAgent(env.request(), env.deps);
@@ -67,15 +110,37 @@ describe("launch (local cmux host)", () => {
     const line = brief.split("\n").find((l) => l.includes("Volley protocol")) as string;
     for (const c of fake.calls) {
       expect(c.argv.join("\n")).not.toContain(line);
-      expect(c.argv).not.toContain("--mcp-config");
+      expect(c.argv.join(" ")).not.toContain("--mcp-config");
     }
     // nothing but the launch command is ever typed into the pane
     expect(fake.argvs(["cmux", "send"])).toEqual([]);
     expect(fake.argvs(["cmux", "send-key"])).toEqual([]);
   });
 
+  it("writes .volley/mcp.json for volleyd's MCP server; no credential in it or in launch.sh", async () => {
+    const { out } = await launchWithCmux();
+    expect(out.kind).toBe("launched");
+    const mcp = readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8");
+    expect(JSON.parse(mcp)).toEqual({
+      mcpServers: { volley: { command: "bun", args: ["run", env.deps.mcpEntry] } },
+    });
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    const password = agent.broker.password as string;
+    expect(password).toMatch(/^pw-/);
+    for (const text of [mcp, script]) {
+      expect(text).not.toContain(password);
+      expect(text).not.toContain("VOLLEY_AUTH");
+    }
+    expect(script).toContain(`--mcp-config='${join(env.worktree, ".volley", "mcp.json")}'`);
+  });
+
   it("cuts the worktree from the release branch and keeps .volley/ out of git", async () => {
     const { out, fake } = await launchWithCmux();
+    // the release branch is fetched first, so a branch pushed from another clone is found
+    expect(fake.argvs(["git", "-C", env.repo, "fetch"])).toEqual([
+      ["git", "-C", env.repo, "fetch", "--quiet", "origin", "release/w1"],
+    ]);
     expect(fake.argvs(["git", "-C", env.repo, "worktree", "add"])).toEqual([
       [
         "git",
@@ -131,8 +196,11 @@ describe("launch (local cmux host)", () => {
       "claude-opus-5-5",
       "--settings",
       "/opt/volley/packages/volley-hooks/settings.volley-hooks.json",
+      "--strict-mcp-config",
+      `--mcp-config=${join(env.worktree, ".volley", "mcp.json")}`,
       "--name",
       "w1-t1-implementer-1",
+      "--",
       brief.replace(/\n+$/, ""), // $(…) strips trailing newlines
     ]);
   });

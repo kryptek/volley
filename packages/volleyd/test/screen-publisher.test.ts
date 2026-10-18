@@ -403,6 +403,7 @@ describe("daemon screen tails", () => {
     host = fakeHost(fake);
     host.onLaunch = () => {
       setTimeout(async () => {
+        await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
         await pub(registryTopic(ID), "registered", "_system/registry", {
           capabilities: [],
           cwd: "/wt",

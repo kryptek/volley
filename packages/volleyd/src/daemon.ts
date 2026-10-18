@@ -103,7 +103,7 @@ import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
-import type { WaveRecord } from "./reducer";
+import type { SpawnFailure, WaveRecord } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type {
@@ -136,7 +136,7 @@ import {
   reapVerdict,
   sampleClock,
 } from "./clock";
-import { HOOKS_DIR } from "./launch";
+import { HOOKS_DIR, MCP_ENTRY } from "./launch";
 import {
   type AgentLiveness,
   CONTINUE_TEXT,
@@ -189,7 +189,7 @@ import {
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
-import { expandHome, worktreePath } from "./worktree";
+import { checkReleaseBranch, expandHome, worktreePath } from "./worktree";
 
 export interface DaemonOptions {
   brokerUrl: string;
@@ -242,6 +242,8 @@ export interface DaemonOptions {
   taskDir?: (wave: WaveId, task: TaskId) => string;
   /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
   now?: () => number;
+  /** The config's bottom layer (default CONFIG_DEFAULTS; `volleyd daemon`: `defaultsFor` env). */
+  configDefaults?: Tunables;
   /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
   screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
   /** Monotonic + wall clock sampled every tick for sleep/wake detection (tests inject a jump). */
@@ -260,6 +262,8 @@ export interface SpawnerOptions {
   claudeJsonPath?: string;
   /** `packages/volley-hooks` (default: the one in this checkout). */
   hooksDir?: string;
+  /** volley-mcp's entry point for `.volley/mcp.json` (default: the one in this checkout). */
+  mcpEntry?: string;
   /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
   mintCredentials?: boolean;
   briefsDir?: string;
@@ -317,6 +321,21 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 const defaultClock = (): ClockSample => ({ mono: performance.now(), wall: Date.now() });
 
 const secondsMs = (s: number) => s * 1000;
+
+/** A task's why_waiting while its spawn failure is unrecovered. */
+function spawnFailedWhy(f: SpawnFailure, now: number): string {
+  if (f.next_retry_at === null) {
+    return `spawn failed: ${f.code} — retries stopped after ${f.attempt} attempt${f.attempt === 1 ? "" : "s"}`;
+  }
+  const s = Math.max(0, Math.ceil((Date.parse(f.next_retry_at) - now) / 1000));
+  return `spawn failed: ${f.code} — retry in ${s}s (attempt ${f.attempt})`;
+}
+
+/** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
+const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
+const SPAWN_STOP_ANSWER = "stop task";
+/** How volleyd resolves the decision it supersedes once the automatic retries stop. */
+const SPAWN_RETRIES_STOPPED = { answer: "retries_stopped", by: DAEMON_AGENT_ID };
 
 /** What one pressure sample measured: machine-global signals, plus the CI queue per repo dir. */
 export interface PressureReading {
@@ -601,7 +620,11 @@ export class Daemon {
     this.log = opts.log ?? (() => {});
     this.now = opts.now ?? Date.now;
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
-    this.config = ConfigStore.load({ home: opts.home, system: this.system });
+    this.config = ConfigStore.load({
+      home: opts.home,
+      system: this.system,
+      ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
+    });
     this.leases = replayLeases(this.system.readAll());
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -1380,7 +1403,7 @@ export class Daemon {
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
       const key = `${wave}/${id}/implementer`;
-      if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) continue;
+      if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
       void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
         this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1410,7 +1433,6 @@ export class Daemon {
       try {
         remote = this.remoteHost(wave, t);
       } catch (e) {
-        this.noteRefusal(key);
         const err =
           e instanceof SpawnError
             ? e
@@ -1420,6 +1442,7 @@ export class Daemon {
           task,
           data: { code: err.code, message: err.message, role, host: t.host, ...err.detail },
         });
+        await this.spawnFailed(wave, task, role, err);
         throw err;
       }
     }
@@ -1443,6 +1466,7 @@ export class Daemon {
       const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
       if (res.kind === "launched") {
         this.refused.delete(key);
+        await this.spawnRecovered(wave, task, role, res.agentId);
         void res.verified.then(
           (outcome) => {
             this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
@@ -1459,21 +1483,105 @@ export class Daemon {
       }
       return res;
     } catch (e) {
-      this.noteRefusal(key);
+      await this.spawnFailed(wave, task, role, e);
       throw e;
     } finally {
       this.spawning.delete(key);
     }
   }
 
-  /** Back off an automatic spawn that was refused: retried after 2^(n-1) × base, capped. */
-  private noteRefusal(key: string): void {
-    const n = (this.refused.get(key)?.n ?? 0) + 1;
+  /**
+   * A spawn of a role no live agent holds was refused (spawnAgent journaled its alarm): journal
+   * `spawn_failed` with the retry,
+   * back off the automatic spawn — 2^(n-1) × 30 s, capped by `spawn_retry_max_s`, none after
+   * `spawn_retry_max` failures in a row — and keep one `spawn_failed` decision open on the task
+   * (not re-opened while open; superseded once, when the retries stop, by one that says so).
+   */
+  private async spawnFailed(wave: WaveId, task: TaskId, role: Role, e: unknown): Promise<void> {
+    const key = `${wave}/${task}/${role}`;
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined) return;
+    // A live agent already holds the role (an extra `volleyd spawn` was refused): the task
+    // itself is fine, so nothing is recorded against it beyond the step's alarm.
+    for (const a of this.supervised.values()) {
+      if (a.wave === wave && a.task === task && a.role === role) return;
+    }
+    const eff = this.config.effective(wave);
+    const prev = rec.spawnFailures[task];
+    const n = prev?.role === role ? prev.attempt + 1 : 1;
+    const stopped = n >= eff.spawn_retry_max;
     const wait = Math.min(
       DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
-      DAEMON_DEFAULTS.spawn_retry_max_ms,
+      secondsMs(eff.spawn_retry_max_s),
     );
-    this.refused.set(key, { n, until: Date.now() + wait });
+    const until = stopped ? Number.POSITIVE_INFINITY : this.now() + wait;
+    this.refused.set(key, { n, until });
+    const code = e instanceof SpawnError ? e.code : "SPAWN_FAILED";
+    const message = e instanceof Error ? e.message : String(e);
+    const nextRetryAt = stopped ? null : new Date(until).toISOString();
+    await this.append(wave, {
+      type: "spawn_failed",
+      task,
+      data: { code, message, role, attempt: n, next_retry_at: nextRetryAt },
+    });
+    this.log(
+      `spawn ${key} failed (${code}), attempt ${n}: ${stopped ? "retries stopped" : `retry in ${wait / 1000}s`}`,
+    );
+    const open = this.openSpawnFailedDecision(wave, task);
+    if (open !== undefined && (!stopped || open.stopped === true)) return;
+    try {
+      if (open !== undefined) await this.resolveNow(wave, open.decision_id, SPAWN_RETRIES_STOPPED);
+      const question = stopped
+        ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
+        : `Needs you: ${task}'s ${role} could not be spawned (${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
+      const base = `spawn_failed-${createHash("sha256").update(`${task}/${role}`).digest("hex").slice(0, 12)}`;
+      let id = base;
+      for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
+      await this.openDecisionNow(
+        wave,
+        { kind: "spawn_failed", task, question, options: SPAWN_FAILED_OPTIONS, id, park: false },
+        { role, code, attempt: n, ...(stopped ? { stopped: true } : {}) },
+      );
+    } catch (err) {
+      // A settled task (a role spawned at merge_ready) takes no task-level decision.
+      this.log(`spawn ${key}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The open `spawn_failed` decision on a task, if any. */
+  private openSpawnFailedDecision(
+    wave: WaveId,
+    task: TaskId,
+  ): (DecisionRecord & { stopped?: boolean }) | undefined {
+    const rec = this.waves.get(wave)?.record;
+    return (rec?.state?.open_decisions ?? [])
+      .map((id) => rec?.decisions[id])
+      .find((d) => d?.kind === "spawn_failed" && d.task === task);
+  }
+
+  /**
+   * A spawn launched after failures: journal `spawn_recovered`, resolve the open `spawn_failed`
+   * decision, and say so in the log (the failures were in it).
+   */
+  private async spawnRecovered(
+    wave: WaveId,
+    task: TaskId,
+    role: Role,
+    agentId: string,
+  ): Promise<void> {
+    const f = this.waves.get(wave)?.record.spawnFailures[task];
+    if (f !== undefined && f.role === role) {
+      await this.append(wave, {
+        type: "spawn_recovered",
+        task,
+        data: { role, agent_id: agentId, after_failures: f.attempt, attempt: f.attempt + 1 },
+      });
+      const open = this.openSpawnFailedDecision(wave, task);
+      if (open !== undefined) {
+        await this.resolveNow(wave, open.decision_id, { answer: "recovered", by: DAEMON_AGENT_ID });
+      }
+    }
+    this.log(`spawned ${agentId} (${wave}/${task}/${role})`);
   }
 
   /** The `local` host agents run on. */
@@ -1660,6 +1768,7 @@ export class Daemon {
       brokerUrl: this.opts.brokerUrl,
       claudeJsonPath: this.claudeJsonPath,
       hooksDir: spawner.hooksDir ?? HOOKS_DIR,
+      mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
       tunables: eff,
       owner: log.record.state?.owner ?? null,
@@ -1946,6 +2055,7 @@ export class Daemon {
         lockHome,
         brokerUrl: remote.brokerUrl,
         hooksDir: remote.hooksDir,
+        mcpEntry: remote.mcpEntry,
         // Trust is the box's own: read from its ~/.claude.json at every spawn, never mirrored.
         remoteTrust: { host: spec.name, target: spec.target, read: () => remote.readTrust() },
         tunables: { ...deps.tunables, worktree_root: spec.worktree_root },
@@ -2174,7 +2284,7 @@ export class Daemon {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;
     const key = `${wave}/${task}/${role}`;
-    if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) return;
+    if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
     const hold = roleSpawnHold({
       killSwitch: this.killSwitch,
@@ -3020,6 +3130,12 @@ export class Daemon {
       const host = rec.wave?.tasks[t.id]?.host;
       if (host !== undefined && host !== "local") t.host = host;
     }
+    // A failed spawn says so, with its countdown, ahead of anything a queued task waits on.
+    for (const t of state.tasks) {
+      const f = rec.spawnFailures[t.id];
+      if (f === undefined || (t.stage !== "queued" && t.why_waiting !== undefined)) continue;
+      t.why_waiting = spawnFailedWhy(f, this.now());
+    }
     for (const t of state.tasks) {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
       const parked = this.parked.get(`${wave}/${t.id}`);
@@ -3157,6 +3273,20 @@ export class Daemon {
         });
       } else {
         // Any other answer requeues the task: the refusal's backoff must not delay the retry.
+        for (const key of this.refused.keys()) {
+          if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
+        }
+      }
+    }
+    if (d.kind === "spawn_failed" && d.task !== null && r.by !== DAEMON_AGENT_ID) {
+      if (r.answer.trim().toLowerCase() === SPAWN_STOP_ANSWER) {
+        await this.append(wave, {
+          type: "task_cancelled",
+          task: d.task,
+          data: { by: r.by, why: `spawn failed (decision ${id})` },
+        });
+      } else {
+        // "retry now": the next tick spawns it, whatever the backoff (or a stop) said.
         for (const key of this.refused.keys()) {
           if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
         }
@@ -3366,6 +3496,8 @@ export class Daemon {
   private async submit(p: Record<string, unknown>): Promise<HandlerResult> {
     const first = this.checkSubmit(p);
     if ("refusal" in first) return first.refusal;
+    const missing = await this.releaseBranchMissing(first.wave);
+    if (missing !== null) return { ok: false, error: missing };
     if (first.existing !== undefined) {
       return this.resubmit(first.existing, first.wave, p.wave_yaml as string);
     }
@@ -3388,6 +3520,18 @@ export class Daemon {
         }),
       ),
     };
+  }
+
+  /**
+   * RELEASE_BRANCH_MISSING when the wave's repo has its release branch neither locally nor as
+   * `origin/<branch>`, so a wave whose every spawn would fail is refused before any task is
+   * admitted. Checked only where volleyd spawns into that repo: with a spawner, and a task on the
+   * local host (a remote host's clone is fetched and checked on the box).
+   */
+  private async releaseBranchMissing(wave: Wave): Promise<string | null> {
+    if (this.opts.spawner === undefined) return null;
+    if (!Object.values(wave.tasks).some((t) => t.host === "local")) return null;
+    return checkReleaseBranch(this.host.exec, expandHome(wave.repo), wave.release_branch);
   }
 
   /**

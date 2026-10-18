@@ -40,6 +40,20 @@ export interface WaveRecord {
   steers: Record<TaskId, { seq: number; message_id: string }>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
   pipeline: Record<TaskId, TaskPipeline>;
+  /** Each task's unrecovered spawn failure (`spawn_failed` until `spawn_recovered`). */
+  spawnFailures: Record<TaskId, SpawnFailure>;
+}
+
+/** A task's latest failed spawn: what failed, how often in a row, and when it is retried. */
+export interface SpawnFailure {
+  role: string;
+  code: string;
+  message: string;
+  at: string;
+  /** Failed attempts in a row. */
+  attempt: number;
+  /** The next automatic retry; null once retries stopped (`spawn_retry_max`). */
+  next_retry_at: string | null;
 }
 
 /**
@@ -62,6 +76,7 @@ export function emptyRecord(): WaveRecord {
     decisions: {},
     steers: {},
     pipeline: {},
+    spawnFailures: {},
   };
 }
 
@@ -166,7 +181,23 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       task.stage = ev.data.stage as TaskStage;
       break;
+    case "spawn_failed":
+      if (ev.task !== undefined) {
+        next.spawnFailures[ev.task] = {
+          role: String(ev.data.role),
+          code: String(ev.data.code),
+          message: String(ev.data.message ?? ""),
+          at: ev.at,
+          attempt: Number(ev.data.attempt),
+          next_retry_at: (ev.data.next_retry_at as string | null | undefined) ?? null,
+        };
+      }
+      break;
+    case "spawn_recovered":
+      if (ev.task !== undefined) delete next.spawnFailures[ev.task];
+      break;
     case "task_cancelled":
+      if (ev.task !== undefined) delete next.spawnFailures[ev.task];
       if (task !== undefined) task.stage = "cancelled";
       // A cancelled task gives back its admission (it may have been admitted but not spawned).
       if (ev.task !== undefined) next.admitted = next.admitted.filter((id) => id !== ev.task);
@@ -276,13 +307,27 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
 }
 
 /**
- * Recompute the fields that follow from task stages and open decisions: waiting_on/why_waiting
- * and gates.
+ * Recompute the fields that follow from task stages, open decisions and spawn failures:
+ * waiting_on/why_waiting, last_error/attempt/next_retry_at and gates. (A spawn failure's
+ * why_waiting counts down to its retry, so the daemon adds it when it publishes.)
  */
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
   const openOn = (task: TaskId) =>
     state.open_decisions.filter((id) => rec.decisions[id]?.task === task);
+  state.tasks = state.tasks.map(
+    ({ last_error: _e, attempt: _a, next_retry_at: _n, ...t }): TaskState => {
+      const f = rec.spawnFailures[t.id];
+      return f === undefined
+        ? t
+        : {
+            ...t,
+            last_error: { code: f.code, message: f.message, at: f.at },
+            attempt: f.attempt,
+            next_retry_at: f.next_retry_at,
+          };
+    },
+  );
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);

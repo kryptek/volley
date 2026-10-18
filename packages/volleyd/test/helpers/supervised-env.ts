@@ -108,6 +108,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   host.onLaunch = () => {
     o.onLaunch?.(daemon);
     setTimeout(async () => {
+      await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
         cwd: "/wt",

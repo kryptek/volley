@@ -21,7 +21,13 @@ import {
   writeAgentJson,
 } from "./identity";
 import { type IssueData, fetchIssue, renderIssueMd } from "./issue";
-import { LAUNCH_COMMAND, launchScriptPath, renderLaunchScript } from "./launch";
+import {
+  LAUNCH_COMMAND,
+  launchScriptPath,
+  mcpConfigPath,
+  renderLaunchScript,
+  renderMcpConfig,
+} from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
@@ -37,9 +43,10 @@ import {
 import { branchName, expandHome, worktreePath } from "./worktree";
 
 /**
- * One spawn, end to end: repo trust → lock → worktree → ISSUE.md → brief + gate → identity
- * (minted credentials, `.volley/agent.json`) → launch script → pre-subscribe → launch → verify
- * through the hook signals (screen fallback only before the hooks run). Every refusal is
+ * One spawn, end to end: repo trust → lock → worktree (cut from the release branch as origin
+ * has it) → ISSUE.md → brief + gate → identity (minted credentials, `.volley/agent.json`) →
+ * `.volley/mcp.json` + launch script → pre-subscribe → launch → verify through the hook signals
+ * and the agent's own MCP status (screen fallback only before the hooks run). Every refusal is
  * journaled (`alarm_raised` with the code) before it is thrown, and releases the lock.
  *
  * The journal's event types are the closed wave-event enum, so the steps map onto it:
@@ -48,6 +55,8 @@ import { branchName, expandHome, worktreePath } from "./worktree";
  *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
  *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
  *   hook signals verified                                           → agent_registered
+ *   hooks verified, the MCP server's status missing                 → verify_failed, then
+ *     decision_opened (mcp_not_registered)
  *   repo_untrusted / model_switch / unknown_screen / hooks_auth_failed → decision_opened
  */
 
@@ -83,6 +92,8 @@ export interface SpawnDeps {
   remoteTrust?: RemoteTrust;
   /** `packages/volley-hooks` ($VOLLEY_HOOKS_DIR). */
   hooksDir: string;
+  /** `packages/volley-mcp/src/index.ts` on the agent's host: its `.volley/mcp.json` server. */
+  mcpEntry: string;
   /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
   mintCredentials: boolean;
   tunables: Pick<Tunables, "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s">;
@@ -115,6 +126,7 @@ export type DecisionKind =
   | "model_switch"
   | "unknown_screen"
   | "hooks_auth_failed"
+  | "mcp_not_registered"
   /** Opened by the daemon's remote setup before spawnAgent runs (daemon.ts remoteSpawn). */
   | "remote_repo_missing";
 
@@ -296,6 +308,7 @@ async function launchAttempt(
     branch,
     base: req.start?.ref ?? req.wave.release_branch,
     ...(req.start?.detach === true ? { detach: true } : {}),
+    ...(req.start === undefined ? { releaseBase: true } : {}),
   });
 
   // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
@@ -347,10 +360,13 @@ async function launchAttempt(
       broker_url: deps.brokerUrl,
       ...(creds !== undefined ? { broker: creds } : {}),
     });
+    // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker.
+    await host.writeFile(mcpConfigPath(ctx.worktree), renderMcpConfig(deps.mcpEntry));
     const script = renderLaunchScript({
       hooksDir: deps.hooksDir,
       model: task.model,
       agentId,
+      worktree: ctx.worktree,
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -439,6 +455,24 @@ async function verifyAndRecover(
         : {}),
     });
     if (result.kind === "registered") return registered(ctx, cur, result);
+    if (result.kind === "mcp_not_registered") {
+      await deps.journal({
+        type: "verify_failed",
+        task: ctx.req.task,
+        data: { agent_id: cur.agentId, role: ctx.req.role, reason: "mcp_not_registered" },
+      });
+      const decisionId = await openDecision(
+        ctx,
+        "mcp_not_registered",
+        decisionIdFor("mcp_not_registered", cur.agentId),
+        {
+          question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
+          options: ["relaunch", "cancel"],
+          data: { agent_id: cur.agentId },
+        },
+      );
+      return decision(cur, "mcp_not_registered", decisionId);
+    }
     if (result.kind === "hooks_auth_failed") {
       const who = result.username ?? "anonymous";
       const decisionId = await openDecision(

@@ -47,8 +47,23 @@ describe("verify through hook signals (Aedes)", () => {
   /** What a real session does after launch: MCP auto-register, then the SessionStart hook. */
   async function sessionStart(
     agentId: string,
-    opts: { registry?: string; model?: string; heartbeat?: boolean; hooks?: boolean } = {},
+    opts: {
+      registry?: string;
+      model?: string;
+      heartbeat?: boolean;
+      hooks?: boolean;
+      /** false: the agent's MCP server is not on this broker (version skew, wrong broker). */
+      mcp?: boolean;
+    } = {},
   ) {
+    if (opts.mcp !== false) {
+      // volley-mcp's lifecycle: the retained `spawning` status, before its own registration.
+      await agentSide.publish(
+        buildTopic(NS, agentId, "status"),
+        hookFixture("status-spawning.json", agentId),
+        { qos: 1, retain: true },
+      );
+    }
     await agentSide.publish(registryTopic(agentId), hookFixture("registry-mcp.json", agentId), {
       qos: 1,
       retain: true,
@@ -107,6 +122,39 @@ describe("verify through hook signals (Aedes)", () => {
     });
     expect(env.host.screenReads).toEqual([]);
     expect(types()).not.toContain("decision_opened");
+  });
+
+  it("hooks register + heartbeat but no MCP status on this broker → mcp_not_registered, verify_failed", async () => {
+    const out = await spawnWith(() => sessionStart("w1-t1-implementer-1", { mcp: false }));
+    expect(out).toMatchObject({ kind: "decision", decision: "mcp_not_registered" });
+    expect(types()).not.toContain("agent_registered");
+    const failed = env.events.find((e) => e.type === "verify_failed");
+    expect(failed?.data).toMatchObject({
+      agent_id: "w1-t1-implementer-1",
+      reason: "mcp_not_registered",
+    });
+    const d = env.events.find((e) => e.type === "decision_opened");
+    expect(d?.task).toBe("T1");
+    expect(d?.data).toMatchObject({ kind: "mcp_not_registered", agent_id: "w1-t1-implementer-1" });
+    expect(d?.data.question).toContain("MCP server is not on this broker");
+    expect(d?.data.question).toContain(".volley/mcp.json");
+    // the agent itself is running (its hooks verified): no screen read, nothing typed
+    expect(env.host.screenReads).toEqual([]);
+    expect(env.host.texts).toEqual([]);
+  });
+
+  it("the MCP status arriving after the hooks (same window) still verifies", async () => {
+    const out = await spawnWith(async () => {
+      await sessionStart("w1-t1-implementer-1", { mcp: false });
+      await new Promise((r) => setTimeout(r, 100));
+      await agentSide.publish(
+        buildTopic(NS, "w1-t1-implementer-1", "status"),
+        hookFixture("status-spawning.json", "w1-t1-implementer-1", {}),
+        { qos: 1, retain: true },
+      );
+    });
+    expect(out).toMatchObject({ kind: "registered" });
+    expect(types()).not.toContain("verify_failed");
   });
 
   it("the MCP server's own registration alone is not a verified spawn", async () => {

@@ -3,11 +3,13 @@ import type { AdmissionSummary } from "../admission";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
-const HELP = `Usage: volleyd admission [--json] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd admission [wave] [--json] [--broker-url <url>] [--namespace <ns>]
 
 Show the daemon's current load-aware spawn admission verdict: whether starts are throttled, why
-(one reason per signal), each pressure signal with its threshold, and the per-wave verdicts.
---json prints the payload exactly as published on volley/_system/admission.
+(one reason per signal), each pressure signal with its threshold, and the per-wave verdicts
+(with a wave: that wave's only).
+--json prints the payload exactly as published on volley/_system/admission (with a wave, its
+per-wave verdicts narrowed to that wave).
 `;
 
 export async function admission({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -24,13 +26,19 @@ export async function admission({ argv, env, io }: CommandArgs): Promise<ExitCod
     io.stdout(HELP);
     return EXIT.OK;
   }
+  if (parsed.positionals.length > 1) {
+    io.stderr(`volleyd admission: expected at most one wave\n${HELP}`);
+    return EXIT.USAGE;
+  }
+  const wave = parsed.positionals[0];
   return withClient(target, io, "volleyd admission", async (client) => {
     const res = await client.request("admission", {});
     if (!res.ok) {
       io.stderr(`volleyd admission: ${res.error ?? "failed"}\n`);
       return EXIT.ERROR;
     }
-    const summary = (res.result ?? null) as AdmissionSummary | null;
+    const all = (res.result ?? null) as AdmissionSummary | null;
+    const summary = all !== null && wave !== undefined ? admissionFor(all, wave) : all;
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(summary, null, 2)}\n`);
       return EXIT.OK;
@@ -50,8 +58,14 @@ function parseAdmission(argv: string[]) {
       help: { type: "boolean", short: "h" },
     },
     strict: true,
-    allowPositionals: false,
+    allowPositionals: true,
   });
+}
+
+/** The summary with its per-wave verdicts narrowed to `wave` (empty when it has none). */
+export function admissionFor(s: AdmissionSummary, wave: string): AdmissionSummary {
+  const v = s.waves?.[wave];
+  return { ...s, waves: v !== undefined ? { [wave]: v } : {} };
 }
 
 /** Human-readable verdict: a header, the reasons, one line per signal, one line per wave. */

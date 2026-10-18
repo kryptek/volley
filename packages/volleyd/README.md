@@ -114,8 +114,8 @@ config.hard_ceiling: must be <= 100
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
 | `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
 | `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
-| `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors. |
-| `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions and `needs you: N` on waves the caller owns. `--json` prints the exact `wave_state` payload. |
+| `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. |
+| `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered). `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
 | `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>]` | Answer a decision (owner only). |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
@@ -127,7 +127,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
-| `volleyd admission [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts. |
+| `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
 | `volleyd cleanup <wave> [--yes] [--force]` | Remove retired agents' cmux workspaces and worktrees. Without `--yes` only prints the plan. Branches are kept. |
 
@@ -433,6 +433,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
+| `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 
@@ -440,6 +441,10 @@ The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease b
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
 that read them (monitors, decisions, spawning) follow. [`config.example.yaml`](config.example.yaml)
 lists every key with its default and example pools, commented out.
+
+`worktree_root` defaults to `~/.volley/worktrees`, or to `$VOLLEYD_HOME/worktrees` when
+`VOLLEYD_HOME` is set (so a second daemon — a smoke run — keeps its worktrees beside its state);
+`config.yaml` or a wave's `config:` still wins.
 
 ---
 
@@ -454,17 +459,65 @@ lists every key with its default and example pools, commented out.
 |---|---|---|---|
 | 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch?"), the wave's spawns park on it |
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
-| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <release_branch>`; `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `WORKTREE_FAILED` |
+| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** `volley auth add-agent <id> --ack-to <parent> --ack-to volleyd --json` → `.volley/agent.json` (mode 0600) | `identity.ts` | `CREDENTIALS_FAILED` |
-| 6 | **Launch** `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
+| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
-The gate runs before credentials are minted, so a rejected brief costs nothing to undo. An
-automatic spawn the loop got refused is retried with backoff (30 s, doubling, capped at 15 min);
-`volleyd spawn` retries at once. While the kill switch is engaged nothing is spawned.
+The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
+refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
+spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Base ref
+
+An agent's branch is cut from the wave's release branch **as origin has it**: the branch is
+often pushed from another clone (`git push -u` in a batch setup), so the daemon's clone may
+know it only as `origin/<release_branch>`, or have a stale local copy. Before `worktree add`,
+volleyd runs `git -C <repo> fetch origin <release_branch>` (a failed fetch — offline, no remote
+— leaves what the repo has), then picks the base:
+
+| The repo has | Base |
+|---|---|
+| only `origin/<b>` | `git branch --track <b> origin/<b>`, then `<b>` (`origin/<b>` if that fails) |
+| both, the local `<b>` strictly behind `origin/<b>` | `origin/<b>` |
+| the local `<b>`, level with or ahead of origin's (or never pushed) | `<b>` |
+| neither | refused: `RELEASE_BRANCH_MISSING: <repo> has neither <b> nor origin/<b> — push it first` |
+
+`volleyd validate` checks the same (locally or `origin/<b>`, no fetch) when the wave's repo is
+on its machine, and the daemon refuses `run` with `RELEASE_BRANCH_MISSING` before any task is
+admitted when a task of the wave runs on the local host. A pipeline role cut from a start commit
+(reviewers, fixups) uses that commit as given. A remote host fetches and cuts from
+`origin/<b>` on the box.
+
+### Spawn failures and retries
+
+Every refused spawn — the daemon's automatic ones (implementers, pipeline roles), and
+`volleyd spawn` — is visible:
+
+- the journal gets `spawn_failed { code, message, role, attempt, next_retry_at }` (besides the
+  step's `alarm_raised`), and the daemon log a `spawn <wave>/<task>/<role> failed (<code>),
+  attempt <k>: retry in <n>s` line;
+- the task's `why_waiting` reads `spawn failed: <code> — retry in <n>s (attempt <k>)`, and its
+  wave-state entry carries `last_error { code, message, at }`, `attempt` and `next_retry_at`
+  (`volleyd status --json`); the `volleyd status` header counts these open alarms
+  (`alarms: N`);
+- **one** `spawn_failed` decision opens on the task (options `retry now` / `stop task`; it does
+  not park the task) and is not re-opened while it is open.
+
+Automatic retries back off: 30 s, doubling per failure, capped at `spawn_retry_max_s`. After
+`spawn_retry_max` failures in a row they stop: `next_retry_at` is `null`, `why_waiting` says
+`retries stopped after <k> attempts`, and the open decision is superseded (resolved
+`retries_stopped`) by one whose question says the retries stopped. Answering `retry now` spawns
+at the next tick whatever the backoff said; `stop task` cancels the task.
+
+A spawn that launches after failures journals `spawn_recovered { role, agent_id,
+after_failures, attempt }`, clears `last_error` / `why_waiting`, resolves the open decision
+(`recovered`, by `volleyd`), and the log prints `spawned <agent_id> (<wave>/<task>/<role>)`.
+The backoff itself lives in the daemon's memory: after a restart a failed spawn is retried at
+once (its failure count, from the journal, carries on).
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
@@ -474,9 +527,19 @@ block; the MCP server and the hooks both read it, so no flag or env carries iden
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
-`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --name <id> "$(cat .volley/brief.md)"`.
-The hooks come in through `--settings`, never `--mcp-config` (variadic: it would swallow the
-prompt). The cmux command starts with two spaces, which keeps it out of shell history and away
+`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`.
+The hooks come in through `--settings`.
+
+**MCP wiring.** The agent's `volley` MCP server is volleyd's, not the user's: volleyd writes
+`.volley/mcp.json` = `{ "mcpServers": { "volley": { "command": "bun", "args": ["run",
+"<checkout>/packages/volley-mcp/src/index.ts"] } } }` — the **same release's** volley-mcp (a
+remote host's: its `volley_dir` checkout), which reads the broker URL, identity and minted
+credentials from `.volley/agent.json` in its cwd, so nothing secret is in either file.
+`--strict-mcp-config` keeps the user's own MCP servers (an everyday `volley` on another broker,
+an older install) out of the session. `--mcp-config` is variadic, so it is passed in the `=`
+form (exactly one value) and `--` ends option parsing before the prompt, which is last: the
+prompt can never be swallowed as a config path. The fence pins this exact form, the path inside
+the sealed worktree, and (remote hosts) the `mcp.json` content. The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
@@ -509,13 +572,22 @@ guidance, so here it keeps its lock and credentials until it reaches `done`, `fa
 ### Verification signals
 
 Before launching, the daemon subscribes to `volley/_system/registry/<id>`,
-`volley/<ns>/<id>/status` and `volley/<ns>/<id>/progress`. The expected sequence from the hooks
-(`packages/volley-hooks`) is: MCP auto-registration (no `model_source`) → the SessionStart hook's
-registry re-publish with `model_source` and `model` → status flipped to `working` → a
-`progress` `heartbeat` with `hook_event: "SessionStart"`. A spawn is verified when **both** the
-SessionStart heartbeat and a registry entry with `model_source` `harness-hook` or `unknown`
-arrive within `spawn_timeout_s`; it is journaled as `agent_registered { model, model_source,
-model_verified }`.
+`volley/<ns>/<id>/status` and `volley/<ns>/<id>/progress`. The expected sequence is: the MCP
+server's retained `spawning` status and auto-registration (no `model_source`) → the SessionStart
+hook's registry re-publish with `model_source` and `model` (`packages/volley-hooks`) → status
+flipped to `working` → a `progress` `heartbeat` with `hook_event: "SessionStart"`. A spawn is
+verified when the SessionStart heartbeat, a registry entry with `model_source` `harness-hook` or
+`unknown`, **and** the MCP server's own `spawning` (or `registered`) status — which only
+volley-mcp publishes — all arrive on volleyd's broker within `spawn_timeout_s`; it is journaled
+as `agent_registered { model, model_source, model_verified }`.
+
+If the hooks verified but the MCP status never came, the session runs some other MCP server
+(version skew, or one on another broker), and the agent's status and progress would never reach
+volleyd: the spawn journals `verify_failed { agent_id, role, reason: "mcp_not_registered" }` and
+opens decision `mcp_not_registered` ("the agent's MCP server is not on this broker — version
+skew or wrong broker; see `.volley/mcp.json`"), which parks the task (its `why_waiting` names the
+decision). The SessionStart hook publishes `working` when it finds no retained status at all, so
+a hook-only registration never shows as `unknown`.
 
 - `model_source: "harness-hook"`: the model id is compared exactly with the task's. Only an
   8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-opus-5` is a mismatch for
@@ -551,10 +623,11 @@ verification opens `unknown_screen`.
 ### Journal mapping
 
 The journal's event types are the closed `wave-event` enum, so the steps use it as follows:
-refusals → `alarm_raised { code, … }`; a launch → `agent_spawned { agent_id, role, attempt,
+refusals → `alarm_raised { code, … }`, then `spawn_failed` (and `spawn_recovered` once a later
+attempt launches); a launch → `agent_spawned { agent_id, role, attempt,
 host, workspace, worktree, branch, issue, credentials, lock }` (plus `stage_entered implement`
-for an implementer's first attempt); verification → `agent_registered`; trust, model and screen
-questions → `decision_opened { decision_id, kind, question, options, pointers }`, opened through
+for an implementer's first attempt); verification → `agent_registered` (or `verify_failed`);
+trust, model, MCP and screen questions → `decision_opened { decision_id, kind, question, options, pointers }`, opened through
 the decision store (retained on `volley/_waves/<wave>/decisions/<id>`, notify bridge; a
 `repo_untrusted` one also carries `repo`); trust accepted later → `decision_resolved { answer:
 "trusted", by: "claude-trust-dialog" }`; retire → `agent_retired`.
@@ -968,11 +1041,11 @@ CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
-    branch --list | merge-base | show
-    worktree add needs -b <branch> or --detach (never checks out an existing branch), and the
-    new branch is never main/master (in any case); fetch takes a remote name or a network URL
-    (https, ssh, git, user@host:path — never a local path) and its refspecs only write
-    refs/remotes/…
+    branch --list | branch --track <b> <remote>/<b> | merge-base | show
+    worktree add needs -b|-B <branch> or --detach (never checks out an existing branch), and
+    the new branch is never main/master (in any case); fetch takes a remote name or a
+    network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
+    write refs/remotes/…
   gh issue view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)
@@ -983,7 +1056,8 @@ ALLOW (program by bare name only — never a path):
     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
     list-workspaces · ping
   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
-    which the launch commands above run
+    which the launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS),
+    including `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>`
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]
@@ -1025,12 +1099,14 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
-    (agent.json, brief.md, launch.sh, review.md, findings.md, findings.json, rebase.md —
-    spelled exactly, directly inside `.volley/`, so no write there is a git config, HEAD,
-    gitfile or hook, or a case variant of launch.sh), an absolute path ending in `/ISSUE.md`
-    or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh` (what the
-    tmux session runs) is written whole, never appended, and its content must be exactly
-    `renderLaunchScript` of valid values (LAUNCH_SCRIPT_VARS)
+    (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
+    rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
+    config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
+    `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
+    (what the tmux session runs) is written whole, never appended, and its content must be
+    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
+    `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
+    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json

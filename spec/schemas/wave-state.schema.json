@@ -120,7 +120,26 @@
             "ci": { "enum": ["green", "red", "running", "none"] }
           }
         },
-        "evidence_path": { "type": "string", "minLength": 1 }
+        "evidence_path": { "type": "string", "minLength": 1 },
+        "last_error": {
+          "type": "object",
+          "required": ["code", "message", "at"],
+          "description": "The task's latest spawn failure, present until a spawn of it succeeds (spawn_recovered) or it is cancelled.",
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Spawn attempts in a row that failed (with last_error)."
+        },
+        "next_retry_at": {
+          "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+          "description": "When the supervisor retries the failed spawn on its own; null once it stopped retrying (with last_error)."
+        }
       }
     },
     "pipelineStep": {
