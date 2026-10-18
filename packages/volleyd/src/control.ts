@@ -20,6 +20,9 @@ export const DAEMON_AGENT_ID = "volleyd";
 export const CONFIG_TOPIC = "volley/_waves/_config";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
+export const ADMISSION_TOPIC = "volley/_system/admission";
+export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
+export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 
 /** Control ops the daemon answers. */
 export type ControlOp =
@@ -35,6 +38,8 @@ export type ControlOp =
   | "resume"
   | "stop"
   | "steer"
+  // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
+  | "admission"
   // Spawn one task's agent now (spawn.ts).
   | "spawn";
 

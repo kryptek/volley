@@ -145,6 +145,15 @@ describe("parseWaveFile", () => {
     expect(errs).toContain("config.hard_ceiling: must be <= 100");
   });
 
+  it("rejects per-wave lease_pools overrides: pools are machine-global", () => {
+    const errs = errorsOf(
+      `${HEADER}tasks:\n  T1: { issue: 1 }\nconfig:\n  lease_pools:\n    build: { capacity: 5, ttl_s: 600 }\n`,
+    );
+    expect(errs).toEqual([
+      "config.lease_pools: lease pools are machine-global; set them in volleyd's global config, not per wave",
+    ]);
+  });
+
   it("rejects malformed YAML and non-mapping documents", () => {
     expect(errorsOf("wave: [unclosed\n")[0]).toMatch(/^\(root\): invalid YAML/);
     expect(errorsOf("- just\n- a list\n")).toEqual(["(root): must be a mapping"]);

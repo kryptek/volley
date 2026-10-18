@@ -15,12 +15,25 @@ import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
+import {
+  type AdmissionState,
+  type AdmissionSummary,
+  type Sample,
+  type Samples,
+  type Verdict,
+  allowJson,
+  decide,
+  summaryPayload,
+} from "./admission";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
+  ADMISSION_TOPIC,
   CONFIG_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
+  LEASE_REQUESTS_FILTER,
+  leasePoolTopic,
   waveEventsTopic,
   waveStateTopic,
 } from "./control";
@@ -51,12 +64,26 @@ import {
   resolveEvent,
   writeDecisionsFile,
 } from "./decisions";
-import { exec } from "./exec";
+import { type ExecFn, exec as realExec } from "./exec";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import { Journal, WaveLog } from "./journal";
+import {
+  HOLDER_GONE,
+  type LeaseBook,
+  type LeaseInput,
+  type LeaseRequest,
+  step as leaseStep,
+  poolPayload,
+  replayLeases,
+} from "./leases";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
+import { countApiSignals, isApiSignal } from "./pressure/api-signals";
+import { sampleCiQueue } from "./pressure/ci-queue";
+import { sampleCmuxPing } from "./pressure/cmux";
+import { sampleContainers } from "./pressure/containers";
+import { sampleMemory } from "./pressure/memory";
 import type { WaveRecord } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
@@ -65,6 +92,7 @@ import type {
   NewEvent,
   TaskAgents,
   TaskId,
+  Tunables,
   TunablesPatch,
   WaveId,
   WaveState,
@@ -145,8 +173,13 @@ export interface DaemonOptions {
    * `tick()` / `tickScreens()`).
    */
   tickMs?: number;
-  /** Spawn admission verdict per wave. T5 supplies the pressure-based one; default is open. */
+  /**
+   * Override the spawn admission verdict per wave (tests). Default: the pressure-based verdict
+   * from the last sample (`pressure`); nothing is admitted until the first sample is in.
+   */
   admission?: (wave: WaveId) => Admission;
+  /** Machine-pressure sampler, run once per tick. Default: the fenced src/pressure samplers. */
+  pressure?: PressureSource;
   log?: (line: string) => void;
   /**
    * MQTT protocol for the daemon's persistent session. Default 5, so `mailbox.session_expiry_s`
@@ -236,6 +269,60 @@ const defaultClock = (): ClockSample => ({ mono: performance.now(), wall: Date.n
 
 const secondsMs = (s: number) => s * 1000;
 
+/** What one pressure sample measured: machine-global signals, plus the CI queue per repo dir. */
+export interface PressureReading {
+  samples: Omit<Samples, "api_overload" | "ci_queue">;
+  ci: Record<string, Sample>;
+}
+
+/** Samples machine pressure. `repos` are the running waves' repo directories (for the CI queue). */
+export type PressureSource = (ctx: {
+  repos: string[];
+  config: Tunables;
+}) => Promise<PressureReading>;
+
+/**
+ * The fenced samplers in src/pressure, run concurrently; a failing one is an unknown signal.
+ * A repo's CI queue is re-sampled at most every `ci_queue_sample_ms` (it spends GitHub API
+ * quota); ticks in between reuse its last sample.
+ */
+export function systemPressure(
+  exec: ExecFn = realExec,
+  now: () => number = Date.now,
+): PressureSource {
+  const ciCache = new Map<string, { at: number; sample: Promise<Sample> }>();
+  const ciQueue = (repo: string, timeout: number) => {
+    const t = now();
+    const hit = ciCache.get(repo);
+    if (hit !== undefined && t - hit.at < DAEMON_DEFAULTS.ci_queue_sample_ms) return hit.sample;
+    const sample = sampleCiQueue(exec, repo, timeout);
+    ciCache.set(repo, { at: t, sample });
+    return sample;
+  };
+  return async ({ repos, config }) => {
+    const timeout = DAEMON_DEFAULTS.sampler_timeout_ms;
+    for (const repo of ciCache.keys()) if (!repos.includes(repo)) ciCache.delete(repo);
+    const [memory_pressure, cmux_ping, containers, ...ci] = await Promise.all([
+      sampleMemory(exec, timeout),
+      // Above the threshold, so a hung socket reads as over it rather than as unknown.
+      sampleCmuxPing(exec, config.admission.cmux_ping_max_ms + timeout),
+      sampleContainers(exec, timeout),
+      ...repos.map((r) => ciQueue(r, timeout)),
+    ]);
+    return {
+      samples: { memory_pressure, cmux_ping, containers },
+      ci: Object.fromEntries(repos.map((r, i) => [r, ci[i] as Sample])),
+    };
+  };
+}
+
+/** A wave file's `repo` as a directory (`~/x` → `$HOME/x`). */
+const repoDir = (repo: string) =>
+  repo === "~" || repo.startsWith("~/") ? join(homedir(), repo.slice(1)) : repo;
+
+/** The hysteresis key of the global (wave-independent) admission verdict. */
+const GLOBAL = "";
+
 /**
  * The daemon's MQTT clientId. Stable, so its persistent session (and mailbox subscription)
  * survives restarts and the broker queues control requests sent while it is down (SPEC §4.4).
@@ -251,6 +338,8 @@ type HandlerResult = Reply & {
 };
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+/** Before the first pressure sample nothing is known about load, so nothing starts. */
+const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
@@ -342,7 +431,7 @@ export class Daemon {
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
-  /** The `_system` journal (config changes, the kill switch); shared with the config store. */
+  /** The `_system` journal (config changes, lease events, the kill switch); shared with the config store. */
   private readonly system: Journal;
   /** `stop --all` engaged: every wave admits nothing and `run` is refused until `resume --all`. */
   private killSwitch: boolean;
@@ -356,6 +445,18 @@ export class Daemon {
   private readonly startedAt = Date.now();
   /** Subscriptions released on `stop` (never the mailbox: it lives in the persistent session). */
   private readonly unsubscribers: (() => Promise<void>)[] = [];
+  private leases: LeaseBook;
+  /** Pools this process has published a retained state for (so a removed one can be cleared). */
+  private readonly publishedPools = new Set<string>();
+  /** Arrival times (ms) of API overload / credit signals seen on agents' progress channels. */
+  private apiSignals: number[] = [];
+  private lastReading: PressureReading | null = null;
+  private sampledAt: Date | null = null;
+  /** Hysteresis state before the last sample, per wave (GLOBAL = machine-wide), for re-decides. */
+  private prevAdmission = new Map<string, AdmissionState>();
+  private readonly verdicts = new Map<string, Verdict>();
+  private summary: AdmissionSummary | null = null;
+  private sampling = false;
   private readonly log: (line: string) => void;
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -396,6 +497,7 @@ export class Daemon {
     this.now = opts.now ?? Date.now;
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
     this.config = ConfigStore.load({ home: opts.home, system: this.system });
+    this.leases = replayLeases(this.system.readAll());
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
       publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
@@ -531,6 +633,11 @@ export class Daemon {
         );
         await this.publishConfig();
         for (const wave of this.waves.keys()) await this.publishState(wave);
+        // Lease pools and admission thresholds are hot: re-publish every pool, re-decide the
+        // last sample with the new thresholds, then grant / admit on this tick.
+        await this.publishAllPools();
+        this.evaluate();
+        await this.publishAdmission();
         await this.tickNow();
       });
     });
@@ -545,14 +652,20 @@ export class Daemon {
         else await this.clearRetained(decisionTopic(wave, d.decision_id));
       }
     }
+    await this.subscribeLeaseInputs();
+    await this.publishAllPools();
     if (this.opts.spawner !== undefined) await this.enqueue(() => this.reconcileAll());
+    // One pressure sample before the first admission (`tick` samples first): a daemon restarted
+    // on an overloaded machine must not admit every ready task (admissions are journaled, so
+    // they would stick).
     await this.tick();
 
     // Mailbox messages are never retained (SPEC §4.1); clear a stray retained one so it cannot be
     // replayed on every subscribe. Then drain: on a resumed session this first returns what the
-    // broker queued while the daemon was down.
+    // broker queued while the daemon was down. Lease requests are drained the same way.
     await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
     void this.mailboxLoop();
+    void this.leaseRequestLoop();
 
     await this.publish(
       this.statusTopic,
@@ -589,10 +702,28 @@ export class Daemon {
 
   /** Hand each mailbox message to the serial queue, one at a time, until the daemon stops. */
   private async mailboxLoop(): Promise<void> {
+    await this.drainLoop(this.mailboxTopic, (m) => this.onMailbox(m.payload));
+  }
+
+  /**
+   * Lease requests, drained like the mailbox: the subscription lives in the persistent session,
+   * so a request sent while the daemon was down (a `release` from a command that finished
+   * meanwhile) is queued by the broker and handled here on the next start.
+   */
+  private async leaseRequestLoop(): Promise<void> {
+    await this.drainLoop(LEASE_REQUESTS_FILTER, (m) =>
+      this.onLeaseRequest(m.topic.split("/")[3] ?? "", m.payload),
+    );
+  }
+
+  private async drainLoop(
+    filter: string,
+    handle: (m: { topic: string; payload: string }) => Promise<void>,
+  ): Promise<void> {
     while (this.running) {
-      let msgs: { payload: string }[];
+      let msgs: { topic: string; payload: string }[];
       try {
-        msgs = await this.broker.drainQueued(this.mailboxTopic, {
+        msgs = await this.broker.drainQueued(filter, {
           idleMs: DAEMON_DEFAULTS.mailbox_idle_ms,
           maxMessages: 1,
         });
@@ -600,7 +731,7 @@ export class Daemon {
         if (this.running) this.fail(e instanceof Error ? e : new Error(String(e)));
         return;
       }
-      for (const m of msgs) void this.enqueue(() => this.onMailbox(m.payload));
+      for (const m of msgs) void this.enqueue(() => handle(m));
     }
   }
 
@@ -676,9 +807,229 @@ export class Daemon {
     return this.screens.tick();
   }
 
-  /** One admission tick, queued behind in-flight work. */
-  tick(): Promise<void> {
-    return this.enqueue(() => this.tickNow()).then(() => {});
+  /** One tick: sample pressure (outside the queue: samplers can be slow), then lease + admission. */
+  async tick(): Promise<void> {
+    await this.sample();
+    await this.enqueue(() => this.tickNow());
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Pressure-based admission
+  // -------------------------------------------------------------------------------------------
+
+  private runningWaves(): [WaveId, WaveLog][] {
+    return [...this.waves].filter(([, l]) => l.record.state?.status === "running" && l.record.wave);
+  }
+
+  /** Take one pressure sample (skipped while one is in flight), then decide and publish. */
+  private async sample(): Promise<void> {
+    if (this.sampling) return;
+    this.sampling = true;
+    try {
+      const repos = [
+        ...new Set(this.runningWaves().map(([, l]) => repoDir(l.record.wave?.repo ?? ""))),
+      ].filter((r) => r !== "");
+      let reading: PressureReading;
+      try {
+        reading = await (this.opts.pressure ?? systemPressure())({
+          repos,
+          config: this.config.effective(),
+        });
+      } catch (e) {
+        this.log(`pressure sample failed: ${e instanceof Error ? e.message : String(e)}`);
+        reading = { samples: {}, ci: {} };
+      }
+      await this.enqueue(async () => {
+        this.lastReading = reading;
+        this.sampledAt = new Date();
+        // The state the new verdicts start from; kept so a config change can re-decide this
+        // same sample with new thresholds without counting it twice for hysteresis.
+        this.prevAdmission = new Map(
+          [...this.verdicts].map(([k, v]): [string, AdmissionState] => [k, v.state]),
+        );
+        this.evaluate();
+        await this.publishAdmission();
+      });
+    } finally {
+      this.sampling = false;
+    }
+  }
+
+  /** Decide the last sample: machine-wide, and per running wave (its overrides, its repo's CI). */
+  private evaluate(): void {
+    const reading = this.lastReading;
+    if (reading === null) return;
+    const now = (this.sampledAt ?? new Date()).getTime();
+    const windows: number[] = [];
+    const samplesFor = (cfg: Tunables, ci: Sample | undefined): Samples => {
+      windows.push(cfg.admission.api_overload_window_s);
+      return {
+        ...reading.samples,
+        api_overload: countApiSignals(this.apiSignals, now, cfg.admission.api_overload_window_s),
+        ...(ci !== undefined ? { ci_queue: ci } : {}),
+      };
+    };
+    // A wave without its own history (submitted since the last sample) starts from the
+    // machine-wide one, so a tripped signal is not forgotten by a new wave.
+    const prev = (key: string) =>
+      this.prevAdmission.get(key) ?? this.prevAdmission.get(GLOBAL) ?? {};
+    const run = (key: string, cfg: Tunables, ci: Sample | undefined) =>
+      this.verdicts.set(key, decide(samplesFor(cfg, ci), prev(key), cfg.admission));
+    // Machine-wide: the busiest measured CI queue among the running waves' repos.
+    const ci = Object.values(reading.ci);
+    const busiest = ci.filter((c) => c.ok).sort((a, b) => (b.value ?? 0) - (a.value ?? 0))[0];
+    run(GLOBAL, this.config.effective(), busiest ?? ci[0]);
+    const live = new Set<string>([GLOBAL]);
+    for (const [wave, log] of this.runningWaves()) {
+      live.add(wave);
+      run(wave, this.config.effective(wave), reading.ci[repoDir(log.record.wave?.repo ?? "")]);
+    }
+    for (const key of this.verdicts.keys()) if (!live.has(key)) this.verdicts.delete(key);
+    const keep = now - Math.max(...windows) * 1000;
+    this.apiSignals = this.apiSignals.filter((t) => t > keep);
+  }
+
+  private async publishAdmission(): Promise<void> {
+    const global = this.verdicts.get(GLOBAL);
+    if (global === undefined) return;
+    const waves: Record<string, { allow: number | null; reasons: string[] }> = {};
+    for (const [key, v] of this.verdicts) {
+      if (key !== GLOBAL) waves[key] = { allow: allowJson(v.allow), reasons: v.reasons };
+    }
+    this.summary = summaryPayload(global, this.sampledAt ?? new Date(), waves);
+    await this.publish(
+      ADMISSION_TOPIC,
+      this.envelope("_system/admission", "admission", this.summary),
+      true,
+    );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Leases
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Subscribe to every agent's status (a holder that turns reaped/done/failed loses its leases;
+   * the retained statuses arrive on subscribe, so a holder that died while the daemon was down
+   * is caught too) and to every agent's progress (the hooks' API overload signals). Lease
+   * requests themselves are drained by `leaseRequestLoop`.
+   */
+  private async subscribeLeaseInputs(): Promise<void> {
+    this.unsubscribers.push(
+      await this.broker.subscribeStream("volley/+/+/status", (m) => {
+        const holder = m.topic.split("/")[2] ?? "";
+        const env = parseEnvelope(m.payload);
+        if (env === null || !HOLDER_GONE.has(env.type)) return;
+        // Checked in queue order, so an `acquire` from this holder still waiting in the queue
+        // is applied first and then freed here.
+        void this.enqueue(async () => {
+          const holds = Object.values(this.leases).some((p) =>
+            [...p.held, ...p.queue].some((l) => l.holder === holder),
+          );
+          if (holds) await this.runLeases({ kind: "holder_status", holder, status: env.type });
+        });
+      }),
+      await this.broker.subscribeStream("volley/+/+/progress", (m) => {
+        const env = parseEnvelope(m.payload);
+        if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
+      }),
+    );
+  }
+
+  private async onLeaseRequest(pool: string, raw: string): Promise<void> {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const check = validator("lease-request.schema.json");
+    if (!isValidAgentId(pool) || !check(msg)) {
+      this.log(`ignored malformed lease request on pool '${pool}'`);
+      return;
+    }
+    const env = msg as Envelope;
+    const req = env.payload as LeaseRequest;
+    // An agent may only acquire, renew or release its own leases (SPEC §4.6.5).
+    if (req.holder !== env.agent_id) {
+      this.log(`ignored lease request: holder ${req.holder} is not the sender ${env.agent_id}`);
+      return;
+    }
+    await this.runLeases({ kind: "request", pool, req });
+  }
+
+  /** Step the lease book: journal + mirror every event, re-publish the pools it touched. */
+  private async runLeases(input: LeaseInput): Promise<void> {
+    const pools = this.config.effective().lease_pools;
+    const r = leaseStep(this.leases, input, {
+      pools,
+      now: new Date(),
+      defaultTtlS: DAEMON_DEFAULTS.lease_default_ttl_s,
+    });
+    const touched = new Set<string>(input.kind === "request" ? [input.pool] : []);
+    for (const ev of r.events) {
+      const e = this.system.append(ev);
+      touched.add(String(e.data.pool));
+      await this.publish(
+        waveEventsTopic(SYSTEM_WAVE),
+        this.envelope("_waves/events", e.type, {
+          wave: SYSTEM_WAVE,
+          seq: e.seq,
+          at: e.at,
+          data: e.data,
+        }),
+        false,
+      );
+    }
+    this.leases = r.book;
+    // `rejected <lease_id>: …` tells a waiting client its request is gone for good.
+    const extra = new Map<string, string[]>();
+    const reject = (pool: string, line: string) =>
+      extra.set(pool, [...(extra.get(pool) ?? []), line]);
+    if (input.kind === "request" && r.rejected !== undefined)
+      reject(input.pool, `rejected ${input.req.lease_id}: ${r.rejected}`);
+    for (const ev of r.events) {
+      if (ev.data.reason === "pool removed")
+        reject(
+          String(ev.data.pool),
+          `rejected ${ev.data.lease_id}: pool ${ev.data.pool} removed from config`,
+        );
+    }
+    for (const pool of touched) await this.publishPool(pool, extra.get(pool) ?? []);
+  }
+
+  /**
+   * Publish one pool's retained state. A pool that is neither configured nor holding anything
+   * has no state: its topic is cleared if this process published it, and never created for a
+   * name that only appeared in a request.
+   */
+  private async publishPool(pool: string, extraReasons: string[] = []): Promise<void> {
+    const pools = this.config.effective().lease_pools;
+    if (!Object.hasOwn(pools, pool) && this.leases[pool] === undefined) {
+      if (this.publishedPools.delete(pool)) {
+        await this.broker.publish(leasePoolTopic(pool), "", { qos: 1, retain: true });
+      }
+      return;
+    }
+    this.publishedPools.add(pool);
+    await this.publish(
+      leasePoolTopic(pool),
+      this.envelope(
+        "_system/leases",
+        "lease_pool",
+        poolPayload(pool, this.leases, pools, extraReasons),
+      ),
+      true,
+    );
+  }
+
+  private async publishAllPools(): Promise<void> {
+    const all = new Set([
+      ...Object.keys(this.config.effective().lease_pools),
+      ...Object.keys(this.leases),
+      ...this.publishedPools,
+    ]);
+    for (const pool of all) await this.publishPool(pool);
   }
 
   /**
@@ -688,6 +1039,7 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    await this.runLeases({ kind: "tick" });
     await this.monitor();
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
@@ -699,8 +1051,11 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
-      const base = (this.opts.admission ?? (() => OPEN_ADMISSION))(wave);
-      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, base), {
+      const pressure =
+        this.opts.admission?.(wave) ??
+        this.verdicts.get(wave) ??
+        (this.lastReading === null ? AWAITING_SAMPLE : OPEN_ADMISSION);
+      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, pressure), {
         live,
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
@@ -802,7 +1157,7 @@ export class Daemon {
 
   /** The `local` host agents run on. */
   private get host(): Host {
-    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(exec);
+    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
     return this.localHost;
   }
   private localHost: Host | undefined;
@@ -1959,6 +2314,8 @@ export class Daemon {
       }
       case "run":
         return this.submit(p);
+      case "admission":
+        return { ok: true, result: this.summary };
       case "spawn":
         return this.manualSpawn(p);
       case "config_get": {
@@ -2093,6 +2450,7 @@ export class Daemon {
       });
       warnings.push(formatOverlap(w));
     }
+    this.evaluate(); // its verdict from the last sample, before its first admission
     await this.tickNow();
     this.log(
       `submitted wave ${wave.wave} (${wave.task_order.length} tasks, owner ${owner ?? "-"})`,

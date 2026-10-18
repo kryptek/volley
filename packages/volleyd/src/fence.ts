@@ -29,6 +29,8 @@ import { basename } from "node:path";
  *   volley auth rm-agent <agent_id> [--no-reload]
  *   launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
+ *   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
+ *     memory_pressure (no arguments: report only) · docker info --format {{json .}}
  *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
@@ -377,6 +379,18 @@ const DOCKER_DENY = new Set([
   "volume prune",
 ]);
 
+/** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
+const PRESSURE_READS: readonly (readonly string[])[] = [
+  ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+  ["memory_pressure"],
+  ["docker", "info", "--format", "{{json .}}"],
+];
+
+function exactly(argv: readonly string[], allowed: readonly (readonly string[])[]): Verdict {
+  const ok = allowed.some((a) => a.length === argv.length && a.every((x, i) => x === argv[i]));
+  return ok ? ALLOW : deny(argv.slice(0, 2).join(" "));
+}
+
 /** Throw `FenceError` unless the policy above allows `argv`. */
 export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}): void {
   if (
@@ -414,7 +428,11 @@ function evaluate(argv: readonly string[]): Verdict {
       return volley(args);
     case "launchctl":
       return launchctl(args);
+    case "sysctl":
+    case "memory_pressure":
+      return exactly(argv, PRESSURE_READS);
     case "docker": {
+      if (exactly(argv, PRESSURE_READS).kind === "allow") return ALLOW;
       const two = args.slice(0, 2).join(" ");
       if (DOCKER_DENY.has(args[0] ?? "") || DOCKER_DENY.has(two))
         return deny(`docker ${two}`.trim());

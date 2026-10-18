@@ -56,6 +56,21 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** TTL of a lease whose request names none, in a pool that sets none. */
+  lease_default_ttl_s: 3600,
+  /** Kill a pressure sampler (sysctl, docker, gh) after this long; its signal is then unknown. */
+  sampler_timeout_ms: 5_000,
+  /**
+   * Re-sample a repo's CI queue (`gh api`, which spends the agents' GitHub rate limit) at most
+   * this often; ticks in between reuse the cached sample.
+   */
+  ci_queue_sample_ms: 60_000,
+  /**
+   * `memory_pressure` fallback (no sysctl level): free percentage at or below which the level is
+   * 4 (critical) or 2 (warn). Heuristic thresholds, not tunables.
+   */
+  memory_free_critical_pct: 10,
+  memory_free_warn_pct: 20,
   /** How long `volleyd spawn` waits for the launch (verification continues in the daemon). */
   spawn_request_timeout_ms: 120_000,
   /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
