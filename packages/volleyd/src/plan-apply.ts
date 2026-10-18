@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { type DecisionInput, type DecisionRecord, openEvent, resolveEvent } from "./decisions";
 import { type PlanDiff, diffPlans } from "./plan-diff";
 import type { WaveRecord } from "./reducer";
 import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "./types";
@@ -15,10 +16,18 @@ import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "
  *   issue changed, in flight → the agents keep the old issue; decision plan_change "restart / let finish"
  *   pipeline / model changed → applies to stages not yet started (running agents keep theirs)
  *
+ * "Queued" means not started: still `queued` with no agent spawned and no spawn under way (an
+ * admitted task waiting for its spawn slot is still queued, and gives its admission back).
+ *
  * The first event is `wave_versioned` carrying the submitted plan (`plan`), the effective plan the
  * scheduler and spawner use from now on (`wave`: the submitted plan, plus removed in-flight tasks
- * and in-flight tasks' old issues kept until decided) and the structural diff. A later version
- * that undoes a change withdraws its open decision.
+ * and in-flight tasks' old issues kept until decided) and the structural diff. plan_change
+ * decisions are T7 decisions (decisions.ts `openEvent`/`resolveEvent`): the daemon opens and
+ * resolves them through its decision store, so they reach `volley/_waves/<wave>/decisions/<id>`.
+ * They are opened with `park: false`: the task keeps running. A question is asked once: an open or answered decision is not
+ * asked again by a later version (a new issue target is a new question, with a new id). A later
+ * version that undoes a change withdraws its open decision; one that asks a new question about the
+ * same change supersedes it.
  */
 
 /** An in-flight task's role and when its current agent was spawned (see `taskActivity`). */
@@ -31,16 +40,37 @@ export interface PlanContext {
   /** ISO timestamp: the decisions' `opened_at`, and "working N min" is measured to it. */
   now: string;
   activity: Record<TaskId, TaskActivity>;
+  /** Tasks whose spawn is under way (not yet journaled `agent_spawned`): in flight. */
+  spawning?: TaskId[];
   /** Where the version's file is stored (journaled on `wave_versioned`). */
   file?: string;
 }
+
+/** One decision step, run through the daemon's decision store (open/resolve + topic) in order. */
+export type PlanDecisionOp =
+  | {
+      op: "resolve";
+      decision_id: string;
+      task: TaskId;
+      answer: "withdrawn" | "superseded";
+      by: string;
+    }
+  | {
+      op: "open";
+      input: DecisionInput & { id: string; task: TaskId };
+      extra: Record<string, unknown>;
+    };
 
 export interface PlanApplication {
   version: number;
   diff: PlanDiff;
   /** The plan the scheduler and spawner use from this version on. */
   effective: Wave;
-  /** Events to journal, in order. Empty when `unchanged`. */
+  /** The plan's own journal events (`wave_versioned`, cancels, queues), in order. */
+  planEvents: NewEvent[];
+  /** The plan_change decisions to resolve and open, after `planEvents`. */
+  decisions: PlanDecisionOp[];
+  /** Every event, in order: `planEvents` then the decisions' events (T7's open/resolve events). */
   events: NewEvent[];
   /** The file is the current plan again (re-submitted as is): nothing to journal. */
   unchanged: boolean;
@@ -56,10 +86,34 @@ export class PlanChangeError extends Error {
 
 export type PlanChangeKind = "removed" | "issue";
 
-/** One plan_change decision per task and kind, stable across versions. */
-export function planDecisionId(wave: string, task: TaskId, change: PlanChangeKind): string {
-  const h = createHash("sha256").update(`${wave}/${task}/${change}`).digest("hex").slice(0, 12);
+/** The id of the plan_change decision a version opens about one task and kind. */
+export function planDecisionId(
+  wave: string,
+  task: TaskId,
+  change: PlanChangeKind,
+  version: number,
+): string {
+  const h = createHash("sha256")
+    .update(`${wave}/${task}/${change}/v${version}`)
+    .digest("hex")
+    .slice(0, 12);
   return `plan_change-${h}`;
+}
+
+/** Answers a plan version gives when it closes its own question (not the owner's answer). */
+const PLAN_ANSWERS = new Set(["withdrawn", "superseded"]);
+
+/** The latest plan_change decision on `task` about `change`, if any (opening order). */
+export function latestPlanDecision(
+  rec: WaveRecord,
+  task: TaskId,
+  change: PlanChangeKind,
+): (DecisionRecord & { change?: string; to_issue?: number }) | undefined {
+  let last: (DecisionRecord & { change?: string; to_issue?: number }) | undefined;
+  for (const d of Object.values(rec.decisions) as (DecisionRecord & { change?: string })[]) {
+    if (d.kind === "plan_change" && d.task === task && d.change === change) last = d;
+  }
+  return last;
 }
 
 /** Stages in which a task has finished its work (a plan change no longer touches it). */
@@ -67,12 +121,16 @@ const SETTLED = new Set(["done", "merge_ready"]);
 
 type Phase = "absent" | "queued" | "in_flight" | "settled" | "cancelled";
 
-function phaseOf(rec: WaveRecord, t: TaskState | undefined): Phase {
+function phaseOf(t: TaskState | undefined, ctx: PlanContext): Phase {
   if (t === undefined) return "absent";
   if (t.stage === "cancelled") return "cancelled";
   if (SETTLED.has(t.stage)) return "settled";
-  if (t.stage === "queued" && !rec.admitted.includes(t.id)) return "queued";
-  return "in_flight"; // admitted (a spawn may be under way), or past `queued`
+  const started =
+    ctx.activity[t.id] !== undefined ||
+    (ctx.spawning ?? []).includes(t.id) ||
+    Object.keys(t.agents).length > 0;
+  if (t.stage === "queued" && !started) return "queued";
+  return "in_flight"; // an agent was spawned (or is being spawned), or past `queued`
 }
 
 /** The latest agent spawned per task, from a wave journal. */
@@ -87,18 +145,32 @@ export function taskActivity(events: Iterable<JournalEvent>): Record<TaskId, Tas
 }
 
 function working(a: TaskActivity | undefined, now: string): string {
-  if (a === undefined) return "admitted, not yet spawned";
+  if (a === undefined) return "spawning";
   const min = Math.max(0, Math.floor((Date.parse(now) - Date.parse(a.since)) / 60_000));
   return `${a.role} working ${min} min`;
 }
 
-/** Normalised plans compared without their version number. */
+/** JSON with object keys sorted: key order (task order included) is not part of a plan. */
+function canonical(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) =>
+    x !== null && typeof x === "object" && !Array.isArray(x)
+      ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : x,
+  );
+}
+
+/** Normalised plans compared without their version number or the order of their keys. */
 export const samePlan = (a: Wave, b: Wave) =>
-  JSON.stringify({ ...a, version: 0 }) === JSON.stringify({ ...b, version: 0 });
+  canonical({ ...a, version: 0, task_order: [] }) ===
+  canonical({ ...b, version: 0, task_order: [] });
+
+/** Wave-level fields a new version may not change: running agents work against them. */
+const FIXED = ["repo", "release_branch", "namespace"] as const;
 
 /**
- * Turn a new version of a wave's file into journal events (pure). Throws PlanChangeError when the
- * wave was never submitted or the new file is for another wave or repo.
+ * Turn a new version of a wave's file into journal events and decision steps (pure). Throws
+ * PlanChangeError when the wave was never submitted or the new file is for another wave, repo,
+ * release branch or namespace.
  */
 export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): PlanApplication {
   const { state, wave: current } = rec;
@@ -106,51 +178,60 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
   if (submitted.wave !== state.wave) {
     throw new PlanChangeError(`wave id '${submitted.wave}' is not '${state.wave}'`);
   }
-  if (submitted.repo !== current.repo) {
-    throw new PlanChangeError(
-      `repo cannot change between versions (${current.repo} -> ${submitted.repo})`,
-    );
+  for (const k of FIXED) {
+    if (submitted[k] !== current[k]) {
+      throw new PlanChangeError(
+        `${k} cannot change between versions (${current[k] ?? "-"} -> ${submitted[k] ?? "-"})`,
+      );
+    }
   }
   const prevPlan = rec.plan ?? current;
   const diff = diffPlans(prevPlan, submitted);
   if (samePlan(prevPlan, submitted)) {
-    return { version: state.version, diff, effective: current, events: [], unchanged: true };
+    return {
+      version: state.version,
+      diff,
+      effective: current,
+      planEvents: [],
+      decisions: [],
+      events: [],
+      unchanged: true,
+    };
   }
 
   const N = state.version + 1;
   const by = `plan v${N}`;
   const plan: Wave = { ...structuredClone(submitted), version: N };
   const taskState = new Map(state.tasks.map((t) => [t.id, t]));
-  const phase = (id: TaskId) => phaseOf(rec, taskState.get(id));
-  const pending = rec.planPending ?? {};
-  const isOpen = (id: string) => state.open_decisions.includes(id);
-  const tail: NewEvent[] = [];
+  const phase = (id: TaskId) => phaseOf(taskState.get(id), ctx);
+  const isOpen = (d: DecisionRecord | undefined): d is DecisionRecord =>
+    d !== undefined && d.resolved === undefined;
+  /** Open, or answered by the owner (not closed by a plan version). */
+  const asked = <D extends DecisionRecord>(d: D | undefined): d is D =>
+    d !== undefined && (d.resolved === undefined || !PLAN_ANSWERS.has(d.resolved.answer));
+  const decisions: PlanDecisionOp[] = [];
 
-  const resolve = (task: TaskId, decisionId: string, answer: string) =>
-    tail.push({ type: "decision_resolved", task, data: { decision_id: decisionId, answer, by } });
+  const resolve = (task: TaskId, d: DecisionRecord, answer: "withdrawn" | "superseded") =>
+    decisions.push({ op: "resolve", decision_id: d.decision_id, task, answer, by });
   const open = (
     task: TaskId,
     change: PlanChangeKind,
     question: string,
     options: string[],
-    data: Record<string, unknown>,
+    extra: Record<string, unknown>,
   ) =>
-    tail.push({
-      type: "decision_opened",
-      task,
-      data: {
-        decision_id: planDecisionId(state.wave, task, change),
+    decisions.push({
+      op: "open",
+      input: {
+        id: planDecisionId(state.wave, task, change, N),
         kind: "plan_change",
-        change,
-        wave: state.wave,
         task,
         question,
         options,
         pointers: {},
-        opened_at: ctx.now,
-        plan_version: N,
-        ...data,
+        park: false, // the plan rule: in-flight work is untouched until the answer
       },
+      extra: { change, plan_version: N, ...extra },
     });
 
   // Tasks the new plan no longer lists but that keep running (their agents need the definition).
@@ -167,33 +248,35 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
       cur !== undefined && cur.issue !== t.issue && (p === "in_flight" || p === "settled");
     tasks[id] = keepIssue ? { ...t, issue: cur.issue } : t;
 
-    const issueId = planDecisionId(state.wave, id, "issue");
+    const issueD = latestPlanDecision(rec, id, "issue");
     if (p === "in_flight" && keepIssue) {
-      const asked = pending[issueId];
-      if (asked?.to_issue !== t.issue) {
-        if (isOpen(issueId)) resolve(id, issueId, "superseded");
-        const a = ctx.activity[id];
+      // Asked (or answered) about this very target already: not asked again.
+      if (!(asked(issueD) && issueD.to_issue === t.issue)) {
+        if (isOpen(issueD)) resolve(id, issueD, "superseded");
         open(
           id,
           "issue",
           `Needs you: ${by} re-points ${id} from #${cur.issue} to #${t.issue}, but it is ` +
-            `working on #${cur.issue} (${working(a, ctx.now)}). Restart ${id} on #${t.issue}?`,
+            `working on #${cur.issue} (${working(ctx.activity[id], ctx.now)}). Restart ${id} on #${t.issue}?`,
           ["restart", "let finish"],
           { from_issue: cur.issue, to_issue: t.issue },
         );
       }
-    } else if (!keepIssue && isOpen(issueId) && pending[issueId] !== undefined) {
-      resolve(id, issueId, "withdrawn");
+    } else if (!keepIssue && isOpen(issueD)) {
+      resolve(id, issueD, "withdrawn");
     }
 
-    const removedId = planDecisionId(state.wave, id, "removed");
-    if (isOpen(removedId) && pending[removedId] !== undefined) resolve(id, removedId, "withdrawn");
+    const removedD = latestPlanDecision(rec, id, "removed");
+    if (isOpen(removedD)) resolve(id, removedD, "withdrawn");
   }
   for (const id of retained) {
     const cur = current.tasks[id] as WaveTask;
     tasks[id] = cur;
-    const removedId = planDecisionId(state.wave, id, "removed");
-    if (phase(id) === "in_flight" && !isOpen(removedId)) {
+    if (phase(id) !== "in_flight") continue;
+    // The plan no longer lists the task: a pending "restart on #new?" no longer applies.
+    const issueD = latestPlanDecision(rec, id, "issue");
+    if (isOpen(issueD)) resolve(id, issueD, "withdrawn");
+    if (!asked(latestPlanDecision(rec, id, "removed"))) {
       open(
         id,
         "removed",
@@ -242,5 +325,76 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
       ...(ctx.file !== undefined ? { file: ctx.file } : {}),
     },
   };
-  return { version: N, diff, effective, events: [versioned, ...head, ...tail], unchanged: false };
+  const planEvents = [versioned, ...head];
+  return {
+    version: N,
+    diff,
+    effective,
+    planEvents,
+    decisions,
+    events: [...planEvents, ...decisionEvents(rec, decisions, new Date(ctx.now))],
+    unchanged: false,
+  };
+}
+
+/**
+ * The journal events of `ops`, built with T7's `openEvent`/`resolveEvent` against `rec` (pure;
+ * what the daemon's decision store journals for them). Throws if T7 refuses one.
+ */
+export function decisionEvents(rec: WaveRecord, ops: PlanDecisionOp[], now: Date): NewEvent[] {
+  return ops.map((o) => {
+    if (o.op === "resolve") {
+      const r = resolveEvent(rec, o.decision_id, { answer: o.answer, by: o.by }, now);
+      if ("error" in r) throw new PlanChangeError(r.error);
+      if ("already" in r) throw new PlanChangeError(`decision '${o.decision_id}' already resolved`);
+      return r.event;
+    }
+    const r = openEvent(rec, o.input, now);
+    if ("error" in r) throw new PlanChangeError(r.error);
+    return { ...r.event, data: { ...o.extra, ...r.event.data } };
+  });
+}
+
+/** What the owner's answer to a plan_change decision does. */
+export interface PlanAnswer {
+  /** Cancel the task's running agents (mailbox `cancel` + interrupt) with this text. */
+  cancel?: string;
+  /** Events to journal after the resolution. */
+  events: NewEvent[];
+}
+
+/**
+ * The effect of a resolved plan_change decision (pure): `stop` on a removed task cancels it;
+ * `restart` on a re-pointed task cancels its agents and queues it again on the new issue (when the
+ * current plan still points it there). `let finish`, and anything on a task that already finished,
+ * does nothing.
+ */
+export function planAnswer(rec: WaveRecord, d: DecisionRecord): PlanAnswer {
+  const none: PlanAnswer = { events: [] };
+  const answer = d.resolved?.answer.trim().toLowerCase();
+  const t = rec.state?.tasks.find((x) => x.id === d.task);
+  if (d.kind !== "plan_change" || t === undefined || answer === undefined) return none;
+  if (t.stage === "cancelled" || SETTLED.has(t.stage)) return none;
+  const x = d as DecisionRecord & { change?: string; to_issue?: number; plan_version?: number };
+  const v = `plan v${x.plan_version ?? rec.state?.version}`;
+  if (x.change === "removed" && answer === "stop") {
+    return {
+      cancel: `volleyd: ${v} removed ${t.id} and the owner answered stop. Stop work on ${t.id} now: do not push, open or merge anything further, publish your terminal status and exit.`,
+      events: [
+        { type: "task_cancelled", task: t.id, data: { reason: `stopped: removed in ${v}` } },
+      ],
+    };
+  }
+  const to = x.to_issue;
+  if (x.change === "issue" && answer === "restart" && to !== undefined) {
+    if (rec.plan?.tasks[t.id]?.issue !== to) return none; // a later version moved it again
+    return {
+      cancel: `volleyd: ${v} re-pointed ${t.id} from #${t.issue} to #${to} and the owner answered restart. Stop work on #${t.issue} now: do not push, open or merge anything further, publish your terminal status and exit.`,
+      events: [
+        { type: "task_cancelled", task: t.id, data: { reason: `restart on #${to} (${v})` } },
+        { type: "task_queued", task: t.id, data: { issue: to, restart_of: t.issue } },
+      ],
+    };
+  }
+  return none;
 }

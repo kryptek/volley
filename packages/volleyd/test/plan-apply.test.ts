@@ -1,10 +1,17 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { formatWave } from "../src/commands/status";
+import { resolveEvent } from "../src/decisions";
 import { readJournalFile } from "../src/journal";
 import { launchScriptPath } from "../src/launch";
-import { PlanChangeError, applyPlan, planDecisionId, taskActivity } from "../src/plan-apply";
+import {
+  PlanChangeError,
+  applyPlan,
+  planAnswer,
+  planDecisionId,
+  taskActivity,
+} from "../src/plan-apply";
 import { type WaveRecord, replay } from "../src/reducer";
 import { spawnAgent } from "../src/spawn";
 import type { JournalEvent, NewEvent, TaskState, Wave } from "../src/types";
@@ -69,6 +76,20 @@ function applyTo(j: ReturnType<typeof journal>, next: Wave) {
 const taskOf = (rec: WaveRecord, id: string): TaskState | undefined =>
   rec.state?.tasks.find((t) => t.id === id);
 
+/** Tasks with an open plan_change decision. */
+const pendingTasks = (rec: WaveRecord) =>
+  (rec.state?.open_decisions ?? [])
+    .map((id) => rec.decisions[id])
+    .filter((d) => d?.kind === "plan_change")
+    .map((d) => d?.task);
+
+/** Journal the owner's answer to a decision (T7's resolve event). */
+function answer(j: ReturnType<typeof journal>, id: string, a: string) {
+  const r = resolveEvent(replay(j.events), id, { answer: a, by: "owner-1" }, new Date(NOW));
+  if (!("event" in r)) throw new Error(`cannot resolve ${id}`);
+  j.push(r.event);
+}
+
 describe("applyPlan", () => {
   it("journals the new version with its structural diff, first", () => {
     const { res, after } = applyTo(midFlight(), V2);
@@ -102,12 +123,11 @@ describe("applyPlan", () => {
       "decision_opened",
     ]);
     const d = res.events.find((e) => e.type === "decision_opened" && e.task === "T3");
+    const id = planDecisionId("w-plan", "T3", "removed", 2);
     expect(d?.data).toMatchObject({
-      decision_id: planDecisionId("w-plan", "T3", "removed"),
+      decision_id: id,
       kind: "plan_change",
       change: "removed",
-      wave: "w-plan",
-      task: "T3",
       options: ["stop", "let finish"],
       plan_version: 2,
       pointers: {},
@@ -117,8 +137,13 @@ describe("applyPlan", () => {
     expect(d?.data.question).toContain("stop T3 (implementer working 14 min)?");
     expect(taskOf(after, "T3")).toEqual(taskOf(before, "T3"));
     expect(after.wave?.tasks.T3).toEqual(V1.tasks.T3); // its agents still need its definition
-    expect(after.state?.open_decisions).toContain(planDecisionId("w-plan", "T3", "removed"));
-    expect(after.state?.plan_pending).toEqual(["T3", "T4"]);
+    expect(after.state?.open_decisions).toContain(id);
+    // A T7 decision record (what the daemon publishes on volley/_waves/<wave>/decisions/<id>).
+    expect(after.decisions[id]).toMatchObject({ wave: "w-plan", task: "T3", change: "removed" });
+    expect(res.decisions).toContainEqual(
+      expect.objectContaining({ op: "open", input: expect.objectContaining({ id, task: "T3" }) }),
+    );
+    expect(pendingTasks(after)).toEqual(["T4", "T3"]);
   });
 
   it("dependency added to a queued task → waiting_on updated; added task queued", () => {
@@ -139,7 +164,7 @@ describe("applyPlan", () => {
     const { res, after } = applyTo(midFlight(), V2);
     const d = res.events.find((e) => e.type === "decision_opened" && e.task === "T4");
     expect(d?.data).toMatchObject({
-      decision_id: planDecisionId("w-plan", "T4", "issue"),
+      decision_id: planDecisionId("w-plan", "T4", "issue", 2),
       kind: "plan_change",
       change: "issue",
       from_issue: 104,
@@ -167,7 +192,9 @@ describe("applyPlan", () => {
 
   it("status shows the version and the tasks pending decision", () => {
     const { after } = applyTo(midFlight(), V2);
-    const header = formatWave(after.state as NonNullable<WaveRecord["state"]>).split("\n")[0];
+    const header = formatWave(after.state as NonNullable<WaveRecord["state"]>, {
+      decisions: Object.values(after.decisions),
+    }).split("\n")[0];
     expect(header).toContain("plan v2 (2 tasks pending decision)");
   });
 
@@ -191,7 +218,7 @@ describe("applyPlan", () => {
       ["T4", "withdrawn", "plan v3"],
     ]);
     expect(after.state?.open_decisions).toEqual([]);
-    expect(after.state?.plan_pending).toBeUndefined();
+    expect(pendingTasks(after)).toEqual([]);
     expect(taskOf(after, "T5")?.stage).toBe("queued"); // re-added after its cancellation
     expect(taskOf(after, "T6")?.stage).toBe("cancelled"); // removed while still queued
     expect(taskOf(after, "T3")?.stage).toBe("implement");
@@ -203,12 +230,18 @@ describe("applyPlan", () => {
     applyTo(j, V2);
     const v3 = parseWaveFile(text("v2.yaml").replace("issue: 114", "issue: 124"));
     const { res, after } = applyTo(j, v3);
-    const id = planDecisionId("w-plan", "T4", "issue");
-    expect(res.events.filter((e) => e.task === "T4").map((e) => [e.type, e.data.answer])).toEqual([
-      ["decision_resolved", "superseded"],
-      ["decision_opened", undefined],
+    const old = planDecisionId("w-plan", "T4", "issue", 2);
+    const id = planDecisionId("w-plan", "T4", "issue", 3);
+    expect(
+      res.events
+        .filter((e) => e.task === "T4")
+        .map((e) => [e.type, e.data.decision_id, e.data.answer]),
+    ).toEqual([
+      ["decision_resolved", old, "superseded"],
+      ["decision_opened", id, undefined],
     ]);
     expect(after.state?.open_decisions.filter((d) => d === id)).toHaveLength(1);
+    expect(after.state?.open_decisions).not.toContain(old);
     // the still-open removal decision for T3 is not re-asked
     expect(res.events.some((e) => e.task === "T3")).toBe(false);
   });
@@ -218,6 +251,168 @@ describe("applyPlan", () => {
     const rec = replay(midFlight().events);
     expect(() => applyPlan(rec, other, { now: NOW, activity: {} })).toThrow(PlanChangeError);
     expect(() => applyPlan(replay([]), V2, { now: NOW, activity: {} })).toThrow(/not submitted/);
+  });
+});
+
+describe("applyPlan: answered, withdrawn and parked plan_change decisions", () => {
+  const v3T6 = () =>
+    parseWaveFile(text("v2.yaml").replace("T6: { issue: 106 }", "T6: { issue: 107 }"));
+
+  it("an answered decision is not asked again by a later version", () => {
+    const j = midFlight();
+    applyTo(j, V2);
+    answer(j, planDecisionId("w-plan", "T3", "removed", 2), "let finish");
+    answer(j, planDecisionId("w-plan", "T4", "issue", 2), "let finish");
+    expect(replay(j.events).state?.open_decisions).toEqual([]);
+    const { res, after } = applyTo(j, v3T6()); // changes only T6's issue
+    expect(res.version).toBe(3);
+    expect(res.events.filter((e) => e.type.startsWith("decision_"))).toEqual([]);
+    expect(after.state?.open_decisions).toEqual([]);
+    expect(after.wave?.tasks.T3).toEqual(V1.tasks.T3); // still running, still defined
+    expect(after.wave?.tasks.T4?.issue).toBe(104); // "let finish": keeps the old issue
+  });
+
+  it("a new issue target after `let finish` is a new question, with a new id", () => {
+    const j = midFlight();
+    applyTo(j, V2);
+    answer(j, planDecisionId("w-plan", "T4", "issue", 2), "let finish");
+    const v3 = parseWaveFile(text("v2.yaml").replace("issue: 114", "issue: 124"));
+    const { res } = applyTo(j, v3);
+    const opened = res.events.filter((e) => e.type === "decision_opened");
+    expect(opened.map((e) => [e.task, e.data.decision_id, e.data.to_issue])).toEqual([
+      ["T4", planDecisionId("w-plan", "T4", "issue", 3), 124],
+    ]);
+  });
+
+  it("removing a task withdraws its open issue decision before asking to stop it", () => {
+    const j = midFlight();
+    applyTo(j, V2); // re-points in-flight T4 (104 -> 114)
+    const v3 = parseWaveFile(
+      text("v2.yaml").replace(
+        "  T4: { issue: 114, after: [T1], pipeline: [implement, merge_ready] }\n",
+        "",
+      ),
+    );
+    const { res, after } = applyTo(j, v3);
+    expect(
+      res.events
+        .filter((e) => e.task === "T4")
+        .map((e) => [e.type, e.data.change ?? e.data.answer]),
+    ).toEqual([
+      ["decision_resolved", "withdrawn"],
+      ["decision_opened", "removed"],
+    ]);
+    const onT4 = (after.state?.open_decisions ?? []).filter(
+      (id) => after.decisions[id]?.task === "T4",
+    );
+    expect(onT4).toEqual([planDecisionId("w-plan", "T4", "removed", 3)]);
+  });
+
+  it("a plan_change decision does not park its task; another decision still parks and resumes it", () => {
+    const j = midFlight();
+    const { after } = applyTo(j, V2);
+    expect(taskOf(after, "T3")?.stage).toBe("implement");
+    expect(taskOf(after, "T3")?.why_waiting).toBeUndefined();
+    j.push({
+      type: "decision_opened",
+      task: "T3",
+      data: { decision_id: "d-blocked", kind: "agent_blocked", question: "?", pointers: {} },
+    });
+    expect(taskOf(replay(j.events), "T3")?.stage).toBe("awaiting_decision");
+    answer(j, "d-blocked", "go on"); // the plan_change one stays open: the task resumes anyway
+    const rec = replay(j.events);
+    expect(taskOf(rec, "T3")?.stage).toBe("implement");
+    expect(pendingTasks(rec)).toContain("T3");
+  });
+
+  it("an admitted task that never spawned counts as queued: removed → cancelled, un-admitted", () => {
+    const j = midFlight();
+    j.push({ type: "task_admitted", task: "T5", data: {} });
+    const { res, after } = applyTo(j, V2);
+    expect(res.events.filter((e) => e.task === "T5").map((e) => e.type)).toEqual([
+      "task_cancelled",
+    ]);
+    expect(after.admitted).not.toContain("T5");
+  });
+
+  it("a task whose spawn is under way is in flight", () => {
+    const j = midFlight();
+    j.push({ type: "task_admitted", task: "T5", data: {} });
+    const rec = replay(j.events);
+    const res = applyPlan(rec, V2, {
+      now: NOW,
+      activity: taskActivity(j.events),
+      spawning: ["T5"],
+    });
+    expect(res.events.filter((e) => e.task === "T5").map((e) => [e.type, e.data.change])).toEqual([
+      ["decision_opened", "removed"],
+    ]);
+    expect(res.events.find((e) => e.task === "T5")?.data.question).toContain("stop T5 (spawning)?");
+  });
+
+  it("refuses a release_branch or namespace change", () => {
+    const rec = replay(midFlight().events);
+    const branch = parseWaveFile(text("v2.yaml").replace("release/w-plan", "release/other"));
+    expect(() => applyPlan(rec, branch, { now: NOW, activity: {} })).toThrow(
+      /release_branch cannot change/,
+    );
+    const ns = parseWaveFile(`${text("v2.yaml")}namespace: other\n`);
+    expect(() => applyPlan(rec, ns, { now: NOW, activity: {} })).toThrow(/namespace cannot change/);
+  });
+
+  it("re-ordering the tasks alone is no change", () => {
+    const rec = replay(midFlight().events);
+    const lines = text("v1.yaml").split("\n");
+    const i = lines.indexOf("  T1: { issue: 101 }");
+    [lines[i], lines[i + 2]] = [lines[i + 2] as string, lines[i] as string];
+    const reordered = parseWaveFile(lines.join("\n"));
+    expect(reordered.task_order).not.toEqual(V1.task_order);
+    expect(applyPlan(rec, reordered, { now: NOW, activity: {} }).unchanged).toBe(true);
+  });
+});
+
+describe("planAnswer", () => {
+  it("stop on a removed task cancels it", () => {
+    const j = midFlight();
+    applyTo(j, V2);
+    answer(j, planDecisionId("w-plan", "T3", "removed", 2), "stop");
+    const rec = replay(j.events);
+    const d = rec.decisions[planDecisionId("w-plan", "T3", "removed", 2)];
+    const effect = planAnswer(rec, d as NonNullable<typeof d>);
+    expect(effect.cancel).toContain("Stop work on T3");
+    expect(effect.events.map((e) => [e.type, e.task])).toEqual([["task_cancelled", "T3"]]);
+    for (const ev of effect.events) j.push(ev);
+    expect(taskOf(replay(j.events), "T3")?.stage).toBe("cancelled");
+  });
+
+  it("restart on a re-pointed task queues it again on the new issue", () => {
+    const j = midFlight();
+    applyTo(j, V2);
+    const id = planDecisionId("w-plan", "T4", "issue", 2);
+    answer(j, id, "restart");
+    const rec = replay(j.events);
+    const effect = planAnswer(
+      rec,
+      rec.decisions[id] as NonNullable<(typeof rec.decisions)[string]>,
+    );
+    expect(effect.events.map((e) => e.type)).toEqual(["task_cancelled", "task_queued"]);
+    for (const ev of effect.events) j.push(ev);
+    const after = replay(j.events);
+    expect(taskOf(after, "T4")).toMatchObject({ stage: "queued", issue: 114, agents: {} });
+    expect(after.wave?.tasks.T4?.issue).toBe(114); // what the next spawn uses
+  });
+
+  it("let finish does nothing", () => {
+    const j = midFlight();
+    applyTo(j, V2);
+    const id = planDecisionId("w-plan", "T3", "removed", 2);
+    answer(j, id, "let finish");
+    const rec = replay(j.events);
+    expect(
+      planAnswer(rec, rec.decisions[id] as NonNullable<(typeof rec.decisions)[string]>),
+    ).toEqual({
+      events: [],
+    });
   });
 });
 
@@ -314,27 +509,27 @@ describe("daemon: volleyd run on a running wave, volleyd diff", () => {
     const r = await runCli(["run", V2_FILE], t.env);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("submitted wave w-plan plan v2\n+ T6\n");
-    // T1, T3 and T5 were admitted on submission (no spawner): T3 and T5 are in flight.
-    expect(r.stdout).toContain("plan v2 (2 tasks pending decision)");
+    // T1, T3 and T5 were admitted on submission, but nothing spawned them (no spawner): T3 and
+    // T5 never started, so removing them cancels them and gives their admission back.
+    expect(r.stdout).toContain("plan v2  owner");
     expect(readFileSync(join(dir, "v2.yaml"), "utf-8")).toBe(text("v2.yaml"));
     const events = readJournalFile(join(dir, "journal.jsonl"));
     expect(events.find((e) => e.type === "wave_versioned")?.data).toMatchObject({
       version: 2,
       file: join(dir, "v2.yaml"),
     });
-    const decisions = events.filter((e) => e.type === "decision_opened");
-    expect(decisions.map((e) => [e.task, e.data.change])).toEqual([
-      ["T3", "removed"],
-      ["T5", "removed"],
+    expect(events.filter((e) => e.type === "decision_opened")).toEqual([]);
+    expect(events.filter((e) => e.type === "task_cancelled").map((e) => e.task)).toEqual([
+      "T3",
+      "T5",
     ]);
-    expect(decisions[0]?.data.question).toContain("stop T3 (admitted, not yet spawned)?");
 
     const state = (await t.retained("volley/_waves/w-plan/state")) as {
-      payload: { version: number; tasks: TaskState[]; plan_pending: string[] };
+      payload: { version: number; tasks: TaskState[] };
     };
     expect(state.payload.version).toBe(2);
-    expect(state.payload.plan_pending).toEqual(["T3", "T5"]);
     const byId = Object.fromEntries(state.payload.tasks.map((x) => [x.id, x]));
+    expect(byId.T3?.stage).toBe("cancelled");
     expect(byId.T4?.issue).toBe(114); // still queued (waits on T1): the re-point applies
     expect(byId.T6?.stage).toBe("queued");
 
@@ -346,5 +541,84 @@ describe("daemon: volleyd run on a running wave, volleyd diff", () => {
     const unknown = await runCli(["diff", "nope", V2_FILE], t.env);
     expect(unknown.exitCode).toBe(1);
     expect(unknown.stderr).toContain("unknown wave 'nope'");
+  });
+
+  it("numbers the first submission v1 whatever its file says", async () => {
+    t = await makeDaemonEnv();
+    await t.start();
+    const file = join(t.home, "first.yaml");
+    writeFileSync(file, `${text("v1.yaml")}version: 3\n`);
+    expect((await runCli(["run", file], t.env)).exitCode).toBe(0);
+    const dir = join(t.home, "waves", "w-plan");
+    expect(existsSync(join(dir, "v1.yaml"))).toBe(true);
+    expect(existsSync(join(dir, "v3.yaml"))).toBe(false);
+    const state = (await t.retained("volley/_waves/w-plan/state")) as {
+      payload: { version: number };
+    };
+    expect(state.payload.version).toBe(1);
+    expect((await runCli(["run", V2_FILE], t.env)).exitCode).toBe(0);
+    expect(existsSync(join(dir, "v2.yaml"))).toBe(true);
+  });
+
+  it("publishes plan_change decisions on the decisions topic; `resolve … stop` cancels the task", async () => {
+    t = await makeDaemonEnv();
+    const daemon = await t.start();
+    expect((await runCli(["run", V1_FILE], t.env)).exitCode).toBe(0);
+    // T3 is running (an implementer was spawned and is implementing).
+    await daemon.recordEvent("w-plan", {
+      type: "agent_spawned",
+      task: "T3",
+      data: { role: "implementer", agent_id: "w-plan-t3-implementer-1", issue: 103 },
+    });
+    await daemon.recordEvent("w-plan", {
+      type: "stage_entered",
+      task: "T3",
+      data: { stage: "implement" },
+    });
+
+    const r = await runCli(["run", V2_FILE], t.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("plan v2 (1 task pending decision)");
+    const id = planDecisionId("w-plan", "T3", "removed", 2);
+    const topic = `volley/_waves/w-plan/decisions/${id}`;
+    const retained = (await t.retained(topic)) as {
+      type: string;
+      payload: Record<string, unknown>;
+    };
+    expect(retained.type).toBe("decision_opened");
+    expect(retained.payload).toMatchObject({
+      decision_id: id,
+      wave: "w-plan",
+      task: "T3",
+      kind: "plan_change",
+      change: "removed",
+      options: ["stop", "let finish"],
+    });
+    expect(schemaErrors("decision.schema.json", retained)).toEqual([]);
+    const listed = await runCli(["decisions", "w-plan"], t.env);
+    expect(listed.stdout).toContain(id);
+
+    const res = await runCli(["resolve", id, "stop"], t.env);
+    expect(res.exitCode).toBe(0);
+    expect(await t.retained(topic)).toBeNull();
+    const events = daemon.journalEvents("w-plan");
+    expect(
+      events
+        .filter((e) => e.task === "T3")
+        .map((e) => e.type)
+        .slice(-3),
+    ).toEqual(["decision_resolved", "steering_sent", "task_cancelled"]);
+    const state = (await t.retained("volley/_waves/w-plan/state")) as {
+      payload: { tasks: TaskState[] };
+    };
+    expect(state.payload.tasks.find((x) => x.id === "T3")?.stage).toBe("cancelled");
+
+    // A later version does not ask about T3 again.
+    const v3 = join(t.home, "v3.yaml");
+    writeFileSync(v3, text("v2.yaml").replace("T6: { issue: 106 }", "T6: { issue: 107 }"));
+    expect((await runCli(["run", v3], t.env)).exitCode).toBe(0);
+    expect(daemon.journalEvents("w-plan").filter((e) => e.type === "decision_opened")).toHaveLength(
+      1,
+    );
   });
 });

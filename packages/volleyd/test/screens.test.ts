@@ -13,9 +13,16 @@ describe("classifyScreen", () => {
     ["blank.txt", "empty"],
     ["trust-dialog.txt", "trust_dialog"],
     ["working.txt", "working"],
-    ["shell-prompt.txt", "unknown"],
+    ["shell-prompt.txt", "shell_prompt"],
   ])("%s → %s", (file, cls) => {
     expect(classifyScreen(screen(file))).toBe(cls);
+  });
+
+  it("a bare shell prompt is the last line ending in a prompt sign; a typed command is not", () => {
+    expect(classifyScreen("Last login: today\n~/wt $ \n\n")).toBe("shell_prompt");
+    expect(classifyScreen("~/wt ❯ ")).toBe("shell_prompt");
+    expect(classifyScreen("~/wt %   bash .volley/launch.sh")).toBe("unknown");
+    expect(classifyScreen("[oh-my-zsh] Would you like to update? [Y/n]")).toBe("update_prompt");
   });
 
   it("an unreadable screen is empty", () => {

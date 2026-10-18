@@ -4,6 +4,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
 import type { PlanDiff } from "./plan-diff";
 import type { PathError } from "./schemas";
@@ -22,8 +23,23 @@ export const CONFIG_TOPIC = "volley/_waves/_config";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 
-/** Ops handled in this release; later tasks add pause/resume/stop/steer/resolve/claim. */
-export type ControlOp = "run" | "diff" | "status" | "config_get" | "config_set" | "spawn";
+/** Control ops the daemon answers. */
+export type ControlOp =
+  | "run"
+  | "diff"
+  | "status"
+  | "config_get"
+  | "config_set"
+  // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
+  | "decisions"
+  | "resolve"
+  | "claim"
+  | "pause"
+  | "resume"
+  | "stop"
+  | "steer"
+  // Spawn one task's agent now (spawn.ts).
+  | "spawn";
 
 export interface ControlResponse {
   text: string;
@@ -37,8 +53,10 @@ export interface ControlResponse {
   /** config_set only (SPEC §4.6.4). */
   applied?: boolean;
   rejected?: PathError[];
+  /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
+  warnings?: string[];
   /** run (a new version of a submitted wave) and diff: the structural plan change. */
-  plan?: { version: number; diff: PlanDiff; unchanged: boolean };
+  plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -64,7 +82,7 @@ export class ControlClient {
   readonly agentId: string;
   private constructor(
     private readonly broker: VolleyBroker,
-    private readonly namespace: string,
+    readonly namespace: string,
     agentId: string,
   ) {
     this.agentId = agentId;
@@ -140,6 +158,33 @@ export class ControlClient {
       clearTimeout(timer);
       await unsubscribe();
     }
+  }
+
+  /** Every retained registry entry (raw payloads), for caller auto-detection. */
+  async readRegistry(timeoutMs: number = DAEMON_DEFAULTS.registry_scan_ms): Promise<string[]> {
+    const msgs = await this.broker.subscribeCollect(
+      "volley/_system/registry/+",
+      Number.POSITIVE_INFINITY,
+      timeoutMs,
+    );
+    return msgs.map((m) => m.payload).filter((p) => p !== "");
+  }
+
+  /** The type of every retained `status` in this namespace, by agent id (owner auto-detection). */
+  async readStatuses(
+    timeoutMs: number = DAEMON_DEFAULTS.registry_scan_ms,
+  ): Promise<Map<string, string>> {
+    const msgs = await this.broker.subscribeCollect(
+      buildTopic(this.namespace, "+", "status"),
+      Number.POSITIVE_INFINITY,
+      timeoutMs,
+    );
+    const out = new Map<string, string>();
+    for (const m of msgs) {
+      const env = m.payload === "" ? null : parseEnvelope(m.payload);
+      if (env !== null) out.set(env.agent_id, env.type);
+    }
+    return out;
   }
 
   async close(): Promise<void> {

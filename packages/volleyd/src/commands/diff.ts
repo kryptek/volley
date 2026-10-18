@@ -7,7 +7,7 @@ import { parseWaveFile } from "../wave-file";
 
 const HELP = `Usage: volleyd diff <wave> <wave.yaml> [--json] [--broker-url <url>] [--namespace <ns>]
 
-Print the structural diff between a running wave's current plan and a wave file — tasks added,
+Print the structural diff between a submitted wave's current plan and a wave file — tasks added,
 removed, and changed (dependencies, issue, pipeline, model) — without submitting anything.
 Submit it as the wave's next version with \`volleyd run <wave.yaml>\`.
 `;

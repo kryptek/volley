@@ -27,6 +27,10 @@ export interface RetireRequest {
   lockPath?: string;
   /** Whether credentials were minted for it (`volley auth rm-agent` is skipped otherwise). */
   minted: boolean;
+  /** The terminal status envelope's payload (summary, pr_url, reason, …), kept in the journal. */
+  terminal?: unknown;
+  /** The agent's retained `result` payload, if it published one. */
+  result?: unknown;
 }
 
 export interface RetireDeps {
@@ -73,6 +77,9 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
       status: req.status,
       credentials_revoked: revoked,
       lock_released: released,
+      // The retained status/result are cleared above; the journal keeps what they said.
+      ...(req.terminal !== undefined ? { terminal: req.terminal } : {}),
+      ...(req.result !== undefined ? { result: req.result } : {}),
     },
   });
 }

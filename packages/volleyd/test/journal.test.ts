@@ -14,6 +14,12 @@ const fixture: JournalEvent[] = readFileSync(
   .split("\n")
   .map((l) => JSON.parse(l));
 
+/** A snapshot of the fixture's first 11 events written before decisions/steers existed. */
+const preT7Snapshot = readFileSync(
+  new URL("./fixtures/snapshot-pre-t7.json", import.meta.url),
+  "utf-8",
+);
+
 /** The fixture as un-sequenced events, so a journal re-assigns seq/at. */
 const fresh: NewEvent[] = fixture.map(({ seq: _s, at, ...rest }) => ({ ...rest, at }));
 
@@ -99,6 +105,24 @@ describe("WaveLog", () => {
     expect(replay(readJournalFile(file))).not.toEqual(full);
 
     expect(WaveLog.open(dir, { snapshotEvery: 4 }).record).toEqual(full);
+  });
+
+  it("loads a pre-decisions snapshot at the journal tail with the new fields defaulted", () => {
+    writeFileSync(
+      join(dir, "journal.jsonl"),
+      `${fixture
+        .slice(0, 11)
+        .map((e) => JSON.stringify(e))
+        .join("\n")}\n`,
+    );
+    writeFileSync(join(dir, "snapshot.json"), preT7Snapshot);
+    const log = WaveLog.open(dir);
+    expect(log.record.seq).toBe(11);
+    expect(log.record.decisions).toEqual({});
+    expect(log.record.steers).toEqual({});
+    // And the tail still applies on top of it.
+    for (const e of fresh.slice(11)) log.append(e);
+    expect(log.record.state?.open_decisions).toEqual([]);
   });
 
   it("restores from journal alone when there is no snapshot", () => {

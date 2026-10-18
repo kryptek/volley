@@ -160,8 +160,6 @@ export interface WaveState {
   open_decisions: string[];
   gates: TaskId[];
   spec?: WaveSpec;
-  /** Tasks with an open plan_change decision (a versioned re-submission is waiting on them). */
-  plan_pending?: TaskId[];
   effective_config?: TunablesPatch;
   updated_at: string;
 }

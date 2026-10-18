@@ -53,6 +53,25 @@ describe("recordRepoTrust", () => {
     expect(after).toEqual(expected);
   });
 
+  it("does not drop a concurrent write by Claude Code: re-reads and retries", () => {
+    const path = join(dir, "claude.json");
+    writeFileSync(path, JSON.stringify({ projects: {}, numStartups: 1 }));
+    let raced = false;
+    recordRepoTrust(path, "/w/repo", {
+      beforeRename: () => {
+        if (raced) return;
+        raced = true;
+        // Claude Code rewrites the file between our read and our rename (a larger file).
+        writeFileSync(path, JSON.stringify({ projects: {}, numStartups: 2, tipsHistory: {} }));
+      },
+    });
+    expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+      projects: { "/w/repo": { hasTrustDialogAccepted: true } },
+      numStartups: 2,
+      tipsHistory: {},
+    });
+  });
+
   it("creates the project entry when the root has none", () => {
     const path = join(dir, "claude.json");
     writeFileSync(path, JSON.stringify({ projects: {} }));

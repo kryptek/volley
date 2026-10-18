@@ -7,14 +7,17 @@
  *   update_prompt  a shell/tool "update? [Y/n]" prompt   → Enter, then one relaunch
  *   login          Claude Code asking for a login        → decision unknown_screen
  *   working        Claude Code is up (hooks silent)      → decision unknown_screen
+ *   shell_prompt   a bare shell prompt, nothing typed    → decision unknown_screen (after an
+ *                  answered update prompt: the one place the launch command is typed again)
  *   empty          nothing on screen                     → decision unknown_screen
- *   unknown        anything else (e.g. a bare shell)     → decision unknown_screen
+ *   unknown        anything else                         → decision unknown_screen
  */
 export type ScreenClass =
   | "trust_dialog"
   | "update_prompt"
   | "login"
   | "working"
+  | "shell_prompt"
   | "empty"
   | "unknown";
 
@@ -48,10 +51,17 @@ const PATTERNS: [ScreenClass, RegExp[]][] = [
   ["working", [/esc to interrupt/i, /bypass permissions on/i, /welcome to claude code/i, /⏵⏵/]],
 ];
 
+/** A shell waiting for input: the last non-empty line ends in a prompt sign, nothing typed. */
+const SHELL_PROMPT = /[$%#❯➜λ]\s*$/;
+
 export function classifyScreen(text: string | null): ScreenClass {
   if (text === null || text.trim() === "") return "empty";
   for (const [cls, res] of PATTERNS) if (res.some((re) => re.test(text))) return cls;
-  return "unknown";
+  const last = text
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .at(-1);
+  return last !== undefined && SHELL_PROMPT.test(last) ? "shell_prompt" : "unknown";
 }
 
 /**

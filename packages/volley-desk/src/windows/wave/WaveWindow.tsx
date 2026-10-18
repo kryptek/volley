@@ -63,7 +63,7 @@ function useNow(fixed: number | undefined, ms = 5000): number {
   return fixed ?? now;
 }
 
-function IconBtn(p: {
+export function IconBtn(p: {
   label: string;
   i: typeof BubbleChatIcon;
   onClick: () => void;

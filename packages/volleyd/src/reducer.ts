@@ -1,3 +1,4 @@
+import { type DecisionRecord, parksTask } from "./decisions";
 import type {
   JournalEvent,
   TaskAgents,
@@ -26,14 +27,24 @@ export interface WaveRecord {
   wave: Wave | null;
   /** The latest submitted wave file (normalised). Absent in snapshots that predate versioning. */
   plan?: Wave | null;
-  /** Open plan_change decisions by decision id. Absent in snapshots that predate versioning. */
-  planPending?: Record<string, { task: TaskId; change: string; to_issue?: number }>;
   /** Tasks the scheduler has admitted, in admission order. */
   admitted: TaskId[];
   /** Agents spawned for this wave (retries and reviewers included) — counts against spawn_budget. */
   spawns: number;
   /** This wave's `config:` overrides. */
   overrides: TunablesPatch;
+  /** Every decision opened in this wave (open and resolved), by id. */
+  decisions: Record<string, DecisionRecord>;
+  /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
+  steers: Record<TaskId, { seq: number; message_id: string }>;
+}
+
+/**
+ * A snapshot record as read from disk, with fields added after it was written defaulted (e.g.
+ * `decisions`/`steers` in snapshots from before decisions existed).
+ */
+export function normalizeRecord(rec: Partial<WaveRecord>): WaveRecord {
+  return { ...emptyRecord(), ...rec };
 }
 
 export function emptyRecord(): WaveRecord {
@@ -42,10 +53,11 @@ export function emptyRecord(): WaveRecord {
     state: null,
     wave: null,
     plan: null,
-    planPending: {},
     admitted: [],
     spawns: 0,
     overrides: {},
+    decisions: {},
+    steers: {},
   };
 }
 
@@ -118,9 +130,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       };
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
-        // Re-added by a later plan version: starts over.
+        // Re-added by a later plan version, or restarted on a new issue: starts over, on the
+        // issue the event names.
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
+        const def = next.wave?.tasks[ev.task];
+        if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
       break;
     }
@@ -134,10 +149,23 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       break;
     case "stage_entered":
-      if (task !== undefined) task.stage = ev.data.stage as TaskStage;
+      if (task === undefined) break;
+      if (task.stage === "awaiting_decision" && ev.data.stage !== "awaiting_decision") {
+        // Parked on a decision: the task stays parked; the stage is where it resumes once its
+        // last open decision is resolved.
+        for (const d of Object.values(next.decisions)) {
+          if (d.task === task.id && d.resolved === undefined && parksTask(d)) {
+            d.resume_stage = ev.data.stage as TaskStage;
+          }
+        }
+        break;
+      }
+      task.stage = ev.data.stage as TaskStage;
       break;
     case "task_cancelled":
       if (task !== undefined) task.stage = "cancelled";
+      // A cancelled task gives back its admission (it may have been admitted but not spawned).
+      if (ev.task !== undefined) next.admitted = next.admitted.filter((id) => id !== ev.task);
       break;
     case "artifact_verified":
       if (task !== undefined) {
@@ -148,24 +176,56 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "decision_opened": {
       const id = ev.data.decision_id as string;
       if (!state.open_decisions.includes(id)) state.open_decisions.push(id);
-      if (ev.data.kind === "plan_change" && ev.task !== undefined) {
-        next.planPending = {
-          ...next.planPending,
-          [id]: {
-            task: ev.task,
-            change: String(ev.data.change),
-            ...(typeof ev.data.to_issue === "number" ? { to_issue: ev.data.to_issue } : {}),
-          },
-        };
+      const d: DecisionRecord = {
+        ...(ev.data as Omit<DecisionRecord, "wave" | "task">),
+        decision_id: id,
+        wave: state.wave,
+        task: ev.task ?? null,
+        pointers: (ev.data.pointers as DecisionRecord["pointers"] | undefined) ?? {},
+        opened_at: (ev.data.opened_at as string | undefined) ?? ev.at,
+      };
+      if (task !== undefined && parksTask(d)) {
+        // Park the task; a second open decision keeps the stage the first one saved.
+        const parked = Object.values(next.decisions).find(
+          (o) => o.task === task.id && o.resolved === undefined && o.resume_stage !== undefined,
+        );
+        d.resume_stage = parked?.resume_stage ?? task.stage;
+        task.stage = "awaiting_decision";
       }
+      next.decisions[id] = d;
       break;
     }
     case "decision_resolved": {
-      state.open_decisions = state.open_decisions.filter((d) => d !== ev.data.decision_id);
-      const { [ev.data.decision_id as string]: _gone, ...rest } = next.planPending ?? {};
-      next.planPending = rest;
+      const id = ev.data.decision_id as string;
+      state.open_decisions = state.open_decisions.filter((d) => d !== id);
+      const d = next.decisions[id];
+      if (d !== undefined) {
+        d.resolved = {
+          answer: ev.data.answer as string,
+          by: ev.data.by as string,
+          at: (ev.data.at as string | undefined) ?? ev.at,
+        };
+        if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
+        // Only a parking decision keeps the task parked (one opened with `park: false` never does).
+        const stillOpen = state.open_decisions.some((o) => {
+          const x = next.decisions[o];
+          return x !== undefined && x.task === d.task && parksTask(x);
+        });
+        const parked = task !== undefined && task.stage === "awaiting_decision";
+        if (task !== undefined && parked && parksTask(d) && !stillOpen) {
+          task.stage = d.resume_stage ?? "queued";
+        }
+      }
       break;
     }
+    case "steering_sent":
+      if (ev.task !== undefined && ev.data.type === "steering") {
+        next.steers[ev.task] = {
+          seq: ev.data.seq as number,
+          message_id: ev.data.message_id as string,
+        };
+      }
+      break;
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
@@ -206,25 +266,35 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
 }
 
 /**
- * Recompute the fields that follow from task stages and open decisions: waiting_on/why_waiting,
- * gates and plan_pending.
+ * Recompute the fields that follow from task stages and open decisions: waiting_on/why_waiting
+ * and gates.
  */
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
+  const openOn = (task: TaskId) =>
+    state.open_decisions.filter((id) => rec.decisions[id]?.task === task);
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
+    if (t.stage === "awaiting_decision") {
+      const ids = openOn(t.id);
+      return ids.length > 0
+        ? { ...t, waiting_on: ids, why_waiting: `awaiting decision ${ids.join(", ")}` }
+        : t;
+    }
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
         : [];
-    return pending.length > 0
-      ? { ...t, waiting_on: pending, why_waiting: `after: ${pending.join(", ")}` }
-      : t;
+    if (pending.length === 0) return t;
+    // A dependency parked on a decision parks its dependents, naming the decision.
+    const parked = pending.filter((d) => stageOf.get(d) === "awaiting_decision");
+    const ids = parked.flatMap(openOn);
+    const why =
+      ids.length > 0
+        ? `awaiting decision ${ids.join(", ")} (${parked.join(", ")})`
+        : `after: ${pending.join(", ")}`;
+    return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
-  const asked = new Set(Object.values(rec.planPending ?? {}).map((p) => p.task));
-  const pending = state.tasks.filter((t) => asked.has(t.id)).map((t) => t.id);
-  if (pending.length > 0) state.plan_pending = pending;
-  else Reflect.deleteProperty(state, "plan_pending");
 }
 
 /** Fold events onto a record (default: empty). */

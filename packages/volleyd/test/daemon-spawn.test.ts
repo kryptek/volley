@@ -1,12 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { cleanupWave } from "../src/commands/cleanup";
+import type { Daemon } from "../src/daemon";
+import { decisionTopic } from "../src/decisions";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
+import { trustDecisionId } from "../src/trust";
 import type { JournalEvent } from "../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
@@ -20,6 +23,8 @@ describe("daemon spawn loop", () => {
   let agent: VolleyBroker;
   let host: FakeHost;
   let repo: string;
+  let claudeJson: string;
+  let daemon: Daemon;
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
@@ -40,15 +45,18 @@ describe("daemon spawn loop", () => {
       { qos: 1, retain },
     );
 
-  beforeEach(async () => {
+  /** A daemon with the spawner on fakes, and wave w1 (one task, T1) submitted to it. */
+  async function setup(o: { trusted?: boolean } = {}) {
     env = await makeDaemonEnv();
     repo = realpathSync(env.home);
     repo = join(repo, "repo");
     mkdirSync(repo);
-    const claudeJson = join(env.home, "claude.json");
+    claudeJson = join(env.home, "claude.json");
     writeFileSync(
       claudeJson,
-      JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } }),
+      JSON.stringify({
+        projects: o.trusted === false ? {} : { [repo]: { hasTrustDialogAccepted: true } },
+      }),
     );
     agent = new VolleyBroker();
     await agent.connect({ url: env.broker.url, agentId: "agent-sim" });
@@ -81,8 +89,13 @@ describe("daemon spawn loop", () => {
         );
       }, 20);
     };
-    await env.start({
-      spawner: { host, claudeJsonPath: claudeJson, hooksDir: "/opt/volley-hooks" },
+    daemon = await env.start({
+      spawner: {
+        host,
+        claudeJsonPath: claudeJson,
+        hooksDir: "/opt/volley-hooks",
+        reapGraceMs: 300,
+      },
     });
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
@@ -91,7 +104,7 @@ describe("daemon spawn loop", () => {
     );
     const r = await runCli(["run", wave], env.env);
     expect(r.exitCode).toBe(0);
-  });
+  }
 
   afterEach(async () => {
     await agent.disconnect();
@@ -99,6 +112,7 @@ describe("daemon spawn loop", () => {
   });
 
   it("spawns the admitted implementer, verifies it through the hooks, refuses a second spawn, retires on done", async () => {
+    await setup();
     await until(() => journal().some((e) => e.type === "agent_registered"));
     const types = journal().map((e) => e.type);
     expect(types).toEqual(
@@ -135,6 +149,13 @@ describe("daemon spawn loop", () => {
     await pub(buildTopic(NS, ID, "result"), "result", "result", { summary: "ok" });
     await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
     await until(() => journal().some((e) => e.type === "agent_retired"));
+    // The cleared status/result payloads are kept in the journal.
+    expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
+      agent_id: ID,
+      status: "done",
+      terminal: { summary: "ok" },
+      result: { summary: "ok" },
+    });
     expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([
       ["volley", "auth", "rm-agent", ID],
     ]);
@@ -160,11 +181,87 @@ describe("daemon spawn loop", () => {
   });
 
   it("cleanup skips worktrees whose agent is not retired", async () => {
+    await setup();
     await until(() => journal().some((e) => e.type === "agent_registered"));
     const io = makeBufferIO();
     const fx = fakeExec();
     await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io);
     expect(fx.calls).toEqual([]);
     expect(io.readStdout()).toContain(`agent(s) not retired: ${ID}`);
+  });
+
+  it("reaped is not retired while the session comes back; reaped and quiet past the grace is", async () => {
+    await setup();
+    await until(() => journal().some((e) => e.type === "agent_registered"));
+    const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
+    // An LWT from a network blip, then the MCP server reconnects with a fresh spawning.
+    await pub(buildTopic(NS, ID, "status"), "reaped", "status", { reason: "lwt" });
+    await new Promise((r) => setTimeout(r, 50));
+    await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
+    await new Promise((r) => setTimeout(r, 600));
+    expect(journal().some((e) => e.type === "agent_retired")).toBe(false);
+    expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([]);
+    expect(existsSync(lock)).toBe(true);
+    // Reaped for good: retired after the grace.
+    await pub(buildTopic(NS, ID, "status"), "reaped", "status", { reason: "lwt" });
+    await until(() => journal().some((e) => e.type === "agent_retired"));
+    expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
+      agent_id: ID,
+      status: "reaped",
+      lock_released: true,
+    });
+  });
+
+  it("an untrusted repo opens a published repo_untrusted decision; answering trust records it and spawns", async () => {
+    await setup({ trusted: false });
+    await until(() => journal().some((e) => e.type === "decision_opened"));
+    const opened = journal().find((e) => e.type === "decision_opened");
+    const id = opened?.data.decision_id as string;
+    expect(opened?.data).toMatchObject({ kind: "repo_untrusted", repo });
+    expect(host.launches).toHaveLength(0);
+    const retained = (await env.retained(decisionTopic("w1", id))) as { payload: unknown };
+    expect(retained.payload).toMatchObject({ kind: "repo_untrusted", task: "T1" });
+
+    const r = await runCli(["resolve", id, "trust", "--by", "tester"], env.env);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(claudeJson, "utf-8")).projects[repo]).toEqual({
+      hasTrustDialogAccepted: true,
+    });
+    await daemon.tick();
+    await until(() => journal().some((e) => e.type === "agent_registered"));
+    expect(host.launches).toHaveLength(1);
+  });
+
+  it("a repo_untrusted decision raised from a pane resolves on the next tick once the repo is trusted", async () => {
+    await setup();
+    await until(() => journal().some((e) => e.type === "agent_registered"));
+    // As verify does on a trust-dialog screen: the task is past `queued`, so no spawn re-checks.
+    const d = await daemon.openDecision("w1", {
+      kind: "repo_untrusted",
+      task: "T1",
+      question: `Needs you: trust ${repo} for dispatch?`,
+      id: trustDecisionId(repo),
+    });
+    expect(daemon.record("w1")?.state?.open_decisions).toEqual([d.decision_id]);
+    await daemon.tick();
+    const resolved = journal().find((e) => e.type === "decision_resolved");
+    expect(resolved?.data).toMatchObject({
+      decision_id: d.decision_id,
+      answer: "trusted",
+      by: "claude-trust-dialog",
+    });
+    expect(daemon.record("w1")?.state?.tasks[0]?.stage).toBe("implement");
+  });
+
+  it("stop interrupts the agent in its workspace; the kill switch refuses spawns", async () => {
+    await setup();
+    await until(() => journal().some((e) => e.type === "agent_registered"));
+    expect((await runCli(["stop", "w1", "--by", "tester"], env.env)).exitCode).toBe(0);
+    expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
+    expect((await runCli(["stop", "--all", "--by", "tester"], env.env)).exitCode).toBe(0);
+    const r = await runCli(["spawn", "w1", "T1", "--json"], env.env);
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(r.stdout).error).toContain("kill switch");
   });
 });

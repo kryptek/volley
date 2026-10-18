@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FenceError, mintConsentToken } from "../src/fence";
 import { LocalCmuxHost, parseWorkspaceRef } from "../src/hosts/local-cmux";
@@ -81,6 +81,13 @@ describe("LocalCmuxHost", () => {
       await host.writeFile(p, "{}", 0o600);
       expect(readFileSync(p, "utf-8")).toBe("{}");
       expect(statSync(p).mode & 0o777).toBe(0o600);
+      // An existing, more open file is replaced, never rewritten in place at its old mode.
+      chmodSync(p, 0o644);
+      const before = statSync(p).ino;
+      await host.writeFile(p, '{"broker":{"password":"pw"}}', 0o600);
+      expect(statSync(p).mode & 0o777).toBe(0o600);
+      expect(statSync(p).ino).not.toBe(before);
+      expect(readdirSync(dirname(p))).toEqual(["agent.json"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
