@@ -189,7 +189,6 @@ export default function App() {
   const [animating, setAnimating] = useState(false);
   const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(animEnd.current), []);
-  const coordsShown = coordsOpen && Object.values(state.waves).some((w) => w.state !== null);
   const arrange = () => {
     const clusters: Cluster[] = [
       ...(coordsShown ? [{ main: sizeOf(COORDS_ID, COORDS_W, COORDS_H), kids: [] }] : []),

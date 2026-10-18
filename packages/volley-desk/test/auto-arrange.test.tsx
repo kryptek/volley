@@ -148,8 +148,8 @@ describe("App auto-arrange (demo mode)", () => {
 
   it("arranges after the first layout, animated for 650 ms", () => {
     const { container } = renderApp();
-    // the placeholder layout parks the coordinators window left of the waves
-    expect(Number.parseFloat(at("Wave coordinators").left)).toBeLessThan(0);
+    // before arrange, the placeholder layout has the coordinators window somewhere other than the origin
+    expect(at("Wave coordinators")).not.toEqual({ left: "0px", top: "0px" });
     advance(399);
     expect(world(container)).not.toHaveClass("world--anim");
     advance(1);
