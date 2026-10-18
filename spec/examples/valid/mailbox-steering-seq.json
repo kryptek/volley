@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-abcd",
+  "parent_id": null,
+  "wall_time": "2026-05-14T02:11:00.000Z",
+  "channel": "mailbox",
+  "type": "steering",
+  "payload": {
+    "text": "Run the integration sweep after all; the flake is fixed on main.",
+    "seq": 4,
+    "supersedes": "0a4f3e7c-8b21-4f3a-9d2e-1c8f7a3e2b41"
+  },
+  "correlation_id": "5d2c9a10-3e4b-4c6d-8f7a-9b0c1d2e3f40"
+}
