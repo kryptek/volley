@@ -68,4 +68,24 @@ describe("createServer (MCP wiring)", () => {
       code: "NOT_REGISTERED",
     });
   });
+
+  it("vol_send_mailbox rejects a non-UUID correlation_id or supersedes before publishing", async () => {
+    state.registered = true;
+    for (const args of [
+      { correlation_id: "" },
+      { correlation_id: "not-a-uuid" },
+      { payload: { text: "x", supersedes: "not-a-uuid" } },
+    ]) {
+      const res = await client.callTool({
+        name: "vol_send_mailbox",
+        arguments: {
+          to_agent_id: "worker-bbbb",
+          type: "steering",
+          payload: { text: "x" },
+          ...args,
+        },
+      });
+      expect(res.isError).toBe(true);
+    }
+  });
 });

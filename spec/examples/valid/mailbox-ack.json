@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "worker-abcd",
+  "parent_id": "coordinator-abcd",
+  "wall_time": "2026-05-14T02:09:01.250Z",
+  "channel": "mailbox",
+  "type": "ack",
+  "payload": {
+    "text": "ACKED",
+    "acked_type": "steering",
+    "seq": 3
+  },
+  "correlation_id": "0a4f3e7c-8b21-4f3a-9d2e-1c8f7a3e2b41"
+}
