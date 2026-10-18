@@ -173,7 +173,8 @@ volley lease status                                        # every pool: holders
   `--timeout <s>` gives up with `124`.
 - **A dead client frees its slot**: `run` and `acquire` connect with an MQTT will that releases
   their lease, so a client that is killed (SIGKILL, OOM, a closed terminal) or loses its network
-  releases it at once instead of at TTL expiry.
+  releases it at once instead of at TTL expiry. A killed `run` also takes its command down (SIGTERM
+  to the command's process group), so the work does not carry on without the lease.
 - **`run` fails open, and never waits on nobody**: with the broker unreachable, no live `volleyd`,
   or a pool that is not configured, it warns on stderr and runs the command unleased — a lease is
   a courtesy to the machine, never a reason an agent's build cannot run. While queued it checks

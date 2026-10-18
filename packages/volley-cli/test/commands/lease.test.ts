@@ -302,24 +302,42 @@ describe("volley lease", () => {
     }
   });
 
-  it("run: killed outright (SIGKILL) while holding, its will releases the lease", async () => {
-    const c = spawnCli([
-      "lease",
-      "run",
-      "--pool",
-      "p",
-      "--holder",
-      "agent-a",
-      ...base(),
-      "--",
-      "sleep",
-      "30",
-    ]);
-    await eventually(() => (sup.pools.p?.held.length ?? 0) === 1, 10_000);
-    c.proc.kill("SIGKILL");
-    await c.exited;
-    await eventually(() => sup.requests.some((q) => q.op === "release" && q.sender === "agent-a"));
-    expect(sup.pools.p?.held).toEqual([]);
+  it("run: killed outright (SIGKILL) while holding, its will releases the lease and the command stops", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lease-kill-"));
+    const pidFile = join(dir, "pid");
+    try {
+      const c = spawnCli([
+        "lease",
+        "run",
+        "--pool",
+        "p",
+        "--holder",
+        "agent-a",
+        ...base(),
+        "--",
+        "sh",
+        "-c",
+        `echo $$ > ${pidFile}; exec sleep 30`,
+      ]);
+      await eventually(
+        () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
+        10_000,
+      );
+      const command = Number(readFileSync(pidFile, "utf-8").trim());
+      expect(sup.pools.p?.held.length).toBe(1);
+      // Wait for the process itself, not `close`: a surviving command would hold its stdio open.
+      const killed = new Promise((r) => c.proc.once("exit", r));
+      c.proc.kill("SIGKILL");
+      await killed;
+      await eventually(() =>
+        sup.requests.some((q) => q.op === "release" && q.sender === "agent-a"),
+      );
+      expect(sup.pools.p?.held).toEqual([]);
+      // The slot is free, so the leased command must not keep running unleased.
+      await eventually(() => !pidAlive(command));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("run: queued when volleyd dies → notices at the next probe and runs unleased", async () => {

@@ -548,7 +548,8 @@ async function cancel(broker: VolleyBroker, pool: string, leaseId: string, holde
  * Run the command with inherited stdio and resolve with its exit code (128 + n when killed by a
  * signal). It runs in its own process group, and a signal delivered to us (`traps` aborts) is
  * forwarded to that whole group, so `sh -c 'cd x && mvn verify'` stops `mvn` too, not just the
- * shell.
+ * shell. If we die without cleaning up (SIGKILL), `guardGroup` stops the group: the will has
+ * already released the lease, so the command must not keep running unleased.
  */
 function exec(command: string[], traps: Traps): Promise<ExitCode> {
   const [cmd, ...args] = command as [string, ...string[]];
@@ -556,6 +557,7 @@ function exec(command: string[], traps: Traps): Promise<ExitCode> {
   if (traps.signal.aborted) return Promise.resolve(signalExit(traps.caught()));
   return new Promise((resolveExit) => {
     const child = spawn(cmd, args, { stdio: "inherit", detached: true });
+    const unguard = child.pid !== undefined ? guardGroup(child.pid) : () => {};
     const forward = () => {
       const sig = traps.caught() ?? "SIGTERM";
       try {
@@ -566,14 +568,36 @@ function exec(command: string[], traps: Traps): Promise<ExitCode> {
     };
     traps.signal.addEventListener("abort", forward, { once: true });
     child.on("error", (e) => {
+      unguard();
       process.stderr.write(`volley lease: ${e.message}\n`);
       resolveExit(127 as ExitCode);
     });
     child.on("close", (code, sig) => {
+      unguard();
       traps.signal.removeEventListener("abort", forward);
       resolveExit((code ?? signalExit(sig)) as ExitCode);
     });
   });
+}
+
+/**
+ * Stop process group `pgid` (SIGTERM) once we are gone. A detached `sh` blocks reading a pipe
+ * from us; our death closes its write end — even under SIGKILL, which no handler sees — and the
+ * read returns. It is detached too, so a kill of our own process group spares it. Returns the
+ * disarm function for a normal exit.
+ */
+function guardGroup(pgid: number): () => void {
+  const guard = spawn("sh", ["-c", 'read -r _; kill -TERM -"$1" 2>/dev/null', "sh", String(pgid)], {
+    stdio: ["pipe", "ignore", "ignore"],
+    detached: true,
+  });
+  guard.on("error", () => {});
+  guard.stdin?.on("error", () => {});
+  guard.unref();
+  return () => {
+    guard.kill("SIGKILL");
+    guard.stdin?.destroy();
+  };
 }
 
 async function acquireCmd(
