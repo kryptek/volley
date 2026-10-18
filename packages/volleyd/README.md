@@ -335,10 +335,14 @@ keeps the last 40 lines, and publishes a retained QoS 0 envelope on `volley/<ns>
 
 A capture whose `hash` equals the last published one is not published. Every capture is also
 emitted in-process (`ScreenPublisher.onCapture`), so other daemon subsystems reuse it instead of
-reading the screen again. A read slower than 2 s, or three failed reads in a row, backs that
-agent off to one capture every 30 s and sets `screen_stale: true` on its task in the wave state
-(the Desk shows a stale marker) until a read succeeds in time. Retire stops the agent's capture
-— after any capture in flight — and then clears the topic with an empty retained payload.
+reading the screen again. A read slower than 2 s (flagged the moment 2 s pass, not when the read
+returns), or three failed reads in a row, backs that agent off to one capture every 30 s and sets
+`screen_stale: true` on its task in the wave state (the Desk shows a stale marker) until a read
+succeeds in time. Every read is bounded at 5 s; a read still pending then counts as failed.
+Captures run on their own 1 s timer beside the daemon's serial queue, never on it, so a slow or
+hung terminal cannot delay admissions, control ops or retire (the timer is off when `tickMs` is
+0, as in tests). Retire stops the agent's capture — after any publish in flight, never waiting
+for a read — and then clears the topic with an empty retained payload.
 
 **Privacy.** A screen tail is whatever the agent's terminal shows, including anything an agent
 printed — tokens, keys, file contents. It is published to the same broker as every other agent

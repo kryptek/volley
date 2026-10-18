@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { FenceError, mintConsentToken } from "../src/fence";
 import { LocalCmuxHost, parseWorkspaceRef } from "../src/hosts/local-cmux";
 import type { SpawnError } from "../src/spawn-error";
@@ -20,6 +21,12 @@ describe("LocalCmuxHost", () => {
       "--lines",
       "40",
     ]);
+  });
+
+  it("readScreen is bounded by screen_read_timeout_ms; a timed-out read is null", async () => {
+    const fake = fakeExec().on(["cmux", "read-screen"], { stdout: "partial", timedOut: true });
+    expect(await new LocalCmuxHost(fake.exec).readScreen("workspace:3", 40)).toBeNull();
+    expect(fake.calls[0]?.opts.timeoutMs).toBe(DAEMON_DEFAULTS.screen_read_timeout_ms);
   });
 
   it("readScreen returns null when cmux fails", async () => {

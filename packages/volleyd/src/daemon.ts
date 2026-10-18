@@ -47,7 +47,10 @@ export interface DaemonOptions {
   namespace: string;
   /** $VOLLEYD_HOME — journals live under `<home>/waves/<wave>/`, config at `<home>/config.yaml`. */
   home: string;
-  /** Admission/monitor tick interval; 0 disables the timer (tests drive `tick()`). */
+  /**
+   * Admission/monitor tick interval; 0 disables the admission and screen timers (tests drive
+   * `tick()` / `tickScreens()`).
+   */
   tickMs?: number;
   /** Spawn admission verdict per wave. T5 supplies the pressure-based one; default is open. */
   admission?: (wave: WaveId) => Admission;
@@ -65,6 +68,8 @@ export interface DaemonOptions {
   spawner?: SpawnerOptions;
   /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
   now?: () => number;
+  /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
+  screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
 }
 
 /** How the daemon spawns agents. Every field has a production default. */
@@ -86,7 +91,6 @@ interface Supervised {
   task: string;
   role: Role;
   namespace: string;
-  workspace: string;
   watch: AgentWatch;
   lockPath: string;
   minted: boolean;
@@ -225,6 +229,7 @@ export class Daemon {
     this.screens = new ScreenPublisher({
       publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
       ...(opts.now !== undefined ? { now: opts.now } : {}),
+      ...opts.screenTimeouts,
       onStale: (agentId) => {
         const a = this.supervised.get(agentId);
         if (a !== undefined) void this.enqueue(() => this.publishState(a.wave));
@@ -627,7 +632,6 @@ export class Daemon {
       task,
       role,
       namespace: watch.namespace,
-      workspace: outcome.workspace,
       watch,
       lockPath: lock,
       minted,
@@ -655,6 +659,7 @@ export class Daemon {
     this.supervised.delete(agentId);
     await a.watch.close();
     // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
+    // Bounded: untrack waits only for a publish in flight, never for a (possibly hung) read.
     await this.screens.untrack(agentId);
     const waveAgents = new Set(
       log.journal

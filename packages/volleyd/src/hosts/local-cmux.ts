@@ -1,5 +1,6 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import type { ConsentToken } from "../fence";
 import { SpawnError } from "../spawn-error";
@@ -52,15 +53,12 @@ export class LocalCmuxHost implements Host {
   }
 
   async readScreen(workspace: string, lines: number): Promise<string | null> {
-    const r = await this.exec([
-      "cmux",
-      "read-screen",
-      "--workspace",
-      workspace,
-      "--lines",
-      String(lines),
-    ]).catch(() => null);
-    return r !== null && r.code === 0 ? r.stdout : null;
+    // Bounded: a hung cmux must not hold a caller (the screen publisher, verification) forever.
+    const r = await this.exec(
+      ["cmux", "read-screen", "--workspace", workspace, "--lines", String(lines)],
+      { timeoutMs: DAEMON_DEFAULTS.screen_read_timeout_ms },
+    ).catch(() => null);
+    return r !== null && r.code === 0 && !r.timedOut ? r.stdout : null;
   }
 
   async sendKeys(workspace: string, key: string): Promise<void> {

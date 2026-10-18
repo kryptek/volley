@@ -11,8 +11,11 @@ import { screenHash, screenTail } from "./screen-tail";
  * host, cuts the tail (`screenTail`), and publishes it retained on `volley/<ns>/<agent>/screen`
  * (QoS 0) only when the hash changed, so a late-attaching Desk sees the current screen at once.
  * Every capture is also emitted in-process (`onCapture`) for consumers that need the screen
- * without reading it again. A read slower than `screen_slow_ms`, or `screen_max_failures` failed
- * reads in a row, backs the agent off to `screen_backoff_s` and marks it stale until a good read.
+ * without reading it again. A read slower than `screen_slow_ms` (marked stale the moment that
+ * passes, not when the read returns), or `screen_max_failures` failed reads in a row, backs the
+ * agent off to `screen_backoff_s` and marks it stale until a read succeeds in time. Every read is
+ * bounded by `screen_read_timeout_ms`: one still pending then counts as failed, so a hung host
+ * never holds a capture (or `untrack`, or the daemon's retire) forever.
  */
 
 /** The `screen` channel payload (screen.schema.json). */
@@ -56,6 +59,9 @@ export interface ScreenPublisherDeps {
   /** Called when an agent's capture becomes stale or recovers. */
   onStale?: (agentId: string, stale: boolean) => void;
   log?: (line: string) => void;
+  /** Overrides of DAEMON_DEFAULTS `screen_slow_ms` / `screen_read_timeout_ms` (tests). */
+  slowMs?: number;
+  readTimeoutMs?: number;
 }
 
 interface Tracked {
@@ -65,6 +71,8 @@ interface Tracked {
   failures: number;
   stale: boolean;
   inflight: Promise<void> | null;
+  /** The retained publish in flight, if any (never rejects). */
+  publishing: Promise<void> | null;
 }
 
 export class ScreenPublisher {
@@ -72,10 +80,14 @@ export class ScreenPublisher {
   private readonly listeners = new Set<(c: ScreenCapture) => void>();
   private readonly now: () => number;
   private readonly log: (line: string) => void;
+  private readonly slowMs: number;
+  private readonly readTimeoutMs: number;
 
   constructor(private readonly deps: ScreenPublisherDeps) {
     this.now = deps.now ?? Date.now;
     this.log = deps.log ?? (() => {});
+    this.slowMs = deps.slowMs ?? DAEMON_DEFAULTS.screen_slow_ms;
+    this.readTimeoutMs = deps.readTimeoutMs ?? DAEMON_DEFAULTS.screen_read_timeout_ms;
   }
 
   /** Start capturing an agent; its first capture is due at the next tick. */
@@ -87,14 +99,18 @@ export class ScreenPublisher {
       failures: 0,
       stale: false,
       inflight: null,
+      publishing: null,
     });
   }
 
-  /** Stop capturing an agent, after any in-flight capture (so a later clear is the last word). */
+  /**
+   * Stop capturing an agent, after any publish already in flight (so a later clear is the last
+   * word). A read still in flight is not waited for: once untracked it publishes nothing.
+   */
   async untrack(agentId: string): Promise<void> {
     const a = this.agents.get(agentId);
     this.agents.delete(agentId);
-    await a?.inflight;
+    await a?.publishing;
   }
 
   /** Stop capturing every agent (daemon halt); in-flight captures finish but publish nothing new. */
@@ -129,13 +145,35 @@ export class ScreenPublisher {
   private async capture(a: Tracked): Promise<void> {
     const { target } = a;
     const started = this.now();
-    const screen = await target.host
-      .readScreen(target.workspace, DAEMON_DEFAULTS.screen_capture_lines)
-      .catch(() => null);
+    let slowFired = false;
+    let timedOut = false;
+    let slowTimer: ReturnType<typeof setTimeout> | undefined;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    const screen = await new Promise<string | null>((resolve) => {
+      slowTimer = setTimeout(() => {
+        slowFired = true;
+        this.setStale(a, true);
+      }, this.slowMs);
+      hardTimer = setTimeout(() => {
+        timedOut = true;
+        resolve(null);
+      }, this.readTimeoutMs);
+      target.host
+        .readScreen(target.workspace, DAEMON_DEFAULTS.screen_capture_lines)
+        .then(resolve, () => resolve(null));
+    }).finally(() => {
+      clearTimeout(slowTimer);
+      clearTimeout(hardTimer);
+    });
+    if (timedOut) this.log(`screen ${target.agentId}: read timed out`);
     const finished = this.now();
-    const slow = finished - started > DAEMON_DEFAULTS.screen_slow_ms;
+    const slow = slowFired || finished - started > this.slowMs;
     a.failures = screen === null ? a.failures + 1 : 0;
-    this.setStale(a, slow || a.failures >= DAEMON_DEFAULTS.screen_max_failures);
+    // Only a read that succeeds in time clears a stale capture.
+    this.setStale(
+      a,
+      slow || a.failures >= DAEMON_DEFAULTS.screen_max_failures || (a.stale && screen === null),
+    );
     const delayS = a.stale ? DAEMON_DEFAULTS.screen_backoff_s : target.intervalS();
     a.nextAt = finished + delayS * 1000;
 
@@ -154,7 +192,7 @@ export class ScreenPublisher {
       if (tail.hash !== a.lastHash && this.agents.get(target.agentId) === a) {
         changed = true;
         a.lastHash = tail.hash;
-        await this.deps
+        a.publishing = this.deps
           .publish(
             buildTopic(target.namespace, target.agentId, "screen"),
             JSON.stringify(
@@ -169,10 +207,15 @@ export class ScreenPublisher {
           )
           .catch((e: unknown) => {
             a.lastHash = null; // retry on the next capture
+            changed = false;
             this.log(`screen ${target.agentId}: ${e instanceof Error ? e.message : String(e)}`);
           });
+        await a.publishing;
+        a.publishing = null;
       }
     }
+    // An agent untracked (retired) or cleared (daemon halt) mid-capture is gone: tell no one.
+    if (this.agents.get(target.agentId) !== a) return;
     const c: ScreenCapture = {
       agentId: target.agentId,
       workspace: target.workspace,

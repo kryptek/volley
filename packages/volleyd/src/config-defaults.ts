@@ -67,6 +67,8 @@ export const DAEMON_DEFAULTS = {
   screen_tail_lines: 40,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
+  /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
+  screen_read_timeout_ms: 5_000,
   /** Consecutive failed captures that back the agent off and mark its screen stale. */
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */

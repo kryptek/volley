@@ -262,10 +262,11 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `owner` | agent id \| null | Coordinator that owns the wave; `null` when orphaned. |
 | `repo`, `release_branch` | string | Where the wave's PRs land. |
 | `status` | enum | `running` \| `paused` \| `awaiting_decision` \| `complete` \| `stopped`. |
-| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, pr?, evidence_path? }`. |
+| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, pr?, evidence_path?, screen_stale? }`. |
 | `tasks[].stage` | enum (closed) | `queued` \| `implement` \| `spec_review` \| `quality_review` \| `fixup` \| `merge_ready` \| `done` \| `blocked` \| `awaiting_decision` \| `cancelled`. |
 | `tasks[].agents` | object | Current agent id per role: `implementer?`, `spec_reviewer?`, `quality_reviewer?`, `fixup?`. |
 | `tasks[].waiting_on`, `why_waiting` | string[], string | What the task is blocked on, and a human-readable reason. |
+| `tasks[].screen_stale` | boolean | `true` while the supervisor's screen capture for any of the task's agents is backed off (§4.6.6), so the retained `screen` topic may be out of date. Per task, not per agent; absent otherwise. |
 | `tasks[].pr` | object | `{ number, url, head_sha?, ci? }`; `ci` is `green` \| `red` \| `running` \| `none`. |
 | `open_decisions` | string[] | Ids of open decisions (§4.6.2). |
 | `gates` | string[] | Task ids that are merge-ready and await a human merge. |
@@ -309,7 +310,7 @@ Heavy operations (integration test suites, builds, browsers) are gated by machin
 
 #### 4.6.6 Screen channel
 
-`screen` is a reserved per-agent channel in addition to those in §4.1: QoS 0, **retained**, published by a supervisor *on the agent's behalf* (the envelope `agent_id` is the supervisor; the topic's `<agent_id>` segment names the agent). `payload: { lines (≤ 40 strings), captured_at, workspace, hash, source }` is the tail of the agent's terminal (`source` is the capture mechanism, e.g. `cmux`); publishers SHOULD skip captures whose `hash` is unchanged. The supervisor clears the topic when the agent is retired. Agents MUST NOT publish their own `screen` channel.
+`screen` is a reserved per-agent channel in addition to those in §4.1: QoS 0, **retained**, published by a supervisor *on the agent's behalf* (the envelope `agent_id` is the supervisor; the topic's `<agent_id>` segment names the agent). `payload: { lines (≤ 40 strings), captured_at, workspace, hash, source }` is the tail of the agent's terminal (`source` is the capture mechanism, e.g. `cmux`); publishers SHOULD skip captures whose `hash` is unchanged. The supervisor clears the topic when the agent is retired. A supervisor whose capture is slow or failing SHOULD back off and set `tasks[].screen_stale` in the wave state (§4.6.1) until a capture succeeds in time. Agents MUST NOT publish their own `screen` channel.
 
 ---
 

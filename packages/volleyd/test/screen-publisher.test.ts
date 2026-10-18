@@ -7,13 +7,19 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { retireAgent } from "../src/retire";
-import { type ScreenCapture, ScreenPublisher, type ScreenTarget } from "../src/screen-publisher";
+import {
+  type ScreenCapture,
+  ScreenPublisher,
+  type ScreenPublisherDeps,
+  type ScreenTarget,
+} from "../src/screen-publisher";
 import type { JournalEvent } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { runCli } from "./helpers/run-cli";
+import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
 const SCREEN = buildTopic(NS, ID, "screen");
@@ -44,6 +50,9 @@ describe("ScreenPublisher", () => {
   let staleChanges: [string, boolean][];
   let captures: ScreenCapture[];
   let interval: number;
+  let makePublisher: (extra?: Partial<ScreenPublisherDeps>) => ScreenPublisher;
+  /** A read that never settles (a hung cmux). */
+  const hang = () => new Promise<string | null>(() => {});
 
   const target = (): ScreenTarget => ({
     agentId: ID,
@@ -69,12 +78,17 @@ describe("ScreenPublisher", () => {
     interval = 5;
     staleChanges = [];
     captures = [];
-    publisher = new ScreenPublisher({
-      publish: (topic, payload) => pubClient.publish(topic, payload, { qos: 0, retain: true }),
-      now: () => clock,
-      onStale: (id, stale) => staleChanges.push([id, stale]),
-    });
-    publisher.onCapture((c) => captures.push(c));
+    makePublisher = (extra = {}) => {
+      const p = new ScreenPublisher({
+        publish: (topic, payload) => pubClient.publish(topic, payload, { qos: 0, retain: true }),
+        now: () => clock,
+        onStale: (id, stale) => staleChanges.push([id, stale]),
+        ...extra,
+      });
+      p.onCapture((c) => captures.push(c));
+      return p;
+    };
+    publisher = makePublisher();
   });
 
   afterEach(async () => {
@@ -99,6 +113,7 @@ describe("ScreenPublisher", () => {
     });
     expect(first.payload.lines.at(-1)).toBe("✳ Sautéing… (34s · ↓ 2.1k tokens · esc to interrupt)");
     expect(first.payload.captured_at).toBe(new Date(clock).toISOString());
+    expect(schemaErrors("screen.schema.json", first)).toEqual([]);
     expect(host.screenReads).toEqual([{ workspace: "workspace:7", lines: 60 }]);
 
     // Not due yet: no read.
@@ -121,6 +136,26 @@ describe("ScreenPublisher", () => {
     expect(second.payload.lines.at(-1)).toBe("● Second step");
     expect(seen).toHaveLength(2);
     expect((await retained()).payload.hash).toBe(second.payload.hash);
+  });
+
+  it("a failed publish is reported as unchanged and retried on the next capture", async () => {
+    let fail = true;
+    const published: string[] = [];
+    publisher = makePublisher({
+      publish: async (topic) => {
+        if (fail) throw new Error("broker down");
+        published.push(topic);
+      },
+    });
+    host.screens = [session];
+    publisher.track(target());
+    await publisher.tick();
+    expect(captures[0]?.changed).toBe(false);
+    fail = false;
+    clock += 5_000;
+    await publisher.tick();
+    expect(captures[1]?.changed).toBe(true);
+    expect(published).toEqual([SCREEN]);
   });
 
   it("reads the interval on every capture (a config change applies without restart)", async () => {
@@ -180,7 +215,67 @@ describe("ScreenPublisher", () => {
     expect(host.screenReads).toHaveLength(1);
   });
 
-  it("untrack waits for an in-flight capture, so retire's clear is the last word", async () => {
+  it("a fast failed read after a slow one keeps the agent stale and backed off", async () => {
+    host.screens = [session, null, session];
+    const read = host.readScreen.bind(host);
+    let slowNext = true;
+    host.readScreen = async (ws, n) => {
+      if (slowNext) clock += 2_500;
+      slowNext = false;
+      return read(ws, n);
+    };
+    publisher.track(target());
+    await publisher.tick(); // slow → stale
+    clock += 30_000;
+    await publisher.tick(); // fast, but failed: no good read yet
+    expect(host.screenReads).toHaveLength(2);
+    expect(publisher.isStale(ID)).toBe(true);
+    expect(staleChanges).toEqual([[ID, true]]);
+    clock += 29_000; // still backed off to 30 s
+    await publisher.tick();
+    expect(host.screenReads).toHaveLength(2);
+    clock += 1_000;
+    await publisher.tick(); // fast and good: recovers
+    expect(host.screenReads).toHaveLength(3);
+    expect(publisher.isStale(ID)).toBe(false);
+  });
+
+  it("a hung read is marked stale once screen_slow_ms passes, and times out as a failure", async () => {
+    publisher = makePublisher({ slowMs: 40, readTimeoutMs: 150 });
+    host.readScreen = hang;
+    publisher.track(target());
+    const ticking = publisher.tick();
+    await until(() => publisher.isStale(ID), 1_000);
+    expect(staleChanges).toEqual([[ID, true]]);
+    await ticking; // the hard timeout settles the capture
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({ screen: null, changed: false, stale: true });
+    // The timed-out read counts: the agent is backed off to 30 s, then read again.
+    host.readScreen = async () => session;
+    clock += 29_000;
+    await publisher.tick();
+    expect(captures).toHaveLength(1);
+    clock += 1_000;
+    await publisher.tick();
+    expect(captures).toHaveLength(2);
+    expect(publisher.isStale(ID)).toBe(false);
+  });
+
+  it("untrack does not wait for a hung read", async () => {
+    publisher = makePublisher({ slowMs: 40, readTimeoutMs: 150 });
+    host.readScreen = hang;
+    publisher.track(target());
+    const ticking = publisher.tick();
+    let untracked = false;
+    void publisher.untrack(ID).then(() => {
+      untracked = true;
+    });
+    await until(() => untracked, 100);
+    await ticking;
+    expect(captures).toHaveLength(0); // an untracked agent's capture reaches no listener
+  });
+
+  it("a read in flight at untrack publishes nothing, so retire's clear is the last word", async () => {
     const seen = await collect(reader, SCREEN);
     let release!: () => void;
     const gate = new Promise<void>((r) => {
@@ -194,14 +289,12 @@ describe("ScreenPublisher", () => {
     };
     publisher.track(target());
     const ticking = publisher.tick();
-    let untracked = false;
-    const untrack = publisher.untrack(ID).then(() => {
-      untracked = true;
-    });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(untracked).toBe(false);
+    await publisher.untrack(ID); // returns without waiting for the read
     release();
-    await Promise.all([ticking, untrack]);
+    await ticking;
+    expect(captures).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen).toEqual([]);
 
     // Retire clears every retained record, the screen included.
     await retireAgent(
@@ -294,6 +387,7 @@ describe("daemon screen tails", () => {
     clock = 5_000_000;
     daemon = await env.start({
       now: () => clock,
+      screenTimeouts: { slowMs: 100, readTimeoutMs: 3_000 },
       spawner: {
         host,
         claudeJsonPath: claudeJson,
@@ -327,7 +421,12 @@ describe("daemon screen tails", () => {
   it("captures the supervised agent's workspace and publishes its tail; retire clears it", async () => {
     host.screens = [session];
     await daemon.tickScreens();
-    await until(async () => (await env.retained(SCREEN)) !== null);
+    // Wait on the content: beforeEach's empty capture is already retained.
+    await until(
+      async () =>
+        ((await env.retained(SCREEN)) as { payload: { lines: string[] } } | null)?.payload
+          .lines[0] === "> fix the flaky retry test in packages/api",
+    );
     const env1 = (await env.retained(SCREEN)) as { agent_id: string; payload: { lines: string[] } };
     expect(env1.agent_id).toBe("volleyd");
     expect(env1.payload.lines[0]).toBe("> fix the flaky retry test in packages/api");
@@ -359,10 +458,29 @@ describe("daemon screen tails", () => {
     }
     await until(async () => (await taskState())?.screen_stale === true);
     expect(daemon.snapshot("w1")?.tasks[0]?.screen_stale).toBe(true);
+    expect(
+      schemaErrors("wave-state.schema.json", await env.retained("volley/_waves/w1/state")),
+    ).toEqual([]);
 
     host.screens = [session];
     clock += 30_000;
     await daemon.tickScreens();
     await until(async () => (await taskState())?.screen_stale === undefined);
   });
+
+  it("a hung read marks the task screen_stale and never blocks retire", async () => {
+    host.readScreen = () => new Promise<string | null>(() => {});
+    const ticking = daemon.tickScreens();
+    await until(async () => (await taskState())?.screen_stale === true, 2_000);
+
+    // Retire completes while the read is still hung (well before its 3 s hard timeout).
+    const t0 = Date.now();
+    await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+    await until(() => journal().some((e) => e.type === "agent_retired"), 1_500);
+    expect(Date.now() - t0).toBeLessThan(1_500);
+    expect(await env.retained(SCREEN)).toBeNull();
+    // Later control work still runs: the serial queue is not wedged.
+    await daemon.tick();
+    await ticking;
+  }, 10_000);
 });
