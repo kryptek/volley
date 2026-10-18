@@ -1,0 +1,2 @@
+Last login: Sat Oct 18 09:12:01 on ttys004
+[oh-my-zsh] Would you like to update? [Y/n] ash .volley/launch.sh

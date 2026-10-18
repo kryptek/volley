@@ -22,7 +22,7 @@ export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 
 /** Ops handled in this release; later tasks add pause/resume/stop/steer/resolve/claim. */
-export type ControlOp = "run" | "status" | "config_get" | "config_set";
+export type ControlOp = "run" | "status" | "config_get" | "config_set" | "spawn";
 
 export interface ControlResponse {
   text: string;

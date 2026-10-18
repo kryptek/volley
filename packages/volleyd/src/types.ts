@@ -92,6 +92,8 @@ export interface WaveTask {
   /** The task's pipeline as written (its own, else the wave's). */
   pipeline: PipelineStep[];
   model: string;
+  /** Where the task's agents run (`host:`, default `local`). */
+  host: string;
   files: string[];
 }
 

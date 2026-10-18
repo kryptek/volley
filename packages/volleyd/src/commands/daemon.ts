@@ -1,29 +1,39 @@
 import { parseArgs } from "node:util";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
-import { Daemon } from "../daemon";
+import { Daemon, type SpawnerOptions } from "../daemon";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
-const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>] [--no-spawn] [--no-mint]
 
 Run the supervisor in the foreground until SIGINT/SIGTERM. Exits 1 if the broker connection is
 lost (launchd then restarts it). State lives in $VOLLEYD_HOME (default ~/.volley/volleyd);
 only one daemon may use a home at a time. \`volleyd install\` runs this under launchd instead.
+
+  --no-spawn   Admit tasks but spawn nothing (the pre-spawn behaviour)
+  --no-mint    Do not mint per-agent broker credentials (an open, anonymous broker)
 `;
 
 export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let target: ReturnType<typeof resolveTarget>;
+  let spawner: SpawnerOptions | undefined;
   try {
     const parsed = parseArgs({
       args: argv,
       options: {
         "broker-url": { type: "string" },
         namespace: { type: "string" },
+        "no-spawn": { type: "boolean", default: false },
+        "no-mint": { type: "boolean", default: false },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
       allowPositionals: false,
     });
+    spawner =
+      parsed.values["no-spawn"] === true
+        ? undefined
+        : { mintCredentials: parsed.values["no-mint"] !== true };
     if (parsed.values.help === true) {
       io.stdout(HELP);
       return EXIT.OK;
@@ -39,6 +49,7 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     d = await Daemon.start({
       ...target,
       home: volleydHome(env),
+      ...(spawner !== undefined ? { spawner } : {}),
       log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
     });
   } catch (e) {

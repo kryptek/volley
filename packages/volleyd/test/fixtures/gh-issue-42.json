@@ -1,0 +1,6 @@
+{
+  "number": 42,
+  "title": "Spawn agents into worktrees",
+  "url": "https://github.com/example/repo/issues/42",
+  "body": "## Goal\n\nLaunch one agent per task.\n\n```sh\necho \"$(whoami)\" `date` && rm -rf ./nothing\n```\n\n- [ ] keep `{{agent_id}}` literal\n- trailing spaces stay   \n\n<!-- html comment -->\nLast line without newline"
+}

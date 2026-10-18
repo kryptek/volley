@@ -22,6 +22,7 @@ interface RawTask {
   after?: TaskId[];
   pipeline?: PipelineStep[];
   model?: string;
+  host?: string;
   files?: string[];
 }
 
@@ -95,6 +96,7 @@ function normalise(w: RawWave): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
+      host: t.host ?? "local",
       files: t.files ?? [],
     };
   }

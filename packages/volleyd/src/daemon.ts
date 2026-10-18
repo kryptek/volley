@@ -8,6 +8,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -21,12 +22,24 @@ import {
   waveEventsTopic,
   waveStateTopic,
 } from "./control";
+import { exec } from "./exec";
+import type { Host } from "./hosts/host";
+import { LocalCmuxHost } from "./hosts/local-cmux";
 import { Journal, WaveLog } from "./journal";
 import { type Admission, activeTasks, admit, ready, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type { JournalEvent, NewEvent, TunablesPatch, WaveId, WaveState } from "./types";
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
+
+import { type Role, briefGatePath, isRole } from "./brief";
+import { HOOKS_DIR } from "./launch";
+import { type AgentProbe, TERMINAL_STATUS, lockPath } from "./locks";
+import { retireAgent } from "./retire";
+import { type SpawnDeps, type SpawnOutcome, type SpawnResult, spawnAgent } from "./spawn";
+import { SpawnError } from "./spawn-error";
+import { type AgentWatch, watchAgent } from "./verify";
+import { worktreePath } from "./worktree";
 
 export interface DaemonOptions {
   brokerUrl: string;
@@ -44,6 +57,35 @@ export interface DaemonOptions {
    * in-process test broker speaks).
    */
   protocolVersion?: 4 | 5;
+  /**
+   * Spawn admitted tasks' implementers (T4). Absent: tasks are admitted but nothing is spawned
+   * (and the `spawn` op is refused) — the default, so tests never launch anything by accident.
+   */
+  spawner?: SpawnerOptions;
+}
+
+/** How the daemon spawns agents. Every field has a production default. */
+export interface SpawnerOptions {
+  /** The `local` host (default: cmux on this machine, through the fenced exec). */
+  host?: Host;
+  /** Claude Code's folder-trust file (default `~/.claude.json`). */
+  claudeJsonPath?: string;
+  /** `packages/volley-hooks` (default: the one in this checkout). */
+  hooksDir?: string;
+  /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
+  mintCredentials?: boolean;
+  briefsDir?: string;
+}
+
+/** A spawned agent the daemon watches until it is retired. */
+interface Supervised {
+  wave: WaveId;
+  task: string;
+  role: Role;
+  namespace: string;
+  watch: AgentWatch;
+  lockPath: string;
+  minted: boolean;
 }
 
 /**
@@ -150,6 +192,12 @@ export class Daemon {
   private timer: ReturnType<typeof setInterval> | undefined;
   private watchdog: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
+  private readonly spawning = new Set<string>();
+  /** Automatic spawns refused this run (not retried by the loop; `volleyd spawn` retries). */
+  private readonly refused = new Set<string>();
+  /** Live spawned agents by agent id. */
+  private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly answered = new Map<string, ControlResponse>();
   private resolveClosed!: (e: Error) => void;
@@ -325,6 +373,8 @@ export class Daemon {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
+    for (const a of this.supervised.values()) void a.watch.close();
+    this.supervised.clear();
   }
 
   /** Die on our own: drop the dead connection, free the home lock, resolve `closed`. */
@@ -407,6 +457,228 @@ export class Daemon {
       if (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons)) {
         await this.publishState(wave);
       }
+    }
+    if (this.opts.spawner !== undefined) {
+      for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Spawning (T4): admitted tasks get an implementer; other roles are sequenced by the pipeline.
+  // -------------------------------------------------------------------------------------------
+
+  /** Start an implementer for every admitted task that has none (runs beside the queue). */
+  private spawnAdmitted(wave: WaveId): void {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.state == null || rec.state.status !== "running") return;
+    for (const id of rec.admitted) {
+      const t = rec.state.tasks.find((x) => x.id === id);
+      if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
+      const key = `${wave}/${id}/implementer`;
+      if (this.spawning.has(key) || this.refused.has(key)) continue;
+      void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
+        this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    }
+  }
+
+  /**
+   * Run one spawn's launch half and hand its verification to `supervise`. Journal appends go
+   * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
+   * serial queue and the queue never waits on a spawn's verification window.
+   */
+  private async startSpawn(wave: WaveId, task: string, role: Role): Promise<SpawnResult> {
+    const log = this.waves.get(wave);
+    const w = log?.record.wave;
+    if (log === undefined || w == null) throw new Error(`unknown wave '${wave}'`);
+    const t = w.tasks[task];
+    if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
+    const key = `${wave}/${task}/${role}`;
+    if (t.host !== "local") {
+      // Remote hosts plug in behind the same Host interface; none is configured yet.
+      this.refused.add(key);
+      const e = new SpawnError("LAUNCH_FAILED", `host '${t.host}' is not configured`, {
+        host: t.host,
+      });
+      await this.append(wave, {
+        type: "alarm_raised",
+        task,
+        data: { code: e.code, message: e.message, role, ...e.detail },
+      });
+      throw e;
+    }
+    this.spawning.add(key);
+    try {
+      const attempt =
+        log.journal
+          .readAll()
+          .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
+          .length + 1;
+      // spawnAgent journals its own refusals.
+      const res = await spawnAgent({ wave: w, task, role, attempt }, this.spawnDeps(wave));
+      if (res.kind === "launched") {
+        void res.verified.then(
+          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path),
+          (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      }
+      return res;
+    } catch (e) {
+      this.refused.add(key);
+      throw e;
+    } finally {
+      this.spawning.delete(key);
+    }
+  }
+
+  private spawnDeps(wave: WaveId): SpawnDeps {
+    const spawner = this.opts.spawner as SpawnerOptions;
+    const log = this.waves.get(wave) as WaveLog;
+    const eff = this.config.effective(wave);
+    const host = spawner.host ?? new LocalCmuxHost(exec);
+    const probe: AgentProbe = {
+      status: async (id) => {
+        const ns = this.supervised.get(id)?.namespace ?? log.record.wave?.namespace;
+        const raw = await this.broker.queryRetained(
+          buildTopic(ns ?? this.opts.namespace, id, "status"),
+          DAEMON_DEFAULTS.probe_ms,
+        );
+        return raw === null || raw === "" ? null : (parseEnvelope(raw)?.type ?? null);
+      },
+      registered: async (id) => {
+        const raw = await this.broker.queryRetained(registryTopic(id), DAEMON_DEFAULTS.probe_ms);
+        return raw !== null && raw !== "";
+      },
+      lastHeartbeat: (id) => this.supervised.get(id)?.watch.state.lastHeartbeatAt ?? null,
+    };
+    return {
+      host,
+      home: this.opts.home,
+      namespace: this.opts.namespace,
+      brokerUrl: this.opts.brokerUrl,
+      claudeJsonPath: spawner.claudeJsonPath ?? join(homedir(), ".claude.json"),
+      hooksDir: spawner.hooksDir ?? HOOKS_DIR,
+      mintCredentials: spawner.mintCredentials ?? true,
+      tunables: eff,
+      owner: log.record.state?.owner ?? null,
+      journal: (ev) => this.append(wave, ev),
+      get openDecisions() {
+        return log.record.state?.open_decisions ?? [];
+      },
+      probe,
+      watch: (ns, id) => watchAgent(this.broker, ns, id),
+      briefGate: briefGatePath(this.opts.home),
+      ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
+    };
+  }
+
+  /** Keep watching a spawned agent; retire it once its terminal status arrives. */
+  private supervise(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    outcome: SpawnOutcome,
+    lock: string,
+  ): void {
+    const { agentId, watch } = outcome;
+    if (!this.running) {
+      void watch.close();
+      return;
+    }
+    const minted =
+      this.waves
+        .get(wave)
+        ?.journal.readAll()
+        .find((e) => e.type === "agent_spawned" && e.data.agent_id === agentId)?.data
+        .credentials === "minted";
+    this.supervised.set(agentId, {
+      wave,
+      task,
+      role,
+      namespace: watch.namespace,
+      watch,
+      lockPath: lock,
+      minted,
+    });
+    const check = (type: string) => {
+      if (TERMINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
+    };
+    watch.onStatus(check);
+    if (watch.state.status !== null) check(watch.state.status.type);
+  }
+
+  private async retire(agentId: string, status: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    const log = a !== undefined ? this.waves.get(a.wave) : undefined;
+    if (a === undefined || log === undefined) return;
+    this.supervised.delete(agentId);
+    await a.watch.close();
+    const waveAgents = new Set(
+      log.journal
+        .readAll()
+        .filter((e) => e.type === "agent_spawned")
+        .map((e) => e.data.agent_id as string),
+    );
+    await retireAgent(
+      {
+        wave: a.wave,
+        task: a.task,
+        role: a.role,
+        agentId,
+        namespace: a.namespace,
+        status,
+        waveAgents,
+        lockPath: a.lockPath,
+        minted: a.minted,
+      },
+      {
+        exec: (this.opts.spawner?.host ?? new LocalCmuxHost(exec)).exec,
+        clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+        journal: (ev) => this.append(a.wave, ev),
+        releaseLock: (path) => {
+          try {
+            unlinkSync(path);
+          } catch {}
+        },
+      },
+    );
+  }
+
+  /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
+  private async manualSpawn(p: Record<string, unknown>): Promise<Reply> {
+    if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const task = typeof p.task === "string" ? p.task : "";
+    const role = typeof p.role === "string" ? p.role : "implementer";
+    if (!this.waves.has(wave)) return { ok: false, error: `unknown wave '${wave}'` };
+    if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
+      return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
+    if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    this.refused.delete(`${wave}/${task}/${role}`);
+    try {
+      const res = await this.startSpawn(wave, task, role);
+      return {
+        ok: true,
+        result:
+          res.kind === "launched"
+            ? {
+                kind: res.kind,
+                agent_id: res.agentId,
+                workspace: res.workspace,
+                worktree: res.worktree,
+              }
+            : { kind: res.kind, decision: res.decision, decision_id: res.decisionId },
+      };
+    } catch (e) {
+      const eff = this.config.effective(wave);
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        result: {
+          code: e instanceof SpawnError ? e.code : "SPAWN_FAILED",
+          lock: lockPath(this.opts.home, worktreePath(eff.worktree_root, wave, task, role)),
+        },
+      };
     }
   }
 
@@ -515,6 +787,8 @@ export class Daemon {
       }
       case "run":
         return this.submit(p);
+      case "spawn":
+        return this.manualSpawn(p);
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))

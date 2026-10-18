@@ -54,4 +54,8 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** How long `volleyd spawn` waits for the launch (verification continues in the daemon). */
+  spawn_request_timeout_ms: 120_000,
+  /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
+  screen_lines: 40,
 } as const;
