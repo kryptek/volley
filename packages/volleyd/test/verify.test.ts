@@ -130,6 +130,30 @@ describe("verify through hook signals (Aedes)", () => {
     expect(env.host.fake.argvs(["cmux", "close-workspace"])).toEqual([]);
   });
 
+  it("an older version of the same family is a mismatch (claude-opus-5 ≠ claude-opus-5-5)", async () => {
+    const out = await spawnWith(() =>
+      sessionStart("w1-t1-implementer-1", { model: "claude-opus-5" }),
+    );
+    expect(out).toMatchObject({ kind: "decision", decision: "model_switch" });
+    expect(env.events.find((e) => e.type === "decision_opened")?.data).toMatchObject({
+      kind: "model_switch",
+      model: "claude-opus-5",
+      expected_model: "claude-opus-5-5",
+    });
+  });
+
+  it("model_source unknown → a status line showing an older version is a mismatch", async () => {
+    const out = await spawnWith(
+      () => sessionStart("w1-t1-implementer-1", { registry: "registry-unknown.json" }),
+      [screen("working.txt").replace(/Opus 5\.5/g, "Opus 5")],
+    );
+    expect(out).toMatchObject({ kind: "decision", decision: "model_switch" });
+    expect(env.events.find((e) => e.type === "agent_registered")?.data).toMatchObject({
+      model: "claude-opus-5",
+      model_source: "unknown",
+    });
+  });
+
   it("model_source unknown → one readScreen; model_verified:false when unreadable", async () => {
     const out = await spawnWith(
       () => sessionStart("w1-t1-implementer-1", { registry: "registry-unknown.json" }),
@@ -226,5 +250,14 @@ describe("sameModel", () => {
     expect(sameModel("claude-opus-5-5[1m]", "claude-opus-5-5")).toBe(true);
     expect(sameModel("claude-opus-5-5-20261001", "claude-opus-5-5")).toBe(true);
     expect(sameModel("claude-sonnet-5-5", "claude-opus-5-5")).toBe(false);
+  });
+
+  it("compares exact versions: a shorter or longer version is a different model", () => {
+    expect(sameModel("claude-opus-5", "claude-opus-5-5")).toBe(false);
+    expect(sameModel("claude-opus-5-5", "claude-opus-5")).toBe(false);
+    expect(sameModel("claude-opus-5-5-1", "claude-opus-5-5")).toBe(false);
+    expect(sameModel("claude-opus-5[1m]", "claude-opus-5-5")).toBe(false);
+    expect(sameModel("claude-opus-5-20261001", "claude-opus-5-5")).toBe(false);
+    expect(sameModel("claude-opus-5-5-20261001", "claude-opus-5-5-20260901")).toBe(true);
   });
 });

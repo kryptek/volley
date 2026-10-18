@@ -122,12 +122,19 @@ export async function watchAgent(
   };
 }
 
-/** Same model, allowing a dated id or a context suffix (`claude-x-1-2-20261001`, `claude-x[1m]`). */
+/**
+ * Same model id, ignoring only a context suffix (`claude-x[1m]`) and an 8-digit date suffix
+ * (`claude-x-1-2-20261001`). Versions are compared exactly: model ids are dash-separated
+ * version numbers, so `claude-opus-5` is NOT `claude-opus-5-5` (no prefix matching).
+ */
 export function sameModel(actual: string, expected: string): boolean {
-  const norm = (m: string) => m.toLowerCase().replace(/\[[^\]]*\]$/, "");
-  const a = norm(actual);
-  const e = norm(expected);
-  return a === e || a.startsWith(`${e}-`) || e.startsWith(`${a}-`);
+  const norm = (m: string) =>
+    m
+      .trim()
+      .toLowerCase()
+      .replace(/\[[^\]]*\]$/, "")
+      .replace(/-\d{8}$/, "");
+  return norm(actual) === norm(expected);
 }
 
 export type VerifyResult =
