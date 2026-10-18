@@ -2,7 +2,7 @@
 
 The Desk: an infinite canvas of live wave and agent windows, driven straight off the Volley MQTT topics. There's no backend: the browser subscribes to the broker over WebSocket. The approved interactive prototype is the visual and interaction spec, and this package ports it piece by piece.
 
-**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode and the agent window, plus one plain placeholder window per wave. The real wave and coordinator windows, the backgrounds, the dock, steering, settings and auto-arrange come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
+**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, and arrange & fit. The backgrounds, the dock, steering and settings come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
 
 ## Run it
 
@@ -26,11 +26,20 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 - Zoom around the cursor with ⌘/Ctrl + wheel or a trackpad pinch. Scale is clamped to 0.3–1.6.
 - Drag a title bar to move a window. The move is divided by the zoom, so the window tracks the pointer. A pointer-down anywhere on a window brings it to the front.
 
+### Arrange & fit
+
+Each visible wave forms a cluster: the wave window with its agents to the right, in task order (then implementer, fixup, spec review, quality review), each agent dropped into the shortest column. The coordinators window is a cluster of its own, placed first. Arrange tries 1–3 agent columns and every number of rows of clusters, keeps the placement that fits the screen at the largest zoom (capped at 1.1), then animates the windows and the view there.
+
+Auto-arrange is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
+
 ## Layout
 
 ```
 src/canvas/useViewport.ts   pan / wheel / zoomAt / fitTo (port of the prototype App.tsx)
-src/canvas/World.tsx        the transformed world layer
+src/canvas/World.tsx        the transformed world layer (world--anim while arranging)
+src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-column packing,
+                            rows × columns chosen for the largest zoom (port of the prototype)
+src/layout/useAutoArrange.ts auto-arrange triggers and the persisted ON/OFF setting
 src/canvas/Frame.tsx        window frame: drag, focus (useFocusOrder), win--born (4 s), onSize,
                             chromes glass | solid, attention wrapper slot
 src/store/mqtt-client.ts    mqtt.js wrapper (port of volley-dash): subscribes to every Desk topic,
