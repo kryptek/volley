@@ -54,6 +54,18 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** How long `volleyd spawn` waits for the launch (verification continues in the daemon). */
+  spawn_request_timeout_ms: 120_000,
+  /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
+  screen_lines: 40,
+  /** After pressing Enter on an update prompt, how long the original launch gets to continue. */
+  relaunch_settle_ms: 3_000,
+  /** First retry delay of an automatic spawn that was refused; doubles per refusal. */
+  spawn_retry_base_ms: 30_000,
+  /** Cap on that retry delay. */
+  spawn_retry_max_ms: 900_000,
+  /** Read-modify-write attempts on `~/.claude.json` while Claude Code keeps rewriting it. */
+  trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */
   steer_wait_ack_ms: 30_000,
   /** Upper bound on a caller's `wait_ack_ms`, so a steer cannot park a waiter indefinitely. */

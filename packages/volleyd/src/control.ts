@@ -34,7 +34,9 @@ export type ControlOp =
   | "pause"
   | "resume"
   | "stop"
-  | "steer";
+  | "steer"
+  // Spawn one task's agent now (spawn.ts).
+  | "spawn";
 
 export interface ControlResponse {
   text: string;

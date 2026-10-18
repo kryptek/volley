@@ -22,6 +22,7 @@ interface RawTask {
   after?: TaskId[];
   pipeline?: PipelineStep[];
   model?: string;
+  host?: string;
   files?: string[];
 }
 
@@ -60,6 +61,19 @@ export function parseWaveFile(text: string, source?: string): Wave {
 
   const w = raw as RawWave;
   const ids = Object.keys(w.tasks);
+  // Agent ids and broker usernames are lowercase: `T1` and `t1` would be one agent.
+  const byLower = new Map<string, string>();
+  const clashes: PathError[] = [];
+  for (const id of ids) {
+    const first = byLower.get(id.toLowerCase());
+    if (first !== undefined) {
+      clashes.push({
+        path: `tasks.${id}`,
+        reason: `task id '${id}' differs from '${first}' only in case`,
+      });
+    } else byLower.set(id.toLowerCase(), id);
+  }
+  if (clashes.length > 0) fail(clashes);
   const unknown: PathError[] = [];
   for (const id of ids) {
     (w.tasks[id]?.after ?? []).forEach((dep, i) => {
@@ -95,6 +109,7 @@ function normalise(w: RawWave): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
+      host: t.host ?? "local",
       files: t.files ?? [],
     };
   }

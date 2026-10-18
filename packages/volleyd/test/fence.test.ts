@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
-import { FenceError, assertAllowed, mintConsentToken } from "../src/fence";
+import { FenceError, assertAllowed, mintConsentToken, mintScriptToken } from "../src/fence";
 
 const DENIED: string[][] = [
   // git: history rewriting, publishing, destructive
@@ -108,10 +108,27 @@ const DENIED: string[][] = [
   ["sudo", "git", "status"],
   ["env", "git", "push"],
   ["curl", "https://example.com"],
+  // volley: only auth add-agent / rm-agent, exact options
+  ["volley", "auth", "init"],
+  ["volley", "pub", "volley/x/y/status", "{}"],
+  ["volley", "auth", "add-agent", "--json"],
+  ["volley", "auth", "add-agent", "Bad_Id"],
+  ["volley", "auth", "add-agent", "a1", "--dir", "/tmp/x"],
+  ["volley", "auth", "add-agent", "a1", "--ack-to", "--json"],
+  ["volley", "auth", "rm-agent", "a1", "--json"],
+  ["volley", "auth", "add-agent", "a1", "--force"],
+  // a script path without a minted token
+  ["/home/u/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
   [],
 ];
 
 const ALLOWED: string[][] = [
+  ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--ack-to", "volleyd", "--json"],
+  ["volley", "auth", "add-agent", "a1", "--ack-to", "p1", "--ack-to", "volleyd", "--no-reload"],
+  ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
+  ["cmux", "new-workspace", "--cwd", "/tmp/wt", "--name", "w1 T1 impl", "--command", "  bash x"],
+  ["cmux", "read-screen", "--workspace", "workspace:3", "--lines", "40"],
+  ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
   ["git", "worktree", "add", "-b", "issue-5", "/tmp/wt", "release/w1"],
   ["git", "fetch", "origin"],
   ["git", "rev-parse", "HEAD"],
@@ -208,6 +225,17 @@ describe("assertAllowed", () => {
     expect(() => assertAllowed(["git", "push"], { consent })).toThrow(FenceError);
     expect(() => assertAllowed(["gh", "pr", "merge", "1"], { consent })).toThrow(FenceError);
     expect(() => assertAllowed(["rm", "-rf", "/tmp/x"], { consent })).toThrow(FenceError);
+  });
+
+  it("a script token allows exactly its own path, and is checked by identity", () => {
+    const gate = mintScriptToken("/h/.volley/volleyd/brief-gate");
+    expect(() =>
+      assertAllowed(["/h/.volley/volleyd/brief-gate", "/wt/.volley/brief.md"], { script: gate }),
+    ).not.toThrow();
+    expect(() => assertAllowed(["/h/other", "x"], { script: gate })).toThrow(FenceError);
+    expect(() => assertAllowed(["git", "push"], { script: gate })).toThrow(FenceError);
+    const forged = { path: "/tmp/evil" } as ReturnType<typeof mintScriptToken>;
+    expect(() => assertAllowed(["/tmp/evil"], { script: forged })).toThrow(FenceError);
   });
 
   it("rejects forged consent tokens", () => {
