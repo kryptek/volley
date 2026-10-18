@@ -99,6 +99,7 @@ export function fakeWatch(
       o.registry === undefined
         ? { model: "claude-opus-5-5", model_source: "harness-hook" }
         : o.registry,
+    hookRegistryAt: o.registry === null ? null : "2026-10-18T12:00:00.000Z",
     sessionStart: o.sessionStart ?? true,
     status: null,
     lastHeartbeatAt: null,
@@ -113,6 +114,7 @@ export function fakeWatch(
       return pred(state);
     },
     onStatus: () => {},
+    onProgress: () => {},
     close: async () => {},
   };
 }

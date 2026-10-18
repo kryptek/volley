@@ -57,6 +57,19 @@ export function parseWaveFile(text: string, source?: string): Wave {
   const raw = doc.toJS() as unknown;
   const validate = validator("wave-file.schema.json");
   if (!validate(raw)) errors.push(...toPathErrors(validate.errors).map(rewordWaveId));
+  // Pools are shared by every wave on the machine, so a per-wave override could not take
+  // effect; reject it rather than accept it and show it in effective_config (SPEC §4.6.4).
+  const config = (raw as { config?: { lease_pools?: unknown } } | null)?.config;
+  if (config?.lease_pools !== undefined) {
+    const path = "config.lease_pools";
+    for (let i = errors.length - 1; i >= 0; i--) {
+      if (errors[i]?.path.startsWith(path)) errors.splice(i, 1);
+    }
+    errors.push({
+      path,
+      reason: "lease pools are machine-global; set them in volleyd's global config, not per wave",
+    });
+  }
   if (errors.length > 0) fail(errors);
 
   const w = raw as RawWave;

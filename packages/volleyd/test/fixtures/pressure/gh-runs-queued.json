@@ -1,0 +1,15 @@
+{
+  "total_count": 4,
+  "workflow_runs": [
+    {
+      "id": 11542318801,
+      "name": "CI",
+      "head_branch": "feature-x",
+      "status": "queued",
+      "conclusion": null,
+      "run_number": 812,
+      "event": "pull_request",
+      "created_at": "2026-10-18T14:58:02Z"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+# volleyd config: copy to $VOLLEYD_HOME/config.yaml (default ~/.volley/volleyd/config.yaml).
+# Every key is optional and layers over the built-in defaults (src/config-defaults.ts); a wave
+# file's `config:` block layers over this. All of it is hot-reloadable: change it with
+# `volleyd config set <path> <value>` (validated, journaled, applied without a restart) rather
+# than by editing this file while the daemon runs. Bounds: spec/schemas/config.schema.json.
+
+# hard_ceiling: 12              # max live supervised agents across all waves (runaway fuse)
+# spawn_budget_multiplier: 3    # per-wave spawn budget = multiplier x task count
+
+# Heavy-operation lease pools. A command matching a pool's `match` regex (checked by the
+# volley-hooks PreToolUse lease hook) runs inside `volley lease run --pool <pool> -- ...` and
+# waits for one of `capacity` leases. Lowering a capacity never preempts a holder; removing a
+# pool keeps its holders and rejects new requests.
+# lease_pools:
+#   backend-it:
+#     capacity: 3
+#     ttl_s: 3600               # lease expiry unless renewed (default 3600)
+#     match: ["mvn .*verify", "mvn .*test", "gradle .*integrationTest"]
+#   build:
+#     capacity: 2
+#     match: ["npm run build", "vite build"]
+#   browser:
+#     capacity: 2
+#     match: ["playwright"]
+
+# Load-aware spawn admission: a signal above its max holds new starts (never running work)
+# until it has been clear for `hysteresis_samples` consecutive samples (one sample per tick).
+# admission:
+#   memory_pressure_max_level: 2   # macOS level: 1 normal, 2 warn, 4 critical
+#   cmux_ping_max_ms: 2000         # `cmux ping` wall time
+#   container_max: 20              # running containers (`docker info`)
+#   api_overload_window_s: 300     # window for provider overload / rate-limit signals
+#   api_overload_max: 3            #   ... and how many of them are tolerated in it
+#   ci_queue_max: 10               # queued workflow runs of the wave's repo (`gh api`)
+#   hysteresis_samples: 3
+
+# claim_after_s: 1800
+# heartbeat_alarm_s: 600        # no heartbeat this long while working -> screen check
+# idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
+# fallback_model: null
+# mailbox: { session_expiry_s: 604800 }
+# worktree_root: ~/.volley/worktrees
+# spawn_timeout_s: 120
+# wake_grace_s: 120

@@ -25,7 +25,7 @@ status publish to its coordinator's detection.
 | parity-legacy-02 | legacy | 4.0s |
 | parity-legacy-03 | legacy | 3.0s |
 | parity-legacy-04 | legacy | 2.0s |
-| parity-volley-01 | volley | 20ms |
-| parity-volley-02 | volley | 19ms |
+| parity-volley-01 | volley | 19ms |
+| parity-volley-02 | volley | 20ms |
 | parity-volley-03 | volley | 19ms |
 | parity-volley-04 | volley | 20ms |

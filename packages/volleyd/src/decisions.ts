@@ -15,6 +15,8 @@ export const DECISION_KINDS = [
   "reviewers_disagree",
   "merge_conflict",
   "agent_blocked",
+  "agent_question",
+  "agent_stalled",
   "unknown_screen",
   "model_switch",
   "repo_untrusted",

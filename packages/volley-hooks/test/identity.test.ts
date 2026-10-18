@@ -7,6 +7,7 @@ import { handle as notification } from "../src/hooks/notification";
 import { handle as postModelSwitch } from "../src/hooks/post-model-switch";
 import { handle as postToolUse } from "../src/hooks/post-tool-use";
 import { handle as preCompact } from "../src/hooks/pre-compact";
+import { handle as preToolUseLease } from "../src/hooks/pre-tool-use-lease";
 import { handle as sessionStart } from "../src/hooks/session-start";
 import { handle as stop } from "../src/hooks/stop";
 import { handle as userPromptSubmit } from "../src/hooks/user-prompt-submit";
@@ -50,6 +51,7 @@ const FIXTURE_FOR: Record<string, string> = {
   stop: "stop.json",
   notification: "notification-agent-needs-input.json",
   "pre-compact": "pre-compact.json",
+  "pre-tool-use-lease": "pre-tool-use-bash.json",
 };
 
 describe("no .volley/agent.json → silent no-op", () => {
@@ -74,6 +76,7 @@ describe("no .volley/agent.json → silent no-op", () => {
     Stop: stop,
     Notification: notification,
     PreCompact: preCompact,
+    PreToolUse: preToolUseLease,
   };
 
   it.each(Object.entries(handlers))("%s handler returns within 50 ms", async (event, handler) => {
