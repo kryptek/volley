@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T14:10:00.000Z",
+  "channel": "progress",
+  "type": "awaiting_input",
+  "payload": {
+    "seq": 108,
+    "source": "harness-hook",
+    "hook_event": "Notification",
+    "notification_type": "agent_needs_input",
+    "text": "Claude needs your permission to use Bash",
+    "question": "Merge T3 into the release branch now?",
+    "session_url": "https://claude.ai/code/session-example",
+    "workspace": "coordinator",
+    "screen_tail": ["Merge T3 into the release branch now?", "1. Yes  2. No"]
+  }
+}

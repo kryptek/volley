@@ -12,6 +12,15 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `result.schema.json` | `result` | section 4 |
 | `capability.schema.json` | `capability` | section 4 |
 | `control.schema.json` | `control` (reserved) | section 4 |
+| `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
+| `wave-state.schema.json` | `_waves/<wave>/state` | section 4.6.1 |
+| `decision.schema.json` | `_waves/<wave>/decisions/<id>` | section 4.6.2 |
+| `wave-event.schema.json` | `_waves/<wave>/events` | section 4.6.3 |
+| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | section 4.6.4 |
+| `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
+| `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
+| `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
+| `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
 
 ## Validating a payload
 

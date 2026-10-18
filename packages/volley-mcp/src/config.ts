@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { VolleyError } from "./errors";
 import { isValidAgentId, isValidNamespace } from "./topics";
 import { randomSuffix } from "./util";
 
@@ -31,20 +33,95 @@ export function generateAgentId(cwd: string): string {
   return `${slug}-${randomSuffix(4)}`;
 }
 
-/** Read configuration from environment, falling back to defaults. `env`/`cwd` are injectable for tests. */
+/** Supervisor-assigned identity read from `<cwd>/.volley/agent.json` (SPEC §6.5). */
+interface AssignedIdentity {
+  agentId: string;
+  namespace?: string;
+  parentId?: string | null;
+  brokerUrl?: string;
+}
+
+/**
+ * Read `<cwd>/.volley/agent.json` if present. The file carries a literal agent_id (no suffix)
+ * and optional namespace / parent_id / broker_url. Returns null when the file does not exist;
+ * throws, naming the path, when it exists but is malformed or out of grammar.
+ */
+function readAssignedIdentity(cwd: string): AssignedIdentity | null {
+  const path = join(cwd, ".volley", "agent.json");
+  if (!existsSync(path)) return null;
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (e) {
+    throw new Error(`${path}: malformed identity file — ${(e as Error).message}`);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${path}: identity file must be a JSON object`);
+  }
+  const file = raw as Record<string, unknown>;
+
+  const agentId = file.agent_id;
+  if (typeof agentId !== "string") {
+    throw new Error(`${path}: identity file must set agent_id to a string`);
+  }
+  if (!isValidAgentId(agentId)) {
+    throw new VolleyError(
+      "INVALID_AGENT_ID",
+      `INVALID_AGENT_ID: ${path}: agent_id "${agentId}" does not match [a-z0-9][a-z0-9_-]{0,62} (SPEC §2.2)`,
+    );
+  }
+  const identity: AssignedIdentity = { agentId };
+
+  if (file.namespace !== undefined) {
+    if (typeof file.namespace !== "string" || !isValidNamespace(file.namespace)) {
+      throw new Error(
+        `${path}: namespace ${JSON.stringify(file.namespace)} does not match [a-z0-9][a-z0-9_-]{0,62}`,
+      );
+    }
+    identity.namespace = file.namespace;
+  }
+  if (file.parent_id !== undefined) {
+    if (
+      file.parent_id !== null &&
+      (typeof file.parent_id !== "string" || !isValidAgentId(file.parent_id))
+    ) {
+      throw new Error(
+        `${path}: parent_id ${JSON.stringify(file.parent_id)} does not match the agent id grammar`,
+      );
+    }
+    identity.parentId = file.parent_id;
+  }
+  if (file.broker_url !== undefined) {
+    if (typeof file.broker_url !== "string" || file.broker_url.length === 0) {
+      throw new Error(`${path}: broker_url must be a non-empty string`);
+    }
+    identity.brokerUrl = file.broker_url;
+  }
+  return identity;
+}
+
+/**
+ * Read configuration from `<cwd>/.volley/agent.json` (if present), then the environment, then
+ * defaults. A key set in the identity file beats its env var. `env`/`cwd` are injectable for tests.
+ */
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
   cwd: string = process.cwd(),
 ): VolleyConfig {
-  const brokerUrl = env.VOLLEY_BROKER_URL ?? "mqtt://localhost:1883";
+  const identity = readAssignedIdentity(cwd);
 
-  const namespace = env.VOLLEY_NAMESPACE ?? "default";
+  const brokerUrl = identity?.brokerUrl ?? env.VOLLEY_BROKER_URL ?? "mqtt://localhost:1883";
+
+  const namespace = identity?.namespace ?? env.VOLLEY_NAMESPACE ?? "default";
   if (!isValidNamespace(namespace)) {
     throw new Error(`VOLLEY_NAMESPACE "${namespace}" does not match [a-z0-9][a-z0-9_-]{0,62}`);
   }
 
   let agentId: string;
-  if (env.VOLLEY_AGENT_ID !== undefined) {
+  if (identity !== null) {
+    agentId = identity.agentId;
+  } else if (env.VOLLEY_AGENT_ID !== undefined) {
     const prefix = env.VOLLEY_AGENT_ID;
     if (!PREFIX_GRAMMAR.test(prefix)) {
       throw new Error(
@@ -56,7 +133,8 @@ export function loadConfig(
     agentId = generateAgentId(cwd);
   }
 
-  const parentId = env.VOLLEY_PARENT_ID ?? null;
+  const parentId =
+    identity?.parentId !== undefined ? identity.parentId : (env.VOLLEY_PARENT_ID ?? null);
   if (parentId !== null && !isValidAgentId(parentId)) {
     throw new Error(`VOLLEY_PARENT_ID "${parentId}" does not match the agent id grammar`);
   }

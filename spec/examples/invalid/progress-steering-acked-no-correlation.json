@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "wall_time": "2026-10-18T14:11:00.000Z",
+  "channel": "progress",
+  "type": "steering_acked",
+  "payload": { "msg": "acknowledged: rebase onto the release branch first" }
+}
