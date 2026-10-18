@@ -21,11 +21,12 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   claim_after_s: 1800,
   heartbeat_alarm_s: 600,
+  idle_grace_s: 180,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
   spawn_timeout_s: 120,
-  wake_grace_s: 60,
+  wake_grace_s: 120,
   screen_tail_interval_s: 5,
 };
 
@@ -89,4 +90,15 @@ export const DAEMON_DEFAULTS = {
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */
   screen_backoff_s: 30,
+  /** Wall clock ahead of the monotonic clock by more than this between two samples = a wake. */
+  wake_jump_ms: 60_000,
+  /** How long a model switch waits for the hooks' PostModelSwitch registry re-publish. */
+  model_switch_verify_ms: 60_000,
+  /** The same recovery fires at most this many times per agent per `recovery_window_ms`. */
+  recovery_max_per_window: 2,
+  recovery_window_ms: 3_600_000,
+  /** Longest agent message quoted in a recovery decision's question. */
+  decision_text_max: 300,
+  /** Bound on each git / gh call of restart reconciliation. */
+  reconcile_probe_ms: 15_000,
 } as const;

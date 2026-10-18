@@ -39,6 +39,8 @@ export interface AgentWatch {
   waitFor(pred: (s: SignalState) => boolean, timeoutMs: number): Promise<boolean>;
   /** Called on every status message (after `state` is updated). */
   onStatus(cb: (type: string, payload: unknown) => void): void;
+  /** Called with every raw progress message of the agent (after `state` is updated). */
+  onProgress(cb: (raw: string) => void): void;
   close(): Promise<void>;
 }
 
@@ -62,6 +64,7 @@ export async function watchAgent(
   };
   const waiters = new Set<() => void>();
   const statusCbs: ((type: string, payload: unknown) => void)[] = [];
+  const progressCbs: ((raw: string) => void)[] = [];
   const statusTopic = buildTopic(namespace, agentId, "status");
   const progressTopic = buildTopic(namespace, agentId, "progress");
   const regTopic = registryTopic(agentId);
@@ -78,9 +81,12 @@ export async function watchAgent(
     } else if (topic === statusTopic) {
       state.status = { type: env.type, payload: env.payload };
       for (const cb of statusCbs) cb(env.type, env.payload);
-    } else if (topic === progressTopic && env.type === "heartbeat") {
-      state.lastHeartbeatAt = now();
-      if (p.hook_event === "SessionStart") state.sessionStart = true;
+    } else if (topic === progressTopic) {
+      if (env.type === "heartbeat") {
+        state.lastHeartbeatAt = now();
+        if (p.hook_event === "SessionStart") state.sessionStart = true;
+      }
+      for (const cb of progressCbs) cb(payload);
     }
     for (const w of [...waiters]) w();
   };
@@ -113,6 +119,9 @@ export async function watchAgent(
     },
     onStatus(cb) {
       statusCbs.push(cb);
+    },
+    onProgress(cb) {
+      progressCbs.push(cb);
     },
     async close() {
       if (closed) return;

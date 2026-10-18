@@ -113,6 +113,7 @@ export function fakeWatch(
       return pred(state);
     },
     onStatus: () => {},
+    onProgress: () => {},
     close: async () => {},
   };
 }

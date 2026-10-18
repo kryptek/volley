@@ -26,6 +26,7 @@
     },
     "claim_after_s": 1800,
     "heartbeat_alarm_s": 600,
+    "idle_grace_s": 180,
     "fallback_model": null,
     "mailbox": { "session_expiry_s": 604800 },
     "worktree_root": "~/.volley/worktrees",
