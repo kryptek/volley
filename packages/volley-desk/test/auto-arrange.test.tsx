@@ -22,14 +22,12 @@ afterEach(() => {
 });
 
 describe("useAutoArrange", () => {
+  type Props = { enabled: boolean; layoutKey: string; hold?: boolean };
   const setup = (enabled: boolean, layoutKey: string) => {
     const arrange = vi.fn();
-    const hook = renderHook(
-      (p: { enabled: boolean; layoutKey: string }) => useAutoArrange({ ...p, arrange }),
-      {
-        initialProps: { enabled, layoutKey },
-      },
-    );
+    const hook = renderHook((p: Props) => useAutoArrange({ ...p, arrange }), {
+      initialProps: { enabled, layoutKey } as Props,
+    });
     return { arrange, ...hook };
   };
 
@@ -38,6 +36,47 @@ describe("useAutoArrange", () => {
     advance(399);
     expect(arrange).not.toHaveBeenCalled();
     advance(1);
+    expect(arrange).toHaveBeenCalledTimes(1);
+  });
+
+  it("only the very first schedule waits 400 ms: a key change after mount waits 120 ms", () => {
+    // as in the prototype, the first-layout flag clears when the first timer is set
+    const { arrange, rerender } = setup(true, "");
+    advance(100);
+    rerender({ enabled: true, layoutKey: "c|w1" });
+    advance(119);
+    expect(arrange).not.toHaveBeenCalled();
+    advance(1);
+    expect(arrange).toHaveBeenCalledTimes(1);
+    advance(1000);
+    expect(arrange).toHaveBeenCalledTimes(1);
+  });
+
+  it("hold freezes the key: a resync and replay back to the same windows does not arrange", () => {
+    const { arrange, rerender } = setup(true, "c|w1|a1");
+    advance(400);
+    arrange.mockClear();
+    rerender({ enabled: true, layoutKey: "|__unassigned__|a1", hold: true });
+    advance(500);
+    rerender({ enabled: true, layoutKey: "c|w1|a1", hold: true });
+    advance(500);
+    rerender({ enabled: true, layoutKey: "c|w1|a1", hold: false });
+    advance(1000);
+    expect(arrange).not.toHaveBeenCalled();
+  });
+
+  it("released with different windows, it arranges once after 120 ms", () => {
+    const { arrange, rerender } = setup(true, "c|w1|a1");
+    advance(400);
+    arrange.mockClear();
+    rerender({ enabled: true, layoutKey: "", hold: true });
+    advance(500);
+    rerender({ enabled: true, layoutKey: "c|w1", hold: false });
+    advance(119);
+    expect(arrange).not.toHaveBeenCalled();
+    advance(1);
+    expect(arrange).toHaveBeenCalledTimes(1);
+    advance(1000);
     expect(arrange).toHaveBeenCalledTimes(1);
   });
 
@@ -185,6 +224,25 @@ describe("App auto-arrange (demo mode)", () => {
     expect(world(container)).not.toHaveClass("world--anim");
     advance(1);
     expect(world(container)).toHaveClass("world--anim");
+  });
+
+  it("a new agent window (the demo's spec reviewer) triggers one arrange after 120 ms", () => {
+    const { container } = renderApp();
+    const windows = () => container.querySelectorAll(".win").length;
+    advance(400 + ARRANGE_ANIM_MS);
+    const before = windows();
+    // the demo spawns its spec reviewer 22 s after load
+    advance(22_000 - 400 - ARRANGE_ANIM_MS);
+    expect(windows()).toBe(before + 1);
+    expect(world(container)).not.toHaveClass("world--anim");
+    advance(119);
+    expect(world(container)).not.toHaveClass("world--anim");
+    advance(1);
+    expect(world(container)).toHaveClass("world--anim");
+    advance(ARRANGE_ANIM_MS);
+    expect(world(container)).not.toHaveClass("world--anim");
+    advance(1000);
+    expect(world(container)).not.toHaveClass("world--anim");
   });
 
   it("OFF: windows stay where they are", () => {

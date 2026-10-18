@@ -100,8 +100,12 @@ code {
 .world--anim .win {
   transition: left 0.55s cubic-bezier(0.2, 0.8, 0.2, 1), top 0.55s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
+/* Tethers (a later task renders them) hide while arranging and fade back in. */
 .world--anim .tethers {
   opacity: 0;
+}
+.tethers {
+  transition: opacity 0.25s ease 0.1s;
 }
 
 /* -------------------------------------------------------------- windows */

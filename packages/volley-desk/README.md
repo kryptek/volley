@@ -30,7 +30,7 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 
 Each visible wave forms a cluster: the wave window with its agents to the right, in task order (then implementer, fixup, spec review, quality review), each agent dropped into the shortest column. The coordinators window is a cluster of its own, placed first. Arrange tries 1–3 agent columns and every number of rows of clusters, keeps the placement that fits the screen at the largest zoom (capped at 1.1), then animates the windows and the view there.
 
-Auto-arrange is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. Dragging a window never re-arranges; the next structural change does.
+Auto-arrange is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
 
 ## Layout
 

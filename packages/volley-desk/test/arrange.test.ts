@@ -98,9 +98,11 @@ describe("arrange", () => {
     const r = arrange(clusters, screen);
     if (!r) throw new Error("no arrangement");
     expect(r.view.s).toBeCloseTo(best);
-    // here the winner is 3 agent columns in 2 rows, well clear of the runner-up
+    // here the winner is 3 agent columns in 2 rows, clear of the runner-up by more than EPS
     const win = all.find((c) => c.s === best);
     expect([win?.cols, win?.rows]).toEqual([3, 2]);
+    const runnerUp = Math.max(...all.filter((c) => c !== win).map((c) => c.s));
+    expect(runnerUp).toBeLessThan(best - 0.005);
     expect(r.place).toEqual(win?.place);
     // and centres it in the fit area below the top bar
     const W = bounds(r.place).W;
