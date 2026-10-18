@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { shq } from "./launch";
 
 /**
  * The authority fence: a code-level policy over every external command volleyd runs.
@@ -34,6 +35,24 @@ import { basename } from "node:path";
  *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+ *
+ * SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
+ *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
+ *     every step is checked against the REMOTE allow-list below and the script `exec` sends on
+ *     stdin is `renderRemoteScript` of exactly those steps; a raw stdin script is refused, as is
+ *     any `ssh <target> '<command>'` string (zsh login shells word-split it differently).
+ *   ssh -N -R <port>:<host>:<port> [-o <Opt>=<v>]… <target>   the reverse broker tunnel.
+ *   -o takes only BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax,
+ *   ExitOnForwardFailure (never ProxyCommand, LocalCommand, …); a target never starts with '-'.
+ *
+ * REMOTE (one step of a RemoteScript; the same DENY list applies first):
+ *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
+ *   gh issue view · claude (any arguments)
+ *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only) |
+ *     capture-pane | send-keys | has-session — kill-session = CONSENT; no tmux global options
+ *   mkdir -p <path>… · cat <path>… · chmod <octal> <path>… · nc -z 127.0.0.1 <port>
+ *   base64 -d — the only step that takes stdin (base64 text only) and redirects to a file
+ *   (absolute path; written under umask 077)
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
  * GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,
@@ -89,9 +108,29 @@ export function mintScriptToken(path: string): ScriptToken {
   return token;
 }
 
+/**
+ * One command of a remote script. `stdin` (base64 text) and `stdout` (a file to write, or with
+ * `append` to append to) are for `base64 -d` only: that is how files reach a remote host.
+ */
+export interface RemoteStep {
+  argv: string[];
+  /** Absolute directory on the remote host to run in. */
+  cwd?: string;
+  stdin?: string;
+  stdout?: string;
+  append?: boolean;
+}
+
+/** The script `ssh -T <target> bash -s` runs: fenced step by step, rendered by `renderRemoteScript`. */
+export interface RemoteScript {
+  steps: RemoteStep[];
+}
+
 export interface FenceOptions {
   consent?: ConsentToken;
   script?: ScriptToken;
+  /** For `ssh … bash -s` only: the remote script, which `exec` renders onto the child's stdin. */
+  remote?: RemoteScript;
 }
 
 type Verdict =
@@ -401,13 +440,16 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
   ) {
     return;
   }
-  const v = evaluate(argv);
-  if (v.kind === "allow") return;
-  if (v.kind === "consent") {
-    if (opts.consent !== undefined && minted.has(opts.consent)) return;
-    throw new FenceError(v.verb, "requires consent from `volleyd cleanup --yes`");
+  const prog = argv[0];
+  const verdicts = prog === "ssh" ? sshVerdicts(argv.slice(1), opts.remote) : [evaluate(argv)];
+  for (const v of verdicts) {
+    if (v.kind === "allow") continue;
+    if (v.kind === "consent") {
+      if (opts.consent !== undefined && minted.has(opts.consent)) continue;
+      throw new FenceError(v.verb, "requires consent from `volleyd cleanup --yes`");
+    }
+    throw new FenceError(v.verb, "not permitted for volleyd");
   }
-  throw new FenceError(v.verb, "not permitted for volleyd");
 }
 
 function evaluate(argv: readonly string[]): Verdict {
@@ -613,4 +655,177 @@ function isRecursiveForce(args: string[]): boolean {
     }
   }
   return r && f;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Remote hosts: ssh, and the steps of a remote script
+// ---------------------------------------------------------------------------------------------
+
+const SSH_OPTIONS = new Set([
+  "BatchMode",
+  "ConnectTimeout",
+  "ServerAliveInterval",
+  "ServerAliveCountMax",
+  "ExitOnForwardFailure",
+]);
+const SSH_TARGET = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$/;
+/** `-R <remote port>:<host>:<port>`: no bind address, so the remote end stays on its loopback. */
+const SSH_REVERSE = /^[0-9]{1,5}:[A-Za-z0-9_][A-Za-z0-9_.-]*:[0-9]{1,5}$/;
+/** An absolute remote path: quoted when rendered; no newline (a heredoc delimiter could follow). */
+const REMOTE_PATH = /^\/[^\n\r\0]*$/;
+const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
+/** The only command a remote tmux session may run (renderLaunchScript's script). */
+export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
+
+/** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
+function sshVerdicts(args: readonly string[], script: RemoteScript | undefined): Verdict[] {
+  let mode: "T" | "N" | undefined;
+  let reverse = false;
+  let i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (!a.startsWith("-")) break;
+    if ((a === "-T" || a === "-N") && mode === undefined) mode = a === "-T" ? "T" : "N";
+    else if (a === "-o") {
+      const [k, v] = (args[++i] ?? "").split("=", 2);
+      if (!SSH_OPTIONS.has(k ?? "") || v === undefined || !/^[A-Za-z0-9]+$/.test(v))
+        return [deny(`ssh -o ${k ?? ""}`)];
+    } else if (a === "-R" && !reverse && SSH_REVERSE.test(args[i + 1] ?? "")) {
+      reverse = true;
+      i++;
+    } else return [deny(`ssh ${a}`)];
+  }
+  const target = args[i] ?? "";
+  const rest = args.slice(i + 1);
+  if (!SSH_TARGET.test(target)) return [deny("ssh (target)")];
+  if (mode === "N" && reverse && rest.length === 0 && script === undefined) return [ALLOW];
+  const isScript =
+    mode === "T" && !reverse && rest.length === 2 && rest[0] === "bash" && rest[1] === "-s";
+  if (!isScript) return [deny("ssh (only `-T <target> bash -s` and the reverse tunnel)")];
+  if (script === undefined || script.steps.length === 0)
+    return [deny("ssh bash -s (without a fenced remote script)")];
+  return script.steps.map(remoteStep);
+}
+
+const remoteDeny = (v: Verdict): Verdict =>
+  v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
+
+function remoteStep(step: RemoteStep): Verdict {
+  if (step.cwd !== undefined && !REMOTE_PATH.test(step.cwd))
+    return deny("remote cwd (not absolute)");
+  const [prog, ...args] = step.argv;
+  const io = step.stdin !== undefined || step.stdout !== undefined || step.append === true;
+  if (io) {
+    const write =
+      prog === "base64" &&
+      args.length === 1 &&
+      args[0] === "-d" &&
+      step.stdin !== undefined &&
+      BASE64.test(step.stdin) &&
+      step.stdout !== undefined &&
+      REMOTE_PATH.test(step.stdout);
+    return write
+      ? ALLOW
+      : deny("remote file write (base64 -d of base64 text to an absolute path only)");
+  }
+  return remoteDeny(remoteCommand(prog, args));
+}
+
+function remoteCommand(prog: string | undefined, args: string[]): Verdict {
+  if (prog === undefined || prog === "") return deny("(empty command)");
+  if (prog.includes("/")) return deny(`${prog} (programs are named, not pathed)`);
+  const paths = (list: string[]) => list.length > 0 && list.every((a) => !a.startsWith("-"));
+  switch (prog) {
+    case "git":
+      return git(args);
+    case "gh": {
+      const two = args.slice(0, 2).join(" ");
+      return two === "issue view"
+        ? checkArgs("gh issue view", args.slice(2), GH_SPECS["issue view"] as OptSpec)
+        : deny(`gh ${two}`.trim());
+    }
+    case "tmux":
+      return tmux(args);
+    case "claude":
+      return ALLOW;
+    case "mkdir":
+      return args[0] === "-p" && paths(args.slice(1)) ? ALLOW : deny("mkdir (only -p <path>…)");
+    case "cat":
+      return paths(args) ? ALLOW : deny("cat (only <path>…)");
+    case "chmod":
+      return /^[0-7]{3,4}$/.test(args[0] ?? "") && paths(args.slice(1))
+        ? ALLOW
+        : deny("chmod (only <octal> <path>…)");
+    case "nc":
+      return args.length === 3 &&
+        args[0] === "-z" &&
+        args[1] === "127.0.0.1" &&
+        /^[0-9]{1,5}$/.test(args[2] ?? "")
+        ? ALLOW
+        : deny("nc (only -z 127.0.0.1 <port>)");
+    case "base64":
+      return deny("base64 (only as a file write)");
+    default: {
+      // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
+      const v = evaluate([prog, ...args]);
+      return v.kind === "allow" ? deny(`${prog} (not on the remote allow-list)`) : v;
+    }
+  }
+}
+
+const TMUX_SPECS: Record<string, OptSpec> = {
+  "new-session": {
+    flags: ["-d"],
+    valued: ["-s", "-c"],
+    positional: (a) => a === TMUX_LAUNCH_COMMAND,
+  },
+  "capture-pane": { flags: ["-p", "-J"], valued: ["-t", "-S", "-E"] },
+  "has-session": { valued: ["-t"] },
+};
+
+function tmux(args: string[]): Verdict {
+  const [sub, ...rest] = args;
+  if (sub === undefined || sub.startsWith("-")) return deny(`tmux ${sub ?? ""}`.trim());
+  if (sub === "kill-session") {
+    const v = checkArgs("tmux kill-session", rest, { valued: ["-t"] });
+    return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
+  }
+  if (sub === "send-keys") {
+    // `send-keys -t <target> [-l] [--] <key|text>…`: what follows the options is typed.
+    const [t, target, ...tail] = rest;
+    if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
+    const afterL = tail[0] === "-l" ? tail.slice(1) : tail;
+    const keys = afterL[0] === "--" ? afterL.slice(1) : afterL;
+    const quoted = afterL[0] === "--";
+    return keys.length > 0 && (quoted || keys.every((k) => !k.startsWith("-")))
+      ? ALLOW
+      : deny("tmux send-keys");
+  }
+  const spec = Object.hasOwn(TMUX_SPECS, sub) ? TMUX_SPECS[sub] : undefined;
+  if (spec === undefined) return deny(`tmux ${sub}`);
+  return checkArgs(`tmux ${sub}`, rest, spec);
+}
+
+/**
+ * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
+ * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
+ * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
+ * heredoc (base64 text cannot contain its delimiter).
+ */
+export function renderRemoteScript(script: RemoteScript): string {
+  const lines = ["set -euo pipefail"];
+  for (const s of script.steps) {
+    const cmd = s.argv.map(shq).join(" ");
+    if (s.stdout !== undefined) {
+      const redirect = s.append === true ? ">>" : ">";
+      lines.push(
+        `( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} <<'VOLLEY_EOF'\n${s.stdin ?? ""}\nVOLLEY_EOF\n)`,
+      );
+    } else if (s.cwd !== undefined) {
+      lines.push(`( cd ${shq(s.cwd)} && ${cmd} )`);
+    } else {
+      lines.push(cmd);
+    }
+  }
+  return `${lines.join("\n")}\n`;
 }

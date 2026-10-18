@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { type FenceOptions, assertAllowed } from "./fence";
+import { FenceError, type FenceOptions, assertAllowed, renderRemoteScript } from "./fence";
 
 export interface ExecOptions extends FenceOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
-  /** Written to the child's stdin, which is then closed. */
+  /** Written to the child's stdin, which is then closed. Not with `remote` (that is the stdin). */
   input?: string;
+  /** Kills the child (SIGTERM, then SIGKILL after the grace) when aborted: long-lived children. */
+  signal?: AbortSignal;
   /**
    * Kill the child after this many ms: SIGTERM, then after `killGraceMs` SIGKILL, and resolve
    * with the output so far even if a grandchild still holds the pipes open. The result then has
@@ -41,7 +43,13 @@ export const exec: ExecFn = async (argv, opts = {}) => {
   assertAllowed(argv, {
     ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
     ...(opts.script !== undefined ? { script: opts.script } : {}),
+    ...(opts.remote !== undefined ? { remote: opts.remote } : {}),
   });
+  if (opts.remote !== undefined && opts.input !== undefined) {
+    throw new FenceError("ssh bash -s", "a raw input next to a fenced remote script");
+  }
+  // A fenced remote script reaches ssh's stdin exactly as it was checked.
+  const input = opts.remote !== undefined ? renderRemoteScript(opts.remote) : opts.input;
   const [cmd, ...args] = argv as string[];
   return new Promise<ExecResult>((resolve, reject) => {
     const child = spawn(cmd as string, args, {
@@ -49,7 +57,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       env: opts.env ?? process.env,
       shell: false,
       // No input → no stdin pipe at all, so nothing can EPIPE.
-      stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+      stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
     const max = opts.maxOutputBytes ?? DAEMON_DEFAULTS.exec_output_max_bytes;
     const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
@@ -76,6 +84,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       settled = true;
       clearTimeout(timer);
       clearTimeout(killer);
+      opts.signal?.removeEventListener("abort", abort);
       resolve({
         code,
         stdout: Buffer.concat(out.stdout).toString(),
@@ -97,6 +106,17 @@ export const exec: ExecFn = async (argv, opts = {}) => {
             }, opts.killGraceMs ?? DAEMON_DEFAULTS.exec_kill_grace_ms);
           }, opts.timeoutMs)
         : undefined;
+    const abort = () => {
+      child.kill("SIGTERM");
+      killer ??= setTimeout(() => {
+        child.kill("SIGKILL");
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(child.exitCode ?? 1);
+      }, opts.killGraceMs ?? DAEMON_DEFAULTS.exec_kill_grace_ms);
+    };
+    if (opts.signal?.aborted === true) abort();
+    else opts.signal?.addEventListener("abort", abort, { once: true });
     child.on("error", (e) => {
       if (settled) return;
       settled = true;
@@ -109,7 +129,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       // A child may exit without reading its input; the write then fails with EPIPE, which must
       // not become an uncaught exception in the daemon. The exit code is the result that matters.
       child.stdin.on("error", () => {});
-      child.stdin.end(opts.input);
+      child.stdin.end(input);
     }
   });
 };

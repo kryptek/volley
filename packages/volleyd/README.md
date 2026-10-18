@@ -420,6 +420,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
+| `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -432,7 +433,8 @@ lists every key with its default and example pools, commented out.
 
 `volleyd daemon` spawns an implementer for every admitted task (`--no-spawn` turns that off;
 `volleyd spawn` starts one by hand). One spawn (`src/spawn.ts`) runs these steps through a
-`Host` (`src/hosts/host.ts`; `local-cmux` is the local one), every command through the fence:
+`Host` (`src/hosts/host.ts`; `local-cmux` is the local one, `ssh-tmux` a
+[remote one](#remote-hosts-ssh--tmux)), every command through the fence:
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
 |---|---|---|---|
@@ -594,6 +596,68 @@ Accepting the dialog by hand in any worktree of the repo works too: every tick r
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
 
+### Remote hosts (ssh + tmux)
+
+A task can run its agents on a second machine: no cmux there, agents in tmux sessions, reached
+over SSH, the broker reached through a reverse SSH tunnel. Name the host in the wave file, either
+inline or as an entry of the config's `hosts` map (an inline `host:` is layered over the entry it
+`name`s):
+
+```yaml
+# $VOLLEYD_HOME/config.yaml
+hosts:
+  box:
+    target: dev@box.example          # ssh destination ([user@]host or an ssh config alias)
+    repo: /home/dev/src/example-repo # the wave repo's clone on the box
+    volley_dir: /home/dev/src/volley # a volley checkout on the box (its hooks)
+    # worktree_root: /home/dev/src/.volley-worktrees   (default: beside repo)
+    # tunnel: { remote_port: 1883, supervise: true }
+
+# wave file
+tasks:
+  T1: { issue: 102, host: box }
+  T2: { issue: 103, host: { type: ssh, name: box, tunnel: { remote_port: 2883 } } }
+```
+
+**Prerequisites on the box** (volleyd does not provision it): `bash`, `bun`, `claude` (logged
+in, with the volley MCP server registered at user scope), `gh` (authenticated, for `gh issue
+view`), `git`, `tmux`, `nc`, `base64`, a clone of the wave repo at `repo` (its `origin` must
+have the release branch) and a volley checkout at `volley_dir` with `bun install` run. The
+daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
+or host-key prompt fails the command).
+
+**Transport.** Every remote command is a script sent on stdin to
+`ssh -T <target> bash -s` — never `ssh <target> '<command>'`: login shells on the box may be
+zsh, which word-splits a command string differently. The script is built from fenced steps
+(see [the fence](#the-authority-fence)'s SSH and REMOTE rules); files (`ISSUE.md`,
+`.volley/brief.md`, `.volley/agent.json` with mode 0600, `.volley/launch.sh`) travel as base64
+through `base64 -d`. The spawn steps are those of the local host, with these differences:
+
+| Step | On a remote host |
+|---|---|
+| Repo trust | the box's `~/.claude.json` (only the trust bits are read) |
+| Lock | `$VOLLEYD_HOME/hosts/<target>/locks/` — keyed by target and worktree path |
+| Worktree | `git -C <repo> fetch origin <release_branch>`, then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path |
+| Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
+| Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'`. Never `--mcp-config` |
+| Screen | `tmux capture-pane -p -t =<session>: -S-60`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
+| Verify / retire | identical: the hook signals arrive over the tunnel; retire revokes the credentials and clears the topics |
+| Cleanup | `volleyd cleanup --yes` kills the tmux session and runs `git worktree remove` on the box, both with the consent token |
+
+**Tunnel.** With `tunnel.supervise: true` (the default) the daemon keeps one
+`ssh -N -R <remote_port>:<broker host>:<broker port> <target>` per target, started when a wave
+first has an unfinished task on it and kept up until the daemon stops, restarting it with
+backoff (1 s doubling to 60 s). There is no bind address,
+so the forwarded port listens on the box's loopback only. With `supervise: false` the tunnel is
+yours to run and the daemon only checks it. The check is `nc -z 127.0.0.1 <remote_port>` on the
+box (through `bash -s`), every 10 s. While it fails, new spawns on that host park with
+`why_waiting: "tunnel down to <target>"` (and an `alarm_raised { code: TUNNEL_DOWN }` in the
+journal); when it recovers they resume. Running agents are never touched — an agent whose
+tunnel drops keeps working and its MQTT client reconnects when the tunnel is back.
+
+The wave state labels remote tasks with `host` (the host's name), so the Desk can show where an
+agent runs.
+
 ---
 
 ## The authority fence
@@ -630,6 +694,24 @@ ALLOW (program by bare name only — never a path):
 
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+
+SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
+  ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
+    every step is checked against the REMOTE allow-list below and the script `exec` sends on
+    stdin is `renderRemoteScript` of exactly those steps; a raw stdin script is refused, as is
+    any `ssh <target> '<command>'` string (zsh login shells word-split it differently).
+  ssh -N -R <port>:<host>:<port> [-o <Opt>=<v>]… <target>   the reverse broker tunnel.
+  -o takes only BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax,
+  ExitOnForwardFailure (never ProxyCommand, LocalCommand, …); a target never starts with '-'.
+
+REMOTE (one step of a RemoteScript; the same DENY list applies first):
+  git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
+  gh issue view · claude (any arguments)
+  tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only) |
+    capture-pane | send-keys | has-session — kill-session = CONSENT; no tmux global options
+  mkdir -p <path>… · cat <path>… · chmod <octal> <path>… · nc -z 127.0.0.1 <port>
+  base64 -d — the only step that takes stdin (base64 text only) and redirects to a file
+  (absolute path; written under umask 077)
 
 OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
 GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,

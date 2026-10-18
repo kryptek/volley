@@ -27,7 +27,18 @@ export const CONFIG_DEFAULTS: Tunables = {
   spawn_timeout_s: 120,
   wake_grace_s: 60,
   screen_tail_interval_s: 5,
+  hosts: {},
 };
+
+/** Defaults for a remote host's unset keys (config `hosts.<name>`). */
+export const REMOTE_HOST_DEFAULTS = {
+  /** Port on the remote machine's 127.0.0.1 that reaches the broker through the tunnel. */
+  remote_port: 1883,
+  /** volleyd keeps the reverse tunnel up itself. */
+  supervise_tunnel: true,
+  /** `worktree_root` default: this directory beside the remote repo. */
+  worktree_dir: ".volley-worktrees",
+} as const;
 
 /** Who `updated_by` names before anyone has changed the config. */
 export const DEFAULTS_AUTHOR = "volleyd-defaults";
@@ -104,4 +115,21 @@ export const DAEMON_DEFAULTS = {
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */
   screen_backoff_s: 30,
+  /** The broker port when the broker URL names none (MQTT's registered port). */
+  mqtt_default_port: 1883,
+  /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */
+  ssh_connect_timeout_s: 10,
+  /** ssh `ServerAliveInterval` for the reverse tunnel (seconds). */
+  ssh_alive_interval_s: 15,
+  /** Bound on one remote command (`ssh … bash -s`); a hung connection must not stall a spawn. */
+  remote_exec_timeout_ms: 120_000,
+  /** Bound on one tunnel check (`nc -z` over `bash -s`). */
+  tunnel_check_timeout_ms: 15_000,
+  /** Wait before restarting a reverse tunnel that exited; doubles per failure up to the max. */
+  tunnel_restart_ms: 1_000,
+  tunnel_restart_max_ms: 60_000,
+  /** How often the tunnel of a host with parked or pending spawns is re-checked. */
+  tunnel_check_ms: 10_000,
+  /** Session-name suffixes tried when a tmux session name is taken (a relaunch). */
+  tmux_session_attempts: 20,
 } as const;
