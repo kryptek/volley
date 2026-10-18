@@ -17,7 +17,7 @@ Before invoking `/volley-issues`:
 2. **volley-mcp registered in this session.** Claude Code stores MCP servers separately from `settings.json` and manages them via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field). Register the server at user scope with `env.VOLLEY_AGENT_ID` set to the coordinator's role prefix (e.g. `coordinator`) and `env.VOLLEY_NAMESPACE=example-dispatch`:
 
    ```sh
-   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"example-dispatch"}}'
+   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password>"}}'
    ```
 
    Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — expect `volley: ... ✓ Connected`. Run `bash packages/volley-issues/scripts/install.sh` to get a ready-to-paste command with the absolute path baked in. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
@@ -31,6 +31,15 @@ Before invoking `/volley-issues`:
    collide. To discover the auto-generated id, call `vol_register` (its response
    includes `agent_id`) or `vol_list_agents` and look for the entry whose
    `capabilities` include `coordinator`.
+
+   **Broker credentials in the shell.** The reference broker config requires a login (`examples/mosquitto-auth/`). The MCP registration's `env` block reaches only the MCP server, not this session's Bash tool, so export the same identity in your shell profile and restart the session:
+
+   ```sh
+   export VOLLEY_AUTH_USERNAME=coordinator
+   export VOLLEY_AUTH_PASSWORD='<coordinator password from `volley auth init`>'
+   ```
+
+   Without them every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one), and `mosquitto_pub` cleanup is refused.
 
 3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
 
@@ -250,6 +259,8 @@ bun run packages/volley-cli/src/cli.ts wait \
   --timeout 14400 &
 ```
 
+An exit code `1` from `volley wait` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`, see Prerequisites), **not** a terminal wake. Query the agent's status before treating it as finished, and fix the credentials before re-backgrounding the wait.
+
 Background-and-detach (`&`) is the entire mechanism. Each background bash exits the moment its agent's retained `status` topic flips to a terminal value. **The Claude Code harness task-notification fires on the bash exit**, which is what wakes the coordinator — same way an interactive subprocess completion surfaces. There is no polling: the wakeup is driven by the broker's retained-message delivery to the `volley wait` subscription.
 
 Record each agent's `agent_id` + the bash process id (`$!` immediately after backgrounding) so you can correlate the wake notifications.
@@ -366,7 +377,7 @@ cmux close-workspace --workspace <ref>
 ```bash
 # Clear every retained record of one finished dispatched agent.
 for t in "volley/_system/registry/<agent-id>" volley/<ns>/<agent-id>/{status,result,mailbox,capability}; do
-  mosquitto_pub -t "$t" -n -r
+  mosquitto_pub -u "$VOLLEY_AUTH_USERNAME" -P "$VOLLEY_AUTH_PASSWORD" -t "$t" -n -r
 done
 ```
 

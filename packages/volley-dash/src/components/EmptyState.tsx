@@ -30,7 +30,7 @@ export function EmptyState({
         <div style={{ color: "var(--fg-4)", marginTop: 6 }}>or, from a script:</div>
         <div>
           <span className="vd-prompt">›</span>{" "}
-          <code>{`mosquitto_pub -t volley/default/my-agent/status -m '{"state":"working"}'`}</code>
+          <code>{`volley pub --agent-id my-agent --channel status --type working --payload '{}'`}</code>
         </div>
         <div style={{ color: "var(--fg-4)", marginTop: 6, fontSize: 11 }}>broker: {brokerUrl}</div>
       </div>

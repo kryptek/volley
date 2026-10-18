@@ -30,10 +30,12 @@ describe("EmptyState", () => {
     expect(screen.getByTestId("empty-hint-card").textContent).toContain("mqtt://example.test:1883");
   });
 
-  it("includes the dispatch + mosquitto_pub example commands", () => {
+  it("includes the dispatch + volley pub example commands", () => {
     render(<EmptyState />);
     const hint = screen.getByTestId("empty-hint-card");
     expect(hint.textContent).toContain("npx volley dispatch");
-    expect(hint.textContent).toContain("mosquitto_pub");
+    // `volley pub` honours VOLLEY_AUTH_*; a bare mosquitto_pub is refused by the auth-only broker.
+    expect(hint.textContent).toContain("volley pub --agent-id my-agent");
+    expect(hint.textContent).not.toContain("mosquitto_pub");
   });
 });

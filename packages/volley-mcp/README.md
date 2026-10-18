@@ -81,7 +81,7 @@ const queued = await broker.drainQueued(`volley/${ns}/${agentId}/mailbox`, { idl
 
 ## Configuration (env vars)
 
-All four are optional; sensible defaults apply.
+All are optional; sensible defaults apply.
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -89,8 +89,10 @@ All four are optional; sensible defaults apply.
 | `VOLLEY_NAMESPACE` | `default` | Logical grouping for the agent's topics. Two namespaces are isolated from each other (e.g. `prod` vs `staging`). Must match `[a-z0-9][a-z0-9_-]{0,62}`; cannot start with `_`. |
 | `VOLLEY_BROKER_URL` | `mqtt://localhost:1883` | MQTT connection URL. Use `mqtts://` for TLS. |
 | `VOLLEY_PARENT_ID` | `null` | If this agent was spawned by another Volley agent, the parent's `agent_id`. Used to build dispatch trees in `vol_list_agents` output. Subagents should embed this in their spawn brief; don't try to pass it via env when spawning, since Claude Code doesn't propagate parent-process env to MCP subprocesses (see below). |
+| `VOLLEY_AUTH_USERNAME` | unset (anonymous) | Broker username (SPEC §11.5). The reference broker config requires one: use `coordinator` for a coordinator session (`volley auth init` prints its password). |
+| `VOLLEY_AUTH_PASSWORD` | unset | Broker password for `VOLLEY_AUTH_USERNAME`. Setting it without a username is a startup error. A refused login fails startup with `AUTH_FAILED` and a `volley auth init` hint; the password is never echoed. |
 
-> **Assigned identity (`.volley/agent.json`).** If the server's working directory contains `.volley/agent.json` (written by a supervisor before it starts the agent — SPEC §6.5), the server uses its `agent_id` **verbatim, with no random suffix**, and its `namespace`, `parent_id` and `broker_url` when present. Values in the file beat the env vars above; keys missing from the file fall back to env, then defaults. A malformed file or an out-of-grammar `agent_id` stops startup with an error naming the file path (`INVALID_AGENT_ID` for a bad id) instead of silently generating an id. Uniqueness of the assigned id is the supervisor's job (recommended form `<wave>-<task>-<role>-<attempt>`). Schema: [`spec/schemas/agent-identity.schema.json`](../../spec/schemas/agent-identity.schema.json).
+> **Assigned identity (`.volley/agent.json`).** If the server's working directory contains `.volley/agent.json` (written by a supervisor before it starts the agent — SPEC §6.5), the server uses its `agent_id` **verbatim, with no random suffix**, and its `namespace`, `parent_id`, `broker_url` and `broker` credentials (`{ "username", "password" }`, minted per agent by `volley auth add-agent`) when present. Values in the file beat the env vars above; keys missing from the file fall back to env, then defaults. A malformed file or an out-of-grammar `agent_id` stops startup with an error naming the file path (`INVALID_AGENT_ID` for a bad id) instead of silently generating an id. Uniqueness of the assigned id is the supervisor's job (recommended form `<wave>-<task>-<role>-<attempt>`). Schema: [`spec/schemas/agent-identity.schema.json`](../../spec/schemas/agent-identity.schema.json).
 
 > **Note on env propagation.** Claude Code's MCP launcher passes the *registration's* `env` block verbatim to spawned MCP subprocesses. Parent-process `export VAR=...` does **NOT** override that block. If you need to give a child agent a different `VOLLEY_AGENT_ID` prefix, embed the desired prefix in the spawn brief text, not the env. The auto-suffix on every MCP startup means same-prefix processes still get distinct ids, so this is a sharp edge to know about, not a footgun — unless `.volley/agent.json` is present (see above), in which case every process started in that directory uses the same assigned id.
 

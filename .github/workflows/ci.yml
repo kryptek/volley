@@ -51,6 +51,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run test
 
+  react-bits:
+    name: React Bits allow-list (volley-desk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/volley-desk check:react-bits
+
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
     runs-on: ubuntu-latest
@@ -60,7 +71,18 @@ jobs:
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun --cwd packages/volley-skill run validate:skill
+      - run: bun run --cwd packages/volley-skill validate:skill
+
+  check-hooks-template:
+    name: Hooks template (every hook command resolves)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun --cwd packages/volley-hooks run check:template
 
   test-integration:
     name: Integration tests (mosquitto)
@@ -84,9 +106,49 @@ jobs:
       - name: Run integration tests
         working-directory: packages/volley-mcp
         run: bun run test:integration
+      - name: Run volley-hooks integration tests (MQTT 5 drain)
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_BROKER_URL: mqtt://127.0.0.1:1883
+        run: bun run test:integration
       - name: Stop mosquitto
         if: always()
         run: docker rm -f mosquitto
+
+  test-integration-auth:
+    name: Integration tests (mosquitto auth + ACL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - name: Start mosquitto with auth
+        # auth-fixture.sh runs inside the container so the passwd hashes match that
+        # mosquitto's mosquitto_passwd; the ACL is the shipped examples/mosquitto-auth/acl.conf.
+        run: |
+          docker run -d --name mosquitto-auth -p 1884:1884 -v "$PWD:/repo:ro" eclipse-mosquitto:2 \
+            sh -c 'sh /repo/packages/volley-mcp/test/integration/auth-fixture.sh /tmp/volley-auth /repo/examples/mosquitto-auth/acl.conf \
+              && chown -R mosquitto:mosquitto /tmp/volley-auth \
+              && exec mosquitto -c /repo/packages/volley-mcp/test/integration/mosquitto-auth.conf'
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/1884) 2>/dev/null; then echo "mosquitto up"; break; fi
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/1884) 2>/dev/null || { docker logs mosquitto-auth; echo "mosquitto did not start in 30s"; exit 1; }
+      - name: Run auth integration tests
+        working-directory: packages/volley-mcp
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-auth.test.ts
+      - name: Broker log
+        if: failure()
+        run: docker logs mosquitto-auth
+      - name: Stop mosquitto
+        if: always()
+        run: docker rm -f mosquitto-auth
 
   parity:
     name: Parity test (4 legacy vs 4 volley)
@@ -97,7 +159,7 @@ jobs:
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun --cwd packages/volley-issues run test:parity
+      - run: bun run --cwd packages/volley-issues test:parity
       - uses: actions/upload-artifact@v4
         with:
           name: parity-report

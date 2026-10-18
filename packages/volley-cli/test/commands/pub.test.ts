@@ -156,3 +156,46 @@ describe("volley pub", () => {
     expect(r.stderr).toContain("agent_id");
   });
 });
+
+describe("volley pub --username / --password", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker({ credentials: { username: "coordinator", password: "pw" } });
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  const argv = (extra: string[]) => [
+    "pub",
+    "--broker-url",
+    tb.url,
+    "--agent-id",
+    "issue-42-fix-7a3f",
+    "--channel",
+    "progress",
+    "--type",
+    "tick",
+    ...extra,
+  ];
+
+  it("authenticates with the flags", async () => {
+    const r = await runCli({ argv: argv(["--username", "coordinator", "--password", "pw"]) });
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+  });
+
+  it("authenticates from VOLLEY_AUTH_* when no flags are given", async () => {
+    const r = await runCli({
+      argv: argv([]),
+      env: { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "pw" },
+    });
+    expect(r.exitCode).toBe(0);
+  });
+
+  it("exits 1 with AUTH_FAILED wording on bad credentials", async () => {
+    const r = await runCli({ argv: argv(["--username", "coordinator", "--password", "nope"]) });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("refused the credentials");
+  });
+});

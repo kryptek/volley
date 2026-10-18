@@ -36,7 +36,9 @@ Before running any subcommand:
      "args": ["run", "<volley-repo>/packages/volley-mcp/src/index.ts"],
      "env": {
        "VOLLEY_AGENT_ID": "coordinator",
-       "VOLLEY_NAMESPACE": "default"
+       "VOLLEY_NAMESPACE": "default",
+       "VOLLEY_AUTH_USERNAME": "coordinator",
+       "VOLLEY_AUTH_PASSWORD": "<coordinator password from `volley auth init`>"
      }
    }'
    ```

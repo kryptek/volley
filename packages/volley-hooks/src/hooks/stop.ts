@@ -1,0 +1,39 @@
+#!/usr/bin/env bun
+/**
+ * Stop: publish `idle` with the last assistant message (first 500 chars). For a coordinator
+ * whose turn ends in a question, also `awaiting_input` with the whole `question` (read from
+ * the unclipped message), `session_url` and `workspace` (SPEC §4.3) — cleared by `resumed` on
+ * the next prompt or tool call. Heartbeat.
+ */
+import { type HookContext, clip, questionOf, runHook } from "../lib/hook-io";
+import { coordinatorFields, openSession, writeActivity } from "../lib/session";
+
+export async function handle(ctx: HookContext): Promise<string | null> {
+  const message = ctx.input.last_assistant_message;
+  const text = clip(message, 500);
+  const question =
+    ctx.identity.mode === "coordinator" && typeof message === "string" ? questionOf(message) : null;
+  const session = await openSession(ctx.identity, ctx.event);
+  try {
+    await session.progress("idle", text !== undefined ? { text } : {});
+    if (question !== null) {
+      await session.progress("awaiting_input", {
+        question,
+        ...(text !== undefined ? { text } : {}),
+        ...coordinatorFields(ctx.identity, ctx.env),
+      });
+    }
+    writeActivity(ctx.identity.stateDir, {
+      state: question !== null ? "awaiting_input" : "idle",
+      at: new Date().toISOString(),
+      hook_event: ctx.event,
+      ...(question !== null ? { question } : {}),
+    });
+    await session.heartbeat();
+    return null;
+  } finally {
+    await session.close();
+  }
+}
+
+if (import.meta.main) await runHook("Stop", handle);

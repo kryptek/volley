@@ -1,0 +1,11 @@
+{
+  "session_id": "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+  "transcript_path": "/tmp/volley-hooks-fixture/transcript.jsonl",
+  "cwd": "/tmp/volley-hooks-fixture",
+  "prompt_id": "9631f860-27fb-4722-b9d2-af669d6e8970",
+  "hook_event_name": "PostModelSwitch",
+  "from_model": "claude-haiku-5-5",
+  "to_model": "claude-sonnet-5-5",
+  "requested_model": "claude-sonnet-5-5",
+  "source": "command"
+}
