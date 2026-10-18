@@ -3,13 +3,14 @@
  * `StatusMark` (status + progress), `task #issue`, the wave chip in the wave
  * accent and the role chip in the title; the task title from the wave `spec`;
  * the pipeline; the latest narration (`payload.msg`, plain text — effects
- * land in D7); an attention slot (D3); the Volley feed and Terminal tabs; and
- * a footer with progress, heartbeat age and the registry model. Everything is
- * read from the store's `AgentView` and the agent's `WaveView`.
+ * land in D7); attention-line (D3) and steering-panel (D4) slots; the Volley
+ * feed and Terminal tabs; and a footer with progress, heartbeat age and the
+ * registry model. Markup and classes follow the prototype; everything is read
+ * from the store's `AgentView` and the agent's `WaveView`.
  */
-import { Message01Icon } from "@hugeicons/core-free-icons";
+import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
 import { UNASSIGNED } from "../../store/reducer";
@@ -44,12 +45,16 @@ export interface AgentWindowProps {
   /** The wave's accent; agents in `unassigned` always use `NEUTRAL_ACCENT`. */
   accent: string;
   frame: AgentFrameProps;
-  /** Clock override (tests); otherwise the window ticks once a second. */
+  /** Clock override (tests); otherwise the window ticks every 2 s. */
   now?: number;
-  /** Attention line (D3). */
+  /** Attention line under the narration (D3). */
   attention?: ReactNode;
   /** Chat glyph: opens the steering panel (D4). */
   onChat?: (agentId: string) => void;
+  /** The chat glyph is lit while the steering panel is open (D4). */
+  steerOpen?: boolean;
+  /** Steering panel, rendered at the bottom of the body (D4). */
+  steer?: ReactNode;
 }
 
 function markStatus(type: string | undefined): StatusMarkStatus {
@@ -68,18 +73,23 @@ function markStatus(type: string | undefined): StatusMarkStatus {
   }
 }
 
+/** The prototype's `ago`: `42s`, `3m`, `1.5h`. */
 export function age(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
 }
+
+const Icon = ({ i, s = 15 }: { i: typeof BubbleChatIcon; s?: number }) => (
+  <HugeiconsIcon icon={i} size={s} strokeWidth={1.8} />
+);
 
 function useNow(fixed: number | undefined): number {
   const [now, setNow] = useState(() => fixed ?? Date.now());
   useEffect(() => {
     if (fixed !== undefined) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
+    const t = setInterval(() => setNow(Date.now()), 2000);
     return () => clearInterval(t);
   }, [fixed]);
   return fixed ?? now;
@@ -93,6 +103,8 @@ export function AgentWindow({
   now: fixedNow,
   attention,
   onChat,
+  steerOpen = false,
+  steer,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -115,44 +127,47 @@ export function AgentWindow({
         color={accent}
         size={18}
       />
-      <span className="t-name ell min0">{agent.task ?? agent.id}</span>
-      {issue !== undefined && <span className="mono dim">#{issue}</span>}
-      <span className="chip chip--wave" style={{ "--acc": accent } as CSSProperties}>
+      <span className="t-name ell min0">
+        {agent.task ?? agent.id}
+        {issue !== undefined && <span className="dim"> #{issue}</span>}
+      </span>
+      <span className="chip chip--wave" title={`Linked to wave ${agent.wave}`}>
+        <i style={{ background: accent }} />
         {agent.wave}
       </span>
       {agent.role && <span className="chip chip--role">{ROLE_LABEL[agent.role]}</span>}
     </>
   );
 
+  const label = `Message ${[agent.task ?? agent.id, agent.role && ROLE_LABEL[agent.role]]
+    .filter(Boolean)
+    .join(" ")}`;
   const actions = (
     <button
       type="button"
-      className="icon-btn"
-      aria-label="Steer this agent"
-      title="Steer this agent"
+      className={`icon-btn${steerOpen ? " icon-btn--hot" : ""}`}
+      aria-label={label}
+      title={label}
       onClick={() => onChat?.(agent.id)}
     >
-      <HugeiconsIcon icon={Message01Icon} size={16} />
+      <Icon i={BubbleChatIcon} />
     </button>
   );
 
   const footer = (
-    <div className="a-foot">
-      <span className="bar" aria-hidden>
-        <i style={{ width: `${progress ?? 0}%` }} />
-      </span>
-      <span className="mono a-pct">{progress === null ? "—" : `${progress}%`}</span>
-      <span
-        className={`hb mono${hbStale ? " hb--stale" : ""}`}
-        title={hbAge === null ? "no heartbeat yet" : "since the last heartbeat"}
-      >
-        ♥ {hbAge === null ? "—" : age(hbAge)}
+    <div className="agent-foot">
+      <div className="bar">
+        <span style={{ width: `${progress ?? 0}%` }} />
+      </div>
+      <span className="mono">{progress === null ? "—" : `${progress}%`}</span>
+      <span className={`hb${hbStale ? " hb--stale" : ""}`} title="Hook heartbeat">
+        <i /> {hbAge === null ? "—" : age(hbAge)}
       </span>
       <span
-        className="a-model mono dim ell min0"
+        className="mono dim ell"
         title={agent.registry?.model_source ? `model: ${agent.registry.model_source}` : undefined}
       >
-        {agent.model ?? "model unknown"}
+        {agent.model?.replace("claude-", "") ?? "model unknown"}
       </span>
     </div>
   );
@@ -171,37 +186,38 @@ export function AgentWindow({
       {agent.task === null && <div className="a-id mono dim ell">{agent.id}</div>}
       {spec?.title && <div className="a-title">{spec.title}</div>}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
-      <div className="a-narr">
-        {agent.narration ?? <span className="dim">no narration yet</span>}
+      <div className="narr" aria-live="polite">
+        {agent.narration ? (
+          <span>{agent.narration}</span>
+        ) : (
+          <span className="dim">no narration yet</span>
+        )}
       </div>
-      {attention !== undefined && <div className="a-attn">{attention}</div>}
+      {attention}
       <div className="tabs" role="tablist">
         <button
           type="button"
           role="tab"
-          className="tab"
           aria-selected={tab === "feed"}
           onClick={() => setTab("feed")}
         >
-          Volley feed <span className="dim">{agent.feed.length}</span>
+          <Icon i={ListViewIcon} s={13} /> Volley feed
         </button>
         <button
           type="button"
           role="tab"
-          className="tab"
           aria-selected={tab === "term"}
           onClick={() => setTab("term")}
         >
-          Terminal
+          <Icon i={TerminalIcon} s={13} /> Terminal
         </button>
       </div>
-      <div role="tabpanel">
-        {tab === "feed" ? (
-          <Feed feed={agent.feed} />
-        ) : (
-          <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
-        )}
-      </div>
+      {tab === "feed" ? (
+        <Feed feed={agent.feed} />
+      ) : (
+        <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
+      )}
+      {steer}
     </Frame>
   );
 }

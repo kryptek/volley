@@ -37,17 +37,18 @@ describe("Feed", () => {
   it("clicking a row shows the exact envelope JSON, clicking again hides it", () => {
     const { container } = render(<Feed feed={[working, steer, narr]} />);
     fireEvent.click(screen.getByRole("button", { name: /Matrix written/ }));
-    const pre = container.querySelector("pre.feed-json");
+    const pre = container.querySelector("pre.env-json");
     expect(pre?.textContent).toBe(JSON.stringify(narr.envelope, null, 2));
     fireEvent.click(screen.getByRole("button", { name: /Matrix written/ }));
-    expect(container.querySelector("pre.feed-json")).toBeNull();
+    expect(container.querySelector("pre.env-json")).toBeNull();
   });
 
   it("marks rows with their channel class", () => {
     render(<Feed feed={[working, steer, narr]} />);
-    expect(screen.getByRole("button", { name: /keep the matrix/ })).toHaveClass("ch-mailbox");
-    expect(screen.getByRole("button", { name: /implementing shard/ })).toHaveClass("ch-status");
-    expect(screen.getByRole("button", { name: /Matrix written/ })).toHaveClass("ch-progress");
+    const row = (name: RegExp) => screen.getByRole("button", { name }).closest(".env");
+    expect(row(/keep the matrix/)).toHaveClass("ch-mailbox");
+    expect(row(/implementing shard/)).toHaveClass("ch-status");
+    expect(row(/Matrix written/)).toHaveClass("ch-progress");
   });
 
   it("labels registry entries by the registry channel", () => {
@@ -63,7 +64,9 @@ describe("Feed", () => {
       receivedAt: T0 - 1000,
     };
     render(<Feed feed={[reg]} />);
-    expect(screen.getByRole("button", { name: /registered/ })).toHaveClass("ch-registry");
+    expect(screen.getByRole("button", { name: /registered/ }).closest(".env")).toHaveClass(
+      "ch-registry",
+    );
   });
 
   it("shows a placeholder with no envelopes", () => {
