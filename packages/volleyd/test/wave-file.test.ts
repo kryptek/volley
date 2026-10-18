@@ -153,6 +153,22 @@ describe("parseWaveFile", () => {
     expect(repo[0]).toMatch(/^repo: /);
   });
 
+  it("rejects a model the fence would refuse to launch or switch to (one grammar: MODEL_ID)", () => {
+    const wave = errorsOf(
+      `${HEADER.replace("claude-opus-5-5", '"opus; git push"')}tasks:\n  T1: { issue: 1 }\n`,
+    );
+    expect(wave).toHaveLength(1);
+    expect(wave[0]).toMatch(/^model: /);
+    const task = errorsOf(`${HEADER}tasks:\n  T1: { issue: 1, model: "x\\n!sh" }\n`);
+    expect(task).toHaveLength(1);
+    expect(task[0]).toMatch(/model/);
+    expect(() =>
+      parseWaveFile(
+        `${HEADER}tasks:\n  T1: { issue: 1, model: "us.anthropic.claude-opus-4-1-20250805-v1:0" }\n`,
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects a duplicate task id", () => {
     const errs = errorsOf(`${HEADER}tasks:\n  T1: { issue: 1 }\n  T1: { issue: 2 }\n`);
     expect(errs).toEqual(["tasks.T1: duplicate task id 'T1'"]);

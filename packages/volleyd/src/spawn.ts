@@ -11,6 +11,7 @@ import {
   runBriefGate,
 } from "./brief";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
   type BrokerCredentials,
@@ -340,18 +341,17 @@ async function launchAttempt(
       broker_url: deps.brokerUrl,
       ...(creds !== undefined ? { broker: creds } : {}),
     });
-    await host.writeFile(
-      launchScriptPath(ctx.worktree),
-      renderLaunchScript({
-        hooksDir: deps.hooksDir,
-        model: task.model,
-        agentId,
-        ...(host.launchEnv !== undefined
-          ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
-          : {}),
-      }),
-      0o700,
-    );
+    const script = renderLaunchScript({
+      hooksDir: deps.hooksDir,
+      model: task.model,
+      agentId,
+      ...(host.launchEnv !== undefined
+        ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
+        : {}),
+    });
+    // The fence starts (or types) the launch command only with this seal of what it runs.
+    const launch = sealLaunchScript(ctx.worktree, script);
+    await host.writeFile(launchScriptPath(ctx.worktree), script, 0o700);
 
     // Subscribe before launching, so no hook signal can be missed.
     const watch = await deps.watch(ctx.namespace, agentId);
@@ -362,13 +362,14 @@ async function launchAttempt(
         // The relaunch reuses the workspace (never a second session in one worktree): its shell
         // is back at a bare prompt, so the launch command is typed there.
         workspace = recovered.workspace;
-        await host.sendText(workspace, LAUNCH_COMMAND);
+        await host.sendText(workspace, LAUNCH_COMMAND, { launch });
         await host.sendKeys(workspace, "Enter");
       } else {
         ({ workspace } = await host.launch({
           cwd: ctx.worktree,
           name: `${req.wave.wave} ${req.task} ${req.role}`,
           command: LAUNCH_COMMAND,
+          launch,
         }));
       }
     } catch (e) {

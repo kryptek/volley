@@ -8,7 +8,9 @@ import {
   type RemoteStep,
   assertAllowed,
   mintConsentToken,
+  mintModelSwitchToken,
   renderRemoteScript,
+  sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 
@@ -16,6 +18,8 @@ import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
+/** The command a remote tmux session runs. */
+const TMUX_LAUNCH = "bash .volley/launch.sh";
 /** A file volleyd reads on a remote host (an allowed `cat`). */
 const BRIEF = "/wt/x/.volley/brief.md";
 
@@ -72,6 +76,25 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["cat", "/home/dev/.ssh/id_ed25519"],
     ["cat", "/wt/x/.volley/../../../home/dev/.ssh/id_ed25519"],
     ["cat", ".ssh/id_ed25519"],
+    // chmod only the files volleyd writes; cat only the files it reads
+    ["chmod", "777", "/home/dev/.ssh"],
+    ["chmod", "700", "/src/r/.volley/x/src/hooks/session-start.ts"],
+    ["chmod", "700", "/src/r/.git/hooks/post-checkout"],
+    ["cat", "/src/r/.volley/config"],
+    ["cat", "/src/r/.volley/x/secret"],
+    // typed text that needs a token (an approved model switch, a sealed launch script)
+    ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "/model claude-sonnet-5-5"],
+    ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
+    [
+      "tmux",
+      "new-session",
+      "-d",
+      "-s",
+      "w1-T1-implementer",
+      "-c",
+      "/wt/x",
+      "bash .volley/launch.sh",
+    ],
   ];
 
   it.each(DENIED)("refuses a remote script containing %s … before ssh runs", (...argv) => {
@@ -96,21 +119,9 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ],
     ["git", "-C", "/wt/x", "rev-parse", "--is-inside-work-tree"],
     ["gh", "issue", "view", "42", "--json", "number,title,body,url"],
-    [
-      "tmux",
-      "new-session",
-      "-d",
-      "-s",
-      "w1-T1-implementer",
-      "-c",
-      "/wt/x",
-      "bash .volley/launch.sh",
-    ],
     ["tmux", "capture-pane", "-p", "-t", "=w1-T1-implementer:", "-S-60"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Escape"],
-    ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
-    ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "/model claude-sonnet-5-5"],
     ["tmux", "has-session", "-t", "=w1-T1-implementer"],
     ["mkdir", "-p", "/wt/x/.volley"],
     ["cat", ".claude.json"],
@@ -118,6 +129,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["cat", "/src/r/.git/info/exclude"],
     ["chmod", "600", "/wt/x/.volley/agent.json"],
     ["chmod", "700", "/wt/x/.volley/launch.sh"],
+    ["chmod", "600", "/wt/x/ISSUE.md"],
     ["cat", BRIEF],
     ["cat", "/src/r/.volley/brief-extra.md"],
     ["nc", "-z", "127.0.0.1", "1883"],
@@ -181,6 +193,11 @@ describe("remote allow-list (ssh … bash -s)", () => {
     for (const ok of [
       "/wt/x/ISSUE.md",
       "/wt/x/.volley/agent.json",
+      "/wt/x/.volley/brief.md",
+      "/wt/x/.volley/review.md",
+      "/wt/x/.volley/findings.md",
+      "/wt/x/.volley/findings.json",
+      "/wt/x/.volley/rebase.md",
       "/src/r/.git/info/exclude",
       ".claude.json.volleyd.tmp",
     ]) {
@@ -197,6 +214,22 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/wt/x//.volley/launch.sh",
       ".claude.json",
       "authorized_keys",
+      // P1-B: only volleyd's own file names, directly inside .volley/ — never a bare repo's
+      // config/HEAD (core.sshCommand), a gitfile (core.fsmonitor), or hooks under .volley/x/
+      "/src/r/.volley/config",
+      "/src/r/.volley/HEAD",
+      "/src/r/.volley/objects/x",
+      "/src/r/.volley/g/config",
+      "/src/r/.volley/w/.git",
+      "/src/r/.volley/x/src/hooks/session-start.ts",
+      "/wt/x/.volley/sub/agent.json",
+      // … nor a case variant of one (a case-insensitive file system opens launch.sh)
+      "/wt/x/.volley/Launch.sh",
+      "/wt/x/.volley/launch.SH",
+      "/wt/x/.VOLLEY/launch.sh",
+      "/wt/x/.Volley/agent.json",
+      "/wt/x/issue.md",
+      "/src/r/.git/INFO/exclude",
     ]) {
       expect(() => assertAllowed(SSH, remote(to(bad))), bad).toThrow(FenceError);
       expect(() => assertAllowed(SSH, remote(to(bad, true))), bad).toThrow(FenceError);
@@ -208,7 +241,12 @@ describe("remote allow-list (ssh … bash -s)", () => {
       hooksDir: "/home/dev/src/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
-      env: { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883", VOLLEY_AGENT_ID: "w1-t1-implementer-1" },
+      // Exactly what SshTmuxHost.launchEnv emits.
+      env: {
+        VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883",
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_AGENT_ID: "w1-t1-implementer-1",
+      },
     };
     const write = (content: string, over: Partial<RemoteStep> = {}): RemoteStep => ({
       argv: ["base64", "-d"],
@@ -224,6 +262,20 @@ describe("remote allow-list (ssh … bash -s)", () => {
     expect(() =>
       assertAllowed(SSH, remote(write(renderLaunchScript({ ...vars, model: "sonnet" })))),
     ).not.toThrow();
+    // Provider-qualified model ids a wave file may name (P2: one grammar with the schema).
+    const bedrock = "us.anthropic.claude-opus-4-1-20250805-v1:0";
+    expect(() =>
+      assertAllowed(SSH, remote(write(renderLaunchScript({ ...vars, model: bedrock })))),
+    ).not.toThrow();
+    // A hooks dir or agent id with a quote or a space renders and parses back the same.
+    expect(() =>
+      assertAllowed(
+        SSH,
+        remote(
+          write(renderLaunchScript({ ...vars, hooksDir: "/home/dev/it's here/volley-hooks" })),
+        ),
+      ),
+    ).not.toThrow();
 
     const bad: Record<string, string> = {
       "arbitrary content": "#!/usr/bin/env bash\ngit push origin HEAD:main\n",
@@ -235,12 +287,164 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "a non-VOLLEY export": renderLaunchScript({ ...vars, env: { BASH_ENV: "/tmp/evil" } }),
       "a relative hooks dir": renderLaunchScript({ ...vars, hooksDir: "evil/hooks" }),
       "a hooks dir with ..": renderLaunchScript({ ...vars, hooksDir: "/home/dev/../tmp/evil" }),
+      // P1-A: a second VOLLEY_HOOKS_DIR export wins in bash, so a SessionStart hook would run a
+      // file of the writer's choosing; the env block is exactly launchEnv's three keys
+      "VOLLEY_HOOKS_DIR exported again": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_HOOKS_DIR: "/src/r/.volley/x" },
+      }),
+      "VOLLEY_HOOKS_DIR as the only export": renderLaunchScript({
+        ...vars,
+        env: { VOLLEY_HOOKS_DIR: "/src/r/.volley/x" },
+      }),
+      "a broker other than the tunnel": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_BROKER_URL: "mqtt://evil.example:1883" },
+      }),
+      "a broker URL with a path": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883/x" },
+      }),
+      "another agent's id": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_AGENT_ID: "coordinator" },
+      }),
+      "a bad namespace": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_NAMESPACE: "a/b" },
+      }),
+      "an extra VOLLEY_ export": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, VOLLEY_AUTH_PASSWORD: "x" },
+      }),
+      "a partial env block": renderLaunchScript({
+        ...vars,
+        env: { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883" },
+      }),
+      "the keys out of order": renderLaunchScript({
+        ...vars,
+        env: {
+          VOLLEY_AGENT_ID: vars.agentId,
+          VOLLEY_NAMESPACE: "default",
+          VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883",
+        },
+      }),
+      "a hooks dir inside .volley/": renderLaunchScript({ ...vars, hooksDir: "/src/r/.volley/x" }),
+      "a hooks dir inside .VOLLEY/": renderLaunchScript({ ...vars, hooksDir: "/src/r/.VOLLEY/x" }),
     };
     for (const [why, content] of Object.entries(bad)) {
       expect(() => assertAllowed(SSH, remote(write(content))), why).toThrow(FenceError);
     }
     // Appending to a launch script could add any command after the exec.
     expect(() => assertAllowed(SSH, remote(write(ok, { append: true })))).toThrow(FenceError);
+  });
+
+  it("P1-A probe: the whole hooks-dir chain is refused as one script", () => {
+    const b64 = (t: string) => Buffer.from(t).toString("base64");
+    const launch = sealLaunchScript(
+      "/wt/x",
+      renderLaunchScript({
+        hooksDir: "/home/dev/src/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+      }),
+    );
+    const evil = renderLaunchScript({
+      hooksDir: "/home/dev/src/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      env: { VOLLEY_HOOKS_DIR: "/src/r/.volley/x" },
+    });
+    const steps: RemoteStep[] = [
+      step("mkdir", "-p", "/src/r/.volley/x/src/hooks"),
+      {
+        argv: ["base64", "-d"],
+        stdin: b64("Bun.spawnSync(['touch', '/tmp/pwned'])\n"),
+        stdout: "/src/r/.volley/x/src/hooks/session-start.ts",
+      },
+      { argv: ["base64", "-d"], stdin: b64(evil), stdout: "/wt/x/.volley/launch.sh" },
+      step("chmod", "700", "/wt/x/.volley/launch.sh"),
+      step("tmux", "new-session", "-d", "-s", "w1-T1-implementer", "-c", "/wt/x", TMUX_LAUNCH),
+    ];
+    expect(() => assertAllowed(SSH, { remote: { steps }, launch })).toThrow(FenceError);
+    // Each write on its own is refused too.
+    expect(() => assertAllowed(SSH, remote(steps[1] as RemoteStep))).toThrow(FenceError);
+    expect(() => assertAllowed(SSH, remote(steps[2] as RemoteStep))).toThrow(FenceError);
+  });
+
+  it("P1-B probes: no .volley/ write can make git run a command", () => {
+    const b64 = (t: string) => Buffer.from(t).toString("base64");
+    const w = (stdout: string, text: string): RemoteStep => ({
+      argv: ["base64", "-d"],
+      stdin: b64(text),
+      stdout,
+    });
+    const chains: Record<string, RemoteStep[]> = {
+      "a bare repo with core.sshCommand": [
+        step("mkdir", "-p", "/src/r/.volley/objects", "/src/r/.volley/refs"),
+        w("/src/r/.volley/HEAD", "ref: refs/heads/x\n"),
+        w(
+          "/src/r/.volley/config",
+          '[core]\n\tsshCommand = "touch /tmp/pwned"\n[remote "origin"]\n\turl = ssh://h/r\n',
+        ),
+        step("git", "-C", "/src/r/.volley", "fetch", "origin"),
+      ],
+      "a gitfile with core.fsmonitor": [
+        step("mkdir", "-p", "/src/r/.volley/g", "/src/r/.volley/w"),
+        w("/src/r/.volley/g/HEAD", "ref: refs/heads/x\n"),
+        w("/src/r/.volley/g/config", '[core]\n\tfsmonitor = "touch /tmp/pwned"\n'),
+        w("/src/r/.volley/w/.git", "gitdir: /src/r/.volley/g\n"),
+        step("git", "-C", "/src/r/.volley/w", "status"),
+      ],
+      "a case variant of launch.sh": [
+        w("/wt/x/.volley/Launch.sh", "#!/bin/sh\ntouch /tmp/pwned\n"),
+        step("tmux", "new-session", "-d", "-s", "w1-T1-implementer", "-c", "/wt/x", TMUX_LAUNCH),
+      ],
+    };
+    const launch = sealLaunchScript(
+      "/wt/x",
+      renderLaunchScript({
+        hooksDir: "/home/dev/src/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+      }),
+    );
+    for (const [why, steps] of Object.entries(chains)) {
+      expect(() => assertAllowed(SSH, { remote: { steps }, launch }), why).toThrow(FenceError);
+    }
+  });
+
+  it("typed text and the tmux launch need their tokens (as in the local fence)", () => {
+    const keys = (text: string) =>
+      step("tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", text);
+    const session = (cwd: string) =>
+      step("tmux", "new-session", "-d", "-s", "w1-T1-implementer", "-c", cwd, TMUX_LAUNCH);
+    const modelSwitch = mintModelSwitchToken("claude-sonnet-5-5", "d-1");
+    const launch = sealLaunchScript(
+      "/wt/x",
+      renderLaunchScript({
+        hooksDir: "/home/dev/src/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+      }),
+    );
+    expect(() =>
+      assertAllowed(SSH, { ...remote(keys("/model claude-sonnet-5-5")), modelSwitch }),
+    ).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(keys("/model opus")), modelSwitch })).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(SSH, { ...remote(keys(LAUNCH_COMMAND)), launch })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(session("/wt/x")), launch })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(session("/tmp/attacker")), launch })).toThrow(
+      FenceError,
+    );
+    expect(() =>
+      assertAllowed(SSH, {
+        ...remote(step("tmux", "new-session", "-d", "-s", "w1-T1-implementer", TMUX_LAUNCH)),
+        launch,
+      }),
+    ).toThrow(FenceError);
   });
 
   it("the trust write: compare the file as read (base64 stdin), write beside it, swap it in", () => {
