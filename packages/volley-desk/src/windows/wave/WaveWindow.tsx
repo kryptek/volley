@@ -108,6 +108,9 @@ export function WaveWindow(p: WaveWindowProps) {
   const tasks = s ? dagNodes(s) : [];
   const pct = wavePct(tasks.map((t) => t.stage));
   const merged = tasks.filter((t) => t.stage === "merged").length;
+  // Count unresolved decisions from the store, not state.open_decisions: a resolved decision can linger in the
+  // retained state until the supervisor re-publishes it (D0 fixup, "ghost" decisions).
+  const openDecisions = Object.values(p.wave.decisions).filter((d) => !d.resolved).length;
 
   const title = (
     <>
@@ -160,7 +163,7 @@ export function WaveWindow(p: WaveWindowProps) {
           {merged} of {tasks.length} merged
         </span>
         <span>
-          {plural(s.open_decisions.length, "decision")} · {plural(s.gates.length, "gate")}
+          {plural(openDecisions, "decision")} · {plural(s.gates.length, "gate")}
         </span>
         {p.startedAt != null && <span className="mono dim">running {ago(now - p.startedAt)}</span>}
       </div>

@@ -90,7 +90,7 @@ describe("App (live store)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    expect(await screen.findByText(/1 open decisions/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 decision ·/)).toBeInTheDocument();
     expect(screen.getByText("waiting for wave state")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("1 waves");
   });

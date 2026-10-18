@@ -39,7 +39,16 @@ function wave(coordinator: CoordinatorState = "working"): WaveView {
     },
     updated_at: "2026-10-18T12:00:00.000Z",
   };
-  return { id: "status-chip", state, decisions: {}, receivedAt: 0 };
+  const open = {
+    decision_id: "status-chip-t3-agent_blocked-1",
+    wave: "status-chip",
+    task: "T3",
+    kind: "agent_blocked" as const,
+    question: "Ties: shared or dense ranking?",
+    pointers: {},
+    opened_at: "2026-10-18T12:00:00Z",
+  };
+  return { id: "status-chip", state, decisions: { [open.decision_id]: open }, receivedAt: 0 };
 }
 
 const frame: WaveWindowProps["frame"] = {
