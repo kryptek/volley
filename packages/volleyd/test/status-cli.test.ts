@@ -236,4 +236,16 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).toContain("LaunchAgents/systems.volley.volleyd.plist");
     expect(r.stdout).toContain("<key>KeepAlive</key>");
   });
+
+  it("never writes broker credentials into the (world-readable) plist", async () => {
+    const r = await runCli(["install", "--dry-run"], {
+      HOME: home,
+      VOLLEYD_HOME: join(home, "state"),
+      VOLLEY_AUTH_USERNAME: "volleyd",
+      VOLLEY_AUTH_PASSWORD: "plist-must-not-hold-this",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toContain("plist-must-not-hold-this");
+    expect(r.stdout).not.toContain("VOLLEY_AUTH");
+  });
 });

@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
 import {
@@ -25,6 +26,7 @@ import {
   decide,
   summaryPayload,
 } from "./admission";
+import { authFields } from "./broker-auth";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
@@ -189,6 +191,11 @@ import { expandHome, worktreePath } from "./worktree";
 export interface DaemonOptions {
   brokerUrl: string;
   namespace: string;
+  /**
+   * The `volleyd` identity's broker credentials (`daemonAuth`: `$VOLLEYD_HOME/broker.json`, else
+   * `VOLLEY_AUTH_*`), sent on every connect. Absent: anonymous (an open broker).
+   */
+  auth?: BrokerAuth;
   /** $VOLLEYD_HOME — journals live under `<home>/waves/<wave>/`, config at `<home>/config.yaml`. */
   home: string;
   /**
@@ -442,7 +449,11 @@ function pidAlive(pid: number): boolean {
 async function assertNotRunning(opts: DaemonOptions): Promise<void> {
   const topic = buildTopic(opts.namespace, DAEMON_AGENT_ID, "status");
   const probe = new VolleyBroker();
-  await probe.connect({ url: opts.brokerUrl, agentId: `${DAEMON_AGENT_ID}-probe` });
+  await probe.connect({
+    url: opts.brokerUrl,
+    agentId: `${DAEMON_AGENT_ID}-probe`,
+    ...authFields(opts.auth),
+  });
   try {
     const prior = await probe.queryRetained(topic, DAEMON_DEFAULTS.probe_ms);
     const priorType = prior !== null ? parseEnvelope(prior)?.type : undefined;
@@ -660,6 +671,7 @@ export class Daemon {
       protocolVersion: this.opts.protocolVersion ?? 5,
       willTopic: this.statusTopic,
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
+      ...authFields(this.opts.auth),
     });
     this.running = true;
 
@@ -3034,6 +3046,12 @@ export class Daemon {
           return {
             ok: false,
             error: "claim needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID",
+          };
+        // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
+        if (!isValidAgentId(p.by))
+          return {
+            ok: false,
+            error: `claim: "${p.by}" is not a valid agent id ([a-z0-9][a-z0-9_-]{0,62})`,
           };
         return this.claim(p, p.by);
       case "pause":

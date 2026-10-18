@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
@@ -16,10 +16,10 @@ else the session registered for this directory).
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseStatus>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseStatus(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd status: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;

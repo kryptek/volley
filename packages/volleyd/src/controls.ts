@@ -1,5 +1,11 @@
 import { parseArgs } from "node:util";
-import { type ControlOp, type ControlResponse, resolveTarget, withClient } from "./control";
+import {
+  type ControlOp,
+  type ControlResponse,
+  type ControlTarget,
+  resolveControlTarget,
+  withClient,
+} from "./control";
 import { type Command, type CommandArgs, EXIT, type ExitCode } from "./io";
 import { resolveCaller } from "./ownership";
 import type { WaveRecord } from "./reducer";
@@ -212,7 +218,7 @@ export interface OpCommand {
 export function opCommand(spec: OpCommand): Command {
   return async ({ argv, env, io }: CommandArgs): Promise<ExitCode> => {
     let parsed: { values: Values; positionals: string[] };
-    let target: ReturnType<typeof resolveTarget>;
+    let target: ControlTarget;
     try {
       parsed = parseArgs({
         args: argv,
@@ -227,7 +233,7 @@ export function opCommand(spec: OpCommand): Command {
         strict: true,
         allowPositionals: true,
       }) as { values: Values; positionals: string[] };
-      target = resolveTarget(parsed.values, env);
+      target = resolveControlTarget(parsed.values, env);
     } catch (e) {
       io.stderr(
         `volleyd ${spec.name}: ${e instanceof Error ? e.message : String(e)}\n${spec.help}`,

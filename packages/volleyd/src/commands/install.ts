@@ -23,6 +23,8 @@ $VOLLEYD_HOME/volleyd.log) and loads it with \`launchctl bootstrap gui/$UID\`. -
 the plist instead. Restart the service with:
   launchctl kickstart -k gui/$UID/${SERVICE_LABEL}
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
+Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,
+written by \`volley auth init --volleyd-file\`).
 `;
 
 export interface ServicePaths {

@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { parse } from "yaml";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
 const HELP = `Usage:
@@ -18,10 +18,10 @@ Common flags: --broker-url <url>  --namespace <ns>
 
 export async function config({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseConfig>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseConfig(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd config: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;

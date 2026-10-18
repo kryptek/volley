@@ -10,6 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
@@ -38,6 +39,14 @@ export interface AuthDeps {
   brokerOwner: () => { uid: number; gid: number } | null;
   chown: (path: string, uid: number, gid: number) => void;
 }
+
+/** Where volleyd keeps its state (volleyd's config-store.ts `volleydHome`, which this mirrors). */
+function volleydHome(env: Record<string, string | undefined>): string {
+  return env.VOLLEYD_HOME ?? join(env.HOME ?? homedir(), ".volley", "volleyd");
+}
+
+/** volleyd's broker credentials file in $VOLLEYD_HOME (volleyd's broker-auth.ts reads it). */
+export const VOLLEYD_BROKER_FILE = "broker.json";
 
 /** The identities every Volley deployment has; agents get their own via add-agent. */
 export const FIXED_IDENTITIES = ["volleyd", "desk", "coordinator"] as const;
@@ -194,6 +203,7 @@ export async function auth(
         json: { type: "boolean" },
         "no-reload": { type: "boolean" },
         "coordinator-file": { type: "boolean" },
+        "volleyd-file": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -230,9 +240,11 @@ export async function auth(
   const passwdFile = join(dir, "passwd");
   const aclFile = join(dir, "acl.conf");
   const skipReload = parsed.values["no-reload"] === true;
-  if (parsed.values["coordinator-file"] === true && verb !== "init") {
-    io.stderr("volley auth: --coordinator-file only applies to init\n");
-    return EXIT.USAGE;
+  for (const flag of ["coordinator-file", "volleyd-file"] as const) {
+    if (parsed.values[flag] === true && verb !== "init") {
+      io.stderr(`volley auth: --${flag} only applies to init\n`);
+      return EXIT.USAGE;
+    }
   }
 
   if (verb === "init") {
@@ -253,6 +265,7 @@ export async function auth(
 
     const minted: [string, string][] = [];
     let coordinatorPassword: string | null = null;
+    let volleydPassword: string | null = null;
     for (const [i, user] of FIXED_IDENTITIES.entries()) {
       const password = deps.generatePassword();
       // `-c` truncates, so only for a new file; `-b` upserts, which keeps minted agents.
@@ -267,6 +280,7 @@ export async function auth(
       }
       minted.push([user, password]);
       if (user === "coordinator") coordinatorPassword = password;
+      if (user === "volleyd") volleydPassword = password;
     }
     chmodSync(passwdFile, 0o600);
     // The coordinator's hooks read their credentials from here (never from settings.json).
@@ -279,6 +293,16 @@ export async function auth(
       const creds = { username: "coordinator", password: coordinatorPassword };
       writeFileSync(coordinatorFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
       chmodSync(coordinatorFile, 0o600);
+    }
+    // volleyd reads its credentials from here (never from the launchd plist); rotated the same way.
+    const volleydFile = join(volleydHome(env), VOLLEYD_BROKER_FILE);
+    const wroteVolleyd = parsed.values["volleyd-file"] === true || existsSync(volleydFile);
+    if (wroteVolleyd) {
+      if (volleydPassword === null) throw new Error("no volleyd identity was minted");
+      mkdirSync(volleydHome(env), { recursive: true, mode: 0o700 });
+      const creds = { username: "volleyd", password: volleydPassword };
+      writeFileSync(volleydFile, `${JSON.stringify(creds)}\n`, { mode: 0o600 });
+      chmodSync(volleydFile, 0o600);
     }
     const owner = deps.brokerOwner();
     if (owner !== null) {
@@ -295,6 +319,11 @@ export async function auth(
           : []),
         ...(wroteCoordinator
           ? [`Wrote ${coordinatorFile} (mode 0600): the coordinator's hook credentials.`]
+          : []),
+        ...(wroteVolleyd
+          ? [
+              `Wrote ${volleydFile} (mode 0600): volleyd's broker credentials (run volleyd as the user that owns it).`,
+            ]
           : []),
         ...(owner !== null ? [`Handed ${dir} to the broker's user (uid ${owner.uid}).`] : []),
         ...(wroteCoordinator && owner !== null
@@ -317,7 +346,9 @@ export async function auth(
         "    AND exported in your shell profile (the volley CLI and mosquitto_pub run from the shell);",
         "    the hooks also read VOLLEY_AUTH_* or, failing that, coordinator.json (--coordinator-file)",
         "  - volley dash / Desk:   sign in as desk in the browser",
-        "  - volleyd:              its config file",
+        wroteVolleyd
+          ? `  - volleyd:              ${volleydFile} (written above)`
+          : "  - volleyd:              $VOLLEYD_HOME/broker.json (re-run with --force --volleyd-file), or VOLLEY_AUTH_* in its environment",
         "",
       ].join("\n"),
     );
@@ -405,6 +436,10 @@ Options:
                   init: also write <dir>/coordinator.json (mode 0600) with the
                   coordinator's credentials, read by the coordinator's volley-hooks
                   (so no password goes in settings.json). Rotated by --force.
+  --volleyd-file  init: also write $VOLLEYD_HOME/broker.json (default
+                  ~/.volley/volleyd/broker.json, mode 0600) with volleyd's
+                  credentials, read by \`volleyd daemon\` (never put in the launchd
+                  plist). Rotated by --force.
   --json          add-agent: print {"username","password"} instead of the bare password
   --no-reload     Do not signal the broker; reload it yourself before relying on the change
   -h, --help      Show this help and exit

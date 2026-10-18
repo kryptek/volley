@@ -1,0 +1,147 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
+import { BROKER_FILE, daemonAuth } from "../src/broker-auth";
+import { daemonStartOptions } from "../src/commands/daemon";
+import { Daemon } from "../src/daemon";
+import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { NO_PRESSURE } from "./helpers/daemon-env";
+import { runCli } from "./helpers/run-cli";
+
+const NS = "volleyd-auth";
+const USERS = { volleyd: "volleyd-pw", coordinator: "coordinator-pw" };
+
+let home: string;
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "volleyd-auth-"));
+});
+afterEach(() => {
+  rmSync(home, { recursive: true, force: true });
+});
+
+function writeBrokerFile(contents: string, mode = 0o600): string {
+  const path = join(home, BROKER_FILE);
+  writeFileSync(path, contents, { mode });
+  chmodSync(path, mode);
+  return path;
+}
+
+describe("daemonAuth: volleyd's broker credentials", () => {
+  it("reads a 0600 $VOLLEYD_HOME/broker.json", () => {
+    writeBrokerFile(JSON.stringify({ username: "volleyd", password: "s3cret" }));
+    expect(daemonAuth(home, {})).toEqual({ username: "volleyd", password: "s3cret" });
+  });
+
+  it("the file wins over VOLLEY_AUTH_*", () => {
+    writeBrokerFile(JSON.stringify({ username: "volleyd", password: "s3cret" }));
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "x" };
+    expect(daemonAuth(home, env)).toEqual({ username: "volleyd", password: "s3cret" });
+  });
+
+  it("refuses a file other users can read (it holds a password)", () => {
+    const path = writeBrokerFile(
+      JSON.stringify({ username: "volleyd", password: "s3cret" }),
+      0o644,
+    );
+    expect(() => daemonAuth(home, {})).toThrow(`${path} is mode 0644`);
+    expect(() => daemonAuth(home, {})).toThrow("chmod 600");
+  });
+
+  it("refuses a malformed file instead of connecting anonymously", () => {
+    writeBrokerFile("{not json");
+    expect(() => daemonAuth(home, {})).toThrow(/broker\.json: malformed/);
+    writeBrokerFile(JSON.stringify({ username: "", password: "x" }));
+    expect(() => daemonAuth(home, {})).toThrow(/non-empty string username/);
+  });
+
+  it("falls back to VOLLEY_AUTH_*, else anonymous (null)", () => {
+    expect(
+      daemonAuth(home, { VOLLEY_AUTH_USERNAME: "volleyd", VOLLEY_AUTH_PASSWORD: "pw" }),
+    ).toEqual({ username: "volleyd", password: "pw" });
+    expect(daemonAuth(home, {})).toBeNull();
+  });
+});
+
+describe("volleyd against a broker that requires credentials", () => {
+  let broker: TestBroker;
+  let reader: VolleyBroker;
+  const daemons: Daemon[] = [];
+  beforeEach(async () => {
+    broker = await startTestBroker({ users: USERS });
+    reader = new VolleyBroker();
+    await reader.connect({
+      url: broker.url,
+      agentId: "test-reader",
+      username: "coordinator",
+      password: USERS.coordinator,
+    });
+  });
+  afterEach(async () => {
+    for (const d of daemons.splice(0)) await d.stop().catch(() => {});
+    await reader.disconnect();
+    await broker.close();
+  });
+
+  const options = (extra: Partial<Parameters<typeof Daemon.start>[0]> = {}) => ({
+    brokerUrl: broker.url,
+    namespace: NS,
+    home,
+    tickMs: 0,
+    protocolVersion: 4 as const,
+    pressure: NO_PRESSURE,
+    ...extra,
+  });
+
+  const liveStatus = async () => {
+    const raw = await reader.queryRetained(`volley/${NS}/volleyd/status`, 500);
+    return raw === null || raw === "" ? null : (JSON.parse(raw) as { type: string }).type;
+  };
+
+  it("without credentials the daemon is refused (AUTH_FAILED)", async () => {
+    await expect(Daemon.start(options())).rejects.toMatchObject({ code: "AUTH_FAILED" });
+  });
+
+  it("with credentials the probe and the daemon connect both authenticate", async () => {
+    daemons.push(
+      await Daemon.start(options({ auth: { username: "volleyd", password: "volleyd-pw" } })),
+    );
+    expect(await liveStatus()).toBe("working");
+  });
+
+  it("`volleyd daemon` starts with $VOLLEYD_HOME/broker.json; control commands use VOLLEY_AUTH_* (coordinator)", async () => {
+    writeBrokerFile(JSON.stringify({ username: "volleyd", password: USERS.volleyd }));
+    const env = { VOLLEY_BROKER_URL: broker.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: home };
+    const opts = daemonStartOptions({ brokerUrl: broker.url, namespace: NS }, env);
+    expect(opts.home).toBe(home);
+    expect(opts.auth).toEqual({ username: "volleyd", password: USERS.volleyd });
+    // The command's options with the test-only overrides (no timers, no real pressure samplers).
+    const { issueBody: _gh, ...rest } = opts;
+    daemons.push(
+      await Daemon.start({ ...rest, tickMs: 0, protocolVersion: 4, pressure: NO_PRESSURE }),
+    );
+    expect(await liveStatus()).toBe("working");
+
+    const anon = await runCli(["status"], env);
+    expect(anon.exitCode).toBe(1);
+    expect(anon.stderr).toMatch(/refused|auth/i);
+
+    const status = await runCli(["status", "--json"], {
+      ...env,
+      VOLLEY_AUTH_USERNAME: "coordinator",
+      VOLLEY_AUTH_PASSWORD: USERS.coordinator,
+    });
+    expect(status.stderr).toBe("");
+    expect(status.exitCode).toBe(0);
+    expect(JSON.parse(status.stdout)).toEqual({ waves: [] });
+  });
+
+  it("`volleyd daemon` refuses a group-readable broker.json before connecting", async () => {
+    writeBrokerFile(JSON.stringify({ username: "volleyd", password: USERS.volleyd }), 0o640);
+    const env = { VOLLEY_BROKER_URL: broker.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: home };
+    const r = await runCli(["daemon", "--no-spawn"], env);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("chmod 600");
+  });
+});

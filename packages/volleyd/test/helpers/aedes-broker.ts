@@ -9,9 +9,32 @@ export interface TestBroker {
   close: () => Promise<void>;
 }
 
-/** Start an in-process Aedes MQTT broker on an OS-assigned free port. */
-export async function startTestBroker(): Promise<TestBroker> {
-  const aedes = new Aedes();
+/**
+ * Start an in-process Aedes MQTT broker on an OS-assigned free port. With `users`, every client
+ * must CONNECT with one of those username/password pairs (anything else is refused with return
+ * code 4, like `allow_anonymous false` in mosquitto).
+ */
+export async function startTestBroker(
+  opts: { users?: Record<string, string> } = {},
+): Promise<TestBroker> {
+  const users = opts.users;
+  const aedes = new Aedes(
+    users === undefined
+      ? {}
+      : {
+          authenticate: (_client, username, password, done) => {
+            const ok =
+              username !== undefined &&
+              Object.hasOwn(users, username) &&
+              password?.toString() === users[username];
+            if (ok) return done(null, true);
+            const err = Object.assign(new Error("bad username or password"), {
+              returnCode: 4 as const,
+            });
+            done(err, null);
+          },
+        },
+  );
   const server = createServer(aedes.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();

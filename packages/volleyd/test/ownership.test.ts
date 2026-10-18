@@ -194,6 +194,15 @@ describe("wave ownership", () => {
     expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
   });
 
+  it("refuses a claim whose new owner is not a valid agent id (the wave-state owner pattern)", async () => {
+    await agentStatus("coord-a", "reaped");
+    const res = await client.request("claim", { wave: WAVE, by: "Alice" });
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('"Alice" is not a valid agent id');
+    expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
+    expect(daemon.journalEvents(WAVE).some((e) => e.type === "owner_claimed")).toBe(false);
+  });
+
   it("claim succeeds after the owner is reaped, and is journaled", async () => {
     await agentRegistry("coord-a", "/work");
     await agentStatus("coord-a", "reaped");

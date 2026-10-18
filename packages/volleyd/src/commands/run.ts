@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { DAEMON_DEFAULTS } from "../config-defaults";
-import { resolveTarget, withClient } from "../control";
+import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
 import { formatDiff } from "../plan-diff";
@@ -25,10 +25,10 @@ Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseRun>;
-  let target: ReturnType<typeof resolveTarget>;
+  let target: ControlTarget;
   try {
     parsed = parseRun(argv);
-    target = resolveTarget(parsed.values, env);
+    target = resolveControlTarget(parsed.values, env);
   } catch (e) {
     io.stderr(`volleyd run: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
     return EXIT.USAGE;

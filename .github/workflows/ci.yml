@@ -153,6 +153,12 @@ jobs:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
         run: bunx vitest run test/integration/mosquitto-acl.test.ts
+      - name: Run volleyd daemon auth integration test
+        working-directory: packages/volleyd
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/daemon-auth.test.ts
       - name: Broker log
         if: failure()
         run: docker logs mosquitto-auth

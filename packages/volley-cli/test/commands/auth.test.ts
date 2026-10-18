@@ -65,7 +65,7 @@ describe("volley auth", () => {
 
   const run = async (argv: string[], deps = fakeDeps()) => {
     const io = makeBufferIO();
-    const code = await auth({ argv, env: {}, io }, deps);
+    const code = await auth({ argv, env: { VOLLEYD_HOME: join(dir, "volleyd-home") }, io }, deps);
     return { code, stdout: io.readStdout(), stderr: io.readStderr(), deps };
   };
 
@@ -167,7 +167,10 @@ describe("volley auth", () => {
 
     it("takes the directory from VOLLEY_AUTH_DIR", async () => {
       const io = makeBufferIO();
-      const code = await auth({ argv: ["init"], env: { VOLLEY_AUTH_DIR: dir }, io }, fakeDeps());
+      const code = await auth(
+        { argv: ["init"], env: { VOLLEY_AUTH_DIR: dir, VOLLEYD_HOME: join(dir, "vh") }, io },
+        fakeDeps(),
+      );
       expect(code).toBe(0);
       expect(existsSync(join(dir, "passwd"))).toBe(true);
     });
@@ -175,7 +178,11 @@ describe("volley auth", () => {
     it("--coordinator-file writes $VOLLEY_AUTH_DIR/coordinator.json (0600) with the coordinator password", async () => {
       const io = makeBufferIO();
       const code = await auth(
-        { argv: ["init", "--coordinator-file"], env: { VOLLEY_AUTH_DIR: dir }, io },
+        {
+          argv: ["init", "--coordinator-file"],
+          env: { VOLLEY_AUTH_DIR: dir, VOLLEYD_HOME: join(dir, "vh") },
+          io,
+        },
         fakeDeps(),
       );
       expect(code).toBe(0);
@@ -213,6 +220,46 @@ describe("volley auth", () => {
       expect(r.stdout).toContain("VOLLEY_AUTH_DIR");
       const plain = await run(["init", "--dir", mkdtempSync(join(tmpdir(), "va-"))], deps);
       expect(plain.stdout).not.toContain("readable only by root");
+    });
+
+    it("--volleyd-file writes $VOLLEYD_HOME/broker.json (0600, dir 0700) with the volleyd password", async () => {
+      const r = await run(["init", "--dir", dir, "--volleyd-file"]);
+      expect(r.code).toBe(0);
+      const home = join(dir, "volleyd-home");
+      const path = join(home, "broker.json");
+      expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+        username: "volleyd",
+        password: "pw-1",
+      });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(home).mode & 0o777).toBe(0o700);
+      expect(r.stdout).toContain(path);
+      expect(r.stdout).not.toContain("volleyd:              its config file");
+    });
+
+    it("without --volleyd-file writes no broker.json; --force rotates an existing one", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const path = join(dir, "volleyd-home", "broker.json");
+      expect(existsSync(path)).toBe(false);
+
+      await run(["init", "--dir", dir, "--force", "--volleyd-file"], deps); // pw-4..pw-6
+      writeFileSync(path, "{}");
+      const r = await run(["init", "--dir", dir, "--force"], deps); // pw-7..pw-9
+      expect(r.code).toBe(0);
+      // A stale file would lock the daemon out after the rotation.
+      expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+        username: "volleyd",
+        password: "pw-7",
+      });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    it("--volleyd-file is only for init", async () => {
+      await run(["init", "--dir", dir]);
+      const r = await run(["add-agent", "w1-t1-implementer-1", "--dir", dir, "--volleyd-file"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--volleyd-file");
     });
 
     it("--coordinator-file is only for init", async () => {
