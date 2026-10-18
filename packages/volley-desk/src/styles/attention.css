@@ -1,0 +1,175 @@
+/*
+ * Attention styles, ported from the approved prototype's styles.css: the
+ * Needs-you pulse (the default effect; electric/star land in D7), the
+ * Needs-you banners, the agent attention line, the coordinators window and
+ * the top-bar pill. The coordinator-tier ring (`.win--attn-coordinator`) is
+ * in desk.css.
+ */
+.win-attn {
+  border-radius: 14px;
+}
+.win-attn-pulse {
+  border-radius: 16px;
+  animation: attn-pulse 1.8s ease-in-out infinite;
+}
+@keyframes attn-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 122, 89, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(255, 122, 89, 0);
+  }
+}
+
+/* --------------------------------------------------------- Needs-you banner */
+.needs-you {
+  border: 1px solid rgba(255, 122, 89, 0.45);
+  background: linear-gradient(180deg, rgba(255, 122, 89, 0.14), rgba(255, 122, 89, 0.05));
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ny-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #ffb4a1;
+  font-size: 13px;
+}
+.ny-q {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  max-width: 62ch;
+  white-space: pre-line;
+}
+.ny-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.ny-copied {
+  color: var(--ok);
+  font-size: 12px;
+}
+.ny-fallback {
+  font-size: 12px;
+  color: var(--mute);
+  user-select: all;
+}
+
+/* ------------------------------------------------------------ attention line */
+.attn-line {
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+.attn-you {
+  background: rgba(255, 122, 89, 0.12);
+  color: #ffb4a1;
+}
+.attn-coordinator {
+  background: rgba(251, 191, 36, 0.1);
+  color: #f6d48a;
+}
+
+/* -------------------------------------------------------------- coordinators */
+.coord-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.coord {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+}
+.coord.st-awaiting_input,
+.coord.st-gone {
+  border-color: rgba(255, 122, 89, 0.45);
+  background: rgba(255, 122, 89, 0.07);
+}
+.coord--hidden {
+  opacity: 0.55;
+}
+.coord-dot {
+  width: 6px;
+  height: 38px;
+  border-radius: 3px;
+}
+.coord-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.coord-sub {
+  font-size: 12px;
+  color: var(--mute);
+  margin-top: 2px;
+}
+.st-awaiting_input .coord-state,
+.st-gone .coord-state {
+  color: #ffb4a1;
+  font-weight: 600;
+}
+.coord-bar {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.coord-bar > span {
+  display: block;
+  height: 100%;
+}
+.coord-actions {
+  display: flex;
+  gap: 2px;
+}
+.coord-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* ------------------------------------------------------------------ top bar */
+.ny-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 122, 89, 0.6);
+  background: rgba(255, 122, 89, 0.16);
+  color: #ffd0c4;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.topbar-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .win-attn-pulse {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(255, 122, 89, 0.55);
+  }
+}

@@ -9,6 +9,13 @@
  * `resync`s first (dropping retained-derived state) and lets the replay
  * rebuild it; agents whose registry entry does not come back within
  * `SETTLE_MS` are pruned.
+ *
+ * `settling` is true until the first connect's replay has settled, from every
+ * disconnect until the next reconnect's replay has settled, and (in demo mode)
+ * for `SETTLE_MS` after load: state seen then is not news, so notifications
+ * stay quiet. `offline` lists the spans after the first connect during which
+ * the Desk was disconnected or settling, so coordinator silence is measured
+ * only over time it could actually hear the broker.
  */
 import {
   type ReactNode,
@@ -19,6 +26,7 @@ import {
   useReducer,
   useState,
 } from "react";
+import type { OfflineSpan } from "../attention";
 import { demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
 import { type DeskMqttClient, createMqttClient } from "./mqtt-client";
 import { initialState, pruneUnconfirmed, reduceAll, resync } from "./reducer";
@@ -31,6 +39,8 @@ const REVIEWER_AFTER_MS = 22_000;
 const FLUSH_MS = 16;
 /** How long after a reconnect the retained replay is given to arrive. */
 const SETTLE_MS = 3000;
+/** Offline spans kept (older ones are long past any `claim_after_s`). */
+const OFFLINE_KEEP = 50;
 
 export type Connection = "demo" | "connecting" | "connected" | "disconnected";
 
@@ -39,6 +49,10 @@ export interface DeskContextValue {
   connection: Connection;
   demo: boolean;
   brokerUrl: string | null;
+  /** The retained replay has not settled yet (first connect, or a reconnect); see the header. */
+  settling: boolean;
+  /** Spans the Desk was disconnected or settling after its first connect. */
+  offline: readonly OfflineSpan[];
 }
 
 export type Action =
@@ -63,14 +77,17 @@ export function storeReducer(state: DeskState, a: Action): DeskState {
 /**
  * Feed a client's deliveries into `dispatch`, coalesced every `flushMs`. A
  * reconnect (every connect after the first) dispatches `resync` in order with
- * the buffered messages, then `prune` once `settleMs` has passed. Returns a
- * cleanup that detaches and cancels pending work; it does not disconnect.
+ * the buffered messages, then `prune` once `settleMs` has passed. `onSettling`
+ * hears `false` once a connect's replay has settled (`settleMs` after it) and
+ * `true` on a disconnect after the first connect. Returns a cleanup that
+ * detaches and cancels pending work; it does not disconnect.
  */
 export function attachClient(
   client: DeskMqttClient,
   dispatch: (a: Action) => void,
   { flushMs = FLUSH_MS, settleMs = SETTLE_MS }: { flushMs?: number; settleMs?: number } = {},
   onConnection?: (c: Connection) => void,
+  onSettling?: (settling: boolean, at: number) => void,
 ): () => void {
   let buffer: DeskMessage[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -90,20 +107,27 @@ export function attachClient(
     }),
     client.onConnect(() => {
       onConnection?.("connected");
-      if (!connected) {
-        connected = true;
-        return;
+      const reconnect = connected;
+      connected = true;
+      if (reconnect) {
+        flush();
+        dispatch({ type: "resync" });
       }
-      flush();
-      dispatch({ type: "resync" });
       if (settle) clearTimeout(settle);
       settle = setTimeout(() => {
         settle = null;
         flush();
-        dispatch({ type: "prune" });
+        if (reconnect) dispatch({ type: "prune" });
+        onSettling?.(false, Date.now());
       }, settleMs);
     }),
-    client.onDisconnect(() => onConnection?.("disconnected")),
+    client.onDisconnect(() => {
+      onConnection?.("disconnected");
+      // The next connect resyncs and settles again; until then nothing is settled.
+      if (settle) clearTimeout(settle);
+      settle = null;
+      if (connected) onSettling?.(true, Date.now());
+    }),
   ];
   return () => {
     for (const off of offs) off();
@@ -123,11 +147,14 @@ export function DeskStoreProvider({
   demo: demoProp,
   brokerUrl: urlProp,
   clientFactory,
+  settleMs = SETTLE_MS,
 }: {
   children: ReactNode;
   demo?: boolean;
   brokerUrl?: string;
   clientFactory?: (url: string) => DeskMqttClient;
+  /** How long a (re)connect's retained replay is given to arrive (tests shorten it). */
+  settleMs?: number;
 }) {
   const demo = demoProp ?? isDemoMode(window.location.search, viteEnv());
   const brokerUrl = demo
@@ -137,9 +164,12 @@ export function DeskStoreProvider({
     demo ? demoState() : initialState(),
   );
   const [connection, setConnection] = useState<Connection>(demo ? "demo" : "connecting");
+  const [settling, setSettling] = useState(true);
+  const [offline, setOffline] = useState<readonly OfflineSpan[]>([]);
 
   useEffect(() => {
     if (!demo) return;
+    const settled = setTimeout(() => setSettling(false), settleMs);
     let step = 0;
     const t = setInterval(() => {
       step += 1;
@@ -150,15 +180,25 @@ export function DeskStoreProvider({
       REVIEWER_AFTER_MS,
     );
     return () => {
+      clearTimeout(settled);
       clearInterval(t);
       clearTimeout(r);
     };
-  }, [demo]);
+  }, [demo, settleMs]);
 
   useEffect(() => {
     if (brokerUrl === null) return;
     const client = (clientFactory ?? ((url: string) => createMqttClient({ url })))(brokerUrl);
-    const detach = attachClient(client, dispatch, {}, setConnection);
+    const onSettling = (now: boolean, at: number) => {
+      setSettling(now);
+      setOffline((spans) => {
+        const last = spans[spans.length - 1];
+        const open = last !== undefined && last.to === null;
+        if (now) return open ? spans : [...spans, { from: at, to: null }].slice(-OFFLINE_KEEP);
+        return open ? [...spans.slice(0, -1), { from: last.from, to: at }] : spans;
+      });
+    };
+    const detach = attachClient(client, dispatch, { settleMs }, setConnection, onSettling);
     setConnection("connecting");
     client.connect().catch((err: unknown) => {
       console.warn("volley-desk: broker connect failed", err);
@@ -168,11 +208,11 @@ export function DeskStoreProvider({
       detach();
       void client.disconnect();
     };
-  }, [brokerUrl, clientFactory]);
+  }, [brokerUrl, clientFactory, settleMs]);
 
   const value = useMemo(
-    () => ({ state, connection, demo, brokerUrl }),
-    [state, connection, demo, brokerUrl],
+    () => ({ state, connection, demo, brokerUrl, settling, offline }),
+    [state, connection, demo, brokerUrl, settling, offline],
   );
   return <DeskContext.Provider value={value}>{children}</DeskContext.Provider>;
 }
