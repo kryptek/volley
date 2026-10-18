@@ -14,7 +14,8 @@ describe("App (demo mode)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5);
+    // 3 waves + 5 agents + the coordinators window.
+    expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5 + 1);
     // Agent windows use .t-name too; wave windows are the ones with a dependency graph.
     const waveNames = [...container.querySelectorAll(".world .win")]
       .filter((w) => w.querySelector(".dag"))
@@ -25,6 +26,27 @@ describe("App (demo mode)", () => {
     expect(container.querySelectorAll(".world .dag")).toHaveLength(3);
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
     expect(container.querySelector(".topbar-mid")?.textContent).toContain("3 waves");
+  });
+});
+
+describe("App attention (demo mode)", () => {
+  it("pulses the waves that need you, shows their banners, the pill and the coordinators window", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    const win = (name: string) => screen.getByRole("region", { name });
+    expect(win("status-chip")).toHaveClass("win--attn-you");
+    expect(win("status-chip").querySelector(".win-attn-pulse")).not.toBeNull();
+    expect(win("status-chip")).toHaveTextContent(
+      "Needs you: the coordinator is waiting for your answer",
+    );
+    expect(win("leaderboard")).toHaveClass("win--attn-you");
+    expect(win("leaderboard")).toHaveTextContent("Needs you: no coordinator for 34 min");
+    expect(win("ci-speed")).toHaveClass("win--attn-coordinator");
+    expect(win("Wave coordinators")).toBeInTheDocument();
+    expect(container.querySelector(".topbar .ny-pill")?.textContent).toMatch(/\d+ needs? you/);
   });
 });
 

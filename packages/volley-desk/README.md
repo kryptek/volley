@@ -43,6 +43,13 @@ src/styles/desk.css         base rules ported from the prototype styles.css
 src/windows/agent/          agent window: AgentWindow (title, pipeline, narration, tabs, footer),
                             Feed (envelopes + JSON), Terminal (screen tail), Pipeline
 src/styles/agent.css        agent window rules
+src/attention.ts            pure attention tiers (you | coordinator | info | none) per wave and agent,
+                            coordinator staleness (claim_after_s), escalation (escalate_after_min)
+src/windows/coordinators/   coordinators window: state per wave, progress, go-to, show/hide
+src/windows/wave/NeedsYou   Needs-you / no-coordinator banners, agent attention line
+src/topbar/TopBar.tsx       top bar: counts, "N need you" pill, coordinators/notify/sound toggles
+src/notify/                 notification + chime on a move into "you" (volley-dash's settings key)
+src/styles/attention.css    pulse (default Needs-you effect), banners, coordinators, pill
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
 ```
@@ -60,6 +67,10 @@ scripts/check-react-bits.ts allow-list check, run in CI
 - **Wave assignment:** agents get their wave, task and role from `tasks[].agents` in the wave state. An agent keeps its wave after its role slot moves on to a new agent. An agent that no wave references belongs to the `unassigned` pseudo-wave (see `agentsByWave`).
 - **Coordinators:** there is one entry per wave owner. The owner's own topics win when they report something: a terminal status means `gone`, an outstanding `awaiting_input` means awaiting input, and `resumed` clears it. If the owner's topics are silent, the store falls back to the supervisor's `coordinator` in the wave state.
 - **Cleared topics:** a cleared retained topic removes what it held. That covers registry → agent, wave state → wave (its agents return to `unassigned`), decision, lease pool and screen.
+
+### Attention
+
+Each wave and agent window gets a tier. **Needs you** (pulsing border): the wave's coordinator is waiting for an answer or is gone (reaped, or silent for longer than `claim_after_s`), an open decision on a wave this browser owns (`?me=`), or a stuck agent with no live coordinator. **Coordinator handling** (amber ring): an open decision, a merge-ready gate or a stuck agent while the coordinator is live; after `escalate_after_min` (default 15, from the wave's `effective_config` or the retained config) it becomes Needs you. **Info**: an open PR or a lease wait. The top-bar pill counts everything at Needs you. A browser notification and the chime fire when something moves into Needs you; the bell and speaker toggles share volley-dash's `volley-dash:notify` setting.
 
 ## React Bits
 

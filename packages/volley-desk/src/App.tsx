@@ -1,17 +1,34 @@
 /**
- * The Desk shell: plain background, pannable/zoomable stage, top bar, a wave
- * window per wave and an agent window per agent (a plain frame for agents with
- * no wave). The coordinators window, backgrounds, dock and arrange come in later
+ * The Desk shell: plain background, pannable/zoomable stage, top bar, the
+ * coordinators window, a wave window per wave and an agent window per agent
+ * (a plain frame for agents with no wave). Every window carries its attention
+ * tier (`attention.ts`); the top bar counts what needs you and notifications
+ * fire when something starts to. Backgrounds, dock and arrange come in later
  * tasks.
  */
 import { useEffect, useRef, useState } from "react";
-import { Frame, useFocusOrder } from "./canvas/Frame";
+import {
+  type Attn,
+  type NeedsYouTarget,
+  agentAttention,
+  coordinatorFor,
+  ctxFrom,
+  needsYouTargets,
+  openDecisions,
+  waveAttention,
+} from "./attention";
+import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
+import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
+import { useNotifySettings } from "./notify/use-notify-settings";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
+import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow } from "./windows/agent/AgentWindow";
+import { COORDS_ID, COORDS_W, CoordinatorsWindow } from "./windows/coordinators/CoordinatorsWindow";
+import { AttentionLine, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
@@ -21,6 +38,8 @@ const WAVE_H = 440;
 const AGENT_H = 470;
 const GAP = 36;
 const CGAP = 96;
+/** Re-evaluate time-based attention (staleness, escalation) this often. */
+const ATTN_TICK_MS = 15_000;
 
 const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
 
@@ -56,10 +75,32 @@ function placeholderLayout(waveIds: string[], groups: Record<string, AgentView[]
   return at;
 }
 
-function leaseSummary(state: DeskState): string {
-  return Object.values(state.leases)
-    .map((p) => `${p.pool} ${p.held.length}/${p.capacity}`)
-    .join(" · ");
+const frameAttn = (a: Attn): Attention | undefined => (a.tier === "none" ? undefined : a.tier);
+
+function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
+/**
+ * When this browser first saw each merge-ready gate (`<wave>/<task>`): gates
+ * carry no time, and escalation needs one. Entries for cleared gates are dropped.
+ */
+function useGateSince(state: DeskState, now: number): Record<string, number> {
+  const since = useRef<Record<string, number>>({});
+  const next: Record<string, number> = {};
+  for (const w of Object.values(state.waves)) {
+    for (const t of w.state?.gates ?? []) {
+      const k = `${w.id}/${t}`;
+      next[k] = since.current[k] ?? now;
+    }
+  }
+  since.current = next;
+  return next;
 }
 
 export default function App() {
@@ -68,6 +109,12 @@ export default function App() {
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const [coordsOpen, setCoordsOpen] = useState(true);
+  const [notify, setNotify] = useNotifySettings();
+  const now = useNow(ATTN_TICK_MS);
+  const gateSince = useGateSince(state, now);
+  const ctx = ctxFrom(state, { now, me, gateSince });
 
   const groups = agentsByWave(state);
   const firstStart = useRef<Record<string, number>>({});
@@ -82,6 +129,7 @@ export default function App() {
     ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
   ];
   const layout = placeholderLayout(waveIds, groups);
+  layout[COORDS_ID] = { x: -(COORDS_W + CGAP), y: 0 };
   const pos = (id: string): Pos => moved[id] ?? layout[id] ?? { x: 0, y: 0 };
   const move = (id: string) => (dx: number, dy: number) =>
     setMoved((m) => {
@@ -89,10 +137,12 @@ export default function App() {
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
 
-  const rects: Rect[] = waveIds.flatMap((id) => [
+  const clusterOf = (id: string): Rect[] => [
     { ...pos(id), w: WAVE_W, h: WAVE_H },
     ...(groups[id] ?? []).map((a) => ({ ...pos(a.id), w: AGENT_W, h: AGENT_H })),
-  ]);
+  ];
+  const visible = waveIds.filter((id) => !hidden.has(id));
+  const rects: Rect[] = visible.flatMap(clusterOf);
   const fitted = useRef(false);
   useEffect(() => {
     if (fitted.current || rects.length === 0) return;
@@ -100,13 +150,14 @@ export default function App() {
     fitTo(rects);
   });
 
-  const place = (id: string) => ({
+  const place = (id: string, attn?: Attention) => ({
     pos: pos(id),
     z: z(id),
     scale: view.s,
     chrome: "glass" as const,
     onMove: move(id),
     onFocus: () => focus(id),
+    ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
     id,
@@ -115,14 +166,81 @@ export default function App() {
     ...place(id),
   });
 
-  const agents = Object.values(state.agents);
+  // ------------------------------------------------------------- attention
+  const waveAttn: Record<string, Attn> = {};
+  for (const w of Object.values(state.waves)) waveAttn[w.id] = waveAttention(w, ctx);
+  const agentAttn: Record<string, Attn> = {};
+  for (const a of Object.values(state.agents)) {
+    agentAttn[a.id] = agentAttention(a, state.waves[a.wave], ctx);
+  }
+  const targets = needsYouTargets(state, { now, me, gateSince });
+  const coordinators = Object.fromEntries(
+    Object.values(state.waves).map((w) => [w.id, coordinatorFor(w, ctx)]),
+  );
+
+  const show = (wave: string) =>
+    setHidden((h) => {
+      if (!h.has(wave)) return h;
+      const next = new Set(h);
+      next.delete(wave);
+      return next;
+    });
+  const toggle = (wave: string) =>
+    setHidden((h) => {
+      const next = new Set(h);
+      if (!next.delete(wave)) next.add(wave);
+      return next;
+    });
+  const goTo = (t: NeedsYouTarget) => {
+    show(t.wave);
+    fitTo(t.kind === "wave" ? clusterOf(t.id) : [{ ...pos(t.id), w: AGENT_W, h: AGENT_H }]);
+    focus(t.id);
+  };
+
+  const items: AttentionItem[] = [
+    ...Object.values(state.waves).map((w) => ({
+      key: `wave:${w.id}`,
+      tier: waveAttn[w.id]?.tier ?? "none",
+      title: `${w.id} needs you`,
+      body: waveAttn[w.id]?.reason ?? "",
+    })),
+    ...Object.values(state.agents)
+      .filter((a) => !state.coordinators[a.id])
+      .map((a) => ({
+        key: `agent:${a.id}`,
+        tier: agentAttn[a.id]?.tier ?? "none",
+        title: `${a.task ? `${a.wave} · ${a.task}` : a.id} needs you`,
+        body: agentAttn[a.id]?.reason ?? "",
+      })),
+  ];
+  useNotifyOnAttention(notify, items);
+
+  const waveList = Object.values(state.waves).filter((w) => w.state !== null);
   return (
     <div className="app">
       <div className="bg-layer bg-plain" aria-hidden />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
         <World view={view}>
-          {waveIds.map((id) => {
+          {coordsOpen && waveList.length > 0 && (
+            <CoordinatorsWindow
+              waves={waveList}
+              coordinators={coordinators}
+              needsYou={targets.length}
+              me={me}
+              hidden={hidden}
+              frame={place(COORDS_ID)}
+              onToggle={toggle}
+              onGoTo={(id) => {
+                show(id);
+                focus(id);
+              }}
+              fitTo={fitTo}
+              clusterOf={clusterOf}
+              onClose={() => setCoordsOpen(false)}
+            />
+          )}
+          {visible.map((id) => {
             const wave = state.waves[id];
             if (!wave) {
               return (
@@ -131,19 +249,30 @@ export default function App() {
                 </Frame>
               );
             }
-            const owner = wave.state?.owner;
+            const coordinator = coordinators[id];
             return (
               <WaveWindow
                 key={id}
                 wave={wave}
                 me={me}
-                coordinatorState={owner ? state.coordinators[owner]?.state : undefined}
+                coordinatorState={coordinator?.state}
                 startedAt={startedAt(id)}
-                frame={place(id)}
+                frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
+                banner={
+                  wave.state &&
+                  coordinator && (
+                    <NeedsYou
+                      wave={id}
+                      coordinator={coordinator}
+                      openDecisions={openDecisions(wave).length}
+                      now={now}
+                    />
+                  )
+                }
               />
             );
           })}
-          {waveIds.flatMap((id) =>
+          {visible.flatMap((id) =>
             (groups[id] ?? []).map((a) => (
               // Keyed by bornAt: a window that existed before its registry entry
               // re-mounts with `born` when the entry arrives.
@@ -152,31 +281,28 @@ export default function App() {
                 agent={a}
                 wave={state.waves[id]}
                 accent={accentOf(id)}
-                frame={place(a.id)}
+                frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
+                attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
               />
             )),
           )}
         </World>
       </div>
 
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">volley</span>
-          <span className="brand-sub">desk</span>
-        </div>
-        <span className="proto">{demo ? "Demo · sample data" : connection}</span>
-        <div className="topbar-mid">
-          <span>
-            <b>{Object.values(state.waves).filter((w) => w.state !== null).length}</b> waves
-          </span>
-          <span>
-            <b>{agents.filter((a) => a.status?.type === "working").length}</b> agents working
-          </span>
-          {Object.keys(state.leases).length > 0 && (
-            <span className="mono">{leaseSummary(state)}</span>
-          )}
-        </div>
-      </header>
+      <TopBar
+        state={state}
+        connection={connection}
+        demo={demo}
+        needsYou={targets.length}
+        onNeedsYou={() => {
+          const first = targets[0];
+          if (first) goTo(first);
+        }}
+        coordsOpen={coordsOpen}
+        onToggleCoords={() => setCoordsOpen((o) => !o)}
+        notify={notify}
+        setNotify={setNotify}
+      />
     </div>
   );
 }
