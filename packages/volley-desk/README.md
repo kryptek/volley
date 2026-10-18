@@ -68,9 +68,9 @@ scripts/check-react-bits.ts allow-list check, run in CI
 
 The gear on a wave window opens the settings modal. Its rows come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
 
-- **Global** shows the retained `volley/_waves/_config`. A change sends one `config_set` request to the daemon's mailbox (`volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`). The row then shows the ack: `applied · v<version>`, or the rejected paths with their reasons.
+- **Global** shows the retained `volley/_waves/_config`. A change sends one `config_set` request to the daemon's mailbox (`volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`). A slider sends once the user lets go: presses and drags within 400 ms of each other become one request with the settled value. The row then shows the ack: `applied · v<version>`, the rejected paths with their reasons, `failed ·` for a refused publish or daemon error, or `no answer ·` when volleyd does not reply in time (the change may still have applied).
 - **This wave** shows the wave's `effective_config` and is read-only. volleyd applies `config_set` to the global config only. Per-wave values come from the wave file's `config:` block.
-- **Without broker credentials** the modal is read-only, and each row offers its exact `volleyd config set <path> <value>` line to copy. The Desk has no sign-in yet, so this is the current state.
+- **Without broker credentials** the modal is read-only, and each row offers its exact `volleyd config set <path> <value>` line to copy. Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand. The Desk has no sign-in yet, so this is the current state.
 
 ## React Bits
 

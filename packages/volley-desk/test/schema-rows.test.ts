@@ -128,6 +128,11 @@ describe("schemaRows", () => {
     expect(at.get("admission.cmux_ping_max_ms")?.hint).toBe("10–60000 ms");
   });
 
+  it("hints each lease pool row with its capacity bounds, not the map's description", () => {
+    expect(at.get("lease_pools.build.capacity")?.hint).toBe("0–64");
+    expect(at.get("lease_pools.backend-it.capacity")?.hint).toBe("0–64");
+  });
+
   it("has no lease rows when no pools are configured", () => {
     const none = schemaRows(schema, null);
     expect(none.some((r) => r.section === "Leases")).toBe(false);

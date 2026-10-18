@@ -70,6 +70,11 @@ export default function App() {
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
   const [settings, setSettings] = useState<string | null>(null);
+  // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
+  const settingsWaveGone = settings !== null && !state.waves[settings];
+  useEffect(() => {
+    if (settingsWaveGone) setSettings(null);
+  }, [settingsWaveGone]);
 
   const groups = agentsByWave(state);
   const firstStart = useRef<Record<string, number>>({});

@@ -19,6 +19,11 @@ export const CONFIG_ACK_TIMEOUT_MS = 10_000;
 export interface ConfigClient {
   /** Publish one envelope (QoS 1, not retained). Rejects when the broker refuses it. */
   publish(topic: string, payload: string): Promise<void>;
+  /**
+   * Every delivery the client receives. The client must already subscribe to
+   * the sender's own mailbox, `volley/<ns>/<identity>/mailbox`: volleyd
+   * answers there, and the transport does not subscribe by itself.
+   */
   onMessage(handler: (msg: DeskMessage) => void): () => void;
 }
 
@@ -34,6 +39,8 @@ export interface ConfigAck {
   rejected: PathReason[];
   /** A daemon error, a refused publish or no answer in time. */
   error?: string;
+  /** No answer in time: volleyd may still have applied the change. */
+  unanswered?: true;
 }
 
 export interface ConfigTransport {
@@ -44,9 +51,9 @@ export interface ConfigTransport {
 
 const mailbox = (namespace: string, agentId: string) => `volley/${namespace}/${agentId}/mailbox`;
 
+/** The request envelope. The namespace is in the topic, not the envelope (registry only). */
 export function configSetEnvelope(r: {
   identity: string;
-  namespace: string;
   correlationId: string;
   patch: Record<string, unknown>;
   text: string;
@@ -57,7 +64,6 @@ export function configSetEnvelope(r: {
     schema_version: "0.1",
     agent_id: r.identity,
     parent_id: null,
-    namespace: r.namespace,
     channel: "mailbox",
     type: "query",
     wall_time: r.now.toISOString(),
@@ -112,6 +118,7 @@ export function createConfigTransport(
               applied: false,
               rejected: [],
               error: `volleyd did not answer within ${timeoutMs / 1000}s`,
+              unanswered: true,
             }),
           timeoutMs,
         );
@@ -129,7 +136,6 @@ export function createConfigTransport(
         });
         const envelope = configSetEnvelope({
           identity: opts.identity,
-          namespace,
           correlationId,
           patch,
           text,

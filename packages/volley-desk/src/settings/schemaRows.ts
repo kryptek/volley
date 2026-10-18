@@ -174,7 +174,6 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
             `${pool} pool capacity`,
             "",
             resolve(schema, capacity),
-            def.description,
           ),
         );
     }
