@@ -1,0 +1,156 @@
+/**
+ * Thin typed wrapper around mqtt.js, ported from volley-dash. Subscribes to
+ * every topic the Desk renders on connect and surfaces each delivery as a
+ * `DeskMessage` for the reducer. Unlike the dashboard client it passes a
+ * zero-length payload through as `envelope: null` — that is how a supervisor
+ * clears a retained topic (SPEC §4.6) — and it reconnects by default, since
+ * the Desk stays open for hours.
+ */
+import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
+import type { DeskMessage, Envelope } from "./types";
+
+export interface CreateMqttClientOptions {
+  url: string;
+  clientId?: string;
+  /** ms between reconnect attempts; 0 disables reconnecting. */
+  reconnectPeriod?: number;
+}
+
+export type MessageHandler = (msg: DeskMessage) => void;
+export type VoidHandler = () => void;
+export type ErrorHandler = (err: Error) => void;
+
+export interface DeskMqttClient {
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  onMessage(handler: MessageHandler): () => void;
+  onConnect(handler: VoidHandler): () => void;
+  onDisconnect(handler: VoidHandler): () => void;
+  onError(handler: ErrorHandler): () => void;
+}
+
+export const DESK_SUBSCRIPTIONS = [
+  "volley/_system/registry/+",
+  "volley/+/+/status",
+  "volley/+/+/progress",
+  "volley/+/+/result",
+  "volley/+/+/mailbox",
+  "volley/+/+/screen",
+  "volley/_waves/+/state",
+  "volley/_waves/+/decisions/+",
+  "volley/_waves/_config",
+  "volley/_system/leases/+",
+  "volley/_system/admission",
+] as const;
+
+const REQUIRED = ["schema_version", "agent_id", "channel", "type"] as const;
+
+/** Parse a payload: `null` for a cleared topic, `undefined` for one to drop. */
+export function parsePayload(raw: Uint8Array | string): Envelope | null | undefined {
+  const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+  if (text.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    console.warn("volley-desk: malformed envelope JSON", err);
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  if (REQUIRED.some((f) => typeof obj[f] !== "string")) {
+    console.warn("volley-desk: envelope missing a required field");
+    return undefined;
+  }
+  return obj as Envelope;
+}
+
+function defaultClientId(): string {
+  return `volley-desk-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClient {
+  const clientId = options.clientId ?? defaultClientId();
+  const messageHandlers = new Set<MessageHandler>();
+  const connectHandlers = new Set<VoidHandler>();
+  const disconnectHandlers = new Set<VoidHandler>();
+  const errorHandlers = new Set<ErrorHandler>();
+
+  let client: MqttClient | null = null;
+
+  const subscribe = (instance: MqttClient): Promise<void> =>
+    new Promise((resolve, reject) => {
+      instance.subscribe([...DESK_SUBSCRIPTIONS], { qos: 1 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+  const on =
+    <H>(set: Set<H>) =>
+    (handler: H) => {
+      set.add(handler);
+      return () => {
+        set.delete(handler);
+      };
+    };
+
+  return {
+    connect() {
+      return new Promise<void>((resolve, reject) => {
+        const connectOptions: IClientOptions = {
+          clientId,
+          reconnectPeriod: options.reconnectPeriod ?? 2000,
+        };
+        const instance = mqtt.connect(options.url, connectOptions);
+        client = instance;
+
+        instance.on("message", (topic, payload) => {
+          const envelope = parsePayload(payload);
+          if (envelope === undefined) return;
+          const msg: DeskMessage = { topic, envelope, receivedAt: Date.now() };
+          for (const h of messageHandlers) h(msg);
+        });
+        instance.on("error", (err) => {
+          for (const h of errorHandlers) h(err);
+        });
+        instance.on("close", () => {
+          for (const h of disconnectHandlers) h();
+        });
+        // mqtt.js re-subscribes on reconnect (`resubscribe` defaults on), so
+        // only the first connect subscribes explicitly.
+        let first = true;
+        instance.on("connect", () => {
+          if (!first) {
+            for (const h of connectHandlers) h();
+            return;
+          }
+          first = false;
+          subscribe(instance)
+            .then(() => {
+              for (const h of connectHandlers) h();
+              resolve();
+            })
+            .catch(reject);
+        });
+        instance.once("error", (err) => {
+          if (!instance.connected) reject(err);
+        });
+      });
+    },
+    disconnect() {
+      const instance = client;
+      if (instance === null) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        instance.end(false, {}, () => {
+          client = null;
+          resolve();
+        });
+      });
+    },
+    onMessage: on(messageHandlers),
+    onConnect: on(connectHandlers),
+    onDisconnect: on(disconnectHandlers),
+    onError: on(errorHandlers),
+  };
+}
