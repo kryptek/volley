@@ -62,7 +62,7 @@ describe("volleyd daemon + control channel", () => {
     expect(JSON.parse(all.stdout)).toEqual({ waves: [retained.payload] });
 
     const human = await runCli(["status"], t.env);
-    expect(human.stdout).toContain(`${WAVE}  running  v1`);
+    expect(human.stdout).toContain(`${WAVE}  running  plan v1`);
     expect(human.stdout).toMatch(/T0\s+#101\s+queued\s+admitted: awaiting spawn/);
     expect(human.stdout).toMatch(/T3\s+#104\s+queued\s+after: T1, T2/);
   });

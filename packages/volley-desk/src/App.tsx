@@ -5,8 +5,9 @@
  * tier (`attention.ts`); the top bar counts what needs you and notifications
  * fire when something starts to. Arrange & fit (`layout/arrange.ts`) packs
  * the windows into per-wave clusters and re-runs on structural changes while
- * auto-arrange is on. The chat glyphs open the steering panel (D4).
- * Backgrounds and the dock come in later tasks.
+ * auto-arrange is on. The chat glyphs open the steering panel (D4). The look (D7,
+ * `look/`): the picked React Bits background under its dim, the window chrome,
+ * Needs-you and narration effects, tethers, the Appearance panel, the dock and toasts.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -23,7 +24,12 @@ import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
-import { ARRANGE_ANIM_MS, useAutoArrange, useAutoArrangeSetting } from "./layout/useAutoArrange";
+import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
+import { Appearance } from "./look/Appearance";
+import { Background } from "./look/Background";
+import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
+import { type Tether, Tethers } from "./look/Tethers";
+import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -130,7 +136,7 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 
 export default function App() {
   const { state, connection, demo, settling, offline, writer, identity } = useDesk();
-  const { view, setView, fitTo, stageRef, stageHandlers } = useViewport();
+  const { view, setView, zoomAt, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -196,9 +202,13 @@ export default function App() {
     fitTo(rects);
   });
 
+  // ------------------------------------------------------------ look (D7)
+  const [look, setLook] = useLook();
+  const [lookOpen, setLookOpen] = useState(false);
+  const [toast, say, closeToast] = useToast();
+
   // ------------------------------------------------------- arrange & fit
-  // D7's dock adds "Arrange & fit" (calls `arrange`) and the auto-arrange toggle.
-  const [autoArrange] = useAutoArrangeSetting();
+  const autoArrange = look.autoArrange;
   const [animating, setAnimating] = useState(false);
   const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(animEnd.current), []);
@@ -245,7 +255,8 @@ export default function App() {
     pos: pos(id),
     z: z(id),
     scale: view.s,
-    chrome: "glass" as const,
+    chrome: look.chrome,
+    attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
     // A window not laid out yet (0 × 0) keeps its fallback size.
@@ -316,12 +327,33 @@ export default function App() {
       })),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
+
+  // Tethers: wave window → each of its agents, for visible waves.
+  const tethers: Tether[] = visible.flatMap((id) =>
+    (groups[id] ?? []).map((a) => ({
+      id: a.id,
+      wave: { ...pos(id), w: WAVE_W },
+      agent: pos(a.id),
+      accent: accentOf(id),
+    })),
+  );
+  const toggleAutoArrange = () => {
+    const on = !look.autoArrange;
+    setLook({ autoArrange: on });
+    say(
+      on ? "Auto-arrange on" : "Auto-arrange off",
+      on
+        ? "New, hidden or shown windows re-arrange and re-fit automatically."
+        : "Windows stay where you put them.",
+    );
+  };
   return (
     <div className="app">
-      <div className="bg-layer bg-plain" aria-hidden />
+      <Background which={look.bg} dim={look.dim} />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
         <World view={view} animating={animating}>
+          <Tethers on={look.tethers} tethers={tethers} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -406,6 +438,7 @@ export default function App() {
                 wave={state.waves[id]}
                 accent={accentOf(id)}
                 frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
+                narrationFx={look.narr}
                 attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                 onChat={toggleSteer}
                 steerOpen={steerOpen === a.id}
@@ -445,6 +478,31 @@ export default function App() {
         notify={notify}
         setNotify={setNotify}
       />
+
+      {lookOpen && (
+        <Appearance
+          look={look}
+          setLook={setLook}
+          onClose={() => setLookOpen(false)}
+          onArrange={arrange}
+        />
+      )}
+
+      <DeskDock
+        coordsOpen={coordsOpen}
+        onToggleCoords={() => setCoordsOpen((o) => !o)}
+        needsYou={targets.length}
+        lookOpen={lookOpen}
+        onToggleLook={() => setLookOpen((o) => !o)}
+        tethers={look.tethers}
+        onToggleTethers={() => setLook({ tethers: !look.tethers })}
+        onArrange={arrange}
+        autoArrange={look.autoArrange}
+        onToggleAutoArrange={toggleAutoArrange}
+        onZoom={(f) => zoomAt(f)}
+      />
+
+      <DeskToast toast={toast} onClose={closeToast} />
 
       {settings !== null && state.waves[settings] && (
         // No config transport until the Desk signs in with broker credentials: read-only.

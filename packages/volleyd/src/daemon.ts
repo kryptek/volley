@@ -11,7 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
@@ -80,6 +80,8 @@ import {
 } from "./leases";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
+import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
+import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
 import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
@@ -95,6 +97,7 @@ import type {
   TaskId,
   Tunables,
   TunablesPatch,
+  Wave,
   WaveId,
   WaveState,
 } from "./types";
@@ -2252,8 +2255,7 @@ export class Daemon {
 
   /**
    * Open a decision: journal `decision_opened` (the task parks in `awaiting_decision`, its
-   * dependents wait, independent tasks keep running), publish it retained, and ring the notify
-   * bridge. Throws on an unknown wave/task or a bad input.
+   * dependents wait, independent tasks keep running — unless opened with `park: false`), publish it retained, and ring the notify bridge. Throws on an unknown wave/task or a bad input.
    */
   openDecision(wave: WaveId, input: DecisionInput): Promise<DecisionRecord> {
     return this.serial(() => this.openDecisionNow(wave, input));
@@ -2440,6 +2442,8 @@ export class Daemon {
       }
       case "run":
         return this.submit(p);
+      case "diff":
+        return this.planDiff(p);
       case "admission":
         return { ok: true, result: this.summary };
       case "spawn":
@@ -2484,11 +2488,19 @@ export class Daemon {
     }
   }
 
-  /** `run`: validate the wave file again (the daemon is authoritative), journal it, queue tasks. */
+  /**
+   * `run`: validate the wave file again (the daemon is authoritative), journal it, queue tasks.
+   * For a wave already submitted, the file is its next version (`resubmit`).
+   */
   private async submit(p: Record<string, unknown>): Promise<HandlerResult> {
     const first = this.checkSubmit(p);
     if ("refusal" in first) return first.refusal;
-    if (this.opts.issueBody === undefined) return this.commitSubmit(first.wave, first.owner, {});
+    if (first.existing !== undefined) {
+      return this.resubmit(first.existing, first.wave, p.wave_yaml as string);
+    }
+    const text = p.wave_yaml as string;
+    if (this.opts.issueBody === undefined)
+      return this.commitSubmit(first.wave, first.owner, {}, text);
     // Fetching issue bodies can take seconds: do it off the serial queue (control ops and ticks,
     // the kill switch included, keep running), then commit inside it, re-checking what may have
     // changed meanwhile (the kill switch, a racing submit of the same wave id).
@@ -2500,16 +2512,20 @@ export class Daemon {
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
-          return this.commitSubmit(again.wave, again.owner, files);
+          if (again.existing !== undefined) return this.resubmit(again.existing, again.wave, text);
+          return this.commitSubmit(again.wave, again.owner, files, text);
         }),
       ),
     };
   }
 
-  /** `run`'s validation: the parsed wave and its owner, or the refusal. */
+  /**
+   * `run`'s validation: the parsed wave, its owner and — for a wave id already submitted — its
+   * log (the file is then a new version), or the refusal.
+   */
   private checkSubmit(
     p: Record<string, unknown>,
-  ): { wave: ReturnType<typeof parseWaveFile>; owner: string | null } | { refusal: Reply } {
+  ): { wave: Wave; owner: string | null; existing?: WaveLog } | { refusal: Reply } {
     const refuse = (r: Reply) => ({ refusal: r });
     if (this.killSwitch) {
       return refuse({
@@ -2517,44 +2533,60 @@ export class Daemon {
         error: `${KILL_SWITCH_REASON}: new runs are refused until \`volleyd resume --all\``,
       });
     }
-    if (typeof p.wave_yaml !== "string")
-      return refuse({ ok: false, error: "run requires payload.wave_yaml" });
     const owner = typeof p.owner === "string" && p.owner !== "" ? p.owner : null;
     if (owner !== null && !isValidAgentId(owner))
       return refuse({ ok: false, error: `owner '${owner}' is not a valid agent id` });
-    let wave: ReturnType<typeof parseWaveFile>;
-    try {
-      wave = parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
-    } catch (e) {
-      if (e instanceof WaveFileError)
-        return refuse({ ok: false, error: e.message, errors: e.errors });
-      throw e;
-    }
-    const existing = this.waves.get(wave.wave)?.record.state;
-    if (existing != null) {
-      if (existing.owner !== null && existing.owner !== owner) {
-        return refuse({
-          ok: false,
-          error: `wave '${wave.wave}' is already ${existing.status} under owner ${existing.owner}`,
-        });
-      }
+    const wave = this.parseRequestWave(p, "run");
+    if ("ok" in wave) return refuse(wave);
+    const log = this.waves.get(wave.wave);
+    const existing = log?.record.state;
+    if (log === undefined || existing == null) return { wave, owner };
+    if (existing.owner !== null && existing.owner !== owner) {
       return refuse({
         ok: false,
-        error: `wave '${wave.wave}' already submitted (versioned re-submission is not supported yet)`,
+        error: `wave '${wave.wave}' is already ${existing.status} under owner ${existing.owner}`,
       });
     }
-    return { wave, owner };
+    return { wave, owner, existing: log };
   }
 
-  /** Journal a checked wave, its tasks (with their issues' Files lists) and overlap warnings. */
+  /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
+  private parseRequestWave(p: Record<string, unknown>, op: string): Wave | Reply {
+    if (typeof p.wave_yaml !== "string")
+      return { ok: false, error: `${op} requires payload.wave_yaml` };
+    try {
+      return parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
+    } catch (e) {
+      if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
+      throw e;
+    }
+  }
+
+  /** Where version N of a wave file is stored: `<home>/waves/<wave>/v<N>.yaml`. */
+  private versionFile(wave: WaveId, version: number): string {
+    return join(this.opts.home, "waves", wave, `v${version}.yaml`);
+  }
+
+  private storeVersion(file: string, text: string): void {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+  }
+
+  /**
+   * Journal a checked wave as plan v1 (the daemon numbers versions; the file's own `version:` is
+   * informational), its tasks (with their issues' Files lists) and overlap warnings.
+   */
   private async commitSubmit(
-    wave: ReturnType<typeof parseWaveFile>,
+    submitted: Wave,
     owner: string | null,
     issueFiles: Record<TaskId, string[]>,
+    text: string,
   ): Promise<Reply> {
+    const wave: Wave = { ...submitted, version: 1 };
     this.waves.set(wave.wave, WaveLog.open(join(this.opts.home, "waves", wave.wave)));
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
+    this.storeVersion(this.versionFile(wave.wave, 1), text);
     await this.append(wave.wave, { type: "wave_submitted", data: { wave, owner } });
     for (const id of wave.task_order) {
       const files = issueFiles[id];
@@ -2678,6 +2710,7 @@ export class Daemon {
       by,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
+    if (!r.already_resolved) await this.applyPlanAnswer(wave, r.decision, by);
     return {
       ok: true,
       result: {
@@ -2688,6 +2721,23 @@ export class Daemon {
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
+  }
+
+  /** Carry out the owner's answer to a plan_change decision (plan-apply.ts `planAnswer`). */
+  private async applyPlanAnswer(wave: WaveId, d: DecisionRecord, by: string): Promise<void> {
+    const log = this.waves.get(wave) as WaveLog;
+    const effect = planAnswer(log.record, d);
+    if (effect.cancel !== undefined && d.task !== null) {
+      const task = d.task;
+      for (const a of runningAgents(log.record).filter((x) => x.task === task)) {
+        await this.cancelAgent(wave, a, by, {
+          ...cancelPayload(wave, task, by),
+          text: effect.cancel,
+        });
+      }
+    }
+    for (const ev of effect.events) await this.append(wave, ev);
+    if (effect.events.length > 0) await this.tickNow();
   }
 
   /**
@@ -2821,24 +2871,34 @@ export class Daemon {
     await this.append(wave, { type: "wave_stopped", data: { by } });
     const cancelled: string[] = [];
     for (const a of runningAgents(log.record)) {
-      const messageId = randomUUID();
-      await this.publish(
-        buildTopic(this.opts.namespace, a.agent_id, "mailbox"),
-        this.envelope("mailbox", "cancel", cancelPayload(wave, a.task, by), messageId),
-        false,
-      );
-      await this.append(wave, {
-        type: "steering_sent",
-        task: a.task,
-        data: { agent_id: a.agent_id, role: a.role, type: "cancel", message_id: messageId, by },
-      });
-      await this.interruptAgent(a.agent_id).catch((e: unknown) => {
-        this.log(`interrupt ${a.agent_id} failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
     return cancelled;
+  }
+
+  /** Send one running agent a mailbox `cancel` (journaled) and interrupt its session. */
+  private async cancelAgent(
+    wave: WaveId,
+    a: { task: TaskId; role: string; agent_id: string },
+    by: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const messageId = randomUUID();
+    await this.publish(
+      buildTopic(this.opts.namespace, a.agent_id, "mailbox"),
+      this.envelope("mailbox", "cancel", payload, messageId),
+      false,
+    );
+    await this.append(wave, {
+      type: "steering_sent",
+      task: a.task,
+      data: { agent_id: a.agent_id, role: a.role, type: "cancel", message_id: messageId, by },
+    });
+    await this.interruptAgent(a.agent_id).catch((e: unknown) => {
+      this.log(`interrupt ${a.agent_id} failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
   }
 
   /** `steer --urgent`'s interrupt; false when none is wired or it failed (never rejects). */
@@ -3027,6 +3087,86 @@ export class Daemon {
           ...(acked ? { acked_by: target.agent_id } : {}),
         },
       })),
+    };
+  }
+
+  /** A new version of a submitted wave: store the file, journal the plan change, re-admit. */
+  private async resubmit(log: WaveLog, wave: Wave, text: string): Promise<Reply> {
+    const rec = log.record;
+    const state = rec.state;
+    if (state === null) return { ok: false, error: `wave '${wave.wave}' has no state` };
+    if (state.status === "complete" || state.status === "stopped") {
+      return {
+        ok: false,
+        error: `wave '${wave.wave}' is ${state.status}; a new version applies only to a live wave`,
+      };
+    }
+    const file = this.versionFile(wave.wave, state.version + 1);
+    const now = new Date().toISOString();
+    let res: ReturnType<typeof applyPlan>;
+    try {
+      const spawning = [...this.spawning]
+        .filter((k) => k.startsWith(`${wave.wave}/`))
+        .map((k) => k.split("/")[1] as TaskId);
+      res = applyPlan(rec, wave, {
+        now,
+        activity: taskActivity(log.journal.readAll()),
+        spawning,
+        file,
+      });
+    } catch (e) {
+      if (e instanceof PlanChangeError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (res.unchanged) {
+      return {
+        ok: false,
+        error: `wave '${wave.wave}' already submitted as v${state.version}; the file has no changes`,
+        plan: { version: res.version, diff: res.diff, unchanged: true },
+      };
+    }
+    this.storeVersion(file, text);
+    this.config.setWaveOverrides(wave.wave, wave.config);
+    for (const ev of res.planEvents) await this.append(wave.wave, ev);
+    // plan_change decisions go through the decision store: journal + retained decision topic.
+    for (const d of res.decisions) {
+      if (d.op === "resolve") {
+        await this.resolveNow(wave.wave, d.decision_id, { answer: d.answer, by: d.by });
+      } else await this.openDecisionNow(wave.wave, d.input, d.extra);
+    }
+    await this.tickNow();
+    this.log(`wave ${wave.wave} v${res.version}: ${JSON.stringify(res.diff)}`);
+    return {
+      ok: true,
+      result: this.snapshot(wave.wave),
+      plan: {
+        version: res.version,
+        diff: res.diff,
+        unchanged: false,
+        decisions: openDecisions(log.record)
+          .filter((d) => d.kind === "plan_change")
+          .map(decisionPayload),
+      },
+    };
+  }
+
+  /** `diff`: the structural diff between a wave's current plan and a file, without submitting. */
+  private planDiff(p: Record<string, unknown>): Reply {
+    const name = typeof p.wave === "string" ? p.wave : "";
+    const rec = this.waves.get(name)?.record;
+    const current = rec?.plan ?? rec?.wave;
+    if (rec?.state == null || current == null)
+      return { ok: false, error: `unknown wave '${name}'` };
+    const wave = this.parseRequestWave(p, "diff");
+    if ("ok" in wave) return wave;
+    if (wave.wave !== name) {
+      return { ok: false, error: `the file is for wave '${wave.wave}', not '${name}'` };
+    }
+    const diff = diffPlans(current, wave);
+    return {
+      ok: true,
+      result: diff,
+      plan: { version: rec.state.version, diff, unchanged: samePlan(current, wave) },
     };
   }
 }

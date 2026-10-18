@@ -18,5 +18,7 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun-types"]
   },
-  "include": ["scripts/**/*.ts", "packages/*/src/**/*.ts"]
+  "include": ["scripts/**/*.ts", "packages/*/src/**/*.ts"],
+  // volley-desk is React (JSX + DOM): its own tsconfig checks it in the per-package pass.
+  "exclude": ["packages/volley-desk"]
 }
