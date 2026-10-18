@@ -189,8 +189,13 @@ const retained = (coordStatus = "working", status: WaveStatePayload["status"] = 
   msg("volley/_waves/w1/state", waveState(status), true),
 ];
 
-/** A fake broker connection the test drives: deliveries, drops and reconnects. */
-function scriptedClient() {
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * A fake broker connection the test drives: deliveries, drops and reconnects.
+ * `sleep` paces them; under fake timers pass one that advances the clock.
+ */
+function scriptedClient(sleep: (ms: number) => Promise<unknown> = realSleep) {
   const message = new Set<(m: DeskMessage) => void>();
   const connect = new Set<() => void>();
   const disconnect = new Set<() => void>();
@@ -213,7 +218,7 @@ function scriptedClient() {
     onDisconnect: on(disconnect),
     onError: () => () => {},
   };
-  const tick = () => new Promise((r) => setTimeout(r, 40));
+  const tick = () => sleep(40);
   return {
     factory: () => client,
     /** Deliver each message in its own flush, as a slow replay would. */
@@ -329,8 +334,18 @@ describe("App attention (live store)", () => {
 
 // ------------------------------------------------------------ live auto-arrange
 
+// The replay's pacing, the settle window and the arrange/animation timeouts all race on the
+// clock: under fake timers each step happens at its scripted time however loaded the machine is.
 describe("App auto-arrange (live store)", () => {
-  const wait = (ms: number) => act(() => new Promise((r) => setTimeout(r, ms)));
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+  const wait = (ms: number) => act(() => advance(ms));
+  const settle = () => wait(SETTLE + 60);
   const mount = (c: ReturnType<typeof scriptedClient>) =>
     render(
       <DeskStoreProvider
@@ -348,7 +363,7 @@ describe("App auto-arrange (live store)", () => {
   };
 
   it("a reconnect resync and replay of the same windows keeps drags and the view", async () => {
-    const c = scriptedClient();
+    const c = scriptedClient(advance);
     const { container } = mount(c);
     const world = () => container.querySelector(".world") as HTMLElement;
     await c.deliver(retained());
@@ -372,7 +387,7 @@ describe("App auto-arrange (live store)", () => {
   });
 
   it("a window that does not come back after a reconnect re-arranges once settled", async () => {
-    const c = scriptedClient();
+    const c = scriptedClient(advance);
     const { container } = mount(c);
     const world = () => container.querySelector(".world") as HTMLElement;
     await c.deliver(retained());

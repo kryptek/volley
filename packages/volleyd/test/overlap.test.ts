@@ -7,7 +7,7 @@ import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { findOverlaps, parseFilesSection } from "../src/overlap";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
-import { NS } from "./helpers/daemon-env";
+import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 
 const body = (name: string) =>
   readFileSync(
@@ -111,6 +111,7 @@ tasks:
       home,
       tickMs: 0,
       protocolVersion: 4,
+      pressure: NO_PRESSURE,
       issueBody: async (_repo, issue) => BODIES[issue] ?? null,
     });
     client = await ControlClient.connect(broker.url, NS);
@@ -162,6 +163,7 @@ tasks:
       home,
       tickMs: 0,
       protocolVersion: 4,
+      pressure: NO_PRESSURE,
       // Issue 1's body is unreachable now: only the journal still knows w1/X's files.
       issueBody: async (_repo, issue) => (issue === 2 ? (BODIES[2] ?? null) : null),
     });
@@ -183,6 +185,7 @@ tasks:
       home,
       tickMs: 0,
       protocolVersion: 4,
+      pressure: NO_PRESSURE,
       issueBody: async (_repo, issue) => {
         await gate;
         return BODIES[issue] ?? null;
@@ -215,6 +218,7 @@ tasks:
       home,
       tickMs: 0,
       protocolVersion: 4,
+      pressure: NO_PRESSURE,
       issueBody: async (_repo, issue) => {
         fetched();
         await gate;
@@ -233,6 +237,7 @@ tasks:
       home,
       tickMs: 0,
       protocolVersion: 4,
+      pressure: NO_PRESSURE,
     });
   });
 

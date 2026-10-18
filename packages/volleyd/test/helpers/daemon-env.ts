@@ -2,10 +2,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
-import { Daemon, type DaemonOptions } from "../../src/daemon";
+import { Daemon, type DaemonOptions, type PressureSource } from "../../src/daemon";
 import { type TestBroker, startTestBroker } from "./aedes-broker";
 
 export const NS = "volleyd-test";
+
+/**
+ * Every signal unknown. Never run the real samplers (sysctl, cmux, docker, gh) from tests: they
+ * read the machine, so a loaded one holds admission.
+ */
+export const NO_PRESSURE: PressureSource = async () => ({ samples: {}, ci: {} });
 
 /** An Aedes broker, a temp $VOLLEYD_HOME, and helpers to start daemons and read topics. */
 export interface DaemonEnv {
@@ -34,8 +40,7 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     home,
     tickMs: 0,
     protocolVersion: 4,
-    // Never run the real samplers (sysctl, cmux, docker, gh) from tests: every signal unknown.
-    pressure: async () => ({ samples: {}, ci: {} }),
+    pressure: NO_PRESSURE,
     ...extra,
   });
   const reader = new VolleyBroker();

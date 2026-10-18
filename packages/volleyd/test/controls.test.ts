@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ import {
 import { Daemon } from "../src/daemon";
 import { admit } from "../src/scheduler";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
-import { NS } from "./helpers/daemon-env";
+import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
@@ -46,6 +47,7 @@ const start = () =>
     home,
     tickMs: 0,
     protocolVersion: 4,
+    pressure: NO_PRESSURE,
     interrupt: async (agentId) => {
       interrupted.push(agentId);
     },
@@ -84,6 +86,29 @@ afterEach(async () => {
 
 const task = (id: string) => daemon.snapshot(WAVE)?.tasks.find((x) => x.id === id);
 
+/** Wait for an outcome itself, never a fixed delay (a loaded machine stretches any delay). */
+async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error("waitFor: condition never held");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/**
+ * Resolve once every message the broker routed to `sub` before this call has reached its
+ * handlers. The broker writes a message to its subscribers before it PUBACKs the publisher (the
+ * daemon awaits that before replying), and one connection delivers in order: a sentinel `sub`
+ * publishes to itself now arrives after all of it. Proves an absence without sleeping.
+ */
+async function drained(sub: VolleyBroker): Promise<void> {
+  const topic = `volley/${NS}/test-barrier/progress`;
+  const token = randomUUID();
+  const got = sub.subscribeUntil(topic, (p) => p === token, 5000);
+  await sub.publish(topic, token, { qos: 1, retain: false });
+  expect(await got).not.toBeNull();
+}
+
 describe("pause / resume", () => {
   it("pause → admission returns 0 with reason 'wave paused'; running agents continue; resume re-admits", async () => {
     expect((await client.request("pause", { wave: WAVE, by: "coord-a" })).ok).toBe(true);
@@ -119,16 +144,22 @@ describe("stop", () => {
       task: "A",
       data: { role: "spec_reviewer", agent_id: "agent-a2" },
     });
-    const got1 = agent.subscribeCollect(`volley/${NS}/agent-a1/mailbox`, 1, 3000);
-    const got2 = agent.subscribeCollect(`volley/${NS}/agent-a2/mailbox`, 1, 3000);
-    await new Promise((r) => setTimeout(r, 100));
+    // subscribeStream resolves after SUBACK, so the cancels published after it cannot be missed.
+    const got: Record<string, string[]> = { "agent-a1": [], "agent-a2": [] };
+    const unsubs = await Promise.all(
+      Object.keys(got).map((id) =>
+        agent.subscribeStream(`volley/${NS}/${id}/mailbox`, (m) => got[id]?.push(m.payload)),
+      ),
+    );
     const res = await client.request("stop", { wave: WAVE, by: "coord-a" });
     expect(res.error).toBeUndefined();
     expect((res.result as { cancelled: string[] }).cancelled.sort()).toEqual([
       "agent-a1",
       "agent-a2",
     ]);
-    const envs = [...(await got1), ...(await got2)].map((m) => parseEnvelope(m.payload));
+    await drained(agent);
+    for (const unsub of unsubs) await unsub();
+    const envs = [...(got["agent-a1"] ?? []), ...(got["agent-a2"] ?? [])].map(parseEnvelope);
     expect(envs).toHaveLength(2);
     for (const env of envs) {
       expect(env?.type).toBe("cancel");
@@ -296,9 +327,11 @@ describe("steer", () => {
     // then a third after it has been answered.
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
-    await new Promise((r) => setTimeout(r, 600));
+    await waitFor(() => answers.length >= 1);
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(() => answers.length >= 2);
+    await drained(sender);
+    await drained(agent);
     await unsub();
     await unsubAnswers();
     await sender.disconnect();
@@ -388,7 +421,7 @@ describe("steer", () => {
       by: "coord-a",
       wait_ack_ms: 0,
     });
-    await new Promise((r) => setTimeout(r, 100));
+    await drained(agent);
     await unsub();
     expect(res.error).toBeUndefined();
     expect(res.result).toMatchObject({ agent_id: "agent-a1", seq: 1, interrupted: true });
@@ -411,7 +444,7 @@ describe("steer", () => {
       escape_only: true,
       by: "coord-a",
     });
-    await new Promise((r) => setTimeout(r, 100));
+    await drained(agent);
     await unsub();
     expect(res.error).toBeUndefined();
     expect(res.result).toMatchObject({

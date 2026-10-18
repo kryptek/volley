@@ -81,18 +81,25 @@ describe("background registry", () => {
 });
 
 describe("Appearance", () => {
-  it("makes every background selectable and persists the pick", () => {
+  it("counts the React Bits backgrounds", () => {
     render(<Harness />);
     expect(screen.getByText("· 63 from React Bits")).toBeInTheDocument();
-    for (const b of BACKGROUNDS) {
+  });
+
+  // One test per background: each role query scans the whole grid, so 64 picks in one test
+  // outran the test timeout on a loaded machine.
+  it.each(BACKGROUNDS.map((b) => [b.name, b] as const))(
+    "makes %s selectable and persists the pick",
+    (_, b) => {
+      render(<Harness />);
       fireEvent.click(grid().getByRole("button", { name: b.name }));
       expect(latest.bg).toBe(b.key);
       expect(stored().bg).toBe(b.key);
       expect(grid().getByRole("button", { name: b.name })).toHaveAttribute("aria-pressed", "true");
       expect(document.querySelector(".bg-layer")).toHaveAttribute("data-bg", b.key);
       expect(screen.getByText(b.name, { selector: ".bg-current b" })).toBeInTheDocument();
-    }
-  });
+    },
+  );
 
   it("searches the list and keeps the current choice listed", () => {
     render(<Harness />);
