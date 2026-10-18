@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { type WaveRecord, apply, emptyRecord, replay } from "./reducer";
+import { type WaveRecord, apply, emptyRecord, normalizeRecord, replay } from "./reducer";
 import type { JournalEvent, NewEvent } from "./types";
 
 const JOURNAL_FILE = "journal.jsonl";
@@ -120,11 +120,14 @@ export class Journal {
     writeFileAtomic(join(this.dir, SNAPSHOT_FILE), JSON.stringify({ seq: record.seq, record }));
   }
 
-  readSnapshot(): { seq: number; record: WaveRecord } | null {
+  readSnapshot(): { seq: number; record: Partial<WaveRecord> } | null {
     const path = join(this.dir, SNAPSHOT_FILE);
     if (!existsSync(path)) return null;
     try {
-      return JSON.parse(readFileSync(path, "utf-8")) as { seq: number; record: WaveRecord };
+      return JSON.parse(readFileSync(path, "utf-8")) as {
+        seq: number;
+        record: Partial<WaveRecord>;
+      };
     } catch {
       return null; // a bad snapshot only costs a full replay
     }
@@ -149,7 +152,8 @@ export class WaveLog {
   static open(dir: string, opts: { snapshotEvery?: number } = {}): WaveLog {
     const journal = Journal.open(dir);
     const snap = journal.readSnapshot();
-    const base = snap !== null && snap.seq <= journal.lastSeq ? snap.record : emptyRecord();
+    const base =
+      snap !== null && snap.seq <= journal.lastSeq ? normalizeRecord(snap.record) : emptyRecord();
     const rec = replay(journal.readAfter(base.seq), base);
     return new WaveLog(journal, rec, opts.snapshotEvery ?? DAEMON_DEFAULTS.snapshot_every);
   }

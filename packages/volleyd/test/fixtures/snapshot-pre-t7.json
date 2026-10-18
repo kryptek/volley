@@ -1,0 +1,119 @@
+{
+  "seq": 11,
+  "record": {
+    "seq": 11,
+    "state": {
+      "wave": "2026-10-20-example",
+      "version": 1,
+      "owner": "coordinator-ab12",
+      "repo": "~/repos/example",
+      "release_branch": "release/2026-10-20-example",
+      "status": "running",
+      "tasks": [
+        {
+          "id": "T0",
+          "issue": 101,
+          "stage": "merge_ready",
+          "agents": { "implementer": "2026-10-20-example-t0-implementer-1" },
+          "pr": {
+            "number": 7,
+            "url": "https://github.com/example-org/example-repo/pull/7",
+            "ci": "green"
+          }
+        },
+        {
+          "id": "T1",
+          "issue": 102,
+          "stage": "queued",
+          "agents": {},
+          "waiting_on": ["T0"],
+          "why_waiting": "after: T0"
+        },
+        {
+          "id": "T2",
+          "issue": 103,
+          "stage": "queued",
+          "agents": {},
+          "waiting_on": ["T0"],
+          "why_waiting": "after: T0"
+        },
+        {
+          "id": "T3",
+          "issue": 104,
+          "stage": "queued",
+          "agents": {},
+          "waiting_on": ["T1", "T2"],
+          "why_waiting": "after: T1, T2"
+        }
+      ],
+      "open_decisions": [],
+      "gates": ["T0"],
+      "spec": {
+        "version": 1,
+        "release_branch": "release/2026-10-20-example",
+        "model": "claude-opus-5-5",
+        "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+        "tasks": {
+          "T0": { "issue": 101, "after": [] },
+          "T1": { "issue": 102, "after": ["T0"] },
+          "T2": { "issue": 103, "after": ["T0"] },
+          "T3": { "issue": 104, "after": ["T1", "T2"] }
+        }
+      },
+      "updated_at": "2026-10-20T09:10:00.000Z"
+    },
+    "wave": {
+      "wave": "2026-10-20-example",
+      "version": 1,
+      "repo": "~/repos/example",
+      "release_branch": "release/2026-10-20-example",
+      "model": "claude-opus-5-5",
+      "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+      "stages": [["implement"], ["spec_review", "quality_review"], ["fixup"], ["merge_ready"]],
+      "tasks": {
+        "T0": {
+          "id": "T0",
+          "issue": 101,
+          "after": [],
+          "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+          "stages": [["implement"], ["spec_review", "quality_review"], ["fixup"], ["merge_ready"]],
+          "model": "claude-opus-5-5",
+          "files": []
+        },
+        "T1": {
+          "id": "T1",
+          "issue": 102,
+          "after": ["T0"],
+          "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+          "stages": [["implement"], ["spec_review", "quality_review"], ["fixup"], ["merge_ready"]],
+          "model": "claude-opus-5-5",
+          "files": []
+        },
+        "T2": {
+          "id": "T2",
+          "issue": 103,
+          "after": ["T0"],
+          "pipeline": ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"],
+          "stages": [["implement"], ["spec_review", "quality_review"], ["fixup"], ["merge_ready"]],
+          "model": "claude-opus-5-5",
+          "files": []
+        },
+        "T3": {
+          "id": "T3",
+          "issue": 104,
+          "after": ["T1", "T2"],
+          "pipeline": ["implement", "merge_ready"],
+          "stages": [["implement"], ["merge_ready"]],
+          "model": "claude-opus-5-5",
+          "files": []
+        }
+      },
+      "task_order": ["T0", "T1", "T2", "T3"],
+      "heavy_pools": [],
+      "config": {}
+    },
+    "admitted": ["T0"],
+    "spawns": 1,
+    "overrides": {}
+  }
+}
