@@ -23,9 +23,8 @@
               "description": "Content hash of lines; publishers skip unchanged captures."
             },
             "source": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Capture mechanism; cmux in the reference implementation."
+              "enum": ["cmux", "tmux"],
+              "description": "Capture mechanism: cmux for agents on the supervisor's own host, tmux for agents on a remote (SSH + tmux) host."
             }
           }
         }

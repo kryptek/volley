@@ -163,7 +163,8 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
     if (typeof def.additionalProperties === "object") {
       const entry = resolve(schema, def.additionalProperties);
       const capacity = entry.properties?.capacity;
-      if (!capacity) throw new Error(`config schema: ${key} entries have no capacity`);
+      // A map of structured records (remote `hosts`) has no per-entry slider: set in config.yaml.
+      if (!capacity) return [];
       const pools = Object.keys((values?.[key] as Record<string, unknown> | undefined) ?? {});
       return pools
         .sort()

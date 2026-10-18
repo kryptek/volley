@@ -25,12 +25,23 @@ const values: Tunables = {
     "backend-it": { capacity: 2, ttl_s: 1800, match: ["mvn .*verify"] },
     build: { capacity: 3 },
   },
+  hosts: { box: { target: "dev@box", repo: "~/src/app", volley_dir: "~/src/volley" } },
+};
+
+/** A map whose entries are structured records (e.g. `hosts`), not per-entry capacities. */
+const isRecordMap = (v: JsonSchema): boolean => {
+  const entry = v.additionalProperties as JsonSchema | undefined;
+  if (typeof entry !== "object") return false;
+  const ref = entry.$ref?.replace("#/$defs/", "");
+  const target = ref !== undefined ? (schema.$defs?.[ref] as JsonSchema) : entry;
+  return target.properties?.capacity === undefined;
 };
 
 /** The leaf tunables of the schema, as dotted paths (map entries expand per value). */
 function expectedLeaves(s: Record<string, JsonSchema>, prefix = ""): string[] {
   return Object.entries(s).flatMap(([k, v]) => {
     const p = `${prefix}${k}`;
+    if (isRecordMap(v)) return [];
     if (v.properties) return expectedLeaves(v.properties as Record<string, JsonSchema>, `${p}.`);
     if (v.additionalProperties) {
       return Object.keys(values.lease_pools ?? {}).map((pool) => `${p}.${pool}.capacity`);
@@ -53,7 +64,7 @@ describe("schemaRows", () => {
     expect(rows.map((r) => r.path).sort()).toEqual(expectedLeaves(props).sort());
   });
 
-  for (const [key, def] of Object.entries(props)) {
+  for (const [key, def] of Object.entries(props).filter(([, d]) => !isRecordMap(d))) {
     it(`renders ${key} with the schema's control type and bounds`, () => {
       const leaves = Object.entries(
         def.properties
@@ -131,6 +142,12 @@ describe("schemaRows", () => {
   it("hints each lease pool row with its capacity bounds, not the map's description", () => {
     expect(at.get("lease_pools.build.capacity")?.hint).toBe("0–64");
     expect(at.get("lease_pools.backend-it.capacity")?.hint).toBe("0–64");
+  });
+
+  it("gives a map of structured records (hosts) no rows, configured or not", () => {
+    expect(Object.keys(props)).toContain("hosts");
+    expect(rows.some((r) => r.path.startsWith("hosts"))).toBe(false);
+    expect(schemaRows(schema, null).some((r) => r.path.startsWith("hosts"))).toBe(false);
   });
 
   it("has no lease rows when no pools are configured", () => {

@@ -49,6 +49,19 @@ export interface AdmissionConfig {
   hysteresis_samples: number;
 }
 
+/** One SSH + tmux host (config `hosts.<name>`, or a wave task's inline `host:`). */
+export interface RemoteHostConfig {
+  type?: "ssh";
+  /** ssh destination, `[user@]host`. */
+  target?: string;
+  /** The wave repo's clone on the remote machine (absolute). */
+  repo?: string;
+  worktree_root?: string;
+  /** The volley checkout on the remote machine (its volley-hooks is `$VOLLEY_HOOKS_DIR`). */
+  volley_dir?: string;
+  tunnel?: { remote_port?: number; supervise?: boolean };
+}
+
 /** Every runtime tunable, fully populated (what `ConfigStore.effective()` returns). */
 export interface Tunables {
   hard_ceiling: number;
@@ -64,6 +77,7 @@ export interface Tunables {
   spawn_timeout_s: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  hosts: Record<string, RemoteHostConfig>;
 }
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
@@ -94,8 +108,10 @@ export interface WaveTask {
   /** The task's pipeline as written (its own, else the wave's). */
   pipeline: PipelineStep[];
   model: string;
-  /** Where the task's agents run (`host:`, default `local`). */
+  /** Where the task's agents run: `local` (the default) or a remote host's name. */
   host: string;
+  /** An inline remote `host:` (layered over config `hosts.<host>`). */
+  host_spec?: RemoteHostConfig & { type: "ssh"; name?: string };
   files: string[];
 }
 
@@ -134,6 +150,8 @@ export interface TaskState {
   agents: TaskAgents;
   waiting_on?: string[];
   why_waiting?: string;
+  /** The remote host the task's agents run on (absent for `local`). */
+  host?: string;
   /** Set while the screen capture of one of the task's agents is backed off (screen-publisher.ts). */
   screen_stale?: boolean;
   pr?: {

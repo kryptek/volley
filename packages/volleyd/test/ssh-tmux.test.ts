@@ -1,0 +1,446 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import type { ExecOptions, ExecResult } from "../src/exec";
+import { type RemoteStep, mintConsentToken, mintScriptToken } from "../src/fence";
+import { type RemoteHostSpec, SshTmuxHost, resolveRemoteHost } from "../src/hosts/ssh-tmux";
+import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import type { SpawnError } from "../src/spawn-error";
+import { fakeExec } from "./helpers/fake-exec";
+import { FIXTURES } from "./helpers/fake-host";
+
+const SPEC: RemoteHostSpec = {
+  name: "box",
+  target: "dev@box",
+  repo: "/home/dev/src/repo",
+  worktree_root: "/home/dev/wt",
+  volley_dir: "/home/dev/src/volley",
+  tunnel: { remote_port: 21883, supervise: true },
+};
+const SSH = [
+  "ssh",
+  "-T",
+  "-o",
+  "BatchMode=yes",
+  "-o",
+  "ConnectTimeout=10",
+  "dev@box",
+  "bash",
+  "-s",
+];
+
+type StepReply = (step: RemoteStep) => Partial<ExecResult> | undefined;
+
+/** A fake exec for one remote host: answers each `ssh … bash -s` by its (single) remote step. */
+function remote(reply: StepReply = () => undefined) {
+  const fake = fakeExec().on(["ssh"], (_argv, opts: ExecOptions) => {
+    const steps = opts.remote?.steps ?? [];
+    for (const s of steps) {
+      const r = reply(s);
+      if (r !== undefined) return r;
+    }
+    return {};
+  });
+  const scripts = () => fake.calls.filter((c) => c.argv[0] === "ssh").map((c) => c.opts.remote);
+  const steps = () => scripts().flatMap((s) => s?.steps ?? []);
+  return { fake, host: new SshTmuxHost(SPEC, fake.exec), scripts, steps };
+}
+
+const argvIs =
+  (...prefix: string[]) =>
+  (s: RemoteStep) =>
+    prefix.every((p, i) => s.argv[i] === p);
+
+describe("SshTmuxHost", () => {
+  it("every remote invocation is `ssh -T <target> bash -s` with the script on stdin", async () => {
+    const r = remote((s) => (argvIs("tmux", "capture-pane")(s) ? { stdout: "x\n" } : undefined));
+    await r.host.writeFile("/home/dev/wt/w1/T1-implementer/ISSUE.md", "# issue\n");
+    await r.host.readScreen("w1-T1-implementer", 40);
+    await r.host.sendKeys("w1-T1-implementer", "Enter");
+    await r.host.exec(["gh", "issue", "view", "42", "--json", "number"], { cwd: SPEC.repo });
+    expect(r.fake.calls.length).toBeGreaterThan(0);
+    for (const c of r.fake.calls) {
+      expect(c.argv).toEqual(SSH);
+      // Never a command string for the remote login shell, never a raw stdin.
+      expect(c.opts.remote?.steps.length).toBeGreaterThan(0);
+      expect(c.opts.input).toBeUndefined();
+    }
+    expect(r.steps().find(argvIs("gh"))).toEqual({
+      argv: ["gh", "issue", "view", "42", "--json", "number"],
+      cwd: SPEC.repo,
+    });
+  });
+
+  it("writeFile creates the directory, decodes base64 into the file, and ends with chmod for a mode", async () => {
+    const r = remote();
+    const path = "/home/dev/wt/w1/T1-implementer/.volley/agent.json";
+    const content = `${JSON.stringify({ agent_id: "a", broker: { password: "pw" } })}\n`;
+    await r.host.writeFile(path, content, 0o600);
+    const steps = r.scripts()[0]?.steps ?? [];
+    expect(steps.map((s) => s.argv)).toEqual([
+      ["mkdir", "-p", "/home/dev/wt/w1/T1-implementer/.volley"],
+      ["base64", "-d"],
+      ["chmod", "600", path],
+    ]);
+    expect(steps[1]?.stdout).toBe(path);
+    expect(Buffer.from(steps[1]?.stdin ?? "", "base64").toString()).toBe(content);
+    // The password never appears in clear in the script.
+    expect(JSON.stringify(steps)).not.toContain('"pw"');
+
+    await r.host.writeFile("/home/dev/wt/x/ISSUE.md", "plain");
+    expect(r.scripts()[1]?.steps.map((s) => s.argv[0])).toEqual(["mkdir", "base64"]);
+  });
+
+  it("a failed remote write throws", async () => {
+    const r = remote((s) => (argvIs("base64")(s) ? { code: 1, stderr: "disk full" } : undefined));
+    await expect(r.host.writeFile("/x/.volley/y", "z")).rejects.toThrow(/disk full/);
+  });
+
+  it("launch: tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    const ws = await r.host.launch({
+      cwd: "/home/dev/wt/w1/T1-implementer",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+    });
+    expect(ws).toEqual({ workspace: "w1-T1-implementer" });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "has-session", "-t", "=w1-T1-implementer"],
+      [
+        "tmux",
+        "new-session",
+        "-d",
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/home/dev/wt/w1/T1-implementer",
+        "bash .volley/launch.sh",
+      ],
+    ]);
+  });
+
+  it("launch picks a free session name when one is taken (the relaunch after an update prompt)", async () => {
+    const taken = new Set(["=w1-T1-implementer"]);
+    const r = remote((s) =>
+      argvIs("tmux", "has-session")(s) ? { code: taken.has(s.argv[3] ?? "") ? 0 : 1 } : undefined,
+    );
+    const ws = await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+    });
+    expect(ws.workspace).toBe("w1-T1-implementer-2");
+  });
+
+  it("a failed launch is LAUNCH_FAILED", async () => {
+    const r = remote((s) =>
+      argvIs("tmux", "has-session")(s)
+        ? { code: 1 }
+        : argvIs("tmux", "new-session")(s)
+          ? { code: 1, stderr: "tmux: command not found" }
+          : undefined,
+    );
+    const err = await r.host
+      .launch({ cwd: "/wt", name: "w1 T1 implementer", command: LAUNCH_COMMAND })
+      .catch((e: unknown) => e as SpawnError);
+    expect(err).toMatchObject({ code: "LAUNCH_FAILED" });
+    expect((err as Error).message).toContain("tmux: command not found");
+  });
+
+  it("launch.sh for a remote host: no --mcp-config, the remote hooks dir, env exports for tooling", () => {
+    const script = renderLaunchScript({
+      hooksDir: new SshTmuxHost(SPEC, fakeExec().exec).hooksDir,
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      env: new SshTmuxHost(SPEC, fakeExec().exec).launchEnv({
+        agent_id: "w1-t1-implementer-1",
+        namespace: "default",
+      }),
+    });
+    expect(script).not.toContain("--mcp-config");
+    expect(script.startsWith("#!/usr/bin/env bash\n")).toBe(true);
+    expect(script).toContain(
+      "export VOLLEY_HOOKS_DIR='/home/dev/src/volley/packages/volley-hooks'",
+    );
+    expect(script).toContain("export VOLLEY_BROKER_URL='mqtt://127.0.0.1:21883'");
+    expect(script).toContain("export VOLLEY_NAMESPACE='default'");
+    expect(script).toContain("export VOLLEY_AGENT_ID='w1-t1-implementer-1'");
+  });
+
+  it("readScreen uses capture-pane -p and returns the last N non-trailing-blank lines", async () => {
+    const capture = readFileSync(join(FIXTURES, "tmux-capture.txt"), "utf-8");
+    const r = remote((s) => (argvIs("tmux", "capture-pane")(s) ? { stdout: capture } : undefined));
+    const screen = await r.host.readScreen("w1-T1-implementer", 5);
+    expect(r.steps()[0]?.argv).toEqual([
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "=w1-T1-implementer:",
+      "-S-5",
+    ]);
+    const lines = (screen ?? "").split("\n");
+    expect(lines).toHaveLength(5);
+    expect(lines.at(-1)).toContain("bypass permissions on");
+  });
+
+  it("readScreen is null when the session is gone or ssh fails", async () => {
+    const r = remote((s) =>
+      argvIs("tmux", "capture-pane")(s) ? { code: 1, stderr: "can't find session" } : undefined,
+    );
+    expect(await r.host.readScreen("gone", 10)).toBeNull();
+    const fails = new SshTmuxHost(SPEC, async () => {
+      throw new Error("spawn ssh ENOENT");
+    });
+    expect(await fails.readScreen("x", 10)).toBeNull();
+  });
+
+  it("sendKeys / sendText map to tmux send-keys (text literal, after --)", async () => {
+    const r = remote();
+    await r.host.sendKeys("w1-T1-implementer", "Enter");
+    await r.host.sendText("w1-T1-implementer", "-not an option");
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "-not an option"],
+    ]);
+  });
+
+  it("close kills the tmux session, only with consent", async () => {
+    const r = remote();
+    await expect(r.host.close("w1-T1-implementer", { reason: "forged" } as never)).rejects.toThrow(
+      /FENCE_DENIED/,
+    );
+    await r.host.close("w1-T1-implementer", mintConsentToken("volleyd cleanup w1 --yes"));
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
+    ]);
+  });
+
+  it("prepareWorktree fetches the release branch, then cuts the worktree from it, no tracking", async () => {
+    const wt = "/home/dev/wt/w1/T1-implementer";
+    const r = remote((s) =>
+      argvIs("git", "-C", wt, "rev-parse")(s)
+        ? { code: 128, stderr: "not a git repository" }
+        : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
+          ? { stdout: ".git\n" }
+          : argvIs("cat")(s)
+            ? { stdout: "# existing\n.volley/\n" }
+            : undefined,
+    );
+    const res = await r.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "w1/T1-implementer-1",
+      base: "release/w1",
+    });
+    expect(res).toEqual({ path: wt, branch: "w1/T1-implementer-1", reused: false });
+    const argvs = r.steps().map((s) => s.argv);
+    expect(argvs.slice(0, 3)).toEqual([
+      ["git", "-C", wt, "rev-parse", "--is-inside-work-tree"],
+      ["git", "-C", SPEC.repo, "fetch", "--quiet", "origin", "release/w1"],
+      [
+        "git",
+        "-C",
+        SPEC.repo,
+        "worktree",
+        "add",
+        "--no-track",
+        wt,
+        "-b",
+        "w1/T1-implementer-1",
+        "origin/release/w1",
+      ],
+    ]);
+    // .volley/ was already excluded: only /ISSUE.md is appended to the remote info/exclude.
+    const append = r.steps().find((s) => s.append === true);
+    expect(append?.stdout).toBe(`${SPEC.repo}/.git/info/exclude`);
+    expect(Buffer.from(append?.stdin ?? "", "base64").toString()).toBe(
+      "# volleyd (agent worktrees)\n/ISSUE.md\n",
+    );
+  });
+
+  it("prepareWorktree reuses an existing remote worktree and reports its branch", async () => {
+    const wt = "/home/dev/wt/w1/T1-implementer";
+    const r = remote((s) =>
+      argvIs("git", "-C", wt, "rev-parse", "--is-inside-work-tree")(s)
+        ? { stdout: "true\n" }
+        : argvIs("git", "-C", wt, "rev-parse", "--abbrev-ref")(s)
+          ? { stdout: "w1/T1-implementer-1\n" }
+          : undefined,
+    );
+    const res = await r.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "w1/T1-implementer-2",
+      base: "release/w1",
+    });
+    expect(res).toEqual({ path: wt, branch: "w1/T1-implementer-1", reused: true });
+    expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
+  });
+
+  it("a failed fetch or worktree add is WORKTREE_FAILED", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "fetch")(s)
+        ? { code: 128, stderr: "couldn't find remote ref release/w1" }
+        : argvIs("git", "-C", "/wt", "rev-parse")(s)
+          ? { code: 128 }
+          : undefined,
+    );
+    const err = await r.host
+      .prepareWorktree({ repo: SPEC.repo, path: "/wt", branch: "b", base: "release/w1" })
+      .catch((e: unknown) => e as SpawnError);
+    expect(err).toMatchObject({ code: "WORKTREE_FAILED" });
+  });
+
+  it("repoExists / tunnelUp / readTrust run over bash -s", async () => {
+    const claudeJson = JSON.stringify({
+      oauthAccount: { token: "secret" },
+      projects: { "/home/dev/src/repo": { hasTrustDialogAccepted: true, history: ["x"] } },
+    });
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-dir")(s)
+        ? { stdout: ".git\n" }
+        : argvIs("nc")(s)
+          ? { code: 1 }
+          : argvIs("cat", ".claude.json")(s)
+            ? { stdout: claudeJson }
+            : undefined,
+    );
+    expect(await r.host.repoExists()).toBe(true);
+    expect(await r.host.tunnelUp()).toBe(false);
+    expect(r.steps().find(argvIs("nc"))?.argv).toEqual(["nc", "-z", "127.0.0.1", "21883"]);
+    // Only the trust bits are kept: nothing else from the remote ~/.claude.json.
+    expect(await r.host.readTrust()).toEqual({
+      projects: { "/home/dev/src/repo": { hasTrustDialogAccepted: true } },
+    });
+  });
+
+  it("repoExists tells a missing clone from a failed ssh (which must not open a decision)", async () => {
+    const answer = (code: number, timedOut = false) =>
+      remote((s) => (argvIs("git")(s) ? { code, timedOut, stderr: "x" } : undefined)).host;
+    expect(await answer(0).repoExists()).toBe(true);
+    expect(await answer(128).repoExists()).toBe(false); // git: not a git repository
+    for (const host of [answer(255), answer(0, true)]) {
+      const err = await host.repoExists().catch((e: unknown) => e as SpawnError);
+      expect(err).toMatchObject({ code: "LAUNCH_FAILED", detail: { target: "dev@box" } });
+    }
+  });
+
+  it("readFile: the file, null when there is none, a throw when ssh fails", async () => {
+    const r = remote((s) =>
+      argvIs("cat", "/src/r/.volley/brief-extra.md")(s)
+        ? { stdout: "notes\n" }
+        : argvIs("cat", "/none")(s)
+          ? { code: 1, stderr: "No such file" }
+          : argvIs("cat", "/down")(s)
+            ? { code: 255, stderr: "ssh: connect" }
+            : undefined,
+    );
+    expect(await r.host.readFile("/src/r/.volley/brief-extra.md")).toBe("notes\n");
+    expect(await r.host.readFile("/none")).toBeNull();
+    await expect(r.host.readFile("/down")).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+    // readTrust over a failed ssh is not "untrusted" either.
+    const down = remote(() => ({ code: 255, stderr: "ssh: connect" }));
+    await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+  });
+
+  it("recordTrust: compare-and-swap of the box's ~/.claude.json, keeping everything else", async () => {
+    const before = `${JSON.stringify({
+      oauthAccount: { token: "secret" },
+      projects: { "/other": { history: ["x"] } },
+    })}\n`;
+    const r = remote((s) => (argvIs("cat", ".claude.json")(s) ? { stdout: before } : undefined));
+    await r.host.recordTrust("/home/dev/src/repo");
+    const write = r.scripts().at(-1)?.steps ?? [];
+    expect(write.map((s) => s.argv)).toEqual([
+      ["cmp", "-s", "-", ".claude.json"],
+      ["base64", "-d"],
+      ["mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"],
+    ]);
+    // The compare is against exactly what was read; the new file changes only the trust key.
+    expect(Buffer.from(write[0]?.stdin ?? "", "base64").toString()).toBe(before);
+    expect(write[1]?.stdout).toBe(".claude.json.volleyd.tmp");
+    expect(JSON.parse(Buffer.from(write[1]?.stdin ?? "", "base64").toString())).toEqual({
+      oauthAccount: { token: "secret" },
+      projects: {
+        "/other": { history: ["x"] },
+        "/home/dev/src/repo": { hasTrustDialogAccepted: true },
+      },
+    });
+  });
+
+  it("recordTrust re-reads and retries when the file changed under it; refuses with no file", async () => {
+    let compares = 0;
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? { stdout: "{}" }
+        : argvIs("cmp")(s)
+          ? ++compares === 1
+            ? { code: 1 }
+            : {}
+          : undefined,
+    );
+    await r.host.recordTrust("/home/dev/src/repo");
+    expect(compares).toBe(2);
+    expect(r.steps().filter(argvIs("cat", ".claude.json"))).toHaveLength(2);
+
+    const none = remote((s) =>
+      argvIs("cat")(s) ? { code: 1, stderr: "No such file" } : undefined,
+    );
+    await expect(none.host.recordTrust("/home/dev/src/repo")).rejects.toThrow(
+      /run claude there once/,
+    );
+    expect(none.steps().some(argvIs("mv"))).toBe(false);
+  });
+
+  it("exec routes credentials and the brief gate to the daemon's machine, the rest remote", async () => {
+    const r = remote((s) => (argvIs("cat")(s) ? { stdout: "the brief\n" } : undefined));
+    r.fake.on(["volley", "auth", "add-agent"], { stdout: '{"username":"a","password":"p"}' });
+    await r.host.exec(["volley", "auth", "add-agent", "a", "--json"]);
+    expect(r.fake.calls.at(-1)?.argv).toEqual(["volley", "auth", "add-agent", "a", "--json"]);
+
+    // The brief gate is a local program: it gets a local copy of the remote brief.
+    let seen = "";
+    const gate = "/home/me/.volleyd/brief-gate";
+    r.fake.on([gate], (argv) => {
+      seen = readFileSync(argv[1] as string, "utf-8");
+      return { stdout: "ok" };
+    });
+    const res = await r.host.exec([gate, "/home/dev/wt/x/.volley/brief.md"], {
+      cwd: "/home/dev/wt/x",
+      script: mintScriptToken(gate),
+    });
+    expect(res.code).toBe(0);
+    expect(seen).toBe("the brief\n");
+    expect(r.steps().find(argvIs("cat"))?.argv).toEqual(["cat", "/home/dev/wt/x/.volley/brief.md"]);
+  });
+});
+
+describe("resolveRemoteHost", () => {
+  const configured = {
+    box: { target: "dev@box", repo: "/src/r", volley_dir: "/src/volley" },
+  };
+
+  it("layers an inline host over the config entry it names, with defaults", () => {
+    expect(
+      resolveRemoteHost("box", { type: "ssh", tunnel: { remote_port: 2883 } }, configured),
+    ).toEqual({
+      name: "box",
+      target: "dev@box",
+      repo: "/src/r",
+      worktree_root: "/src/.volley-worktrees",
+      volley_dir: "/src/volley",
+      tunnel: { remote_port: 2883, supervise: true },
+    });
+    expect(resolveRemoteHost("box", undefined, configured).tunnel.remote_port).toBe(21883);
+  });
+
+  it("an unknown or incomplete host is refused with what is missing", () => {
+    expect(() => resolveRemoteHost("nope", undefined, configured)).toThrow(
+      /host 'nope' is not configured/,
+    );
+    expect(() => resolveRemoteHost("half", { type: "ssh", name: "half", target: "x" }, {})).toThrow(
+      /repo, volley_dir/,
+    );
+  });
+});

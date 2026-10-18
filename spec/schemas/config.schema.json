@@ -173,6 +173,69 @@
           "minimum": 1,
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
+        },
+        "hosts": {
+          "type": "object",
+          "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+            "not": { "const": "local" }
+          },
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/remoteHost" }
+        }
+      }
+    },
+    "remoteHost": {
+      "type": "object",
+      "$ref": "#/$defs/remoteHostProperties",
+      "properties": { "type": { "const": "ssh" } },
+      "unevaluatedProperties": false
+    },
+    "remoteHostProperties": {
+      "description": "The settings of one SSH + tmux host, left open so the wave file's inline host can add type and name. Paths are on the remote machine and must be absolute. Object keywords only (no type), so the wave file can apply it to a string-or-object host.",
+      "properties": {
+        "target": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$",
+          "description": "ssh destination, [user@]host (an ssh config alias works). Never starts with '-', so it can never be read as an option."
+        },
+        "repo": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "The wave repository's clone on the remote machine; the release branch is fetched into it before each worktree is cut."
+        },
+        "worktree_root": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "Directory on the remote machine under which agent worktrees are created (default: .volley-worktrees beside repo)."
+        },
+        "volley_dir": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "The volley checkout on the remote machine; its packages/volley-hooks is the agents' VOLLEY_HOOKS_DIR."
+        },
+        "tunnel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "remote_port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535,
+              "default": 21883,
+              "description": "Port on the remote machine's 127.0.0.1 that reaches the broker; agents get broker_url mqtt://127.0.0.1:<remote_port>. Not 1883 by default: a remote machine running its own broker has that port taken."
+            },
+            "supervise": {
+              "type": "boolean",
+              "default": true,
+              "description": "true: the supervisor keeps ssh -N -R <remote_port>:<broker> up itself (one per target and remote_port). false: the tunnel is operator-managed and only checked."
+            }
+          }
         }
       }
     },
