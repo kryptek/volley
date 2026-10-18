@@ -209,3 +209,74 @@ describe("DeskStoreProvider auth refusal on a later reconnect", () => {
     expect(screen.getByTestId("desk")).toHaveTextContent("disconnected:desk");
   });
 });
+
+describe("SignInGate look (D9)", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  /** A broker whose CONNACK waits until `accept()`. */
+  function slowFactory() {
+    let accept = () => {};
+    const make = (): DeskMqttClient => {
+      const connected = new Set<() => void>();
+      return {
+        connect: () =>
+          new Promise<void>((resolve) => {
+            accept = () => {
+              for (const h of connected) h();
+              resolve();
+            };
+          }),
+        disconnect: async () => {},
+        publish: async () => {},
+        onMessage: () => () => {},
+        onConnect: (h) => {
+          connected.add(h);
+          return () => connected.delete(h);
+        },
+        onDisconnect: () => () => {},
+        onError: () => () => {},
+      };
+    };
+    return { make, accept: () => accept() };
+  }
+
+  it("without WebGL the form sits on the plain gradient and still signs in", async () => {
+    const f = factory();
+    const { container } = gate(f);
+    expect(container.querySelector(".signin-bg--plain")).toBeInTheDocument();
+    signIn("desk", "pw");
+    await flush();
+    expect(screen.getByTestId("desk")).toHaveTextContent("connected:desk");
+  });
+
+  it("disables the button and reads 'Signing in…' while connecting", async () => {
+    const f = slowFactory();
+    render(
+      <SignInGate demo={false} env={{}} brokerUrl="ws://broker.test:9001" clientFactory={f.make}>
+        <Probe />
+      </SignInGate>,
+    );
+    signIn("desk", "pw");
+    await flush();
+    const busy = screen.getByRole("button", { name: "Signing in…" });
+    expect(busy).toBeDisabled();
+    expect(screen.queryByTestId("desk")).not.toBeInTheDocument();
+    await act(async () => f.accept());
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("desk")).toHaveTextContent("connected:desk");
+  });
+
+  it("tilts the card toward the pointer and resets when it leaves", () => {
+    const { container } = gate(factory());
+    const card = container.querySelector<HTMLElement>(".signin-card");
+    if (!card) throw new Error("no .signin-card");
+    expect(card.style.getPropertyValue("--ry")).toBe("0.00deg");
+    fireEvent.pointerMove(card, { clientX: 1000, clientY: 700 });
+    expect(card.style.getPropertyValue("--ry")).not.toBe("0.00deg");
+    expect(card.style.getPropertyValue("--rx")).not.toBe("0.00deg");
+    fireEvent.pointerLeave(card);
+    expect(card.style.getPropertyValue("--rx")).toBe("0.00deg");
+    expect(card.style.getPropertyValue("--ry")).toBe("0.00deg");
+  });
+});
