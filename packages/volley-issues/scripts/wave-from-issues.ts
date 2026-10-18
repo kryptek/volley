@@ -57,8 +57,17 @@ const ISSUE_REF =
 /** Dependency-line text that declares no dependencies (after parentheticals and punctuation). */
 const NONE = new Set(["none", "n/a", "-", "—"]);
 
-/** The wave-file task id for an issue. */
-export const taskIdFor = (issue: number) => `i${issue}`;
+/**
+ * A task tag at the start of an issue title (`O0: …`, `T3b — …`, `D10 - …`); group 1 is the tag.
+ * Every tag it matches fits the wave-file task-id grammar.
+ */
+const TITLE_TAG = /^([A-Z]{1,3}\d{1,3}[a-z]?)\s*[:—–-]/;
+
+/** The wave-file task id for an issue: its title's task tag, else `i<number>`. */
+export function taskIdFor(issue: number, title?: string): string {
+  const tag = typeof title === "string" ? TITLE_TAG.exec(title) : null;
+  return tag?.[1] ?? `i${issue}`;
+}
 
 /**
  * The issues named on the body's dependency lines. `declared: false` means there is no such
@@ -158,6 +167,20 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     if (inSet.has(i.number)) throw new Error(`duplicate issue #${i.number}`);
     inSet.add(i.number);
   }
+  // volleyd rejects task ids that differ only in case, so collisions are checked case-blind.
+  const ids = new Map<number, string>();
+  const owners = new Map<string, number>();
+  for (const i of issues) {
+    const id = taskIdFor(i.number, i.title);
+    const other = owners.get(id.toLowerCase());
+    if (other !== undefined) {
+      throw new Error(
+        `task id '${id}' is used by both #${other} and #${i.number} (give one of them a distinct title tag)`,
+      );
+    }
+    owners.set(id.toLowerCase(), i.number);
+    ids.set(i.number, id);
+  }
   const satisfied = new Set(opts.satisfied ?? []);
   for (const n of satisfied) {
     // Dropping it would silently cut the edge to a task that is actually in the wave.
@@ -192,9 +215,9 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
           `#${issue.number} depends on #${ref}, which is not in this wave (add it, or pass it as satisfied if it is already merged)`,
         );
       }
-      after.push(taskIdFor(ref));
+      after.push(ids.get(ref) as string);
     }
-    lines.push(`  ${taskIdFor(issue.number)}:`, `    issue: ${issue.number}`);
+    lines.push(`  ${ids.get(issue.number) as string}:`, `    issue: ${issue.number}`);
     if (typeof issue.title === "string" && issue.title !== "") {
       lines.push(`    title: ${q(issue.title)}`);
     }
@@ -209,8 +232,9 @@ const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <i
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
-Each issue becomes task i<number>; a "Depends on: #N" or "deps: #N" line in its body becomes
-after: [i<N>] (also "owner/repo#N" and issue URLs when --repo-slug names this repository,
+Each issue becomes a task named by its title's task tag ("O0: ...", "T3b - ..." -> O0, T3b),
+or i<number> when the title has none; two issues with the same id are an error. A
+"Depends on: #N" or "deps: #N" line in its body becomes after: [<id of #N>] (also "owner/repo#N" and issue URLs when --repo-slug names this repository,
 and "- #N" list items under an empty label). A dependency outside the set is an error unless
 listed in --satisfied; so is a dependency line it cannot read.
 Writes the wave YAML to --out (default stdout). Issues with no dependency line are listed on

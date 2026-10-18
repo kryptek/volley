@@ -43,7 +43,26 @@ Teardown (§8) prints what it will remove and asks before removing it.
   3–4 small open issues. Make one depend on another (`Depends on: #<n>` in its body) and leave
   at least two independent. Push a release branch for the wave, e.g.
   `release/<yyyy-mm-dd>-smoke`.
+  **Tracking branch** (remove this note once volleyd fetches a release branch that exists only
+  on origin): a branch pushed from another clone is only `origin/release/<x>` in the laptop's
+  clone, and `volleyd run` needs it as a local branch. Before `volleyd run` (§5):
+  ```sh
+  git -C "$TEST_REPO" fetch origin
+  git -C "$TEST_REPO" branch --track release/<yyyy-mm-dd>-smoke origin/release/<yyyy-mm-dd>-smoke
+  ```
 - [ ] This repo at the release head, with `bun install` clean.
+- [ ] **Step 0: the skills are this release's.** An older `~/.claude/skills/volley-issues` (the
+  v0.1 skill knows only the legacy cmux + `volley wait` path) makes the coordinator ignore
+  volleyd. From the repo root, install all three skills (each installer is idempotent and
+  replaces a stale copy, keeping a backup of a non-symlink one), then check:
+  ```sh
+  bash packages/volley-issues/scripts/install.sh
+  bash packages/volley-skill/scripts/install.sh
+  bash packages/volley-wait/scripts/install.sh
+  bash packages/volley-issues/scripts/install.sh --check   # "installed 0.2, repo 0.2", exit 0
+  ```
+  `--check` changes nothing and exits 1 when the installed `/volley-issues` is missing or older
+  than this checkout's (`version:` in its `SKILL.md` frontmatter).
 - [ ] **The flags this smoke needs exist in this build.** Broker auth for volleyd
   (`volley auth init --volleyd-file`, `$VOLLEYD_HOME/broker.json`) and the Desk's LAN flag
   (`volley dash --host <addr>`) land in separate fixes for this release. From the repo root:
@@ -217,10 +236,33 @@ hard-code your everyday broker's credentials) are left alone.
       "command": "bun",
       "args": ["run", "$VOLLEY_REPO/packages/volley-mcp/src/index.ts"],
       "env": { "VOLLEY_BROKER_URL": "$VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE": "default",
+               "VOLLEY_AGENT_ID": "coordinator",
                "VOLLEY_AUTH_USERNAME": "coordinator", "VOLLEY_AUTH_PASSWORD": "$VOLLEY_AUTH_PASSWORD" } } } }
   EOF
   )
+  grep -c '"VOLLEY_AGENT_ID": "coordinator"' "$SMOKE/mcp.json"   # 1
   ```
+  `VOLLEY_AGENT_ID` is the agent-id **prefix**: the MCP server appends a fresh `-xxxx` at every
+  start, so the session registers as `coordinator-xxxx`. Without it the id is named after the
+  working directory (`<test-repo>-xxxx`), which reads as just another agent, while every later
+  check here (`volley list`, the `--owner` you pass to `volleyd run`, the Desk's owner chip and
+  `★ yours`) expects the `coordinator-` id. The smoke broker carries no other traffic, so
+  `VOLLEY_NAMESPACE` stays `default`; on a shared broker, give the smoke its own namespace here
+  and in the wave file's `namespace:`.
+- [ ] **First-run browser prompt.** When it finds Chrome, Claude Code asks once per user profile
+  whether to use Claude in Chrome, and waits for a key, so an unattended start (this
+  coordinator, or an agent volleyd spawns under the same profile) hangs on it. It is asked while
+  `claudeInChromeDefaultEnabled` is unset in the profile's `~/.claude.json`
+  (`$CLAUDE_CONFIG_DIR/.claude.json` with a custom config dir); answering records the choice
+  there. Check, and if it prints `null`, answer it
+  once in an interactive `claude` (or set *Claude in Chrome → Enabled by default* in `/config`),
+  then quit:
+  ```sh
+  bun -e 'console.log(require(`${process.env.HOME}/.claude.json`).claudeInChromeDefaultEnabled ?? null)'
+  # true or false, not null
+  ```
+  Passing `--no-chrome` to `claude` also skips it, for that session only. Do the same on the box
+  for the user its agents run as.
 - [ ] Start the coordinator session in the test repo, from a terminal that has the smoke block
   and the `VOLLEY_AUTH_*` exports above:
   ```sh

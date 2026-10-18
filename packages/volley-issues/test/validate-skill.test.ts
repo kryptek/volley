@@ -1,8 +1,13 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   REQUIRED_SECTIONS,
   REQUIRED_VOLLEYD_PATH,
+  SKILL_VERSION,
   parseSimpleYaml,
   splitFrontmatter,
   validateFrontmatter,
@@ -16,6 +21,7 @@ const GOOD_FRONTMATTER = `---
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents coordinated via Volley
 user_invocable: true
+version: 0.2
 ---
 `;
 
@@ -53,12 +59,21 @@ describe("validateFrontmatter", () => {
     expect(validateFrontmatter(GOOD_FRONTMATTER).ok).toBe(true);
   });
   it("rejects wrong name", () => {
-    const bad = "---\nname: not-volley-issues\ndescription: x\nuser_invocable: true\n---\n";
+    const bad =
+      "---\nname: not-volley-issues\ndescription: x\nuser_invocable: true\nversion: 0.2\n---\n";
     expect(validateFrontmatter(bad).errors.join(" ")).toContain('name must be "volley-issues"');
   });
   it("rejects user_invocable: false", () => {
     const bad = "---\nname: volley-issues\ndescription: x\nuser_invocable: false\n---\n";
     expect(validateFrontmatter(bad).errors.join(" ")).toContain("user_invocable must be true");
+  });
+  it("rejects a missing or different version", () => {
+    const missing = GOOD_FRONTMATTER.replace("version: 0.2\n", "");
+    expect(validateFrontmatter(missing).errors.join(" ")).toContain(
+      `version must be "${SKILL_VERSION}"`,
+    );
+    const old = GOOD_FRONTMATTER.replace("version: 0.2", "version: 0.1");
+    expect(validateFrontmatter(old).errors.join(" ")).toContain("version must be");
   });
   it("rejects empty description", () => {
     const bad = "---\nname: volley-issues\ndescription: \nuser_invocable: true\n---\n";
@@ -126,5 +141,78 @@ describe("validateSkill (end-to-end)", () => {
   });
   it("accepts the shipped SKILL.md", () => {
     expect(validateSkill(SHIPPED).errors).toEqual([]);
+  });
+});
+
+describe("skill version", () => {
+  it("the shipped SKILL.md declares version: 0.2", () => {
+    expect(SKILL_VERSION).toBe("0.2");
+    const { frontmatter } = splitFrontmatter(SHIPPED);
+    expect(frontmatter).toMatch(/^version: 0\.2$/m);
+  });
+});
+
+describe("install.sh --check", () => {
+  const INSTALL = fileURLToPath(new URL("../scripts/install.sh", import.meta.url));
+  const SKILL_DIR = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+  const homes: string[] = [];
+  afterAll(() => {
+    for (const h of homes) rmSync(h, { recursive: true, force: true });
+  });
+
+  /** A throwaway $HOME, optionally with an installed copy of the skill at the given version. */
+  function home(installed?: string | "symlink"): string {
+    const h = mkdtempSync(join(tmpdir(), "volley-issues-home-"));
+    homes.push(h);
+    const skills = join(h, ".claude", "skills");
+    mkdirSync(skills, { recursive: true });
+    if (installed === "symlink") symlinkSync(SKILL_DIR, join(skills, "volley-issues"));
+    else if (installed !== undefined) {
+      const dir = join(skills, "volley-issues");
+      mkdirSync(dir);
+      const fm = installed === "" ? "" : `version: ${installed}\n`;
+      writeFileSync(join(dir, "SKILL.md"), `---\nname: volley-issues\n${fm}---\n# old\n`);
+    }
+    return h;
+  }
+  const check = (h: string) =>
+    spawnSync("bash", [INSTALL, "--check"], {
+      encoding: "utf-8",
+      env: { ...process.env, HOME: h },
+    });
+
+  it("exits 1 against an installed copy declaring version: 0.1, printing both versions", () => {
+    const r = check(home("0.1"));
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain("installed 0.1");
+    expect(r.stdout + r.stderr).toContain(`repo ${SKILL_VERSION}`);
+  });
+
+  it("exits 1 against a v0.1 copy with no version field, and when nothing is installed", () => {
+    expect(check(home("")).status).toBe(1);
+    expect(check(home()).status).toBe(1);
+  });
+
+  it("exits 0 when the installed copy is this repo's skill, and never changes anything", () => {
+    const h = home("symlink");
+    const r = check(h);
+    expect(r.stdout + r.stderr).toContain(`installed ${SKILL_VERSION}`);
+    expect(r.status).toBe(0);
+    const old = home("0.1");
+    check(old);
+    const kept = readFileSync(join(old, ".claude/skills/volley-issues/SKILL.md"), "utf8");
+    expect(kept).toContain("version: 0.1");
+  });
+
+  it("prints the installed and repo versions on a plain install", () => {
+    const h = home("0.1");
+    const r = spawnSync("bash", [INSTALL], {
+      encoding: "utf-8",
+      env: { ...process.env, HOME: h },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("installed 0.1");
+    expect(r.stdout).toContain(`repo ${SKILL_VERSION}`);
+    expect(check(h).status).toBe(0);
   });
 });

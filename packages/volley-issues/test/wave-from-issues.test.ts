@@ -227,6 +227,65 @@ describe("waveFromIssues", () => {
   });
 });
 
+describe("task ids from title tags", () => {
+  const TAGGED: IssueInput[] = [
+    { number: 68, title: "O0: onboarding groundwork", body: "Depends on: none" },
+    { number: 70, title: "T3b — fence follow-up", body: "Depends on: #68" },
+    { number: 71, title: "D10 - desk polish", body: "Depends on: #68, #70" },
+    { number: 72, title: "Untagged chore", body: "Depends on: #71" },
+  ];
+
+  it("uses the title's task tag, keeping its case", () => {
+    expect(taskIdFor(68, "O0: onboarding groundwork")).toBe("O0");
+    expect(taskIdFor(70, "T3b — fence follow-up")).toBe("T3b");
+    expect(taskIdFor(71, "D10 - desk polish")).toBe("D10");
+    expect(taskIdFor(73, "ABC123:no space")).toBe("ABC123");
+  });
+
+  it("falls back to i<N> for a title without a tag", () => {
+    expect(taskIdFor(72, "Untagged chore")).toBe("i72");
+    expect(taskIdFor(74, "T4 without a separator")).toBe("i74");
+    expect(taskIdFor(75, "fix: T4 lower-case prefix")).toBe("i75");
+    expect(taskIdFor(76, "ABCD1: tag too long")).toBe("i76");
+    expect(taskIdFor(77, "")).toBe("i77");
+    expect(taskIdFor(78)).toBe("i78");
+  });
+
+  it("names tasks by tag and resolves after: through the same mapping", () => {
+    const { yaml } = waveFromIssues(TAGGED, OPTS);
+    expect(yaml).toContain('  O0:\n    issue: 68\n    title: "O0: onboarding groundwork"\n');
+    expect(yaml).toContain("  T3b:\n    issue: 70\n");
+    expect(yaml).toContain("    after: [O0]\n");
+    expect(yaml).toContain("  D10:\n    issue: 71\n");
+    expect(yaml).toContain("    after: [O0, T3b]\n");
+    expect(yaml).toContain("  i72:\n    issue: 72\n");
+    expect(yaml).toContain("    after: [D10]\n");
+  });
+
+  it("output with tagged ids passes volleyd validate", () => {
+    const r = volleydValidate(waveFromIssues(TAGGED, OPTS).yaml);
+    expect(r.out).toContain("4 task(s), critical path 4");
+    expect(r.code).toBe(0);
+  });
+
+  it("errors on a tag used by two issues, naming both", () => {
+    const dup: IssueInput[] = [
+      { number: 80, title: "O1: first", body: "" },
+      { number: 81, title: "O1 — second", body: "" },
+    ];
+    expect(() => waveFromIssues(dup, OPTS)).toThrow(/task id 'O1'.*#80.*#81/);
+  });
+
+  it("errors when a tag collides with another issue's fallback id, ignoring case", () => {
+    // volleyd rejects task ids that differ only in case, so the helper must not emit them.
+    const clash: IssueInput[] = [
+      { number: 90, title: "Untagged", body: "" },
+      { number: 91, title: "I90: tagged like a fallback", body: "" },
+    ];
+    expect(() => waveFromIssues(clash, OPTS)).toThrow(/#90.*#91/);
+  });
+});
+
 describe("wave-from-issues CLI", () => {
   it("reads issues JSON and writes the wave file", () => {
     const input = join(tmp, "issues.json");

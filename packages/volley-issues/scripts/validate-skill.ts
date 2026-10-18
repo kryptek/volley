@@ -5,6 +5,12 @@ export interface ValidationResult {
   errors: string[];
 }
 
+/**
+ * The skill's frontmatter `version:`. `scripts/install.sh --check` compares an installed copy's
+ * version with this repo's, so bump it whenever the dispatch flow changes incompatibly.
+ */
+export const SKILL_VERSION = "0.2";
+
 /** Major section headings that must be present in the SKILL.md body. */
 export const REQUIRED_SECTIONS = [
   "## Prerequisites",
@@ -52,7 +58,7 @@ export function splitFrontmatter(source: string): { frontmatter: string | null; 
   return { frontmatter: source.slice(4, closeIdx), body: source.slice(closeIdx + 5) };
 }
 
-/** Tiny YAML parser — same scope as volley-skill's: 3 fields, no nesting. */
+/** Tiny YAML parser — same scope as volley-skill's: flat scalar fields, no nesting. */
 export function parseSimpleYaml(yaml: string): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (const rawLine of yaml.split("\n")) {
@@ -91,6 +97,11 @@ export function validateFrontmatter(source: string): ValidationResult {
   }
   if (parsed.user_invocable !== true) {
     errors.push("frontmatter.user_invocable must be true");
+  }
+  if (parsed.version !== SKILL_VERSION) {
+    errors.push(
+      `frontmatter.version must be "${SKILL_VERSION}", got ${JSON.stringify(parsed.version)}`,
+    );
   }
   return { ok: errors.length === 0, errors };
 }
