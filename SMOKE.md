@@ -2,6 +2,8 @@
 
 This file collects feature-level smoke recipes that span multiple packages — the per-package SMOKE.md files under `packages/*/SMOKE.md` cover narrower scopes (volley-issues dispatch, volley-skill / volley-wait skill installation, etc.). Add a new section per plan that ships a release tag.
 
+**v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+
 ---
 
 ## Plan 9 — `volley notify` (v0.1.3)
@@ -16,6 +18,11 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
    lsof -nP -iTCP:9001 -sTCP:LISTEN
    ```
    If `:9001` isn't listening, see the root [README §2](README.md) — the bundled `examples/mosquitto-localhost.conf` configures it.
+- [ ] **Broker credentials.** Since v0.2 the bundled config refuses anonymous clients. In every terminal below, export the `coordinator` identity that `volley auth init` printed (the CLI reads it from the environment; `mosquitto_pub` needs it as flags):
+   ```sh
+   export VOLLEY_AUTH_USERNAME=coordinator VOLLEY_AUTH_PASSWORD='<coordinator password>'
+   ```
+   On a broker that still allows anonymous clients, skip this and drop the `-u`/`-P` flags in Cleanup.
 - [ ] `brew install terminal-notifier` (macOS-only; needed for the desktop surface — webhook + bell work without it).
 - [ ] Repo at `v0.1.0-plan9` (or HEAD with Plan 9 phases 1–4 merged); `bun install` clean.
 - [ ] In one terminal: a tiny netcat-based webhook capture listener:
@@ -58,11 +65,11 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 
 ### Dashboard surface — browser notifications
 
-- [ ] Start the dashboard:
+- [ ] Start the dashboard. These notifications live in the legacy dashboard (`volley dash` opens the Desk since v0.2):
    ```sh
-   bun run packages/volley-cli/src/cli.ts dash --no-open
+   bun run packages/volley-cli/src/cli.ts dash --legacy --no-open
    ```
-   Open http://localhost:5173/ in a browser (or whatever port Vite picked).
+   Open http://localhost:5173/ in a browser (or whatever port Vite picked). On an auth broker, sign in as `desk` with the password `volley auth init` printed.
 
 - [ ] In the top bar (right side, near the broker LED), click the bell icon. Confirm the popover renders with:
    - "Browser notifications" switch
@@ -101,10 +108,10 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 - [ ] SIGINT the dashboard, the netcat listener, and (if still running) the notify loop.
 - [ ] Clear retained registry slots from the smoke run:
    ```sh
-   mosquitto_pub -t "volley/_system/registry/smoke-alpha" -n -r
-   mosquitto_pub -t "volley/default/smoke-alpha/status" -n -r
-   mosquitto_pub -t "volley/_system/registry/smoke-beta" -n -r
-   mosquitto_pub -t "volley/default/smoke-beta/status" -n -r
+   mosquitto_pub -u coordinator -P "$VOLLEY_AUTH_PASSWORD" -t "volley/_system/registry/smoke-alpha" -n -r
+   mosquitto_pub -u coordinator -P "$VOLLEY_AUTH_PASSWORD" -t "volley/default/smoke-alpha/status" -n -r
+   mosquitto_pub -u coordinator -P "$VOLLEY_AUTH_PASSWORD" -t "volley/_system/registry/smoke-beta" -n -r
+   mosquitto_pub -u coordinator -P "$VOLLEY_AUTH_PASSWORD" -t "volley/default/smoke-beta/status" -n -r
    ```
 
 ### Results

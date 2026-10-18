@@ -138,6 +138,48 @@ export const MOSQUITTO_ETC_DIRS: readonly string[] = [
 ];
 
 /**
+ * `$VOLLEY_AUTH_DIR/coordinator.json` (written by `volley auth init --coordinator-file`); without
+ * VOLLEY_AUTH_DIR, the CLI's default `<mosquitto etc dir>/volley/coordinator.json`.
+ */
+export function coordinatorAuthPath(env: Record<string, string | undefined>): string | null {
+  if (env.VOLLEY_AUTH_DIR !== undefined) return join(env.VOLLEY_AUTH_DIR, "coordinator.json");
+  const etc = MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
+  return etc === undefined ? null : join(etc, "volley", "coordinator.json");
+}
+
+/**
+ * The coordinator's credentials from `coordinatorAuthPath(env)`, or null when there is no such
+ * file. An unreadable or malformed file throws (never a silent anonymous connect).
+ */
+export function readCoordinatorAuth(env: Record<string, string | undefined>): BrokerAuth | null {
+  const path = coordinatorAuthPath(env);
+  if (path === null || !existsSync(path)) return null;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (e) {
+    throw new Error(`${path}: cannot read coordinator credentials — ${(e as Error).message}`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${path}: malformed coordinator credentials — ${(e as Error).message}`);
+  }
+  const c = raw as { username?: unknown; password?: unknown } | null;
+  if (
+    typeof c !== "object" ||
+    c === null ||
+    typeof c.username !== "string" ||
+    c.username === "" ||
+    typeof c.password !== "string"
+  ) {
+    throw new Error(`${path}: must hold a non-empty string username and a string password`);
+  }
+  return { username: c.username, password: c.password };
+}
+
+/**
  * Credentials from `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. A username alone is
  * allowed (some brokers check only the username); a password alone is a configuration error.
  */

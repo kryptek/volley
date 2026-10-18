@@ -16,11 +16,12 @@
  */
 import { Search, X } from "lucide-react";
 import { type ChangeEvent, type KeyboardEvent, useEffect, useRef } from "react";
+import pkg from "../../package.json";
 import { NotifySettings } from "./NotifySettings";
 import { Input } from "./ui/input";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
-const VOLLEY_VERSION = "v0.1.0";
+const VOLLEY_VERSION = `v${pkg.version}`;
 
 export interface TopBarProps {
   namespaces?: string[] | undefined;

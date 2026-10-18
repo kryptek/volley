@@ -106,7 +106,7 @@ export interface DeskContextValue {
 /** localStorage key for the Desk's broker credentials (`{ username, password }`). */
 export const CREDENTIALS_STORAGE_KEY = "volley-desk:broker-auth";
 
-/** The agent-id grammar (SPEC §3, `volley-mcp/topics` `ID_PATTERN`): the username is the sender id. */
+/** The agent-id grammar (SPEC §2.2, `volley-mcp/topics` `ID_PATTERN`): the username is the sender id. */
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 /**

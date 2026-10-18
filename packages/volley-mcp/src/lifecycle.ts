@@ -6,7 +6,7 @@ import { volRegister } from "./tools/register";
 import { buildTopic } from "./topics";
 
 /**
- * Start the Volley server lifecycle (design doc §5.1):
+ * Start the Volley server lifecycle (SPEC §5 states, §7 LWT):
  *  1. connect to the broker with the LWT pre-armed (retained status: reaped),
  *  2. publish the initial retained status: spawning,
  *  3. auto-register with default capabilities=[] and cwd=process.cwd() so the

@@ -461,9 +461,18 @@ describe("config.example.yaml", () => {
     expect(load(example).effective()).toEqual(CONFIG_DEFAULTS);
   });
 
+  it("documents every top-level tunable", () => {
+    for (const key of Object.keys(CONFIG_DEFAULTS))
+      expect(example).toMatch(new RegExp(`^# ${key}:`, "m"));
+  });
+
   it("uncommented, it is valid, documents the real defaults, and defines the example pools", () => {
     const eff = load(uncommented).effective();
-    expect({ ...eff, lease_pools: {} }).toEqual(CONFIG_DEFAULTS);
+    expect({ ...eff, lease_pools: {}, hosts: {} }).toEqual(CONFIG_DEFAULTS);
+    expect(eff.hosts.buildbox).toMatchObject({
+      target: "me@buildbox",
+      repo: "/home/me/src/myrepo",
+    });
     expect(Object.keys(eff.lease_pools)).toEqual(["backend-it", "build", "browser"]);
     expect(eff.lease_pools["backend-it"]).toMatchObject({ capacity: 3, ttl_s: 3600 });
     expect(eff.lease_pools.build?.match).toEqual(["npm run build", "vite build"]);

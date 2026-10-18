@@ -13,7 +13,7 @@ export interface QueryResult {
   last_seen: string | null;
 }
 
-/** vol_query — fetch the current retained value at an exact topic (design doc §5.2). */
+/** vol_query — fetch the current retained value at an exact topic. */
 export async function volQuery(state: ServerState, input: QueryInput): Promise<QueryResult> {
   const raw = await state.broker.queryRetained(input.topic, 1000);
   if (raw === null) {

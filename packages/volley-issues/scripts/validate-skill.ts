@@ -18,7 +18,7 @@ export const REQUIRED_SECTIONS = [
   "## Coordinator loop",
   "## Release branch merge",
   "## Cleanup",
-  // Conformance is the audit-trail anchor mapping SPEC §7.5 clauses to spawn-brief
+  // Conformance is the audit-trail anchor mapping SPEC §11 clauses to spawn-brief
   // behaviors. Required so a future editor can't accidentally drop the "yes, we
   // ship a conforming Volley agent" claim without the validator catching it.
   "## Conformance with Volley v0.1",

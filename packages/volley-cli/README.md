@@ -187,7 +187,14 @@ volley lease status                                        # every pool: holders
   a courtesy to the machine, never a reason an agent's build cannot run. While queued it checks
   every 30 s: if volleyd went away, the pool was removed (or dropped the request), or volleyd never
   queued the request after 3 re-sends, it prints a `WARNING` and runs the command unleased.
-  `acquire` fails (exit `1`) instead.
+  `acquire` fails (exit `1`) instead. **A refused login is not an outage**: when the broker answers
+  but rejects the credentials (`AUTH_FAILED`), `run` exits `1` without running the command, so a
+  credentials mistake surfaces instead of silently defeating the pool.
+- **Credentials**: `--username`/`--password`, else `<--project-dir or cwd>/.volley/agent.json`'s
+  `broker` block, else `VOLLEY_AUTH_*`. With `--coordinator` (what the coordinator-mode hook passes)
+  it resolves them as the coordinator hooks do: `VOLLEY_AUTH_*`, else
+  `$VOLLEY_AUTH_DIR/coordinator.json` (from `volley auth init --coordinator-file`), and never reads
+  an identity file. A malformed `coordinator.json` is an error, not an anonymous connect.
 - The [volley-hooks](../volley-hooks/README.md) PreToolUse lease hook wraps matching `Bash`
   commands in `volley lease run` automatically.
 

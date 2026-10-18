@@ -11,12 +11,13 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release.** This package has the wave file, journal, reducer, scheduler, fence,
-> config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop and
-> the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
-> admission, and it spawns each admitted task's implementer (worktree, identity, cmux launch,
-> hook-signal verification, per-worktree lock, retire). The reviewer/fixup pipeline stages and
-> recovery come in later tasks of the volleyd epic.
+> **Status: pre-release (v0.2.0).** This package has the wave file, journal, reducer, scheduler,
+> fence, config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop
+> and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
+> admission. It spawns each admitted task's agents (worktree, identity, cmux launch, hook-signal
+> verification, per-worktree lock, retire), drives them through the review pipeline to a
+> merge-ready gate and notices the merge, recovers stalled agents, applies mid-wave plan changes,
+> publishes screen tails, and can run agents on a second machine over ssh + tmux.
 
 ---
 
@@ -274,6 +275,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `op` | Fields | `result` |
 |---|---|---|
 | `run` | `wave_yaml`, `source?` | the new wave state |
+| `diff` | `wave`, `wave_yaml`, `source?` | the structural diff between the wave's current plan and the file, plus `plan: { version, diff, unchanged }`; submits nothing |
 | `status` | `wave?` | one wave state, or `{ waves: [...] }` |
 | `config_get` | `path?`, `wave?` | the value (the full retained payload when neither is given) |
 | `config_set` | `patch`, `by` (SPEC §4.6.4) | `{ version }`, plus `applied` / `rejected: [{ path, reason }]` |
@@ -284,6 +286,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
+| `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack

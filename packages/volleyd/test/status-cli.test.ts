@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import pkg from "../package.json";
 import { patchFor } from "../src/commands/config";
 import {
   findBun,
@@ -46,7 +47,7 @@ describe("volleyd (top level)", () => {
     ]) {
       expect(help.stdout).toContain(`  ${cmd}`);
     }
-    expect((await runCli(["--version"])).stdout).toMatch(/^\d+\.\d+\.\d+/);
+    expect((await runCli(["--version"])).stdout.trim()).toBe(pkg.version);
     const bad = await runCli(["frobnicate"]);
     expect(bad.exitCode).toBe(2);
     expect(bad.stderr).toContain("unknown command: frobnicate");

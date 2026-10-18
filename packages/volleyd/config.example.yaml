@@ -42,3 +42,17 @@
 # worktree_root: ~/.volley/worktrees
 # spawn_timeout_s: 120
 # wake_grace_s: 120
+# screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+
+# Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
+# over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and
+# must be absolute. See README "Remote hosts (ssh + tmux)".
+# hosts:
+#   buildbox:
+#     target: me@buildbox          # ssh destination ([user@]host or an ssh config alias)
+#     repo: /home/me/src/myrepo    # the wave repo's clone there
+#     volley_dir: /home/me/src/volley
+#     worktree_root: /home/me/src/.volley-worktrees   # default: .volley-worktrees beside repo
+#     tunnel:
+#       remote_port: 21883         # remote 127.0.0.1 port that reaches the broker
+#       supervise: true            # volleyd keeps `ssh -N -R` up itself
