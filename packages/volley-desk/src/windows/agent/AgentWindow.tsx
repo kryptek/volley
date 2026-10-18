@@ -2,8 +2,8 @@
  * The agent window, ported from the prototype `AgentWindow`: a React Bits
  * `StatusMark` (status + progress), `task #issue`, the wave chip in the wave
  * accent and the role chip in the title; the task title from the wave `spec`;
- * the pipeline; the latest narration (`payload.msg`, plain text — effects
- * land in D7); attention-line (D3) and steering-panel (D4) slots; the Volley
+ * the pipeline; the latest narration (`payload.msg`, with the look's
+ * narration effect, D7); attention-line (D3) and steering-panel (D4) slots; the Volley
  * feed and Terminal tabs; and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`.
@@ -16,6 +16,7 @@ import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMar
 import { UNASSIGNED } from "../../store/reducer";
 import type { AgentView, FeedEntry, Role, WaveView } from "../../store/types";
 import { Feed, feedChannel } from "./Feed";
+import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
 import "../../styles/agent.css";
@@ -47,6 +48,8 @@ export interface AgentWindowProps {
   frame: AgentFrameProps;
   /** Clock override (tests); otherwise the window ticks every 2 s. */
   now?: number;
+  /** Narration effect from the look (D7); plain by default. */
+  narrationFx?: NarrationFx;
   /** Attention line under the narration (D3). */
   attention?: ReactNode;
   /** Chat glyph: opens the steering panel (D4). */
@@ -112,6 +115,7 @@ export function AgentWindow({
   accent: waveAccent,
   frame,
   now: fixedNow,
+  narrationFx = "plain",
   attention,
   onChat,
   steerOpen = false,
@@ -196,13 +200,7 @@ export function AgentWindow({
     >
       {spec?.title && <div className="a-title">{spec.title}</div>}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
-      <div className="narr" aria-live="polite">
-        {agent.narration ? (
-          <span>{agent.narration}</span>
-        ) : (
-          <span className="dim">no narration yet</span>
-        )}
-      </div>
+      <Narration text={agent.narration} fx={narrationFx} />
       {attention}
       <div className="tabs" role="tablist">
         <button

@@ -36,9 +36,8 @@ function readLook(): Record<string, unknown> {
 
 /**
  * Auto-arrange ON/OFF, persisted per browser; a missing or corrupt entry means
- * ON. The value is per hook instance: App owns the only instance, and D7's
- * dock and appearance settings must share App's `[on, set]` (or lift this into
- * their `useLook`) rather than call it again.
+ * ON. The value is per hook instance. The App reads the setting through
+ * `useLook` (D7), which owns the whole entry; don't use both in one page.
  */
 export function useAutoArrangeSetting(): [boolean, (on: boolean) => void] {
   const [on, setOn] = useState(() => readLook().autoArrange !== false);

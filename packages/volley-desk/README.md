@@ -2,7 +2,7 @@
 
 The Desk: an infinite canvas of live wave and agent windows, driven straight off the Volley MQTT topics. There's no backend: the browser subscribes to the broker over WebSocket. The approved interactive prototype is the visual and interaction spec, and this package ports it piece by piece.
 
-**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, and arrange & fit. The backgrounds, the dock, steering and settings come in later tasks. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
+**Status:** foundation only. The package currently ships the canvas (pan and zoom), the window frame, the MQTT store, demo mode, the wave, agent and coordinators windows, attention tiers, arrange & fit, settings, and the look (backgrounds, window styles, effects, tethers, the dock). Steering comes in a later task. `volley dash` still opens the classic dashboard (`packages/volley-dash`) until the cutover.
 
 ## Run it
 
@@ -41,7 +41,8 @@ src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-colu
                             rows × columns chosen for the largest zoom (port of the prototype)
 src/layout/useAutoArrange.ts auto-arrange triggers and the persisted ON/OFF setting
 src/canvas/Frame.tsx        window frame: drag, focus (useFocusOrder), win--born (4 s), onSize,
-                            chromes glass | solid, attention wrapper slot
+                            chromes glass | liquid | spotlight | glow | solid, Needs-you
+                            effect pulse | electric | star (attnStyle; wrapAttention overrides)
 src/store/mqtt-client.ts    mqtt.js wrapper (port of volley-dash): subscribes to every Desk topic,
                             passes cleared retained topics through as envelope null
 src/store/reducer.ts        pure reducer → { waves, agents, coordinators, config, leases, admission }
@@ -62,8 +63,22 @@ src/styles/attention.css    pulse (default Needs-you effect), banners, coordinat
 src/settings/               settings modal (wave gear): rows built from spec/schemas/config.schema.json
                             (schemaRows), config_set requests + acks (configTransport), SettingsModal
 src/styles/settings.css     settings modal rules
+src/look/useLook.ts         the look, persisted in localStorage `volley-desk-look`: bg, dim,
+                            chrome, attn, narr, tethers, autoArrange (defaults = prototype LOOK0)
+src/look/backgrounds.ts     all 63 free React Bits backgrounds + None, each lazy (its own chunk)
+src/look/Background.tsx     background layer: error boundary → no-WebGL message, bg-dim overlay
+src/look/Appearance.tsx     Appearance panel: background search + list, dim, window style,
+                            auto-arrange, Needs-you effect, narration effect
+src/look/Tethers.tsx        SVG cubic per agent, wave window → agent, in the wave accent
+src/look/DeskDock.tsx       React Bits Dock (coordinators + needs-you badge, appearance, tethers,
+                            arrange & fit, auto-arrange, zoom in/out) and SwipeToast notices
+src/windows/agent/Narration narration effect: DecryptedText | ShinyText | plain
+src/styles/look.css         background, tethers, chromes, dock and Appearance rules
 src/rb/                     React Bits components (installed from the shadcn registry, see below)
 scripts/check-react-bits.ts allow-list check, run in CI
+scripts/sync-react-bits-backgrounds.ts
+                            diffs reactbits.dev/llms.txt "Backgrounds" against the registry;
+                            CI runs it as an optional (warning) step
 ```
 
 ### Subscriptions
@@ -105,6 +120,20 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 |---|---|---|
 | StatusMark | `bunx --bun shadcn@latest add @react-bits/StatusMark-TS-CSS --path src/rb/StatusMark --yes` | agent window title (`src/windows/agent/AgentWindow.tsx`) |
 | ElasticSlider | `bunx --bun shadcn@latest add @react-bits/ElasticSlider-TS-CSS --path src/rb/ElasticSlider --yes` | settings rows (`src/settings/SettingsModal.tsx`) |
+| Dock | `bunx --bun shadcn@latest add @react-bits/Dock-TS-CSS --path src/rb/Dock --yes` | dock (`src/look/DeskDock.tsx`) |
+| SwipeToast | `bunx --bun shadcn@latest add @react-bits/SwipeToast-TS-CSS --path src/rb/SwipeToast --yes` | notices (`src/look/DeskDock.tsx`) |
+| GlassSurface | `bunx --bun shadcn@latest add @react-bits/GlassSurface-TS-CSS --path src/rb/GlassSurface --yes` | liquid-glass chrome (`src/canvas/Frame.tsx`) |
+| SpotlightCard | `bunx --bun shadcn@latest add @react-bits/SpotlightCard-TS-CSS --path src/rb/SpotlightCard --yes` | spotlight chrome (`src/canvas/Frame.tsx`) |
+| BorderGlow | `bunx --bun shadcn@latest add @react-bits/BorderGlow-TS-CSS --path src/rb/BorderGlow --yes` | border-glow chrome (`src/canvas/Frame.tsx`) |
+| ElectricBorder | `bunx --bun shadcn@latest add @react-bits/ElectricBorder-TS-CSS --path src/rb/ElectricBorder --yes` | electric Needs-you effect (`src/canvas/Frame.tsx`) |
+| StarBorder | `bunx --bun shadcn@latest add @react-bits/StarBorder-TS-CSS --path src/rb/StarBorder --yes` | star Needs-you effect (`src/canvas/Frame.tsx`) |
+| DecryptedText | `bunx --bun shadcn@latest add @react-bits/DecryptedText-TS-CSS --path src/rb/DecryptedText --yes` | decrypt narration (`src/windows/agent/Narration.tsx`) |
+| ShinyText | `bunx --bun shadcn@latest add @react-bits/ShinyText-TS-CSS --path src/rb/ShinyText --yes` | shiny narration (`src/windows/agent/Narration.tsx`) |
+| every background (63, the list in `src/look/backgrounds.ts`) | `bunx --bun shadcn@latest add @react-bits/<Name>-TS-CSS --path src/rb/<Name> --yes` | background picker (`src/look/backgrounds.ts`) |
+
+**Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome ignores `src/rb/` (`biome.json`). The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
+
+**Backgrounds stay complete.** `bun run sync:react-bits-backgrounds` compares the `## Backgrounds` section of https://reactbits.dev/llms.txt with `src/look/backgrounds.ts` and exits 1 when React Bits lists one the picker lacks (CI shows it as a warning). To add one: install it, add it to the allow-list and to `BACKGROUNDS` (components with a required prop get a generated input in `p`, as `GridDistortion.imageSrc` does).
 
 **Allow-list.** Only the free components that the approved prototype uses are allowed. The list is in `scripts/check-react-bits.ts` (`REACT_BITS_ALLOW_LIST`). `bun run check:react-bits` fails when any entry under `src/rb/` is not on it, and CI runs it as the *React Bits allow-list* job. Pro components are never allowed.
 
