@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by `volleyd install`. Edit the template in packages/volleyd/launchd/, not this file. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{LABEL}}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{BUN}}</string>
+    <string>{{CLI}}</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VOLLEYD_HOME</key>
+    <string>{{VOLLEYD_HOME}}</string>
+    <key>VOLLEY_BROKER_URL</key>
+    <string>{{BROKER_URL}}</string>
+    <key>VOLLEY_NAMESPACE</key>
+    <string>{{NAMESPACE}}</string>
+    <key>PATH</key>
+    <string>{{PATH}}</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>{{VOLLEYD_HOME}}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>{{LOG}}</string>
+  <key>StandardErrorPath</key>
+  <string>{{LOG}}</string>
+</dict>
+</plist>

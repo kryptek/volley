@@ -38,17 +38,32 @@ bunx vitest run test/broker.test.ts              # single test file
 bunx vitest run test/broker.test.ts -t 'LWT'     # single test by name pattern
 ```
 
+volleyd (the wave supervisor daemon) has the same per-package shape:
+
+```sh
+cd packages/volleyd
+bun run test                                   # vitest: pure modules + Aedes-backed daemon/control tests
+bun src/cli.ts validate test/fixtures/example.yaml
+VOLLEYD_HOME=$(mktemp -d) VOLLEY_BROKER_URL=mqtt://127.0.0.1:<private-port> bun src/cli.ts daemon
+```
+
 The mosquitto integration test is opt-in because it needs a real broker on `localhost:1883`. Locally: `brew services start mosquitto`. In CI: a docker mosquitto container is started by `.github/workflows/ci.yml` (`test-integration` job). Without `VOLLEY_INTEGRATION=1` the test self-skips.
 
 ## Architecture
 
-**Bun workspace, three packages.** Only `volley-mcp` has source files today; `volley-cli` and `volley-skill` are populated by Plans 3 and 4.
+**Bun workspace.** `volley-mcp` (MCP server), `volley-cli` (CLI), `volley-dash` (dashboard), the skill packages, and `volleyd` (wave supervisor daemon).
 
 **`packages/volley-mcp/` — the reference MCP server.** Strictly layered, single I/O boundary:
 - `broker.ts` is the **only** file that imports `mqtt`. It wraps the client with `connect` (arms LWT), `publish`, `queryRetained` (subscribes to read the retained value at one topic), `subscribeCollect` (collects N messages or until a timeout), `disconnect`, `simulateCrash`.
 - Pure helpers (no I/O, trivially unit-testable): `errors.ts`, `channels.ts` (SPEC §4.1 QoS/retain map), `topics.ts` (id/namespace grammar, topic builders, MQTT filter validation), `envelope.ts`, `config.ts` (env parsing + agent-id generation).
 - `lifecycle.ts` sits on top of the broker: `startLifecycle` publishes initial `spawning` status and arms the LWT; `shutdownLifecycle` publishes a terminal status then DISCONNECTs (the clean DISCONNECT suppresses the LWT).
 - `tools/*.ts` are pure `(state, input) => result` functions; `server.ts` wires them into an MCP `McpServer` with Zod input schemas; `index.ts` is the stdio entry point.
+
+**`packages/volleyd/` — the wave supervisor daemon (pre-release).** Pure core, thin I/O shell:
+- Pure: `wave-file.ts` (YAML → `spec/schemas/wave-file.schema.json` → normalised `Wave`, path-qualified errors), `reducer.ts` (journal events → T1 `wave-state` payload; idempotent by `seq`), `scheduler.ts` (critical-path-ordered `ready`, `admit` under hard ceiling + spawn budget), `fence.ts` (the authority fence over every external command).
+- `exec.ts` is the **only** place a child process is spawned, and it calls the fence first (a test greps for it). Never spawn anywhere else.
+- `journal.ts` (fsync'd JSONL per wave + snapshots), `config-store.ts` (defaults ← `$VOLLEYD_HOME/config.yaml` ← per-wave `config:`; `config_set` validated, journaled in `_system`, hot-applied). Tunable literals live only in `config-defaults.ts` (grep-guard test).
+- `daemon.ts` registers as agent `volleyd`, answers control ops on its mailbox (`control.ts`: mailbox `query` → `ack` with the same `correlation_id`), and publishes retained `volley/_waves/<wave>/state` + the `/events` mirror after every journal append. `cli.ts` + `commands/*.ts` are thin wrappers; later tasks add one line each to the `cli.ts` command table.
 
 **Why Aedes for unit tests.** `test/helpers/aedes-broker.ts` spawns a real in-process MQTT broker on a free port. Every "unit" test exercises the real `mqtt.js` client against real MQTT semantics — retained messages, QoS, LWT — without external dependencies. Mocking the broker would defeat the purpose.
 

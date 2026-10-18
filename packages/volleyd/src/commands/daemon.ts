@@ -1,0 +1,65 @@
+import { parseArgs } from "node:util";
+import { volleydHome } from "../config-store";
+import { resolveTarget } from "../control";
+import { Daemon } from "../daemon";
+import { type CommandArgs, EXIT, type ExitCode } from "../io";
+
+const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>]
+
+Run the supervisor in the foreground until SIGINT/SIGTERM. Exits 1 if the broker connection is
+lost (launchd then restarts it). State lives in $VOLLEYD_HOME (default ~/.volley/volleyd);
+only one daemon may use a home at a time. \`volleyd install\` runs this under launchd instead.
+`;
+
+export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> {
+  let target: ReturnType<typeof resolveTarget>;
+  try {
+    const parsed = parseArgs({
+      args: argv,
+      options: {
+        "broker-url": { type: "string" },
+        namespace: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+      strict: true,
+      allowPositionals: false,
+    });
+    if (parsed.values.help === true) {
+      io.stdout(HELP);
+      return EXIT.OK;
+    }
+    target = resolveTarget(parsed.values, env);
+  } catch (e) {
+    io.stderr(`volleyd daemon: ${e instanceof Error ? e.message : String(e)}\n${HELP}`);
+    return EXIT.USAGE;
+  }
+
+  let d: Daemon;
+  try {
+    d = await Daemon.start({
+      ...target,
+      home: volleydHome(env),
+      log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
+    });
+  } catch (e) {
+    io.stderr(`volleyd daemon: ${e instanceof Error ? e.message : String(e)}\n`);
+    return EXIT.ERROR;
+  }
+  // Run until a signal (clean stop) or until the daemon dies on its own (broker connection lost):
+  // then exit non-zero so launchd's KeepAlive restarts it.
+  let onSignal: () => void = () => {};
+  const signalled = new Promise<"signal">((resolve) => {
+    onSignal = () => resolve("signal");
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+  });
+  const outcome = await Promise.race([signalled, d.closed]);
+  process.off("SIGINT", onSignal);
+  process.off("SIGTERM", onSignal);
+  if (outcome !== "signal") {
+    io.stderr(`volleyd daemon: ${outcome.message}; exiting so the service manager restarts it\n`);
+    return EXIT.ERROR;
+  }
+  await d.stop();
+  return EXIT.OK;
+}
