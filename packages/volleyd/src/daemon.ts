@@ -25,9 +25,11 @@ import {
 import {
   AckTracker,
   KILL_SWITCH_REASON,
+  TASK_ROLES,
   candidates as admissible,
   admissionFor,
   cancelPayload,
+  isTaskRole,
   killSwitchEngaged,
   nextSteer,
   runningAgents,
@@ -53,15 +55,7 @@ import { claimVerdict, guardMutation } from "./ownership";
 import type { WaveRecord } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
-import type {
-  JournalEvent,
-  NewEvent,
-  TaskAgents,
-  TaskId,
-  TunablesPatch,
-  WaveId,
-  WaveState,
-} from "./types";
+import type { JournalEvent, NewEvent, TaskId, TunablesPatch, WaveId, WaveState } from "./types";
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
@@ -398,8 +392,10 @@ export class Daemon {
    */
   private onProgress(agent: string | undefined, raw: string): void {
     if (agent === undefined || agent === DAEMON_AGENT_ID) return;
-    this.lastSeen.set(agent, Date.now());
     const env = parseEnvelope(raw);
+    // A message queued while the daemon was down arrives late: count it from when it was sent.
+    const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
+    this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
@@ -606,10 +602,11 @@ export class Daemon {
       await this.append(wave, r.event);
       const d = log.record.decisions[r.id] as DecisionRecord;
       await this.publishDecision(wave, d);
-      await this.publish(
+      // SPEC §4.1: progress is QoS 0, not retained.
+      await this.broker.publish(
         buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
-        this.envelope("progress", "blocked", attentionPayload(d)),
-        false,
+        JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
+        { qos: 0, retain: false },
       );
       this.log(`opened ${describeDecision(d)}`);
       return d;
@@ -649,9 +646,10 @@ export class Daemon {
     // The next stage's brief: every resolved decision of the task, in opening order. The
     // resolution is already journaled, so a failed write is logged, not reported as a failure.
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);
-    const dir =
-      this.opts.taskDir?.(wave, d.task) ?? join(this.opts.home, "waves", wave, "tasks", d.task);
+    let dir = `the brief for ${wave}/${d.task}`;
     try {
+      dir =
+        this.opts.taskDir?.(wave, d.task) ?? join(this.opts.home, "waves", wave, "tasks", d.task);
       const brief = writeDecisionsFile(dir, renderDecisionsMd(wave, d.task, all));
       return { decision: d, already_resolved: false, brief };
     } catch (e) {
@@ -825,6 +823,8 @@ export class Daemon {
       ok: true,
       defer: this.fetchIssueFiles(first.wave).then((files) =>
         this.serial(async () => {
+          // The daemon may have stopped (and released the home lock) while the fetch ran.
+          if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
           return this.commitSubmit(again.wave, again.owner, files);
@@ -936,9 +936,9 @@ export class Daemon {
 
   /** Overlaps between `wave`'s tasks and the unsettled tasks of every other live wave. */
   private overlaps(wave: WaveId) {
-    const files = (w: WaveId, rec: WaveRecord, settled: boolean) =>
+    const files = (w: WaveId, rec: WaveRecord, unsettledOnly: boolean) =>
       (rec.state?.tasks ?? [])
-        .filter((t) => !settled || (t.stage !== "done" && t.stage !== "cancelled"))
+        .filter((t) => !unsettledOnly || (t.stage !== "done" && t.stage !== "cancelled"))
         .map((t) => ({
           id: t.id,
           files: [
@@ -973,7 +973,7 @@ export class Daemon {
     const decisions: DecisionPayload[] = [...this.waves]
       .filter(([w]) => typeof p.wave !== "string" || w === p.wave)
       .flatMap(([, log]) =>
-        p.all === true ? Object.values(log.record.decisions ?? {}) : openDecisions(log.record),
+        p.all === true ? Object.values(log.record.decisions) : openDecisions(log.record),
       )
       .map(decisionPayload);
     return { ok: true, result: { decisions } };
@@ -988,7 +988,7 @@ export class Daemon {
     const wave =
       typeof p.wave === "string"
         ? p.wave
-        : [...this.waves].find(([, log]) => log.record.decisions?.[id] !== undefined)?.[0];
+        : [...this.waves].find(([, log]) => log.record.decisions[id] !== undefined)?.[0];
     const state = wave !== undefined ? this.waves.get(wave)?.record.state : undefined;
     if (wave === undefined || state == null)
       return {
@@ -1198,7 +1198,12 @@ export class Daemon {
       return { ok: false, error: "steer requires a non-empty payload.text" };
     const refused = guardMutation(w.log.record.state as WaveState, by, "steer");
     if (refused !== null) return { ok: false, error: refused };
-    const role = typeof p.role === "string" ? (p.role as keyof TaskAgents) : undefined;
+    if (p.role !== undefined && (typeof p.role !== "string" || !isTaskRole(p.role)))
+      return {
+        ok: false,
+        error: `unknown role '${String(p.role)}' (one of ${TASK_ROLES.join(", ")})`,
+      };
+    const role = p.role;
     const target = steerTarget(w.log.record, p.task, role);
     if (target === null) {
       return {

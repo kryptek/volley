@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,6 +197,43 @@ tasks:
     release();
     expect((await run).warnings).toHaveLength(1);
     expect(daemon.snapshot("w2")?.tasks.map((t) => t.id)).toEqual(["Y"]);
+  });
+
+  it("a run whose issue fetch finishes after stop() journals nothing", async () => {
+    await daemon.stop();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let fetched!: () => void;
+    const reached = new Promise<void>((r) => {
+      fetched = r;
+    });
+    const late = await Daemon.start({
+      brokerUrl: broker.url,
+      namespace: NS,
+      home,
+      tickMs: 0,
+      protocolVersion: 4,
+      issueBody: async (_repo, issue) => {
+        fetched();
+        await gate;
+        return BODIES[issue] ?? null;
+      },
+    });
+    void client.request("run", { wave_yaml: wave("w4", 2) }, { timeoutMs: 1000 }).catch(() => {});
+    await reached;
+    await late.stop();
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(join(home, "waves", "w4"))).toBe(false);
+    daemon = await Daemon.start({
+      brokerUrl: broker.url,
+      namespace: NS,
+      home,
+      tickMs: 0,
+      protocolVersion: 4,
+    });
   });
 
   it("no overlap → no warning and nothing journaled", async () => {

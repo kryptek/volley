@@ -356,6 +356,23 @@ describe("steer", () => {
       (await client.request("steer", { wave: WAVE, task: "B", text: "x", by: "coord-a" })).error,
     ).toContain("task 'B' has no agent");
   });
+
+  it("refuses a role that is not a task role (no prototype keys), journaling nothing", async () => {
+    const seq = daemon.record(WAVE)?.seq;
+    for (const role of ["constructor", "__proto__", "toString", "reviewer"]) {
+      const res = await client.request("steer", {
+        wave: WAVE,
+        task: "A",
+        text: "x",
+        role,
+        by: "coord-a",
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain(`unknown role '${role}'`);
+    }
+    expect(daemon.record(WAVE)?.seq).toBe(seq);
+    expect(daemon.record(WAVE)?.steers).toEqual({});
+  });
 });
 
 describe("controls (pure)", () => {

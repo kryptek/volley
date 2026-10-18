@@ -47,8 +47,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     if (states.some((s) => s.open_decisions.length > 0)) {
       const d = await client.request("decisions", wave !== undefined ? { wave } : {});
       decisions = d.ok ? (d.result as { decisions: DecisionPayload[] }).decisions : [];
-      // --as is the old spelling of --by, kept as an alias.
-      caller = (await resolveCaller(client, parsed.values.by ?? parsed.values.as, env)).id;
+      caller = (await resolveCaller(client, parsed.values.by, env)).id;
     }
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
@@ -66,7 +65,6 @@ function parseStatus(argv: string[]) {
     options: {
       json: { type: "boolean", default: false },
       by: { type: "string" },
-      as: { type: "string" },
       "broker-url": { type: "string" },
       namespace: { type: "string" },
       help: { type: "boolean", short: "h" },

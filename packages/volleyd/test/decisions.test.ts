@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -250,6 +250,22 @@ describe("decision lifecycle", () => {
     const again = await t.start();
     expect(again.snapshot(WAVE)?.open_decisions).toEqual([d.decision_id]);
     expect(again.snapshot(WAVE)?.tasks.find((x) => x.id === "B")?.stage).toBe("awaiting_decision");
+  });
+
+  it("starts when a wave's journal tail is a snapshot written before decisions existed", async () => {
+    await daemon.stop();
+    const fixtures = new URL("./fixtures/", import.meta.url);
+    const dir = join(t.home, "waves", "2026-10-20-example");
+    mkdirSync(dir, { recursive: true });
+    const lines = readFileSync(new URL("journal.jsonl", fixtures), "utf-8").trim().split("\n");
+    writeFileSync(join(dir, "journal.jsonl"), `${lines.slice(0, 11).join("\n")}\n`);
+    copyFileSync(new URL("snapshot-pre-t7.json", fixtures), join(dir, "snapshot.json"));
+
+    const again = await t.start();
+    expect(again.record("2026-10-20-example")?.decisions).toEqual({});
+    const list = await client.request("decisions", { wave: "2026-10-20-example", all: true });
+    expect(list.error).toBeUndefined();
+    expect((list.result as { decisions: unknown[] }).decisions).toEqual([]);
   });
 });
 

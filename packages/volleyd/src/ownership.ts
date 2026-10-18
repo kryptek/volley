@@ -80,6 +80,7 @@ export function claimVerdict(
 export interface RegistryEntry {
   agent_id: string;
   parent_id: string | null;
+  namespace?: string;
   cwd?: string;
   started_at?: string;
 }
@@ -92,6 +93,7 @@ export function parseRegistryEntry(raw: string): RegistryEntry | null {
   return {
     agent_id: env.agent_id,
     parent_id: env.parent_id,
+    ...(env.namespace !== undefined ? { namespace: env.namespace } : {}),
     ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}),
     ...(typeof p.started_at === "string" ? { started_at: p.started_at } : {}),
   };
@@ -99,13 +101,14 @@ export function parseRegistryEntry(raw: string): RegistryEntry | null {
 
 /**
  * Who is calling: `VOLLEY_AGENT_ID` when set, else the top-level (no parent) session registered
- * for the caller's cwd or the closest parent directory of it — newest first among equally close
- * ones — skipping the daemon itself and sessions whose retained status (`statuses`, by agent id)
- * is terminal, since registry entries outlive their sessions (SPEC §6). Else null.
+ * for the caller's cwd (in the caller's namespace, when given) or the closest parent directory of
+ * it — newest first among equally close ones — skipping the daemon itself and sessions whose
+ * retained status (`statuses`, by agent id) is terminal, since registry entries outlive their
+ * sessions (SPEC §6). Else null.
  */
 export function detectOwner(
   entries: RegistryEntry[],
-  caller: { agentId?: string | undefined; cwd: string },
+  caller: { agentId?: string | undefined; cwd: string; namespace?: string | undefined },
   statuses: ReadonlyMap<string, string> = new Map(),
 ): string | null {
   if (caller.agentId !== undefined && caller.agentId !== "") return caller.agentId;
@@ -118,6 +121,7 @@ export function detectOwner(
       (e): e is RegistryEntry & { cwd: string } =>
         e.parent_id === null &&
         e.agent_id !== DAEMON_AGENT_ID &&
+        (caller.namespace === undefined || e.namespace === caller.namespace) &&
         e.cwd !== undefined &&
         inCwd(e.cwd) &&
         !GONE.has(statuses.get(e.agent_id) ?? ""),
@@ -139,6 +143,8 @@ export async function resolveCaller(
   client: {
     readRegistry: () => Promise<string[]>;
     readStatuses: () => Promise<Map<string, string>>;
+    /** The namespace the caller acts in; registry entries of other namespaces are skipped. */
+    readonly namespace?: string;
   },
   flag: string | undefined,
   env: Record<string, string | undefined>,
@@ -159,5 +165,8 @@ export async function resolveCaller(
           warning: `VOLLEY_AGENT_ID=${agentId} has no registry entry; using it anyway`,
         };
   }
-  return { id: detectOwner(entries, { cwd }, await client.readStatuses()), auto: true };
+  return {
+    id: detectOwner(entries, { cwd, namespace: client.namespace }, await client.readStatuses()),
+    auto: true,
+  };
 }

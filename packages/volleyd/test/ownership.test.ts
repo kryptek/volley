@@ -30,8 +30,9 @@ async function agentStatus(agentId: string, type: string) {
     retain: true,
   });
 }
-async function heartbeat(agentId: string) {
+async function heartbeat(agentId: string, sentAt?: Date) {
   const env = buildEnvelope({
+    ...(sentAt !== undefined ? { now: () => sentAt } : {}),
     agentId,
     parentId: null,
     channel: "progress",
@@ -141,6 +142,19 @@ describe("wave ownership", () => {
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/owned by coord-a .*last seen 0s ago/);
     expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
+  });
+
+  it("a heartbeat counts from its envelope wall_time, not its (late) arrival", async () => {
+    await agentRegistry("coord-a", "/work");
+    await agentStatus("coord-a", "working");
+    const sent = new Date();
+    advanceClock(TWO_HOURS);
+    // A progress message queued while the daemon was down, delivered 2 h after it was sent.
+    await heartbeat("coord-a", sent);
+    await settle();
+    const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
+    expect(res.error).toBeUndefined();
+    expect(daemon.snapshot(WAVE)?.owner).toBe("coord-b");
   });
 
   it("refuses claim of an owner the broker has never seen until claim_after_s has passed", async () => {
@@ -355,6 +369,27 @@ describe("ownership (pure)", () => {
     ]);
     expect(detectOwner(entries, { cwd: "/srv/me/repo" }, statuses)).toBe("coord-live");
     expect(detectOwner(entries.slice(0, 1), { cwd: "/srv/me" })).toBeNull();
+  });
+
+  it("detectOwner: only sessions of the caller's namespace qualify", () => {
+    const entries = [
+      {
+        agent_id: "coord-other-ns",
+        parent_id: null,
+        namespace: "other",
+        cwd: "/repo",
+        started_at: "2026-10-18T11:00:00Z",
+      },
+      {
+        agent_id: "coord-mine",
+        parent_id: null,
+        namespace: "mine",
+        cwd: "/repo",
+        started_at: "2026-10-18T09:00:00Z",
+      },
+    ];
+    expect(detectOwner(entries, { cwd: "/repo", namespace: "mine" })).toBe("coord-mine");
+    expect(detectOwner(entries, { cwd: "/repo", namespace: "none" })).toBeNull();
   });
 
   it("resolveCaller: a flag wins; VOLLEY_AGENT_ID is checked against the registry", async () => {

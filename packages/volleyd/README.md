@@ -275,7 +275,9 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   to every running agent of the wave (journaled as `steering_sent { type: "cancel" }`). The
   daemon also calls its `interrupt` hook for each agent (Escape into the agent's session); the
   spawner (T4) wires it to cmux, so until then `stop` sends only the mailbox cancel. A stopped
-  wave can be resumed explicitly.
+  wave can be resumed explicitly. Known gap until the spawner (T4) can respawn: `stop` journals
+  no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
+  in their stage, counting against `hard_ceiling`) with no agent working them.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
   even if the daemon dies part-way, and survives restarts), every wave stops, and the daemon refuses `run` with `kill switch engaged` until
   `resume --all`. Anyone may pull it; releasing it leaves stopped waves stopped.

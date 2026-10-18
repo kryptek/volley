@@ -48,6 +48,17 @@ const ROLE_FOR_STAGE: Partial<Record<TaskStage, keyof TaskAgents>> = {
   fixup: "fixup",
 };
 
+/** The roles a steer may name. */
+export const TASK_ROLES: readonly (keyof TaskAgents)[] = [
+  "implementer",
+  "spec_reviewer",
+  "quality_reviewer",
+  "fixup",
+];
+
+export const isTaskRole = (r: string): r is keyof TaskAgents =>
+  (TASK_ROLES as readonly string[]).includes(r);
+
 /** Who a steer to `task` reaches: `role`'s agent, else the current stage's, else the implementer. */
 export function steerTarget(
   rec: WaveRecord,
@@ -59,7 +70,7 @@ export function steerTarget(
   const order: (keyof TaskAgents)[] =
     role !== undefined ? [role] : [ROLE_FOR_STAGE[t.stage] ?? "implementer", "implementer"];
   for (const r of order) {
-    const id = t.agents[r];
+    const id = Object.hasOwn(t.agents, r) ? t.agents[r] : undefined;
     if (id !== undefined) return { role: r, agent_id: id };
   }
   return null;
@@ -67,7 +78,7 @@ export function steerTarget(
 
 /** `seq` for the next steer to `task` (1, 2, …) and the message it supersedes. */
 export function nextSteer(rec: WaveRecord, task: TaskId): { seq: number; supersedes?: string } {
-  const prev = rec.steers?.[task];
+  const prev = rec.steers[task];
   return prev === undefined ? { seq: 1 } : { seq: prev.seq + 1, supersedes: prev.message_id };
 }
 

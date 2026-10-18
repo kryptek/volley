@@ -34,6 +34,14 @@ export interface WaveRecord {
   steers: Record<TaskId, { seq: number; message_id: string }>;
 }
 
+/**
+ * A snapshot record as read from disk, with fields added after it was written defaulted (e.g.
+ * `decisions`/`steers` in snapshots from before decisions existed).
+ */
+export function normalizeRecord(rec: Partial<WaveRecord>): WaveRecord {
+  return { ...emptyRecord(), ...rec };
+}
+
 export function emptyRecord(): WaveRecord {
   return {
     seq: 0,
@@ -62,9 +70,6 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.seq <= rec.seq) return rec;
   const next = structuredClone(rec);
   next.seq = ev.seq;
-  // Snapshots written before decisions/steers existed lack these fields.
-  next.decisions ??= {};
-  next.steers ??= {};
 
   if (ev.type === "wave_submitted") {
     const wave = ev.data.wave as Wave;
@@ -220,7 +225,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
   const openOn = (task: TaskId) =>
-    state.open_decisions.filter((id) => rec.decisions?.[id]?.task === task);
+    state.open_decisions.filter((id) => rec.decisions[id]?.task === task);
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);

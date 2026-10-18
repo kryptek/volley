@@ -75,7 +75,7 @@ export class ControlClient {
   readonly agentId: string;
   private constructor(
     private readonly broker: VolleyBroker,
-    private readonly namespace: string,
+    readonly namespace: string,
     agentId: string,
   ) {
     this.agentId = agentId;

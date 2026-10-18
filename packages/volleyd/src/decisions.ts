@@ -72,7 +72,7 @@ export const newDecisionId = () => `d-${randomSuffix(8)}`;
 
 /** Decisions still open in a record, in opening order. */
 export function openDecisions(rec: WaveRecord): DecisionRecord[] {
-  const all = rec.decisions ?? {};
+  const all = rec.decisions;
   return (rec.state?.open_decisions ?? []).flatMap((id) => (all[id] ? [all[id]] : []));
 }
 
@@ -99,7 +99,7 @@ export function openEvent(
   }
   const id = input.id ?? newDecisionId();
   if (!ID_RE.test(id)) return { error: `decision id '${id}' does not match ${ID_RE.source}` };
-  if (rec.decisions?.[id] !== undefined) return { error: `decision '${id}' already exists` };
+  if (rec.decisions[id] !== undefined) return { error: `decision '${id}' already exists` };
   return {
     id,
     event: {
@@ -129,7 +129,7 @@ export function resolveEvent(
   r: { answer: string; by: string; rationale?: string },
   now: Date,
 ): { event: NewEvent } | { already: DecisionRecord } | { error: string } {
-  const d = rec.decisions?.[id];
+  const d = rec.decisions[id];
   if (d === undefined) return { error: `unknown decision '${id}' in wave '${rec.state?.wave}'` };
   if (d.resolved !== undefined) return { already: d };
   if (typeof r.answer !== "string" || r.answer.trim() === "")
