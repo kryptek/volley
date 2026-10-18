@@ -70,6 +70,7 @@ export interface Tunables {
   admission: AdmissionConfig;
   claim_after_s: number;
   heartbeat_alarm_s: number;
+  idle_grace_s: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;
@@ -215,6 +216,8 @@ export const WAVE_EVENT_TYPES = [
   "lease_expired",
   "alarm_raised",
   "wake_detected",
+  "reap_suppressed",
+  "reconciled",
   "config_changed",
 ] as const;
 

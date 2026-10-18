@@ -5,7 +5,9 @@
  * tier (`attention.ts`); the top bar counts what needs you and notifications
  * fire when something starts to. Arrange & fit (`layout/arrange.ts`) packs
  * the windows into per-wave clusters and re-runs on structural changes while
- * auto-arrange is on. Backgrounds and the dock come in later tasks.
+ * auto-arrange is on. The chat glyphs open the steering panel (D4). The look (D7,
+ * `look/`): the picked React Bits background under its dim, the window chrome,
+ * Needs-you and narration effects, tethers, the Appearance panel, the dock and toasts.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,15 +24,22 @@ import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
-import { ARRANGE_ANIM_MS, useAutoArrange, useAutoArrangeSetting } from "./layout/useAutoArrange";
+import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
+import { Appearance } from "./look/Appearance";
+import { Background } from "./look/Background";
+import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
+import { type Tether, Tethers } from "./look/Tethers";
+import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
+import { ClaimButton } from "./steer/SteerPanel";
+import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
-import { AGENT_WIDTH, AgentWindow } from "./windows/agent/AgentWindow";
+import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import {
   COORDS_ID,
   COORDS_W,
@@ -126,14 +135,18 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline } = useDesk();
-  const { view, setView, fitTo, stageRef, stageHandlers } = useViewport();
+  const { state, connection, demo, settling, offline, writer, identity } = useDesk();
+  const { view, setView, zoomAt, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
+  const steering = useSteering(state, writer, identity);
+  /** The window whose steering panel is open (a wave id or an agent id). */
+  const [steerOpen, setSteerOpen] = useState<string | null>(null);
+  const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
   const ctxOpts = { now, me, gateSince, offline };
@@ -189,9 +202,13 @@ export default function App() {
     fitTo(rects);
   });
 
+  // ------------------------------------------------------------ look (D7)
+  const [look, setLook] = useLook();
+  const [lookOpen, setLookOpen] = useState(false);
+  const [toast, say, closeToast] = useToast();
+
   // ------------------------------------------------------- arrange & fit
-  // D7's dock adds "Arrange & fit" (calls `arrange`) and the auto-arrange toggle.
-  const [autoArrange] = useAutoArrangeSetting();
+  const autoArrange = look.autoArrange;
   const [animating, setAnimating] = useState(false);
   const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(animEnd.current), []);
@@ -238,7 +255,8 @@ export default function App() {
     pos: pos(id),
     z: z(id),
     scale: view.s,
-    chrome: "glass" as const,
+    chrome: look.chrome,
+    attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
     // A window not laid out yet (0 × 0) keeps its fallback size.
@@ -309,12 +327,33 @@ export default function App() {
       })),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
+
+  // Tethers: wave window → each of its agents, for visible waves.
+  const tethers: Tether[] = visible.flatMap((id) =>
+    (groups[id] ?? []).map((a) => ({
+      id: a.id,
+      wave: { ...pos(id), w: WAVE_W },
+      agent: pos(a.id),
+      accent: accentOf(id),
+    })),
+  );
+  const toggleAutoArrange = () => {
+    const on = !look.autoArrange;
+    setLook({ autoArrange: on });
+    say(
+      on ? "Auto-arrange on" : "Auto-arrange off",
+      on
+        ? "New, hidden or shown windows re-arrange and re-fit automatically."
+        : "Windows stay where you put them.",
+    );
+  };
   return (
     <div className="app">
-      <div className="bg-layer bg-plain" aria-hidden />
+      <Background which={look.bg} dim={look.dim} />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
         <World view={view} animating={animating}>
+          <Tethers on={look.tethers} tethers={tethers} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -346,6 +385,7 @@ export default function App() {
             // Only a wave at tier you gets a banner: an ended wave's coordinator is gone
             // because the work is done, not because the wave needs claiming.
             const needsYou = waveAttn[id]?.tier === "you";
+            const chat = waveChatTarget(wave.state?.owner, coordinator, identity);
             return (
               <WaveWindow
                 key={id}
@@ -354,6 +394,8 @@ export default function App() {
                 coordinatorState={coordinator?.state}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === id}
                 banner={
                   needsYou &&
                   coordinator && (
@@ -362,11 +404,28 @@ export default function App() {
                       coordinator={coordinator}
                       openDecisions={openDecisions(wave).length}
                       now={now}
+                      claim={<ClaimButton wave={id} transport={steering.transport} />}
                     />
                   )
                 }
                 onSettings={setSettings}
-              />
+              >
+                {steerOpen === id &&
+                  steering.panel({
+                    target: chat.agentId
+                      ? {
+                          agentId: chat.agentId,
+                          namespace: state.agents[chat.agentId]?.namespace ?? "default",
+                          coordinator: true,
+                          wave: id,
+                        }
+                      : null,
+                    readOnlyReason: "reason" in chat ? chat.reason : undefined,
+                    label: id,
+                    coordinator: true,
+                    onClose: () => setSteerOpen(null),
+                  })}
+              </WaveWindow>
             );
           })}
           {visible.flatMap((id) =>
@@ -379,7 +438,26 @@ export default function App() {
                 wave={state.waves[id]}
                 accent={accentOf(id)}
                 frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
+                narrationFx={look.narr}
                 attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === a.id}
+                steer={
+                  steerOpen === a.id &&
+                  steering.panel({
+                    target: {
+                      agentId: a.id,
+                      namespace: a.namespace ?? "default",
+                      coordinator: false,
+                      ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
+                      ...(a.task ? { task: a.task } : {}),
+                    },
+                    label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
+                    coordinator: false,
+                    copy: a.task && a.wave !== UNASSIGNED ? { wave: a.wave, task: a.task } : null,
+                    onClose: () => setSteerOpen(null),
+                  })
+                }
               />
             )),
           )}
@@ -400,6 +478,31 @@ export default function App() {
         notify={notify}
         setNotify={setNotify}
       />
+
+      {lookOpen && (
+        <Appearance
+          look={look}
+          setLook={setLook}
+          onClose={() => setLookOpen(false)}
+          onArrange={arrange}
+        />
+      )}
+
+      <DeskDock
+        coordsOpen={coordsOpen}
+        onToggleCoords={() => setCoordsOpen((o) => !o)}
+        needsYou={targets.length}
+        lookOpen={lookOpen}
+        onToggleLook={() => setLookOpen((o) => !o)}
+        tethers={look.tethers}
+        onToggleTethers={() => setLook({ tethers: !look.tethers })}
+        onArrange={arrange}
+        autoArrange={look.autoArrange}
+        onToggleAutoArrange={toggleAutoArrange}
+        onZoom={(f) => zoomAt(f)}
+      />
+
+      <DeskToast toast={toast} onClose={closeToast} />
 
       {settings !== null && state.waves[settings] && (
         // No config transport until the Desk signs in with broker credentials: read-only.

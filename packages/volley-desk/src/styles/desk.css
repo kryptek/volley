@@ -1,8 +1,9 @@
 /*
  * Desk base styles, ported from the approved prototype's styles.css: tokens,
  * the pannable world, window frame (glass and solid chromes), shared controls
- * and the top bar. Window-content, background, dock and appearance rules
- * arrive with the tasks that build those parts.
+ * and the top bar. Window-content rules live next to their windows; the
+ * background, tethers, React Bits chromes, dock and Appearance rules are in
+ * look.css.
  */
 :root {
   --ink: #e8ecf4;
@@ -100,7 +101,7 @@ code {
 .world--anim .win {
   transition: left 0.55s cubic-bezier(0.2, 0.8, 0.2, 1), top 0.55s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-/* Tethers (a later task renders them) hide while arranging and fade back in. */
+/* Tethers (look/Tethers.tsx) hide while arranging and fade back in. */
 .world--anim .tethers {
   opacity: 0;
 }

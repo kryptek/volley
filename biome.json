@@ -1,6 +1,8 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "organizeImports": { "enabled": true },
+  "organizeImports": {
+    "enabled": true
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -31,5 +33,23 @@
   },
   "files": {
     "ignore": ["node_modules", "dist", "build", "bun.lock", "spec/examples"]
-  }
+  },
+  "overrides": [
+    {
+      "include": ["packages/volley-desk/src/rb/**"],
+      "ignore": [
+        "packages/volley-desk/src/rb/StatusMark/**",
+        "packages/volley-desk/src/rb/ElasticSlider/**"
+      ],
+      "linter": {
+        "enabled": false
+      },
+      "formatter": {
+        "enabled": false
+      },
+      "organizeImports": {
+        "enabled": false
+      }
+    }
+  ]
 }

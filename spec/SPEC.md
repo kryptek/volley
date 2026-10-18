@@ -285,7 +285,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 |---|---|---|
 | `decision_id`, `wave` | string | Identity. |
 | `task` | task id \| null | `null` for a wave-level decision. |
-| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `unknown_screen` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change`. A `repo_untrusted` or `remote_repo_missing` decision for a remote host also carries `host` and `target` (the ssh destination); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. |
+| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change`. A `repo_untrusted` or `remote_repo_missing` decision for a remote host also carries `host` and `target` (the ssh destination); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. |
 | `question` | string | What needs answering. |
 | `options` | string[] | Suggested answers (optional; free text is always allowed). |
 | `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
@@ -300,7 +300,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 `volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits:
 
-`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `wake_grace_s`, `screen_tail_interval_s`, `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
+`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `wake_grace_s`, `screen_tail_interval_s`, `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
 
 Per-wave overrides use the same shape with every key optional (a wave file's `config:` block) and appear in the wave state as `effective_config`. The exception is `lease_pools`: pools are machine-global (§4.6.5), so a supervisor rejects a wave file that overrides them rather than accept an override it cannot apply.
 

@@ -47,7 +47,7 @@ import { branchName, expandHome, worktreePath } from "./worktree";
  *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
  *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
  *   hook signals verified                                           → agent_registered
- *   repo_untrusted / model_switch / unknown_screen                  → decision_opened
+ *   repo_untrusted / model_switch / unknown_screen / hooks_auth_failed → decision_opened
  */
 
 export interface SpawnRequest {
@@ -102,7 +102,11 @@ export interface SpawnDeps {
   relaunchSettleMs?: number;
 }
 
-export type DecisionKind = "repo_untrusted" | "model_switch" | "unknown_screen";
+export type DecisionKind =
+  | "repo_untrusted"
+  | "model_switch"
+  | "unknown_screen"
+  | "hooks_auth_failed";
 
 export interface RemoteTrust {
   host: string;
@@ -254,6 +258,8 @@ interface Launched {
   workspace: string;
   watch: AgentWatch;
   minted: boolean;
+  /** Epoch ms just before the launch (an older hooks-error.json is stale). */
+  launchedAt: number;
 }
 
 /** Steps 2–5 for one attempt: everything up to a running terminal and a live watch. */
@@ -331,6 +337,7 @@ async function launchAttempt(
 
     // Subscribe before launching, so no hook signal can be missed.
     const watch = await deps.watch(ctx.namespace, agentId);
+    const launchedAt = Date.now();
     let workspace: string;
     try {
       if (recovered !== undefined) {
@@ -373,7 +380,7 @@ async function launchAttempt(
     if (req.role === "implementer" && attempt === 1) {
       await deps.journal({ type: "stage_entered", task: req.task, data: { stage: "implement" } });
     }
-    return { agentId, attempt, workspace, watch, minted: creds !== undefined };
+    return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
     if (creds !== undefined) await revokeCredentials(host.exec, agentId);
     throw e;
@@ -399,8 +406,27 @@ async function verifyAndRecover(
       expectedModel: task.model,
       timeoutMs: secondsMs(deps.tunables.spawn_timeout_s),
       screenLines: DAEMON_DEFAULTS.screen_lines,
+      launchedAt: cur.launchedAt,
+      // Only a local worktree's file is readable here; a remote host falls back to its screen.
+      ...(deps.host.name === "local"
+        ? { hooksErrorPath: join(ctx.worktree, ".volley", "hooks-error.json") }
+        : {}),
     });
     if (result.kind === "registered") return registered(ctx, cur, result);
+    if (result.kind === "hooks_auth_failed") {
+      const who = result.username ?? "anonymous";
+      const decisionId = await openDecision(
+        ctx,
+        "hooks_auth_failed",
+        decisionIdFor("hooks_auth_failed", cur.agentId),
+        {
+          question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}). Check its credentials (volley auth add-agent / the .volley/agent.json broker block), then relaunch?`,
+          options: ["relaunch", "cancel"],
+          data: { agent_id: cur.agentId, username: result.username, hook_event: result.hook_event },
+        },
+      );
+      return decision(cur, "hooks_auth_failed", decisionId);
+    }
 
     const screen = saveScreen(ctx, cur.agentId, result.screen);
     if (result.screen_class === "trust_dialog") {

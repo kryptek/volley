@@ -76,7 +76,9 @@ function parseStatus(argv: string[]) {
 
 /**
  * Human-readable wave summary: a header line, then one line per task, then its open decisions.
- * The header gains `needs you: N` when `caller` owns the wave and N decisions are open.
+ * The header shows `plan vN`, with `(K tasks pending decision)` when open plan_change decisions
+ * (in `ctx.decisions`) wait on K tasks, and gains `needs you: N` when `caller` owns the wave and N
+ * decisions are open.
  */
 export function formatWave(
   s: WaveState,
@@ -85,8 +87,23 @@ export function formatWave(
   const open = s.open_decisions.length;
   const needs =
     open > 0 && s.owner !== null && s.owner === ctx.caller ? `  needs you: ${open}` : "";
+  const pending = new Set(
+    (ctx.decisions ?? [])
+      .filter(
+        (d) =>
+          d.wave === s.wave &&
+          d.kind === "plan_change" &&
+          d.task !== null &&
+          s.open_decisions.includes(d.decision_id),
+      )
+      .map((d) => d.task),
+  ).size;
+  const version =
+    pending > 0
+      ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
+      : `plan v${s.version}`;
   const header =
-    `${s.wave}  ${s.status}  v${s.version}  owner: ${s.owner ?? "-"}  ` +
+    `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}\n`;
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {

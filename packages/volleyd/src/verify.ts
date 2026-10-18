@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
@@ -13,8 +14,9 @@ import { type ScreenClass, classifyScreen, modelFromScreen } from "./screens";
  *     re-publish; the MCP server's own auto-registration carries no model_source).
  *
  * Expected sequence: MCP auto-registration (no model) → hooks registry re-publish (+ model) →
- * status flipped to `working` → SessionStart heartbeat. Only if that does not arrive in time is
- * the terminal's screen read and classified (screens.ts).
+ * status flipped to `working` → SessionStart heartbeat. If that does not arrive in time, the hooks'
+ * own error file is consulted first (a broker that refused their credentials is not a screen
+ * problem); only then is the terminal's screen read and classified (screens.ts).
  */
 
 /** Model sources that prove the SessionStart hook ran. */
@@ -23,10 +25,12 @@ const HOOK_MODEL_SOURCES = new Set(["harness-hook", "unknown"]);
 export interface SignalState {
   /** The latest registry entry the hooks published (has `model_source`), or null. */
   hookRegistry: Record<string, unknown> | null;
+  /** `wall_time` of that entry's envelope: a fresh re-publish has a new one, a re-delivery not. */
+  hookRegistryAt: string | null;
   /** True once a SessionStart heartbeat arrived. */
   sessionStart: boolean;
-  /** The agent's latest retained status. */
-  status: { type: string; payload: unknown } | null;
+  /** The agent's latest retained status (`wall_time` tells a re-delivery from a new one). */
+  status: { type: string; payload: unknown; wall_time: string } | null;
   /** Epoch ms of the latest heartbeat. */
   lastHeartbeatAt: number | null;
 }
@@ -39,6 +43,8 @@ export interface AgentWatch {
   waitFor(pred: (s: SignalState) => boolean, timeoutMs: number): Promise<boolean>;
   /** Called on every status message (after `state` is updated). */
   onStatus(cb: (type: string, payload: unknown) => void): void;
+  /** Called with every raw progress message of the agent (after `state` is updated). */
+  onProgress(cb: (raw: string) => void): void;
   close(): Promise<void>;
 }
 
@@ -56,12 +62,14 @@ export async function watchAgent(
 ): Promise<AgentWatch> {
   const state: SignalState = {
     hookRegistry: null,
+    hookRegistryAt: null,
     sessionStart: false,
     status: null,
     lastHeartbeatAt: null,
   };
   const waiters = new Set<() => void>();
   const statusCbs: ((type: string, payload: unknown) => void)[] = [];
+  const progressCbs: ((raw: string) => void)[] = [];
   const statusTopic = buildTopic(namespace, agentId, "status");
   const progressTopic = buildTopic(namespace, agentId, "progress");
   const regTopic = registryTopic(agentId);
@@ -74,13 +82,17 @@ export async function watchAgent(
     if (topic === regTopic) {
       if (env.type === "registered" && HOOK_MODEL_SOURCES.has(String(p.model_source))) {
         state.hookRegistry = p;
+        state.hookRegistryAt = env.wall_time;
       }
     } else if (topic === statusTopic) {
-      state.status = { type: env.type, payload: env.payload };
+      state.status = { type: env.type, payload: env.payload, wall_time: env.wall_time };
       for (const cb of statusCbs) cb(env.type, env.payload);
-    } else if (topic === progressTopic && env.type === "heartbeat") {
-      state.lastHeartbeatAt = now();
-      if (p.hook_event === "SessionStart") state.sessionStart = true;
+    } else if (topic === progressTopic) {
+      if (env.type === "heartbeat") {
+        state.lastHeartbeatAt = now();
+        if (p.hook_event === "SessionStart") state.sessionStart = true;
+      }
+      for (const cb of progressCbs) cb(payload);
     }
     for (const w of [...waiters]) w();
   };
@@ -113,6 +125,9 @@ export async function watchAgent(
     },
     onStatus(cb) {
       statusCbs.push(cb);
+    },
+    onProgress(cb) {
+      progressCbs.push(cb);
     },
     async close() {
       if (closed) return;
@@ -149,7 +164,9 @@ export type VerifyResult =
       /** Whether the screen was read (only for the `unknown` model fallback). */
       screen_read: boolean;
     }
-  | { kind: "timeout"; screen: string | null; screen_class: ScreenClass };
+  | { kind: "timeout"; screen: string | null; screen_class: ScreenClass }
+  /** The broker refused the hooks' CONNECT (`<worktree>/.volley/hooks-error.json`). */
+  | { kind: "hooks_auth_failed"; username: string | null; hook_event: string; at: string };
 
 export interface VerifyInput {
   watch: AgentWatch;
@@ -158,6 +175,34 @@ export interface VerifyInput {
   expectedModel: string;
   timeoutMs: number;
   screenLines: number;
+  /**
+   * `<worktree>/.volley/hooks-error.json`, when the worktree is on this host (volley-hooks writes
+   * it on AUTH_FAILED and clears it on the next successful connect).
+   */
+  hooksErrorPath?: string;
+  /** Epoch ms of the launch: an older error file is left over from an earlier session. */
+  launchedAt?: number;
+}
+
+/** The hooks' AUTH_FAILED record at `path`, if it is there and from this launch. */
+export function readHooksError(
+  path: string,
+  since = 0,
+): { username: string | null; hook_event: string; at: string } | null {
+  let e: { code?: unknown; at?: unknown; hook_event?: unknown; username?: unknown };
+  try {
+    e = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (e?.code !== "AUTH_FAILED" || typeof e.at !== "string") return null;
+  const at = Date.parse(e.at);
+  if (Number.isNaN(at) || at < since) return null;
+  return {
+    username: typeof e.username === "string" ? e.username : null,
+    hook_event: typeof e.hook_event === "string" ? e.hook_event : "",
+    at: e.at,
+  };
 }
 
 /**
@@ -167,6 +212,9 @@ export interface VerifyInput {
 export async function verifyRegistration(v: VerifyInput): Promise<VerifyResult> {
   const ok = await v.watch.waitFor(hookSignalsArrived, v.timeoutMs);
   if (!ok) {
+    const refused =
+      v.hooksErrorPath !== undefined ? readHooksError(v.hooksErrorPath, v.launchedAt) : null;
+    if (refused !== null) return { kind: "hooks_auth_failed", ...refused };
     const screen = await v.host.readScreen(v.workspace, v.screenLines);
     return { kind: "timeout", screen, screen_class: classifyScreen(screen) };
   }

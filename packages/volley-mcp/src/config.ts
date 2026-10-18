@@ -127,10 +127,21 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
 }
 
 /**
+ * Where Homebrew / distro packages keep mosquitto.conf. `volley auth` keeps its files in
+ * `volley/` under the first that exists when neither `--dir` nor `VOLLEY_AUTH_DIR` is given;
+ * the coordinator's hooks look for `coordinator.json` in the same place.
+ */
+export const MOSQUITTO_ETC_DIRS: readonly string[] = [
+  "/opt/homebrew/etc/mosquitto",
+  "/usr/local/etc/mosquitto",
+  "/etc/mosquitto",
+];
+
+/**
  * Credentials from `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. A username alone is
  * allowed (some brokers check only the username); a password alone is a configuration error.
  */
-function authFromEnv(env: Record<string, string | undefined>): BrokerAuth | null {
+export function authFromEnv(env: Record<string, string | undefined>): BrokerAuth | null {
   const username = env.VOLLEY_AUTH_USERNAME;
   const password = env.VOLLEY_AUTH_PASSWORD;
   if (username === undefined || username === "") {

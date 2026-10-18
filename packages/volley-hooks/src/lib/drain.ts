@@ -70,7 +70,11 @@ export async function openDrainSession(
   const lock = join(identity.stateDir, "drain.lock");
   const token = drain ? tryLock(lock, drainLockStaleMs(ctx.env)) : null;
   if (token === null) {
-    return { session: await openSession(identity, ctx.event), drained: null, release: () => {} };
+    return {
+      session: await openSession(identity, ctx.event, ctx.env),
+      drained: null,
+      release: () => {},
+    };
   }
   const release = () => releaseLock(lock, token);
   let session: HookSession;

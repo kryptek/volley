@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-18T12:05:00.000Z",
+  "channel": "progress",
+  "type": "awaiting_input",
+  "payload": {
+    "notification_type": "quota_auto_resume_fired",
+    "text": "Usage limit reached; Claude will resume automatically when it resets",
+    "class": "credit",
+    "source": "harness-hook",
+    "seq": 7,
+    "hook_event": "Notification"
+  },
+  "correlation_id": null
+}

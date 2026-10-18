@@ -61,6 +61,10 @@ jobs:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/volley-desk check:react-bits
+      # Warns (doesn't fail CI) when React Bits adds a background the picker lacks.
+      - name: React Bits backgrounds are all in the picker
+        continue-on-error: true
+        run: bun run --cwd packages/volley-desk sync:react-bits-backgrounds
 
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
@@ -143,6 +147,12 @@ jobs:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
         run: bunx vitest run test/integration/mosquitto-auth.test.ts
+      - name: Run hooks auth + ACL integration tests
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-acl.test.ts
       - name: Broker log
         if: failure()
         run: docker logs mosquitto-auth

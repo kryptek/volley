@@ -2,13 +2,16 @@
  * The window frame, ported from the prototype `windows.tsx` `Frame`: title
  * bar drag (pointer delta ÷ zoom scale), focus on any pointer-down, the
  * `win--born` entrance kept for 4 s, and `ResizeObserver` sizing via `onSize`.
- * Chromes here are `glass` and `solid`; the React Bits chromes plug in later
- * through `chrome`. A window at attention tier `you` is wrapped in the pulse
- * (the owner's default Needs-you effect); the electric/star effects plug in
- * later through the `wrapAttention` slot.
+ * Chromes (D7): `glass` (default) and `solid` are CSS; `liquid` lays a React
+ * Bits `GlassSurface` under the content, `spotlight` wraps it in a
+ * `SpotlightCard` and `glow` in a `BorderGlow`, all tinted by the accent. A
+ * window at attention tier `you` is wrapped in its Needs-you effect
+ * (`attnStyle`): the pulse (the owner's default), an `ElectricBorder` or a
+ * `StarBorder`. The `wrapAttention` slot overrides the effect.
  */
 import type React from "react";
 import "../styles/attention.css";
+import "../styles/look.css";
 import {
   type CSSProperties,
   type ReactNode,
@@ -17,9 +20,17 @@ import {
   useRef,
   useState,
 } from "react";
+import type { AttnStyle, Chrome } from "../look/options";
+import BorderGlow from "../rb/BorderGlow/BorderGlow";
+import ElectricBorder from "../rb/ElectricBorder/ElectricBorder";
+import GlassSurface from "../rb/GlassSurface/GlassSurface";
+import SpotlightCard from "../rb/SpotlightCard/SpotlightCard";
+import StarBorder from "../rb/StarBorder/StarBorder";
 
-export type Chrome = "glass" | "solid";
+export type { AttnStyle, Chrome } from "../look/options";
 export type Attention = "you" | "coordinator" | "info";
+/** The Needs-you colour (prototype `--hot`). */
+const HOT = "#ff7a59";
 
 /** How long a new window keeps its `win--born` class. */
 export const BORN_MS = 4000;
@@ -27,6 +38,65 @@ export const BORN_MS = 4000;
 /** The default Needs-you effect: a pulsing border (styles/attention.css). */
 export function pulse(framed: ReactNode): ReactNode {
   return <div className="win-attn win-attn-pulse">{framed}</div>;
+}
+
+/** The Needs-you wrapper for an effect (props from the prototype `Frame`). */
+export function attentionEffect(style: AttnStyle): (framed: ReactNode) => ReactNode {
+  if (style === "electric") {
+    return (framed) => (
+      <ElectricBorder
+        color={HOT}
+        borderRadius={14}
+        speed={1}
+        chaos={0.6}
+        thickness={2}
+        className="win-attn"
+      >
+        {framed}
+      </ElectricBorder>
+    );
+  }
+  if (style === "star") {
+    return (framed) => (
+      // A div, not StarBorder's default <button>: the window holds buttons of its own.
+      <StarBorder
+        as="div"
+        className="win-attn win-attn-star"
+        color={HOT}
+        duration={4}
+        thickness={2}
+      >
+        {framed}
+      </StarBorder>
+    );
+  }
+  return pulse;
+}
+
+/** `#rrggbb` → `rgba(r,g,b,a)`. */
+export function hexA(hex: string, a: number): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/** `#rrggbb` → `"h s l"` (degrees, percent, percent), BorderGlow's `glowColor` format. */
+export function hexToHsl(hex: string): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0;
+  let s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h /= 6;
+  }
+  return `${Math.round(h * 360)} ${Math.round(s * 100)} ${Math.round(l * 100)}`;
 }
 
 export interface FrameProps {
@@ -41,7 +111,9 @@ export interface FrameProps {
   scale: number;
   chrome: Chrome;
   attn?: Attention;
-  /** Wraps the framed window at tier `you`; defaults to `pulse` (electric/star in D7). */
+  /** The Needs-you effect at tier `you` (default `pulse`). */
+  attnStyle?: AttnStyle;
+  /** Wraps the framed window at tier `you`, overriding `attnStyle`. */
   wrapAttention?: (framed: ReactNode) => ReactNode;
   actions?: ReactNode;
   footer?: ReactNode;
@@ -89,6 +161,20 @@ export function Frame(p: FrameProps) {
 
   const inner = (
     <div className={`win-inner chrome-${p.chrome}`}>
+      {p.chrome === "liquid" && (
+        <div className="win-glass" aria-hidden>
+          <GlassSurface
+            width="100%"
+            height="100%"
+            borderRadius={14}
+            brightness={22}
+            opacity={0.88}
+            blur={14}
+            backgroundOpacity={0.18}
+            saturation={1.4}
+          />
+        </div>
+      )}
       <header
         className="win-bar"
         onPointerDown={down}
@@ -104,6 +190,29 @@ export function Frame(p: FrameProps) {
       {p.footer && <footer className="win-foot">{p.footer}</footer>}
     </div>
   );
+
+  let framed: ReactNode = inner;
+  if (p.chrome === "spotlight") {
+    framed = (
+      <SpotlightCard className="win-wrap" spotlightColor={hexA(p.accent, 0.22)} ambient>
+        {inner}
+      </SpotlightCard>
+    );
+  } else if (p.chrome === "glow") {
+    framed = (
+      <BorderGlow
+        className="win-wrap"
+        glowColor={hexToHsl(p.accent)}
+        backgroundColor="rgba(14,16,26,.78)"
+        borderRadius={14}
+        glowRadius={28}
+        colors={[p.accent, "#a78bfa", "#f472b6"]}
+      >
+        {inner}
+      </BorderGlow>
+    );
+  }
+  const wrap = p.wrapAttention ?? attentionEffect(p.attnStyle ?? "pulse");
 
   return (
     <section
@@ -121,7 +230,7 @@ export function Frame(p: FrameProps) {
       onPointerDownCapture={p.onFocus}
       aria-label={p.label ?? (typeof p.title === "string" ? p.title : undefined)}
     >
-      {p.attn === "you" ? (p.wrapAttention ?? pulse)(inner) : inner}
+      {p.attn === "you" ? wrap(framed) : framed}
     </section>
   );
 }

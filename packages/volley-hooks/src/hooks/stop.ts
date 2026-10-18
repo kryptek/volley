@@ -13,7 +13,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
   const text = clip(message, 500);
   const question =
     ctx.identity.mode === "coordinator" && typeof message === "string" ? questionOf(message) : null;
-  const session = await openSession(ctx.identity, ctx.event);
+  const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
     await session.progress("idle", text !== undefined ? { text } : {});
     if (question !== null) {
