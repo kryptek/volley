@@ -443,6 +443,22 @@ describe("VolleyBroker persistent sessions + drainQueued", () => {
     await a.disconnect();
   });
 
+  it("a clean connect with the same clientId discards the persistent session", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    await a.disconnect();
+    await a.connect({ ...persistentOpts(), cleanSession: true });
+    expect(a.clientId).toBe("volley-a-hooks");
+    await a.disconnect();
+
+    await publishOnce(MAILBOX, "nobody-subscribed");
+
+    await a.connect(persistentOpts());
+    expect(await a.drainQueued(MAILBOX, { idleMs: 200 })).toEqual([]);
+    await a.disconnect();
+  });
+
   it("queues a QoS 1 message published while the consumer is offline; drainQueued returns it on reconnect", async () => {
     const a = new VolleyBroker();
     await a.connect(persistentOpts());

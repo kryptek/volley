@@ -15,9 +15,10 @@ export interface BrokerConnectOptions {
   keepaliveSeconds?: number;
   connectTimeoutMs?: number;
   /**
-   * MQTT clientId. REQUIRED (and used verbatim) when `cleanSession` is false, because the
-   * broker keys the persistent session on it. Ignored on the default clean-session path,
-   * which always uses `volley-<agentId>-<random>` (see `connect`). Each persistent
+   * MQTT clientId, used verbatim when supplied. REQUIRED when `cleanSession` is false,
+   * because the broker keys the persistent session on it (a clean connect with the same
+   * clientId discards that session). When omitted, `connect` generates
+   * `volley-<agentId>-<random>`. Each persistent
    * consumer MUST own a distinct clientId (e.g. `volley-<agent_id>-mcp` vs
    * `volley-<agent_id>-hooks`): a same-clientId connect kicks the older client off.
    */
@@ -139,12 +140,13 @@ export class VolleyBroker {
       // Append a random suffix so two MCP processes sharing one VOLLEY_AGENT_ID
       // (the user-scope-MCP-on-two-Claude-Code-sessions case) get distinct MQTT
       // clientIds and don't kick each other off — MQTT spec mandates the broker
-      // disconnect the older client on a same-clientId reconnect. A persistent
-      // session cannot use a suffix (the session is keyed on the clientId), so the
-      // caller owns uniqueness there.
-      const clientId = persistent
-        ? (opts.clientId as string)
-        : `volley-${opts.agentId}-${randomBytes(4).toString("hex")}`;
+      // disconnect the older client on a same-clientId reconnect. An explicit
+      // clientId (mandatory for a persistent session, which is keyed on it) is used
+      // verbatim, so the caller owns uniqueness there.
+      const clientId =
+        opts.clientId !== undefined && opts.clientId !== ""
+          ? opts.clientId
+          : `volley-${opts.agentId}-${randomBytes(4).toString("hex")}`;
       const protocolVersion = opts.protocolVersion ?? 4;
       const options: IClientOptions = {
         clientId,
