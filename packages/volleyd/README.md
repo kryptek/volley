@@ -161,6 +161,7 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 | `volley/_waves/<wave>/state` | yes | Full `wave_state` snapshot (with `effective_config`), after every change. |
 | `volley/_waves/<wave>/events` | no | Live mirror of each journal event. The journal is the record. |
 | `volley/_waves/_config` | yes | Effective global config + `version` / `updated_at` / `updated_by`. |
+| `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -214,6 +215,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
+| `screen_tail_interval_s` | each agent's next screen capture | — |
 
 This foundation consumes `hard_ceiling` and `spawn_budget_multiplier`; the other rows describe
 the contract the subsystems that read them (leases, monitors, decisions, spawning) follow.
@@ -314,6 +316,35 @@ host, workspace, worktree, branch, issue, credentials, lock }` (plus `stage_ente
 for an implementer's first attempt); verification → `agent_registered`; trust, model and screen
 questions → `decision_opened { decision_id, kind, question, options, pointers }`; trust accepted
 in the dialog later → `decision_resolved { answer: "trusted" }`; retire → `agent_retired`.
+
+### Screen tails
+
+The daemon is the only reader of agents' terminals (`src/screen-publisher.ts`). Every
+`screen_tail_interval_s` (default 5 s, per-wave overridable) it reads each supervised agent's
+workspace through its host (`cmux read-screen --workspace <ref> --lines 60` locally), cuts the
+tail with `screenTail()` (`src/screen-tail.ts`: everything from Claude Code's input box down —
+the rule above the `❯` prompt, any draft typed into it, the status bar — is dropped, `(ctrl+…)`
+hints are removed, blank lines skipped; a screen without an input box keeps its last lines),
+keeps the last 40 lines, and publishes a retained QoS 0 envelope on `volley/<ns>/<agent>/screen`:
+
+```json
+{ "agent_id": "volleyd", "channel": "screen", "type": "screen_tail",
+  "payload": { "lines": ["…"], "captured_at": "…", "workspace": "workspace:3",
+               "hash": "…", "source": "cmux" } }
+```
+
+A capture whose `hash` equals the last published one is not published. Every capture is also
+emitted in-process (`ScreenPublisher.onCapture`), so other daemon subsystems reuse it instead of
+reading the screen again. A read slower than 2 s, or three failed reads in a row, backs that
+agent off to one capture every 30 s and sets `screen_stale: true` on its task in the wave state
+(the Desk shows a stale marker) until a read succeeds in time. Retire stops the agent's capture
+— after any capture in flight — and then clears the topic with an empty retained payload.
+
+**Privacy.** A screen tail is whatever the agent's terminal shows, including anything an agent
+printed — tokens, keys, file contents. It is published to the same broker as every other agent
+record and has the same trust boundary: anyone who can subscribe to `volley/<ns>/+/screen` can
+read it, so restrict broker access (per-agent credentials and ACLs) as for the rest of the
+namespace.
 
 ### Retire and cleanup
 

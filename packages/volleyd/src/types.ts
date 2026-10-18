@@ -62,6 +62,7 @@ export interface Tunables {
   worktree_root: string;
   spawn_timeout_s: number;
   wake_grace_s: number;
+  screen_tail_interval_s: number;
 }
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
@@ -132,6 +133,8 @@ export interface TaskState {
   agents: TaskAgents;
   waiting_on?: string[];
   why_waiting?: string;
+  /** Set while the screen capture of one of the task's agents is backed off (screen-publisher.ts). */
+  screen_stale?: boolean;
   pr?: {
     number: number;
     url: string;

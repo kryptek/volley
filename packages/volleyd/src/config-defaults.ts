@@ -26,6 +26,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   worktree_root: "~/.volley/worktrees",
   spawn_timeout_s: 120,
   wake_grace_s: 60,
+  screen_tail_interval_s: 5,
 };
 
 /** Who `updated_by` names before anyone has changed the config. */
@@ -58,4 +59,16 @@ export const DAEMON_DEFAULTS = {
   spawn_request_timeout_ms: 120_000,
   /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
   screen_lines: 40,
+  /** How often the screen publisher checks which agents are due a capture. */
+  screen_tick_ms: 1_000,
+  /** Lines read per screen-tail capture (`cmux read-screen --lines`), before the chrome is cut. */
+  screen_capture_lines: 60,
+  /** Lines kept in a published screen tail (screen.schema.json maxItems). */
+  screen_tail_lines: 40,
+  /** A capture slower than this backs the agent off and marks its screen stale. */
+  screen_slow_ms: 2_000,
+  /** Consecutive failed captures that back the agent off and mark its screen stale. */
+  screen_max_failures: 3,
+  /** Capture interval while an agent is backed off. */
+  screen_backoff_s: 30,
 } as const;

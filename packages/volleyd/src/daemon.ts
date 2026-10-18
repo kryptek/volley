@@ -36,6 +36,7 @@ import { type Role, briefGatePath, isRole } from "./brief";
 import { HOOKS_DIR } from "./launch";
 import { type AgentProbe, TERMINAL_STATUS, lockPath } from "./locks";
 import { retireAgent } from "./retire";
+import { ScreenPublisher } from "./screen-publisher";
 import { type SpawnDeps, type SpawnOutcome, type SpawnResult, spawnAgent } from "./spawn";
 import { SpawnError } from "./spawn-error";
 import { type AgentWatch, watchAgent } from "./verify";
@@ -62,6 +63,8 @@ export interface DaemonOptions {
    * (and the `spawn` op is refused) — the default, so tests never launch anything by accident.
    */
   spawner?: SpawnerOptions;
+  /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
+  now?: () => number;
 }
 
 /** How the daemon spawns agents. Every field has a production default. */
@@ -83,6 +86,7 @@ interface Supervised {
   task: string;
   role: Role;
   namespace: string;
+  workspace: string;
   watch: AgentWatch;
   lockPath: string;
   minted: boolean;
@@ -191,6 +195,7 @@ export class Daemon {
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
   private watchdog: ReturnType<typeof setInterval> | undefined;
+  private screenTimer: ReturnType<typeof setInterval> | undefined;
   private running = false;
   /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
   private readonly spawning = new Set<string>();
@@ -200,6 +205,8 @@ export class Daemon {
   private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly answered = new Map<string, ControlResponse>();
+  /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
+  private readonly screens: ScreenPublisher;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -215,6 +222,15 @@ export class Daemon {
     private readonly releaseLock: () => void,
   ) {
     this.log = opts.log ?? (() => {});
+    this.screens = new ScreenPublisher({
+      publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+      onStale: (agentId) => {
+        const a = this.supervised.get(agentId);
+        if (a !== undefined) void this.enqueue(() => this.publishState(a.wave));
+      },
+      log: this.log,
+    });
     this.config = ConfigStore.load({
       home: opts.home,
       system: Journal.open(join(opts.home, "waves", SYSTEM_WAVE)),
@@ -344,7 +360,10 @@ export class Daemon {
     );
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
-    if (tickMs > 0) this.timer = setInterval(() => void this.tick(), tickMs);
+    if (tickMs > 0) {
+      this.timer = setInterval(() => void this.tick(), tickMs);
+      this.screenTimer = setInterval(() => void this.tickScreens(), DAEMON_DEFAULTS.screen_tick_ms);
+    }
     this.watchdog = setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
@@ -373,6 +392,8 @@ export class Daemon {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
+    clearInterval(this.screenTimer);
+    this.screens.clear();
     for (const a of this.supervised.values()) void a.watch.close();
     this.supervised.clear();
   }
@@ -419,6 +440,11 @@ export class Daemon {
     });
     this.queue = run;
     return run;
+  }
+
+  /** Capture the screens of supervised agents that are due (beside the serial queue). */
+  tickScreens(): Promise<void> {
+    return this.screens.tick();
   }
 
   /** One admission tick, queued behind in-flight work. */
@@ -535,7 +561,7 @@ export class Daemon {
     const spawner = this.opts.spawner as SpawnerOptions;
     const log = this.waves.get(wave) as WaveLog;
     const eff = this.config.effective(wave);
-    const host = spawner.host ?? new LocalCmuxHost(exec);
+    const host = this.host();
     const probe: AgentProbe = {
       status: async (id) => {
         const ns = this.supervised.get(id)?.namespace ?? log.record.wave?.namespace;
@@ -572,7 +598,12 @@ export class Daemon {
     };
   }
 
-  /** Keep watching a spawned agent; retire it once its terminal status arrives. */
+  /** The `local` host agents are spawned on (and their screens read from). */
+  private host(): Host {
+    return this.opts.spawner?.host ?? new LocalCmuxHost(exec);
+  }
+
+  /** Keep watching a spawned agent (and its screen); retire it once its terminal status arrives. */
   private supervise(
     wave: WaveId,
     task: string,
@@ -596,9 +627,19 @@ export class Daemon {
       task,
       role,
       namespace: watch.namespace,
+      workspace: outcome.workspace,
       watch,
       lockPath: lock,
       minted,
+    });
+    const host = this.host();
+    this.screens.track({
+      agentId,
+      namespace: watch.namespace,
+      workspace: outcome.workspace,
+      host,
+      source: host.name === "local" ? "cmux" : "tmux",
+      intervalS: () => this.config.effective(wave).screen_tail_interval_s,
     });
     const check = (type: string) => {
       if (TERMINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
@@ -613,6 +654,8 @@ export class Daemon {
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
     await a.watch.close();
+    // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
+    await this.screens.untrack(agentId);
     const waveAgents = new Set(
       log.journal
         .readAll()
@@ -632,7 +675,7 @@ export class Daemon {
         minted: a.minted,
       },
       {
-        exec: (this.opts.spawner?.host ?? new LocalCmuxHost(exec)).exec,
+        exec: this.host().exec,
         clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
         journal: (ev) => this.append(a.wave, ev),
         releaseLock: (path) => {
@@ -714,6 +757,11 @@ export class Daemon {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
       if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
+    }
+    for (const t of state.tasks) {
+      if (Object.values(t.agents).some((id) => id !== undefined && this.screens.isStale(id))) {
+        t.screen_stale = true;
+      }
     }
     return state;
   }

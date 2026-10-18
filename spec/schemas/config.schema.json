@@ -51,7 +51,8 @@
                 "mailbox",
                 "worktree_root",
                 "spawn_timeout_s",
-                "wake_grace_s"
+                "wake_grace_s",
+                "screen_tail_interval_s"
               ]
             }
           ]
@@ -158,6 +159,12 @@
           "minimum": 0,
           "maximum": 3600,
           "description": "Grace period after a detected host sleep/wake before liveness alarms resume."
+        },
+        "screen_tail_interval_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
         }
       }
     },
