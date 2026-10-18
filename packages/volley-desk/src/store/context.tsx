@@ -9,6 +9,12 @@
  * `resync`s first (dropping retained-derived state) and lets the replay
  * rebuild it; agents whose registry entry does not come back within
  * `SETTLE_MS` are pruned.
+ *
+ * Broker credentials (T14) make the Desk a writer (D4 steering): it signs in
+ * as that identity, which becomes its `identity` (the sender of everything it
+ * publishes, whose mailbox carries the answers) and `writer` is the client.
+ * Without credentials the connection is anonymous and read-only. Demo mode
+ * writes to a simulated client instead.
  */
 import {
   type ReactNode,
@@ -17,10 +23,13 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
 } from "react";
+import { DEMO_IDENTITY, createDemoSteerClient } from "../steer/demoClient";
+import type { SteerClient } from "../steer/transport";
 import { demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
-import { type DeskMqttClient, createMqttClient } from "./mqtt-client";
+import { type BrokerCredentials, type DeskMqttClient, createMqttClient } from "./mqtt-client";
 import { initialState, pruneUnconfirmed, reduceAll, resync } from "./reducer";
 import type { DeskMessage, DeskState } from "./types";
 
@@ -39,6 +48,45 @@ export interface DeskContextValue {
   connection: Connection;
   demo: boolean;
   brokerUrl: string | null;
+  /** The Desk's broker identity when it can write; `null` when anonymous. */
+  identity: string | null;
+  /** Publishes as `identity` (steering, control requests); `null` when read-only. */
+  writer: SteerClient | null;
+}
+
+/** localStorage key for the Desk's broker credentials (`{ username, password }`). */
+export const CREDENTIALS_STORAGE_KEY = "volley-desk:broker-auth";
+
+/**
+ * Broker credentials: `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD`,
+ * else the JSON stored under `CREDENTIALS_STORAGE_KEY`; `null` (anonymous) otherwise.
+ */
+export function readCredentials(
+  env: Record<string, unknown>,
+  storage: Pick<Storage, "getItem"> | null,
+): BrokerCredentials | null {
+  const u = env.VITE_VOLLEY_BROKER_USERNAME;
+  const p = env.VITE_VOLLEY_BROKER_PASSWORD;
+  if (typeof u === "string" && u !== "")
+    return { username: u, password: typeof p === "string" ? p : "" };
+  try {
+    const raw = storage?.getItem(CREDENTIALS_STORAGE_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw) as Partial<BrokerCredentials>;
+    return typeof c.username === "string" && c.username !== "" && typeof c.password === "string"
+      ? { username: c.username, password: c.password }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function localStorageOrNull(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 export type Action =
@@ -122,21 +170,45 @@ export function DeskStoreProvider({
   children,
   demo: demoProp,
   brokerUrl: urlProp,
+  auth: authProp,
   clientFactory,
 }: {
   children: ReactNode;
   demo?: boolean;
   brokerUrl?: string;
-  clientFactory?: (url: string) => DeskMqttClient;
+  /** Broker credentials; `null` forces anonymous; default `readCredentials`. */
+  auth?: BrokerCredentials | null;
+  clientFactory?: (url: string, auth?: BrokerCredentials) => DeskMqttClient;
 }) {
   const demo = demoProp ?? isDemoMode(window.location.search, viteEnv());
   const brokerUrl = demo
     ? null
     : (urlProp ?? (viteEnv().VITE_VOLLEY_BROKER_URL as string | undefined) ?? DEFAULT_BROKER_URL);
-  const [state, dispatch] = useReducer(storeReducer, undefined, () =>
-    demo ? demoState() : initialState(),
+  const [auth] = useState(() =>
+    demo
+      ? null
+      : authProp !== undefined
+        ? authProp
+        : readCredentials(viteEnv(), localStorageOrNull()),
   );
+  const identity = demo ? DEMO_IDENTITY : (auth?.username ?? null);
+  const [state, dispatch] = useReducer(storeReducer, undefined, () => ({
+    ...(demo ? demoState() : initialState()),
+    ...(identity !== null ? { self: identity } : {}),
+  }));
   const [connection, setConnection] = useState<Connection>(demo ? "demo" : "connecting");
+  const [liveWriter, setLiveWriter] = useState<SteerClient | null>(null);
+  // The demo writer answers a coordinator with `resumed` instead of `steering_acked`.
+  const coordinatorIds = useRef<ReadonlySet<string>>(new Set());
+  coordinatorIds.current = new Set(Object.keys(state.coordinators));
+  const [demoWriter] = useState<SteerClient | null>(() =>
+    demo
+      ? createDemoSteerClient(
+          (msgs) => dispatch({ type: "apply", msgs }),
+          (id) => coordinatorIds.current.has(id),
+        )
+      : null,
+  );
 
   useEffect(() => {
     if (!demo) return;
@@ -157,8 +229,11 @@ export function DeskStoreProvider({
 
   useEffect(() => {
     if (brokerUrl === null) return;
-    const client = (clientFactory ?? ((url: string) => createMqttClient({ url })))(brokerUrl);
+    const client = (
+      clientFactory ?? ((url: string, a?: BrokerCredentials) => createMqttClient({ url, auth: a }))
+    )(brokerUrl, auth ?? undefined);
     const detach = attachClient(client, dispatch, {}, setConnection);
+    setLiveWriter(auth ? client : null);
     setConnection("connecting");
     client.connect().catch((err: unknown) => {
       console.warn("volley-desk: broker connect failed", err);
@@ -166,13 +241,15 @@ export function DeskStoreProvider({
     });
     return () => {
       detach();
+      setLiveWriter(null);
       void client.disconnect();
     };
-  }, [brokerUrl, clientFactory]);
+  }, [brokerUrl, clientFactory, auth]);
 
+  const writer = demo ? demoWriter : liveWriter;
   const value = useMemo(
-    () => ({ state, connection, demo, brokerUrl }),
-    [state, connection, demo, brokerUrl],
+    () => ({ state, connection, demo, brokerUrl, identity: writer ? identity : null, writer }),
+    [state, connection, demo, brokerUrl, identity, writer],
   );
   return <DeskContext.Provider value={value}>{children}</DeskContext.Provider>;
 }

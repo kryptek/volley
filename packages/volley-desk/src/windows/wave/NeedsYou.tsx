@@ -4,7 +4,7 @@
  * Claude` (the session URL from the coordinator hooks) and a button that copies
  * `cmux select-workspace --workspace <ref>`; a wave with no coordinator shows
  * how long it has been gone and the copyable `volleyd claim <wave>` command
- * (the claim button itself is a write and lands in D4). `AttentionLine` is the
+ * (plus D4's claim button in the `claim` slot when the Desk can write). `AttentionLine` is the
  * agent window's `Needs you · …` / `Coordinator handling · …` line.
  */
 import {
@@ -66,9 +66,11 @@ export interface NeedsYouProps {
   /** Unresolved decisions on the wave. */
   openDecisions: number;
   now: number;
+  /** The no-coordinator banner's claim button (D4); absent when the Desk is read-only. */
+  claim?: ReactNode;
 }
 
-export function NeedsYou({ wave, coordinator: c, openDecisions, now }: NeedsYouProps) {
+export function NeedsYou({ wave, coordinator: c, openDecisions, now, claim }: NeedsYouProps) {
   if (c.state === "awaiting_input") {
     const q = firstLines(c.question ?? c.text ?? "");
     const cmd = c.workspace ? `cmux select-workspace --workspace ${c.workspace}` : null;
@@ -123,6 +125,7 @@ export function NeedsYou({ wave, coordinator: c, openDecisions, now }: NeedsYouP
           {parked} Claim this wave from a Claude session to take it over.
         </p>
         <div className="ny-actions">
+          {claim}
           <CopyButton
             text={cmd}
             label={

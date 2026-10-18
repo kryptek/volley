@@ -91,6 +91,7 @@ describe("App (live store)", () => {
           }, 0);
         },
         disconnect: async () => {},
+        publish: async () => {},
         onMessage: (h) => {
           handlers.add(h);
           return () => handlers.delete(h);
