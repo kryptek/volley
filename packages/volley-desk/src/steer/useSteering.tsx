@@ -4,6 +4,7 @@
  * the steering panel for one target with its last message's delivery state.
  */
 import { type ReactNode, useMemo, useReducer, useRef } from "react";
+import { supervisorNamespace } from "../store/reducer";
 import type { DeskState } from "../store/types";
 import { SteerPanel } from "./SteerPanel";
 import { ackStateOf, steerLog } from "./ackState";
@@ -56,7 +57,7 @@ export function useSteering(
 ): { transport: SteerTransport | null; panel: (p: PanelSpec) => ReactNode } {
   const [log, dispatch] = useReducer(steerLog, []);
   const daemonNs = useRef("default");
-  daemonNs.current = desk.agents[DAEMON_AGENT_ID]?.namespace ?? "default";
+  daemonNs.current = supervisorNamespace(desk, DAEMON_AGENT_ID);
   const transport = useMemo(
     () =>
       writer && identity

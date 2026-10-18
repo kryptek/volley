@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { Envelope, FeedEntry } from "../src/store/types";
+import { initialState, reduceAll } from "../src/store/reducer";
+import type { DeskMessage, Envelope, FeedEntry } from "../src/store/types";
 import { Feed } from "../src/windows/agent/Feed";
 
 const AGENT = "ci-speed-t3b-implementer-1";
@@ -132,5 +133,39 @@ describe("Feed", () => {
     // FEED_LIMIT reached: the oldest entry is sliced off as a new one arrives.
     rerender(<Feed feed={[steer, narr, more]} />);
     expect(screen.getByRole("button", { name: /Matrix written/ }).closest(".env")).toBe(before);
+  });
+
+  it("shows the empty hint for an agent with no signal", () => {
+    render(<Feed feed={[]} noSignal />);
+    expect(screen.getByText(/no envelopes yet/)).toHaveTextContent(/no signal/);
+  });
+});
+
+describe("Feed control traffic", () => {
+  // volleyd's control channel: a mailbox `query` with `payload.op`, answered by an `ack` that
+  // echoes `acked_type: "query"` and the op. Neither is a conversation with the agent.
+  const query = entry("mailbox", "query", { op: "status", text: "volleyd status" }, 10);
+  const reply = entry(
+    "mailbox",
+    "ack",
+    { acked_type: "query", op: "status", ok: true, text: "2 waves" },
+    11,
+  );
+  const plainQuery = entry("mailbox", "query", { text: "what are you on?" }, 20);
+  const ack = entry("mailbox", "ack", { acked_type: "steering" }, 31);
+
+  it("hides control queries and their replies; steering, acks and plain queries still show", () => {
+    render(<Feed feed={[working, query, reply, steer, ack, plainQuery, narr]} />);
+    expect(screen.queryByRole("button", { name: /volleyd status/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /2 waves/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /keep the matrix to 4 shards/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /what are you on\?/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(5);
+  });
+
+  it("the store never rings control traffic into an agent's feed", () => {
+    const m = (e: FeedEntry): DeskMessage => ({ ...e });
+    const s = reduceAll(initialState(), [m(working), m(query), m(reply), m(steer)]);
+    expect(s.agents[AGENT]?.feed.map((f) => f.envelope.type)).toEqual(["working", "steering"]);
   });
 });

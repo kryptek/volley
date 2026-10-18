@@ -158,3 +158,11 @@ describe("CoordinatorsWindow", () => {
     expect(p.onClose).toHaveBeenCalled();
   });
 });
+
+describe("CoordinatorsWindow supervisor row", () => {
+  it("is absent without supervisors (the demo), so the first row is the first wave", () => {
+    setup();
+    expect(screen.queryByRole("listitem", { name: /^Supervisor/ })).toBeNull();
+    expect(screen.getAllByRole("listitem")[0]).toHaveAccessibleName("status-chip");
+  });
+});

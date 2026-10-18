@@ -8,6 +8,12 @@
  * columns and every row count, clusters are laid out in rows and the
  * placement with the largest fitting scale wins, so one big cluster spreads
  * to the viewport's aspect instead of a tall strip.
+ *
+ * Side clusters (the unassigned group, the coordinators window) are not
+ * spread over rows with the waves: they close the first row, right after its
+ * waves and before any overflow row, so they sit next to the waves instead of
+ * trailing far behind them. A side cluster packs its agents in a near-square
+ * block (⌈√n⌉ columns) whatever the waves use, which bounds its tethers.
  */
 import { FIT_MIN_SCALE, type View } from "../canvas/useViewport";
 
@@ -34,6 +40,8 @@ export interface Box {
 export interface Cluster {
   main: Box;
   kids: Box[];
+  /** Laid out at the end of the first row, after its waves (see the module comment). */
+  side?: boolean;
 }
 
 /** The browser viewport (`window.innerWidth` / `innerHeight`). */
@@ -85,16 +93,21 @@ function fitArea(screen: Screen) {
 export function candidates(clusters: readonly Cluster[], screen: Screen): Candidate[] {
   const { vw, vh } = fitArea(screen);
   const out: Candidate[] = [];
-  const maxCols = Math.max(MIN_MAX_COLS, ...clusters.map((cl) => cl.kids.length));
+  const waves = clusters.filter((cl) => !cl.side);
+  const sides = clusters
+    .filter((cl) => cl.side)
+    .map((cl) => layoutCluster(cl, Math.ceil(Math.sqrt(cl.kids.length))));
+  if (waves.length === 0 && sides.length === 0) return out;
+  const maxCols = Math.max(MIN_MAX_COLS, ...waves.map((cl) => cl.kids.length));
   for (let c = 1; c <= maxCols; c++) {
-    const lays = clusters.map((cl) => layoutCluster(cl, c));
-    for (let rows = 1; rows <= lays.length; rows++) {
+    const lays = waves.map((cl) => layoutCluster(cl, c));
+    for (let rows = 1; rows <= Math.max(1, lays.length); rows++) {
       const per = Math.ceil(lays.length / rows);
       const place: Record<string, Pos> = {};
       let y = 0;
       let W = 0;
-      for (let r = 0; r * per < lays.length; r++) {
-        const row = lays.slice(r * per, r * per + per);
+      for (let r = 0; r === 0 || r * per < lays.length; r++) {
+        const row = [...lays.slice(r * per, r * per + per), ...(r === 0 ? sides : [])];
         let x = 0;
         for (const l of row) {
           for (const [id, p] of Object.entries(l.at)) place[id] = { x: x + p.x, y: y + p.y };

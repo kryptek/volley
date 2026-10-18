@@ -2,9 +2,11 @@
  * The agent window's Volley feed (prototype `AgentWindow` feed tab): every envelope the store kept for the agent
  * (registry, status, progress, result, mailbox), oldest first and newest last,
  * auto-scrolled to the bottom while the reader is there. Clicking a row toggles the pretty JSON of the
- * real envelope as it arrived, not a reconstruction.
+ * real envelope as it arrived, not a reconstruction. volleyd's control traffic (a mailbox `query`
+ * with `payload.op` and its reply) is not shown: it is the daemon's, not a conversation with the agent.
  */
 import { type UIEvent, useLayoutEffect, useRef, useState } from "react";
+import { isControlTraffic } from "../../store/reducer";
 import type { FeedEntry } from "../../store/types";
 
 /** Within this many px of the bottom a scroller keeps following new content. */
@@ -75,15 +77,25 @@ function clock(ms: number): string {
     .join(":");
 }
 
-export function Feed({ feed }: { feed: readonly FeedEntry[] }) {
+export function Feed({
+  feed,
+  noSignal = false,
+}: { feed: readonly FeedEntry[]; noSignal?: boolean }) {
   const [open, setOpen] = useState<FeedEntry | null>(null);
   const { ref, onScroll } = useFollow<HTMLDivElement>(feed);
   // Stable sort: equal timestamps keep arrival order.
   const rows = feed
+    .filter((e) => !(feedChannel(e) === "mailbox" && isControlTraffic(e.envelope)))
     .map((e, i) => ({ e, i, t: entryTime(e) }))
     .sort((a, b) => a.t - b.t || a.i - b.i);
 
-  if (rows.length === 0) return <div className="feed feed--empty dim">no envelopes yet</div>;
+  if (rows.length === 0) {
+    return (
+      <div className="feed feed--empty dim">
+        no envelopes yet{noSignal ? " · no signal from this agent on this broker" : ""}
+      </div>
+    );
+  }
   return (
     <div className="feed" ref={ref} onScroll={onScroll}>
       {rows.map(({ e, t }) => {

@@ -5,13 +5,18 @@
  * viewport to the wave and its agents) and show/hide. A wave that has ended
  * shows a neutral `Complete` / `Stopped` instead: its coordinator is gone
  * because the work is done, and there is nothing to claim. Hidden waves keep
- * running and still count towards the top-bar pill and notifications.
+ * running and still count towards the top-bar pill and notifications. The
+ * first row is the supervisor (`volleyd`) with the top-bar pill's health: it
+ * runs the waves, but it is not an agent and has no window of its own.
  */
 import { Cancel01Icon, CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import type { EffectiveCoordinator } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
-import type { CoordinatorState, WaveView } from "../../store/types";
+import { plural } from "../../lib/plural";
+import { supervisorHealth } from "../../store/reducer";
+import type { CoordinatorState, SupervisorView, WaveView } from "../../store/types";
+import { age } from "../agent/AgentWindow";
 import { Clawd } from "../wave/Clawd";
 import { IconBtn, dagNodes, isMine } from "../wave/WaveWindow";
 import { accentFor } from "../wave/accent";
@@ -57,6 +62,32 @@ export interface CoordinatorsWindowProps {
   onClose: () => void;
   /** The "show finished" toggle: agents that finished more than `graceMin` ago are hidden. */
   finished?: { hidden: number; shown: boolean; graceMin: number; onToggle: () => void };
+  /** The supervisors for the first row; `[]` says volleyd is absent, omitted shows no row (demo). */
+  supervisors?: readonly SupervisorView[];
+  /** Clock for the supervisor's age (the App's attention tick). */
+  now?: number;
+}
+
+function SupervisorRow({ sup, now }: { sup: SupervisorView | undefined; now: number }) {
+  const id = sup?.id ?? "volleyd";
+  const h = supervisorHealth(sup);
+  const parts = [id, h.label, ...(h.since === null ? [] : [age(now - h.since)])];
+  if (!h.down && sup?.wavesOwned != null) parts.push(plural(sup.wavesOwned, "wave"));
+  return (
+    <li
+      aria-label={`Supervisor ${id}`}
+      className={`coord coord--sup st-${h.down ? "gone" : "working"}`}
+    >
+      <span className="coord-dot" style={{ background: h.down ? "#ff7a59" : "#34d399" }} />
+      <div className="coord-main">
+        <div className="coord-name">Supervisor</div>
+        <div className="coord-sub">
+          <span className="coord-state">{parts.join(" · ")}</span>
+          {sup?.version && <span className="dim"> · v{sup.version}</span>}
+        </div>
+      </div>
+    </li>
+  );
 }
 
 function pctOf(w: WaveView): number {
@@ -92,6 +123,12 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
       actions={<IconBtn label="Close coordinators" i={Cancel01Icon} onClick={p.onClose} />}
     >
       <ul className="coord-list">
+        {p.supervisors && p.supervisors.length === 0 && (
+          <SupervisorRow sup={undefined} now={p.now ?? Date.now()} />
+        )}
+        {p.supervisors?.map((s) => (
+          <SupervisorRow key={s.id} sup={s} now={p.now ?? Date.now()} />
+        ))}
         {p.waves.map((w) => {
           const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
           const accent = accentFor(w.id);

@@ -1,6 +1,6 @@
 /**
  * Pure Desk reducer: folds Volley MQTT deliveries into
- * `{ waves, agents, coordinators, config, leases, admission }`.
+ * `{ waves, agents, coordinators, supervisors, config, leases, admission }`.
  *
  * Agents are keyed by the topic's `<agent_id>` segment, not the envelope's
  * `agent_id`: a mailbox envelope names its sender and a screen envelope names
@@ -12,6 +12,12 @@
  * replay of an envelope already in an agent's feed is not appended again.
  * After a reconnect the store calls `resync` first, so topics cleared while
  * the Desk was offline do not linger.
+ *
+ * A supervisor (`volleyd`: registry capability `supervisor`, or an id matching
+ * `^volleyd(-|$)`) is health, not an agent: it goes into `supervisors` and
+ * never gets an agent window. volleyd's control channel — a mailbox `query`
+ * with `payload.op` and the daemon's `ack` echoing it — is kept out of every
+ * agent's feed.
  */
 import {
   type AgentView,
@@ -28,6 +34,7 @@ import {
   type Role,
   type ScreenPayload,
   type SteeringReceipts,
+  type SupervisorView,
   type WaveStatePayload,
   type WaveView,
 } from "./types";
@@ -42,6 +49,14 @@ const AGENT_CHANNELS = ["status", "progress", "result", "mailbox", "screen"] as 
 type AgentChannel = (typeof AGENT_CHANNELS)[number];
 
 const TERMINAL_STATUS = new Set(["done", "failed", "reaped"]);
+
+/** volleyd's agent id, and the ids of its control clients (`volleyd-cli-<suffix>`). */
+const SUPERVISOR_ID = /^volleyd(-|$)/;
+
+/** A supervisor by its id alone (`volleyd`, `volleyd-<suffix>`). */
+export function isSupervisorId(id: string): boolean {
+  return SUPERVISOR_ID.test(id);
+}
 
 /** Order agents within a wave the way the prototype stacks them. */
 const ROLE_ORDER: readonly Role[] = [
@@ -88,7 +103,15 @@ export function routeTopic(topic: string): Route | null {
 }
 
 export function initialState(): DeskState {
-  return { waves: {}, agents: {}, coordinators: {}, config: null, leases: {}, admission: null };
+  return {
+    waves: {},
+    agents: {},
+    coordinators: {},
+    supervisors: {},
+    config: null,
+    leases: {},
+    admission: null,
+  };
 }
 
 export function reduceAll(state: DeskState, msgs: readonly DeskMessage[]): DeskState {
@@ -100,9 +123,16 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
   if (route === null) return state;
   switch (route.kind) {
     case "registry":
+      if (isSupervisor(state, route.agentId, m.envelope)) {
+        return withCoordinators(reduceSupervisor(state, route.agentId, "registry", null, m));
+      }
       return withCoordinators(reduceRegistry(state, route.agentId, m));
     case "agent": {
       const s = withReceipts(state, route, m);
+      if (isSupervisor(s, route.agentId, null)) {
+        return reduceSupervisor(s, route.agentId, route.channel, route.namespace, m);
+      }
+      if (route.channel === "mailbox" && m.envelope && isControlTraffic(m.envelope)) return s;
       return ownsNoAgent(s, route, m) ? s : withCoordinators(reduceAgent(s, route, m));
     }
     case "wave":
@@ -129,8 +159,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 
 /**
  * Forget everything that retained topics hold, ahead of the replay that
- * follows a reconnect: waves (with their decisions), config, leases,
- * admission, and each agent's registry, status and screen. Live-only parts —
+ * follows a reconnect: waves (with their decisions), supervisors, config,
+ * leases, admission, and each agent's registry, status and screen. Live-only parts —
  * feed, narration, progress, heartbeat, attention — are kept. Agents that were
  * registered become `unconfirmed` until their registry entry is replayed.
  */
@@ -155,6 +185,7 @@ export function resync(state: DeskState): DeskState {
     waves: {},
     agents,
     coordinators: {},
+    supervisors: {},
     config: null,
     leases: {},
     admission: null,
@@ -314,6 +345,9 @@ function reduceAgent(
   }
   const payload = record(env.payload);
   if (!replay) next.lastSeen = touch(prev, at);
+  if (channel === "progress" && !replay && at >= (prev.lastProgress?.at ?? at)) {
+    next.lastProgress = { type: env.type, at };
+  }
   const narration = str(payload.msg);
   if (narration !== undefined) next.narration = narration;
   if (typeof payload.progress === "number") next.progress = payload.progress;
@@ -340,6 +374,114 @@ function reduceAgent(
     next.attention = null;
   }
   return putAgent(state, next);
+}
+
+// ------------------------------------------------------------- supervisors
+
+/** Supervisor statuses that mean it is running (volleyd's `LIVE_STATUS`). */
+const LIVE_SUPERVISOR = new Set(["spawning", "registered", "working"]);
+
+/** A known supervisor, one by its id, or a registry entry declaring capability `supervisor`. */
+function isSupervisor(state: DeskState, id: string, registry: Envelope | null): boolean {
+  if (isSupervisorId(id) || state.supervisors?.[id]) return true;
+  const caps = record(registry?.payload).capabilities;
+  return Array.isArray(caps) && caps.includes("supervisor");
+}
+
+/**
+ * volleyd's control channel: a mailbox `query` carrying `payload.op`, or the
+ * daemon's `ack` to one (it echoes `acked_type: "query"` and the op).
+ */
+export function isControlTraffic(env: Envelope): boolean {
+  const p = record(env.payload);
+  if (typeof p.op !== "string") return false;
+  return env.type === "query" || (env.type === "ack" && p.acked_type === "query");
+}
+
+/**
+ * A supervisor's registry, status and progress update its health; its
+ * mailbox, results and screens are not news about it. An agent window made
+ * before its registry entry said it was a supervisor is folded in and dropped.
+ */
+function reduceSupervisor(
+  state: DeskState,
+  id: string,
+  channel: AgentChannel | "registry",
+  namespace: string | null,
+  m: DeskMessage,
+): DeskState {
+  const env = m.envelope;
+  const supervisors = { ...state.supervisors };
+  const prev = supervisors[id];
+  const stray = state.agents[id];
+  const agents = { ...state.agents };
+  delete agents[id];
+  if (channel === "registry" && env === null) {
+    if (!prev && !stray) return state;
+    delete supervisors[id];
+    return { ...state, supervisors, agents };
+  }
+  if (channel !== "registry" && channel !== "status" && channel !== "progress") return state;
+  if (env === null) {
+    if (!prev || channel !== "status") return state;
+    supervisors[id] = { ...prev, status: null };
+    return { ...state, supervisors };
+  }
+  const at = seenAt(m, env);
+  const base: SupervisorView = prev ?? {
+    id,
+    namespace: stray?.namespace ?? null,
+    registry: null,
+    status: stray?.status?.type ?? null,
+    lastHeartbeat: stray?.lastSeen ?? null,
+    wavesOwned: null,
+  };
+  const payload = record(env.payload);
+  const next: SupervisorView = {
+    ...base,
+    namespace: str(env.namespace) ?? base.namespace ?? namespace,
+    lastHeartbeat: Math.max(base.lastHeartbeat ?? at, at),
+  };
+  const version = str(payload.version);
+  if (version !== undefined) next.version = version;
+  if (channel === "registry") next.registry = payload as RegistryPayload;
+  if (channel === "status") {
+    next.status = env.type;
+    if (typeof payload.waves === "number") next.wavesOwned = payload.waves;
+  }
+  supervisors[id] = next;
+  return { ...state, supervisors, agents };
+}
+
+/** A supervisor's health for the top-bar pill and the coordinators row. */
+export interface SupervisorHealth {
+  /** Not running: reaped, stopped, failed, no status, or no supervisor at all. */
+  down: boolean;
+  /** Its status type, `no status`, or `absent`. */
+  label: string;
+  /** ms of its last sign of life, when known. */
+  since: number | null;
+}
+
+export function supervisorHealth(s: SupervisorView | undefined): SupervisorHealth {
+  if (!s) return { down: true, label: "absent", since: null };
+  return {
+    down: s.status === null || !LIVE_SUPERVISOR.has(s.status),
+    label: s.status ?? "no status",
+    since: s.lastHeartbeat,
+  };
+}
+
+/** The supervisors, volleyd first. */
+export function supervisorList(state: DeskState): SupervisorView[] {
+  return Object.values(state.supervisors ?? {}).sort(
+    (a, b) => Number(b.id === "volleyd") - Number(a.id === "volleyd") || a.id.localeCompare(b.id),
+  );
+}
+
+/** The namespace volleyd's control mailbox lives in: its registry's, else `default`. */
+export function supervisorNamespace(state: DeskState, id = "volleyd"): string {
+  return state.supervisors?.[id]?.namespace ?? "default";
 }
 
 // ---------------------------------------------------------------- receipts

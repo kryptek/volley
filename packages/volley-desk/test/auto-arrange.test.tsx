@@ -163,8 +163,10 @@ describe("App auto-arrange (demo mode)", () => {
     expect(world(container)).not.toHaveClass("world--anim");
     advance(1);
     expect(world(container)).toHaveClass("world--anim");
-    // arrange puts the coordinators cluster first, at the origin
-    expect(at("Wave coordinators")).toEqual({ left: "0px", top: "0px" });
+    // arrange puts the first wave at the origin and closes its row with the coordinators window
+    expect(at("status-chip")).toEqual({ left: "0px", top: "0px" });
+    expect(at("Wave coordinators").top).toBe("0px");
+    expect(at("Wave coordinators").left).not.toBe("0px");
     advance(ARRANGE_ANIM_MS);
     expect(world(container)).not.toHaveClass("world--anim");
   });

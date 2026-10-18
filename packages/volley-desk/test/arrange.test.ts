@@ -179,4 +179,63 @@ describe("arrange", () => {
   it("returns null with nothing to arrange", () => {
     expect(arrange([], screen)).toBeNull();
   });
+
+  describe("unassigned agents and the coordinators window sit next to the waves", () => {
+    // Two waves, the unassigned group (3 agents) and the coordinators window: the last two are
+    // side clusters, laid out on the first row right after its waves.
+    const unassigned: Cluster = {
+      main: box("unassigned", 620, 200),
+      kids: [box("u1", 460, 470), box("u2", 460, 470), box("u3", 460, 470)],
+      side: true,
+    };
+    const coordsSide: Cluster = { ...coords, side: true };
+    const set = [unassigned, waveA, coordsSide, waveB];
+    const dims = Object.fromEntries(set.flatMap((c) => [c.main, ...c.kids]).map((b) => [b.id, b]));
+    /** A cluster's right edge in a placement. */
+    const end = (place: Record<string, { x: number; y: number }>, ids: string[]) =>
+      Math.max(...ids.map((k) => (place[k]?.x ?? 0) + (dims[k]?.w ?? 0)));
+    const waveIds = (c: Cluster) => [c.main.id, ...c.kids.map((k) => k.id)];
+
+    for (const sc of [screen, { width: 1920, height: 1080 }, { width: 390, height: 844 }]) {
+      it(`every candidate puts them on the waves' first row, one CGAP apart (${sc.width}px)`, () => {
+        for (const c of candidates(set, sc)) {
+          const p = c.place;
+          const u = p.unassigned;
+          const co = p.coordinators;
+          if (!u || !co) throw new Error("side clusters not placed");
+          // same row as the first wave cluster
+          expect(u.y).toBe(p["wave-a"]?.y);
+          expect(co.y).toBe(p["wave-a"]?.y);
+          // the last wave cluster on that row, then unassigned, then coordinators
+          const row = [waveA, waveB].filter((w) => p[w.main.id]?.y === u.y);
+          const last = row.at(-1);
+          if (!last) throw new Error("no wave on the row");
+          expect(u.x - end(p, waveIds(last))).toBe(CGAP);
+          expect(co.x - end(p, waveIds(unassigned))).toBe(CGAP);
+          // every window is placed, once
+          expect(Object.keys(p).sort()).toEqual(Object.keys(dims).sort());
+        }
+      });
+    }
+
+    it("keeps the tethers to unassigned agents short", () => {
+      const r = arrange(set, screen);
+      if (!r) throw new Error("no arrangement");
+      const m = r.place.unassigned;
+      if (!m) throw new Error("unassigned not placed");
+      // Chord from the group window's right edge to each agent's top-left corner.
+      const bound = 460 + 470 + 2 * GAP;
+      for (const k of unassigned.kids) {
+        const a = r.place[k.id];
+        if (!a) throw new Error(`${k.id} not placed`);
+        expect(Math.hypot(a.x - (m.x + 620), a.y - m.y)).toBeLessThan(bound);
+      }
+    });
+
+    it("with no waves, the side clusters make one row", () => {
+      const c = candidates([unassigned, coordsSide], screen);
+      expect(c.map((x) => x.rows)).toEqual(c.map(() => 1));
+      expect(c[0]?.place.unassigned).toEqual({ x: 0, y: 0 });
+    });
+  });
 });
