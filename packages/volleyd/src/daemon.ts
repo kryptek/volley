@@ -3284,6 +3284,21 @@ export class Daemon {
       .catch((e: unknown) => this.log(`error: ${String(e)}`));
   }
 
+  /** `wall_time` of every retained registry entry, by agent id (account_list's `last_seen`). */
+  private async registrySeen(): Promise<Map<string, string>> {
+    const msgs = await this.broker.subscribeCollect(
+      "volley/_system/registry/+",
+      Number.POSITIVE_INFINITY,
+      DAEMON_DEFAULTS.registry_scan_ms,
+    );
+    const seen = new Map<string, string>();
+    for (const m of msgs) {
+      const env = m.payload === "" ? null : parseEnvelope(m.payload);
+      if (env !== null) seen.set(env.agent_id, env.wall_time);
+    }
+    return seen;
+  }
+
   /**
    * An account op (`volley/_system/auth/ops/<username>`) or a token redemption
    * (`volley/_system/auth/redeem`), answered on `volley/_system/auth/replies/<correlation_id>`.
@@ -3313,7 +3328,14 @@ export class Daemon {
       } else {
         const sender = topic.split("/")[4] ?? "";
         this.authSeen.set(sender, new Date().toISOString());
-        out = await accountOp(exec, sender, payload, (name) => this.authSeen.get(name));
+        const registry = payload.op === "account_list" ? await this.registrySeen() : new Map();
+        // The later of the account's last auth request and its registry entry (an agent id).
+        const lastSeen = (name: string) =>
+          [this.authSeen.get(name), registry.get(name)]
+            .filter((t): t is string => t !== undefined)
+            .sort()
+            .pop();
+        out = await accountOp(exec, sender, payload, lastSeen);
       }
     } catch (e) {
       const op = typeof payload.op === "string" ? payload.op : "";

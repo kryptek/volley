@@ -248,6 +248,35 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(auth.argvs(["volley", "auth", "add"])).toEqual([]);
   });
 
+  it("account_list reports last_seen from the account's retained registry entry", async () => {
+    const reg = new VolleyBroker();
+    await reg.connect({
+      url: broker.url,
+      agentId: "reg-writer",
+      username: "volleyd",
+      password: pw("volleyd"),
+    });
+    clients.push(reg);
+    const entry = buildEnvelope({
+      agentId: "steer-1",
+      parentId: null,
+      channel: "_system/registry",
+      type: "registered",
+      payload: { capabilities: [], started_at: "2026-10-18T11:00:00.000Z" },
+      now: () => new Date("2026-10-18T11:30:00.000Z"),
+    });
+    await reg.publish("volley/_system/registry/steer-1", JSON.stringify(entry), {
+      qos: 1,
+      retain: true,
+    });
+    const list = await op("admin-1", { op: "account_list" });
+    const accounts = (list?.result as { accounts: { name: string; last_seen?: string }[] })
+      .accounts;
+    expect(accounts.find((a) => a.name === "steer-1")?.last_seen).toBe("2026-10-18T11:30:00.000Z");
+    // The admin's own request counts as being seen.
+    expect(typeof accounts.find((a) => a.name === "admin-1")?.last_seen).toBe("string");
+  });
+
   it("account_list, account_rotate and account_revoke (journaled)", async () => {
     const list = await op("admin-1", { op: "account_list" });
     expect(list).toMatchObject({ ok: true });

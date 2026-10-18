@@ -87,6 +87,36 @@ therefore forge any agent's status, result or registry entry. Agents dispatched 
 identity (the legacy `/volley-issues` path) inherit the MCP server's env and therefore also log
 in as `coordinator`. Treat the coordinator password as operator-level.
 
+## Accounts and roles
+
+Beyond the fixed identities and per-agent identities, `volley auth add <name> --role <role>`
+creates an **account** (registry: `accounts.json` next to `passwd`; never a password). Each role
+is a template `volley auth` appends to `acl.conf` as a managed `# >>> volley account <name>` block:
+
+| Role | Writes (beyond the shared patterns) |
+|---|---|
+| `admin` | everything `coordinator` may, plus `volley/_system/auth/ops/<name>` (account ops through volleyd) |
+| `steer` | any agent's `mailbox` (steering, control requests to volleyd) |
+| `watch` | nothing |
+| `supervisor` | `volley/#` (a volleyd) |
+| `peer` | `volley/_system/machines/<name>` and below (a paired machine) |
+
+The shared `pattern` lines still apply to every account: read `volley/#`, write the account's own
+`%u` channels and registry entry, and lease requests. So `watch` is read-only in practice, but can
+publish as its own agent id. `rotate` mints a new password, `revoke` removes the password, entry
+and block, `list` shows the registry.
+
+**One-time tokens.** `volley auth token` prints a single-use admin token (`vly_admin_…`, 10
+minutes; only its hash is stored in `tokens.json`); volleyd's `signin_link` op makes a `steer` or
+`watch` one for a phone. A token is also the password of a temporary login `redeem-<id>` with a
+managed `# >>> volley token <id>` block that allows exactly one write,
+`volley/_system/auth/redeem`. That is how a browser with nothing but the token reaches volleyd
+without the broker accepting anonymous clients: mosquitto applies `pattern` lines (including
+`pattern read volley/#`) to anonymous clients too, and a `deny` would also block the redeem topic,
+so an anonymous redeem topic would expose the whole tree to every web page. Redeeming burns the
+token and removes its login; an expired token's login is removed by the next `volley auth` account
+command (`volley auth list` will do).
+
 ## Giving clients their credentials
 
 | Client | Where credentials come from |
@@ -136,4 +166,5 @@ Read the header of [`acl.conf`](acl.conf) first. Keep your own lines above the m
 reads, so do not use it to fence off `_waves/*`; the per-agent rules enumerate channels instead.
 A denied publish is dropped silently under MQTT 3.1.1, so check a change with a subscriber. The
 CI job `test-integration-auth` runs `packages/volley-mcp/test/integration/mosquitto-auth.test.ts`
-against this exact file.
+against this exact file, and `packages/volleyd/test/integration/mosquitto-roles.test.ts` against it
+plus the role and token blocks `volley auth` generates.
