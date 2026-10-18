@@ -1,0 +1,12 @@
+{
+  "ID": "",
+  "Containers": 0,
+  "ContainersRunning": 0,
+  "ContainersPaused": 0,
+  "ContainersStopped": 0,
+  "Images": 0,
+  "ServerErrors": [
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  ],
+  "ClientInfo": { "Debug": false, "Version": "27.3.1" }
+}

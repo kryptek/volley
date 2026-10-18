@@ -14,6 +14,7 @@ describe("classifyScreen", () => {
     ["trust-dialog.txt", "trust_dialog"],
     ["working.txt", "working"],
     ["shell-prompt.txt", "shell_prompt"],
+    ["credit-exhausted.txt", "credit_exhausted"],
   ])("%s → %s", (file, cls) => {
     expect(classifyScreen(screen(file))).toBe(cls);
   });

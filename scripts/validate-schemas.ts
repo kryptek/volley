@@ -23,6 +23,7 @@
  *   - `config-*.json` -> config.schema.json
  *   - `configset-*.json` -> config-set-request.schema.json
  *   - `screen-*.json` -> screen.schema.json
+ *   - `admission-*.json` -> admission.schema.json
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -53,6 +54,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   config: "config.schema.json",
   configset: "config-set-request.schema.json",
   screen: "screen.schema.json",
+  admission: "admission.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

@@ -13,10 +13,10 @@ coordinator session.
 
 > **Status: pre-release.** This package has the wave file, journal, reducer, scheduler, fence,
 > config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop and
-> the kill switch, steering and overlap warnings, and it spawns each admitted task's implementer
-> (worktree, identity, cmux launch, hook-signal verification, per-worktree lock, retire). Leases
-> and pressure-based admission, the reviewer/fixup pipeline stages and recovery come in later
-> tasks of the volleyd epic.
+> the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
+> admission, and it spawns each admitted task's implementer (worktree, identity, cmux launch,
+> hook-signal verification, per-worktree lock, retire). The reviewer/fixup pipeline stages and
+> recovery come in later tasks of the volleyd epic.
 
 ---
 
@@ -26,6 +26,8 @@ coordinator session.
 - [The wave file](#the-wave-file)
 - [CLI](#cli)
 - [How it works](#how-it-works)
+- [Leases](#leases)
+- [Spawn admission](#spawn-admission)
 - [Topics and the control channel](#topics-and-the-control-channel)
 - [Decisions](#decisions)
 - [Ownership and claim](#ownership-and-claim)
@@ -34,6 +36,7 @@ coordinator session.
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+- [Recovery](#recovery)
 - [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
@@ -80,7 +83,7 @@ tasks:
 # namespace: dispatch        # Volley namespace for the wave's agents
 # spawn_budget: 20           # default: spawn_budget_multiplier × task count
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
-# config: { hard_ceiling: 4 }  # per-wave overrides of any tunable (see Configuration)
+# config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run;
@@ -122,6 +125,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
+| `volleyd admission [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts. |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
 | `volleyd cleanup <wave> [--yes] [--force]` | Remove retired agents' cmux workspaces and worktrees. Without `--yes` only prints the plan. Branches are kept. |
 
@@ -134,7 +138,8 @@ names an agent with no registry entry, and `claim` refuses to run without any id
 
 Commands that talk to the daemon fail fast with `volleyd not running` (exit 1, within ~1 s) when
 the daemon's retained status is missing or terminal. `events`/`ack` read `$VOLLEYD_HOME` directly
-and work while the daemon is down; use the wave `_system` for global events (`config_changed`).
+and work while the daemon is down; use the wave `_system` for global events (`config_changed`,
+`lease_*`).
 
 ---
 
@@ -174,6 +179,67 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 
 ---
 
+## Leases
+
+A bare concurrency cap is the wrong tool: six agents editing files is fine, six running
+integration suites with containers is not. Heavy commands therefore take a lease from a
+machine-global **pool** (`lease_pools` in the config: `capacity`, optional `ttl_s`, and the
+`match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to wrap matching Bash
+commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+
+- **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
+  SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
+  lease already held or queued is a no-op; `release` of a queued request cancels it.
+- **Grants** are FIFO, never past the pool's *current* capacity. The pool state is re-published
+  retained after every request, with `reasons` such as `queued: 3/3 backend-it leases held`.
+- **A lease ends** on release, on TTL expiry (`ttl_s` of the request, else the pool's, else
+  1 hour; `renew` restarts it — `volley lease run` renews at half the TTL), or when the holder's
+  retained `status` turns `reaped`, `done` or `failed`.
+- **Hot config, never preempt**: a capacity increase grants queued requests on the next tick; a
+  decrease stops granting until holders release; a removed pool keeps its holders, drops its
+  queued requests (they never started; each gets `rejected <lease_id>: pool <p> removed from
+  config`, and `volley lease run` then runs its command unleased), reports capacity 0 with
+  `pool <p> removed from config: new requests rejected`, rejects new acquires and disappears when
+  its last holder releases. Pools are machine-global: they come only from the global config, and a
+  wave file that sets `config.lease_pools` is rejected.
+- **Durable**: every grant/release/expiry is journaled as `lease_requested`, `lease_granted`,
+  `lease_released` or `lease_expired` in the `_system` journal (mirrored on
+  `volley/_waves/_system/events`); a restart replays it, so held leases survive. Requests sent
+  while the daemon is down wait in its persistent session and are handled on the next start
+  (the daemon drains them like its mailbox).
+
+## Spawn admission
+
+Every tick (10 s) the daemon samples machine pressure through the fence (`src/pressure/*`) and
+computes a pure verdict (`src/admission.ts`, `decide(samples, state, config) → { allow, reasons }`)
+that the scheduler applies on top of the hard ceiling and spawn budget:
+
+| Signal | Measured by | Over when (`admission.*`) |
+|---|---|---|
+| `memory_pressure` | `sysctl -n kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical); `memory_pressure`'s free percentage as fallback | level > `memory_pressure_max_level` |
+| `cmux_ping` | wall time of `cmux ping` (a ping that hangs counts as the time waited) | ms > `cmux_ping_max_ms` |
+| `containers` | `docker info --format {{json .}}` → `ContainersRunning` | > `container_max` |
+| `api_overload` | agents' progress (via the hooks): `awaiting_input` with `quota_auto_resume_*`, `idle` text matching `overloaded\|rate limit\|usage limit` | count in the last `api_overload_window_s` > `api_overload_max` |
+| `ci_queue` | `gh api repos/{owner}/{repo}/actions/runs?status=queued` in the wave's repo → `total_count`, at most once a minute per repo (it spends the agents' GitHub API quota; ticks in between reuse the last sample) | > `ci_queue_max` |
+
+- **Throttle starts only**: an over signal sets `allow` to 0; nothing running is touched.
+- **Hysteresis**: after a breach a signal must be clear for `hysteresis_samples` consecutive
+  samples (`recovering: cmux ping clear for 1/3 samples`) before the allowance rises again.
+- **Unknown never throttles**: a tool that is missing (Linux has no memory-pressure sysctl, no
+  cmux, docker or gh) makes its signal `unknown`. On a signal that is already recovering, an
+  unknown sample counts toward the clean samples (`… clear for 2/3 samples (last sample
+  unknown)`), so a tool that breaks after a breach cannot hold starts back forever.
+- **Nothing starts before the first sample**: the daemon samples once before its first
+  admission, so a daemon restarted on an overloaded machine does not admit every ready task.
+- **Reasons everywhere**: the verdict's reasons become `why_waiting` on the wave's ready tasks
+  (`memory pressure critical (level 4 > max 2)`), joined by the ceiling/budget reasons, and are
+  published retained on `volley/_system/admission` (`spec/schemas/admission.schema.json`) with
+  every signal's value and threshold. `volleyd admission` prints it.
+- **Hot**: thresholds are read from the config store per wave (`config:` overrides apply); a
+  `config_set` re-decides the last sample with the new thresholds immediately.
+
+---
+
 ## Topics and the control channel
 
 | Topic | Retained | What |
@@ -186,6 +252,10 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 | `volley/_waves/<wave>/decisions/<id>` | while open | Each open decision (`decision.schema.json`); cleared on resolve. |
 | `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision. |
 | `volley/_waves/_system/events` | no | Live mirror of `_system` journal events (the kill switch). |
+| `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `held`, FIFO `queue`, `reasons`. |
+| `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
+| `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
+| `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -211,7 +281,8 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claim` | `wave`, `by` | `{ wave, owner, previous, why }` |
 | `pause` / `resume` | `wave` (or `all: true` for `resume`), `by` | `{ wave, status, changed }` / `{ kill_switch }` |
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
-| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by? }` |
+| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
+| `admission` | — | the retained admission summary (null before the first sample) |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
@@ -304,6 +375,13 @@ names the previous steer, so the recipient can drop stale guidance. The steer is
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).
 
+`urgent: true` interrupts the agent's session (the same interrupt as `stop`: the configured
+hook, else Escape into the spawned agent's workspace) **before** the steering message is published, and the answer adds `interrupted`.
+`escape_only: true` (implies `urgent`; `text` not needed) only interrupts: nothing is published or
+journaled, so a client that sends its own mailbox message (the Desk) asks for the interrupt first
+and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
+(no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
+
 ## Overlap warnings
 
 At submit the daemon reads each task issue's `Files` section (`## Files` / `### Files` heading or
@@ -346,14 +424,17 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `wake_grace_s` | next monitor tick | — |
+| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `wake_grace_s` | next monitor tick | — |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
+| `screen_tail_interval_s` | each agent's next screen capture | — |
 
-This foundation consumes `hard_ceiling` and `spawn_budget_multiplier`; the other rows describe
-the contract the subsystems that read them (leases, monitors, decisions, spawning) follow.
+The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
+`lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
+that read them (monitors, decisions, spawning) follow. [`config.example.yaml`](config.example.yaml)
+lists every key with its default and example pools, commented out.
 
 ---
 
@@ -446,7 +527,7 @@ truth). When no SessionStart heartbeat arrived in time, the screen is captured t
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
 | `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
-| `login`, `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
+| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
 
 After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
 signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
@@ -469,10 +550,44 @@ the decision store (retained on `volley/_waves/<wave>/decisions/<id>`, notify br
 `repo_untrusted` one also carries `repo`); trust accepted later → `decision_resolved { answer:
 "trusted", by: "claude-trust-dialog" }`; retire → `agent_retired`.
 
+### Screen tails
+
+The daemon is the only reader of agents' terminals (`src/screen-publisher.ts`). Every
+`screen_tail_interval_s` (default 5 s, per-wave overridable) it reads each supervised agent's
+workspace through its host (`cmux read-screen --workspace <ref> --lines 60` locally), cuts the
+tail with `screenTail()` (`src/screen-tail.ts`: everything from Claude Code's input box down —
+the rule above the `❯` prompt, any draft typed into it, the status bar — is dropped, `(ctrl+…)`
+hints are removed, blank lines skipped; a screen without an input box keeps its last lines),
+keeps the last 40 lines, and publishes a retained QoS 0 envelope on `volley/<ns>/<agent>/screen`:
+
+```json
+{ "agent_id": "volleyd", "channel": "screen", "type": "screen_tail",
+  "payload": { "lines": ["…"], "captured_at": "…", "workspace": "workspace:3",
+               "hash": "…", "source": "cmux" } }
+```
+
+A capture whose `hash` equals the last published one is not published. Every capture is also
+emitted in-process (`ScreenPublisher.onCapture`), so other daemon subsystems reuse it instead of
+reading the screen again. A read slower than 2 s (flagged the moment 2 s pass, not when the read
+returns), or three failed reads in a row, backs that agent off to one capture every 30 s and sets
+`screen_stale: true` on its task in the wave state (the Desk shows a stale marker) until a read
+succeeds in time. Every read is bounded at 5 s; a read still pending then counts as failed.
+Captures run on their own 1 s timer beside the daemon's serial queue, never on it, so a slow or
+hung terminal cannot delay admissions, control ops or retire (the timer is off when `tickMs` is
+0, as in tests). Retire stops the agent's capture — after any publish in flight, never waiting
+for a read — and then clears the topic with an empty retained payload.
+
+**Privacy.** A screen tail is whatever the agent's terminal shows, including anything an agent
+printed — tokens, keys, file contents. It is published to the same broker as every other agent
+record and has the same trust boundary: anyone who can subscribe to `volley/<ns>/+/screen` can
+read it, so restrict broker access (per-agent credentials and ACLs) as for the rest of the
+namespace.
+
 ### Retire and cleanup
 
 When a supervised agent's `done` or `failed` status arrives, the daemon retires it. `reaped` (its
-LWT) is retired only after `heartbeat_alarm_s` passes with no fresh status or heartbeat: a
+LWT) is retired only after the reap grace passes with no fresh status or heartbeat (see
+[Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
 retained payloads on its `registry`, `status`, `result`, `capability` and `screen` topics, the
@@ -489,6 +604,89 @@ file just before its rename and retries rather than drop a concurrent Claude Cod
 Accepting the dialog by hand in any worktree of the repo works too: every tick re-checks the
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
+
+---
+
+## Recovery
+
+Once an agent is supervised, its hooks (volley-hooks) are the primary source of truth about what
+it is doing; its screen is read only when the hooks go silent. `src/liveness.ts` folds every
+`harness-hook` progress event of the agent (its own narration does not count) into an activity
+model: the last hook signal (`at`, `seq`, `hook_event`), `working | idle | awaiting_input`, the
+last Stop text, and what it is waiting on. Every monitor tick (10 s) checks it against the
+agent's retained status. All rules are pure functions; the daemon carries out their actions.
+
+| Signal | Action | What needs approval |
+|---|---|---|
+| `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the Stop text of the current idle (never an earlier turn's: `resumed` clears it; else the notification text) and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
+| `idle` (Stop) with no terminal status and no `resumed` for `idle_grace_s` (default 3 min; an `idle_prompt` confirms the idle sooner) | one steer: "Continue; publish done/blocked/failed when finished" | — |
+| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge: a further decision only if it is still idle a full `idle_grace_s` later; `stop task` cancels it |
+| `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
+| `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
+| no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` | read the screen (bounded, once per tick until decided) and classify it: | |
+| ↳ the credit prompt (`screens.ts` `credit_exhausted`) | decision `model_switch` with the capture | the switch |
+| ↳ readable and changing (two reads differ, or the screen-tail capture changed since the last hook signal) | decision `unknown_screen`, `class: "hooks_silent"`: "hooks may be broken by a harness update" | — |
+| ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
+| ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
+| any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
+
+Every recovery decision carries `class` and `agent_id` (on the journal event and the retained
+topic) and answers `stop task` the same way: a `cancel` to the agent, an interrupt (Escape), and
+`task_cancelled`. While one is open the task's `why_waiting` says what the agent is stuck on:
+`question pending (decision d-…)`, `stalled: credit prompt (decision d-…)`, `hooks silent 12 min`,
+`stalled: idle 9 min (decision d-…)`, `idle 4 min: nudged to continue`.
+
+**Model switch (`src/recovery.ts`).** `credit_exhausted` opens `model_switch` with the options
+`switch to <fallback_model>`, `wait`, `stop task` (`fallback_model` from the config store, read
+when the decision opens; null → `wait` / `stop task` only). Nothing is typed into the agent's
+terminal before the decision is resolved. On `switch to <m>` (or `switch`, meaning the fallback)
+the daemon journals `alarm_raised { alarm: "model_switch_sent" }`, types `/model <m>` and Enter,
+and waits up to 60 s for the hooks' PostModelSwitch registry re-publish naming `m` (an entry that
+already named it does not count). Verified → `alarm_raised { alarm: "model_switch_verified" }`;
+otherwise `model_switch_unverified` and the decision is re-opened (`class:
+"model_switch_unverified"`) with a fresh screen capture. The same recovery fires at most twice
+per agent per hour: the third credit exhaustion in an hour is decision only (no switch offered),
+and an approved third switch is not typed (`alarm_raised { alarm: "recovery_limited" }`, the
+decision re-opened as `class: "model_switch_limited"`, which says so). Models are never switched without approval. Known-screen actions
+beyond this stay with spawning: `update_prompt` → Enter is pre-hook only.
+
+**Sleep/wake (`src/clock.ts`).** Every tick samples a monotonic clock (stopped while the host
+sleeps) and the wall clock; the wall clock running more than 60 s ahead between two samples
+journals `wake_detected { jump_ms }` in `_system`. Liveness clocks restart at the wake (the sleep
+is not silence) and liveness alarms are held for `wake_grace_s` (default 120 s). A `reaped`
+status (an LWT) is never retired at once: it is held as a pending reap for the reap grace
+(`heartbeat_alarm_s`; right after a wake at least `wake_grace_s`: a wake never shortens it). A
+heartbeat from the agent after the LWT journals `reap_suppressed { agent_id, reaped_at,
+heartbeat_at, wake }` and drops that reap for good: the agent stays supervised, however long it
+then sits quiet, and a re-delivery of the same retained LWT changes nothing. The daemon never
+republishes `working` on an agent's behalf (SPEC linearity), so its retained status stays
+`reaped` until the agent publishes one; meanwhile liveness checks it as its last status before
+the reap, so a session that really died ends in the silence path (`crash_candidate`, alarm
+only). Only a new LWT is held again. No heartbeat by the end of the grace: the reap is accepted
+(on the reap timer or the next tick) and the agent retired.
+
+**Restart reconciliation (`src/reconcile.ts`).** On start (spawning on or off), for every task
+that is not `done` / `merge_ready` / `cancelled`, its current agents — the latest spawn per role,
+not retired — are compared with the retained registry entry and status, any heartbeat seen while
+reconciling (the daemon keeps none across a restart, so only a live one counts), the worktree
+lock, git (`rev-parse --verify` of the branch) and — for an agent that reported `done` while the
+daemon was down — GitHub (`gh pr list --head`, `gh pr checks`). The probes run concurrently and
+beside the serial queue, after the mailbox loop started (control ops are answered meanwhile);
+one `reconciled { agent_id, drift, action?, branch: { name, exists, head } }` per agent is
+journaled inside it:
+
+| Finding | `action` | Then |
+|---|---|---|
+| consistent | none (`drift: []`) | the agent is watched again (status, hooks, screen tail) |
+| the agent reported `done`, its PR exists and CI is green | `mark_done_verified` | `artifact_verified { pr }`; watched again, so its `done` retires it |
+| any sign it may be alive (registry, live status, lock, recent heartbeat), or `done` without a green PR, or `failed` | `re_wait` | watched again; the normal status path takes over |
+| no registry entry, no status, no heartbeat, no lock | `respawn_needed` | decision `agent_blocked`, `class: "respawn_needed"` (options `respawn`, `stop task`; `stop task` only with spawning off) — not a second one while it is open |
+
+Nothing is respawned automatically — only on the owner's `respawn` answer, through the normal
+spawn path (its lock check still applies). Either answer journals `agent_retired { status:
+"gone" }` for the vanished agent (its minted credentials revoked), so no later restart
+reconciles it again. Open recovery decisions are re-linked to the agent
+they name when it is watched again, so `resumed` still closes them after a restart.
 
 ---
 
@@ -577,6 +775,8 @@ ALLOW (program by bare name only — never a path):
   volley auth rm-agent <agent_id> [--no-reload]
   launchctl bootstrap | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
+  pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
+    memory_pressure (no arguments: report only) · docker info --format {{json .}}
 
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.

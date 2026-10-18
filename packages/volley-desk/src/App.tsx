@@ -3,8 +3,10 @@
  * coordinators window, a wave window per wave and an agent window per agent
  * (a plain frame for agents with no wave). Every window carries its attention
  * tier (`attention.ts`); the top bar counts what needs you and notifications
- * fire when something starts to. Backgrounds, dock and arrange come in later
- * tasks.
+ * fire when something starts to. Arrange & fit (`layout/arrange.ts`) packs
+ * the windows into per-wave clusters and re-runs on structural changes while
+ * auto-arrange is on. The chat glyphs open the steering panel (D4).
+ * Backgrounds and the dock come in later tasks.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -20,14 +22,18 @@ import {
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
+import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
+import { ARRANGE_ANIM_MS, useAutoArrange, useAutoArrangeSetting } from "./layout/useAutoArrange";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
+import { ClaimButton } from "./steer/SteerPanel";
+import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
-import { AGENT_WIDTH, AgentWindow } from "./windows/agent/AgentWindow";
+import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import {
   COORDS_ID,
   COORDS_W,
@@ -39,11 +45,12 @@ import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
 const AGENT_W = AGENT_WIDTH;
-// Guesses until D6's arrange measures real windows.
+// Sizes until a window has been measured (Frame `onSize`), shared by the
+// placeholder layout, the fits and arrange. The prototype's arrange guessed
+// 620 / 520; in a browser the ResizeObserver reports before arrange runs, so
+// one set of guesses is kept on purpose.
 const WAVE_H = 440;
 const AGENT_H = 470;
-const GAP = 36;
-const CGAP = 96;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
 
@@ -122,14 +129,18 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline } = useDesk();
-  const { view, fitTo, stageRef, stageHandlers } = useViewport();
+  const { state, connection, demo, settling, offline, writer, identity } = useDesk();
+  const { view, setView, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
+  const steering = useSteering(state, writer, identity);
+  /** The window whose steering panel is open (a wave id or an agent id). */
+  const [steerOpen, setSteerOpen] = useState<string | null>(null);
+  const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
   const ctxOpts = { now, me, gateSince, offline };
@@ -161,9 +172,15 @@ export default function App() {
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
 
+  const sizes = useRef<Record<string, { w: number; h: number }>>({});
+  const sizeOf = (id: string, w: number, h: number) => ({ id, ...(sizes.current[id] ?? { w, h }) });
+  const rectOf = (id: string, w: number, h: number): Rect => {
+    const { w: sw, h: sh } = sizeOf(id, w, h);
+    return { ...pos(id), w: sw, h: sh };
+  };
   const clusterOf = (id: string): Rect[] => [
-    { ...pos(id), w: WAVE_W, h: WAVE_H },
-    ...(groups[id] ?? []).map((a) => ({ ...pos(a.id), w: AGENT_W, h: AGENT_H })),
+    rectOf(id, WAVE_W, WAVE_H),
+    ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
   ];
   const visible = waveIds.filter((id) => !hidden.has(id));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
@@ -179,6 +196,51 @@ export default function App() {
     fitTo(rects);
   });
 
+  // ------------------------------------------------------- arrange & fit
+  // D7's dock adds "Arrange & fit" (calls `arrange`) and the auto-arrange toggle.
+  const [autoArrange] = useAutoArrangeSetting();
+  const [animating, setAnimating] = useState(false);
+  const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(animEnd.current), []);
+  const arrange = () => {
+    // Forget the sizes of windows that have left the store.
+    for (const id of Object.keys(sizes.current)) {
+      if (id !== COORDS_ID && !state.agents[id] && !waveIds.includes(id)) delete sizes.current[id];
+    }
+    const clusters: Cluster[] = [
+      ...(coordsShown
+        ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(waveList.length)), kids: [] }]
+        : []),
+      ...visible.map((id) => ({
+        main: sizeOf(id, WAVE_W, WAVE_H),
+        kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
+      })),
+    ];
+    const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
+    if (!r) return;
+    setAnimating(true);
+    setMoved((m) => ({ ...m, ...r.place }));
+    setView(r.view);
+    clearTimeout(animEnd.current);
+    animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
+  };
+  const layoutKey = [
+    coordsShown ? "c" : "",
+    ...visible,
+    ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
+  ].join("|");
+  // A reconnect's resync empties the waves and the replay rebuilds them: hold the
+  // key until it settles, so only windows that really came or went re-arrange.
+  // The first connect (and demo load) settles too, but arranges as data arrives.
+  const settledOnce = useRef(false);
+  if (!settling) settledOnce.current = true;
+  useAutoArrange({
+    enabled: autoArrange,
+    layoutKey,
+    arrange,
+    hold: settling && settledOnce.current,
+  });
+
   const place = (id: string, attn?: Attention) => ({
     pos: pos(id),
     z: z(id),
@@ -186,6 +248,10 @@ export default function App() {
     chrome: "glass" as const,
     onMove: move(id),
     onFocus: () => focus(id),
+    // A window not laid out yet (0 × 0) keeps its fallback size.
+    onSize: (w: number, h: number) => {
+      if (w > 0 && h > 0) sizes.current[id] = { w, h };
+    },
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -226,7 +292,7 @@ export default function App() {
     });
   const goTo = (t: NeedsYouTarget) => {
     show(t.wave);
-    fitTo(t.kind === "wave" ? clusterOf(t.id) : [{ ...pos(t.id), w: AGENT_W, h: AGENT_H }]);
+    fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
     focus(t.id);
   };
 
@@ -255,7 +321,7 @@ export default function App() {
       <div className="bg-layer bg-plain" aria-hidden />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
-        <World view={view}>
+        <World view={view} animating={animating}>
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -287,6 +353,7 @@ export default function App() {
             // Only a wave at tier you gets a banner: an ended wave's coordinator is gone
             // because the work is done, not because the wave needs claiming.
             const needsYou = waveAttn[id]?.tier === "you";
+            const chat = waveChatTarget(wave.state?.owner, coordinator, identity);
             return (
               <WaveWindow
                 key={id}
@@ -295,6 +362,8 @@ export default function App() {
                 coordinatorState={coordinator?.state}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === id}
                 banner={
                   needsYou &&
                   coordinator && (
@@ -303,11 +372,28 @@ export default function App() {
                       coordinator={coordinator}
                       openDecisions={openDecisions(wave).length}
                       now={now}
+                      claim={<ClaimButton wave={id} transport={steering.transport} />}
                     />
                   )
                 }
                 onSettings={setSettings}
-              />
+              >
+                {steerOpen === id &&
+                  steering.panel({
+                    target: chat.agentId
+                      ? {
+                          agentId: chat.agentId,
+                          namespace: state.agents[chat.agentId]?.namespace ?? "default",
+                          coordinator: true,
+                          wave: id,
+                        }
+                      : null,
+                    readOnlyReason: "reason" in chat ? chat.reason : undefined,
+                    label: id,
+                    coordinator: true,
+                    onClose: () => setSteerOpen(null),
+                  })}
+              </WaveWindow>
             );
           })}
           {visible.flatMap((id) =>
@@ -321,6 +407,24 @@ export default function App() {
                 accent={accentOf(id)}
                 frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
                 attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === a.id}
+                steer={
+                  steerOpen === a.id &&
+                  steering.panel({
+                    target: {
+                      agentId: a.id,
+                      namespace: a.namespace ?? "default",
+                      coordinator: false,
+                      ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
+                      ...(a.task ? { task: a.task } : {}),
+                    },
+                    label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
+                    coordinator: false,
+                    copy: a.task && a.wave !== UNASSIGNED ? { wave: a.wave, task: a.task } : null,
+                    onClose: () => setSteerOpen(null),
+                  })
+                }
               />
             )),
           )}
