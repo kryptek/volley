@@ -1,0 +1,109 @@
+/* Steering panel (D4), ported from the prototype styles.css "steering" block. */
+.steer {
+  border: 1px solid color-mix(in srgb, var(--acc) 45%, transparent);
+  background: rgba(8, 10, 18, 0.88);
+  border-radius: 12px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.steer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 13px;
+}
+.steer-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.steer .prompt-bar,
+.steer [class*="prompt-bar"] {
+  max-width: 100%;
+}
+.ack {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--dim);
+  align-items: center;
+}
+.ack li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ack li::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--dim);
+}
+.ack li.on {
+  color: var(--ink);
+}
+.ack li.on::before {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+.ack-txt {
+  flex-basis: 100%;
+  color: var(--mute);
+  font-style: italic;
+}
+
+/* Desk additions: refused / superseded messages and the read-only fallback. */
+.ack-err {
+  font-size: 12px;
+  color: #ffb4a1;
+}
+.ack-note {
+  font-size: 12px;
+  color: var(--dim);
+}
+.steer-ro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.steer-ro-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mute);
+}
+.steer-ro-input {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 20, 0.92);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.steer-ro-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.steer-ro-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.steer-ro-copied {
+  color: var(--ok);
+  font-size: 12px;
+}
+.steer-ro-fallback {
+  font-size: 12px;
+  color: var(--mute);
+  user-select: all;
+}

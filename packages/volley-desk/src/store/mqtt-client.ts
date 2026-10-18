@@ -5,14 +5,23 @@
  * zero-length payload through as `envelope: null` — that is how a supervisor
  * clears a retained topic (SPEC §4.6) — flags retained replays, and it
  * reconnects by default, since the Desk stays open for hours (the store
- * resyncs on each reconnect; see `attachClient` in `context.tsx`).
+ * resyncs on each reconnect; see `attachClient` in `context.tsx`). With broker
+ * credentials (T14, the `desk` identity) it can also `publish` (steering, D4).
  */
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import type { DeskMessage, Envelope } from "./types";
 
+/** Broker credentials (mosquitto `password_file` identity, e.g. `desk`). */
+export interface BrokerCredentials {
+  username: string;
+  password: string;
+}
+
 export interface CreateMqttClientOptions {
   url: string;
   clientId?: string;
+  /** Sign in as this identity; anonymous when absent. */
+  auth?: BrokerCredentials | undefined;
   /** ms between reconnect attempts; 0 disables reconnecting. */
   reconnectPeriod?: number;
 }
@@ -24,6 +33,8 @@ export type ErrorHandler = (err: Error) => void;
 export interface DeskMqttClient {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  /** Publish at QoS 1, not retained; resolves on PUBACK, rejects when not connected. */
+  publish(topic: string, payload: string): Promise<void>;
   onMessage(handler: MessageHandler): () => void;
   onConnect(handler: VoidHandler): () => void;
   onDisconnect(handler: VoidHandler): () => void;
@@ -109,6 +120,9 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         const connectOptions: IClientOptions = {
           clientId,
           reconnectPeriod: options.reconnectPeriod ?? 2000,
+          ...(options.auth
+            ? { username: options.auth.username, password: options.auth.password }
+            : {}),
         };
         const instance = mqtt.connect(options.url, connectOptions);
         client = instance;
@@ -163,6 +177,18 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         instance.end(false, {}, () => {
           client = null;
           resolve();
+        });
+      });
+    },
+    publish(topic, payload) {
+      const instance = client;
+      if (instance === null || !instance.connected) {
+        return Promise.reject(new Error("not connected to the broker"));
+      }
+      return new Promise<void>((resolve, reject) => {
+        instance.publish(topic, payload, { qos: 1, retain: false }, (err) => {
+          if (err) reject(err);
+          else resolve();
         });
       });
     },

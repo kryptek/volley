@@ -3,8 +3,8 @@
  * coordinators window, a wave window per wave and an agent window per agent
  * (a plain frame for agents with no wave). Every window carries its attention
  * tier (`attention.ts`); the top bar counts what needs you and notifications
- * fire when something starts to. Backgrounds, dock and arrange come in later
- * tasks.
+ * fire when something starts to. The chat glyphs open the steering panel
+ * (D4). Backgrounds, dock and arrange come in later tasks.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -23,11 +23,13 @@ import { type Rect, useViewport } from "./canvas/useViewport";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
+import { ClaimButton } from "./steer/SteerPanel";
+import { useSteering } from "./steer/useSteering";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
-import { AGENT_WIDTH, AgentWindow } from "./windows/agent/AgentWindow";
+import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import {
   COORDS_ID,
   COORDS_W,
@@ -122,7 +124,7 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline } = useDesk();
+  const { state, connection, demo, settling, offline, writer, identity } = useDesk();
   const { view, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
@@ -130,6 +132,10 @@ export default function App() {
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
+  const steering = useSteering(state, writer, identity);
+  /** The window whose steering panel is open (a wave id or an agent id). */
+  const [steerOpen, setSteerOpen] = useState<string | null>(null);
+  const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
   const ctxOpts = { now, me, gateSince, offline };
@@ -287,6 +293,7 @@ export default function App() {
             // Only a wave at tier you gets a banner: an ended wave's coordinator is gone
             // because the work is done, not because the wave needs claiming.
             const needsYou = waveAttn[id]?.tier === "you";
+            const coordId = wave.state?.owner ?? wave.state?.coordinator?.agent_id;
             return (
               <WaveWindow
                 key={id}
@@ -295,6 +302,8 @@ export default function App() {
                 coordinatorState={coordinator?.state}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === id}
                 banner={
                   needsYou &&
                   coordinator && (
@@ -303,11 +312,27 @@ export default function App() {
                       coordinator={coordinator}
                       openDecisions={openDecisions(wave).length}
                       now={now}
+                      claim={<ClaimButton wave={id} transport={steering.transport} />}
                     />
                   )
                 }
                 onSettings={setSettings}
-              />
+              >
+                {steerOpen === id &&
+                  steering.panel({
+                    target: coordId
+                      ? {
+                          agentId: coordId,
+                          namespace: state.agents[coordId]?.namespace ?? "default",
+                          coordinator: true,
+                          wave: id,
+                        }
+                      : null,
+                    label: id,
+                    coordinator: true,
+                    onClose: () => setSteerOpen(null),
+                  })}
+              </WaveWindow>
             );
           })}
           {visible.flatMap((id) =>
@@ -321,6 +346,24 @@ export default function App() {
                 accent={accentOf(id)}
                 frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
                 attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                onChat={toggleSteer}
+                steerOpen={steerOpen === a.id}
+                steer={
+                  steerOpen === a.id &&
+                  steering.panel({
+                    target: {
+                      agentId: a.id,
+                      namespace: a.namespace ?? "default",
+                      coordinator: false,
+                      ...(a.wave !== UNASSIGNED ? { wave: a.wave } : {}),
+                      ...(a.task ? { task: a.task } : {}),
+                    },
+                    label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
+                    coordinator: false,
+                    copy: a.task && a.wave !== UNASSIGNED ? { wave: a.wave, task: a.task } : null,
+                    onClose: () => setSteerOpen(null),
+                  })
+                }
               />
             )),
           )}
