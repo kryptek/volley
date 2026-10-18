@@ -1,6 +1,7 @@
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "../src/broker";
+import { VolleyError } from "../src/errors";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 
 describe("VolleyBroker connect / disconnect / LWT", () => {
@@ -408,5 +409,109 @@ describe("VolleyBroker subscribeStream", () => {
     await expect(b.subscribeStream("volley/test/dead/+", () => {})).rejects.toMatchObject({
       code: "BROKER_DOWN",
     });
+  });
+});
+
+describe("VolleyBroker persistent sessions + drainQueued", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  const MAILBOX = "volley/t/a/mailbox";
+  const persistentOpts = () => ({
+    url: tb.url,
+    agentId: "a",
+    clientId: "volley-a-hooks",
+    cleanSession: false,
+  });
+
+  async function publishOnce(topic: string, payload: string): Promise<void> {
+    const pub = new VolleyBroker();
+    await pub.connect({ url: tb.url, agentId: "pub-only" });
+    await pub.publish(topic, payload, { qos: 1, retain: false });
+    await pub.disconnect();
+  }
+
+  it("uses the caller's clientId verbatim (no random suffix) for a persistent session", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    expect(a.clientId).toBe("volley-a-hooks");
+    await a.disconnect();
+  });
+
+  it("queues a QoS 1 message published while the consumer is offline; drainQueued returns it on reconnect", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    expect(await a.drainQueued(MAILBOX, { idleMs: 150 })).toEqual([]);
+    await a.disconnect();
+
+    await publishOnce(MAILBOX, "while-you-were-out");
+
+    await a.connect(persistentOpts());
+    const got = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    expect(got).toEqual([{ topic: MAILBOX, payload: "while-you-were-out" }]);
+    await a.disconnect();
+  });
+
+  it("drainQueued returns after idleMs with 0 messages, and the subscription survives a disconnect/reconnect cycle", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    const t0 = Date.now();
+    expect(await a.drainQueued(MAILBOX, { idleMs: 200 })).toEqual([]);
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(180);
+    expect(elapsed).toBeLessThan(1500);
+    await a.disconnect();
+
+    // Reconnect WITHOUT re-subscribing, then publish live: only the session's
+    // restored subscription can route this message to us.
+    await a.connect(persistentOpts());
+    await publishOnce(MAILBOX, "live-after-reconnect");
+    const got = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    expect(got.map((m) => m.payload)).toEqual(["live-after-reconnect"]);
+    await a.disconnect();
+  });
+
+  it("drainQueued stops at maxMessages and leaves the rest for the next drain", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    await a.disconnect();
+
+    await publishOnce(MAILBOX, "one");
+    await publishOnce(MAILBOX, "two");
+    await publishOnce(MAILBOX, "three");
+
+    await a.connect(persistentOpts());
+    const first = await a.drainQueued(MAILBOX, { idleMs: 200, maxMessages: 2 });
+    expect(first.map((m) => m.payload)).toEqual(["one", "two"]);
+    const rest = await a.drainQueued(MAILBOX, { idleMs: 200 });
+    expect(rest.map((m) => m.payload)).toEqual(["three"]);
+    await a.disconnect();
+  });
+
+  it("buffers mailbox messages that arrive between drains on a live connection", async () => {
+    const a = new VolleyBroker();
+    await a.connect(persistentOpts());
+    await a.drainQueued(MAILBOX, { idleMs: 100 });
+    await publishOnce(MAILBOX, "between-drains");
+    await new Promise((r) => setTimeout(r, 100));
+    const got = await a.drainQueued(MAILBOX, { idleMs: 100 });
+    expect(got.map((m) => m.payload)).toEqual(["between-drains"]);
+    await a.disconnect();
+  });
+
+  it("throws IMPL_CLIENT_ID_REQUIRED when cleanSession:false is requested without a clientId", async () => {
+    const a = new VolleyBroker();
+    const err = await a
+      .connect({ url: tb.url, agentId: "a", cleanSession: false })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VolleyError);
+    expect(err).toMatchObject({ code: "IMPL_CLIENT_ID_REQUIRED" });
+    expect(a.connected).toBe(false);
   });
 });

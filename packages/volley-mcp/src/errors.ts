@@ -12,8 +12,8 @@ export type VolleyErrorCode =
 export type ToolErrorCode = VolleyErrorCode | `IMPL_${string}`;
 
 export class VolleyError extends Error {
-  readonly code: VolleyErrorCode;
-  constructor(code: VolleyErrorCode, message: string) {
+  readonly code: ToolErrorCode;
+  constructor(code: ToolErrorCode, message: string) {
     super(message);
     this.name = "VolleyError";
     this.code = code;

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import mqtt, { type MqttClient } from "mqtt";
+import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import { VolleyError } from "./errors";
 
 export interface BrokerConnectOptions {
@@ -14,23 +14,119 @@ export interface BrokerConnectOptions {
   willPayload?: string;
   keepaliveSeconds?: number;
   connectTimeoutMs?: number;
+  /**
+   * MQTT clientId. REQUIRED (and used verbatim) when `cleanSession` is false, because the
+   * broker keys the persistent session on it. Ignored on the default clean-session path,
+   * which always uses `volley-<agentId>-<random>` (see `connect`). Each persistent
+   * consumer MUST own a distinct clientId (e.g. `volley-<agent_id>-mcp` vs
+   * `volley-<agent_id>-hooks`): a same-clientId connect kicks the older client off.
+   */
+  clientId?: string;
+  /**
+   * false = persistent session: the broker keeps this client's subscriptions and queues
+   * QoS 1 messages for it while it is offline. Default true (today's behaviour).
+   */
+  cleanSession?: boolean;
+  /**
+   * MQTT v5 `sessionExpiryInterval` for a persistent session; ignored on v4, where a
+   * persistent session lives until the broker's own expiry policy removes it. Applies
+   * to NEW connections only: an existing session keeps the expiry it was created with
+   * until the client reconnects.
+   */
+  sessionExpirySeconds?: number;
+  /** MQTT protocol version. Default 4 (v3.1.1). */
+  protocolVersion?: 4 | 5;
+}
+
+export interface BrokerMessage {
+  topic: string;
+  payload: string;
+}
+
+export interface DrainOptions {
+  /** Resolve once no message has arrived for this long (measured from SUBACK). */
+  idleMs: number;
+  /** Stop after this many messages; any remainder stays buffered for the next drain. */
+  maxMessages?: number;
+}
+
+/** MQTT topic-filter match (`+` = one level, trailing `#` = any remaining levels). */
+function topicMatches(filter: string, topic: string): boolean {
+  const f = filter.split("/");
+  const t = topic.split("/");
+  for (let i = 0; i < f.length; i++) {
+    if (f[i] === "#") return true;
+    if (i >= t.length) return false;
+    if (f[i] !== "+" && f[i] !== t[i]) return false;
+  }
+  return f.length === t.length;
+}
+
+/**
+ * `mqtt.connectAsync(url, options, false)`, plus a hook that runs on the client before the
+ * connection completes so listeners are attached ahead of the first inbound packet.
+ */
+function connectClient(
+  url: string,
+  options: IClientOptions,
+  beforeConnect: (client: MqttClient) => void,
+): Promise<MqttClient> {
+  return new Promise((resolve, reject) => {
+    const client = mqtt.connect(url, options);
+    beforeConnect(client);
+    const off = () => {
+      client.off("connect", onConnect);
+      client.off("error", onError);
+      client.off("close", onClose);
+    };
+    const onConnect = () => {
+      off();
+      resolve(client);
+    };
+    const onError = (err: Error) => {
+      off();
+      client.end();
+      reject(err);
+    };
+    const onClose = () => onError(new Error("Couldn't connect to server"));
+    client.on("connect", onConnect);
+    client.on("error", onError);
+    client.on("close", onClose);
+  });
 }
 
 /** Thin wrapper over an MQTT client — the only module in volley-mcp that imports `mqtt`. */
 export class VolleyBroker {
   private client: MqttClient | null = null;
+  /**
+   * Messages received for `drainQueued` but not yet handed out. They are PUBACKed on
+   * receipt, so anything still here at disconnect is lost — which is why mailbox
+   * recipients confirm end-to-end with an application-level `ack` (SPEC §4.4).
+   */
+  private drainBuffer: BrokerMessage[] = [];
+  /** Filters drained on this connection; null = buffer everything (persistent session, pre-first-drain). */
+  private drainFilters: Set<string> | null = null;
+  private drainClient: MqttClient | null = null;
+  private drainListener: ((t: string, p: Buffer) => void) | null = null;
+  private drainWaiters = new Set<() => void>();
 
   async connect(opts: BrokerConnectOptions): Promise<void> {
     if (this.client !== null) {
       throw new VolleyError("BROKER_DOWN", "broker is already connected; call disconnect() first");
     }
+    const persistent = opts.cleanSession === false;
+    if (persistent && (opts.clientId === undefined || opts.clientId === "")) {
+      throw new VolleyError(
+        "IMPL_CLIENT_ID_REQUIRED",
+        "cleanSession:false requires an explicit clientId — the broker keys the persistent session on it",
+      );
+    }
     const timeoutMs = opts.connectTimeoutMs ?? 5000;
     // Hoist timer so the catch block can clear it on the connect-failure path.
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      // Pass allowRetries=false so connectAsync adds a 'close' listener that rejects
-      // when the connection closes without a successful connect. This ensures the
-      // promise rejects (rather than hanging) when the broker is unreachable.
+      // connectClient rejects on a 'close' before a successful connect (connectAsync's
+      // allowRetries=false behaviour), so an unreachable broker rejects rather than hangs.
       const will =
         opts.willTopic !== undefined && opts.willPayload !== undefined
           ? {
@@ -43,28 +139,36 @@ export class VolleyBroker {
       // Append a random suffix so two MCP processes sharing one VOLLEY_AGENT_ID
       // (the user-scope-MCP-on-two-Claude-Code-sessions case) get distinct MQTT
       // clientIds and don't kick each other off — MQTT spec mandates the broker
-      // disconnect the older client on a same-clientId reconnect.
-      const clientSuffix = randomBytes(4).toString("hex");
+      // disconnect the older client on a same-clientId reconnect. A persistent
+      // session cannot use a suffix (the session is keyed on the clientId), so the
+      // caller owns uniqueness there.
+      const clientId = persistent
+        ? (opts.clientId as string)
+        : `volley-${opts.agentId}-${randomBytes(4).toString("hex")}`;
+      const protocolVersion = opts.protocolVersion ?? 4;
+      const options: IClientOptions = {
+        clientId,
+        keepalive: opts.keepaliveSeconds ?? 60,
+        connectTimeout: timeoutMs,
+        reconnectPeriod: 0,
+        clean: !persistent,
+        protocolVersion,
+        ...(protocolVersion === 5 && persistent && opts.sessionExpirySeconds !== undefined
+          ? { properties: { sessionExpiryInterval: opts.sessionExpirySeconds } }
+          : {}),
+        ...(will !== undefined ? { will } : {}),
+      };
       this.client = await Promise.race([
-        mqtt
-          .connectAsync(
-            opts.url,
-            {
-              clientId: `volley-${opts.agentId}-${clientSuffix}`,
-              keepalive: opts.keepaliveSeconds ?? 60,
-              connectTimeout: timeoutMs,
-              reconnectPeriod: 0,
-              clean: true,
-              ...(will !== undefined ? { will } : {}),
-            },
-            false,
-          )
-          .then((client) => {
-            // Clear the timeout timer so it does not keep the event loop alive
-            // after a successful connect.
-            clearTimeout(timer);
-            return client;
-          }),
+        connectClient(opts.url, options, (client) => {
+          // A resumed session's queued messages arrive right behind CONNACK — before
+          // any caller can call drainQueued — so the buffer must be armed pre-connect.
+          if (persistent) this.armDrainBuffer(client, null);
+        }).then((client) => {
+          // Clear the timeout timer so it does not keep the event loop alive
+          // after a successful connect.
+          clearTimeout(timer);
+          return client;
+        }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () =>
@@ -80,6 +184,7 @@ export class VolleyBroker {
       ]);
     } catch (e) {
       clearTimeout(timer);
+      this.resetDrainBuffer();
       if (e instanceof VolleyError) throw e;
       throw new VolleyError(
         "BROKER_DOWN",
@@ -116,6 +221,7 @@ export class VolleyBroker {
     if (this.client === null) return;
     await this.client.endAsync();
     this.client = null;
+    this.resetDrainBuffer();
   }
 
   /** Test/crash helper: destroy the socket with no DISCONNECT so the broker fires the LWT. */
@@ -123,6 +229,7 @@ export class VolleyBroker {
     if (this.client === null) return;
     this.client.stream.destroy();
     this.client = null;
+    this.resetDrainBuffer();
   }
 
   /**
@@ -135,6 +242,97 @@ export class VolleyBroker {
     if (this.client === null) return;
     this.client.stream.destroy();
     // intentionally NOT setting this.client = null
+  }
+
+  /**
+   * Start buffering inbound messages for `drainQueued`. `filters` null buffers every
+   * message (a resumed persistent session's subscriptions are unknown until drained).
+   */
+  private armDrainBuffer(client: MqttClient, filters: Set<string> | null): void {
+    this.resetDrainBuffer();
+    const listener = (t: string, p: Buffer) => {
+      if (this.drainClient !== client) return;
+      if (this.drainFilters !== null && ![...this.drainFilters].some((f) => topicMatches(f, t))) {
+        return;
+      }
+      this.drainBuffer.push({ topic: t, payload: p.toString() });
+      for (const wake of this.drainWaiters) wake();
+    };
+    client.on("message", listener);
+    this.drainClient = client;
+    this.drainListener = listener;
+    this.drainFilters = filters;
+  }
+
+  private resetDrainBuffer(): void {
+    if (this.drainClient !== null && this.drainListener !== null) {
+      this.drainClient.removeListener("message", this.drainListener);
+    }
+    this.drainClient = null;
+    this.drainListener = null;
+    this.drainFilters = null;
+    this.drainBuffer = [];
+  }
+
+  /**
+   * Subscribe (QoS 1) to `topic` and collect messages until none has arrived for
+   * `opts.idleMs` (or `opts.maxMessages` are collected). Unlike `subscribeCollect` this
+   * does NOT unsubscribe: on a persistent session (`cleanSession: false`) the
+   * subscription outlives the connection, so the broker queues messages while this
+   * client is offline and delivers them on the next connect, where this returns them.
+   * Messages that arrive on a live connection between drains are buffered for the next
+   * call. Never rejects on idle; resolves with whatever was collected.
+   */
+  async drainQueued(topic: string, opts: DrainOptions): Promise<BrokerMessage[]> {
+    const client = this.requireClient();
+    if (this.drainClient !== client) this.armDrainBuffer(client, new Set());
+    if (this.drainFilters === null) this.drainFilters = new Set([topic]);
+    else this.drainFilters.add(topic);
+    await new Promise<void>((resolve, reject) => {
+      client.subscribe(topic, { qos: 1 }, (err) => {
+        if (err) {
+          reject(new VolleyError("BROKER_DOWN", `subscribe failed for ${topic}: ${err.message}`));
+          return;
+        }
+        resolve();
+      });
+    });
+    const max = opts.maxMessages ?? Number.POSITIVE_INFINITY;
+    return new Promise((resolve) => {
+      const collected: BrokerMessage[] = [];
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.drainWaiters.delete(take);
+        resolve(collected);
+      };
+      const armIdle = () => {
+        clearTimeout(timer);
+        timer = setTimeout(finish, opts.idleMs);
+      };
+      const take = () => {
+        if (settled) return;
+        const before = collected.length;
+        let i = 0;
+        while (i < this.drainBuffer.length && collected.length < max) {
+          const m = this.drainBuffer[i] as BrokerMessage;
+          if (topicMatches(topic, m.topic)) {
+            collected.push(m);
+            this.drainBuffer.splice(i, 1);
+          } else {
+            i++;
+          }
+        }
+        if (collected.length >= max) finish();
+        else if (collected.length > before) armIdle();
+      };
+      this.drainWaiters.add(take);
+      armIdle();
+      take();
+    });
   }
 
   async publish(
