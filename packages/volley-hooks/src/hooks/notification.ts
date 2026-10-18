@@ -3,10 +3,10 @@
  * Notification (side-effect only): `agent_needs_input` / `idle_prompt` / `permission_prompt`
  * → `awaiting_input`; `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`;
  * `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only.
- * Coordinators add `question` (the last Stop's question, else the message), `session_url`
- * and `workspace`.
+ * Coordinators add `question` (the last Stop's whole question, else the whole message),
+ * `session_url` and `workspace`.
  */
-import { type HookContext, clip, firstLines, questionOf, runHook } from "../lib/hook-io";
+import { type HookContext, boundQuestion, clip, runHook } from "../lib/hook-io";
 import {
   type Activity,
   coordinatorFields,
@@ -19,6 +19,7 @@ const AWAITING = new Set(["agent_needs_input", "idle_prompt", "permission_prompt
 
 export async function handle(ctx: HookContext): Promise<string | null> {
   const type = typeof ctx.input.notification_type === "string" ? ctx.input.notification_type : "";
+  const message = typeof ctx.input.message === "string" ? ctx.input.message.trim() : "";
   const text = clip(ctx.input.message, 500);
   const base = { notification_type: type, ...(text !== undefined ? { text } : {}) };
   const { identity } = ctx;
@@ -28,8 +29,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
     if (AWAITING.has(type) || type.startsWith("quota_auto_resume")) {
       const coordinator: Record<string, unknown> = {};
       if (identity.mode === "coordinator") {
-        const question =
-          questionOf(readActivity(identity.stateDir)?.text) ?? firstLines(text ?? "");
+        const question = readActivity(identity.stateDir)?.question ?? boundQuestion(message);
         if (question !== "") coordinator.question = question;
         Object.assign(coordinator, coordinatorFields(identity, ctx.env));
       }
@@ -49,7 +49,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
         state,
         at: new Date().toISOString(),
         hook_event: ctx.event,
-        ...(prev?.text !== undefined ? { text: prev.text } : {}),
+        ...(prev?.question !== undefined ? { question: prev.question } : {}),
       });
     }
     await session.heartbeat();

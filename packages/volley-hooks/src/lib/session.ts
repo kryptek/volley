@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Env } from "./hook-io";
-import type { HookIdentity, RegistryRecord } from "./identity";
+import { type HookIdentity, type RegistryCandidate, registryCandidates } from "./identity";
 import { nextSeq, writeFileAtomic } from "./seq";
 
 // volley-mcp/broker pulls in mqtt; it is imported lazily so a hook with no identity
@@ -37,11 +37,26 @@ async function connectClean(url: string, agentId: string): Promise<VolleyBroker>
   return broker;
 }
 
-/** Every retained registry entry (coordinator identity lookup). */
-export async function listRegistry(brokerUrl: string): Promise<RegistryRecord[]> {
+/**
+ * Coordinator identity lookup: the retained registry entries whose cwd is `dir`, newest
+ * first, each with its retained status type. The registry is read until it goes quiet
+ * (not for a fixed total), so a large or remote registry is read in full.
+ */
+export async function lookupRegistry(brokerUrl: string, dir: string): Promise<RegistryCandidate[]> {
   const broker = await connectClean(brokerUrl, "volley-hooks");
   try {
-    return await broker.subscribeCollect("volley/_system/registry/+", 10_000, 300);
+    const records = await broker.drainQueued("volley/_system/registry/+", {
+      idleMs: 150,
+      maxWaitMs: 3000,
+    });
+    const candidates = registryCandidates(records, dir);
+    await Promise.all(
+      candidates.map(async (c) => {
+        const raw = await broker.queryRetained(buildTopic(c.namespace, c.agentId, "status"), 300);
+        c.status = raw === null ? null : (parseEnvelope(raw)?.type ?? null);
+      }),
+    );
+    return candidates;
   } finally {
     await broker.disconnect();
   }
@@ -133,8 +148,8 @@ export interface Activity {
   state: ActivityState;
   at: string;
   hook_event: string;
-  /** The last Stop's assistant text (a later idle notification asks the same question). */
-  text?: string;
+  /** The question the last Stop ended on (a later idle notification asks the same one). */
+  question?: string;
 }
 
 export function readActivity(stateDir: string): Activity | null {
@@ -147,6 +162,58 @@ export function readActivity(stateDir: string): Activity | null {
 
 export function writeActivity(stateDir: string, activity: Activity): void {
   writeFileAtomic(join(stateDir, "activity.json"), `${JSON.stringify(activity)}\n`);
+}
+
+/** How often a drain hook checks that the registry still carries the harness model. */
+const MODEL_CHECK_MS = 30_000;
+
+interface HarnessModel {
+  model: string;
+  checked_at?: number;
+}
+
+const modelPath = (stateDir: string) => join(stateDir, "model.json");
+
+/** Remember the harness-reported model (SessionStart / PostModelSwitch), or forget it. */
+export function writeHarnessModel(stateDir: string, model: string | undefined): void {
+  if (model === undefined) {
+    rmSync(modelPath(stateDir), { force: true });
+    return;
+  }
+  writeFileAtomic(modelPath(stateDir), `${JSON.stringify({ model } satisfies HarnessModel)}\n`);
+}
+
+function readHarnessModel(stateDir: string): HarnessModel | null {
+  try {
+    const m = JSON.parse(readFileSync(modelPath(stateDir), "utf-8")) as HarnessModel;
+    return typeof m.model === "string" && m.model !== "" ? m : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The MCP server's own register (its startup auto-register, or the agent's `vol_register`)
+ * replaces the whole registry entry and drops the harness model. At most every 30 s, put it
+ * back when the retained entry no longer carries it.
+ */
+export async function ensureHarnessModel(
+  session: HookSession,
+  now: () => number = Date.now,
+): Promise<void> {
+  const { stateDir } = session.identity;
+  const known = readHarnessModel(stateDir);
+  if (known === null) return;
+  if (known.checked_at !== undefined && now() - known.checked_at < MODEL_CHECK_MS) return;
+  const raw = await session.broker.queryRetained(registryTopic(session.identity.agentId), 300);
+  const p = (raw === null ? null : parseEnvelope(raw)?.payload) as Record<string, unknown> | null;
+  if (p?.model !== known.model || p?.model_source !== "harness-hook") {
+    await session.republishRegistry(known.model);
+  }
+  writeFileAtomic(
+    modelPath(stateDir),
+    `${JSON.stringify({ model: known.model, checked_at: now() } satisfies HarnessModel)}\n`,
+  );
 }
 
 /** The cmux workspace ref of the pane this hook runs in (`cmux identify`), if any. */
@@ -188,7 +255,6 @@ export class HookSession {
     readonly identity: HookIdentity,
     readonly broker: VolleyBroker,
     readonly hookEvent: string,
-    private readonly onClose: () => void = () => {},
   ) {}
 
   topic(channel: string, agentId = this.identity.agentId): string {
@@ -268,12 +334,8 @@ export class HookSession {
     return this.progress("heartbeat");
   }
 
-  async close(): Promise<void> {
-    try {
-      await this.broker.disconnect();
-    } finally {
-      this.onClose();
-    }
+  close(): Promise<void> {
+    return this.broker.disconnect();
   }
 }
 

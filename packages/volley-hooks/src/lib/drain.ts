@@ -3,9 +3,22 @@ import { join } from "node:path";
 import { parseEnvelope } from "volley-mcp/envelope";
 import type { HookContext } from "./hook-io";
 import type { HookIdentity } from "./identity";
-import { releaseLock, tryLock } from "./seq";
-import { HookSession, connectDrain, openSession, readActivity, writeActivity } from "./session";
-import { appendBlock, hasBlock, liveDirectives, markSuperseded } from "./steering-file";
+import { drainLockStaleMs, releaseLock, tryLock } from "./seq";
+import {
+  HookSession,
+  connectDrain,
+  ensureHarnessModel,
+  openSession,
+  readActivity,
+  writeActivity,
+} from "./session";
+import {
+  appendBlock,
+  hasBlock,
+  markDelivered,
+  markSuperseded,
+  undeliveredDirectives,
+} from "./steering-file";
 
 /** One mailbox message as the drain sees it. */
 export interface MailMessage {
@@ -46,24 +59,25 @@ export function parseMail(raw: string): MailMessage | null {
  * Open this hook's session. With `drain`, take `.volley/drain.lock` and, if it is free,
  * connect the persistent drain session and drain the mailbox; if another hook holds the lock
  * (parallel PostToolUse), fall back to a clean session and drain nothing — the holder drains.
- * Closing the session releases the lock.
+ * The caller MUST call `release` (it frees the lock, if held) once the drained directives
+ * have been emitted; closing the session does not.
  */
 export async function openDrainSession(
   identity: HookIdentity,
   ctx: Pick<HookContext, "env" | "event">,
   drain: boolean,
-): Promise<{ session: HookSession; drained: MailMessage[] | null }> {
+): Promise<{ session: HookSession; drained: MailMessage[] | null; release: () => void }> {
   const lock = join(identity.stateDir, "drain.lock");
-  if (!drain || !tryLock(lock)) {
-    return { session: await openSession(identity, ctx.event), drained: null };
+  const token = drain ? tryLock(lock, drainLockStaleMs(ctx.env)) : null;
+  if (token === null) {
+    return { session: await openSession(identity, ctx.event), drained: null, release: () => {} };
   }
+  const release = () => releaseLock(lock, token);
   let session: HookSession;
   try {
-    session = new HookSession(identity, await connectDrain(identity, ctx.env), ctx.event, () =>
-      releaseLock(lock),
-    );
+    session = new HookSession(identity, await connectDrain(identity, ctx.env), ctx.event);
   } catch (e) {
-    releaseLock(lock);
+    release();
     throw e;
   }
   try {
@@ -72,9 +86,10 @@ export async function openDrainSession(
       maxWaitMs: 2000,
     });
     const drained = raw.map((m) => parseMail(m.payload)).filter((m) => m !== null);
-    return { session, drained };
+    return { session, drained, release };
   } catch (e) {
     await session.close();
+    release();
     throw e;
   }
 }
@@ -105,22 +120,25 @@ const ACT_ON_IT =
 export function formatSteering(
   heading: string,
   items: { type: string; from: string; id: string; seq: number | null; text: string }[],
+  footer: string | null = ACT_ON_IT,
 ): string {
   const body = items.map((m, i) => `${i + 1}. ${describe(m)}:\n${m.text}`).join("\n\n");
-  return `${heading}\n\n${body}\n\n${ACT_ON_IT}`;
+  return footer === null ? `${heading}\n\n${body}` : `${heading}\n\n${body}\n\n${footer}`;
 }
 
 /**
  * Record, ack and format drained mail. Each directive is appended to STEERING.md before it is
- * acked (a crash in between re-delivers nothing, but the directive is on disk). A message
- * already in STEERING.md is re-acked, not re-injected. `supersedes` marks the older block
- * (same sender only); only directives still live are injected. Acks addressed to this agent
- * are reported, never stored or acked (SPEC §4.4).
+ * acked; it is marked delivered only once the hook's stdout has been written (see
+ * `drainHook`). Every live directive not yet delivered is injected — new mail, and any that
+ * an earlier hook stored and acked but died before emitting — so an ack never strands a
+ * directive. A message already in STEERING.md is re-acked, not stored twice. `supersedes`
+ * marks the older block (same sender only). Acks addressed to this agent are reported, never
+ * stored or acked (SPEC §4.4). Returns the context and the ids to mark delivered.
  */
 export async function processMail(
   session: HookSession,
   messages: MailMessage[],
-): Promise<string | null> {
+): Promise<{ text: string | null; ids: string[] }> {
   const path = steeringPath(session.identity);
   const ordered = messages
     .map((m, i) => ({ m, i }))
@@ -131,7 +149,6 @@ export async function processMail(
     .map(({ m }) => m);
 
   const notes: string[] = [];
-  const fresh: (MailMessage & { id: string })[] = [];
   for (const m of ordered) {
     if (m.type === "ack") {
       if (m.id !== null) notes.push(`[volley] ${m.from} acknowledged your message ${m.id}.`);
@@ -152,21 +169,38 @@ export async function processMail(
     });
     if (m.supersedes !== null) markSuperseded(path, m.supersedes, withId.id, m.from);
     if (m.id !== null) await ack(session, withId);
-    fresh.push(withId);
   }
 
-  const live = new Set(liveDirectives(path).map((b) => b.id));
-  const inject = fresh.filter((m) => live.has(m.id));
+  const inject = undeliveredDirectives(path);
   const parts = [...notes];
   if (inject.length > 0) {
     parts.push(
       formatSteering(
-        `[volley steering] ${inject.length} message(s) from your Volley mailbox, oldest first:`,
+        `[volley steering] ${inject.length} message(s) from your Volley mailbox:`,
         inject,
       ),
     );
   }
-  return parts.length > 0 ? parts.join("\n\n") : null;
+  return { text: parts.length > 0 ? parts.join("\n\n") : null, ids: inject.map((b) => b.id) };
+}
+
+/**
+ * Once the context naming `ids` is on stdout, mark them delivered; then free the drain lock
+ * (held until now so a concurrent drain cannot inject the same directives again).
+ */
+export function deliverAfterEmit(
+  ctx: Pick<HookContext, "afterEmit">,
+  stateDir: string,
+  ids: string[],
+  release: () => void,
+): void {
+  ctx.afterEmit((emitted) => {
+    try {
+      if (emitted && ids.length > 0) markDelivered(join(stateDir, "STEERING.md"), ids);
+    } finally {
+      release();
+    }
+  });
 }
 
 /**
@@ -198,13 +232,20 @@ export function drainsFor(ctx: Pick<HookContext, "event" | "input" | "env">): bo
 
 /** UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat. */
 export async function drainHook(ctx: HookContext): Promise<string | null> {
-  const { session, drained } = await openDrainSession(ctx.identity, ctx, drainsFor(ctx));
+  const { session, drained, release } = await openDrainSession(ctx.identity, ctx, drainsFor(ctx));
+  let handedOff = false;
   try {
     await markWorking(session);
-    const context = drained === null ? null : await processMail(session, drained);
+    await ensureHarnessModel(session);
+    const mail = drained === null ? null : await processMail(session, drained);
     await session.heartbeat();
-    return context;
+    if (mail !== null) {
+      deliverAfterEmit(ctx, ctx.identity.stateDir, mail.ids, release);
+      handedOff = true;
+    }
+    return mail?.text ?? null;
   } finally {
     await session.close();
+    if (!handedOff) release();
   }
 }

@@ -11,6 +11,7 @@ import {
   connectClient,
   fixture,
   makeWorkdir,
+  publishEnvelope,
   publishRegistry,
   runHook,
   tick,
@@ -116,7 +117,7 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     expect(progress.envelopes[1]?.payload).toMatchObject({
       source: "harness-hook",
       hook_event: "Stop",
-      question: "Should I merge PR 12 now?\nIt has two approvals.",
+      question: "Should I merge PR 12 now?\nIt has two approvals.\nOr should I wait for CI?",
       session_url: "https://claude.ai/code/session_0123",
       workspace: "workspace:7",
     });
@@ -141,10 +142,59 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     await progress.stop();
   });
 
+  it("a turn far longer than the 500-char text clip still publishes its whole question", async () => {
+    const summary = Array.from({ length: 40 }, (_, i) => `- step ${i}: ${"done ".repeat(10)}`);
+    const question = `Should I merge PR 12 now, given ${"the reviews, ".repeat(170)}or wait for CI?`;
+    expect(question.length).toBeGreaterThan(2048);
+    const message = `${summary.join("\n")}\n\n${question}`;
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    await runHook("stop", fixture("stop.json", dir, { last_assistant_message: message }), {
+      cwd: dir,
+      env,
+    });
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "awaiting_input", "heartbeat"]);
+    expect((progress.envelopes[0]?.payload as { text: string }).text).toHaveLength(500);
+    expect(progress.envelopes[1]?.payload).toMatchObject({ question });
+
+    // The idle_prompt that follows asks the same, whole question.
+    await runHook("notification", fixture("notification-idle-prompt.json", dir), { cwd: dir, env });
+    await tick(150);
+    expect(progress.envelopes[3]?.type).toBe("awaiting_input");
+    expect(progress.envelopes[3]?.payload).toMatchObject({
+      notification_type: "idle_prompt",
+      question,
+    });
+    await progress.stop();
+  });
+
+  it("skips a newer registry entry whose agent is gone", async () => {
+    await publishRegistry(client, "coordinator-dead", "default", {
+      capabilities: [],
+      cwd: dir,
+      started_at: "2026-10-18T12:00:00.000Z",
+    });
+    await publishEnvelope(
+      client,
+      buildTopic("default", "coordinator-dead", "status"),
+      { agentId: "coordinator-dead", parentId: null, channel: "status", type: "reaped" },
+      { qos: 1, retain: true },
+    );
+    const progress = await collect(client, "volley/+/+/progress");
+    await runHook("stop", fixture("stop.json", dir), { cwd: dir, env });
+    await tick(150);
+    expect(new Set(progress.envelopes.map((e) => e.agent_id))).toEqual(new Set([COORD]));
+    await progress.stop();
+  });
+
   it("is a no-op when no registry entry matches the cwd", async () => {
     const other = makeWorkdir();
+    const progress = await collect(client, "volley/+/+/progress");
     const run = await runHook("stop", fixture("stop-question.json", other), { cwd: other, env });
     expect(run.exitCode).toBe(0);
     expect(run.stdout).toBe("");
+    await tick(150);
+    expect(progress.envelopes).toEqual([]);
+    await progress.stop();
   });
 });

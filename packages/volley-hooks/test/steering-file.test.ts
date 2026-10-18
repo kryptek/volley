@@ -6,6 +6,7 @@ import {
   appendBlock,
   hasBlock,
   liveDirectives,
+  markDelivered,
   markSuperseded,
   readBlocks,
 } from "../src/lib/steering-file";
@@ -36,6 +37,32 @@ describe("STEERING.md", () => {
     expect(markSuperseded(p, "id-1", "id-2", "coord-a")).toBe(true);
     expect(readBlocks(p)[0]).toMatchObject({ state: "superseded", supersededBy: "id-2" });
     expect(liveDirectives(p)).toEqual([]);
+  });
+
+  it("round-trips text byte for byte, including escapes and blank edges", () => {
+    const p = path();
+    const texts = [
+      "\n\nleading blank\n ## indented heading\n## heading\n\\## escaped-looking\ntrailing\n\n",
+      "",
+      "\\",
+      "## \n\\## \n \\## ",
+    ];
+    texts.forEach((text, i) => appendBlock(p, { ...base, seq: i, id: `id-${i}`, text }));
+    markDelivered(p, ["id-1"]);
+    expect(readBlocks(p).map((b) => b.text)).toEqual(texts);
+    expect(readBlocks(p).map((b) => b.id)).toEqual(["id-0", "id-1", "id-2", "id-3"]);
+  });
+
+  it("marks blocks delivered without touching their state", () => {
+    const p = path();
+    appendBlock(p, { ...base, seq: 1, id: "id-1", text: "a" });
+    appendBlock(p, { ...base, seq: 2, id: "id-2", text: "b" });
+    expect(readBlocks(p).map((b) => b.delivered)).toEqual([false, false]);
+    markDelivered(p, ["id-2"]);
+    expect(readBlocks(p).map((b) => [b.id, b.state, b.delivered])).toEqual([
+      ["id-1", "live", false],
+      ["id-2", "live", true],
+    ]);
   });
 
   it("a missing file has no blocks", () => {

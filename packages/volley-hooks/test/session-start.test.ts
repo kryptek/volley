@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
-import { appendBlock, markSuperseded } from "../src/lib/steering-file";
+import { appendBlock, markDelivered, markSuperseded } from "../src/lib/steering-file";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   collect,
@@ -112,7 +112,7 @@ describe("session-start", () => {
   });
 
   it.each(["session-start-compact.json", "session-start-resume.json"])(
-    "%s re-injects every live STEERING.md directive",
+    "%s re-injects every live, already-delivered steering directive for context only",
     async (name) => {
       const path = join(dir, ".volley", "STEERING.md");
       const base = { type: "steering", from: "coordinator-ab12", at: "2026-10-18T10:00:00.000Z" };
@@ -120,6 +120,7 @@ describe("session-start", () => {
       appendBlock(path, { ...base, seq: 2, id: "id-2", text: "use approach B" });
       appendBlock(path, { ...base, seq: 3, id: "id-3", text: "keep the PR small" });
       markSuperseded(path, "id-1", "id-2", "coordinator-ab12");
+      markDelivered(path, ["id-1", "id-2", "id-3"]);
       const run = await sessionStart(name);
       const parsed = JSON.parse(run.stdout) as { hookSpecificOutput: { hookEventName: string } };
       expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
@@ -127,8 +128,42 @@ describe("session-start", () => {
       expect(ctx).toContain("use approach B");
       expect(ctx).toContain("keep the PR small");
       expect(ctx).not.toContain("use approach A");
+      expect(ctx).toContain("already delivered");
+      // Already acted on: no request for a new acknowledgement.
+      expect(ctx).not.toContain("steering_acked");
     },
   );
+
+  it("never re-injects an already-delivered cancel, nudge or query", async () => {
+    const path = join(dir, ".volley", "STEERING.md");
+    const base = { from: "coordinator-ab12", at: "2026-10-18T10:00:00.000Z" };
+    appendBlock(path, { ...base, seq: 1, type: "cancel", id: "id-1", text: "stop task one" });
+    appendBlock(path, { ...base, seq: 2, type: "nudge", id: "id-2", text: "still there?" });
+    appendBlock(path, { ...base, seq: 3, type: "query", id: "id-3", text: "which branch?" });
+    appendBlock(path, { ...base, seq: 4, type: "steering", id: "id-4", text: "use bun" });
+    markDelivered(path, ["id-1", "id-2", "id-3", "id-4"]);
+    const ctx = contextOf((await sessionStart("session-start-compact.json")).stdout);
+    expect(ctx).toContain("use bun");
+    expect(ctx).not.toContain("stop task one");
+    expect(ctx).not.toContain("CANCEL");
+    expect(ctx).not.toContain("still there?");
+    expect(ctx).not.toContain("which branch?");
+  });
+
+  it("a directive stored but never delivered is injected as new mail, listed once", async () => {
+    const path = join(dir, ".volley", "STEERING.md");
+    appendBlock(path, {
+      seq: 1,
+      type: "steering",
+      id: "id-1",
+      from: "coordinator-ab12",
+      at: "2026-10-18T10:00:00.000Z",
+      text: "never reached the model",
+    });
+    const ctx = contextOf((await sessionStart("session-start-compact.json")).stdout);
+    expect(ctx?.split("never reached the model")).toHaveLength(2);
+    expect(ctx).toContain("steering_acked");
+  });
 
   it("a done directive is not re-injected", async () => {
     const path = join(dir, ".volley", "STEERING.md");

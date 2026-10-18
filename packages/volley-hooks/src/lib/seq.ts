@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -11,43 +13,92 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** A lock file older than this is treated as abandoned by a crashed hook. */
+/** A lock file older than this is treated as abandoned by a crashed hook (`seq.lock`). */
 export const LOCK_STALE_MS = 5000;
 
+/** How long Claude waits on one hook before `runHook`'s deadline exits it. */
+export function hookTimeoutMs(env: Record<string, string | undefined>): number {
+  const ms = Number(env.VOLLEY_HOOKS_TIMEOUT_MS ?? 10_000);
+  return ms > 0 ? ms : 10_000;
+}
+
 /**
- * Create `path` exclusively (O_EXCL). Returns false while another process holds it; a lock
- * whose mtime is older than `staleMs` is broken and re-taken.
+ * `drain.lock` is held for a whole drain (connects, drain, acks, heartbeat), which the hook
+ * deadline bounds; it only counts as stale once its holder must be dead.
  */
-export function tryLock(path: string, staleMs = LOCK_STALE_MS): boolean {
+export function drainLockStaleMs(env: Record<string, string | undefined>): number {
+  return hookTimeoutMs(env) + 5000;
+}
+
+/**
+ * Create `path` exclusively (O_EXCL) holding a fresh token, and return the token (pass it to
+ * `releaseLock`). Returns null while another process holds it; a lock whose mtime is older
+ * than `staleMs` is broken and re-taken.
+ */
+export function tryLock(path: string, staleMs = LOCK_STALE_MS): string | null {
   mkdirSync(dirname(path), { recursive: true });
+  const token = `${process.pid}.${randomUUID()}`;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = openSync(path, "wx");
-      writeSync(fd, String(process.pid));
+      writeSync(fd, token);
       closeSync(fd);
-      return true;
+      return token;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      let held: string;
       let age: number;
       try {
+        held = readFileSync(path, "utf-8");
         age = Date.now() - statSync(path).mtimeMs;
       } catch {
-        continue; // released between our open and stat: try again
+        continue; // released between our open and read: try again
       }
-      if (age <= staleMs) return false;
-      try {
-        unlinkSync(path);
-      } catch {
-        // another process broke it first
-      }
+      if (age <= staleMs) return null;
+      breakStaleLock(path, held);
     }
   }
-  return false;
+  return null;
 }
 
-export function releaseLock(path: string): void {
+/**
+ * Remove the lock at `path` only if it still holds `judged` (the content seen when it was
+ * judged stale). The file is moved aside atomically first, so a hook that broke the same
+ * stale lock and re-took it a moment earlier keeps its fresh lock: it is put back.
+ */
+export function breakStaleLock(path: string, judged: string): boolean {
+  const aside = `${path}.${process.pid}.${randomUUID()}.stale`;
   try {
-    unlinkSync(path);
+    renameSync(path, aside);
+  } catch {
+    return false; // another process broke it first
+  }
+  let moved: string | null = null;
+  try {
+    moved = readFileSync(aside, "utf-8");
+  } catch {
+    // unreadable: treat as someone else's
+  }
+  const ours = moved === judged;
+  if (!ours) {
+    try {
+      linkSync(aside, path); // no-clobber restore of the fresh lock
+    } catch {
+      // the path was re-taken meanwhile; leave the newer lock in place
+    }
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // already gone
+  }
+  return ours;
+}
+
+/** Remove `path` if it is still the lock `token` took (a broken-and-re-taken lock is left). */
+export function releaseLock(path: string, token: string): void {
+  try {
+    if (readFileSync(path, "utf-8") === token) unlinkSync(path);
   } catch {
     // already gone
   }
@@ -56,14 +107,16 @@ export function releaseLock(path: string): void {
 /** Run `fn` holding `path`, waiting (polling) up to `waitMs` for it. */
 async function withLock<T>(path: string, fn: () => T, waitMs = 2000): Promise<T> {
   const deadline = Date.now() + waitMs;
-  while (!tryLock(path)) {
+  let token = tryLock(path);
+  while (token === null) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
     await new Promise((r) => setTimeout(r, 5 + Math.random() * 10));
+    token = tryLock(path);
   }
   try {
     return fn();
   } finally {
-    releaseLock(path);
+    releaseLock(path, token);
   }
 }
 

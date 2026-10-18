@@ -1,15 +1,18 @@
 #!/usr/bin/env bun
 /**
  * Stop: publish `idle` with the last assistant message (first 500 chars). For a coordinator
- * whose turn ends in a question, also `awaiting_input` with `question`, `session_url` and
- * `workspace` (SPEC §4.3) — cleared by `resumed` on the next prompt or tool call. Heartbeat.
+ * whose turn ends in a question, also `awaiting_input` with the whole `question` (read from
+ * the unclipped message), `session_url` and `workspace` (SPEC §4.3) — cleared by `resumed` on
+ * the next prompt or tool call. Heartbeat.
  */
 import { type HookContext, clip, questionOf, runHook } from "../lib/hook-io";
 import { coordinatorFields, openSession, writeActivity } from "../lib/session";
 
 export async function handle(ctx: HookContext): Promise<string | null> {
-  const text = clip(ctx.input.last_assistant_message, 500);
-  const question = ctx.identity.mode === "coordinator" ? questionOf(text) : null;
+  const message = ctx.input.last_assistant_message;
+  const text = clip(message, 500);
+  const question =
+    ctx.identity.mode === "coordinator" && typeof message === "string" ? questionOf(message) : null;
   const session = await openSession(ctx.identity, ctx.event);
   try {
     await session.progress("idle", text !== undefined ? { text } : {});
@@ -24,7 +27,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
       state: question !== null ? "awaiting_input" : "idle",
       at: new Date().toISOString(),
       hook_event: ctx.event,
-      ...(text !== undefined ? { text } : {}),
+      ...(question !== null ? { question } : {}),
     });
     await session.heartbeat();
     return null;

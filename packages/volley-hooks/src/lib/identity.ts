@@ -68,13 +68,17 @@ function canonical(dir: string): string {
   }
 }
 
-/** Registry lookups are cached this long; SessionStart always refreshes. */
+/** Registry lookups (hits and misses) are cached this long; SessionStart always refreshes. */
 const IDENTITY_TTL_MS = 60_000;
 
+/** At startup, how many times to look again for this session's own entry. */
+const STARTUP_ATTEMPTS = 4;
+
 interface CachedIdentity {
-  agent_id: string;
-  namespace: string;
-  parent_id: string | null;
+  /** null: no coordinator entry for this directory (a cached miss). */
+  agent_id: string | null;
+  namespace?: string;
+  parent_id?: string | null;
   fetched_at: number;
 }
 
@@ -84,18 +88,25 @@ export interface RegistryRecord {
   payload: string;
 }
 
-/**
- * Pick the coordinator's registry entry for `dir`: entries whose `payload.cwd` is that
- * directory, newest `started_at` first (the MCP server auto-registers at startup, so the
- * running session's entry is the newest).
- */
-export function matchRegistry(
-  records: RegistryRecord[],
-  dir: string,
-): { agentId: string; namespace: string; parentId: string | null } | null {
+/** A registry entry whose cwd is the session's directory, with its retained status type. */
+export interface RegistryCandidate {
+  agentId: string;
+  namespace: string;
+  parentId: string | null;
+  startedAt: string;
+  status: string | null;
+}
+
+/** Reads the registry entries for `dir`, newest `started_at` first (it opens a socket). */
+export type RegistryLookup = (brokerUrl: string, dir: string) => Promise<RegistryCandidate[]>;
+
+/** SPEC §5.1 terminal states that mean the session is gone (`blocked` may still be alive). */
+const GONE = new Set(["done", "failed", "reaped"]);
+
+/** Registry entries whose `payload.cwd` is `dir`, newest `started_at` first (status unset). */
+export function registryCandidates(records: RegistryRecord[], dir: string): RegistryCandidate[] {
   const want = canonical(dir);
-  let best: { agentId: string; namespace: string; parentId: string | null; at: string } | null =
-    null;
+  const out: RegistryCandidate[] = [];
   for (const r of records) {
     const env = parseEnvelope(r.payload);
     if (env === null || env.type !== "registered") continue;
@@ -104,33 +115,37 @@ export function matchRegistry(
     if (!isValidAgentId(env.agent_id)) continue;
     const ns = env.namespace ?? "default";
     if (!isValidNamespace(ns)) continue;
-    const at = typeof p.started_at === "string" ? p.started_at : "";
-    if (best === null || at > best.at) {
-      best = { agentId: env.agent_id, namespace: ns, parentId: env.parent_id, at };
-    }
+    out.push({
+      agentId: env.agent_id,
+      namespace: ns,
+      parentId: env.parent_id,
+      startedAt: typeof p.started_at === "string" ? p.started_at : "",
+      status: null,
+    });
   }
-  return best === null
-    ? null
-    : { agentId: best.agentId, namespace: best.namespace, parentId: best.parentId };
+  return out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
 }
 
 /**
- * Coordinator identity: the registry entry whose cwd is `dir`, cached in the state directory
- * for 60 s. `listRegistry` reads the retained registry (it opens a socket — only called on a
- * cache miss).
+ * Coordinator identity: the newest registry entry for `dir` whose agent is not gone (status
+ * `done`/`failed`/`reaped`). The result — a hit or a miss, including an unreachable broker —
+ * is cached in the state directory for 60 s, so a directory with no coordinator costs one
+ * lookup a minute. With `notBefore` (SessionStart at startup), an entry older than that is
+ * a previous session: look again a few times for this session's own entry (its MCP server
+ * starts concurrently), and if none appears return null without caching.
  */
 export async function resolveCoordinatorIdentity(
   dir: string,
   env: Env,
-  listRegistry: (brokerUrl: string) => Promise<RegistryRecord[]>,
-  opts: { refresh?: boolean; now?: () => number } = {},
+  lookup: RegistryLookup,
+  opts: { refresh?: boolean; now?: () => number; notBefore?: number; retryDelayMs?: number } = {},
 ): Promise<HookIdentity | null> {
   const now = opts.now ?? Date.now;
   const stateDir = coordinatorStateDir(dir, env);
   const brokerUrl = env.VOLLEY_BROKER_URL ?? "mqtt://localhost:1883";
   const cachePath = join(stateDir, "identity.json");
-  const make = (c: CachedIdentity): HookIdentity => ({
-    mode: "coordinator",
+  const make = (c: { agent_id: string; namespace: string; parent_id: string | null }) => ({
+    mode: "coordinator" as const,
     agentId: c.agent_id,
     namespace: c.namespace,
     parentId: c.parent_id,
@@ -142,22 +157,51 @@ export async function resolveCoordinatorIdentity(
   if (opts.refresh !== true) {
     try {
       const cached = JSON.parse(readFileSync(cachePath, "utf-8")) as CachedIdentity;
-      if (now() - cached.fetched_at < IDENTITY_TTL_MS && isValidAgentId(cached.agent_id)) {
-        return make(cached);
+      if (now() - cached.fetched_at < IDENTITY_TTL_MS) {
+        if (cached.agent_id === null) return null;
+        if (isValidAgentId(cached.agent_id) && typeof cached.namespace === "string") {
+          return make({
+            agent_id: cached.agent_id,
+            namespace: cached.namespace,
+            parent_id: cached.parent_id ?? null,
+          });
+        }
       }
     } catch {
       // no usable cache
     }
   }
 
-  const match = matchRegistry(await listRegistry(brokerUrl), dir);
-  if (match === null) return null;
-  const entry: CachedIdentity = {
-    agent_id: match.agentId,
-    namespace: match.namespace,
-    parent_id: match.parentId,
-    fetched_at: now(),
-  };
-  writeFileAtomic(cachePath, `${JSON.stringify(entry)}\n`);
-  return make(entry);
+  const attempts = opts.notBefore === undefined ? 1 : STARTUP_ATTEMPTS;
+  for (let attempt = 1; ; attempt++) {
+    let candidates: RegistryCandidate[];
+    try {
+      candidates = await lookup(brokerUrl, dir);
+    } catch {
+      candidates = [];
+    }
+    const best = candidates.find((c) => c.status === null || !GONE.has(c.status)) ?? null;
+    const stale =
+      best !== null &&
+      opts.notBefore !== undefined &&
+      !(Date.parse(best.startedAt) >= opts.notBefore);
+    if (best !== null && !stale) {
+      const entry = {
+        agent_id: best.agentId,
+        namespace: best.namespace,
+        parent_id: best.parentId,
+      };
+      writeFileAtomic(cachePath, `${JSON.stringify({ ...entry, fetched_at: now() })}\n`);
+      return make(entry);
+    }
+    // Cache the miss, unless this is startup in a directory sessions have registered from:
+    // this session's own entry may only be moments away.
+    if (candidates.length === 0 || opts.notBefore === undefined) {
+      const miss: CachedIdentity = { agent_id: null, fetched_at: now() };
+      writeFileAtomic(cachePath, `${JSON.stringify(miss)}\n`);
+      return null;
+    }
+    if (attempt >= attempts) return null;
+    await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 500));
+  }
 }

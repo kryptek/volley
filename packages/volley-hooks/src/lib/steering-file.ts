@@ -6,11 +6,13 @@ import { writeFileAtomic } from "./seq";
  * survives compaction and restarts. One block per message:
  *
  *     ## <seq|-> <type> <message id>
- *     <!-- volley from=<sender> at=<iso> state=live|superseded|done [by=<id>] -->
+ *     <!-- volley from=<sender> at=<iso> state=live|superseded|done [by=<id>] [delivered=1] -->
  *     <text>
  *
- * `state=done` is never written by the hooks; an agent or operator may set it by hand to
- * stop a directive being re-injected after a compaction.
+ * `delivered=1` is set once the directive's text has reached the model (the hook's stdout was
+ * written); a live block without it is injected by the next drain. `state=done` is never
+ * written by the hooks; an agent or operator may set it by hand to stop a directive being
+ * re-injected after a compaction.
  */
 
 export type BlockState = "live" | "superseded" | "done";
@@ -23,22 +25,27 @@ export interface SteeringBlock {
   at: string;
   state: BlockState;
   supersededBy?: string;
+  delivered: boolean;
   text: string;
 }
 
-export type NewBlock = Omit<SteeringBlock, "state" | "supersededBy">;
+export type NewBlock = Omit<SteeringBlock, "state" | "supersededBy" | "delivered">;
 
 const HEADER = "# Volley steering\n";
 const BLOCK_HEAD = /^## (\S+) (\S+) (\S+)$/;
 const META = /^<!-- volley (.*) -->$/;
 
-/** Text lines that would parse as a block heading are escaped with a leading space. */
-const escapeText = (text: string) => text.replace(/^## /gm, " ## ");
-const unescapeText = (text: string) => text.replace(/^ ## /gm, "## ");
+/**
+ * Text lines that would parse as a block heading (`## `) get a leading backslash, and so do
+ * lines already starting with one, so unescaping restores the exact text.
+ */
+const escapeText = (text: string) => text.replace(/^(## |\\)/gm, "\\$1");
+const unescapeText = (text: string) => text.replace(/^\\/gm, "");
 
 function render(b: SteeringBlock): string {
   const meta = [`from=${b.from}`, `at=${b.at}`, `state=${b.state}`];
   if (b.supersededBy !== undefined) meta.push(`by=${b.supersededBy}`);
+  if (b.delivered) meta.push("delivered=1");
   return `## ${b.seq ?? "-"} ${b.type} ${b.id}\n<!-- volley ${meta.join(" ")} -->\n${escapeText(b.text)}\n`;
 }
 
@@ -48,7 +55,10 @@ export function readBlocks(path: string): SteeringBlock[] {
   let current: { block: SteeringBlock; lines: string[]; meta: boolean } | null = null;
   const flush = () => {
     if (current === null) return;
-    current.block.text = unescapeText(current.lines.join("\n").replace(/^\n+|\n+$/g, ""));
+    // Every rendered block ends in one blank line (the separator / final newline).
+    const lines = current.lines;
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    current.block.text = unescapeText(lines.join("\n"));
     blocks.push(current.block);
   };
   for (const line of readFileSync(path, "utf-8").split("\n")) {
@@ -65,6 +75,7 @@ export function readBlocks(path: string): SteeringBlock[] {
           from: "",
           at: "",
           state: "live",
+          delivered: false,
           text: "",
         },
         lines: [],
@@ -80,6 +91,7 @@ export function readBlocks(path: string): SteeringBlock[] {
         if (k === "from") current.block.from = v;
         else if (k === "at") current.block.at = v;
         else if (k === "by") current.block.supersededBy = v;
+        else if (k === "delivered") current.block.delivered = v === "1";
         else if (k === "state" && (v === "live" || v === "superseded" || v === "done")) {
           current.block.state = v;
         }
@@ -102,7 +114,7 @@ export function hasBlock(path: string, id: string): boolean {
 }
 
 export function appendBlock(path: string, block: NewBlock): void {
-  const text = render({ ...block, state: "live" });
+  const text = render({ ...block, state: "live", delivered: false });
   if (!existsSync(path)) {
     writeFileAtomic(path, `${HEADER}\n${text}`);
     return;
@@ -127,4 +139,23 @@ export function markSuperseded(path: string, id: string, by: string, from: strin
 /** Directives still in force: neither superseded nor done. */
 export function liveDirectives(path: string): SteeringBlock[] {
   return readBlocks(path).filter((b) => b.state === "live");
+}
+
+/** Record that the blocks `ids` have reached the model. */
+export function markDelivered(path: string, ids: string[]): void {
+  const want = new Set(ids);
+  const blocks = readBlocks(path);
+  let changed = false;
+  for (const b of blocks) {
+    if (want.has(b.id) && !b.delivered) {
+      b.delivered = true;
+      changed = true;
+    }
+  }
+  if (changed) writeBlocks(path, blocks);
+}
+
+/** Live directives whose text has not reached the model yet, in the order they arrived. */
+export function undeliveredDirectives(path: string): SteeringBlock[] {
+  return liveDirectives(path).filter((b) => !b.delivered);
 }

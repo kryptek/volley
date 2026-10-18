@@ -95,6 +95,11 @@ jobs:
       - name: Run integration tests
         working-directory: packages/volley-mcp
         run: bun run test:integration
+      - name: Run volley-hooks integration tests (MQTT 5 drain)
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_BROKER_URL: mqtt://127.0.0.1:1883
+        run: bun run test:integration
       - name: Stop mosquitto
         if: always()
         run: docker rm -f mosquitto

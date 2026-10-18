@@ -127,7 +127,7 @@ describe("notification", () => {
     expect(first(envs).payload).toMatchObject({
       notification_type: "idle_prompt",
       text: "Claude is waiting for your input",
-      question: "Should I merge PR 12 now?\nIt has two approvals.",
+      question: "Should I merge PR 12 now?\nIt has two approvals.\nOr should I wait for CI?",
       session_url: "https://claude.ai/code/session_0123",
       workspace: "workspace:7",
     });

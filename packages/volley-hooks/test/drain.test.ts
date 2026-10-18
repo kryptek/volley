@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
+import { registryTopic } from "volley-mcp/topics";
+import { appendBlock, readBlocks } from "../src/lib/steering-file";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   collect,
@@ -11,6 +13,8 @@ import {
   fixture,
   makeWorkdir,
   publishEnvelope,
+  publishRegistry,
+  retainedEnvelope,
   runHook,
   tick,
 } from "./helpers/hooks";
@@ -166,14 +170,95 @@ describe("mailbox drain (post-tool-use)", () => {
     await acks.stop();
   });
 
-  it("skips the drain while another hook holds the drain lock", async () => {
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(join(dir, ".volley", "drain.lock"), String(process.pid));
+  it("skips the drain while another hook holds the drain lock; the mail stays queued", async () => {
+    const lock = join(dir, ".volley", "drain.lock");
+    writeFileSync(lock, "another-hook");
     await send("coord-a", "held back", { seq: 1 });
     await tick(50);
     const run = await postToolUse();
     expect(run.exitCode).toBe(0);
     expect(contextOf(run.stdout)).toBeNull();
+    // The other hook's lock is untouched.
+    expect(readFileSync(lock, "utf-8")).toBe("another-hook");
+
+    unlinkSync(lock);
+    const ctx = contextOf((await postToolUse()).stdout);
+    expect(ctx?.split("held back")).toHaveLength(2);
+    expect(contextOf((await postToolUse()).stdout)).toBeNull();
+  });
+
+  it("injects a directive stored but never delivered (crash after the ack), exactly once", async () => {
+    const acks = await collect(client, `volley/${NS}/coord-a/mailbox`);
+    // A previous hook appended this block and acked it, then died before its stdout reached
+    // the model: the sender saw the ack and will never re-send.
+    appendBlock(join(dir, ".volley", "STEERING.md"), {
+      seq: 7,
+      type: "steering",
+      id: "lost-1",
+      from: "coord-a",
+      at: "2026-10-18T10:00:00.000Z",
+      text: "rebase before you push",
+    });
+    const ctx = contextOf((await postToolUse()).stdout);
+    expect(ctx).toContain("rebase before you push");
+    expect(ctx).toContain("steering_acked");
+    expect(readBlocks(join(dir, ".volley", "STEERING.md"))[0]?.delivered).toBe(true);
+    expect(contextOf((await postToolUse()).stdout)).toBeNull();
+    await tick(100);
+    expect(acks.envelopes).toHaveLength(0);
+    await acks.stop();
+  });
+
+  it("a redelivered message stored but never injected is re-acked and injected once", async () => {
+    const acks = await collect(client, `volley/${NS}/coord-a/mailbox`);
+    const id = randomUUID();
+    appendBlock(join(dir, ".volley", "STEERING.md"), {
+      seq: 1,
+      type: "steering",
+      id,
+      from: "coord-a",
+      at: "2026-10-18T10:00:00.000Z",
+      text: "ship it after the checks",
+    });
+    // The sender never saw an ack and retries with the same id.
+    await publishEnvelope(client, MAILBOX, {
+      agentId: "coord-a",
+      parentId: null,
+      channel: "mailbox",
+      type: "steering",
+      payload: { text: "ship it after the checks", seq: 1 },
+      correlationId: id,
+    });
+    await tick(50);
+    const ctx = contextOf((await postToolUse()).stdout);
+    expect(ctx?.split("ship it after the checks")).toHaveLength(2);
+    await tick(150);
+    expect(acks.envelopes.map((e) => e.correlation_id)).toEqual([id]);
+    expect(readFileSync(join(dir, ".volley", "STEERING.md"), "utf-8").match(/^## /gm)).toHaveLength(
+      1,
+    );
+    expect(contextOf((await postToolUse()).stdout)).toBeNull();
+    await acks.stop();
+  });
+
+  it("restores the harness model when the MCP server's own register overwrote it", async () => {
+    await runHook("session-start", fixture("session-start-startup.json", dir), { cwd: dir });
+    // The MCP server's startup auto-register (or the agent's vol_register) replaces the entry.
+    await publishRegistry(client, AGENT, NS, {
+      capabilities: ["implements-issue"],
+      cwd: dir,
+      model: "self-reported-model",
+      model_source: "self-reported",
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    await postToolUse();
+    const reg = await retainedEnvelope(client, registryTopic(AGENT));
+    expect(reg.payload).toMatchObject({
+      capabilities: ["implements-issue"],
+      model: "claude-opus-5-5",
+      model_source: "harness-hook",
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
   });
 
   it("honours VOLLEY_HOOKS_DRAIN_MATCHER for PostToolUse", async () => {
