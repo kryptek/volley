@@ -559,6 +559,33 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     });
     expect(box.launches).toHaveLength(0);
   });
+
+  it("remote_repo_missing goes through the decision store; `cancel` cancels the task", async () => {
+    box.tunnel = true;
+    box.repoExists = async () => false;
+    await submit("w1", "  T1: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").some((e) => e.type === "decision_opened"));
+    const id = journal("w1").find((e) => e.type === "decision_opened")?.data.decision_id as string;
+    // Published retained like every decision (the Desk shows it; notify rings).
+    const retained = (await env.retained(`volley/_waves/w1/decisions/${id}`)) as {
+      payload: { kind: string; target: string; host: string };
+    } | null;
+    expect(retained?.payload).toMatchObject({
+      kind: "remote_repo_missing",
+      host: "box",
+      target: "dev@box",
+    });
+    expect((await task("w1", "T1"))?.stage).toBe("awaiting_decision");
+
+    await daemon.resolveDecision("w1", id, { answer: "cancel", by: "coord-a" });
+    expect(journal("w1").find((e) => e.type === "task_cancelled")).toMatchObject({
+      task: "T1",
+      data: { by: "coord-a" },
+    });
+    expect((await task("w1", "T1"))?.stage).toBe("cancelled");
+    expect(await env.retained(`volley/_waves/w1/decisions/${id}`)).toBeNull();
+    expect(box.launches).toHaveLength(0);
+  });
 });
 
 describe("TunnelSupervisor", () => {

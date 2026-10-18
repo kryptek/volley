@@ -21,6 +21,7 @@ export const DECISION_KINDS = [
   "hooks_auth_failed",
   "model_switch",
   "repo_untrusted",
+  "remote_repo_missing",
   "ci_failed",
   "wave_complete",
   "plan_change",

@@ -113,7 +113,9 @@ export type DecisionKind =
   | "repo_untrusted"
   | "model_switch"
   | "unknown_screen"
-  | "hooks_auth_failed";
+  | "hooks_auth_failed"
+  /** Opened by the daemon's remote setup before spawnAgent runs (daemon.ts remoteSpawn). */
+  | "remote_repo_missing";
 
 export interface RemoteTrust {
   host: string;

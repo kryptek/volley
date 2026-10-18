@@ -181,6 +181,7 @@ import {
   type SpawnDeps,
   type SpawnOutcome,
   type SpawnResult,
+  openDecisionFor,
   spawnAgent,
 } from "./spawn";
 import { SpawnError } from "./spawn-error";
@@ -1755,7 +1756,7 @@ export class Daemon {
     const { spec } = remote;
     const journal = deps.journal;
     const decisionId = `remote_repo_missing-${createHash("sha256").update(`${spec.target}:${spec.repo}`).digest("hex").slice(0, 12)}`;
-    const open = log.record.state?.open_decisions ?? [];
+    const openId = openDecisionFor(log.record.state?.open_decisions ?? [], decisionId);
     // An ssh failure is not a missing clone: it throws a transient LAUNCH_FAILED (backed off).
     const exists = await remote.repoExists().catch(async (e: unknown) => {
       const err =
@@ -1770,23 +1771,16 @@ export class Daemon {
       throw err;
     });
     if (!exists) {
-      if (!open.includes(decisionId)) {
-        await this.append(wave, {
-          type: "decision_opened",
+      // Through the decision store: retained topic (the Desk, notify) and the task parks.
+      if (openId === undefined) {
+        await this.openSpawnDecision(wave, {
+          kind: "remote_repo_missing",
+          id: decisionId,
           task,
-          data: {
-            decision_id: decisionId,
-            kind: "remote_repo_missing",
-            wave,
-            task,
-            question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-            options: ["retry", "cancel"],
-            pointers: {},
-            opened_at: new Date().toISOString(),
-            host: spec.name,
-            target: spec.target,
-            repo: spec.repo,
-          },
+          question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
+          options: ["retry", "cancel"],
+          pointers: {},
+          data: { host: spec.name, target: spec.target, repo: spec.repo },
         });
       }
       throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
@@ -1795,12 +1789,8 @@ export class Daemon {
         repo: spec.repo,
       });
     }
-    if (open.includes(decisionId)) {
-      await this.append(wave, {
-        type: "decision_resolved",
-        task,
-        data: { decision_id: decisionId, answer: "found", by: DAEMON_AGENT_ID },
-      });
+    if (openId !== undefined) {
+      await this.resolveNow(wave, openId, { answer: "found", by: DAEMON_AGENT_ID });
     }
     const lockHome = join(this.opts.home, "hosts", spec.target);
     mkdirSync(lockHome, { recursive: true, mode: 0o700 });
@@ -3001,6 +2991,17 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
+    if (
+      d.kind === "remote_repo_missing" &&
+      d.task !== null &&
+      r.answer.trim().toLowerCase() === "cancel"
+    ) {
+      await this.append(wave, {
+        type: "task_cancelled",
+        task: d.task,
+        data: { by: r.by, why: `no clone on the remote host (decision ${id})` },
+      });
+    }
     if (d.task === null) return { decision: d, already_resolved: false };
     if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
       const task = d.task;
