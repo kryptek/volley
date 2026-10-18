@@ -3,7 +3,9 @@
  * empty space to pan (pointer capture), wheel to pan, ⌘/Ctrl-wheel (and
  * trackpad pinch, which browsers report as ctrl-wheel) to zoom around the
  * cursor, scale clamped to [0.3, 1.6], and `fitTo(rects)` to frame a set of
- * world rectangles below the top bar. Touch (D8): one finger on empty canvas
+ * world rectangles below the top bar. A fit may go below the wheel minimum
+ * (down to `FIT_MIN_SCALE`) so everything shows; from there the wheel zooms
+ * back in smoothly and never further out. Touch (D8): one finger on empty canvas
  * pans, two fingers pinch-zoom around their midpoint, on empty canvas or on a
  * window's body alike (windows fill a phone screen); `panBy` serves the arrow
  * keys. Phones (< `NARROW_PX`) start zoomed out and clamp window widths
@@ -28,6 +30,8 @@ export interface Rect {
 export const MIN_SCALE = 0.3;
 export const MAX_SCALE = 1.6;
 const FIT_MAX_SCALE = 1.1;
+/** The lowest scale a fit (or arrange & fit) sets: far enough out to show a whole busy Desk. */
+export const FIT_MIN_SCALE = 0.05;
 
 /** Pointer-downs on fixed chrome never move the canvas. */
 const CHROME = ".look, .dock-wrap, .topbar, .modal-scrim";
@@ -75,7 +79,9 @@ export function initialView(): View {
   return { x: narrow ? 8 : 40, y: narrow ? 70 : 76, s: narrow ? 0.5 : 0.82 };
 }
 
-const clamp = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+/** Zoom from `from` to `s`, clamped; below `MIN_SCALE` (after a fit) zooming out stays put. */
+const clamp = (s: number, from: number) =>
+  Math.min(MAX_SCALE, Math.max(Math.min(MIN_SCALE, from), s));
 
 export function useViewport(opts: { initial?: View } = {}) {
   const [view, setView] = useState<View>(() => opts.initial ?? initialView());
@@ -89,7 +95,7 @@ export function useViewport(opts: { initial?: View } = {}) {
   const zoomAt = useCallback(
     (factor: number, cx = window.innerWidth / 2, cy = window.innerHeight / 2) =>
       setView((v) => {
-        const s = clamp(v.s * factor);
+        const s = clamp(v.s * factor, v.s);
         return { s, x: cx - ((cx - v.x) * s) / v.s, y: cy - ((cy - v.y) * s) / v.s };
       }),
     [],
@@ -105,7 +111,7 @@ export function useViewport(opts: { initial?: View } = {}) {
     const H = window.innerHeight - 170;
     const s = Math.min(
       FIT_MAX_SCALE,
-      Math.max(MIN_SCALE, Math.min(W / (maxX - minX + 80), H / (maxY - minY + 80))),
+      Math.max(FIT_MIN_SCALE, Math.min(W / (maxX - minX + 80), H / (maxY - minY + 80))),
     );
     setView({
       s,
@@ -166,7 +172,7 @@ export function useViewport(opts: { initial?: View } = {}) {
       const m0 = { x: (last.x + other.x) / 2, y: (last.y + other.y) / 2 };
       const m1 = { x: (now.x + other.x) / 2, y: (now.y + other.y) / 2 };
       setView((v) => {
-        const s = d0 > 0 ? clamp((v.s * d1) / d0) : v.s;
+        const s = d0 > 0 ? clamp((v.s * d1) / d0, v.s) : v.s;
         return { s, x: m1.x - ((m0.x - v.x) * s) / v.s, y: m1.y - ((m0.y - v.y) * s) / v.s };
       });
     },

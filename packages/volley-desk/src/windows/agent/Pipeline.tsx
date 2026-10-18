@@ -23,6 +23,8 @@ const ROLE_STEP: Record<Role, number> = {
   spec_reviewer: 1,
   quality_reviewer: 1,
   fixup: 2,
+  // The rebase agent fixes the branch up after the release branch moved: the fixup step.
+  rebase: 2,
 };
 
 export function Pipeline({

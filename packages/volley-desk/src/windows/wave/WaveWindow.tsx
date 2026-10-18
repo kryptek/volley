@@ -23,6 +23,8 @@ export interface WaveWindowProps {
   wave: WaveView;
   /** This browser's coordinator agent id (`?me=`); `null` = no wave is mine. */
   me: string | null;
+  /** The Desk's broker identity: a wave it owns (it claimed it) is mine too. */
+  identity?: string | null | undefined;
   /** The store's view of the owner coordinator; falls back to the wave state's `coordinator`. */
   coordinatorState?: CoordinatorState | undefined;
   /** ms when the wave started (its earliest agent); omitted → no age shown. */
@@ -46,6 +48,15 @@ export interface WaveWindowProps {
 /** Desk read of `?me=<agent_id>`: the coordinator this browser speaks for. */
 export function meFromSearch(search: string): string | null {
   return new URLSearchParams(search).get("me") || null;
+}
+
+/** The wave is this browser's: owned by its coordinator (`?me=`) or by the Desk itself (claimed). */
+export function isMine(
+  owner: string | null | undefined,
+  me: string | null,
+  identity?: string | null,
+): boolean {
+  return !!owner && (owner === me || owner === identity);
 }
 
 function ago(ms: number): string {
@@ -118,7 +129,7 @@ export function WaveWindow(p: WaveWindowProps) {
   const id = p.wave.id;
   const accent = accentFor(id);
   const waiting = (p.coordinatorState ?? s?.coordinator?.state) === "awaiting_input";
-  const mine = p.me !== null && s?.owner === p.me;
+  const mine = isMine(s?.owner, p.me, p.identity);
   const tasks = s ? dagNodes(s) : [];
   // Cancelled tasks never run, so they stay out of the rail and the progress maths.
   const live = tasks.filter((t) => !t.cancelled);

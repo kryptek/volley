@@ -111,6 +111,33 @@ const config = (over: Partial<ConfigPayload>): ConfigPayload => ({
   ...over,
 });
 
+describe("a wave the Desk itself owns (claimed; P2-11)", () => {
+  // After `claim` the owner is the Desk's broker identity, which has no agent of its own.
+  const own = (over: Partial<WaveStatePayload> = {}, decisions: DecisionPayload[] = []) =>
+    wave({ owner: "desk", ...over }, decisions);
+  const deskCtx = (over: Partial<AttentionCtx> = {}) =>
+    ctx({ identity: "desk", coordinators: { desk: coord("gone", { id: "desk" }) }, ...over });
+
+  it("has a coordinator: the person at this Desk", () => {
+    expect(coordinatorFor(own(), deskCtx())).toMatchObject({ id: "desk", state: "working" });
+    expect(waveAttention(own(), deskCtx())).toEqual({ tier: "none" });
+  });
+
+  it("puts its open decisions and merge-ready gates on you, not on a coordinator", () => {
+    expect(waveAttention(own({}, [decision()]), deskCtx())).toEqual({
+      tier: "you",
+      reason: "Decision: Shared or dense ranking?",
+    });
+    expect(waveAttention(own({ gates: ["T2"] }), deskCtx())).toMatchObject({ tier: "you" });
+    const blocked = agent("impl-1", { status: { type: "blocked", payload: {}, at: NOW } });
+    expect(agentAttention(blocked, own(), deskCtx()).tier).toBe("you");
+  });
+
+  it("another browser (another identity) still sees a wave nobody coordinates", () => {
+    expect(waveAttention(own(), deskCtx({ identity: "desk-phone" })).tier).toBe("you");
+  });
+});
+
 describe("defaults", () => {
   it("match volleyd's claim_after_s and the prototype's escalate_after_min", () => {
     expect(DEFAULT_CLAIM_AFTER_S).toBe(1800);

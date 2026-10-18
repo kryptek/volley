@@ -32,6 +32,7 @@ export const ROLE_LABEL: Record<Role, string> = {
   spec_reviewer: "spec review",
   quality_reviewer: "quality review",
   fixup: "fixup",
+  rebase: "rebase",
 };
 
 /** Frame props the App supplies; the window fills in the rest. */
@@ -240,9 +241,7 @@ export function AgentWindow({
       {tab === "feed" ? (
         <Feed feed={agent.feed} />
       ) : (
-        // Assumed contract for T13: the supervisor flags a stale capture per task,
-        // as `tasks[].screen_stale: true` in the wave state (not yet in SPEC §4.6
-        // or wave-state.schema.json).
+        // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
         <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
       )}
       {steer}

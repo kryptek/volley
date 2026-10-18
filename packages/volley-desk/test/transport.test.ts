@@ -179,6 +179,36 @@ describe("createSteerTransport", () => {
     ]);
   });
 
+  it("/stop names the target's role, so volleyd interrupts that agent, not the stage's (P2-7)", async () => {
+    const m = setup();
+    const reviewer: SteerTarget = { ...AGENT, agentId: "spec-a1", role: "spec_reviewer" };
+    const sent = m.transport.send(reviewer, "/stop");
+    await flush();
+    expect(m.published[0]?.envelope.payload).toMatchObject({
+      op: "steer",
+      escape_only: true,
+      task: "T2",
+      role: "spec_reviewer",
+    });
+    answer(m, { ok: true, result: { agent_id: "spec-a1", interrupted: true } });
+    await flush();
+    expect(m.events).toContainEqual({ type: "interrupt", id: sent.id, interrupted: true });
+  });
+
+  it("an interrupt that reached another agent is not reported as interrupting the target", async () => {
+    const m = setup();
+    const sent = m.transport.send(AGENT, "/stop");
+    await flush();
+    answer(m, { ok: true, result: { agent_id: "spec-a1", interrupted: true } });
+    await flush();
+    expect(m.events).toContainEqual({
+      type: "interrupt",
+      id: sent.id,
+      interrupted: false,
+      reason: "volleyd interrupted spec-a1, not impl-a1",
+    });
+  });
+
   it("Urgent mode: interrupt request, then the steering message", async () => {
     const m = setup();
     m.transport.send(AGENT, "rebase first", { urgent: true });
@@ -334,6 +364,12 @@ describe("copySteerCommand", () => {
     // `!` (history expansion) and `'` survive an interactive bash/zsh paste.
     expect(copySteerCommand("w", "T1", "Stop now! it's $HOME")).toBe(
       `volleyd steer w T1 'Stop now! it'\\''s $HOME'`,
+    );
+  });
+
+  it("names the agent's role, so the command reaches that agent (P2-7)", () => {
+    expect(copySteerCommand("w", "T1", "hold on", "quality_reviewer")).toBe(
+      "volleyd steer w T1 'hold on' --role quality_reviewer",
     );
   });
 });

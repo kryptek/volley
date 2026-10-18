@@ -293,6 +293,13 @@ describe("Pipeline", () => {
     expect(cur).toHaveClass("held");
   });
 
+  it("a rebase agent held outside a pipeline stage sits on the fixup step (P2-8)", () => {
+    render(<Pipeline stage="blocked" agentRole="rebase" />);
+    const cur = screen.getByRole("listitem", { current: "step" });
+    expect(cur).toHaveTextContent("fixup");
+    expect(cur).toHaveClass("held");
+  });
+
   it("done marks every step done and none current", () => {
     render(<Pipeline stage="done" agentRole="implementer" />);
     expect(screen.queryByRole("listitem", { current: "step" })).toBeNull();

@@ -256,3 +256,12 @@
     animation: none;
   }
 }
+.look-num {
+  width: 64px;
+  margin: 0 4px;
+  padding: 3px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+}

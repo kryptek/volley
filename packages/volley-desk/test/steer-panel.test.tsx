@@ -7,7 +7,7 @@ import { ClaimButton, SteerPanel } from "../src/steer/SteerPanel";
 import type { ControlReply, SteerTransport } from "../src/steer/transport";
 import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, readCredentials } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
-import type { DeskMessage, Envelope } from "../src/store/types";
+import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
 
 const noop = () => {};
 
@@ -426,6 +426,73 @@ describe("Desk steering end to end (live store)", () => {
     expect(b.published).toHaveLength(0);
   });
 
+  /** Type `/stop …` into the panel's prompt and press Send. */
+  function stop(panel: HTMLElement) {
+    fireEvent.change(within(panel).getByRole("textbox", { name: "Prompt" }), {
+      target: { value: "/stop halt" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Send" }));
+  }
+
+  it("/stop on the agent holding its slot asks volleyd to interrupt exactly that role", async () => {
+    const b = fakeBroker();
+    signedIn(b);
+    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
+    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    await waitFor(() => expect(within(panel).queryByText(/Read-only/)).toBeNull());
+    stop(panel);
+    await waitFor(() => expect(b.published).toHaveLength(1));
+    expect(b.published[0]?.topic).toBe("volley/default/volleyd/mailbox");
+    expect(b.published[0]?.envelope.payload).toMatchObject({
+      op: "steer",
+      escape_only: true,
+      wave: "w1",
+      task: "T1",
+      role: "implementer",
+    });
+  });
+
+  it("/stop on an agent whose role slot moved on interrupts nobody and says why (stale target)", async () => {
+    const b = fakeBroker();
+    signedIn(b);
+    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
+    // A fixup round / model switch: the implementer slot now belongs to a new agent.
+    const p = waveState.payload as WaveStatePayload;
+    const moved = {
+      ...waveState,
+      payload: {
+        ...p,
+        tasks: p.tasks.map((t) =>
+          t.id === "T1" ? { ...t, agents: { ...t.agents, implementer: "w1-t1-implementer-2" } } : t,
+        ),
+      },
+    } as Envelope;
+    act(() =>
+      b.deliver({ topic: "volley/_waves/w1/state", envelope: moved, receivedAt: Date.now() }),
+    );
+    // Let the store apply the new state (it batches deliveries).
+    await act(async () => new Promise((r) => setTimeout(r, 40)));
+    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    await waitFor(() => expect(within(panel).queryByText(/Read-only/)).toBeNull());
+    stop(panel);
+    // No escape_only query reaches volleyd: it would press Escape in implementer-2.
+    await waitFor(() => expect(b.published).toHaveLength(1));
+    expect(
+      b.published.some(
+        (m) => m.envelope.payload && (m.envelope.payload as { op?: unknown }).op === "steer",
+      ),
+    ).toBe(false);
+    expect(b.published[0]).toMatchObject({
+      topic: `volley/default/${AGENT}/mailbox`,
+      envelope: { type: "cancel" },
+    });
+    expect(
+      await within(panel).findByText(
+        `Delivered (not interrupted: ${AGENT} no longer holds the implementer slot on T1 (now w1-t1-implementer-2))`,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("anonymous: the panel is read-only with the volleyd steer copy command", async () => {
     const b = fakeBroker();
     render(
@@ -441,8 +508,11 @@ describe("Desk steering end to end (live store)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
     const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
     expect(within(panel).getByText(/Read-only/)).toBeInTheDocument();
+    // The command names the agent's role, so it reaches this agent and not the stage's (P2-7).
     expect(
-      within(panel).getByRole("button", { name: /^Copy "volleyd steer w1 T1/ }),
+      within(panel).getByRole("button", {
+        name: /^Copy "volleyd steer w1 T1 .* --role implementer"$/,
+      }),
     ).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "Post a progress update now" }));
     expect(b.published).toHaveLength(0);

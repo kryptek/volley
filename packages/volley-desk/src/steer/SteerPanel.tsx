@@ -56,7 +56,7 @@ export interface SteerPanelProps {
     | null
     | undefined;
   /** Where the read-only copy command steers; none for coordinators or agents without a task. */
-  copy?: { wave: string; task: string } | null | undefined;
+  copy?: { wave: string; task: string; role?: string | undefined } | null | undefined;
   /** Read-only for another reason than missing credentials (nobody to message). */
   readOnlyReason?: string | undefined;
   onClose: () => void;
@@ -175,11 +175,11 @@ function ReadOnly({
 }: {
   draft: string;
   setDraft: (s: string) => void;
-  copy: { wave: string; task: string } | null;
+  copy: { wave: string; task: string; role?: string | undefined } | null;
   reason: string | undefined;
 }) {
   const [state, setState] = useState<CopyState>("idle");
-  const cmd = copy ? copySteerCommand(copy.wave, copy.task, draft.trim() || "…") : null;
+  const cmd = copy ? copySteerCommand(copy.wave, copy.task, draft.trim() || "…", copy.role) : null;
   const doCopy = async () => {
     if (!cmd) return;
     try {
@@ -219,7 +219,7 @@ function ReadOnly({
               onClick={() => void doCopy()}
               disabled={draft.trim() === ""}
             >
-              <span className="mono">{`Copy "volleyd steer ${copy.wave} ${copy.task} \\"…\\""`}</span>
+              <span className="mono">{`Copy "volleyd steer ${copy.wave} ${copy.task} \\"…\\"${copy.role ? ` --role ${copy.role}` : ""}"`}</span>
               <Icon i={Copy01Icon} s={12} />
             </button>
             {state === "copied" && <span className="steer-ro-copied">Copied</span>}

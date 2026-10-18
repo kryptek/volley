@@ -3,8 +3,11 @@
  * save): background, dim, window chrome, Needs-you effect, narration effect,
  * tethers and auto-arrange, persisted per browser in the `volley-desk-look`
  * localStorage entry; D6's saved `autoArrange` lives in the same entry and
- * carries over. Unlike the prototype, a stored value of the wrong kind falls
- * back to its default instead of reaching the UI.
+ * carries over. The same entry keeps whether finished agents are shown (the
+ * coordinators window's toggle) and after how many minutes a finished agent
+ * leaves the canvas (`finishedGraceMin`, the Appearance panel). Unlike the
+ * prototype, a stored value of the wrong kind falls back to its default
+ * instead of reaching the UI.
  */
 import { useCallback, useState } from "react";
 import { isBackground } from "./backgrounds";
@@ -30,6 +33,10 @@ export interface Look {
   narr: NarrationFx;
   tethers: boolean;
   autoArrange: boolean;
+  /** Show agents that finished (done, failed, reaped) more than `finishedGraceMin` ago. */
+  showFinished: boolean;
+  /** Minutes a finished agent stays on the canvas while `showFinished` is off. */
+  finishedGraceMin: number;
 }
 
 export const LOOK0: Look = {
@@ -40,7 +47,12 @@ export const LOOK0: Look = {
   narr: "decrypt",
   tethers: true,
   autoArrange: true,
+  showFinished: false,
+  finishedGraceMin: 10,
 };
+
+/** The longest `finishedGraceMin` (a day). */
+export const FINISHED_GRACE_MAX_MIN = 1440;
 
 /** The dim slider's range (prototype: 0–0.85 in 0.05 steps). */
 export const DIM_MAX = 0.85;
@@ -52,6 +64,8 @@ const oneOf =
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 const isDim = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= DIM_MAX;
+export const isGraceMin = (v: unknown): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= FINISHED_GRACE_MAX_MIN;
 
 const VALID: { [K in keyof Look]: (v: unknown) => v is Look[K] } = {
   bg: isBackground,
@@ -61,6 +75,8 @@ const VALID: { [K in keyof Look]: (v: unknown) => v is Look[K] } = {
   narr: oneOf(NARRATION_FX),
   tethers: isBool,
   autoArrange: isBool,
+  showFinished: isBool,
+  finishedGraceMin: isGraceMin,
 };
 
 function readEntry(): Record<string, unknown> {

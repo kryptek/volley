@@ -7,6 +7,7 @@ import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { attachClient, storeReducer } from "../src/store/context";
 import {
+  AuthFailedError,
   DESK_SUBSCRIPTIONS,
   type DeskMqttClient,
   createMqttClient,
@@ -228,6 +229,22 @@ describe("createMqttClient publish (D4 steering)", () => {
     await sub.endAsync();
 
     expect(got).toEqual([{ topic: "volley/default/impl-a1/mailbox", qos: 1, retain: false }]);
+  });
+
+  it("rejects connect() with AuthFailedError when the broker refuses the credentials", async () => {
+    client = createMqttClient({
+      url: broker.url,
+      reconnectPeriod: 0,
+      auth: { username: "desk", password: "wrong" },
+    });
+    const err = await client.connect().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(AuthFailedError);
+    expect((err as AuthFailedError).code).toBe("AUTH_FAILED");
+  });
+
+  it("an anonymous connect to a broker that requires credentials is an auth failure too", async () => {
+    client = createMqttClient({ url: broker.url, reconnectPeriod: 0 });
+    expect(await client.connect().catch((e: Error) => e)).toBeInstanceOf(AuthFailedError);
   });
 
   it("rejects a publish when not connected", async () => {
