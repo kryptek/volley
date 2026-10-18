@@ -22,7 +22,31 @@ export interface PanelSpec {
   coordinator: boolean;
   /** Wave and task for the read-only `volleyd steer` command. */
   copy?: { wave: string; task: string } | null;
+  /** Why there is nobody to message (with `target: null`). */
+  readOnlyReason?: string | undefined;
   onClose: () => void;
+}
+
+/**
+ * Who a wave's chat messages: its coordinator session, never the Desk itself.
+ * Once the Desk owns the wave (it claimed it) there is no coordinator session
+ * to message; a coordinator that is gone has no session either.
+ */
+export function waveChatTarget(
+  owner: string | null | undefined,
+  coordinator: { id: string | null; state: string } | undefined,
+  identity: string | null,
+): { agentId: string } | { agentId: null; reason: string } {
+  if (identity !== null && owner === identity)
+    return {
+      agentId: null,
+      reason: "You own this wave; there is no coordinator session to message.",
+    };
+  if (!coordinator?.id || coordinator.id === identity)
+    return { agentId: null, reason: "This wave has no coordinator to message. Claim it first." };
+  if (coordinator.state === "gone")
+    return { agentId: null, reason: "This wave's coordinator is gone. Claim it first." };
+  return { agentId: coordinator.id };
 }
 
 export function useSteering(
@@ -45,7 +69,7 @@ export function useSteering(
     [writer, identity],
   );
 
-  const panel = ({ target, label, coordinator, copy, onClose }: PanelSpec) => {
+  const panel = ({ target, label, coordinator, copy, readOnlyReason, onClose }: PanelSpec) => {
     const last = target ? [...log].reverse().find((m) => m.target === target.agentId) : undefined;
     return (
       <SteerPanel
@@ -55,11 +79,21 @@ export function useSteering(
           target && transport ? (text, urgent) => transport.send(target, text, { urgent }) : null
         }
         last={
-          last ? { text: last.text, state: ackStateOf(last, log, desk), error: last.error } : null
+          last
+            ? {
+                text: last.text,
+                state: ackStateOf(last, log, desk),
+                error: last.error,
+                urgent: last.urgent === true,
+                interrupt: last.interrupt,
+              }
+            : null
         }
         copy={copy}
         readOnlyReason={
-          target ? undefined : "This wave has no coordinator to message. Claim it first."
+          target
+            ? undefined
+            : (readOnlyReason ?? "This wave has no coordinator to message. Claim it first.")
         }
         onClose={onClose}
       />

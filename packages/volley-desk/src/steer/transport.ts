@@ -2,19 +2,26 @@
  * Steering transport (D4): publishes T0-shaped mailbox envelopes (SPEC §4.4)
  * from the browser client, signed as the Desk's broker identity.
  *
- * Every message gets a fresh UUID `correlation_id` (its message id), a `seq`
- * per target and `supersedes` = the previous message to the same target. The
- * publish lifecycle is reported through `onEvent` (`sending`, then `puback`
- * or `failed`); what comes back afterwards (hook ack, `steering_acked`) is
- * read from the store by `ackState.ts`.
+ * Every message gets a fresh UUID `correlation_id` (its message id) and a
+ * `seq` per target. `supersedes` chains `steering` only: a steering message
+ * supersedes the previous steering message to the same target, while a
+ * `nudge` (`/status`) or `cancel` supersedes nothing, so a quick status ask
+ * never retires a standing directive in the agent's STEERING.md. The publish
+ * lifecycle is reported through `onEvent` (`sending`, then `puback` or
+ * `failed`); what comes back afterwards (hook ack, `steering_acked`) is read
+ * from the store by `ackState.ts`.
  *
- * Urgent (`/stop`, or Urgent mode) additionally sends the daemon a control
- * request to interrupt the session with Escape: a mailbox `query` to
- * `volley/<ns>/volleyd/mailbox` with `payload: { op: "steer", urgent: true,
- * escape_only: true, message_id, agent_id, wave?, task?, by, text }`. The
- * message itself was already published here, so `escape_only` asks the
- * daemon not to deliver it again. `control()` sends any other op (`claim`)
- * the same way and resolves with the daemon's ack on the Desk's own mailbox.
+ * Urgent (`/stop`, or Urgent mode) first asks the daemon to interrupt the
+ * session: a mailbox `query` to `volley/<ns>/volleyd/mailbox` with
+ * `payload: { op: "steer", urgent: true, escape_only: true, wait_ack_ms: 0,
+ * wave, task, by }`. `escape_only` makes volleyd press Escape (its interrupt
+ * hook) and deliver nothing, so once it answers the Desk publishes its own
+ * message and the agent gets exactly one. The outcome is reported as an
+ * `interrupt` event (`interrupted: false` with a reason when volleyd has no
+ * interrupt wired, refused, did not answer, or the target has no wave task);
+ * the message is delivered either way. `control()` sends any other op
+ * (`claim`) the same way and resolves with the daemon's ack on the Desk's own
+ * mailbox.
  *
  * The transport takes the smallest client it needs (publish + the delivery
  * stream), so the Desk's broker client backs it once signed in with broker
@@ -91,6 +98,8 @@ export interface ControlReply {
   ok: boolean;
   error?: string;
   result?: unknown;
+  /** The request never reached the broker (the publish failed): nothing was refused. */
+  unsent?: true;
 }
 
 export interface SteerTransport {
@@ -143,8 +152,33 @@ export function createSteerTransport(
   const timeoutMs = opts.timeoutMs ?? CONTROL_TIMEOUT_MS;
   const newId = opts.newId ?? (() => crypto.randomUUID());
   const now = opts.now ?? (() => new Date());
-  /** Last seq and message id per target agent. */
-  const last = new Map<string, { seq: number; id: string }>();
+  /** Last seq per target agent. */
+  const lastSeq = new Map<string, number>();
+  /** Last `steering` message id per target agent (what the next steering supersedes). */
+  const lastSteering = new Map<string, string>();
+
+  /** Ask volleyd to interrupt `target` (escape_only); resolves with the outcome, never rejects. */
+  const interrupt = async (
+    target: SteerTarget,
+  ): Promise<{ interrupted: boolean; reason?: string }> => {
+    if (target.wave === undefined || target.task === undefined)
+      return { interrupted: false, reason: "no wave task to interrupt" };
+    const r = await control(
+      "steer",
+      {
+        urgent: true,
+        escape_only: true,
+        wait_ack_ms: 0,
+        wave: target.wave,
+        task: target.task,
+      },
+      `Interrupt ${target.agentId} (Escape)`,
+    );
+    if (!r.ok) return { interrupted: false, reason: r.error ?? "volleyd refused the interrupt" };
+    return (r.result as { interrupted?: unknown } | undefined)?.interrupted === true
+      ? { interrupted: true }
+      : { interrupted: false, reason: "volleyd has no interrupt for this agent" };
+  };
 
   const control: SteerTransport["control"] = (op, fields, text = `volleyd ${op}`) => {
     const id = newId();
@@ -187,7 +221,7 @@ export function createSteerTransport(
       });
       client
         .publish(mailbox(daemonNs, DAEMON_AGENT_ID), JSON.stringify(req))
-        .catch((err: unknown) => done({ ok: false, error: message(err) }));
+        .catch((err: unknown) => done({ ok: false, error: message(err), unsent: true }));
     });
   };
 
@@ -197,9 +231,10 @@ export function createSteerTransport(
     send(target, input, { urgent = false } = {}) {
       const c = compose(input, urgent);
       const id = newId();
-      const prev = last.get(target.agentId);
-      const seq = (prev?.seq ?? 0) + 1;
-      last.set(target.agentId, { seq, id });
+      const seq = (lastSeq.get(target.agentId) ?? 0) + 1;
+      lastSeq.set(target.agentId, seq);
+      const supersedes = c.type === "steering" ? lastSteering.get(target.agentId) : undefined;
+      if (c.type === "steering") lastSteering.set(target.agentId, id);
       const at = now();
       const sent: SentSteer = {
         id,
@@ -209,9 +244,10 @@ export function createSteerTransport(
         type: c.type,
         text: c.text,
         seq,
-        ...(prev ? { supersedes: prev.id } : {}),
+        ...(supersedes !== undefined ? { supersedes } : {}),
         sentAt: at.getTime(),
         puback: false,
+        ...(c.urgent ? { urgent: true } : {}),
       };
       onEvent({ type: "sending", msg: sent });
       const env = envelope({
@@ -219,35 +255,31 @@ export function createSteerTransport(
         namespace: target.namespace,
         type: c.type,
         id,
-        payload: { text: c.text, seq, ...(prev ? { supersedes: prev.id } : {}) },
+        payload: { text: c.text, seq, ...(supersedes !== undefined ? { supersedes } : {}) },
         now: at,
       });
-      client.publish(mailbox(target.namespace, target.agentId), JSON.stringify(env)).then(
-        () => onEvent({ type: "puback", id }),
-        (err: unknown) => onEvent({ type: "failed", id, error: message(err) }),
-      );
-      if (c.urgent) {
-        void control(
-          "steer",
-          {
-            urgent: true,
-            escape_only: true,
-            message_id: id,
-            agent_id: target.agentId,
-            ...(target.wave !== undefined ? { wave: target.wave } : {}),
-            ...(target.task !== undefined ? { task: target.task } : {}),
-          },
-          `Interrupt ${target.agentId} (Escape) for urgent ${c.type} ${id}`,
+      const publish = () =>
+        client.publish(mailbox(target.namespace, target.agentId), JSON.stringify(env)).then(
+          () => onEvent({ type: "puback", id }),
+          (err: unknown) => onEvent({ type: "failed", id, error: message(err) }),
         );
+      if (c.urgent) {
+        // Interrupt first, so the message lands in a stopped session; deliver it either way.
+        void interrupt(target).then((r) => {
+          onEvent({ type: "interrupt", id, ...r });
+          return publish();
+        });
+      } else {
+        void publish();
       }
       return sent;
     },
   };
 }
 
-/** Double-quote `s` for a POSIX shell. */
+/** Single-quote `s` for a POSIX shell (no `$`, backtick or `!` history expansion inside). */
 function shellQuote(s: string): string {
-  return `"${s.replace(/["\\$`]/g, (ch) => `\\${ch}`)}"`;
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 /** The `volleyd steer` line the read-only panel offers to copy. */

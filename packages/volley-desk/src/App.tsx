@@ -24,7 +24,7 @@ import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
 import { ClaimButton } from "./steer/SteerPanel";
-import { useSteering } from "./steer/useSteering";
+import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
@@ -293,7 +293,7 @@ export default function App() {
             // Only a wave at tier you gets a banner: an ended wave's coordinator is gone
             // because the work is done, not because the wave needs claiming.
             const needsYou = waveAttn[id]?.tier === "you";
-            const coordId = wave.state?.owner ?? wave.state?.coordinator?.agent_id;
+            const chat = waveChatTarget(wave.state?.owner, coordinator, identity);
             return (
               <WaveWindow
                 key={id}
@@ -320,14 +320,15 @@ export default function App() {
               >
                 {steerOpen === id &&
                   steering.panel({
-                    target: coordId
+                    target: chat.agentId
                       ? {
-                          agentId: coordId,
-                          namespace: state.agents[coordId]?.namespace ?? "default",
+                          agentId: chat.agentId,
+                          namespace: state.agents[chat.agentId]?.namespace ?? "default",
                           coordinator: true,
                           wave: id,
                         }
                       : null,
+                    readOnlyReason: "reason" in chat ? chat.reason : undefined,
                     label: id,
                     coordinator: true,
                     onClose: () => setSteerOpen(null),

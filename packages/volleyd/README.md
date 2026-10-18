@@ -205,7 +205,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claim` | `wave`, `by` | `{ wave, owner, previous, why }` |
 | `pause` / `resume` | `wave` (or `all: true` for `resume`), `by` | `{ wave, status, changed }` / `{ kill_switch }` |
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
-| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by? }` |
+| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
@@ -296,6 +296,13 @@ names the previous steer, so the recipient can drop stale guidance. The steer is
 - `delivered`: neither arrived in time.
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).
+
+`urgent: true` interrupts the agent's session (the daemon's `interrupt` hook, e.g. Escape via
+cmux) **before** the steering message is published, and the answer adds `interrupted`.
+`escape_only: true` (implies `urgent`; `text` not needed) only interrupts: nothing is published or
+journaled, so a client that sends its own mailbox message (the Desk) asks for the interrupt first
+and then publishes, and the agent gets exactly one message. When no interrupt hook is wired, or
+it fails, the request still answers `ok` with `interrupted: false`.
 
 ## Overlap warnings
 

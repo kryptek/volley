@@ -118,14 +118,34 @@ describe("createSteerTransport", () => {
     ).toEqual([undefined, undefined]);
   });
 
-  it("/stop publishes a cancel plus the urgent control request to the daemon", async () => {
-    const { transport, published } = setup();
-    const sent = transport.send(AGENT, "/stop");
+  /** Answer the daemon's pending control request (the last `query` published). */
+  const answer = (
+    m: ReturnType<typeof setup>,
+    payload: Record<string, unknown>,
+    agent = DAEMON_AGENT_ID,
+  ) => {
+    const req = m.published.filter((p) => p.envelope.type === "query").at(-1);
+    m.deliver({
+      topic: "volley/default/desk/mailbox",
+      receivedAt: 1,
+      envelope: {
+        schema_version: "0.1",
+        agent_id: agent,
+        channel: "mailbox",
+        type: "ack",
+        correlation_id: req?.envelope.correlation_id ?? null,
+        payload: { text: "ACKED", acked_type: "query", op: "steer", ...payload },
+      },
+    });
+  };
+
+  it("/stop asks the daemon to interrupt (escape_only) first, then publishes the one cancel", async () => {
+    const m = setup();
+    const sent = m.transport.send(AGENT, "/stop");
     await flush();
-    expect(published).toHaveLength(2);
-    const [cancel, control] = published;
-    expect(cancel?.topic).toBe("volley/default/impl-a1/mailbox");
-    expect(cancel?.envelope).toMatchObject({ type: "cancel", correlation_id: sent.id });
+    // Only the interrupt request so far: the cancel waits for the daemon's answer.
+    expect(m.published).toHaveLength(1);
+    const control = m.published[0];
     expect(control?.topic).toBe(`volley/default/${DAEMON_AGENT_ID}/mailbox`);
     expect(control?.envelope).toMatchObject({
       agent_id: "desk",
@@ -135,22 +155,102 @@ describe("createSteerTransport", () => {
         op: "steer",
         urgent: true,
         escape_only: true,
-        message_id: sent.id,
-        agent_id: "impl-a1",
+        wait_ack_ms: 0,
         wave: "status-chip",
         task: "T2",
         by: "desk",
       },
     });
-    expect(typeof (control?.envelope.payload as { text?: unknown }).text).toBe("string");
     expect(control?.envelope.correlation_id).not.toBe(sent.id);
+    expect(m.events.map((e) => e.type)).toEqual(["sending"]);
+
+    answer(m, { ok: true, result: { agent_id: "impl-a1", escape_only: true, interrupted: true } });
+    await flush();
+    expect(m.published).toHaveLength(2);
+    const cancel = m.published[1];
+    expect(cancel?.topic).toBe("volley/default/impl-a1/mailbox");
+    expect(cancel?.envelope).toMatchObject({ type: "cancel", correlation_id: sent.id });
+    // Exactly one message reaches the agent.
+    expect(m.published.filter((p) => p.topic.endsWith("/impl-a1/mailbox"))).toHaveLength(1);
+    expect(m.events).toEqual([
+      expect.objectContaining({ type: "sending" }),
+      { type: "interrupt", id: sent.id, interrupted: true },
+      { type: "puback", id: sent.id },
+    ]);
   });
 
-  it("Urgent mode sends steering plus the urgent control request", async () => {
-    const { transport, published } = setup();
-    transport.send(AGENT, "rebase first", { urgent: true });
+  it("Urgent mode: interrupt request, then the steering message", async () => {
+    const m = setup();
+    m.transport.send(AGENT, "rebase first", { urgent: true });
     await flush();
-    expect(published.map((p) => p.envelope.type)).toEqual(["steering", "query"]);
+    answer(m, { ok: true, result: { interrupted: true } });
+    await flush();
+    expect(m.published.map((p) => p.envelope.type)).toEqual(["query", "steering"]);
+  });
+
+  it("no interrupt wired: delivered anyway, recorded as not interrupted", async () => {
+    const m = setup();
+    const sent = m.transport.send(AGENT, "/stop");
+    await flush();
+    answer(m, { ok: true, result: { interrupted: false } });
+    await flush();
+    expect(m.published.map((p) => p.envelope.type)).toEqual(["query", "cancel"]);
+    expect(m.events).toContainEqual({
+      type: "interrupt",
+      id: sent.id,
+      interrupted: false,
+      reason: "volleyd has no interrupt for this agent",
+    });
+  });
+
+  it("a refused or unanswered interrupt still delivers the message, with the reason", async () => {
+    const m = setup();
+    const refused = m.transport.send(AGENT, "/stop");
+    await flush();
+    answer(m, { ok: false, error: "wave status-chip is owned by coordinator-x" });
+    await flush();
+    expect(m.events).toContainEqual({
+      type: "interrupt",
+      id: refused.id,
+      interrupted: false,
+      reason: "wave status-chip is owned by coordinator-x",
+    });
+    const silent = m.transport.send(AGENT, "/stop");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(m.events).toContainEqual(
+      expect.objectContaining({ type: "interrupt", id: silent.id, interrupted: false }),
+    );
+    expect(m.published.map((p) => p.envelope.type)).toEqual(["query", "cancel", "query", "cancel"]);
+  });
+
+  it("a target with no wave task (a coordinator) is not interrupted and gets no daemon request", async () => {
+    const m = setup();
+    const sent = m.transport.send(
+      { agentId: "coordinator-k2", namespace: "default", coordinator: true, wave: "w" },
+      "/stop",
+    );
+    await flush();
+    expect(m.published.map((p) => p.envelope.type)).toEqual(["cancel"]);
+    expect(m.events).toContainEqual({
+      type: "interrupt",
+      id: sent.id,
+      interrupted: false,
+      reason: "no wave task to interrupt",
+    });
+  });
+
+  it("supersedes chains only steering: a nudge or cancel supersedes nothing and is never superseded", async () => {
+    const m = setup();
+    const a = m.transport.send(AGENT, "keep the rename out of this PR");
+    const nudge = m.transport.send(AGENT, "/status");
+    const b = m.transport.send(AGENT, "include the docs");
+    await flush();
+    expect(nudge).toMatchObject({ type: "nudge", seq: 2 });
+    expect(nudge.supersedes).toBeUndefined();
+    expect(b).toMatchObject({ type: "steering", seq: 3, supersedes: a.id });
+    expect(
+      (m.published[1]?.envelope.payload as { supersedes?: string }).supersedes,
+    ).toBeUndefined();
   });
 
   it("a refused publish is reported as failed", async () => {
@@ -226,10 +326,14 @@ describe("createSteerTransport", () => {
 describe("copySteerCommand", () => {
   it("yields the exact volleyd steer line, shell-quoted", () => {
     expect(copySteerCommand("status-chip", "T2", "keep the rename out")).toBe(
-      'volleyd steer status-chip T2 "keep the rename out"',
+      "volleyd steer status-chip T2 'keep the rename out'",
     );
     expect(copySteerCommand("w", "T1", 'say "hi" for $5 `now`\\')).toBe(
-      'volleyd steer w T1 "say \\"hi\\" for \\$5 \\`now\\`\\\\"',
+      `volleyd steer w T1 'say "hi" for $5 \`now\`\\'`,
+    );
+    // `!` (history expansion) and `'` survive an interactive bash/zsh paste.
+    expect(copySteerCommand("w", "T1", "Stop now! it's $HOME")).toBe(
+      `volleyd steer w T1 'Stop now! it'\\''s $HOME'`,
     );
   });
 });

@@ -8,13 +8,13 @@
  * `progress/steering_acked` with the message id, §4.3).
  *
  * Coordinator target: the same states, read as "shown in your Claude session"
- * (its hooks acked it) and "coordinator replied" (`acked`: a `resumed` or
- * `working` signal after the send, or a mailbox message correlated to it).
+ * (its hooks acked it) and "coordinator replied" (`acked`: a live `resumed`
+ * or `working` signal after the send, or a mailbox message correlated to it).
  *
  * A message that a newer one to the same target supersedes is **superseded**,
  * unless the recipient already acted on it. A refused publish is **failed**.
  */
-import type { AgentView, DeskState, Receipts } from "../store/types";
+import type { DeskState, Receipts } from "../store/types";
 
 export type AckState =
   | "idle"
@@ -45,12 +45,17 @@ export interface SentSteer {
   puback: boolean;
   /** Why the publish was refused. */
   error?: string;
+  /** Sent urgent (`/stop`, Urgent mode): the daemon was asked to interrupt first. */
+  urgent?: true;
+  /** The interrupt's outcome, once known (urgent only). */
+  interrupt?: { interrupted: boolean; reason?: string };
 }
 
 export type SteerLogEvent =
   | { type: "sending"; msg: SentSteer }
   | { type: "puback"; id: string }
-  | { type: "failed"; id: string; error: string };
+  | { type: "failed"; id: string; error: string }
+  | { type: "interrupt"; id: string; interrupted: boolean; reason?: string };
 
 /** Messages kept in the log; the oldest are dropped first. */
 export const STEER_LOG_LIMIT = 100;
@@ -65,23 +70,18 @@ export function steerLog(log: readonly SentSteer[], e: SteerLogEvent): SentSteer
       return log.map((m) => (m.id === e.id ? { ...m, puback: true } : m));
     case "failed":
       return log.map((m) => (m.id === e.id ? { ...m, error: e.error } : m));
+    case "interrupt": {
+      const interrupt = {
+        interrupted: e.interrupted,
+        ...(e.reason !== undefined ? { reason: e.reason } : {}),
+      };
+      return log.map((m) => (m.id === e.id ? { ...m, interrupt } : m));
+    }
   }
 }
 
 const from = (r: Receipts | undefined, id: string, agent: string): boolean =>
   r?.[id]?.[agent] !== undefined;
-
-/** The coordinator worked again after `since`: a `resumed` hook event or a `working` status. */
-function signalledSince(agent: AgentView | undefined, since: number): boolean {
-  return (
-    agent?.feed.some(
-      (f) =>
-        f.receivedAt >= since &&
-        ((f.envelope.channel === "progress" && f.envelope.type === "resumed") ||
-          (f.envelope.channel === "status" && f.envelope.type === "working")),
-    ) ?? false
-  );
-}
 
 export function ackStateOf(msg: SentSteer, log: readonly SentSteer[], desk: DeskState): AckState {
   if (msg.error !== undefined) return "failed";
@@ -90,7 +90,7 @@ export function ackStateOf(msg: SentSteer, log: readonly SentSteer[], desk: Desk
   const acted = msg.coordinator
     ? from(r?.applied, msg.id, msg.target) ||
       from(r?.replies, msg.id, msg.target) ||
-      signalledSince(desk.agents[msg.target], msg.sentAt)
+      (r?.signals[msg.target] ?? Number.NEGATIVE_INFINITY) >= msg.sentAt
     : from(r?.applied, msg.id, msg.target);
   if (acted) return "acked";
   if (log.some((m) => m.supersedes === msg.id && m.target === msg.target)) return "superseded";

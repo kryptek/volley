@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ClaimButton, SteerPanel } from "../src/steer/SteerPanel";
 import type { ControlReply, SteerTransport } from "../src/steer/transport";
-import { DeskStoreProvider } from "../src/store/context";
+import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, readCredentials } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope } from "../src/store/types";
 
@@ -104,6 +104,32 @@ describe("SteerPanel (writable)", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Not sent: not authorised");
   });
 
+  it("says whether an urgent message interrupted the session", () => {
+    const at = (last: Parameters<typeof SteerPanel>[0]["last"]) =>
+      render(
+        <SteerPanel target="T2" coordinator={false} onSend={noop} onClose={noop} last={last} />,
+      );
+    const a = at({ text: "x", state: "sending", urgent: true });
+    expect(screen.getByText("Interrupting (Escape)…")).toBeInTheDocument();
+    // The first step shows as pending while the publish waits for its PUBACK.
+    expect(screen.getByRole("list", { name: "Delivery" }).querySelector("li")).toHaveClass(
+      "pending",
+    );
+    a.unmount();
+    const b = at({ text: "x", state: "sent", urgent: true, interrupt: { interrupted: true } });
+    expect(screen.getByText("Interrupted (Escape), then delivered")).toBeInTheDocument();
+    b.unmount();
+    at({
+      text: "x",
+      state: "sent",
+      urgent: true,
+      interrupt: { interrupted: false, reason: "volleyd has no interrupt for this agent" },
+    });
+    expect(
+      screen.getByText("Delivered (not interrupted: volleyd has no interrupt for this agent)"),
+    ).toBeInTheDocument();
+  });
+
   it("closes", () => {
     const onClose = vi.fn();
     render(<SteerPanel target="T2" coordinator={false} onSend={noop} onClose={onClose} />);
@@ -138,7 +164,7 @@ describe("SteerPanel (no broker credentials)", () => {
     fireEvent.click(copy);
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        'volleyd steer status-chip T2 "keep the \\"rename\\" out"',
+        `volleyd steer status-chip T2 'keep the "rename" out'`,
       ),
     );
     expect(await screen.findByText("Copied")).toBeInTheDocument();
@@ -195,6 +221,17 @@ describe("ClaimButton", () => {
     expect(screen.getByRole("button", { name: "Claim this wave" })).toBeEnabled();
   });
 
+  it("a request that never reached the broker is 'not sent', not 'refused'", async () => {
+    const t = transport(
+      Promise.resolve({ ok: false, error: "not connected to the broker", unsent: true }),
+    );
+    render(<ClaimButton wave="w" transport={t} />);
+    fireEvent.click(screen.getByRole("button", { name: "Claim this wave" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Claim not sent: not connected to the broker",
+    );
+  });
+
   it("renders nothing without a write transport (the copy command stays)", () => {
     const { container } = render(<ClaimButton wave="w" transport={null} />);
     expect(container).toBeEmptyDOMElement();
@@ -222,7 +259,10 @@ describe("Desk steering end to end (live store)", () => {
     },
   };
 
-  function fakeBroker() {
+  function fakeBroker({
+    connects = true,
+    state = waveState,
+  }: { connects?: boolean; state?: Envelope } = {}) {
     const handlers = new Set<(m: DeskMessage) => void>();
     const published: { topic: string; envelope: Envelope }[] = [];
     const deliver = (m: DeskMessage) => {
@@ -232,10 +272,12 @@ describe("Desk steering end to end (live store)", () => {
     const factory = (_url: string, auth?: unknown): DeskMqttClient => {
       auths.push(auth);
       const none = () => () => {};
+      let connected = () => {};
       return {
         connect: async () => {
           setTimeout(() => {
-            deliver({ topic: "volley/_waves/w1/state", envelope: waveState, receivedAt: 1 });
+            if (connects) connected();
+            deliver({ topic: "volley/_waves/w1/state", envelope: state, receivedAt: 1 });
             deliver(registry);
           }, 0);
         },
@@ -247,7 +289,10 @@ describe("Desk steering end to end (live store)", () => {
           handlers.add(h);
           return () => handlers.delete(h);
         },
-        onConnect: none,
+        onConnect: (h) => {
+          connected = h;
+          return () => {};
+        },
         onDisconnect: none,
         onError: none,
       };
@@ -321,6 +366,66 @@ describe("Desk steering end to end (live store)", () => {
     expect(screen.queryByRole("region", { name: "desk" })).toBeNull();
   });
 
+  const signedIn = (b: ReturnType<typeof fakeBroker>) =>
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        auth={{ username: "desk", password: "pw" }}
+        clientFactory={b.factory}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+
+  it("the wave chat messages the live coordinator session", async () => {
+    const p = waveState.payload as Record<string, unknown>;
+    const live = {
+      ...waveState,
+      payload: {
+        ...p,
+        coordinator: {
+          ...(p.coordinator as Record<string, unknown>),
+          last_seen: new Date().toISOString(),
+        },
+      },
+    } as Envelope;
+    const b = fakeBroker({ state: live });
+    signedIn(b);
+    fireEvent.click(await screen.findByRole("button", { name: "Message the coordinator of w1" }));
+    const panel = screen.getByRole("dialog", { name: "Message w1" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Give me a status summary" }));
+    await waitFor(() => expect(b.published).toHaveLength(1));
+    expect(b.published[0]?.topic).toBe("volley/default/coordinator-ab12/mailbox");
+  });
+
+  it("after the Desk claims the wave, the wave chat is read-only and sends nothing to itself", async () => {
+    const claimed = {
+      ...waveState,
+      payload: { ...(waveState.payload as Record<string, unknown>), owner: "desk" },
+    } as Envelope;
+    const b = fakeBroker({ state: claimed });
+    signedIn(b);
+    fireEvent.click(await screen.findByRole("button", { name: "Message the coordinator of w1" }));
+    const panel = screen.getByRole("dialog", { name: "Message w1" });
+    expect(
+      within(panel).getByText("You own this wave; there is no coordinator session to message."),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByRole("list", { name: "Delivery" })).toBeNull();
+    fireEvent.click(within(panel).getByRole("button", { name: "Give me a status summary" }));
+    expect(b.published).toHaveLength(0);
+  });
+
+  it("credentials that never connect leave the panel read-only", async () => {
+    const b = fakeBroker({ connects: false });
+    signedIn(b);
+    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
+    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    expect(within(panel).getByText(/Read-only/)).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Post a progress update now" }));
+    expect(b.published).toHaveLength(0);
+  });
+
   it("anonymous: the panel is read-only with the volleyd steer copy command", async () => {
     const b = fakeBroker();
     render(
@@ -361,5 +466,31 @@ describe("Desk steering (demo mode)", () => {
     await waitFor(() => expect(lit()).toBe(3), { timeout: 4000 });
     // The demo "agent" acknowledged through the same reducer the live path uses.
     expect(panel.closest(".win")).toHaveTextContent(/Acknowledged: keep the rename out of this pr/);
+  });
+});
+
+describe("readCredentials", () => {
+  const store = (v: unknown) => ({
+    getItem: (k: string) => (k === CREDENTIALS_STORAGE_KEY ? JSON.stringify(v) : null),
+  });
+
+  it("accepts a username in the agent-id grammar", () => {
+    expect(readCredentials({}, store({ username: "desk", password: "pw" }))).toEqual({
+      username: "desk",
+      password: "pw",
+    });
+  });
+
+  it("a username that is not a valid agent id stays anonymous (read-only), with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      readCredentials(
+        { VITE_VOLLEY_BROKER_USERNAME: "Desk", VITE_VOLLEY_BROKER_PASSWORD: "x" },
+        null,
+      ),
+    ).toBeNull();
+    expect(readCredentials({}, store({ username: "ops@host", password: "pw" }))).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
   });
 });

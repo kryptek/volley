@@ -70,11 +70,23 @@ export interface DeskContextValue {
 /** localStorage key for the Desk's broker credentials (`{ username, password }`). */
 export const CREDENTIALS_STORAGE_KEY = "volley-desk:broker-auth";
 
+/** The agent-id grammar (SPEC §3, `volley-mcp/topics` `ID_PATTERN`): the username is the sender id. */
+const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
 /**
- * Broker credentials: `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD`,
- * else the JSON stored under `CREDENTIALS_STORAGE_KEY`; `null` (anonymous) otherwise.
+ * Broker credentials: `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD`
+ * (dev only: Vite inlines them into a built bundle), else the JSON stored under
+ * `CREDENTIALS_STORAGE_KEY`; `null` (anonymous) otherwise. A username outside the
+ * agent-id grammar cannot sign envelopes or name a mailbox, so it stays anonymous.
  */
 export function readCredentials(
+  env: Record<string, unknown>,
+  storage: Pick<Storage, "getItem"> | null,
+): BrokerCredentials | null {
+  return validIdentity(fromEnvOrStorage(env, storage));
+}
+
+function fromEnvOrStorage(
   env: Record<string, unknown>,
   storage: Pick<Storage, "getItem"> | null,
 ): BrokerCredentials | null {
@@ -92,6 +104,14 @@ export function readCredentials(
   } catch {
     return null;
   }
+}
+
+function validIdentity(c: BrokerCredentials | null): BrokerCredentials | null {
+  if (c === null || AGENT_ID.test(c.username)) return c;
+  console.warn(
+    `volley-desk: broker username '${c.username}' is not a valid agent id; staying read-only`,
+  );
+  return null;
 }
 
 function localStorageOrNull(): Storage | null {
@@ -226,6 +246,10 @@ export function DeskStoreProvider({
   const [settling, setSettling] = useState(true);
   const [offline, setOffline] = useState<readonly OfflineSpan[]>([]);
   const [liveWriter, setLiveWriter] = useState<SteerClient | null>(null);
+  const [liveConnected, setLiveConnected] = useState(false);
+  useEffect(() => {
+    if (connection === "connected") setLiveConnected(true);
+  }, [connection]);
   // The demo writer answers a coordinator with `resumed` instead of `steering_acked`.
   const coordinatorIds = useRef<ReadonlySet<string>>(new Set());
   coordinatorIds.current = new Set(Object.keys(state.coordinators));
@@ -273,6 +297,7 @@ export function DeskStoreProvider({
     };
     const detach = attachClient(client, dispatch, { settleMs }, setConnection, onSettling);
     setLiveWriter(auth ? client : null);
+    setLiveConnected(false);
     setConnection("connecting");
     client.connect().catch((err: unknown) => {
       console.warn("volley-desk: broker connect failed", err);
@@ -285,7 +310,8 @@ export function DeskStoreProvider({
     };
   }, [brokerUrl, clientFactory, settleMs, auth]);
 
-  const writer = demo ? demoWriter : liveWriter;
+  // Writes only once the credentialed connection has actually come up (bad credentials never do).
+  const writer = demo ? demoWriter : liveConnected ? liveWriter : null;
   const value = useMemo(
     () => ({
       state,

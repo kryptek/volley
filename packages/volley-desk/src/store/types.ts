@@ -297,4 +297,6 @@ export interface SteeringReceipts {
   acks: Receipts;
   applied: Receipts;
   replies: Receipts;
+  /** When each agent last signalled live `resumed` / `working` (never a retained replay). */
+  signals: Record<string, number>;
 }

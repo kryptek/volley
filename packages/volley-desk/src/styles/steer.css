@@ -54,6 +54,11 @@
   background: var(--ok);
   border-color: var(--ok);
 }
+/* Published, waiting for the broker's PUBACK. */
+.ack li.pending::before {
+  border-color: var(--ok);
+  opacity: 0.5;
+}
 .ack-txt {
   flex-basis: 100%;
   color: var(--mute);

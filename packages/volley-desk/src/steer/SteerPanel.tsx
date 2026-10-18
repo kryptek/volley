@@ -43,7 +43,18 @@ export interface SteerPanelProps {
   /** Publish `text` (urgent: also interrupt); `null` without broker credentials (read-only). */
   onSend: ((text: string, urgent: boolean) => void) | null;
   /** The last message sent from this panel and its delivery state. */
-  last?: { text: string; state: AckState; error?: string | undefined } | null | undefined;
+  last?:
+    | {
+        text: string;
+        state: AckState;
+        error?: string | undefined;
+        /** Sent urgent: the daemon was asked to interrupt first. */
+        urgent?: boolean | undefined;
+        /** The interrupt's outcome, once known. */
+        interrupt?: { interrupted: boolean; reason?: string | undefined } | undefined;
+      }
+    | null
+    | undefined;
   /** Where the read-only copy command steers; none for coordinators or agents without a task. */
   copy?: { wave: string; task: string } | null | undefined;
   /** Read-only for another reason than missing credentials (nobody to message). */
@@ -127,7 +138,10 @@ function Delivery({
     <>
       <ol className="ack" aria-label="Delivery">
         {ackLabels(coordinator).map((label, i) => (
-          <li key={label} className={i < lit ? "on" : ""}>
+          <li
+            key={label}
+            className={i < lit ? "on" : i === 0 && last.state === "sending" ? "pending" : ""}
+          >
             {label}
           </li>
         ))}
@@ -138,9 +152,17 @@ function Delivery({
           Not sent: {last.error ?? "the broker refused the message"}
         </div>
       )}
-      {last.state === "superseded" && <div className="ack-note">Superseded by a newer message</div>}
+      {last.urgent && last.state !== "failed" && (
+        <div className="ack-note">{interruptNote(last.interrupt)}</div>
+      )}
     </>
   );
+}
+
+function interruptNote(i: NonNullable<SteerPanelProps["last"]>["interrupt"]): string {
+  if (!i) return "Interrupting (Escape)…";
+  if (i.interrupted) return "Interrupted (Escape), then delivered";
+  return `Delivered (not interrupted${i.reason ? `: ${i.reason}` : ""})`;
 }
 
 type CopyState = "idle" | "copied" | "failed";
@@ -172,8 +194,8 @@ function ReadOnly({
       <p className="steer-ro-note">
         {reason ?? (
           <>
-            Read-only: this Desk is connected to the broker anonymously. Sign in with broker
-            credentials to steer from here
+            Read-only: this Desk is not signed in to the broker (anonymous, or its credentials have
+            not connected). Sign in with broker credentials to steer from here
             {cmd ? ", or copy the command and run it in a terminal." : "."}
           </>
         )}
@@ -236,7 +258,11 @@ export function ClaimButton({
             ok: true,
             text: `Claimed: ${typeof owner === "string" ? owner : transport.identity} now owns ${wave}`,
           }
-        : { kind: "done", ok: false, text: `Claim refused: ${r.error ?? "no reason given"}` },
+        : {
+            kind: "done",
+            ok: false,
+            text: `${r.unsent ? "Claim not sent" : "Claim refused"}: ${r.error ?? "no reason given"}`,
+          },
     );
   };
   return (

@@ -3,7 +3,8 @@
  * envelope it is, then the recipient "answers" through the same reducer the
  * live path uses: the hook's ack to the Desk's mailbox, then the model's
  * `steering_acked` (a coordinator: `resumed`). A daemon control request gets
- * an `ok` ack. Timings follow the prototype (1.1 s delivered, 2.6 s acked).
+ * an `ok` ack (an urgent interrupt answers `interrupted: true`). Timings
+ * follow the prototype (1.1 s delivered, 2.6 s acked).
  */
 import type { DeskMessage, Envelope } from "../store/types";
 import { DAEMON_AGENT_ID, type SteerClient } from "./transport";
@@ -49,8 +50,16 @@ export function createDemoSteerClient(
       const id = env.correlation_id ?? null;
       const self = `volley/${ns}/${env.agent_id}/mailbox`;
       if (to === DAEMON_AGENT_ID) {
+        // An urgent steer's interrupt (escape_only) "presses Escape" in the demo.
+        const escapeOnly =
+          (env.payload as { escape_only?: unknown } | undefined)?.escape_only === true;
+        const answer = {
+          text: "ACKED",
+          ok: true,
+          ...(escapeOnly ? { result: { interrupted: true } } : {}),
+        };
         setTimeout(() => {
-          emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", { text: "ACKED", ok: true }, id));
+          emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", answer, id));
         }, CONTROL_MS);
         return;
       }

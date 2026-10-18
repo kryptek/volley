@@ -172,6 +172,15 @@ describe("ackStateOf", () => {
       expect(ackStateOf(toCoord, log, desk)).toBe("acked");
     });
 
+    it("a retained working replayed after a reconnect is not a reply", () => {
+      const replay: DeskMessage = {
+        ...msg(`volley/default/${COORD}/status`, env(COORD, "status", "working"), T0 + 40),
+        retained: true,
+      };
+      const desk = reduceAll(base(), [ack(COORD, ID1), replay]);
+      expect(ackStateOf(toCoord, log, desk)).toBe("delivered");
+    });
+
     it("replied = a mailbox reply correlated to the message", () => {
       const desk = reduceAll(base(), [
         msg(
@@ -207,7 +216,6 @@ describe("reducer: own-mailbox acks and steering_acked", () => {
   it("an ack never creates its recipient as an agent (it is a sender: a CLI, the daemon)", () => {
     const desk = reduceAll(initialState(), [ack(AGENT, ID1)]);
     expect(desk.agents[DESK]).toBeUndefined();
-    expect(desk.steering?.acks[ID1]).toEqual({ [AGENT]: T0 + 10 });
   });
 
   it("the Desk's own outgoing message is not mistaken for a reply", () => {
@@ -217,9 +225,39 @@ describe("reducer: own-mailbox acks and steering_acked", () => {
         env(DESK, "mailbox", "steering", { correlation_id: ID1, payload: { text: "hi", seq: 1 } }),
       ),
     ]);
-    expect(desk.steering?.replies[ID1]).toEqual({ [DESK]: T0 + 10 });
+    expect(desk.steering?.replies[ID1]).toBeUndefined();
     const log = [sent({ puback: true })];
     expect(ackStateOf(log[0] as SentSteer, log, desk)).toBe("sent");
+  });
+
+  it("records acks and replies only from the Desk's own mailbox (SPEC §4.4)", () => {
+    const elsewhere = "volley/default/cli-x9/mailbox";
+    const desk = reduceAll(base(), [
+      msg(
+        elsewhere,
+        env(AGENT, "mailbox", "ack", { correlation_id: ID1, payload: { text: "ACKED" } }),
+      ),
+      msg(
+        `volley/default/${AGENT}/mailbox`,
+        env(COORD, "mailbox", "steering", { correlation_id: ID2, payload: { text: "relay" } }),
+      ),
+    ]);
+    expect(desk.steering?.acks[ID1]).toBeUndefined();
+    expect(desk.steering?.replies[ID2]).toBeUndefined();
+    // Without a signed-in identity there is no own mailbox: nothing is recorded.
+    expect(reduceAll(initialState(), [ack(AGENT, ID1)]).steering?.acks[ID1]).toBeUndefined();
+  });
+
+  it("the Desk's echo of its own message on its own mailbox is never a reply", () => {
+    const desk = reduceAll(base(), [
+      msg(
+        `volley/default/${DESK}/mailbox`,
+        env(DESK, "mailbox", "steering", { correlation_id: ID1, payload: { text: "hi" } }),
+      ),
+    ]);
+    expect(desk.steering?.replies[ID1]).toBeUndefined();
+    const toSelf = sent({ target: DESK, coordinator: true, puback: true });
+    expect(ackStateOf(toSelf, [toSelf], desk)).toBe("sent");
   });
 
   it("keeps receipts and self across a reconnect resync", () => {

@@ -1146,6 +1146,18 @@ export class Daemon {
     return cancelled;
   }
 
+  /** Interrupt one agent's session; false when no interrupt is wired or it failed. */
+  private async interruptAgent(agentId: string): Promise<boolean> {
+    if (this.opts.interrupt === undefined) return false;
+    try {
+      await this.opts.interrupt(agentId);
+      return true;
+    } catch (e) {
+      this.log(`interrupt ${agentId} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
   /** The kill switch: stop every wave, then refuse `run` until `resume --all`. Anyone may pull it. */
   private async stopAll(by: string): Promise<HandlerResult> {
     // Engage (and journal) the switch first: a crash part-way through still refuses `run` after
@@ -1194,7 +1206,11 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     if (typeof p.task !== "string") return { ok: false, error: "steer requires payload.task" };
-    if (typeof p.text !== "string" || p.text.trim() === "")
+    // `escape_only` interrupts the session and delivers nothing: the caller (the Desk) publishes
+    // its own mailbox message after the answer, so the agent never gets a second steer.
+    const escapeOnly = p.escape_only === true;
+    const urgent = escapeOnly || p.urgent === true;
+    if (!escapeOnly && (typeof p.text !== "string" || p.text.trim() === ""))
       return { ok: false, error: "steer requires a non-empty payload.text" };
     const refused = guardMutation(w.log.record.state as WaveState, by, "steer");
     if (refused !== null) return { ok: false, error: refused };
@@ -1213,6 +1229,23 @@ export class Daemon {
           : `unknown task '${p.task}' in wave '${w.wave}'`,
       };
     }
+    // Urgent: interrupt (Escape) before delivering, so the message lands in a stopped session.
+    const interrupted = urgent ? await this.interruptAgent(target.agent_id) : undefined;
+    if (escapeOnly) {
+      this.log(`steer --escape-only ${w.wave}/${p.task} → ${target.agent_id} by ${by}`);
+      return {
+        ok: true,
+        result: {
+          wave: w.wave,
+          task: p.task,
+          agent_id: target.agent_id,
+          role: target.role,
+          escape_only: true,
+          interrupted,
+        },
+      };
+    }
+    if (typeof p.text !== "string") return { ok: false, error: "steer requires payload.text" };
     const { seq, supersedes } = nextSteer(w.log.record, p.task);
     const messageId = randomUUID();
     const waitMs =
@@ -1263,6 +1296,7 @@ export class Daemon {
       delivery: "delivered",
       received: false,
       acked: false,
+      ...(interrupted !== undefined ? { interrupted } : {}),
     };
     if (heard === null) return { ok: true, result };
     return {
