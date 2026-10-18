@@ -15,6 +15,7 @@ Commands:
   events      Print journal events after a named cursor
   ack         Advance a named journal cursor
   config      Get or set supervisor config (volleyd config get|set)
+  admission   Show the spawn admission verdict and its reasons
   spawn       Spawn one task's agent now (worktree, identity, launch, verify)
   cleanup     Remove a wave's retired worktrees and workspaces (--yes)
   decisions   List open decisions
@@ -46,6 +47,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   events: async () => (await import("./commands/events")).events,
   ack: async () => (await import("./commands/ack")).ack,
   config: async () => (await import("./commands/config")).config,
+  admission: async () => (await import("./commands/admission")).admission,
   spawn: async () => (await import("./commands/spawn")).spawn,
   cleanup: async () => (await import("./commands/cleanup")).cleanup,
   decisions: async () => (await import("./commands/decisions")).decisions,

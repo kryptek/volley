@@ -1,0 +1,19 @@
+{
+  "ID": "0b4f9a52-7d0e-4b39-9f55-1c0f6f4c3e21",
+  "Containers": 12,
+  "ContainersRunning": 7,
+  "ContainersPaused": 0,
+  "ContainersStopped": 5,
+  "Images": 41,
+  "Driver": "overlay2",
+  "MemoryLimit": true,
+  "SwapLimit": true,
+  "NCPU": 10,
+  "MemTotal": 16757342208,
+  "OperatingSystem": "Docker Desktop",
+  "OSType": "linux",
+  "Architecture": "aarch64",
+  "ServerVersion": "27.3.1",
+  "ServerErrors": null,
+  "Warnings": null
+}

@@ -12,6 +12,8 @@ export interface BrokerConnectOptions {
    */
   willTopic?: string;
   willPayload?: string;
+  /** Publish the will retained (default true: an agent's LWT is its retained status). */
+  willRetain?: boolean;
   keepaliveSeconds?: number;
   connectTimeoutMs?: number;
   /**
@@ -179,7 +181,7 @@ export class VolleyBroker {
               topic: opts.willTopic,
               payload: Buffer.from(opts.willPayload),
               qos: 1 as const,
-              retain: true,
+              retain: opts.willRetain ?? true,
             }
           : undefined;
       // Append a random suffix so two MCP processes sharing one VOLLEY_AGENT_ID

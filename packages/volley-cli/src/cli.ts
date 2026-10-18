@@ -15,6 +15,7 @@ Subcommands:
   dash     Launch the Volley dashboard (Vite)
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
   auth     Manage broker credentials (init, add-agent, rm-agent)
+  lease    Heavy-operation leases from volleyd (run, acquire, release, status)
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -58,6 +59,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/notify")).notify as Subcommand;
     case "auth":
       return (await import("./commands/auth")).auth as Subcommand;
+    case "lease":
+      return (await import("./commands/lease")).lease as Subcommand;
     default:
       return null;
   }

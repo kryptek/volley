@@ -34,6 +34,7 @@ describe("scripts/install.sh", () => {
         "PostModelSwitch",
         "PostToolUse",
         "PreCompact",
+        "PreToolUse",
         "SessionStart",
         "Stop",
         "UserPromptSubmit",
@@ -57,6 +58,6 @@ describe("scripts/install.sh", () => {
   it("creates the settings file when missing", () => {
     const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
     install(settings);
-    expect(Object.keys(read(settings).hooks)).toHaveLength(7);
+    expect(Object.keys(read(settings).hooks)).toHaveLength(8);
   });
 });
