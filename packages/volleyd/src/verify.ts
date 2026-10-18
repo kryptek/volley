@@ -23,10 +23,12 @@ const HOOK_MODEL_SOURCES = new Set(["harness-hook", "unknown"]);
 export interface SignalState {
   /** The latest registry entry the hooks published (has `model_source`), or null. */
   hookRegistry: Record<string, unknown> | null;
+  /** `wall_time` of that entry's envelope: a fresh re-publish has a new one, a re-delivery not. */
+  hookRegistryAt: string | null;
   /** True once a SessionStart heartbeat arrived. */
   sessionStart: boolean;
-  /** The agent's latest retained status. */
-  status: { type: string; payload: unknown } | null;
+  /** The agent's latest retained status (`wall_time` tells a re-delivery from a new one). */
+  status: { type: string; payload: unknown; wall_time: string } | null;
   /** Epoch ms of the latest heartbeat. */
   lastHeartbeatAt: number | null;
 }
@@ -39,6 +41,8 @@ export interface AgentWatch {
   waitFor(pred: (s: SignalState) => boolean, timeoutMs: number): Promise<boolean>;
   /** Called on every status message (after `state` is updated). */
   onStatus(cb: (type: string, payload: unknown) => void): void;
+  /** Called with every raw progress message of the agent (after `state` is updated). */
+  onProgress(cb: (raw: string) => void): void;
   close(): Promise<void>;
 }
 
@@ -56,12 +60,14 @@ export async function watchAgent(
 ): Promise<AgentWatch> {
   const state: SignalState = {
     hookRegistry: null,
+    hookRegistryAt: null,
     sessionStart: false,
     status: null,
     lastHeartbeatAt: null,
   };
   const waiters = new Set<() => void>();
   const statusCbs: ((type: string, payload: unknown) => void)[] = [];
+  const progressCbs: ((raw: string) => void)[] = [];
   const statusTopic = buildTopic(namespace, agentId, "status");
   const progressTopic = buildTopic(namespace, agentId, "progress");
   const regTopic = registryTopic(agentId);
@@ -74,13 +80,17 @@ export async function watchAgent(
     if (topic === regTopic) {
       if (env.type === "registered" && HOOK_MODEL_SOURCES.has(String(p.model_source))) {
         state.hookRegistry = p;
+        state.hookRegistryAt = env.wall_time;
       }
     } else if (topic === statusTopic) {
-      state.status = { type: env.type, payload: env.payload };
+      state.status = { type: env.type, payload: env.payload, wall_time: env.wall_time };
       for (const cb of statusCbs) cb(env.type, env.payload);
-    } else if (topic === progressTopic && env.type === "heartbeat") {
-      state.lastHeartbeatAt = now();
-      if (p.hook_event === "SessionStart") state.sessionStart = true;
+    } else if (topic === progressTopic) {
+      if (env.type === "heartbeat") {
+        state.lastHeartbeatAt = now();
+        if (p.hook_event === "SessionStart") state.sessionStart = true;
+      }
+      for (const cb of progressCbs) cb(payload);
     }
     for (const w of [...waiters]) w();
   };
@@ -113,6 +123,9 @@ export async function watchAgent(
     },
     onStatus(cb) {
       statusCbs.push(cb);
+    },
+    onProgress(cb) {
+      progressCbs.push(cb);
     },
     async close() {
       if (closed) return;

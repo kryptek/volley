@@ -25,6 +25,7 @@ global settings file cheaply.
 - [What each hook publishes](#what-each-hook-publishes)
 - [Mailbox drain](#mailbox-drain)
 - [Coordinator sessions](#coordinator-sessions)
+- [Heavy-operation leases](#heavy-operation-leases)
 - [Configuration](#configuration)
 - [State files](#state-files)
 - [Tests](#tests)
@@ -81,6 +82,7 @@ All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq
 | `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message | — |
 | `Notification` | `agent_needs_input` / `idle_prompt` / `permission_prompt` → `awaiting_input` (`notification_type`, `text`); `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`; `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only | — |
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
+| `PreToolUse` (`Bash`) | — (rewrites the command: see [Heavy-operation leases](#heavy-operation-leases)) | `command queued for a <pool> lease` when it wraps |
 
 Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not compliance**: the
 `ack` on the sender's mailbox means the message reached the session. The injected text asks the
@@ -162,6 +164,36 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
 `VOLLEY_WORKSPACE`, else `cmux identify` (`caller.workspace_ref`) when running inside cmux. The
 coordinator's own mailbox is drained too, so acks for messages it sent land in its context.
 
+## Heavy-operation leases
+
+`pre-tool-use-lease.ts` (PreToolUse, matcher `Bash`) keeps heavy commands inside volleyd's lease
+pools. When `tool_input.command` matches one of a pool's `match` regexes (the `lease_pools` of the
+retained `volley/_waves/_config`, read once a minute and cached in `lease-pools.json`), the hook
+returns `hookSpecificOutput.updatedInput` with the command wrapped:
+
+```
+cd x && mvn -q verify
+  → bun '<repo>/packages/volley-cli/src/cli.ts' lease run --pool 'backend-it' --holder '<agent id>' \
+      --broker-url '<url>' --project-dir '<project>' -- "${SHELL:-/bin/sh}" -c 'cd x && mvn -q verify'
+```
+
+plus `additionalContext` "command queued for a backend-it lease". `volley lease run` waits for the
+lease *inside* the Bash tool call — the agent sees the wait (`queued … granted after 42 s`), and no
+hook timeout is involved — then runs the original command and releases the lease when it exits. It
+fails open: with no live volleyd or an unconfigured pool it runs the command unleased. Pool names
+come from a retained broker topic, so a name that is not a valid pool id is ignored, and every
+value spliced into the wrapped command is shell-quoted. A command
+that is already wrapped, matches no pool, or arrives while no pools are configured passes through
+untouched (empty output). The hook never changes the permission decision. Because the original
+runs in a child shell, a `cd` inside it does not carry over to the next Bash call.
+
+**Known gap.** Matching is on the command text, so an agent can run a heavy operation the
+regexes do not see — from a script file (`./run-it.sh`), through an alias or a wrapper
+(`./mvnw`), or by building the command at runtime. The wrapper is a courtesy, not a sandbox: the
+backstop is volleyd's pressure-based spawn admission (memory pressure, multiplexer latency,
+containers, provider overload, CI queue), which stops new agents from starting while the machine
+is loaded. Write `match` patterns for the forms your agents actually use.
+
 ## Configuration
 
 | Env var | Default | Purpose |
@@ -176,6 +208,7 @@ coordinator's own mailbox is drained too, so acks for messages it sent land in i
 | `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
+| `VOLLEY_LEASE_CLI` | this repo's `volley-cli`, else `volley` | Shell fragment the lease hook uses to invoke the CLI. |
 | `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` | as volley-mcp | Used when `agent.json` does not set them. |
 
 Session expiry: `mailbox.session_expiry_s` from the retained `volley/_waves/_config` (read once and
@@ -186,7 +219,7 @@ connections only (SPEC §4.4).
 
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
-`resumed`), `config.json` (expiry cache), `model.json` (the harness-reported model) and, for
+`resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests

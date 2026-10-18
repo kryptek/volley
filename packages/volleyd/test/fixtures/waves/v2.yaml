@@ -1,0 +1,12 @@
+# Plan v2: T3 and T5 removed, T6 added, T2 gains a dependency and a model, T4 is re-pointed
+# at another issue with a shorter pipeline. T1 is unchanged.
+wave: w-plan
+repo: ~/repos/example
+release_branch: release/w-plan
+model: claude-opus-5-5
+pipeline: [implement, [spec_review, quality_review], merge_ready]
+tasks:
+  T1: { issue: 101 }
+  T2: { issue: 102, after: [T1, T6], model: claude-sonnet-5-5 }
+  T4: { issue: 114, after: [T1], pipeline: [implement, merge_ready] }
+  T6: { issue: 106 }

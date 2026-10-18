@@ -4,7 +4,9 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
+import type { PlanDiff } from "./plan-diff";
 import type { PathError } from "./schemas";
 
 /**
@@ -20,10 +22,14 @@ export const DAEMON_AGENT_ID = "volleyd";
 export const CONFIG_TOPIC = "volley/_waves/_config";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
+export const ADMISSION_TOPIC = "volley/_system/admission";
+export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
+export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 
 /** Control ops the daemon answers. */
 export type ControlOp =
   | "run"
+  | "diff"
   | "status"
   | "config_get"
   | "config_set"
@@ -35,6 +41,8 @@ export type ControlOp =
   | "resume"
   | "stop"
   | "steer"
+  // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
+  | "admission"
   // Spawn one task's agent now (spawn.ts).
   | "spawn";
 
@@ -52,6 +60,8 @@ export interface ControlResponse {
   rejected?: PathError[];
   /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
   warnings?: string[];
+  /** run (a new version of a submitted wave) and diff: the structural plan change. */
+  plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);

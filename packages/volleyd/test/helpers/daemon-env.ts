@@ -12,7 +12,10 @@ export interface DaemonEnv {
   broker: TestBroker;
   home: string;
   env: Record<string, string>;
-  /** Daemon options for this env (timer off: tests drive tick(); MQTT 3.1.1 for Aedes). */
+  /**
+   * Daemon options for this env (timer off: tests drive tick(); MQTT 3.1.1 for Aedes; no real
+   * pressure samplers).
+   */
   options: (extra?: Partial<DaemonOptions>) => DaemonOptions;
   /** Start a daemon with `options()`. Stopped automatically in cleanup(). */
   start: (extra?: Partial<DaemonOptions>) => Promise<Daemon>;
@@ -31,6 +34,8 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     home,
     tickMs: 0,
     protocolVersion: 4,
+    // Never run the real samplers (sysctl, cmux, docker, gh) from tests: every signal unknown.
+    pressure: async () => ({ samples: {}, ci: {} }),
     ...extra,
   });
   const reader = new VolleyBroker();

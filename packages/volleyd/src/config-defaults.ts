@@ -21,11 +21,12 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   claim_after_s: 1800,
   heartbeat_alarm_s: 600,
+  idle_grace_s: 180,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
   spawn_timeout_s: 120,
-  wake_grace_s: 60,
+  wake_grace_s: 120,
   screen_tail_interval_s: 5,
 };
 
@@ -55,6 +56,21 @@ export const DAEMON_DEFAULTS = {
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
   exec_output_max_bytes: 4 * 1024 * 1024,
+  /** TTL of a lease whose request names none, in a pool that sets none. */
+  lease_default_ttl_s: 3600,
+  /** Kill a pressure sampler (sysctl, docker, gh) after this long; its signal is then unknown. */
+  sampler_timeout_ms: 5_000,
+  /**
+   * Re-sample a repo's CI queue (`gh api`, which spends the agents' GitHub rate limit) at most
+   * this often; ticks in between reuse the cached sample.
+   */
+  ci_queue_sample_ms: 60_000,
+  /**
+   * `memory_pressure` fallback (no sysctl level): free percentage at or below which the level is
+   * 4 (critical) or 2 (warn). Heuristic thresholds, not tunables.
+   */
+  memory_free_critical_pct: 10,
+  memory_free_warn_pct: 20,
   /** How long `volleyd spawn` waits for the launch (verification continues in the daemon). */
   spawn_request_timeout_ms: 120_000,
   /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
@@ -89,4 +105,15 @@ export const DAEMON_DEFAULTS = {
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */
   screen_backoff_s: 30,
+  /** Wall clock ahead of the monotonic clock by more than this between two samples = a wake. */
+  wake_jump_ms: 60_000,
+  /** How long a model switch waits for the hooks' PostModelSwitch registry re-publish. */
+  model_switch_verify_ms: 60_000,
+  /** The same recovery fires at most this many times per agent per `recovery_window_ms`. */
+  recovery_max_per_window: 2,
+  recovery_window_ms: 3_600_000,
+  /** Longest agent message quoted in a recovery decision's question. */
+  decision_text_max: 300,
+  /** Bound on each git / gh call of restart reconciliation. */
+  reconcile_probe_ms: 15_000,
 } as const;
