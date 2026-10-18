@@ -3,8 +3,9 @@
  * coordinators window, a wave window per wave and an agent window per agent
  * (a plain frame for agents with no wave). Every window carries its attention
  * tier (`attention.ts`); the top bar counts what needs you and notifications
- * fire when something starts to. Backgrounds, dock and arrange come in later
- * tasks.
+ * fire when something starts to. Arrange & fit (`layout/arrange.ts`) packs
+ * the windows into per-wave clusters and re-runs on structural changes while
+ * auto-arrange is on. Backgrounds and the dock come in later tasks.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -20,6 +21,8 @@ import {
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
+import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
+import { ARRANGE_ANIM_MS, useAutoArrange, useAutoArrangeSetting } from "./layout/useAutoArrange";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -39,11 +42,10 @@ import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
 const AGENT_W = AGENT_WIDTH;
-// Guesses until D6's arrange measures real windows.
+// Sizes until a window has been measured (Frame `onSize`).
 const WAVE_H = 440;
 const AGENT_H = 470;
-const GAP = 36;
-const CGAP = 96;
+const COORDS_H = 360;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
 
@@ -123,7 +125,7 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 
 export default function App() {
   const { state, connection, demo, settling, offline } = useDesk();
-  const { view, fitTo, stageRef, stageHandlers } = useViewport();
+  const { view, setView, fitTo, stageRef, stageHandlers } = useViewport();
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -179,6 +181,38 @@ export default function App() {
     fitTo(rects);
   });
 
+  // ------------------------------------------------------- arrange & fit
+  const sizes = useRef<Record<string, { w: number; h: number }>>({});
+  const sizeOf = (id: string, w: number, h: number) => ({ id, ...(sizes.current[id] ?? { w, h }) });
+  // D7's dock adds "Arrange & fit" (calls `arrange`) and the auto-arrange toggle.
+  const [autoArrange] = useAutoArrangeSetting();
+  const [animating, setAnimating] = useState(false);
+  const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(animEnd.current), []);
+  const coordsShown = coordsOpen && Object.values(state.waves).some((w) => w.state !== null);
+  const arrange = () => {
+    const clusters: Cluster[] = [
+      ...(coordsShown ? [{ main: sizeOf(COORDS_ID, COORDS_W, COORDS_H), kids: [] }] : []),
+      ...visible.map((id) => ({
+        main: sizeOf(id, WAVE_W, WAVE_H),
+        kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
+      })),
+    ];
+    const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
+    if (!r) return;
+    setAnimating(true);
+    setMoved((m) => ({ ...m, ...r.place }));
+    setView(r.view);
+    clearTimeout(animEnd.current);
+    animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
+  };
+  const layoutKey = [
+    coordsShown ? "c" : "",
+    ...visible,
+    ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
+  ].join("|");
+  useAutoArrange({ enabled: autoArrange, layoutKey, arrange });
+
   const place = (id: string, attn?: Attention) => ({
     pos: pos(id),
     z: z(id),
@@ -186,6 +220,10 @@ export default function App() {
     chrome: "glass" as const,
     onMove: move(id),
     onFocus: () => focus(id),
+    // A window not laid out yet (0 × 0) keeps its fallback size.
+    onSize: (w: number, h: number) => {
+      if (w > 0 && h > 0) sizes.current[id] = { w, h };
+    },
     ...(attn ? { attn } : {}),
   });
   const frame = (id: string, accent: string, width: number) => ({
@@ -255,7 +293,7 @@ export default function App() {
       <div className="bg-layer bg-plain" aria-hidden />
 
       <div className="stage" ref={stageRef} {...stageHandlers}>
-        <World view={view}>
+        <World view={view} animating={animating}>
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
