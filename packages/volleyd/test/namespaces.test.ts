@@ -218,9 +218,10 @@ describe("one progress subscription", () => {
       return (res.result as { signals: { api_overload?: { value?: number } } }).signals.api_overload
         ?.value;
     };
-    let n: number | undefined;
-    for (let i = 0; i < 50 && (n = await count()) === 0; i++) {
+    let n = await count();
+    for (let i = 0; i < 50 && n === 0; i++) {
       await new Promise((r) => setTimeout(r, 20));
+      n = await count();
     }
     expect(n).toBe(1);
   });
