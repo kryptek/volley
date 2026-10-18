@@ -9,18 +9,30 @@ import { makeBufferIO } from "../../src/io";
  * A fake `mosquitto_passwd` that keeps the file format (`user:hash` per line) so tests
  * can assert on file contents without the real binary or a real broker.
  */
-function fakeDeps(): AuthDeps & { calls: string[][]; reloads: number } {
+function fakeDeps(): AuthDeps & {
+  calls: string[][];
+  reloads: number;
+  chowns: [string, number, number][];
+} {
   let n = 0;
   const deps = {
     calls: [] as string[][],
     reloads: 0,
+    chowns: [] as [string, number, number][],
     async passwd(args: string[]) {
       deps.calls.push(args);
       const create = args[0] === "-c";
       const del = args[0] === "-D";
-      const rest = create ? args.slice(2) : del ? args.slice(1) : args.slice(1);
-      const [file, user, password] = rest as [string, string, string | undefined];
+      const [file, user, password] = args.slice(create ? 2 : 1) as [
+        string,
+        string,
+        string | undefined,
+      ];
       const lines = create || !existsSync(file) ? [] : readFileSync(file, "utf-8").split("\n");
+      // Like the real mosquitto_passwd 2.x: -D on an unknown user warns and exits 1.
+      if (del && !lines.some((l) => l.startsWith(`${user}:`))) {
+        return { code: 1, stderr: `Warning: User ${user} not found` };
+      }
       const kept = lines.filter((l) => l !== "" && !l.startsWith(`${user}:`));
       if (!del) kept.push(`${user}:hashed(${password})`);
       writeFileSync(file, kept.length > 0 ? `${kept.join("\n")}\n` : "");
@@ -33,6 +45,10 @@ function fakeDeps(): AuthDeps & { calls: string[][]; reloads: number } {
     generatePassword() {
       n++;
       return `pw-${n}`;
+    },
+    brokerOwner: (): { uid: number; gid: number } | null => null,
+    chown(path: string, uid: number, gid: number) {
+      deps.chowns.push([path, uid, gid]);
     },
   };
   return deps;
@@ -87,6 +103,59 @@ describe("volley auth", () => {
       const forced = await run(["init", "--dir", dir, "--force"]);
       expect(forced.code).toBe(0);
       expect(readFileSync(join(dir, "passwd"), "utf-8")).toContain("desk:hashed(pw-2)");
+    });
+
+    it("--force rotates the fixed identities in place and keeps minted agents", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      await run(["add-agent", "w1-t1-implementer-1", "--dir", dir], deps); // pw-4
+      deps.calls.length = 0;
+
+      const r = await run(["init", "--dir", dir, "--force"], deps);
+      expect(r.code).toBe(0);
+      // No -c: recreating the file would revoke (and, after the reload, kick) every agent.
+      expect(deps.calls.every((c) => c[0] !== "-c")).toBe(true);
+      expect(readFileSync(join(dir, "passwd"), "utf-8")).toBe(
+        "w1-t1-implementer-1:hashed(pw-4)\nvolleyd:hashed(pw-5)\ndesk:hashed(pw-6)\ncoordinator:hashed(pw-7)\n",
+      );
+    });
+
+    it("keeps an existing (possibly customised) acl.conf", async () => {
+      writeFileSync(join(dir, "acl.conf"), "# my edits\n");
+      const r = await run(["init", "--dir", dir]);
+      expect(r.code).toBe(0);
+      expect(readFileSync(join(dir, "acl.conf"), "utf-8")).toBe("# my edits\n");
+      expect(r.stdout).toContain("Kept the existing");
+    });
+
+    it("removes a half-written passwd file when mosquitto_passwd fails mid-way", async () => {
+      const deps = fakeDeps();
+      const real = deps.passwd;
+      deps.passwd = async (args) =>
+        args.includes("desk") ? { code: 1, stderr: "Error: boom" } : real(args);
+      const r = await run(["init", "--dir", dir], deps);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("Error: boom");
+      // A leftover passwd holding only volleyd would make the next plain `init` refuse.
+      expect(existsSync(join(dir, "passwd"))).toBe(false);
+    });
+
+    it("as root, hands the dir and files to the broker's user so it can read them", async () => {
+      const deps = fakeDeps();
+      deps.brokerOwner = () => ({ uid: 101, gid: 102 });
+      const r = await run(["init", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(deps.chowns).toEqual([
+        [dir, 101, 102],
+        [join(dir, "acl.conf"), 101, 102],
+        [join(dir, "passwd"), 101, 102],
+      ]);
+    });
+
+    it("does not chown when there is no broker user to hand the files to", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      expect(deps.chowns).toEqual([]);
     });
 
     it("--no-reload skips the broker reload and says so", async () => {
@@ -147,6 +216,92 @@ describe("volley auth", () => {
           expect(r.code).toBe(2);
         }
       }
+    });
+
+    it("add-agent rejects ids the ACL's `+` would let reach reserved or foreign topics", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      // `volley/+/%u/status` with %u=registry matches volley/_system/registry/status;
+      // an agent named `mailbox` has a registry entry any steering client can write.
+      for (const id of ["registry", "leases", "health", "federation", "status", "mailbox"]) {
+        const r = await run(["add-agent", id, "--dir", dir], deps);
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("reserved");
+      }
+    });
+
+    it("add-agent --ack-to grants the agent write on exactly those senders' mailboxes", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const bundled = readFileSync(join(dir, "acl.conf"), "utf-8");
+      const r = await run(
+        [
+          "add-agent",
+          "w1-t1-implementer-1",
+          "--ack-to",
+          "coordinator-ab12",
+          "--ack-to",
+          "volleyd",
+          "--dir",
+          dir,
+        ],
+        deps,
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("pw-4\n");
+      const acl = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(acl.startsWith(bundled)).toBe(true);
+      expect(acl.slice(bundled.length)).toBe(
+        [
+          "",
+          "# >>> volley agent w1-t1-implementer-1 (managed by `volley auth`; do not edit)",
+          "user w1-t1-implementer-1",
+          "topic write volley/+/coordinator-ab12/mailbox",
+          "topic write volley/+/volleyd/mailbox",
+          "# <<< volley agent w1-t1-implementer-1",
+          "",
+        ].join("\n"),
+      );
+
+      // Re-minting replaces the block instead of stacking a second one.
+      await run(
+        ["add-agent", "w1-t1-implementer-1", "--ack-to", "coordinator-cd34", "--dir", dir],
+        deps,
+      );
+      const again = readFileSync(join(dir, "acl.conf"), "utf-8");
+      expect(again.match(/user w1-t1-implementer-1/g)).toHaveLength(1);
+      expect(again).toContain("topic write volley/+/coordinator-cd34/mailbox");
+      expect(again).not.toContain("volley/+/coordinator-ab12/mailbox");
+
+      // rm-agent drops the block along with the password.
+      await run(["rm-agent", "w1-t1-implementer-1", "--dir", dir], deps);
+      expect(readFileSync(join(dir, "acl.conf"), "utf-8")).toBe(bundled);
+    });
+
+    it("add-agent without --ack-to writes no ACL block", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const bundled = readFileSync(join(dir, "acl.conf"), "utf-8");
+      await run(["add-agent", "w1-t1-implementer-1", "--dir", dir], deps);
+      expect(readFileSync(join(dir, "acl.conf"), "utf-8")).toBe(bundled);
+    });
+
+    it("add-agent rejects an out-of-grammar --ack-to id without minting anything", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      const r = await run(["add-agent", "w1", "--ack-to", "Bad Id", "--dir", dir], deps);
+      expect(r.code).toBe(2);
+      expect(readFileSync(join(dir, "passwd"), "utf-8")).not.toContain("w1:");
+    });
+
+    it("rm-agent of an agent that was never minted (or already revoked) succeeds", async () => {
+      const deps = fakeDeps();
+      await run(["init", "--dir", dir], deps);
+      deps.calls.length = 0;
+      const r = await run(["rm-agent", "w1-t1-implementer-1", "--dir", dir], deps);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain("not in");
+      expect(deps.calls).toEqual([]);
     });
 
     it("add-agent before init fails with a pointer to init", async () => {

@@ -37,6 +37,7 @@ local `gh run list` query and target it directly.
 |---|---|---|---|
 | `GITHUB_REPOSITORY` | yes | — | `owner/repo`, set automatically by GitHub Actions. |
 | `GITHUB_RUN_ID` | yes | — | Numeric run id, set automatically by GitHub Actions. |
+| `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` | when the broker requires auth | — | Broker credentials, from repo secrets. The reference ACL ([`examples/mosquitto-auth/`](../../mosquitto-auth/README.md)) only lets a per-agent identity write its own channels, and the run's `gh-…` agent id is not known ahead of time, so use the `coordinator` identity (or mint `volley auth add-agent gh-<owner>-<repo>-<run-id>` per run). |
 | `VOLLEY_BROKER_URL` | no | `mqtt://localhost:1883` | MQTT broker URL. Set this for cloud runners pointing at a public/tunneled broker. `mqtts://` requires the `volley` CLI on the runner (the `mosquitto_pub` fallback is plain-TCP only). |
 | `VOLLEY_NAMESPACE` | no | `ci` | Volley namespace; the topic becomes `volley/<ns>/<agent_id>/status`. |
 

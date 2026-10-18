@@ -157,7 +157,14 @@ describe("resolveAuth", () => {
       username: "desk",
       password: "flag-pw",
     });
-    expect(resolveAuth({ username: "desk" }, env, cwd)).toEqual({ username: "desk" });
+  });
+  it("--username alone takes the password from VOLLEY_AUTH_PASSWORD (the documented safe path)", () => {
+    const env = { VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: "env-pw" };
+    expect(resolveAuth({ username: "desk" }, env, cwd)).toEqual({
+      username: "desk",
+      password: "env-pw",
+    });
+    expect(resolveAuth({ username: "desk" }, {}, cwd)).toEqual({ username: "desk" });
   });
   it("falls back to VOLLEY_AUTH_*, then anonymous", () => {
     expect(

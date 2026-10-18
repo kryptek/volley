@@ -131,7 +131,8 @@ export function resolveNamespace(
 /**
  * Broker credentials: `--username`/`--password` flags win, then the `broker` block of
  * `<cwd>/.volley/agent.json`, then `VOLLEY_AUTH_USERNAME`/`VOLLEY_AUTH_PASSWORD`; null means
- * anonymous. Flags pass straight through so the caller can override an identity file.
+ * anonymous. Flags pass straight through so the caller can override an identity file; a
+ * `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`.
  */
 export function resolveAuth(
   flags: { username?: string | undefined; password?: string | undefined },
@@ -139,8 +140,10 @@ export function resolveAuth(
   cwd: string = process.cwd(),
 ): BrokerAuth | null {
   if (flags.username !== undefined) {
-    return flags.password !== undefined
-      ? { username: flags.username, password: flags.password }
+    // `--username` + VOLLEY_AUTH_PASSWORD is the documented way to keep the password off argv.
+    const password = flags.password ?? env.VOLLEY_AUTH_PASSWORD;
+    return password !== undefined
+      ? { username: flags.username, password }
       : { username: flags.username };
   }
   if (flags.password !== undefined) throw new Error("--password requires --username");

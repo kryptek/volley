@@ -107,9 +107,9 @@ The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2
 | `--on <csv>` | `VOLLEY_NOTIFY_ON` | `blocked,failed,reaped` | Lifecycle types that fire (`spawning,working,done,blocked,failed,reaped,registered`) |
 | `--surface <csv>` | `VOLLEY_NOTIFY_SURFACES` | `bell` | Comma-separated surfaces: `bell`, `desktop`, `webhook` |
 | `--webhook-url <url>` | `VOLLEY_NOTIFY_WEBHOOK_URL` | — | Required only when `webhook ∈ --surface`. Must be `http(s)://` |
-| `--namespace <ns>` | `VOLLEY_NAMESPACE` | `default` |
-| `--username <user>` | `VOLLEY_AUTH_USERNAME` | anonymous |
-| `--password <pw>` | `VOLLEY_AUTH_PASSWORD` | none | Informational (the pattern already encodes the namespace) |
+| `--namespace <ns>` | `VOLLEY_NAMESPACE` | `default` | Informational (the pattern already encodes the namespace) |
+| `--username <user>` | `VOLLEY_AUTH_USERNAME` | anonymous | Broker username |
+| `--password <pw>` | `VOLLEY_AUTH_PASSWORD` | none | Broker password (prefer the env var: argv is visible in `ps`) |
 | `--broker-url <url>` | `VOLLEY_BROKER_URL` | `mqtt://localhost:1883` | MQTT broker |
 | `--help` / `-h` | — | — | Print usage and exit |
 
@@ -130,8 +130,15 @@ volley auth init                          # passwd + acl.conf with volleyd / des
                                           # prints their passwords ONCE and the mosquitto.conf lines
 volley auth add-agent w1-t1-implementer-1 # mint a password (username = agent id); prints only the password
 volley auth add-agent w1-t1-implementer-1 --json   # {"username","password"} for .volley/agent.json "broker"
-volley auth rm-agent w1-t1-implementer-1  # revoke on retire
+volley auth add-agent w1-t1-implementer-1 --ack-to coordinator-ab12   # + let it ack its parent
+volley auth rm-agent w1-t1-implementer-1  # revoke on retire (succeeds if already revoked)
 ```
+
+- `--ack-to <sender_id>` (repeatable) appends a managed `user` block to `acl.conf` that lets the agent write exactly those senders' mailboxes, so its acks (SPEC §4.4) and query replies reach them. Without it a minted agent can write no mailbox at all, and the broker silently drops its acks. Pass the parent's agent id (and `volleyd` when the daemon steers it).
+- `add-agent` refuses the fixed identity names and ids the ACL's namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, and the channel names).
+- `init --force` rotates the three fixed passwords in place: minted agents and an existing (possibly edited) `acl.conf` are kept.
+- Run as root (e.g. `sudo volley auth init --dir /etc/mosquitto/volley` on Linux), `init` hands the directory and files to the `mosquitto` user, because the distro broker drops to that user before it opens `password_file`.
+- `mosquitto_passwd` receives each generated password on its command line, so it is briefly visible in `ps` while that child runs.
 
 Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/volley`, e.g. `/opt/homebrew/etc/mosquitto/volley`). `init` refuses to overwrite an existing `passwd` without `--force` (which rotates every fixed identity). `--no-reload` skips the signal; the reload goes to every `mosquitto` process you own, so a root-owned systemd broker needs `sudo systemctl reload mosquitto` (the command warns when it cannot signal).
 
@@ -224,7 +231,9 @@ These work on every subcommand and respect env vars as fallbacks:
 | `--help` | — | — |
 | `--version` | — | prints version |
 
-Credentials resolve as: flags, then the `broker` block of `./.volley/agent.json` (an agent's assigned identity), then `VOLLEY_AUTH_*`. Prefer the env var over `--password`: argv is visible in `ps`. A refused login exits `1` with `AUTH_FAILED` and a `volley auth init` hint.
+Credentials resolve as: flags, then the `broker` block of `./.volley/agent.json` (an agent's assigned identity), then `VOLLEY_AUTH_*`. `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`. Prefer the env var over `--password`: argv is visible in `ps`.
+
+**Shell sessions need the credentials too.** A Claude Code MCP registration's `env` block reaches only the MCP server, not the session's Bash tool. Export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` in your shell profile so `volley wait` / `volley sub` (and `mosquitto_pub -u … -P …`) can log in; otherwise they exit `1` with `AUTH_FAILED` immediately. A refused login exits `1` with `AUTH_FAILED` and a `volley auth init` hint.
 
 ---
 

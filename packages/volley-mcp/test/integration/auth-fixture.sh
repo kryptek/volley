@@ -13,3 +13,12 @@ chmod 0600 "$dir/passwd" "$dir/acl.conf"
 for user in volleyd desk coordinator w1-t1-implementer-1 w1-t2-implementer-1; do
   mosquitto_passwd -b "$dir/passwd" "$user" "$user-test-pw"
 done
+# What `volley auth add-agent w1-t1-implementer-1 --ack-to coordinator-ab12`
+# appends to acl.conf (the test checks the agent can ack that coordinator).
+cat >> "$dir/acl.conf" <<'ACL'
+
+# >>> volley agent w1-t1-implementer-1 (managed by `volley auth`; do not edit)
+user w1-t1-implementer-1
+topic write volley/+/coordinator-ab12/mailbox
+# <<< volley agent w1-t1-implementer-1
+ACL

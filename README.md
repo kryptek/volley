@@ -155,7 +155,7 @@ Mosquitto's stock install ships with a config that doesn't accept connections ou
 bun packages/volley-cli/src/cli.ts auth init
 ```
 
-It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew (edit the two paths on Intel or Linux, or pass `--dir`). Then install the config and start the service:
+It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew (edit the two paths on Intel or Linux, or pass `--dir`). On **Linux** run it as root so it can write `/etc/mosquitto` and hand the files to the `mosquitto` user the broker runs as: `sudo bun packages/volley-cli/src/cli.ts auth init --dir /etc/mosquitto/volley` (if you made the files another way, `sudo chown -R mosquitto: /etc/mosquitto/volley`, or the broker will not start). Then install the config and start the service:
 
 ```sh
 # macOS (Apple Silicon):
@@ -208,6 +208,13 @@ claude mcp add-json -s user volley '{
     "VOLLEY_AUTH_PASSWORD": "<coordinator password from step 2>"
   }
 }'
+```
+
+The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. Export the same identity in your shell profile too:
+
+```sh
+export VOLLEY_AUTH_USERNAME=coordinator
+export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
 ```
 
 Then **quit Claude Code completely (Cmd-Q) and reopen it.** MCP registration is read at startup.
