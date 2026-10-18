@@ -85,7 +85,7 @@ describe("CoordinatorsWindow", () => {
   it("shows each wave's progress", () => {
     setup();
     const bar = row("ci-speed").querySelector(".coord-bar > span") as HTMLElement;
-    // T1 done (1) + T2 implementing: half way there or less, never 0 or 100.
+    // T1 done (1) + T2 implementing: more than half way, never 0 or 100.
     expect(bar.style.width).toMatch(/^\d+%$/);
     expect(Number.parseInt(bar.style.width, 10)).toBeGreaterThan(50);
     expect(Number.parseInt(bar.style.width, 10)).toBeLessThan(100);
@@ -111,6 +111,28 @@ describe("CoordinatorsWindow", () => {
     expect(clusterOf).toHaveBeenCalledWith("leaderboard");
     expect(fitTo).toHaveBeenCalledWith(cluster);
     expect(p.onGoTo).toHaveBeenCalledWith("leaderboard");
+  });
+
+  it("shows an ended wave as Complete / Stopped, not as one to claim", () => {
+    const done = (w: WaveView, status: "complete" | "stopped"): WaveView => ({
+      ...w,
+      state: w.state && { ...w.state, status },
+    });
+    setup({
+      waves: [
+        done(wave("old-a", "coord-1"), "complete"),
+        done(wave("old-b", "coord-2"), "stopped"),
+      ],
+      coordinators: {
+        "old-a": { id: "coord-1", state: "gone" },
+        "old-b": { id: "coord-2", state: "gone" },
+      },
+    });
+    expect(within(row("old-a")).getByText("Complete")).toBeInTheDocument();
+    expect(within(row("old-b")).getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText("No coordinator · claim it")).toBeNull();
+    expect(row("old-a")).toHaveClass("st-ended");
+    expect(row("old-a")).not.toHaveClass("st-gone");
   });
 
   it("closes", () => {

@@ -4,6 +4,7 @@ import {
   DEFAULT_CLAIM_AFTER_S,
   DEFAULT_ESCALATE_AFTER_MIN,
   agentAttention,
+  connectedSilence,
   coordinatorFor,
   needsYouTargets,
   tierFor,
@@ -178,6 +179,8 @@ describe("tierFor(wave)", () => {
   it("escalates a coordinator-tier decision to you after escalate_after_min", () => {
     const w = wave({}, [decision({ opened_at: iso(NOW - 16 * MIN) })]);
     expect(tierFor(w, ctx())).toBe("you");
+    // The config-driven rows below anticipate `escalate_after_min` becoming a
+    // SPEC §4.6.4 tunable; today volleyd never publishes it, so 15 min applies.
     expect(tierFor(w, ctx({ config: config({ escalate_after_min: 20 }) }))).toBe("coordinator");
     // A per-wave override wins over the global config.
     const local = wave({ effective_config: { escalate_after_min: 10 } }, [
@@ -191,6 +194,25 @@ describe("tierFor(wave)", () => {
     const w = wave({ gates: ["T2"] });
     expect(tierFor(w, ctx({ gateSince: { "w1/T2": NOW - 14 * MIN } }))).toBe("coordinator");
     expect(tierFor(w, ctx({ gateSince: { "w1/T2": NOW - 15 * MIN } }))).toBe("you");
+  });
+
+  it("does not count time the Desk was offline as coordinator silence", () => {
+    const quiet = { agents: { "coord-1": agent("coord-1", { lastSeen: NOW - 40 * MIN }) } };
+    expect(tierFor(wave(), ctx(quiet))).toBe("you");
+    // Offline for the last 20 min (and still): only 20 min of connected silence.
+    expect(tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 20 * MIN, to: null }] }))).toBe(
+      "none",
+    );
+    // A closed span counts the same; one before lastSeen does not help.
+    expect(
+      tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 30 * MIN, to: NOW - 15 * MIN }] })),
+    ).toBe("none");
+    expect(
+      tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 90 * MIN, to: NOW - 50 * MIN }] })),
+    ).toBe("you");
+    expect(connectedSilence(NOW - 10 * MIN, NOW, [{ from: NOW - 5 * MIN, to: null }])).toBe(
+      5 * MIN,
+    );
   });
 
   it("treats a quiet coordinator as gone after claim_after_s", () => {

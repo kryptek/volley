@@ -2,7 +2,9 @@
  * The coordinators window, ported from the prototype `CoordinatorsWindow`: one
  * row per wave with its coordinator's state (`Working` / `Waiting for your
  * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
- * viewport to the wave and its agents) and show/hide. Hidden waves keep
+ * viewport to the wave and its agents) and show/hide. A wave that has ended
+ * shows a neutral `Complete` / `Stopped` instead: its coordinator is gone
+ * because the work is done, and there is nothing to claim. Hidden waves keep
  * running and still count towards the top-bar pill and notifications.
  */
 import { Cancel01Icon, CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
@@ -25,12 +27,18 @@ export const STATE_LABEL: Record<CoordinatorState, string> = {
   gone: "No coordinator · claim it",
 };
 
+/** Labels for waves that have ended (`waveAttention` gives them tier `none`). */
+export const ENDED_LABEL: Partial<Record<string, string>> = {
+  complete: "Complete",
+  stopped: "Stopped",
+};
+
 export interface CoordinatorsWindowProps {
   /** Waves with state, in display order. */
   waves: WaveView[];
   /** Each wave's effective coordinator (`coordinatorFor`), by wave id. */
   coordinators: Record<string, EffectiveCoordinator>;
-  /** How many items need you (the pill's count). */
+  /** The title chip's count: waves whose coordinator is not working (as in the prototype). */
   needsYou: number;
   me: string | null;
   hidden: ReadonlySet<string>;
@@ -85,20 +93,22 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
           const accent = accentFor(w.id);
           const hidden = p.hidden.has(w.id);
           const mine = p.me !== null && w.state?.owner === p.me;
+          const ended = ENDED_LABEL[w.state?.status ?? ""];
           return (
             <li
               key={w.id}
               aria-label={w.id}
-              className={`coord st-${c.state}${hidden ? " coord--hidden" : ""}`}
+              className={`coord st-${ended ? "ended" : c.state}${hidden ? " coord--hidden" : ""}`}
             >
               <span className="coord-dot" style={{ background: accent }} />
               <div className="coord-main">
                 <div className="coord-name">
-                  <Clawd size={16} waiting={c.state === "awaiting_input"} /> {w.id}{" "}
+                  <Clawd size={16} waiting={!ended && c.state === "awaiting_input"} /> {w.id}{" "}
                   {mine && <span className="chip chip--mine">★ yours</span>}
                 </div>
                 <div className="coord-sub">
-                  {c.id ?? "no owner"} · <span className="coord-state">{STATE_LABEL[c.state]}</span>
+                  {c.id ?? "no owner"} ·{" "}
+                  <span className="coord-state">{ended ?? STATE_LABEL[c.state]}</span>
                 </div>
                 <div className="coord-bar">
                   <span style={{ width: `${pctOf(w)}%`, background: accent }} />

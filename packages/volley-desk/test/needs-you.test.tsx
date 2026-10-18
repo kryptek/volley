@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EffectiveCoordinator } from "../src/attention";
 import { Frame } from "../src/canvas/Frame";
-import { AttentionLine, NeedsYou, firstLines } from "../src/windows/wave/NeedsYou";
+import { AttentionLine, COPY_RESET_MS, NeedsYou, firstLines } from "../src/windows/wave/NeedsYou";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
@@ -97,6 +97,35 @@ describe("NeedsYou (no coordinator)", () => {
       fireEvent.click(screen.getByRole("button", { name: /volleyd claim leaderboard/ }));
     });
     expect(screen.getByText("Copy failed: select the command")).toBeInTheDocument();
+  });
+
+  it("clears Copied / Copy failed after a moment", async () => {
+    vi.useFakeTimers();
+    try {
+      stubClipboard();
+      render(<NeedsYou wave="leaderboard" coordinator={gone} openDecisions={0} now={NOW} />);
+      const button = screen.getByRole("button", { name: /volleyd claim leaderboard/ });
+      await act(async () => {
+        fireEvent.click(button);
+      });
+      expect(button).toHaveTextContent("Copied");
+      act(() => {
+        vi.advanceTimersByTime(COPY_RESET_MS);
+      });
+      expect(button).not.toHaveTextContent("Copied");
+
+      Reflect.deleteProperty(navigator, "clipboard");
+      await act(async () => {
+        fireEvent.click(button);
+      });
+      expect(screen.getByText("Copy failed: select the command")).toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(COPY_RESET_MS);
+      });
+      expect(screen.queryByText("Copy failed: select the command")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

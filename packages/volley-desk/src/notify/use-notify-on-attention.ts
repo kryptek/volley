@@ -10,9 +10,10 @@
  *
  * An item fires once per entry into `you`: it must leave `you` (be seen at
  * another tier) before it can fire again. An item that disappears keeps its
- * last tier for `forgetAfterMs`, so the drop-and-replay of a reconnect
- * resync does not re-fire. Nothing fires until `armAfterMs` after mount, so
- * whatever already needed you when the page loaded stays quiet.
+ * last tier for `forgetAfterMs`. While `quiet` (the store is `settling`: the
+ * first replay, or a reconnect's resync and replay) tiers are tracked but
+ * nothing fires, so whatever needed you when the page loaded or the Desk
+ * reconnected stays quiet, and so do the transient tiers of a resync.
  */
 import { useEffect, useRef } from "react";
 import type { Tier } from "../attention";
@@ -27,21 +28,23 @@ export interface AttentionItem {
 }
 
 export interface NotifyOnAttentionOptions {
-  /** Quiet period after mount while the retained replay lands (default 3 s). */
+  /** Track tiers without firing (pass the store's `settling`). */
+  quiet?: boolean;
+  /** Extra quiet period after mount (default 0: `quiet` covers the replay). */
   armAfterMs?: number;
   /** How long a vanished item's tier is remembered (default 30 s). */
   forgetAfterMs?: number;
   audioSrc?: string;
 }
 
-const ARM_AFTER_MS = 3000;
 const FORGET_AFTER_MS = 30_000;
 
 export function useNotifyOnAttention(
   settings: NotifyOptions,
   items: readonly AttentionItem[],
   {
-    armAfterMs = ARM_AFTER_MS,
+    quiet = false,
+    armAfterMs = 0,
     forgetAfterMs = FORGET_AFTER_MS,
     audioSrc = "/notify.mp3",
   }: NotifyOnAttentionOptions = {},
@@ -58,7 +61,7 @@ export function useNotifyOnAttention(
 
   useEffect(() => {
     const now = Date.now();
-    const armed = now - mountedAt.current >= armAfterMs;
+    const armed = !quiet && now - mountedAt.current >= armAfterMs;
     const fresh: AttentionItem[] = [];
     const present = new Set<string>();
     for (const it of items) {
@@ -89,9 +92,9 @@ export function useNotifyOnAttention(
     // One chime per render, however many items arrived together.
     if (canSound && audioRef.current !== null) {
       audioRef.current.currentTime = 0;
-      void audioRef.current.play().catch(() => {
+      void audioRef.current.play()?.catch(() => {
         // Autoplay policies may reject until the page has had a user gesture.
       });
     }
-  }, [settings, items, armAfterMs, forgetAfterMs]);
+  }, [settings, items, quiet, armAfterMs, forgetAfterMs]);
 }

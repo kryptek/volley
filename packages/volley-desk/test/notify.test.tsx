@@ -66,8 +66,7 @@ const item = (tier: AttentionItem["tier"], over: Partial<AttentionItem> = {}): A
 
 function setup(settings: NotifyOptions, first: AttentionItem[] = []) {
   return renderHook(
-    ({ items, s }: { items: AttentionItem[]; s: NotifyOptions }) =>
-      useNotifyOnAttention(s, items, { armAfterMs: 0 }),
+    ({ items, s }: { items: AttentionItem[]; s: NotifyOptions }) => useNotifyOnAttention(s, items),
     { initialProps: { items: first, s: settings } },
   );
 }
@@ -111,7 +110,27 @@ describe("useNotifyOnAttention", () => {
     expect(notificationCtor).toHaveBeenCalledTimes(1);
   });
 
-  it("stays quiet about what already needed you before it was armed", () => {
+  it("tracks but never fires while quiet (the store is settling), nor for what it saw then", () => {
+    const { rerender } = renderHook(
+      ({ items, quiet }: { items: AttentionItem[]; quiet: boolean }) =>
+        useNotifyOnAttention(on, items, { quiet }),
+      { initialProps: { items: [] as AttentionItem[], quiet: true } },
+    );
+    // Replay: items arrive at you, and a resync shuffles tiers and adds items.
+    rerender({ items: [item("you")], quiet: true });
+    rerender({ items: [item("none"), item("you", { key: "agent:coord-1" })], quiet: true });
+    rerender({ items: [item("you")], quiet: true });
+    // Settled: what is at you now was already at you while quiet.
+    rerender({ items: [item("you")], quiet: false });
+    expect(notificationCtor).not.toHaveBeenCalled();
+    expect(playSpy).not.toHaveBeenCalled();
+    // A real transition after settling fires.
+    rerender({ items: [item("coordinator")], quiet: false });
+    rerender({ items: [item("you")], quiet: false });
+    expect(notificationCtor).toHaveBeenCalledTimes(1);
+  });
+
+  it("can still hold off for an extra period after mount (armAfterMs)", () => {
     const { rerender } = renderHook(
       ({ items }: { items: AttentionItem[] }) =>
         useNotifyOnAttention(on, items, { armAfterMs: 60_000 }),
@@ -119,7 +138,6 @@ describe("useNotifyOnAttention", () => {
     );
     rerender({ items: [item("you")] });
     expect(notificationCtor).not.toHaveBeenCalled();
-    expect(playSpy).not.toHaveBeenCalled();
   });
 
   it("gates the banner on enabled + permission and the chime on sound + motion", () => {

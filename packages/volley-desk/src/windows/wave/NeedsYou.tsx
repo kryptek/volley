@@ -14,7 +14,7 @@ import {
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type { Attn, EffectiveCoordinator } from "../../attention";
 import "../../styles/attention.css";
 
@@ -34,9 +34,17 @@ export function firstLines(text: string, n = 2): string {
 
 type CopyState = "idle" | "copied" | "failed";
 
+/** How long "Copied" / "Copy failed" stays up (the prototype's toast is transient too). */
+export const COPY_RESET_MS = 2000;
+
 /** A button that copies `text`; when the clipboard refuses, it says so and the text stays selectable. */
 function CopyButton({ text, label }: { text: string; label: ReactNode }) {
   const [state, setState] = useState<CopyState>("idle");
+  useEffect(() => {
+    if (state === "idle") return;
+    const t = setTimeout(() => setState("idle"), COPY_RESET_MS);
+    return () => clearTimeout(t);
+  }, [state]);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);

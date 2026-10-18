@@ -1,8 +1,9 @@
 /// <reference lib="dom" />
 /**
- * Ported verbatim from volley-dash (`src/lib/notify-permission.ts`). Tiny wrapper around `Notification.requestPermission()`. Supported floor is
- * Safari 16+, Firefox 47+, Chrome / Edge (all Chromium with the modern
- * Promise-returning signature). Defensive against environments without
+ * Ported from volley-dash (`src/lib/notify-permission.ts`). Tiny wrapper
+ * around `Notification.requestPermission()`. Supported floor is Safari 16+,
+ * Firefox 47+, Chrome / Edge (all Chromium with the modern Promise-returning
+ * signature). Defensive against environments without
  * `window.Notification` (a hardened iframe, jsdom, SSR) by resolving to
  * `"denied"` so callers can safely treat the result as a tri-state.
  *

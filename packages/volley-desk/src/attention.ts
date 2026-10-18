@@ -11,8 +11,15 @@
  * - **info** — notable but nobody's job yet: an open PR, a lease wait.
  * - **none** — nothing to see.
  *
- * Tunables come from the wave's `effective_config`, else the retained global
- * config, else the defaults below.
+ * `claim_after_s` comes from the wave's `effective_config`, else the retained
+ * global config, else volleyd's default. `escalate_after_min` is read the same
+ * way, but it is not yet a SPEC §4.6.4 tunable (nor in `config.schema.json` or
+ * volleyd's defaults), so in practice it is the fixed 15 min below until it is
+ * added there.
+ *
+ * Silence (staleness) is measured only over time this browser was connected
+ * and settled: while the Desk is offline nothing can refresh `lastSeen`, so
+ * offline spans (`AttentionCtx.offline`) do not count towards `claim_after_s`.
  */
 import { UNASSIGNED } from "./store/reducer";
 import type {
@@ -45,6 +52,29 @@ export interface AttentionCtx {
   leases?: Record<string, LeasePoolPayload>;
   /** When this browser first saw each merge-ready gate (`<wave>/<task>` → ms); gates carry no time. */
   gateSince?: Record<string, number>;
+  /** Spans the Desk was offline or still settling after a reconnect; excluded from silence. */
+  offline?: readonly OfflineSpan[];
+}
+
+/** A span (ms) the Desk could not hear the broker; `to: null` while it still can't. */
+export interface OfflineSpan {
+  from: number;
+  to: number | null;
+}
+
+/** `now - since`, minus the parts of that interval the Desk spent offline. */
+export function connectedSilence(
+  since: number,
+  now: number,
+  offline: readonly OfflineSpan[] = [],
+): number {
+  let away = 0;
+  for (const o of offline) {
+    const from = Math.max(o.from, since);
+    const to = Math.min(o.to ?? now, now);
+    if (to > from) away += to - from;
+  }
+  return Math.max(0, now - since - away);
 }
 
 export interface Attn {
@@ -109,7 +139,7 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
   if (
     state === "working" &&
     lastSeen !== undefined &&
-    ctx.now - lastSeen > tunables(w, ctx).claimMs
+    connectedSilence(lastSeen, ctx.now, ctx.offline) > tunables(w, ctx).claimMs
   ) {
     state = "gone";
   }
@@ -260,11 +290,15 @@ export function tierFor(
   return waveAttention(x as WaveView, y as AttentionCtx).tier;
 }
 
+export interface CtxOpts {
+  now: number;
+  me?: string | null;
+  gateSince?: Record<string, number>;
+  offline?: readonly OfflineSpan[];
+}
+
 /** The store's parts of the attention context. */
-export function ctxFrom(
-  state: DeskState,
-  opts: { now: number; me?: string | null; gateSince?: Record<string, number> },
-): AttentionCtx {
+export function ctxFrom(state: DeskState, opts: CtxOpts): AttentionCtx {
   return {
     ...opts,
     config: state.config,
@@ -280,22 +314,32 @@ export interface NeedsYouTarget {
   wave: string;
 }
 
+/** Tiers already computed by the caller, so `needsYouTargets` need not recompute them. */
+export interface ComputedAttention {
+  waves: Record<string, Attn>;
+  agents: Record<string, Attn>;
+}
+
 /**
  * Everything at tier `you`: waves first, then agents whose wave is not already
  * listed. Its length is the top-bar pill and the dock badge count.
  */
 export function needsYouTargets(
   state: DeskState,
-  opts: { now: number; me?: string | null; gateSince?: Record<string, number> },
+  opts: CtxOpts,
+  computed?: ComputedAttention,
 ): NeedsYouTarget[] {
   const ctx = ctxFrom(state, opts);
+  const waveTier = (w: WaveView) => (computed?.waves[w.id] ?? waveAttention(w, ctx)).tier;
+  const agentTier = (a: AgentView) =>
+    (computed?.agents[a.id] ?? agentAttention(a, state.waves[a.wave], ctx)).tier;
   const waves = Object.values(state.waves)
-    .filter((w) => waveAttention(w, ctx).tier === "you")
+    .filter((w) => waveTier(w) === "you")
     .map((w): NeedsYouTarget => ({ kind: "wave", id: w.id, wave: w.id }));
   const listed = new Set(waves.map((t) => t.wave));
   const agents = Object.values(state.agents)
     .filter((a) => !listed.has(a.wave) && !state.coordinators[a.id])
-    .filter((a) => agentAttention(a, state.waves[a.wave], ctx).tier === "you")
+    .filter((a) => agentTier(a) === "you")
     .map((a): NeedsYouTarget => ({ kind: "agent", id: a.id, wave: a.wave }));
   return [...waves, ...agents];
 }

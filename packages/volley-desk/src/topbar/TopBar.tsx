@@ -71,7 +71,8 @@ export function TopBar(p: TopBarProps) {
       return;
     }
     void requestNotificationPermission().then((result) => {
-      setDenied(result !== "granted");
+      // Only a refusal is "blocked"; dismissing the prompt leaves it askable.
+      setDenied(result === "denied");
       p.setNotify({ ...p.notify, enabled: result === "granted" });
     });
   };
