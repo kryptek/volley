@@ -116,6 +116,14 @@ describe("parseWaveFile", () => {
     expect(
       errorsOf(`${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, name: local } }\n`),
     ).toEqual([expect.stringMatching(/^tasks\.A\.host\.name/)]);
+    // A nameless inline host is named by its target, and `local` is never an ssh host.
+    expect(
+      errorsOf(
+        `${HEADER}tasks:\n  A: { issue: 1, host: { type: ssh, target: local, repo: /src/r, volley_dir: /src/v } }\n`,
+      ),
+    ).toEqual([
+      expect.stringMatching(/^tasks\.A\.host\.target: `local` is the supervisor's own host/),
+    ]);
   });
 
   it("rejects an unknown after target with a path-qualified error", () => {

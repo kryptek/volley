@@ -3,8 +3,15 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
-import { type ConsentToken, type RemoteStep, TMUX_LAUNCH_COMMAND } from "../fence";
+import {
+  type ConsentToken,
+  REMOTE_CLAUDE_JSON,
+  REMOTE_CLAUDE_JSON_TMP,
+  type RemoteStep,
+  TMUX_LAUNCH_COMMAND,
+} from "../fence";
 import { SpawnError } from "../spawn-error";
+import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES } from "../worktree";
 import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "./host";
@@ -67,10 +74,22 @@ export interface RemoteHost extends Host {
   readonly hooksDir: string;
   /** The broker URL agents on the box use (the tunnel's remote end). */
   readonly brokerUrl: string;
+  /** True / false for a clone / none at `repo`; throws LAUNCH_FAILED when ssh itself fails. */
   repoExists(): Promise<boolean>;
   tunnelUp(): Promise<boolean>;
+  /** The box's folder trust; null when it has no readable `~/.claude.json`; throws if ssh fails. */
   readTrust(): Promise<Record<string, unknown> | null>;
+  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json`. */
+  recordTrust(root: string): Promise<void>;
+  /** A file on the box; null when it does not exist; throws when ssh fails. */
+  readFile(path: string): Promise<string | null>;
 }
+
+/** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
+const SSH_FAILED = 255;
+
+/** True when the result is ssh failing, not the remote command. */
+const transportFailed = (r: ExecResult) => r.timedOut || r.code === SSH_FAILED;
 
 /** Programs that act on the daemon's own machine (the broker's credentials), never the box. */
 const LOCAL_PROGRAMS = new Set(["volley"]);
@@ -323,12 +342,28 @@ export class SshTmuxHost implements RemoteHost {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
   }
 
-  /** True when the box has a clone at `repo`. */
+  /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */
+  private sshFailed(what: string, r: ExecResult | null): SpawnError {
+    const why = r === null ? "no result" : r.timedOut ? "timed out" : r.stderr.trim();
+    return new SpawnError("LAUNCH_FAILED", `ssh to ${this.spec.target} failed (${what}): ${why}`, {
+      host: this.name,
+      target: this.spec.target,
+    });
+  }
+
+  /** True when the box has a clone at `repo`, false when git says it has none. */
   async repoExists(): Promise<boolean> {
     const r = await this.run([
       { argv: ["git", "-C", this.spec.repo, "rev-parse", "--git-dir"] },
     ]).catch(() => null);
-    return r?.code === 0;
+    if (r === null || transportFailed(r)) throw this.sshFailed("repo check", r);
+    return r.code === 0;
+  }
+
+  async readFile(path: string): Promise<string | null> {
+    const r = await this.run([{ argv: ["cat", path] }]).catch(() => null);
+    if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
+    return r.code === 0 ? r.stdout : null;
   }
 
   /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */
@@ -346,15 +381,8 @@ export class SshTmuxHost implements RemoteHost {
    * Null when it cannot be read.
    */
   async readTrust(): Promise<Record<string, unknown> | null> {
-    // bash -s starts in the login user's home directory.
-    const r = await this.run([{ argv: ["cat", ".claude.json"] }]).catch(() => null);
-    if (r === null || r.code !== 0) return null;
-    let cfg: unknown;
-    try {
-      cfg = JSON.parse(r.stdout);
-    } catch {
-      return null;
-    }
+    const cfg = await this.readClaudeJson();
+    if (cfg === null) return null;
     const projects: Record<string, { hasTrustDialogAccepted: true }> = {};
     const table = (cfg as { projects?: unknown } | null)?.projects;
     if (typeof table === "object" && table !== null) {
@@ -367,6 +395,55 @@ export class SshTmuxHost implements RemoteHost {
       }
     }
     return { projects };
+  }
+
+  /** The box's whole `~/.claude.json` and its text; null when absent or not a JSON object. */
+  private async readClaudeJson(): Promise<Record<string, unknown> | null> {
+    return (await this.readClaudeJsonText())?.cfg ?? null;
+  }
+
+  private async readClaudeJsonText(): Promise<{
+    text: string;
+    cfg: Record<string, unknown>;
+  } | null> {
+    // bash -s starts in the login user's home directory.
+    const text = await this.readFile(REMOTE_CLAUDE_JSON);
+    if (text === null) return null;
+    try {
+      const cfg = JSON.parse(text) as unknown;
+      return typeof cfg === "object" && cfg !== null && !Array.isArray(cfg)
+        ? { text, cfg: cfg as Record<string, unknown> }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Set `projects[root].hasTrustDialogAccepted` in the box's `~/.claude.json`, changing nothing
+   * else, like the local recordRepoTrust: read it, write the new file beside it, and swap it in
+   * only if the file is still what was read (`cmp`, then `mv`, in one script). Claude Code
+   * rewrites the file often, so a changed file is re-read and the write retried. Called only on
+   * the owner's explicit `trust` answer.
+   */
+  async recordTrust(root: string): Promise<void> {
+    for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
+      const cur = await this.readClaudeJsonText();
+      if (cur === null) {
+        throw new Error(
+          `no readable ~/.claude.json on ${this.spec.target}: run claude there once, then retry`,
+        );
+      }
+      const next = `${JSON.stringify(withTrust(cur.cfg, root), null, 2)}\n`;
+      const r = await this.run([
+        { argv: ["cmp", "-s", "-", REMOTE_CLAUDE_JSON], stdin: b64(cur.text) },
+        { argv: ["base64", "-d"], stdin: b64(next), stdout: REMOTE_CLAUDE_JSON_TMP },
+        { argv: ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON] },
+      ]).catch(() => null);
+      if (r === null || transportFailed(r)) throw this.sshFailed("trust write", r);
+      if (r.code === 0) return;
+    }
+    throw new Error(`~/.claude.json on ${this.spec.target} kept changing; trust not recorded`);
   }
 }
 

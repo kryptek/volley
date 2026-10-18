@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Role, briefExtra, loadTemplate, renderBrief, runBriefGate } from "./brief";
+import {
+  type Role,
+  briefExtra,
+  briefExtraFrom,
+  briefExtraPath,
+  loadTemplate,
+  renderBrief,
+  runBriefGate,
+} from "./brief";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { Host } from "./hosts/host";
 import {
@@ -53,11 +61,18 @@ export interface SpawnDeps {
   host: Host;
   /** $VOLLEYD_HOME: locks, screen captures. */
   home: string;
+  /** Where the worktree locks live, if not `home` (a remote host's: per target). */
+  lockHome?: string;
   /** The daemon's namespace (a wave's `namespace:` overrides it). */
   namespace: string;
   brokerUrl: string;
   /** Claude Code's `~/.claude.json` (folder trust). */
   claudeJsonPath: string;
+  /**
+   * A remote host's folder trust, read from its own `~/.claude.json` instead of
+   * `claudeJsonPath`; its repo_untrusted decisions carry `host` and `target`.
+   */
+  remoteTrust?: RemoteTrust;
   /** `packages/volley-hooks` ($VOLLEY_HOOKS_DIR). */
   hooksDir: string;
   /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
@@ -88,6 +103,12 @@ export interface SpawnDeps {
 }
 
 export type DecisionKind = "repo_untrusted" | "model_switch" | "unknown_screen";
+
+export interface RemoteTrust {
+  host: string;
+  target: string;
+  read: () => Promise<Record<string, unknown> | null>;
+}
 
 /** A decision a spawn opens; `id` is the base id (the store may suffix a re-opened one). */
 export interface SpawnDecision {
@@ -173,16 +194,20 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
   try {
     // 0. Repo trust, before anything is created.
     ctx.root = await repoRoot(deps.host.exec, repo);
-    const open = openDecisionFor(deps.openDecisions, trustDecisionId(ctx.root));
-    const trusted = isRepoTrusted(readClaudeJson(deps.claudeJsonPath), ctx.root);
+    const open = openDecisionFor(deps.openDecisions, trustId(ctx));
+    const cfg =
+      deps.remoteTrust !== undefined
+        ? await deps.remoteTrust.read()
+        : readClaudeJson(deps.claudeJsonPath);
+    const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
       if (open !== undefined) {
         return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
-      const decisionId = await openDecision(ctx, "repo_untrusted", trustDecisionId(ctx.root), {
-        question: trustQuestion(ctx.root),
+      const decisionId = await openDecision(ctx, "repo_untrusted", trustId(ctx), {
+        question: trustQuestion(ctx.root, deps.remoteTrust?.target),
         options: ["trust", "cancel"],
-        data: { repo: ctx.root },
+        data: trustData(ctx),
       });
       return { kind: "decision", decision: "repo_untrusted", decisionId, opened: true };
     }
@@ -191,7 +216,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     // 1. Lock first.
     const agentId = agentIdFor(req.wave.wave, req.task, req.role, req.attempt);
     ctx.lock = await acquireLock(
-      lockPath(deps.home, ctx.worktree),
+      lockPath(deps.lockHome ?? deps.home, ctx.worktree),
       {
         wave: req.wave.wave,
         task: req.task,
@@ -266,7 +291,10 @@ async function launchAttempt(
     release_branch: req.wave.release_branch,
     branch: wt.branch,
     worktree: ctx.worktree,
-    extra: briefExtra(ctx.root),
+    extra:
+      host.readFile !== undefined
+        ? briefExtraFrom(await host.readFile(briefExtraPath(ctx.root)))
+        : briefExtra(ctx.root),
   });
   await host.writeFile(briefPath, brief);
   if (deps.briefGate !== null)
@@ -377,12 +405,12 @@ async function verifyAndRecover(
     const screen = saveScreen(ctx, cur.agentId, result.screen);
     if (result.screen_class === "trust_dialog") {
       const decisionId =
-        openDecisionFor(deps.openDecisions, trustDecisionId(ctx.root)) ??
-        (await openDecision(ctx, "repo_untrusted", trustDecisionId(ctx.root), {
-          question: trustQuestion(ctx.root),
+        openDecisionFor(deps.openDecisions, trustId(ctx)) ??
+        (await openDecision(ctx, "repo_untrusted", trustId(ctx), {
+          question: trustQuestion(ctx.root, deps.remoteTrust?.target),
           options: ["trust", "cancel"],
           screen,
-          data: { repo: ctx.root, agent_id: cur.agentId },
+          data: { ...trustData(ctx), agent_id: cur.agentId },
         }));
       return decision(cur, "repo_untrusted", decisionId, screen);
     }
@@ -574,6 +602,15 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
     data: { decision_id: id, answer, by, at: new Date().toISOString() },
   });
 }
+
+/** The repo_untrusted decision id for the spawn's repo root, on the machine it runs on. */
+const trustId = (ctx: Ctx) => trustDecisionId(ctx.root, ctx.deps.remoteTrust?.target);
+
+/** A repo_untrusted decision's facts: the root, and for a remote host where it is trusted. */
+const trustData = (ctx: Ctx): Record<string, unknown> => {
+  const r = ctx.deps.remoteTrust;
+  return { repo: ctx.root, ...(r !== undefined ? { host: r.host, target: r.target } : {}) };
+};
 
 /** Keep the screen that triggered a decision under `$VOLLEYD_HOME/waves/<wave>/screens/`. */
 function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | undefined {

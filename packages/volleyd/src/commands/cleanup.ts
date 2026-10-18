@@ -84,13 +84,15 @@ export async function cleanupWave(
     : undefined;
   let failed = 0;
   for (const t of targets) {
+    // A remote worktree's lines name the machine it is on.
+    const where = t.remote !== undefined ? ` on ${t.remote.target}` : "";
     if (t.live.length > 0) {
-      io.stdout(`skip ${t.worktree}: agent(s) not retired: ${t.live.join(", ")}\n`);
+      io.stdout(`skip ${t.worktree}${where}: agent(s) not retired: ${t.live.join(", ")}\n`);
       continue;
     }
     if (consent === undefined) {
       io.stdout(
-        `would remove ${t.worktree}${t.workspaces.length > 0 ? ` and workspace(s) ${t.workspaces.join(", ")}` : ""}\n`,
+        `would remove ${t.worktree}${where}${t.workspaces.length > 0 ? ` and workspace(s) ${t.workspaces.join(", ")}` : ""}\n`,
       );
       continue;
     }
@@ -102,23 +104,32 @@ export async function cleanupWave(
         io.stderr(`workspace ${ws}: ${e instanceof Error ? e.message : String(e)}\n`);
       }
     }
-    if (t.remote === undefined && !existsSync(t.worktree)) {
-      io.stdout(`gone ${t.worktree}\n`);
+    if (t.remote === undefined ? !existsSync(t.worktree) : await remoteGone(host, t.worktree)) {
+      io.stdout(`gone ${t.worktree}${where}\n`);
       continue;
     }
     const gitRepo = t.remote?.repo ?? repo;
     const argv = ["git", "-C", gitRepo, "worktree", "remove", ...(opts.force ? ["--force"] : [])];
     const r = await host.exec([...argv, t.worktree], { consent });
-    if (r.code === 0) io.stdout(`removed ${t.worktree}\n`);
+    if (r.code === 0) io.stdout(`removed ${t.worktree}${where}\n`);
     else {
       failed++;
-      io.stderr(`could not remove ${t.worktree}: ${r.stderr.trim()}\n`);
+      io.stderr(`could not remove ${t.worktree}${where}: ${r.stderr.trim()}\n`);
     }
   }
   if (consent === undefined && targets.some((t) => t.live.length === 0)) {
     io.stdout("dry run: pass --yes to remove\n");
   }
   return failed;
+}
+
+/** ssh's own exit status: the probe could not reach the box, which says nothing about the path. */
+const SSH_FAILED = 255;
+
+/** True when the box answered that `path` is no work tree (already removed): a re-run is a no-op. */
+async function remoteGone(host: Host, path: string): Promise<boolean> {
+  const r = await host.exec(["git", "-C", path, "rev-parse", "--is-inside-work-tree"]);
+  return r.code !== 0 && r.code !== SSH_FAILED && !r.timedOut;
 }
 
 /** The remote host a journaled worktree lives on: only its target and repo are needed here. */

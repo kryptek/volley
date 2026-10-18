@@ -219,13 +219,13 @@
               "type": "integer",
               "minimum": 1024,
               "maximum": 65535,
-              "default": 1883,
-              "description": "Port on the remote machine's 127.0.0.1 that reaches the broker; agents get broker_url mqtt://127.0.0.1:<remote_port>."
+              "default": 21883,
+              "description": "Port on the remote machine's 127.0.0.1 that reaches the broker; agents get broker_url mqtt://127.0.0.1:<remote_port>. Not 1883 by default: a remote machine running its own broker has that port taken."
             },
             "supervise": {
               "type": "boolean",
               "default": true,
-              "description": "true: the supervisor keeps ssh -N -R <remote_port>:<broker> up itself (one per target). false: the tunnel is operator-managed and only checked."
+              "description": "true: the supervisor keeps ssh -N -R <remote_port>:<broker> up itself (one per target and remote_port). false: the tunnel is operator-managed and only checked."
             }
           }
         }

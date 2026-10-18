@@ -32,8 +32,11 @@ export const CONFIG_DEFAULTS: Tunables = {
 
 /** Defaults for a remote host's unset keys (config `hosts.<name>`). */
 export const REMOTE_HOST_DEFAULTS = {
-  /** Port on the remote machine's 127.0.0.1 that reaches the broker through the tunnel. */
-  remote_port: 1883,
+  /**
+   * Port on the remote machine's 127.0.0.1 that reaches the broker through the tunnel. Not
+   * MQTT's 1883: a box running its own broker has that port taken.
+   */
+  remote_port: 21883,
   /** volleyd keeps the reverse tunnel up itself. */
   supervise_tunnel: true,
   /** `worktree_root` default: this directory beside the remote repo. */
@@ -128,8 +131,17 @@ export const DAEMON_DEFAULTS = {
   /** Wait before restarting a reverse tunnel that exited; doubles per failure up to the max. */
   tunnel_restart_ms: 1_000,
   tunnel_restart_max_ms: 60_000,
-  /** How often the tunnel of a host with parked or pending spawns is re-checked. */
+  /**
+   * How often each forward with an unfinished task on it (queued, parked or running: a running
+   * agent's reap waits while its tunnel is down) is re-checked.
+   */
   tunnel_check_ms: 10_000,
+  /** How long a fresh tunnel ssh may take to bring its forward up before a failed check counts. */
+  tunnel_settle_ms: 15_000,
+  /** How often an open repo_untrusted decision on a remote host re-reads the box's trust. */
+  remote_trust_check_ms: 10_000,
+  /** Tail of a tunnel's stderr kept on its journaled exit alarm. */
+  alarm_stderr_max_chars: 500,
   /** Session-name suffixes tried when a tmux session name is taken (a relaunch). */
   tmux_session_attempts: 20,
 } as const;

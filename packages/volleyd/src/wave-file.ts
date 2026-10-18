@@ -108,10 +108,19 @@ export function parseWaveFile(text: string, source?: string): Wave {
   if (unknown.length > 0) fail(unknown);
 
   // An inline host without a name has no config entry to inherit from: it must be complete.
+  // Its name (else its target) names it, and `local` is the daemon's own machine, never an ssh one.
   const hostErrors: PathError[] = [];
   for (const id of ids) {
     const h = w.tasks[id]?.host;
-    if (typeof h !== "object" || h.name !== undefined) continue;
+    if (typeof h !== "object") continue;
+    if ((h.name ?? h.target) === "local") {
+      hostErrors.push({
+        path: `tasks.${id}.host.${h.name !== undefined ? "name" : "target"}`,
+        reason: "`local` is the supervisor's own host; name the ssh host something else",
+      });
+      continue;
+    }
+    if (h.name !== undefined) continue;
     for (const key of ["target", "repo", "volley_dir"] as const) {
       if (h[key] === undefined) {
         hostErrors.push({

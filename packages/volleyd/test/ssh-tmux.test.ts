@@ -93,7 +93,7 @@ describe("SshTmuxHost", () => {
 
   it("a failed remote write throws", async () => {
     const r = remote((s) => (argvIs("base64")(s) ? { code: 1, stderr: "disk full" } : undefined));
-    await expect(r.host.writeFile("/x/y", "z")).rejects.toThrow(/disk full/);
+    await expect(r.host.writeFile("/x/.volley/y", "z")).rejects.toThrow(/disk full/);
   });
 
   it("launch: tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'", async () => {
@@ -315,6 +315,84 @@ describe("SshTmuxHost", () => {
     });
   });
 
+  it("repoExists tells a missing clone from a failed ssh (which must not open a decision)", async () => {
+    const answer = (code: number, timedOut = false) =>
+      remote((s) => (argvIs("git")(s) ? { code, timedOut, stderr: "x" } : undefined)).host;
+    expect(await answer(0).repoExists()).toBe(true);
+    expect(await answer(128).repoExists()).toBe(false); // git: not a git repository
+    for (const host of [answer(255), answer(0, true)]) {
+      const err = await host.repoExists().catch((e: unknown) => e as SpawnError);
+      expect(err).toMatchObject({ code: "LAUNCH_FAILED", detail: { target: "dev@box" } });
+    }
+  });
+
+  it("readFile: the file, null when there is none, a throw when ssh fails", async () => {
+    const r = remote((s) =>
+      argvIs("cat", "/src/r/.volley/brief-extra.md")(s)
+        ? { stdout: "notes\n" }
+        : argvIs("cat", "/none")(s)
+          ? { code: 1, stderr: "No such file" }
+          : argvIs("cat", "/down")(s)
+            ? { code: 255, stderr: "ssh: connect" }
+            : undefined,
+    );
+    expect(await r.host.readFile("/src/r/.volley/brief-extra.md")).toBe("notes\n");
+    expect(await r.host.readFile("/none")).toBeNull();
+    await expect(r.host.readFile("/down")).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+    // readTrust over a failed ssh is not "untrusted" either.
+    const down = remote(() => ({ code: 255, stderr: "ssh: connect" }));
+    await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+  });
+
+  it("recordTrust: compare-and-swap of the box's ~/.claude.json, keeping everything else", async () => {
+    const before = `${JSON.stringify({
+      oauthAccount: { token: "secret" },
+      projects: { "/other": { history: ["x"] } },
+    })}\n`;
+    const r = remote((s) => (argvIs("cat", ".claude.json")(s) ? { stdout: before } : undefined));
+    await r.host.recordTrust("/home/dev/src/repo");
+    const write = r.scripts().at(-1)?.steps ?? [];
+    expect(write.map((s) => s.argv)).toEqual([
+      ["cmp", "-s", "-", ".claude.json"],
+      ["base64", "-d"],
+      ["mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"],
+    ]);
+    // The compare is against exactly what was read; the new file changes only the trust key.
+    expect(Buffer.from(write[0]?.stdin ?? "", "base64").toString()).toBe(before);
+    expect(write[1]?.stdout).toBe(".claude.json.volleyd.tmp");
+    expect(JSON.parse(Buffer.from(write[1]?.stdin ?? "", "base64").toString())).toEqual({
+      oauthAccount: { token: "secret" },
+      projects: {
+        "/other": { history: ["x"] },
+        "/home/dev/src/repo": { hasTrustDialogAccepted: true },
+      },
+    });
+  });
+
+  it("recordTrust re-reads and retries when the file changed under it; refuses with no file", async () => {
+    let compares = 0;
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? { stdout: "{}" }
+        : argvIs("cmp")(s)
+          ? ++compares === 1
+            ? { code: 1 }
+            : {}
+          : undefined,
+    );
+    await r.host.recordTrust("/home/dev/src/repo");
+    expect(compares).toBe(2);
+    expect(r.steps().filter(argvIs("cat", ".claude.json"))).toHaveLength(2);
+
+    const none = remote((s) =>
+      argvIs("cat")(s) ? { code: 1, stderr: "No such file" } : undefined,
+    );
+    await expect(none.host.recordTrust("/home/dev/src/repo")).rejects.toThrow(
+      /run claude there once/,
+    );
+    expect(none.steps().some(argvIs("mv"))).toBe(false);
+  });
+
   it("exec routes credentials and the brief gate to the daemon's machine, the rest remote", async () => {
     const r = remote((s) => (argvIs("cat")(s) ? { stdout: "the brief\n" } : undefined));
     r.fake.on(["volley", "auth", "add-agent"], { stdout: '{"username":"a","password":"p"}' });
@@ -345,16 +423,16 @@ describe("resolveRemoteHost", () => {
 
   it("layers an inline host over the config entry it names, with defaults", () => {
     expect(
-      resolveRemoteHost("box", { type: "ssh", tunnel: { remote_port: 21883 } }, configured),
+      resolveRemoteHost("box", { type: "ssh", tunnel: { remote_port: 2883 } }, configured),
     ).toEqual({
       name: "box",
       target: "dev@box",
       repo: "/src/r",
       worktree_root: "/src/.volley-worktrees",
       volley_dir: "/src/volley",
-      tunnel: { remote_port: 21883, supervise: true },
+      tunnel: { remote_port: 2883, supervise: true },
     });
-    expect(resolveRemoteHost("box", undefined, configured).tunnel.remote_port).toBe(1883);
+    expect(resolveRemoteHost("box", undefined, configured).tunnel.remote_port).toBe(21883);
   });
 
   it("an unknown or incomplete host is refused with what is missing", () => {

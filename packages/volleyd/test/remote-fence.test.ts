@@ -46,6 +46,14 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["nc", "-z", "evil.example", "1883"],
     ["terraform", "apply"],
     ["curl", "https://example.com"],
+    // Nothing volleyd does runs claude remotely (the agent starts from launch.sh in tmux).
+    ["claude", "--version"],
+    ["claude", "-p", "do something"],
+    // The trust write's swap and compare, exactly; nothing like them.
+    ["mv", "-f", "/tmp/x", ".claude.json"],
+    ["mv", ".claude.json.volleyd.tmp", ".claude.json"],
+    ["cmp", "-s", "-", "/etc/shadow"],
+    ["cmp", "-s", "-", ".claude.json"], // the compare needs its base64 stdin
   ];
 
   it.each(DENIED)("refuses a remote script containing %s … before ssh runs", (...argv) => {
@@ -84,8 +92,9 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "some text"],
     ["tmux", "has-session", "-t", "=w1-T1-implementer"],
-    ["claude", "--version"],
     ["mkdir", "-p", "/wt/x/.volley"],
+    ["cat", ".claude.json"],
+    ["mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"],
     ["cat", "/src/r/.git/info/exclude"],
     ["chmod", "600", "/wt/x/.volley/agent.json"],
     ["nc", "-z", "127.0.0.1", "1883"],
@@ -139,6 +148,55 @@ describe("remote allow-list (ssh … bash -s)", () => {
     );
   });
 
+  it("base64 -d writes only the files volleyd writes, never an arbitrary absolute path", () => {
+    const to = (stdout: string, append = false): RemoteStep => ({
+      argv: ["base64", "-d"],
+      stdin: Buffer.from("x").toString("base64"),
+      stdout,
+      ...(append ? { append } : {}),
+    });
+    for (const ok of [
+      "/wt/x/ISSUE.md",
+      "/wt/x/.volley/agent.json",
+      "/wt/x/.volley/launch.sh",
+      "/src/r/.git/info/exclude",
+      ".claude.json.volleyd.tmp",
+    ]) {
+      expect(() => assertAllowed(SSH, remote(to(ok))), ok).not.toThrow();
+    }
+    expect(() => assertAllowed(SSH, remote(to("/src/r/.git/info/exclude", true)))).not.toThrow();
+    for (const bad of [
+      "/home/dev/.ssh/authorized_keys",
+      "/home/dev/.bashrc",
+      "/etc/cron.d/x",
+      "/wt/x/.volley/../../../home/dev/.profile",
+      ".claude.json",
+      "authorized_keys",
+    ]) {
+      expect(() => assertAllowed(SSH, remote(to(bad))), bad).toThrow(FenceError);
+      expect(() => assertAllowed(SSH, remote(to(bad, true))), bad).toThrow(FenceError);
+    }
+  });
+
+  it("the trust write: compare the file as read (base64 stdin), write beside it, swap it in", () => {
+    const steps: RemoteStep[] = [
+      { argv: ["cmp", "-s", "-", ".claude.json"], stdin: Buffer.from("{}").toString("base64") },
+      {
+        argv: ["base64", "-d"],
+        stdin: Buffer.from('{"projects":{}}').toString("base64"),
+        stdout: ".claude.json.volleyd.tmp",
+      },
+      step("mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"),
+    ];
+    expect(() => assertAllowed(SSH, { remote: { steps } })).not.toThrow();
+    expect(() =>
+      assertAllowed(
+        SSH,
+        remote({ argv: ["cmp", "-s", "-", ".claude.json"], stdin: "not base64!" }),
+      ),
+    ).toThrow(FenceError);
+  });
+
   it("refuses every other ssh form: no script, a raw script, a remote command string", () => {
     expect(() => assertAllowed(SSH)).toThrow(FenceError);
     expect(() => assertAllowed(SSH, { remote: { steps: [] } })).toThrow(FenceError);
@@ -186,11 +244,32 @@ describe("remote allow-list (ssh … bash -s)", () => {
 });
 
 describe("renderRemoteScript", () => {
+  it("gives every step but a heredoc one /dev/null on stdin (bash -s reads the script from it)", () => {
+    const script = renderRemoteScript({
+      steps: [step("cat", "/x"), { ...step("git", "status"), cwd: "/wt" }],
+    });
+    expect(script).toBe(
+      "set -euo pipefail\n'cat' '/x' </dev/null\n( cd '/wt' && 'git' 'status' </dev/null )\n",
+    );
+  });
+
+  it("feeds the trust compare its base64 through `base64 -d |`", () => {
+    const b64 = Buffer.from("{}").toString("base64");
+    const script = renderRemoteScript({
+      steps: [{ argv: ["cmp", "-s", "-", ".claude.json"], stdin: b64 }],
+    });
+    expect(script).toBe(
+      `set -euo pipefail\n'base64' '-d' <<'VOLLEY_EOF' | 'cmp' '-s' '-' '.claude.json'\n${b64}\nVOLLEY_EOF\n`,
+    );
+  });
+
   it("single-quotes every word, so nothing in a path or value is shell syntax", () => {
     const script = renderRemoteScript({
       steps: [{ argv: ["cat", "/wt/it's; rm -rf / #"], cwd: "/wt/$(reboot)" }],
     });
-    expect(script).toContain(`( cd '/wt/$(reboot)' && 'cat' '/wt/it'\\''s; rm -rf / #' )`);
+    expect(script).toContain(
+      `( cd '/wt/$(reboot)' && 'cat' '/wt/it'\\''s; rm -rf / #' </dev/null )`,
+    );
     expect(script.startsWith("set -euo pipefail\n")).toBe(true);
   });
 

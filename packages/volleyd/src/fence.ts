@@ -47,12 +47,17 @@ import { shq } from "./launch";
  *
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
- *   gh issue view · claude (any arguments)
+ *   gh issue view
  *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only) |
  *     capture-pane | send-keys | has-session — kill-session = CONSENT; no tmux global options
  *   mkdir -p <path>… · cat <path>… · chmod <octal> <path>… · nc -z 127.0.0.1 <port>
- *   base64 -d — the only step that takes stdin (base64 text only) and redirects to a file
- *   (absolute path; written under umask 077)
+ *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
+ *     077, and only to the files volleyd writes: an absolute path inside a `.volley/` directory
+ *     or ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`
+ *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
+ *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
+ *     mv -f .claude.json.volleyd.tmp .claude.json
+ *   Every other step's stdin is /dev/null, so no step can read the rest of the script.
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
  * GH_SPECS in src/fence.ts); any other option is denied — e.g. `fetch --upload-pack`/`-u`,
@@ -710,24 +715,48 @@ function sshVerdicts(args: readonly string[], script: RemoteScript | undefined):
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
 
+/** The remote login user's Claude Code config (bash -s starts in the home directory). */
+export const REMOTE_CLAUDE_JSON = ".claude.json";
+/** Where RemoteHost.recordTrust writes the new config before the compare-and-swap `mv`. */
+export const REMOTE_CLAUDE_JSON_TMP = ".claude.json.volleyd.tmp";
+/** The only argv that takes base64 on stdin without writing a file: the trust write's compare. */
+const TRUST_COMPARE = ["cmp", "-s", "-", REMOTE_CLAUDE_JSON];
+const TRUST_SWAP = ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON];
+const sameArgv = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The files volleyd writes on a remote host (worktree files, the shared exclude, the trust tmp). */
+function writablePath(path: string): boolean {
+  if (path === REMOTE_CLAUDE_JSON_TMP) return true;
+  return (
+    REMOTE_PATH.test(path) &&
+    !path.split("/").includes("..") &&
+    (path.includes("/.volley/") || path.endsWith("/ISSUE.md") || path.endsWith("/info/exclude"))
+  );
+}
+
 function remoteStep(step: RemoteStep): Verdict {
   if (step.cwd !== undefined && !REMOTE_PATH.test(step.cwd))
     return deny("remote cwd (not absolute)");
   const [prog, ...args] = step.argv;
   const io = step.stdin !== undefined || step.stdout !== undefined || step.append === true;
   if (io) {
+    const b64 = step.stdin !== undefined && BASE64.test(step.stdin);
+    if (sameArgv(step.argv, TRUST_COMPARE) && step.stdout === undefined && step.append !== true)
+      return b64 ? ALLOW : deny("remote cmp (base64 text on stdin only)");
     const write =
       prog === "base64" &&
       args.length === 1 &&
       args[0] === "-d" &&
-      step.stdin !== undefined &&
-      BASE64.test(step.stdin) &&
+      b64 &&
       step.stdout !== undefined &&
-      REMOTE_PATH.test(step.stdout);
+      writablePath(step.stdout) &&
+      (step.append !== true || step.stdout !== REMOTE_CLAUDE_JSON_TMP);
     return write
       ? ALLOW
-      : deny("remote file write (base64 -d of base64 text to an absolute path only)");
+      : deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
   }
+  if (sameArgv(step.argv, TRUST_SWAP)) return ALLOW;
   return remoteDeny(remoteCommand(prog, args));
 }
 
@@ -746,8 +775,6 @@ function remoteCommand(prog: string | undefined, args: string[]): Verdict {
     }
     case "tmux":
       return tmux(args);
-    case "claude":
-      return ALLOW;
     case "mkdir":
       return args[0] === "-p" && paths(args.slice(1)) ? ALLOW : deny("mkdir (only -p <path>…)");
     case "cat":
@@ -810,21 +837,24 @@ function tmux(args: string[]): Verdict {
  * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
  * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
  * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
- * heredoc (base64 text cannot contain its delimiter).
+ * heredoc (base64 text cannot contain its delimiter). The trust compare is fed the same way,
+ * through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
+ * stdin would consume the rest of the script.
  */
 export function renderRemoteScript(script: RemoteScript): string {
   const lines = ["set -euo pipefail"];
+  const heredoc = (s: RemoteStep) => `<<'VOLLEY_EOF'\n${s.stdin ?? ""}\nVOLLEY_EOF`;
   for (const s of script.steps) {
     const cmd = s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
       const redirect = s.append === true ? ">>" : ">";
-      lines.push(
-        `( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} <<'VOLLEY_EOF'\n${s.stdin ?? ""}\nVOLLEY_EOF\n)`,
-      );
+      lines.push(`( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} ${heredoc(s)}\n)`);
+    } else if (s.stdin !== undefined) {
+      lines.push(`'base64' '-d' ${heredoc(s).replace("\n", ` | ${cmd}\n`)}`);
     } else if (s.cwd !== undefined) {
-      lines.push(`( cd ${shq(s.cwd)} && ${cmd} )`);
+      lines.push(`( cd ${shq(s.cwd)} && ${cmd} </dev/null )`);
     } else {
-      lines.push(cmd);
+      lines.push(`${cmd} </dev/null`);
     }
   }
   return `${lines.join("\n")}\n`;
