@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import { type Rect, useViewport } from "./canvas/useViewport";
+import { SettingsModal } from "./settings/SettingsModal";
 import { useDesk } from "./store/context";
 import { UNASSIGNED, agentsByWave } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
@@ -68,6 +69,12 @@ export default function App() {
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
+  const [settings, setSettings] = useState<string | null>(null);
+  // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
+  const settingsWaveGone = settings !== null && !state.waves[settings];
+  useEffect(() => {
+    if (settingsWaveGone) setSettings(null);
+  }, [settingsWaveGone]);
 
   const groups = agentsByWave(state);
   const firstStart = useRef<Record<string, number>>({});
@@ -140,6 +147,7 @@ export default function App() {
                 coordinatorState={owner ? state.coordinators[owner]?.state : undefined}
                 startedAt={startedAt(id)}
                 frame={place(id)}
+                onSettings={setSettings}
               />
             );
           })}
@@ -177,6 +185,16 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {settings !== null && state.waves[settings] && (
+        // No config transport until the Desk signs in with broker credentials: read-only.
+        <SettingsModal
+          wave={state.waves[settings]}
+          config={state.config}
+          transport={null}
+          onClose={() => setSettings(null)}
+        />
+      )}
     </div>
   );
 }

@@ -1,0 +1,625 @@
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../src/App";
+import { SLIDER_COMMIT_MS, SettingsModal } from "../src/settings/SettingsModal";
+import {
+  type ConfigClient,
+  type ConfigTransport,
+  copyCommand,
+  createConfigTransport,
+} from "../src/settings/configTransport";
+import { DeskStoreProvider } from "../src/store/context";
+import type { DeskMqttClient } from "../src/store/mqtt-client";
+import type { ConfigPayload, DeskMessage, Envelope, WaveView } from "../src/store/types";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const config: ConfigPayload = {
+  version: 7,
+  updated_at: "2026-10-18T12:00:00.000Z",
+  updated_by: "volleyd-defaults",
+  hard_ceiling: 12,
+  spawn_budget_multiplier: 3,
+  lease_pools: { build: { capacity: 2, ttl_s: 1800, match: ["npm run build"] } },
+  admission: {
+    memory_pressure_max_level: 2,
+    cmux_ping_max_ms: 1500,
+    container_max: 20,
+    api_overload_window_s: 300,
+    api_overload_max: 3,
+    ci_queue_max: 10,
+    hysteresis_samples: 3,
+  },
+  claim_after_s: 1800,
+  heartbeat_alarm_s: 600,
+  fallback_model: "claude-sonnet-5-5",
+  mailbox: { session_expiry_s: 604800 },
+  worktree_root: "/tmp/volley worktrees",
+  spawn_timeout_s: 180,
+  wake_grace_s: 120,
+};
+
+function wave(): WaveView {
+  return {
+    id: "status-chip",
+    receivedAt: 0,
+    decisions: {},
+    state: {
+      wave: "status-chip",
+      version: 1,
+      owner: "coordinator-desk1",
+      repo: "example-org/example-repo",
+      release_branch: "release/2026-10-20-status-chip",
+      status: "running",
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      effective_config: { ...config, hard_ceiling: 4 },
+      updated_at: "2026-10-18T12:00:00.000Z",
+    },
+  };
+}
+
+/** A fake broker client: records publishes and lets the test deliver messages. */
+function fakeClient() {
+  const published: { topic: string; envelope: Envelope }[] = [];
+  const handlers = new Set<(m: DeskMessage) => void>();
+  const client: ConfigClient = {
+    publish: vi.fn(async (topic: string, payload: string) => {
+      published.push({ topic, envelope: JSON.parse(payload) as Envelope });
+    }),
+    onMessage: (h) => {
+      handlers.add(h);
+      return () => handlers.delete(h);
+    },
+  };
+  const deliver = (topic: string, envelope: Envelope) =>
+    act(async () => {
+      for (const h of handlers) h({ topic, envelope, receivedAt: Date.now() });
+    });
+  const ack = (correlationId: string, payload: Record<string, unknown>) =>
+    deliver("volley/default/desk/mailbox", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "mailbox",
+      type: "ack",
+      wall_time: "2026-10-18T12:00:01.000Z",
+      correlation_id: correlationId,
+      payload: { text: "config_set", acked_type: "query", op: "config_set", ...payload },
+    });
+  return { client, published, deliver, ack, handlers };
+}
+
+function setup(transport: ConfigTransport | null, onClose = vi.fn()) {
+  const view = render(
+    <SettingsModal wave={wave()} config={config} transport={transport} onClose={onClose} />,
+  );
+  const retain = (next: ConfigPayload) =>
+    view.rerender(
+      <SettingsModal wave={wave()} config={next} transport={transport} onClose={onClose} />,
+    );
+  return { onClose, retain };
+}
+
+const slider = (name: string) => screen.getByRole("slider", { name });
+const rowOf = (name: string) => slider(name).closest(".cfg-row") as HTMLElement;
+const flush = () => act(async () => {});
+/** Let the slider's commit window pass: the settled value is sent. */
+const settle = () =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(SLIDER_COMMIT_MS);
+  });
+const press = (name: string, key: string, times = 1) => {
+  for (let i = 0; i < times; i++) fireEvent.keyDown(slider(name), { key });
+};
+const ids = (f: ReturnType<typeof fakeClient>) =>
+  f.published.map((p) => p.envelope.correlation_id as string);
+const applied = (version: number) => ({
+  ok: true,
+  applied: true,
+  rejected: [],
+  result: { version },
+});
+
+function setClipboard(value: unknown) {
+  Object.defineProperty(navigator, "clipboard", { value, configurable: true });
+}
+function setExecCommand(fn: ((cmd: string) => boolean) | undefined) {
+  Object.defineProperty(document, "execCommand", { value: fn, configurable: true });
+}
+
+describe("SettingsModal", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    setClipboard(undefined);
+    setExecCommand(undefined);
+  });
+
+  it("builds its sections from the schema and shows the current global values", () => {
+    setup(null);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    for (const h of ["Admission", "Leases", "Attention", "Recovery"]) {
+      expect(screen.getByRole("heading", { name: h })).toBeInTheDocument();
+    }
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuemax", "100");
+    expect(slider("build pool capacity")).toHaveAttribute("aria-valuenow", "2");
+    expect(screen.getByRole("textbox", { name: "Fallback model" })).toHaveValue(
+      "claude-sonnet-5-5",
+    );
+    expect(
+      screen.getByText(
+        "Runaway fuse: maximum concurrently live supervised agents across all waves.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/applies at the next admission tick/)).toHaveTextContent(
+      "Saved through volleyd config set · applies at the next admission tick · never preempts running work",
+    );
+  });
+
+  it("moving the hard-ceiling slider sends config_set to the daemon's mailbox and shows the ack", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await flush();
+    expect(f.published).toHaveLength(0);
+    await settle();
+
+    expect(f.published).toHaveLength(1);
+    const [{ topic, envelope }] = f.published as [(typeof f.published)[number]];
+    expect(topic).toBe("volley/default/volleyd/mailbox");
+    expect(envelope).toMatchObject({
+      schema_version: "0.1",
+      agent_id: "desk",
+      channel: "mailbox",
+      type: "query",
+      payload: { op: "config_set", patch: { hard_ceiling: 13 }, by: "desk" },
+    });
+    expect(envelope.correlation_id).toMatch(UUID);
+    expect((envelope.payload as Record<string, unknown>).text).toBe("config_set hard_ceiling=13");
+    expect(envelope.payload).not.toHaveProperty("wave");
+    expect(within(rowOf("Hard ceiling")).getByText("sending…")).toBeInTheDocument();
+
+    await f.ack(envelope.correlation_id as string, {
+      ok: true,
+      applied: true,
+      rejected: [],
+      result: { version: 8 },
+    });
+    expect(within(rowOf("Hard ceiling")).getByText("applied · v8")).toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+  });
+
+  it("shows a rejected ack's reasons inline and returns the slider to the current value", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("build pool capacity", "ArrowLeft");
+    await settle();
+    const { envelope } = f.published[0] as (typeof f.published)[number];
+    expect(envelope.payload).toMatchObject({ patch: { lease_pools: { build: { capacity: 1 } } } });
+
+    // A reply for someone else's request changes nothing.
+    await f.ack("00000000-0000-4000-8000-000000000000", { ok: true, applied: true, rejected: [] });
+    expect(within(rowOf("build pool capacity")).getByText("sending…")).toBeInTheDocument();
+
+    await f.ack(envelope.correlation_id as string, {
+      ok: false,
+      applied: false,
+      rejected: [{ path: "lease_pools.build.capacity", reason: "must be >= 2 while held" }],
+    });
+    const alert = within(rowOf("build pool capacity")).getByRole("alert");
+    expect(alert).toHaveTextContent(
+      "rejected · lease_pools.build.capacity: must be >= 2 while held",
+    );
+    expect(slider("build pool capacity")).toHaveAttribute("aria-valuenow", "2");
+  });
+
+  it("sends one config_set for a burst of key presses, with the value the user settled on", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight", 8);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SLIDER_COMMIT_MS - 1);
+    });
+    expect(f.published).toHaveLength(0);
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "20");
+    await settle();
+    expect(f.published).toHaveLength(1);
+    expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { hard_ceiling: 20 } });
+  });
+
+  it("shows the answer to the latest change of a row, not an older one that answers late", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    const [first, second] = ids(f);
+    expect(f.published[1]?.envelope.payload).toMatchObject({ patch: { hard_ceiling: 14 } });
+    await f.ack(second as string, applied(9));
+    await f.ack(first as string, {
+      ok: false,
+      applied: false,
+      rejected: [{ path: "hard_ceiling", reason: "superseded" }],
+    });
+    expect(within(rowOf("Hard ceiling")).getByText("applied · v9")).toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "14");
+  });
+
+  it("sends a revert to the retained value while the change away from it is in flight", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    press("Hard ceiling", "ArrowLeft");
+    // The answer to 13 lands before the revert is sent: it must not read "applied" next to 12.
+    await f.ack(ids(f)[0] as string, applied(8));
+    expect(within(rowOf("Hard ceiling")).queryByText("applied · v8")).not.toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
+
+    await settle();
+    expect(f.published.map((p) => p.envelope.payload)).toMatchObject([
+      { patch: { hard_ceiling: 13 } },
+      { patch: { hard_ceiling: 12 } },
+    ]);
+    expect(within(rowOf("Hard ceiling")).getByText("sending…")).toBeInTheDocument();
+    await f.ack(ids(f)[1] as string, applied(9));
+    expect(within(rowOf("Hard ceiling")).getByText("applied · v9")).toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
+  });
+
+  it("returning to the value in flight cancels the queued change and keeps that answer", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    press("Hard ceiling", "ArrowLeft");
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    expect(f.published).toHaveLength(1);
+    await f.ack(ids(f)[0] as string, applied(8));
+    expect(within(rowOf("Hard ceiling")).getByText("applied · v8")).toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+  });
+
+  it("keeps a row's change in flight when the retained config changes another row", async () => {
+    const f = fakeClient();
+    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    retain({ ...config, version: 8, claim_after_s: 900 });
+    expect(slider("Claim after")).toHaveAttribute("aria-valuenow", "900");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+    expect(within(rowOf("Hard ceiling")).getByText("sending…")).toBeInTheDocument();
+
+    // Its own value retained: the row shows it, whatever order the ack comes in.
+    retain({ ...config, version: 9, claim_after_s: 900, hard_ceiling: 13 });
+    await f.ack(ids(f)[0] as string, applied(9));
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+    retain({ ...config, version: 10, claim_after_s: 900, hard_ceiling: 15 });
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "15");
+  });
+
+  it("labels an unanswered request as unknown and keeps the value", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk", timeoutMs: 1000 }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const row = within(rowOf("Hard ceiling"));
+    expect(row.getByRole("alert")).toHaveTextContent(
+      "no answer · volleyd did not answer within 1s",
+    );
+    expect(row.queryByText(/rejected/)).not.toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
+  });
+
+  it("labels a refused publish as failed and returns the slider", async () => {
+    const refusing: ConfigClient = {
+      ...fakeClient().client,
+      publish: async () => {
+        throw new Error("not authorised");
+      },
+    };
+    setup(createConfigTransport(refusing, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    press("Hard ceiling", "ArrowRight");
+    await settle();
+    expect(within(rowOf("Hard ceiling")).getByRole("alert")).toHaveTextContent(
+      "failed · not authorised",
+    );
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
+  });
+
+  it("puts a multiplier's × right after the value", () => {
+    setup(null);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(within(rowOf("Spawn budget")).getByText("3×")).toBeInTheDocument();
+    expect(within(rowOf("Claim after")).getByText("1800 s")).toBeInTheDocument();
+  });
+
+  it("sends a text tunable on Enter, empty meaning null when the schema allows it", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    const box = screen.getByRole("textbox", { name: "Fallback model" });
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
+  });
+
+  it("without credentials the control is disabled and the copy command is exact", async () => {
+    const writeText = vi.fn(async () => {});
+    setClipboard({ writeText });
+    setup(null);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+
+    const row = rowOf("Hard ceiling");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
+    fireEvent.keyDown(slider("Hard ceiling"), { key: "ArrowRight" });
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
+    expect(within(row).getByText("volleyd config set hard_ceiling 12")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Copy command" }));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("volleyd config set hard_ceiling 12");
+    expect(within(row).getByRole("button", { name: "Copy command" })).toHaveTextContent("Copied");
+
+    expect(screen.getByRole("textbox", { name: "Worktree root" })).toBeDisabled();
+    expect(
+      within(rowOf("build pool capacity")).getByText(
+        "volleyd config set lease_pools.build.capacity 2",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("the wave scope shows the wave's effective config, read-only, and never writes", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    const waveScope = screen.getByRole("radio", { name: "This wave (status-chip)" });
+    expect(waveScope).toHaveAttribute("aria-checked", "true");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "4");
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(/wave file's/)).toHaveTextContent("config:");
+    fireEvent.keyDown(slider("Hard ceiling"), { key: "ArrowRight" });
+    await flush();
+    expect(f.published).toHaveLength(0);
+    expect(screen.queryByText(/^volleyd config set \w/)).not.toBeInTheDocument();
+  });
+
+  it("shows only a note while the wave has no effective config", () => {
+    const { state, ...rest } = wave();
+    const { effective_config: _, ...bare } = state as NonNullable<WaveView["state"]>;
+    const w: WaveView = { ...rest, state: bare };
+    render(<SettingsModal wave={w} config={config} transport={null} onClose={() => {}} />);
+    expect(screen.getByText("No effective config for this wave yet.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("slider")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(screen.getAllByRole("slider").length).toBeGreaterThan(0);
+  });
+
+  it("falls back to selecting the command and execCommand without the async Clipboard API", async () => {
+    const exec = vi.fn(() => true);
+    setExecCommand(exec);
+    setup(null);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    const row = within(rowOf("Hard ceiling"));
+    fireEvent.click(row.getByRole("button", { name: "Copy command" }));
+    await flush();
+    expect(exec).toHaveBeenCalledWith("copy");
+    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 12");
+    expect(row.getByRole("button", { name: "Copy command" })).toHaveTextContent("Copied");
+  });
+
+  it("asks the user to copy by hand when the clipboard rejects and execCommand fails", async () => {
+    setClipboard({ writeText: vi.fn(async () => Promise.reject(new Error("denied"))) });
+    setExecCommand(() => false);
+    setup(null);
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    const row = within(rowOf("Hard ceiling"));
+    fireEvent.click(row.getByRole("button", { name: "Copy command" }));
+    await flush();
+    expect(row.getByRole("button", { name: "Copy command" })).toHaveTextContent("Select and copy");
+    expect(window.getSelection()?.toString()).toBe("volleyd config set hard_ceiling 12");
+  });
+
+  it("closes on Done, Escape, the close button and a scrim click", () => {
+    const { onClose } = setup(null);
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.pointerDown(screen.getByRole("dialog").parentElement as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(3);
+    // Focus moves into the dialog on open, so Escape works without a click first.
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(4);
+  });
+
+  it("Escape in a text field drops its edit and keeps the modal open", async () => {
+    const f = fakeClient();
+    const { onClose } = setup(createConfigTransport(f.client, { identity: "desk" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    const box = screen.getByRole("textbox", { name: "Fallback model" });
+    fireEvent.change(box, { target: { value: "other-model" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    fireEvent.blur(box);
+    await flush();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(box).toHaveValue("claude-sonnet-5-5");
+    expect(f.published).toHaveLength(0);
+  });
+});
+
+describe("createConfigTransport", () => {
+  it("carries the wave and the sender identity, with the namespace in the topic only", async () => {
+    const f = fakeClient();
+    const t = createConfigTransport(f.client, { identity: "desk", namespace: "dispatch" });
+    const sent = t.send({ hard_ceiling: 3 }, { wave: "status-chip", text: "hard ceiling" });
+    await flush();
+    const { topic, envelope } = f.published[0] as (typeof f.published)[number];
+    expect(topic).toBe("volley/dispatch/volleyd/mailbox");
+    expect(envelope).not.toHaveProperty("namespace");
+    expect(envelope).toMatchObject({
+      payload: {
+        op: "config_set",
+        text: "hard ceiling",
+        patch: { hard_ceiling: 3 },
+        by: "desk",
+        wave: "status-chip",
+      },
+    });
+    // The answer arrives on the Desk's own mailbox in that namespace.
+    await f.deliver("volley/dispatch/desk/mailbox", {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "mailbox",
+      type: "ack",
+      wall_time: "2026-10-18T12:00:01.000Z",
+      correlation_id: envelope.correlation_id as string,
+      payload: { text: "ok", ok: true, applied: true, rejected: [], result: { version: 9 } },
+    });
+    await expect(sent).resolves.toEqual({ applied: true, version: 9, rejected: [] });
+    expect(f.handlers.size).toBe(0);
+  });
+
+  it("reports a daemon error and an unanswered request", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakeClient();
+      const t = createConfigTransport(f.client, { identity: "desk", timeoutMs: 1000 });
+      const unanswered = t.send({ hard_ceiling: 3 });
+      await vi.advanceTimersByTimeAsync(1000);
+      await expect(unanswered).resolves.toEqual({
+        applied: false,
+        rejected: [],
+        error: "volleyd did not answer within 1s",
+        unanswered: true,
+      });
+      expect(f.handlers.size).toBe(0);
+
+      const failing: ConfigClient = {
+        ...f.client,
+        publish: async () => {
+          throw new Error("not authorised");
+        },
+      };
+      await expect(
+        createConfigTransport(failing, { identity: "desk" }).send({ hard_ceiling: 3 }),
+      ).resolves.toEqual({ applied: false, rejected: [], error: "not authorised" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("copyCommand", () => {
+  it("prints values the way volleyd config set parses them (YAML)", () => {
+    expect(copyCommand("hard_ceiling", 12)).toBe("volleyd config set hard_ceiling 12");
+    expect(copyCommand("fallback_model", null)).toBe("volleyd config set fallback_model null");
+    expect(copyCommand("fallback_model", "claude-sonnet-5-5")).toBe(
+      "volleyd config set fallback_model claude-sonnet-5-5",
+    );
+    expect(copyCommand("worktree_root", "/tmp/volley worktrees")).toBe(
+      `volleyd config set worktree_root '"/tmp/volley worktrees"'`,
+    );
+    expect(copyCommand("fallback_model", "null")).toBe(
+      `volleyd config set fallback_model '"null"'`,
+    );
+    expect(copyCommand("worktree_root", "it's")).toBe(
+      `volleyd config set worktree_root '"it'\\''s"'`,
+    );
+  });
+});
+
+describe("App wiring", () => {
+  it("the wave window's gear opens the settings for that wave, read-only without credentials", () => {
+    render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
+    expect(screen.getByRole("radio", { name: "This wave (ci-speed)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+    expect(slider("Hard ceiling")).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("gives focus back to the gear when the modal closes", () => {
+    render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    const gear = screen.getByRole("button", { name: "Settings for ci-speed" });
+    gear.focus();
+    fireEvent.click(gear);
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(gear).toHaveFocus();
+  });
+
+  it("does not reopen the modal by itself when its wave goes away and comes back", async () => {
+    const handlers = new Set<(m: DeskMessage) => void>();
+    const none = () => () => {};
+    const client: DeskMqttClient = {
+      connect: async () => {},
+      disconnect: async () => {},
+      onMessage: (h) => {
+        handlers.add(h);
+        return () => handlers.delete(h);
+      },
+      onConnect: none,
+      onDisconnect: none,
+      onError: none,
+    };
+    const state = wave().state;
+    const retained = (envelope: Envelope | null) =>
+      act(async () => {
+        for (const h of handlers) {
+          h({ topic: "volley/_waves/status-chip/state", envelope, receivedAt: Date.now() });
+        }
+      });
+    const waveEnvelope: Envelope = {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "_waves/state",
+      type: "wave_state",
+      wall_time: "2026-10-18T12:00:00.000Z",
+      payload: state,
+    };
+    render(
+      <DeskStoreProvider demo={false} brokerUrl="ws://test.invalid" clientFactory={() => client}>
+        <App />
+      </DeskStoreProvider>,
+    );
+    await retained(waveEnvelope);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings for status-chip" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await retained(null);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await retained(waveEnvelope);
+    expect(
+      await screen.findByRole("button", { name: "Settings for status-chip" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
