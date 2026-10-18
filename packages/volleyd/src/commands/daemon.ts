@@ -52,10 +52,8 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       home: volleydHome(env),
       ...(spawner !== undefined ? { spawner } : {}),
       issueBody: ghIssueBody,
-      // TODO(T4 spawner): wire `interrupt` (Escape into the agent's cmux workspace, via exec and
-      // the fence) and `taskDir` (the task's worktree, so the next stage reads
-      // `.volley/decisions.md`). Both need the agent→workspace/worktree mapping T4 introduces;
-      // until then `stop` sends only the mailbox cancel and the brief lands under $VOLLEYD_HOME.
+      // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
+      // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
       log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
     });
   } catch (e) {

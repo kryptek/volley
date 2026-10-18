@@ -40,8 +40,19 @@ export interface AgentProbe {
   lastHeartbeat(agentId: string): number | null;
 }
 
-/** SPEC §5.1 states after which an agent is gone. */
+/**
+ * The SPEC §5.2 terminal states this supervisor retires an agent on and reclaims its lock after.
+ * `blocked` is left out on purpose: SPEC §5.2 lets a blocked agent remain alive awaiting mailbox
+ * guidance, so it keeps its worktree lock and credentials until it reaches done/failed/reaped.
+ */
 export const TERMINAL_STATUS: ReadonlySet<string> = new Set(["done", "failed", "reaped"]);
+
+/**
+ * Terminal states that end the session for certain (retired at once). `reaped` is the LWT: a
+ * network blip or an MCP-server restart fires it too, while the session lives on and may
+ * reconnect with a fresh `spawning` (SPEC §6.5), so it only counts after a quiet grace period.
+ */
+export const FINAL_STATUS: ReadonlySet<string> = new Set(["done", "failed"]);
 
 export function lockPath(home: string, worktree: string): string {
   const hash = createHash("sha256").update(resolve(worktree)).digest("hex").slice(0, 16);
@@ -73,11 +84,14 @@ export interface LockFacts {
  * writing process gone. Anything else is `live`.
  */
 export function lockVerdict(lock: LockInfo, f: LockFacts): "live" | "stale" {
-  if (f.status !== null) return TERMINAL_STATUS.has(f.status) ? "stale" : "live";
-  if (f.registered || f.pidAlive) return "live";
   const at = Date.parse(lock.at);
   const last = Math.max(Number.isNaN(at) ? 0 : at, f.lastHeartbeat ?? 0);
-  return f.now - last > f.staleAfterMs ? "stale" : "live";
+  const quiet = f.now - last > f.staleAfterMs;
+  // Reaped (the LWT) may be a blip: the session still holds the worktree until it goes quiet.
+  if (f.status === "reaped") return quiet ? "stale" : "live";
+  if (f.status !== null) return FINAL_STATUS.has(f.status) ? "stale" : "live";
+  if (f.registered || f.pidAlive) return "live";
+  return quiet ? "stale" : "live";
 }
 
 function pidAliveOther(pid: number): boolean {

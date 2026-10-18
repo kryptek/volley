@@ -17,6 +17,7 @@ export const DECISION_KINDS = [
   "agent_blocked",
   "unknown_screen",
   "model_switch",
+  "repo_untrusted",
   "ci_failed",
   "wave_complete",
   "plan_change",

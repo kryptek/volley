@@ -56,10 +56,23 @@ describe("lockVerdict", () => {
     }
   });
 
-  it("a terminal status frees it", () => {
-    for (const s of ["done", "failed", "reaped"]) {
+  it("a final status (done/failed) frees it", () => {
+    for (const s of ["done", "failed"]) {
       expect(lockVerdict(info(), { ...base, status: s, registered: true })).toBe("stale");
     }
+  });
+
+  it("reaped (the LWT) frees it only once the agent has been quiet past the alarm", () => {
+    const facts = { ...base, status: "reaped", registered: true, pidAlive: true };
+    expect(lockVerdict(info(), facts)).toBe("live");
+    expect(lockVerdict(info({ at: old }), { ...facts, lastHeartbeat: now - MIN })).toBe("live");
+    expect(lockVerdict(info({ at: old }), { ...facts, lastHeartbeat: null })).toBe("stale");
+  });
+
+  it("blocked keeps the lock (SPEC §5.2: a blocked agent may stay alive)", () => {
+    expect(lockVerdict(info({ at: old }), { ...base, status: "blocked", registered: false })).toBe(
+      "live",
+    );
   });
 
   it("dead pid + no registry entry + no heartbeat for > 10 min is stale", () => {

@@ -65,12 +65,19 @@ import { WaveFileError, parseWaveFile } from "./wave-file";
 
 import { type Role, briefGatePath, isRole } from "./brief";
 import { HOOKS_DIR } from "./launch";
-import { type AgentProbe, TERMINAL_STATUS, lockPath } from "./locks";
+import { type AgentProbe, FINAL_STATUS, lockPath } from "./locks";
 import { retireAgent } from "./retire";
-import { type SpawnDeps, type SpawnOutcome, type SpawnResult, spawnAgent } from "./spawn";
+import {
+  type SpawnDecision,
+  type SpawnDeps,
+  type SpawnOutcome,
+  type SpawnResult,
+  spawnAgent,
+} from "./spawn";
 import { SpawnError } from "./spawn-error";
+import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, watchAgent } from "./verify";
-import { worktreePath } from "./worktree";
+import { expandHome, worktreePath } from "./worktree";
 
 export interface DaemonOptions {
   brokerUrl: string;
@@ -98,9 +105,15 @@ export interface DaemonOptions {
    * task's files hint. Default: none (wave-file `files` only); `volleyd daemon` wires `gh`.
    */
   issueBody?: IssueBodyFn;
-  /** Interrupts an agent's session on `stop` (e.g. Escape via cmux). Default: none. */
+  /**
+   * Interrupts an agent's session on `stop`. Default: with a spawner, Escape into the agent's
+   * workspace (from its `agent_spawned`); without one, none.
+   */
   interrupt?: (agentId: string) => Promise<void>;
-  /** Where a task's `.volley/decisions.md` goes. Default `<home>/waves/<wave>/tasks/<task>`. */
+  /**
+   * Where a task's `.volley/decisions.md` goes. Default: with a spawner, the task's latest
+   * worktree; otherwise (or before any spawn) `<home>/waves/<wave>/tasks/<task>`.
+   */
   taskDir?: (wave: WaveId, task: TaskId) => string;
 }
 
@@ -115,6 +128,11 @@ export interface SpawnerOptions {
   /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
   mintCredentials?: boolean;
   briefsDir?: string;
+  /**
+   * How long an agent whose status is `reaped` (its LWT) stays supervised before it is retired,
+   * waiting for a fresh status or heartbeat. Default `heartbeat_alarm_s` (tests shorten it).
+   */
+  reapGraceMs?: number;
 }
 
 /** A spawned agent the daemon watches until it is retired. */
@@ -126,6 +144,9 @@ interface Supervised {
   watch: AgentWatch;
   lockPath: string;
   minted: boolean;
+  workspace: string;
+  /** Armed while the status is `reaped`: retires the agent unless it comes back first. */
+  reapTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
 /**
@@ -255,8 +276,8 @@ export class Daemon {
   private running = false;
   /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
   private readonly spawning = new Set<string>();
-  /** Automatic spawns refused this run (not retried by the loop; `volleyd spawn` retries). */
-  private readonly refused = new Set<string>();
+  /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
+  private readonly refused = new Map<string, { n: number; until: number }>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
@@ -472,7 +493,10 @@ export class Daemon {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
-    for (const a of this.supervised.values()) void a.watch.close();
+    for (const a of this.supervised.values()) {
+      clearTimeout(a.reapTimer);
+      void a.watch.close();
+    }
     this.supervised.clear();
   }
 
@@ -568,6 +592,7 @@ export class Daemon {
       }
     }
     if (this.opts.spawner !== undefined) {
+      await this.resolveTrustedRepos();
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
     }
   }
@@ -579,12 +604,12 @@ export class Daemon {
   /** Start an implementer for every admitted task that has none (runs beside the queue). */
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
-    if (rec?.state == null || rec.state.status !== "running") return;
+    if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
     for (const id of rec.admitted) {
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
       const key = `${wave}/${id}/implementer`;
-      if (this.spawning.has(key) || this.refused.has(key)) continue;
+      if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) continue;
       void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
         this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
       });
@@ -605,7 +630,7 @@ export class Daemon {
     const key = `${wave}/${task}/${role}`;
     if (t.host !== "local") {
       // Remote hosts plug in behind the same Host interface; none is configured yet.
-      this.refused.add(key);
+      this.noteRefusal(key);
       const e = new SpawnError("LAUNCH_FAILED", `host '${t.host}' is not configured`, {
         host: t.host,
       });
@@ -626,6 +651,7 @@ export class Daemon {
       // spawnAgent journals its own refusals.
       const res = await spawnAgent({ wave: w, task, role, attempt }, this.spawnDeps(wave));
       if (res.kind === "launched") {
+        this.refused.delete(key);
         void res.verified.then(
           (outcome) => this.supervise(wave, task, role, outcome, res.lock.path),
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
@@ -633,18 +659,121 @@ export class Daemon {
       }
       return res;
     } catch (e) {
-      this.refused.add(key);
+      this.noteRefusal(key);
       throw e;
     } finally {
       this.spawning.delete(key);
     }
   }
 
+  /** Back off an automatic spawn that was refused: retried after 2^(n-1) × base, capped. */
+  private noteRefusal(key: string): void {
+    const n = (this.refused.get(key)?.n ?? 0) + 1;
+    const wait = Math.min(
+      DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
+      DAEMON_DEFAULTS.spawn_retry_max_ms,
+    );
+    this.refused.set(key, { n, until: Date.now() + wait });
+  }
+
+  /** The `local` host agents run on. */
+  private get host(): Host {
+    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(exec);
+    return this.localHost;
+  }
+  private localHost: Host | undefined;
+
+  private get claudeJsonPath(): string {
+    return this.opts.spawner?.claudeJsonPath ?? join(homedir(), ".claude.json");
+  }
+
+  /** The latest `agent_spawned` facts for an agent id (any wave), or for a wave's task. */
+  private spawnedRecord(
+    match: (e: JournalEvent) => boolean,
+    wave?: WaveId,
+  ): Record<string, unknown> | undefined {
+    const logs = wave !== undefined ? [this.waves.get(wave)] : [...this.waves.values()];
+    for (const log of logs) {
+      const e = log?.journal
+        .readAll()
+        .filter((x) => x.type === "agent_spawned" && match(x))
+        .at(-1);
+      if (e !== undefined) return e.data;
+    }
+    return undefined;
+  }
+
+  /** `stop`'s interrupt: the configured one, else Escape into the agent's workspace. */
+  private async interruptAgent(agentId: string): Promise<void> {
+    if (this.opts.interrupt !== undefined) return this.opts.interrupt(agentId);
+    if (this.opts.spawner === undefined) return;
+    const ws =
+      this.supervised.get(agentId)?.workspace ??
+      this.spawnedRecord((e) => e.data.agent_id === agentId)?.workspace;
+    if (typeof ws === "string") await this.host.sendKeys(ws, "Escape");
+  }
+
+  /** Where a task's `.volley/decisions.md` goes (its worktree once it has one). */
+  private taskDirFor(wave: WaveId, task: TaskId): string {
+    if (this.opts.taskDir !== undefined) return this.opts.taskDir(wave, task);
+    const wt =
+      this.opts.spawner !== undefined
+        ? this.spawnedRecord((e) => e.task === task, wave)?.worktree
+        : undefined;
+    return typeof wt === "string" ? wt : join(this.opts.home, "waves", wave, "tasks", task);
+  }
+
+  /**
+   * A `repo_untrusted` decision resolves itself once its repo is trusted: the owner accepted the
+   * dialog by hand (in any worktree of it), or answered `trust`. Covers decisions opened before
+   * a launch and those raised from a pane's trust dialog (whose task is no longer queued).
+   */
+  private async resolveTrustedRepos(): Promise<void> {
+    let cfg: Record<string, unknown> | null | undefined;
+    for (const [wave, log] of this.waves) {
+      for (const d of openDecisions(log.record)) {
+        if (d.kind !== "repo_untrusted") continue;
+        const root = (d as { repo?: unknown }).repo;
+        const repo = typeof root === "string" ? root : log.record.wave?.repo;
+        if (repo === undefined) continue;
+        cfg ??= readClaudeJson(this.claudeJsonPath);
+        if (!isRepoTrusted(cfg, expandHome(repo))) continue;
+        await this.resolveNow(wave, d.decision_id, {
+          answer: "trusted",
+          by: "claude-trust-dialog",
+        });
+      }
+    }
+  }
+
+  /**
+   * Open a spawn's decision through the decision store (outside the serial queue: spawns run
+   * beside it). A base id already used by a resolved decision is re-opened as `<id>-<n>`.
+   */
+  private async openSpawnDecision(wave: WaveId, d: SpawnDecision): Promise<string> {
+    const decisions = this.waves.get(wave)?.record.decisions ?? {};
+    let id = d.id;
+    for (let n = 2; decisions[id] !== undefined; n++) id = `${d.id}-${n}`;
+    const rec = await this.openDecisionNow(
+      wave,
+      {
+        kind: d.kind,
+        task: d.task,
+        question: d.question,
+        options: d.options,
+        pointers: d.pointers,
+        id,
+      },
+      d.data,
+    );
+    return rec.decision_id;
+  }
+
   private spawnDeps(wave: WaveId): SpawnDeps {
     const spawner = this.opts.spawner as SpawnerOptions;
     const log = this.waves.get(wave) as WaveLog;
     const eff = this.config.effective(wave);
-    const host = spawner.host ?? new LocalCmuxHost(exec);
+    const host = this.host;
     const probe: AgentProbe = {
       status: async (id) => {
         const ns = this.supervised.get(id)?.namespace ?? log.record.wave?.namespace;
@@ -665,7 +794,7 @@ export class Daemon {
       home: this.opts.home,
       namespace: this.opts.namespace,
       brokerUrl: this.opts.brokerUrl,
-      claudeJsonPath: spawner.claudeJsonPath ?? join(homedir(), ".claude.json"),
+      claudeJsonPath: this.claudeJsonPath,
       hooksDir: spawner.hooksDir ?? HOOKS_DIR,
       mintCredentials: spawner.mintCredentials ?? true,
       tunables: eff,
@@ -678,10 +807,19 @@ export class Daemon {
       watch: (ns, id) => watchAgent(this.broker, ns, id),
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
+      clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      openDecision: (d) => this.openSpawnDecision(wave, d),
+      resolveDecision: async (id, answer, by) => {
+        await this.resolveNow(wave, id, { answer, by });
+      },
     };
   }
 
-  /** Keep watching a spawned agent; retire it once its terminal status arrives. */
+  /**
+   * Keep watching a spawned agent; retire it once it is gone: at once on `done`/`failed`, and on
+   * `reaped` (its LWT, which a network blip also fires) only after a grace period in which no
+   * fresh status or heartbeat arrived — an assigned identity may reconnect (SPEC §6.5).
+   */
   private supervise(
     wave: WaveId,
     task: string,
@@ -694,23 +832,38 @@ export class Daemon {
       void watch.close();
       return;
     }
-    const minted =
-      this.waves
-        .get(wave)
-        ?.journal.readAll()
-        .find((e) => e.type === "agent_spawned" && e.data.agent_id === agentId)?.data
-        .credentials === "minted";
-    this.supervised.set(agentId, {
+    const a: Supervised = {
       wave,
       task,
       role,
       namespace: watch.namespace,
       watch,
       lockPath: lock,
-      minted,
-    });
+      minted: outcome.minted,
+      workspace: outcome.workspace,
+    };
+    this.supervised.set(agentId, a);
+    const alarm = this.config.effective(wave).heartbeat_alarm_s;
+    const graceMs = this.opts.spawner?.reapGraceMs ?? alarm * 1000;
+    const armReap = (since: number) => {
+      a.reapTimer = setTimeout(() => {
+        a.reapTimer = undefined;
+        if (this.supervised.get(agentId) !== a || watch.state.status?.type !== "reaped") return;
+        const beat = watch.state.lastHeartbeatAt ?? 0;
+        // A heartbeat after the LWT: the session is alive and its MCP server reconnecting.
+        if (beat > since) armReap(beat);
+        else void this.enqueue(() => this.retire(agentId, "reaped"));
+      }, graceMs);
+    };
     const check = (type: string) => {
-      if (TERMINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
+      if (this.supervised.get(agentId) !== a) return;
+      if (type === "reaped") {
+        if (a.reapTimer === undefined) armReap(Date.now());
+        return;
+      }
+      clearTimeout(a.reapTimer);
+      a.reapTimer = undefined;
+      if (FINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
     };
     watch.onStatus(check);
     if (watch.state.status !== null) check(watch.state.status.type);
@@ -721,7 +874,14 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    clearTimeout(a.reapTimer);
+    const terminal = a.watch.state.status?.payload;
     await a.watch.close();
+    const resultRaw = await this.broker
+      .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
+      .catch(() => null);
+    const result =
+      resultRaw !== null && resultRaw !== "" ? parseEnvelope(resultRaw)?.payload : undefined;
     const waveAgents = new Set(
       log.journal
         .readAll()
@@ -739,9 +899,11 @@ export class Daemon {
         waveAgents,
         lockPath: a.lockPath,
         minted: a.minted,
+        ...(terminal !== undefined ? { terminal } : {}),
+        ...(result !== undefined ? { result } : {}),
       },
       {
-        exec: (this.opts.spawner?.host ?? new LocalCmuxHost(exec)).exec,
+        exec: this.host.exec,
         clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
         journal: (ev) => this.append(a.wave, ev),
         releaseLock: (path) => {
@@ -756,6 +918,11 @@ export class Daemon {
   /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
   private async manualSpawn(p: Record<string, unknown>): Promise<Reply> {
     if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
+    if (this.killSwitch)
+      return {
+        ok: false,
+        error: `${KILL_SWITCH_REASON}: spawns are refused until \`volleyd resume --all\``,
+      };
     const wave = typeof p.wave === "string" ? p.wave : "";
     const task = typeof p.task === "string" ? p.task : "";
     const role = typeof p.role === "string" ? p.role : "implementer";
@@ -866,23 +1033,30 @@ export class Daemon {
    * bridge. Throws on an unknown wave/task or a bad input.
    */
   openDecision(wave: WaveId, input: DecisionInput): Promise<DecisionRecord> {
-    return this.serial(async () => {
-      const log = this.waves.get(wave);
-      if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-      const r = openEvent(log.record, input, new Date());
-      if ("error" in r) throw new Error(r.error);
-      await this.append(wave, r.event);
-      const d = log.record.decisions[r.id] as DecisionRecord;
-      await this.publishDecision(wave, d);
-      // SPEC §4.1: progress is QoS 0, not retained.
-      await this.broker.publish(
-        buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
-        JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
-        { qos: 0, retain: false },
-      );
-      this.log(`opened ${describeDecision(d)}`);
-      return d;
-    });
+    return this.serial(() => this.openDecisionNow(wave, input));
+  }
+
+  /** `openDecision` without the queue; `extra` facts are kept on the decision (journal + topic). */
+  private async openDecisionNow(
+    wave: WaveId,
+    input: DecisionInput,
+    extra: Record<string, unknown> = {},
+  ): Promise<DecisionRecord> {
+    const log = this.waves.get(wave);
+    if (log === undefined) throw new Error(`unknown wave '${wave}'`);
+    const r = openEvent(log.record, input, new Date());
+    if ("error" in r) throw new Error(r.error);
+    await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
+    const d = log.record.decisions[r.id] as DecisionRecord;
+    await this.publishDecision(wave, d);
+    // SPEC §4.1: progress is QoS 0, not retained.
+    await this.broker.publish(
+      buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
+      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
+      { qos: 0, retain: false },
+    );
+    this.log(`opened ${describeDecision(d)}`);
+    return d;
   }
 
   /** Resolve a decision (no ownership check — the control op does that). Idempotent. */
@@ -920,8 +1094,7 @@ export class Daemon {
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);
     let dir = `the brief for ${wave}/${d.task}`;
     try {
-      dir =
-        this.opts.taskDir?.(wave, d.task) ?? join(this.opts.home, "waves", wave, "tasks", d.task);
+      dir = this.taskDirFor(wave, d.task);
       const brief = writeDecisionsFile(dir, renderDecisionsMd(wave, d.task, all));
       return { decision: d, already_resolved: false, brief };
     } catch (e) {
@@ -1271,6 +1444,8 @@ export class Daemon {
       };
     const refused = guardMutation(state, by, "resolve");
     if (refused !== null) return { ok: false, error: refused };
+    const trust = this.trustAnswer(wave, id, p.answer);
+    if (trust !== null) return { ok: false, error: trust };
     const r = await this.resolveNow(wave, id, {
       answer: p.answer,
       by,
@@ -1286,6 +1461,25 @@ export class Daemon {
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
+  }
+
+  /**
+   * The owner's explicit `trust` answer to an open `repo_untrusted` decision records the dialog's
+   * acceptance in `~/.claude.json` (that key only) before the decision resolves. Returns an error
+   * message when that write fails, else null. No other answer, and nothing else, ever writes it.
+   */
+  private trustAnswer(wave: WaveId, id: string, answer: string): string | null {
+    const d = this.waves.get(wave)?.record.decisions[id];
+    if (d?.kind !== "repo_untrusted" || d.resolved !== undefined) return null;
+    if (answer.trim().toLowerCase() !== "trust" || this.opts.spawner === undefined) return null;
+    const root = (d as { repo?: unknown }).repo;
+    if (typeof root !== "string") return `decision '${id}' names no repo to trust`;
+    try {
+      recordRepoTrust(this.claudeJsonPath, root);
+      return null;
+    } catch (e) {
+      return `recording trust for ${root}: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   /** `claim`: take a wave over when its owner is gone (status, registry age, heartbeats). */
@@ -1411,7 +1605,7 @@ export class Daemon {
         task: a.task,
         data: { agent_id: a.agent_id, role: a.role, type: "cancel", message_id: messageId, by },
       });
-      await this.opts.interrupt?.(a.agent_id).catch((e: unknown) => {
+      await this.interruptAgent(a.agent_id).catch((e: unknown) => {
         this.log(`interrupt ${a.agent_id} failed: ${e instanceof Error ? e.message : String(e)}`);
       });
       cancelled.push(a.agent_id);

@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import { cleanupPlan } from "../src/commands/cleanup";
+import { Journal } from "../src/journal";
+import { LAUNCH_COMMAND } from "../src/launch";
+import { retainedTopics } from "../src/retire";
 import { type SpawnOutcome, spawnAgent } from "../src/spawn";
 import { trustDecisionId } from "../src/trust";
 import { sameModel, watchAgent } from "../src/verify";
@@ -194,16 +198,30 @@ describe("verify through hook signals (Aedes)", () => {
     expect(env.host.keys).toEqual([]); // never auto-accepted
   });
 
-  it("no SessionStart heartbeat + update prompt → Enter, then one relaunch (attempt+1, same lock)", async () => {
-    const out = await spawnWith(
-      async (attempt) => {
-        if (attempt === 2) await sessionStart("w1-t1-implementer-2");
-      },
-      [screen("update-prompt.txt")],
-    );
+  it("no SessionStart heartbeat + update prompt → Enter, then one relaunch typed into the same workspace (attempt+1, same lock)", async () => {
+    env = await makeSpawnEnv({
+      spawnTimeoutS: 0.5,
+      watch: (ns, id) => watchAgent(daemonSide, ns, id),
+    });
+    env.host.screens = [screen("update-prompt.txt"), screen("shell-prompt.txt")];
+    // The retyped launch command starts the second attempt's session in the same pane.
+    const typeText = env.host.sendText;
+    env.host.sendText = async (ws, text) => {
+      await typeText(ws, text);
+      setTimeout(() => void sessionStart("w1-t1-implementer-2"), 20);
+    };
+    const launched = await spawnAgent(env.request(), env.deps);
+    if (launched.kind !== "launched") throw new Error("expected a launch");
+    const out = await launched.verified;
+    await out.watch.close();
     expect(out).toMatchObject({ kind: "registered", agentId: "w1-t1-implementer-2" });
-    expect(env.host.keys).toEqual([{ workspace: "workspace:1", key: "Enter" }]);
-    expect(env.host.launches).toHaveLength(2);
+    // Never a second workspace in the same worktree: the launch command is typed into it.
+    expect(env.host.launches).toHaveLength(1);
+    expect(env.host.keys).toEqual([
+      { workspace: "workspace:1", key: "Enter" },
+      { workspace: "workspace:1", key: "Enter" },
+    ]);
+    expect(env.host.texts).toEqual([{ workspace: "workspace:1", text: LAUNCH_COMMAND }]);
     const spawned = env.events.filter((e) => e.type === "agent_spawned");
     expect(spawned.map((e) => e.data.agent_id)).toEqual([
       "w1-t1-implementer-1",
@@ -211,27 +229,97 @@ describe("verify through hook signals (Aedes)", () => {
     ]);
     expect(spawned[1]?.data).toMatchObject({
       attempt: 2,
+      workspace: "workspace:1",
       recovered_from: "w1-t1-implementer-1",
       recovery: "update_prompt",
       lock: spawned[0]?.data.lock,
     });
-    // the first identity is revoked before the second is minted
+    // the first identity is revoked before the second is minted, and journaled as retired
     expect(env.host.fake.argvs(["volley", "auth"]).map((a) => `${a[2]} ${a[3]}`)).toEqual([
       "add-agent w1-t1-implementer-1",
       "rm-agent w1-t1-implementer-1",
       "add-agent w1-t1-implementer-2",
     ]);
+    expect(env.events.find((e) => e.type === "agent_retired")?.data).toMatchObject({
+      agent_id: "w1-t1-implementer-1",
+      status: "superseded",
+      credentials_revoked: true,
+      lock_released: false,
+    });
+    expect(env.cleared).toEqual(retainedTopics(NS, "w1-t1-implementer-1"));
+    // cleanup sees only the second attempt as live, and nothing once it is retired too.
+    const j = Journal.open(join(env.home, "waves", "w1"));
+    j.append({ type: "wave_submitted", data: { wave: env.wave } });
+    for (const e of env.events) j.append(e);
+    expect(cleanupPlan(env.home, "w1").targets[0]?.live).toEqual(["w1-t1-implementer-2"]);
+    j.append({
+      type: "agent_retired",
+      task: "T1",
+      data: { agent_id: "w1-t1-implementer-2", role: "implementer", status: "done" },
+    });
+    expect(cleanupPlan(env.home, "w1").targets[0]?.live).toEqual([]);
     const agentJson = JSON.parse(
       readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"),
     );
     expect(agentJson.agent_id).toBe("w1-t1-implementer-2");
   });
 
-  it("relaunches only once: a second update prompt opens unknown_screen", async () => {
+  it("after Enter the original launch may continue: its hook signals verify it, no relaunch", async () => {
+    env = await makeSpawnEnv({
+      spawnTimeoutS: 0.3,
+      watch: (ns, id) => watchAgent(daemonSide, ns, id),
+    });
+    env.host.screens = [screen("update-prompt.txt")];
+    const orig = env.host.sendKeys;
+    env.host.sendKeys = async (ws, key) => {
+      await orig(ws, key);
+      setTimeout(() => void sessionStart("w1-t1-implementer-1"), 10);
+    };
+    const out = await spawnAgent(env.request(), env.deps);
+    if (out.kind !== "launched") throw new Error("expected a launch");
+    const verified = await out.verified;
+    await verified.watch.close();
+    expect(verified).toMatchObject({ kind: "registered", agentId: "w1-t1-implementer-1" });
+    expect(env.host.launches).toHaveLength(1);
+    expect(env.host.texts).toEqual([]);
+    expect(env.events.filter((e) => e.type === "agent_spawned")).toHaveLength(1);
+  });
+
+  it("after Enter a screen that is not a bare shell is never typed into; a second timeout opens unknown_screen", async () => {
     const out = await spawnWith(async () => {}, [screen("update-prompt.txt")]);
     expect(out).toMatchObject({ kind: "decision", decision: "unknown_screen" });
-    expect(env.host.launches).toHaveLength(2);
+    expect(env.host.launches).toHaveLength(1);
+    expect(env.host.texts).toEqual([]);
     expect(env.host.keys).toHaveLength(1);
+  });
+
+  it("a failing Enter releases the lock, closes the watch and journals the refusal", async () => {
+    let closed = 0;
+    env = await makeSpawnEnv({
+      spawnTimeoutS: 0.2,
+      watch: async (ns, id) => {
+        const w = await watchAgent(daemonSide, ns, id);
+        const close = w.close;
+        return {
+          ...w,
+          state: w.state,
+          close: async () => {
+            closed++;
+            await close();
+          },
+        };
+      },
+    });
+    env.host.screens = [screen("update-prompt.txt")];
+    env.host.sendKeys = async () => {
+      throw new Error("cmux: socket timeout");
+    };
+    const out = await spawnAgent(env.request(), env.deps);
+    if (out.kind !== "launched") throw new Error("expected a launch");
+    await expect(out.verified).rejects.toThrow("socket timeout");
+    expect(existsSync(out.lock.path)).toBe(false);
+    expect(closed).toBeGreaterThan(0);
+    expect(env.events.at(-1)).toMatchObject({ type: "alarm_raised" });
   });
 
   it("an unknown screen → unknown_screen decision with the capture path", async () => {
