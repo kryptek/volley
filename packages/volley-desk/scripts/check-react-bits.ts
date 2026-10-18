@@ -82,6 +82,7 @@ export const REACT_BITS_ALLOW_LIST: readonly string[] = [
   "Silk",
   "SlicedWaves",
   "SoftAurora",
+  "SpecularButton",
   "SpotlightCard",
   "StarBorder",
   "StatusMark",

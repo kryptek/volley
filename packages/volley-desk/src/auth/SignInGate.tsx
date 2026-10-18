@@ -13,17 +13,33 @@
  *
  * localStorage is readable by any script on this origin; that is the same
  * trust boundary as the Desk itself, which holds the session.
+ *
+ * The look (D9) is the prototype `signin.tsx`: Line Waves behind a deep glass
+ * card that tilts toward the pointer, recessed fields and a Specular Button.
+ * After a submit the card stays up, busy, until the first connect settles
+ * (connected, or disconnected: the Desk then shows its own offline state).
  */
-import { type FormEvent, type ReactNode, useState } from "react";
+import {
+  type CSSProperties,
+  type FormEvent,
+  type PointerEvent,
+  type ReactNode,
+  useEffect,
+  useState,
+} from "react";
+import SpecularButton from "../rb/SpecularButton/SpecularButton";
 import {
   CREDENTIALS_STORAGE_KEY,
   DeskStoreProvider,
   readCredentials,
   resolveBrokerUrl,
+  useDesk,
   viteEnv,
 } from "../store/context";
 import { isDemoMode } from "../store/fixtures";
 import type { BrokerCredentials, DeskMqttClient } from "../store/mqtt-client";
+import { Clawd } from "../windows/wave/Clawd";
+import { PHONE, REDUCED_MOTION, SignInBackdrop, useMedia } from "./SignInBackdrop";
 import "../styles/signin.css";
 
 /** The agent-id grammar (SPEC §2.2): the username signs every envelope and names the Desk's mailbox. */
@@ -89,6 +105,8 @@ export function SignInGate({
   );
   const [lastUsername, setLastUsername] = useState(creds?.username ?? "desk");
   const [error, setError] = useState<string | null>(null);
+  /** A submitted sign-in whose first connect hasn't settled yet. */
+  const [pending, setPending] = useState(false);
   const passthrough = {
     ...(brokerUrl !== undefined ? { brokerUrl } : {}),
     ...(clientFactory !== undefined ? { clientFactory } : {}),
@@ -102,56 +120,105 @@ export function SignInGate({
       </DeskStoreProvider>
     );
   }
-  if (creds === null) {
-    return (
-      <SignInForm
-        brokerUrl={resolveBrokerUrl(brokerUrl)}
-        initialUsername={lastUsername}
-        error={error}
-        onError={setError}
-        onSubmit={(next) => {
-          writeStored(storage, next);
-          setLastUsername(next.username);
-          setError(null);
-          setCreds(next);
-        }}
-      />
-    );
-  }
+  const url = resolveBrokerUrl(brokerUrl);
+  // The backdrop keeps its slot from the form to the busy card, so Line Waves isn't remounted.
   return (
-    <DeskStoreProvider
-      demo={false}
-      auth={creds.username !== "" ? creds : null}
-      onAuthFailed={(message) => {
-        writeStored(storage, null);
-        setLastUsername(creds.username);
-        setError(`The broker refused the sign-in: ${message}`);
-        setCreds(null);
-      }}
-      {...passthrough}
-    >
-      {children}
-    </DeskStoreProvider>
+    <>
+      {(creds === null || pending) && <SignInBackdrop />}
+      {creds === null ? (
+        <SignInCard
+          brokerUrl={url}
+          initialUsername={lastUsername}
+          initialPassword=""
+          error={error}
+          onError={setError}
+          onSubmit={(next) => {
+            writeStored(storage, next);
+            setLastUsername(next.username);
+            setError(null);
+            setPending(true);
+            setCreds(next);
+          }}
+        />
+      ) : (
+        <DeskStoreProvider
+          demo={false}
+          auth={creds.username !== "" ? creds : null}
+          onAuthFailed={(message) => {
+            writeStored(storage, null);
+            setLastUsername(creds.username);
+            setError(`The broker refused the sign-in: ${message}`);
+            setPending(false);
+            setCreds(null);
+          }}
+          {...passthrough}
+        >
+          {pending ? (
+            <Connecting onSettled={() => setPending(false)}>
+              <SignInCard
+                brokerUrl={url}
+                initialUsername={creds.username}
+                initialPassword={creds.password}
+                error={null}
+                busy
+                onError={() => {}}
+                onSubmit={() => {}}
+              />
+            </Connecting>
+          ) : (
+            children
+          )}
+        </DeskStoreProvider>
+      )}
+    </>
   );
 }
 
-function SignInForm({
+/** Shows `children` (the busy card) until the first connect leaves `connecting`. */
+function Connecting({ children, onSettled }: { children: ReactNode; onSettled: () => void }) {
+  const { connection } = useDesk();
+  useEffect(() => {
+    if (connection !== "connecting") onSettled();
+  }, [connection, onSettled]);
+  return <>{children}</>;
+}
+
+const NO_TILT = { x: 0, y: 0 };
+
+function SignInCard({
   brokerUrl,
   initialUsername,
+  initialPassword,
   error,
+  busy = false,
   onError,
   onSubmit,
 }: {
   brokerUrl: string;
   initialUsername: string;
+  initialPassword: string;
   error: string | null;
+  busy?: boolean;
   onError: (message: string) => void;
   onSubmit: (creds: BrokerCredentials) => void;
 }) {
   const [username, setUsername] = useState(initialUsername);
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(initialPassword);
+  const [tilt, setTilt] = useState(NO_TILT);
+  const reduced = useMedia(REDUCED_MOTION);
+  const phone = useMedia(PHONE);
+  const still = reduced || phone;
+  const move = (e: PointerEvent<HTMLDivElement>) => {
+    if (still) return;
+    const r = e.currentTarget.querySelector(".signin-card")?.getBoundingClientRect();
+    if (!r) return;
+    const nx = (e.clientX - (r.left + r.width / 2)) / window.innerWidth;
+    const ny = (e.clientY - (r.top + r.height / 2)) / window.innerHeight;
+    setTilt({ x: Math.max(-1, Math.min(1, nx * 2)), y: Math.max(-1, Math.min(1, ny * 2)) });
+  };
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     const name = username.trim();
     if (name !== "" && !AGENT_ID.test(name)) {
       onError(`'${name}' is not a valid agent id: use lowercase letters, digits, _ and -`);
@@ -159,44 +226,86 @@ function SignInForm({
     }
     onSubmit({ username: name, password: name === "" ? "" : password });
   };
+  const tiltVars = {
+    "--rx": `${(-tilt.y * 5).toFixed(2)}deg`,
+    "--ry": `${(tilt.x * 7).toFixed(2)}deg`,
+    "--gx": `${50 + tilt.x * 30}%`,
+    "--gy": `${30 + tilt.y * 25}%`,
+  } as CSSProperties;
   return (
-    <div className="signin-scrim">
-      <form className="signin" aria-label="Sign in to the broker" onSubmit={submit}>
-        <h1 className="signin-title">Sign in to the broker</h1>
-        <div className="mono dim">{brokerUrl}</div>
-        {error !== null && (
-          <div className="signin-error" role="alert">
-            {error}
+    <div className="signin-screen" onPointerMove={move} onPointerLeave={() => setTilt(NO_TILT)}>
+      <div className="signin-card" style={tiltVars}>
+        <div className="signin-sheen" aria-hidden />
+        <div className="signin-brand">
+          <span aria-hidden>
+            <Clawd size={30} />
+          </span>
+          <div>
+            <h1 className="signin-word">
+              volley <span>desk</span>
+            </h1>
+            <div className="signin-sub">Sign in to your broker</div>
           </div>
-        )}
-        <label className="field">
-          <span>Username</span>
-          <input
-            autoComplete="username"
-            autoCapitalize="none"
-            spellCheck={false}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>Password</span>
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </label>
-        <button type="submit" className="btn btn--hot">
-          Sign in
-        </button>
-        <p className="signin-note dim">
-          Use the <code>desk</code> identity from <code>volley auth init</code>. Leave the username
-          empty for a broker that allows anonymous access (read-only). Stored in this browser's
-          localStorage.
-        </p>
-      </form>
+        </div>
+        <form className="signin-form" aria-label="Sign in to the broker" onSubmit={submit}>
+          <div className="signin-broker" data-state={busy ? "busy" : "idle"}>
+            <i className="dot" aria-hidden />
+            {brokerUrl}
+          </div>
+          <label className="f3d">
+            <span>Username</span>
+            <input
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={username}
+              readOnly={busy}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </label>
+          <label className="f3d">
+            <span>Password</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              placeholder="••••••••••"
+              value={password}
+              readOnly={busy}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          {error !== null && (
+            <div className="signin-err" role="alert">
+              {error}
+            </div>
+          )}
+          <div className={`spec-wrap${busy ? " is-busy" : ""}`}>
+            <SpecularButton
+              type="submit"
+              size="lg"
+              disabled={busy}
+              className="spec-signin"
+              tint="#7c6cf6"
+              tintOpacity={0.32}
+              baseColor="#2a1f6e"
+              lineColor="#d6f7ff"
+              textColor="#ffffff"
+              intensity={1.15}
+              idleIntensity={0.35}
+              glow={0.9}
+              thickness={1.4}
+              followMouse
+              autoAnimate
+            >
+              {busy ? "Signing in…" : "Sign in"}
+            </SpecularButton>
+          </div>
+          <p className="signin-hint">
+            Use the account from Setup or Settings → Broker accounts. Leave the username empty to
+            watch read-only.
+          </p>
+        </form>
+      </div>
     </div>
   );
 }

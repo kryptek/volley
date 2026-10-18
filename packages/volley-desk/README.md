@@ -27,6 +27,10 @@ The broker requires credentials (`examples/mosquitto-auth/`), so on first load t
 
 localStorage is readable by any script on the Desk's origin, the same trust boundary as the Desk itself.
 
+![The Desk's sign-in: Line Waves behind a tilted glass card](docs/sign-in.png)
+
+The look is the approved prototype's (`auth/SignInGate.tsx`, `styles/signin.css`): React Bits Line Waves behind a vignette, a deep glass card that tilts toward the pointer, recessed fields and a Specular Button that reads *Signing in…* and stays disabled until the first connect settles (connected, or disconnected: the Desk then shows its own offline state). Line Waves is lazy-loaded (`auth/SignInBackdrop.tsx`); without WebGL (`hasWebGL`), under `prefers-reduced-motion`, while its chunk loads or if it throws, the plain gradient stands in. Below 700 px the card fills the width inside a 16 px margin, does not tilt, and Line Waves draws 8 lines instead of 14.
+
 ### LAN use
 
 `volley dash --host 0.0.0.0` serves the page on the LAN, but a phone also has to reach the broker, and `examples/mosquitto-localhost.conf` binds its WebSocket listener to `127.0.0.1`. Add a second WebSocket listener on the machine's LAN address:
@@ -221,9 +225,11 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 | StarBorder | `bunx --bun shadcn@latest add @react-bits/StarBorder-TS-CSS --path src/rb/StarBorder --yes` | star Needs-you effect (`src/canvas/Frame.tsx`) |
 | DecryptedText | `bunx --bun shadcn@latest add @react-bits/DecryptedText-TS-CSS --path src/rb/DecryptedText --yes` | decrypt narration (`src/windows/agent/Narration.tsx`) |
 | ShinyText | `bunx --bun shadcn@latest add @react-bits/ShinyText-TS-CSS --path src/rb/ShinyText --yes` | shiny narration (`src/windows/agent/Narration.tsx`) |
+| SpecularButton | `bunx --bun shadcn@latest add @react-bits/SpecularButton-TS-CSS --path src/rb/SpecularButton --yes` | sign-in button (`src/auth/SignInGate.tsx`) |
+| LineWaves (also a background) | `bunx --bun shadcn@latest add @react-bits/LineWaves-TS-CSS --path src/rb/LineWaves --yes` | sign-in backdrop (`src/auth/SignInBackdrop.tsx`) |
 | every background (63, the list in `src/look/backgrounds.ts`) | `bunx --bun shadcn@latest add @react-bits/<Name>-TS-CSS --path src/rb/<Name> --yes` | background picker (`src/look/backgrounds.ts`) |
 
-**Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome skips the vendored components (a `biome.json` override on `src/rb/`) but still lints `StatusMark` and `ElasticSlider`, which were adapted by hand. The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
+**Vendored code.** Components are kept as the registry ships them, so they can be re-installed or diffed against upstream. The registry code isn't written for this repo's strict compiler flags (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), so each component installed from D7 on gets one first line, `// @ts-nocheck: vendored React Bits component …`; its exported prop types still check the Desk's call sites. Biome skips the vendored components (a `biome.json` override on `src/rb/`) but still lints `StatusMark` and `ElasticSlider`, which were adapted by hand. `SpecularButton` has one marked change: its effect cleanup releases the WebGL context only once the canvas has left the page, since React's StrictMode (dev) re-runs the effect on the same canvas and a lost context never draws again. The registry install also rewrites `react-dom` to a range and adds `ogl`, `three` and `vgpu` unpinned: restore `react-dom` and pin new dependencies to exact versions at least two weeks old.
 
 **Licence.** The components under `src/rb/` are not Apache-2.0: they keep React Bits' MIT + Commons Clause licence, which allows shipping them as part of this application but not redistributing the components themselves. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
