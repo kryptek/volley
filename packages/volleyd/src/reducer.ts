@@ -19,8 +19,15 @@ export interface WaveRecord {
   seq: number;
   /** null until `wave_submitted`. */
   state: WaveState | null;
-  /** The submitted wave file (normalised). */
+  /**
+   * The effective plan (normalised): what the scheduler and spawner use. Equal to `plan` until a
+   * versioned re-submission keeps something of an older version running (plan-apply.ts).
+   */
   wave: Wave | null;
+  /** The latest submitted wave file (normalised). Absent in snapshots that predate versioning. */
+  plan?: Wave | null;
+  /** Open plan_change decisions by decision id. Absent in snapshots that predate versioning. */
+  planPending?: Record<string, { task: TaskId; change: string; to_issue?: number }>;
   /** Tasks the scheduler has admitted, in admission order. */
   admitted: TaskId[];
   /** Agents spawned for this wave (retries and reviewers included) — counts against spawn_budget. */
@@ -30,7 +37,16 @@ export interface WaveRecord {
 }
 
 export function emptyRecord(): WaveRecord {
-  return { seq: 0, state: null, wave: null, admitted: [], spawns: 0, overrides: {} };
+  return {
+    seq: 0,
+    state: null,
+    wave: null,
+    plan: null,
+    planPending: {},
+    admitted: [],
+    spawns: 0,
+    overrides: {},
+  };
 }
 
 const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
@@ -52,6 +68,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.type === "wave_submitted") {
     const wave = ev.data.wave as Wave;
     next.wave = wave;
+    next.plan = wave;
     next.overrides = wave.config;
     next.state = {
       wave: wave.wave,
@@ -63,25 +80,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       tasks: [],
       open_decisions: [],
       gates: [],
-      spec: {
-        version: wave.version,
-        release_branch: wave.release_branch,
-        model: wave.model,
-        pipeline: wave.pipeline,
-        tasks: Object.fromEntries(
-          wave.task_order.map((id) => {
-            const t = wave.tasks[id];
-            return [
-              id,
-              {
-                issue: t?.issue ?? 0,
-                ...(t?.title !== undefined ? { title: t.title } : {}),
-                after: t?.after ?? [],
-              },
-            ];
-          }),
-        ),
-      },
+      spec: specOf(wave),
       updated_at: ev.at,
     };
     return next;
@@ -93,16 +92,38 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   const task = ev.task !== undefined ? state.tasks.find((t) => t.id === ev.task) : undefined;
 
   switch (ev.type) {
-    case "task_queued":
-      if (ev.task !== undefined && task === undefined) {
-        state.tasks.push({
-          id: ev.task,
-          issue: (ev.data.issue as number | undefined) ?? next.wave?.tasks[ev.task]?.issue ?? 0,
-          stage: "queued",
-          agents: {},
-        });
+    case "wave_versioned": {
+      // plan-apply.ts: `plan` is the file as submitted, `wave` the effective plan.
+      const wave = ev.data.wave as Wave;
+      const plan = (ev.data.plan as Wave | undefined) ?? wave;
+      next.wave = wave;
+      next.plan = plan;
+      next.overrides = plan.config;
+      state.version = plan.version;
+      state.release_branch = plan.release_branch;
+      state.spec = specOf(plan);
+      for (const t of state.tasks) {
+        const issue = wave.tasks[t.id]?.issue;
+        if (issue !== undefined) t.issue = issue;
       }
       break;
+    }
+    case "task_queued": {
+      if (ev.task === undefined) break;
+      const queued: TaskState = {
+        id: ev.task,
+        issue: (ev.data.issue as number | undefined) ?? next.wave?.tasks[ev.task]?.issue ?? 0,
+        stage: "queued",
+        agents: {},
+      };
+      if (task === undefined) state.tasks.push(queued);
+      else if (task.stage === "cancelled") {
+        // Re-added by a later plan version: starts over.
+        state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
+        next.admitted = next.admitted.filter((id) => id !== ev.task);
+      }
+      break;
+    }
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
@@ -127,11 +148,24 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "decision_opened": {
       const id = ev.data.decision_id as string;
       if (!state.open_decisions.includes(id)) state.open_decisions.push(id);
+      if (ev.data.kind === "plan_change" && ev.task !== undefined) {
+        next.planPending = {
+          ...next.planPending,
+          [id]: {
+            task: ev.task,
+            change: String(ev.data.change),
+            ...(typeof ev.data.to_issue === "number" ? { to_issue: ev.data.to_issue } : {}),
+          },
+        };
+      }
       break;
     }
-    case "decision_resolved":
+    case "decision_resolved": {
       state.open_decisions = state.open_decisions.filter((d) => d !== ev.data.decision_id);
+      const { [ev.data.decision_id as string]: _gone, ...rest } = next.planPending ?? {};
+      next.planPending = rest;
       break;
+    }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
@@ -148,7 +182,33 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   return next;
 }
 
-/** Recompute the fields that follow from task stages: waiting_on/why_waiting and gates. */
+/** The wave-state `spec`: the submitted file's shape. */
+function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
+  return {
+    version: wave.version,
+    release_branch: wave.release_branch,
+    model: wave.model,
+    pipeline: wave.pipeline,
+    tasks: Object.fromEntries(
+      wave.task_order.map((id) => {
+        const t = wave.tasks[id];
+        return [
+          id,
+          {
+            issue: t?.issue ?? 0,
+            ...(t?.title !== undefined ? { title: t.title } : {}),
+            after: t?.after ?? [],
+          },
+        ];
+      }),
+    ),
+  };
+}
+
+/**
+ * Recompute the fields that follow from task stages and open decisions: waiting_on/why_waiting,
+ * gates and plan_pending.
+ */
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
@@ -161,6 +221,10 @@ function derive(state: WaveState, rec: WaveRecord): void {
       : t;
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+  const asked = new Set(Object.values(rec.planPending ?? {}).map((p) => p.task));
+  const pending = state.tasks.filter((t) => asked.has(t.id)).map((t) => t.id);
+  if (pending.length > 0) state.plan_pending = pending;
+  else Reflect.deleteProperty(state, "plan_pending");
 }
 
 /** Fold events onto a record (default: empty). */

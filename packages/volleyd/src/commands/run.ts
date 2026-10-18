@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { resolveTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
+import { formatDiff } from "../plan-diff";
 import type { WaveState } from "../types";
 import { parseWaveFile } from "../wave-file";
 import { formatWave } from "./status";
@@ -10,6 +11,11 @@ const HELP = `Usage: volleyd run <wave.yaml> [--json] [--broker-url <url>] [--na
 
 Validate a wave file locally, then submit it to the running daemon. Returns as soon as the
 daemon has journaled the wave; tasks start as the scheduler admits them.
+
+If the daemon already runs a wave with this id, the file is that wave's next plan version: the
+daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
+it (added tasks queue, removed queued tasks cancel, in-flight tasks get a plan_change decision).
+Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 `;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -54,6 +60,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     }
     const state = res.result as WaveState;
     if (parsed.values.json === true) io.stdout(`${JSON.stringify(state, null, 2)}\n`);
+    else if (res.plan !== undefined)
+      io.stdout(
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${formatWave(state)}`,
+      );
     else
       io.stdout(`submitted wave ${state.wave} (${state.tasks.length} tasks)\n${formatWave(state)}`);
     return EXIT.OK;

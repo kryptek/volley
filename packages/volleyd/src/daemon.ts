@@ -6,10 +6,11 @@ import {
   readFileSync,
   readdirSync,
   unlinkSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
@@ -26,9 +27,11 @@ import { exec } from "./exec";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import { Journal, WaveLog } from "./journal";
+import { PlanChangeError, applyPlan, samePlan, taskActivity } from "./plan-apply";
+import { diffPlans } from "./plan-diff";
 import { type Admission, activeTasks, admit, ready, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
-import type { JournalEvent, NewEvent, TunablesPatch, WaveId, WaveState } from "./types";
+import type { JournalEvent, NewEvent, TunablesPatch, Wave, WaveId, WaveState } from "./types";
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
@@ -787,6 +790,8 @@ export class Daemon {
       }
       case "run":
         return this.submit(p);
+      case "diff":
+        return this.planDiff(p);
       case "spawn":
         return this.manualSpawn(p);
       case "config_get": {
@@ -829,25 +834,40 @@ export class Daemon {
     }
   }
 
-  /** `run`: validate the wave file again (the daemon is authoritative), journal it, queue tasks. */
-  private async submit(p: Record<string, unknown>): Promise<Reply> {
+  /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
+  private parseRequestWave(p: Record<string, unknown>, op: string): Wave | Reply {
     if (typeof p.wave_yaml !== "string")
-      return { ok: false, error: "run requires payload.wave_yaml" };
-    let wave: ReturnType<typeof parseWaveFile>;
+      return { ok: false, error: `${op} requires payload.wave_yaml` };
     try {
-      wave = parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
+      return parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;
     }
-    if (this.waves.has(wave.wave)) {
-      return {
-        ok: false,
-        error: `wave '${wave.wave}' already submitted (versioned re-submission is not supported yet)`,
-      };
-    }
+  }
+
+  /** Where version N of a wave file is stored: `<home>/waves/<wave>/v<N>.yaml`. */
+  private versionFile(wave: WaveId, version: number): string {
+    return join(this.opts.home, "waves", wave, `v${version}.yaml`);
+  }
+
+  private storeVersion(file: string, text: string): void {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+  }
+
+  /**
+   * `run`: validate the wave file again (the daemon is authoritative), journal it, queue tasks.
+   * For a wave already submitted, the file is its next version (`resubmit`).
+   */
+  private async submit(p: Record<string, unknown>): Promise<Reply> {
+    const wave = this.parseRequestWave(p, "run");
+    if ("ok" in wave) return wave;
+    const existing = this.waves.get(wave.wave);
+    if (existing !== undefined) return this.resubmit(existing, wave, p.wave_yaml as string);
     this.waves.set(wave.wave, WaveLog.open(join(this.opts.home, "waves", wave.wave)));
     this.config.setWaveOverrides(wave.wave, wave.config);
+    this.storeVersion(this.versionFile(wave.wave, wave.version), p.wave_yaml as string);
     await this.append(wave.wave, { type: "wave_submitted", data: { wave, owner: null } });
     for (const id of wave.task_order) {
       await this.append(wave.wave, {
@@ -859,6 +879,65 @@ export class Daemon {
     await this.tickNow();
     this.log(`submitted wave ${wave.wave} (${wave.task_order.length} tasks)`);
     return { ok: true, result: this.snapshot(wave.wave) };
+  }
+
+  /** A new version of a submitted wave: store the file, journal the plan change, re-admit. */
+  private async resubmit(log: WaveLog, wave: Wave, text: string): Promise<Reply> {
+    const rec = log.record;
+    const state = rec.state;
+    if (state === null) return { ok: false, error: `wave '${wave.wave}' has no state` };
+    if (state.status === "complete" || state.status === "stopped") {
+      return {
+        ok: false,
+        error: `wave '${wave.wave}' is ${state.status}; a new version applies only to a live wave`,
+      };
+    }
+    const file = this.versionFile(wave.wave, state.version + 1);
+    const now = new Date().toISOString();
+    let res: ReturnType<typeof applyPlan>;
+    try {
+      res = applyPlan(rec, wave, { now, activity: taskActivity(log.journal.readAll()), file });
+    } catch (e) {
+      if (e instanceof PlanChangeError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (res.unchanged) {
+      return {
+        ok: false,
+        error: `wave '${wave.wave}' already submitted as v${state.version}; the file has no changes`,
+        plan: { version: res.version, diff: res.diff, unchanged: true },
+      };
+    }
+    this.storeVersion(file, text);
+    this.config.setWaveOverrides(wave.wave, wave.config);
+    for (const ev of res.events) await this.append(wave.wave, ev);
+    await this.tickNow();
+    this.log(`wave ${wave.wave} v${res.version}: ${JSON.stringify(res.diff)}`);
+    return {
+      ok: true,
+      result: this.snapshot(wave.wave),
+      plan: { version: res.version, diff: res.diff, unchanged: false },
+    };
+  }
+
+  /** `diff`: the structural diff between a wave's current plan and a file, without submitting. */
+  private planDiff(p: Record<string, unknown>): Reply {
+    const name = typeof p.wave === "string" ? p.wave : "";
+    const rec = this.waves.get(name)?.record;
+    const current = rec?.plan ?? rec?.wave;
+    if (rec?.state == null || current == null)
+      return { ok: false, error: `unknown wave '${name}'` };
+    const wave = this.parseRequestWave(p, "diff");
+    if ("ok" in wave) return wave;
+    if (wave.wave !== name) {
+      return { ok: false, error: `the file is for wave '${wave.wave}', not '${name}'` };
+    }
+    const diff = diffPlans(current, wave);
+    return {
+      ok: true,
+      result: diff,
+      plan: { version: rec.state.version, diff, unchanged: samePlan(current, wave) },
+    };
   }
 }
 

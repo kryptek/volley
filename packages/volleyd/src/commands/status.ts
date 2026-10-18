@@ -57,8 +57,13 @@ function parseStatus(argv: string[]) {
 
 /** Human-readable wave summary: a header line, then one line per task. */
 export function formatWave(s: WaveState): string {
+  const pending = s.plan_pending?.length ?? 0;
+  const version =
+    pending > 0
+      ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
+      : `v${s.version}`;
   const header =
-    `${s.wave}  ${s.status}  v${s.version}  owner: ${s.owner ?? "-"}  ` +
+    `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${s.open_decisions.length}\n`;
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {

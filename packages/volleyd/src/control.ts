@@ -5,6 +5,7 @@ import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { EXIT, type ExitCode, type IO } from "./io";
+import type { PlanDiff } from "./plan-diff";
 import type { PathError } from "./schemas";
 
 /**
@@ -22,7 +23,7 @@ export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 
 /** Ops handled in this release; later tasks add pause/resume/stop/steer/resolve/claim. */
-export type ControlOp = "run" | "status" | "config_get" | "config_set" | "spawn";
+export type ControlOp = "run" | "diff" | "status" | "config_get" | "config_set" | "spawn";
 
 export interface ControlResponse {
   text: string;
@@ -36,6 +37,8 @@ export interface ControlResponse {
   /** config_set only (SPEC §4.6.4). */
   applied?: boolean;
   rejected?: PathError[];
+  /** run (a new version of a submitted wave) and diff: the structural plan change. */
+  plan?: { version: number; diff: PlanDiff; unchanged: boolean };
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);

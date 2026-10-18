@@ -9,7 +9,8 @@ Commands:
   daemon      Run the supervisor in the foreground
   install     Install and load the launchd service (macOS)
   uninstall   Unload and remove the launchd service
-  run         Validate a wave file and submit it to the daemon
+  run         Validate a wave file and submit it to the daemon (or a new version of it)
+  diff        Show the structural diff between a wave's plan and a wave file
   validate    Validate a wave file locally (no daemon needed)
   status      Show wave state from the daemon
   events      Print journal events after a named cursor
@@ -18,7 +19,7 @@ Commands:
   spawn       Spawn one task's agent now (worktree, identity, launch, verify)
   cleanup     Remove a wave's retired worktrees and workspaces (--yes)
 
-Global flags (daemon/install/run/status/config):
+Global flags (daemon/install/run/diff/status/config):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     Volley namespace (env: VOLLEY_NAMESPACE; default: default)
 State directory: $VOLLEYD_HOME (default: ~/.volley/volleyd)
@@ -34,6 +35,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   install: async () => (await import("./commands/install")).install,
   uninstall: async () => (await import("./commands/install")).uninstall,
   run: async () => (await import("./commands/run")).run,
+  diff: async () => (await import("./commands/diff")).diff,
   validate: async () => (await import("./commands/validate")).validate,
   status: async () => (await import("./commands/status")).status,
   events: async () => (await import("./commands/events")).events,

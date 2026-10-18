@@ -28,6 +28,7 @@ coordinator session.
 - [Topics and the control channel](#topics-and-the-control-channel)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+- [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
@@ -100,7 +101,8 @@ config.hard_ceiling: must be <= 100
 | `volleyd daemon` | Run the supervisor in the foreground until SIGINT/SIGTERM. |
 | `volleyd install [--dry-run]` | Write `~/Library/LaunchAgents/systems.volley.volleyd.plist` and `launchctl bootstrap` it. |
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
-| `volleyd run <wave.yaml> [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. |
+| `volleyd run <wave.yaml> [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. For a wave id the daemon already runs, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
+| `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between the wave's current plan and the file, without submitting. |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors. |
 | `volleyd status [wave] [--json]` | Wave state from the daemon. `--json` prints the exact `wave_state` payload. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
@@ -328,6 +330,45 @@ and branches are never deleted.
 Answering a `repo_untrusted` decision with `trust` records exactly
 `projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`); accepting the dialog in any
 worktree of the repo works too, and the next tick resumes the parked spawns.
+
+---
+
+## Plan changes (versioned wave files)
+
+Plans change while a wave runs. `volleyd run <wave.yaml>` with the id of a wave the daemon already
+holds (running, paused or awaiting a decision) submits the file as that wave's **next version**:
+
+1. The file is stored as `$VOLLEYD_HOME/waves/<wave>/v<N>.yaml` (`v1.yaml` is the first
+   submission; the file's own `version:` field is informational, the daemon numbers versions).
+2. `wave_versioned` is journaled with the structural diff (`src/plan-diff.ts`: tasks added,
+   removed, and changed — dependencies, issue, pipeline, model), the submitted plan and the
+   effective plan, then the rule events below. A file with no changes at all is refused
+   (`already submitted as vN`); a different `repo:` is refused.
+3. The rules (`src/plan-apply.ts`) apply mechanically, against the wave's current state:
+
+| Change | Task not yet admitted | Task in flight (admitted, or past `queued`) |
+|---|---|---|
+| task added | `task_queued` (a task removed earlier and re-added is re-queued) | — |
+| task removed | `task_cancelled` | untouched; decision `plan_change` "stop T3 (implementer working 14 min)?" — `stop` / `let finish` |
+| `after` changed | the new dependencies apply (`waiting_on` re-evaluated) | not paused (it already started); its dependents re-evaluate |
+| `issue` changed | applies | keeps the old issue; decision `plan_change` — `restart` / `let finish` |
+| `pipeline` / `model` changed | applies | applies to stages not yet started; running agents keep theirs |
+
+Tasks that finished (`merge_ready`, `done`) are left as they are. The scheduler and spawner use the
+*effective* plan: the submitted one, plus removed in-flight tasks and in-flight tasks' old issues,
+kept until their decision is answered. The wave state's `spec` is the plan as submitted, `version`
+is the plan version, and `plan_pending` lists the tasks with an open `plan_change` decision;
+`volleyd status` shows `plan v3 (2 tasks pending decision)`. A later version that undoes a change
+withdraws its decision (`decision_resolved` with answer `withdrawn`; a re-pointed issue that is
+re-pointed again is `superseded` and asked anew). Decision ids are stable per task and kind
+(`plan_change-<hash>`), and each carries `change` (`removed` | `issue`), `plan_version` and, for an
+issue change, `from_issue` / `to_issue`, so the resolver can act on the answer. A version's
+`config:` block replaces the wave's overrides.
+
+```sh
+volleyd diff 2026-10-20-example wave-v2.yaml   # + T6 / - T3 / ~ T2  after +T6; model a -> b
+volleyd run wave-v2.yaml                        # submitted wave 2026-10-20-example plan v2
+```
 
 ---
 
