@@ -9,7 +9,8 @@ import type { JournalEvent, LeasePoolConfig, NewEvent } from "./types";
  *
  * Rules: grants are FIFO and never exceed the pool's current capacity; nothing is ever
  * preempted (a capacity cut, or a pool removed from config, only stops new grants); a lease
- * ends on release, on TTL expiry, or when its holder's status turns terminal.
+ * ends on release, on TTL expiry, or when its holder's status turns terminal. A pool removed
+ * from config drops its queued requests (they never started), so their clients stop waiting.
  */
 
 export interface HeldLease {
@@ -158,9 +159,9 @@ export function replayLeases(events: readonly JournalEvent[]): LeaseBook {
 
 /**
  * One input → the events it causes, applied. After the input itself, every step expires leases
- * past their TTL and then grants queued requests FIFO while a pool is under its current
- * capacity — so a capacity increase is granted on the next tick and a decrease only waits for
- * releases.
+ * past their TTL, drops the queued requests of pools no longer configured, and then grants
+ * queued requests FIFO while a pool is under its current capacity — so a capacity increase is
+ * granted on the next tick and a decrease only waits for releases.
  */
 export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext): LeaseStepResult {
   const at = ctx.now.toISOString();
@@ -217,6 +218,17 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
       if (Date.parse(h.expires_at) <= ctx.now.getTime()) {
         emit("lease_expired", { pool, lease_id: h.lease_id, holder: h.holder });
       }
+    }
+  }
+  for (const [pool, p] of Object.entries(cur)) {
+    if (Object.hasOwn(ctx.pools, pool)) continue;
+    for (const q of p.queue) {
+      emit("lease_released", {
+        pool,
+        lease_id: q.lease_id,
+        holder: q.holder,
+        reason: "pool removed",
+      });
     }
   }
   for (const pool of Object.keys(cur)) {

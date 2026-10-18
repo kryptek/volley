@@ -58,7 +58,7 @@
       "properties": {
         "state": {
           "enum": ["clear", "over", "recovering", "unknown"],
-          "description": "over: past its threshold now; recovering: clear, but not yet for hysteresis_samples consecutive samples; unknown: could not be measured (never throttles)."
+          "description": "over: past its threshold now; recovering: tripped earlier and clear (or unmeasurable) for fewer than hysteresis_samples consecutive samples; unknown: could not be measured and not tripped (never throttles)."
         },
         "value": { "type": "number", "description": "The measured value (level, ms, count)." },
         "max": {
@@ -66,7 +66,11 @@
           "description": "The configured threshold the value is compared with."
         },
         "clean_samples": { "type": "integer", "minimum": 0 },
-        "error": { "type": "string", "maxLength": 500, "description": "Why the signal is unknown." }
+        "error": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Why the last sample could not be measured (state unknown, or recovering on an unmeasurable sample)."
+        }
       }
     }
   }

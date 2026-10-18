@@ -124,6 +124,21 @@ describe("decide: hysteresis", () => {
     expect(run(CALM).reasons).toEqual(["recovering: memory pressure clear for 1/3 samples"]);
   });
 
+  it("an unknown sample on a tripped signal counts toward recovery and is reported as recovering", () => {
+    const tripped = decide({ ...CALM, containers: s(50) }, emptyAdmissionState(), CFG).state;
+    const v = decide({ ...CALM, containers: { ...unknown, error: "docker down" } }, tripped, CFG);
+    expect(v.allow).toBe(0);
+    expect(v.reasons).toEqual([
+      "recovering: containers clear for 1/3 samples (last sample unknown)",
+    ]);
+    expect(v.signals.containers).toEqual({
+      state: "recovering",
+      max: 20,
+      clean_samples: 1,
+      error: "docker down",
+    });
+  });
+
   it("hysteresis_samples: 1 recovers on the first clean sample", () => {
     const one = { ...CFG, hysteresis_samples: 1 };
     const tripped = decide({ ...CALM, containers: s(50) }, emptyAdmissionState(), one).state;
@@ -267,8 +282,8 @@ describe("volleyd daemon: pressure-based admission", () => {
 
   it("a threshold changed through config_set re-decides without a restart", async () => {
     reading.samples.containers = s(25);
+    // start() takes the first sample: the only one before the threshold change.
     const daemon = await t.start({ pressure: async () => reading });
-    await daemon.tick();
     expect((await runCli(["run", PARALLEL], t.env)).exitCode).toBe(0);
     expect((await state()).tasks[0]?.why_waiting).toBe("25 containers running > max 20");
 
@@ -276,6 +291,26 @@ describe("volleyd daemon: pressure-based admission", () => {
     expect(set.exitCode).toBe(0);
     await daemon.tick();
     expect((await state()).tasks[0]?.why_waiting).toBe("admitted: awaiting spawn");
+  });
+
+  it("after a restart under critical pressure it admits nothing, before or after the first tick", async () => {
+    reading.samples.memory_pressure = s(4);
+    let daemon = await t.start({ pressure: async () => reading });
+    await daemon.tick();
+    expect((await runCli(["run", PARALLEL], t.env)).exitCode).toBe(0);
+    expect((await state()).tasks.map((x) => x.why_waiting)).toEqual(
+      Array(4).fill("memory pressure critical (level 4 > max 2)"),
+    );
+    await daemon.stop();
+
+    daemon = await t.start({ pressure: async () => reading });
+    expect((await state()).tasks.map((x) => x.why_waiting)).toEqual(
+      Array(4).fill("memory pressure critical (level 4 > max 2)"),
+    );
+    await daemon.tick();
+    expect((await state()).tasks.every((x) => x.why_waiting !== "admitted: awaiting spawn")).toBe(
+      true,
+    );
   });
 
   it("counts API overload signals from agents' progress events", async () => {

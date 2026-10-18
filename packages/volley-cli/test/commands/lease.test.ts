@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -21,7 +23,11 @@ interface Req {
  * the pools, and a FIFO grant loop over lease requests that re-publishes the retained pool
  * state after every request (SPEC §4.6.5). Enough to drive the client; the real one is volleyd.
  */
-async function fakeVolleyd(url: string, capacities: Record<string, number>) {
+async function fakeVolleyd(
+  url: string,
+  capacities: Record<string, number>,
+  opts: { ignoreRequests?: boolean } = {},
+) {
   const b = new VolleyBroker();
   await b.connect({ url, agentId: "volleyd" });
   const env = (channel: string, type: string, payload: unknown) =>
@@ -80,11 +86,33 @@ async function fakeVolleyd(url: string, capacities: Record<string, number>) {
     if (e === null) return;
     const r = { ...(e.payload as Omit<Req, "sender">), sender: e.agent_id };
     requests.push(r);
-    void handle(m.topic.split("/")[3] ?? "", r);
+    if (opts.ignoreRequests !== true) void handle(m.topic.split("/")[3] ?? "", r);
   });
   return {
     requests,
     pools,
+    /** Die like volleyd's LWT would say: retained status reaped, then drop the connection. */
+    die: async () => {
+      await b.publish("volley/test/volleyd/status", env("status", "reaped", {}), {
+        qos: 1,
+        retain: true,
+      });
+      await b.disconnect();
+    },
+    /** Remove a pool from config with requests still queued: drop them, clear the pool topic. */
+    removePool: async (pool: string) => {
+      delete capacities[pool];
+      await b.publish(
+        "volley/_waves/_config",
+        env("_waves/_config", "config", { lease_pools: {} }),
+        {
+          qos: 1,
+          retain: true,
+        },
+      );
+      delete pools[pool];
+      await b.publish(`volley/_system/leases/${pool}`, "", { qos: 1, retain: true });
+    },
     /** Hold a lease on behalf of someone else (as if granted earlier). */
     hold: (pool: string, lease_id: string, holder: string) =>
       handle(pool, { op: "acquire", lease_id, holder, sender: holder }),
@@ -93,6 +121,29 @@ async function fakeVolleyd(url: string, capacities: Record<string, number>) {
     close: () => b.disconnect(),
   };
 }
+
+/** Run the CLI as a real process (for signals), collecting stderr. */
+function spawnCli(args: string[], env: Record<string, string> = {}) {
+  const proc = spawn("bun", ["run", CLI_ENTRY, ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...env },
+  });
+  const out = { stderr: "" };
+  proc.stderr.on("data", (c: Buffer) => {
+    out.stderr += c.toString();
+  });
+  const exited = new Promise<number | null>((r) => proc.on("close", (code) => r(code)));
+  return { proc, out, exited };
+}
+
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const eventually = async (fn: () => boolean, ms = 5000) => {
   const deadline = Date.now() + ms;
@@ -201,6 +252,125 @@ describe("volley lease", () => {
     expect(stderr).not.toContain("granted");
   });
 
+  it("run: SIGHUP during the wait cancels the request and exits 129", async () => {
+    await sup.hold("p", "l-other", "agent-z");
+    const c = spawnCli([
+      "lease",
+      "run",
+      "--pool",
+      "p",
+      "--holder",
+      "agent-a",
+      ...base(),
+      "--",
+      "true",
+    ]);
+    await eventually(() => (sup.pools.p?.queue.length ?? 0) === 1, 10_000);
+    c.proc.kill("SIGHUP");
+    expect(await c.exited).toBe(129);
+    await eventually(() => sup.requests.some((q) => q.op === "release" && q.holder === "agent-a"));
+  });
+
+  it("run: SIGTERM while the command runs reaches the whole process group, not just the shell", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lease-pg-"));
+    const pidFile = join(dir, "pid");
+    try {
+      const c = spawnCli([
+        "lease",
+        "run",
+        "--pool",
+        "p",
+        "--holder",
+        "agent-a",
+        ...base(),
+        "--",
+        "sh",
+        "-c",
+        `sleep 60 & echo $! > ${pidFile}; wait`,
+      ]);
+      await eventually(
+        () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
+        10_000,
+      );
+      const grandchild = Number(readFileSync(pidFile, "utf-8").trim());
+      c.proc.kill("SIGTERM");
+      expect(await c.exited).toBe(143);
+      await eventually(() => !pidAlive(grandchild));
+      await eventually(() => sup.requests.some((q) => q.op === "release"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("run: killed outright (SIGKILL) while holding, its will releases the lease", async () => {
+    const c = spawnCli([
+      "lease",
+      "run",
+      "--pool",
+      "p",
+      "--holder",
+      "agent-a",
+      ...base(),
+      "--",
+      "sleep",
+      "30",
+    ]);
+    await eventually(() => (sup.pools.p?.held.length ?? 0) === 1, 10_000);
+    c.proc.kill("SIGKILL");
+    await c.exited;
+    await eventually(() => sup.requests.some((q) => q.op === "release" && q.sender === "agent-a"));
+    expect(sup.pools.p?.held).toEqual([]);
+  });
+
+  it("run: queued when volleyd dies → notices at the next probe and runs unleased", async () => {
+    await sup.hold("p", "l-other", "agent-z");
+    const run = runCli({
+      argv: [
+        "lease",
+        "run",
+        "--pool",
+        "p",
+        "--holder",
+        "agent-a",
+        ...base(),
+        "--",
+        "sh",
+        "-c",
+        "exit 4",
+      ],
+      env: { VOLLEY_LEASE_RESEND_MS: "200" },
+    });
+    await eventually(() => (sup.pools.p?.queue.length ?? 0) === 1);
+    await sup.die();
+    const r = await run;
+    expect(r.exitCode).toBe(4);
+    expect(r.stderr).toContain("volleyd went away; running without a lease");
+  });
+
+  it("run: queued when its pool is removed from config → runs unleased", async () => {
+    await sup.hold("p", "l-other", "agent-z");
+    const run = runCli({
+      argv: [
+        "lease",
+        "run",
+        "--pool",
+        "p",
+        "--holder",
+        "agent-a",
+        ...base(),
+        "--",
+        "sh",
+        "-c",
+        "exit 6",
+      ],
+    });
+    await eventually(() => (sup.pools.p?.queue.length ?? 0) === 1);
+    await sup.removePool("p");
+    const r = await run;
+    expect(r.exitCode).toBe(6);
+    expect(r.stderr).toMatch(/pool p removed.*; running without a lease/);
+  });
+
   it("run: --timeout gives up with 124 and cancels", async () => {
     await sup.hold("p", "l-other", "agent-z");
     const r = await runCli({
@@ -279,6 +449,18 @@ describe("volley lease", () => {
     expect(sup.pools.build?.held).toEqual([]);
   });
 
+  it("release: defaults --holder to the lease id's prefix, and an emptied pool counts as released", async () => {
+    await sup.hold("build", "agent-a.x1", "agent-a");
+    await sup.removePool("build");
+    const rel = await runCli({
+      argv: ["lease", "release", "--pool", "build", "--lease-id", "agent-a.x1", ...base()],
+    });
+    expect(rel.stderr).toBe("");
+    expect(rel.exitCode).toBe(0);
+    await eventually(() => sup.requests.some((q) => q.op === "release"));
+    expect(sup.requests.at(-1)).toMatchObject({ holder: "agent-a", sender: "agent-a" });
+  });
+
   it("acquire fails fast on an unconfigured pool", async () => {
     const r = await runCli({ argv: ["lease", "acquire", "--pool", "nope", ...base()] });
     expect(r.exitCode).toBe(1);
@@ -300,6 +482,38 @@ describe("volley lease", () => {
     expect(
       (await runCli({ argv: ["lease", "run", "--pool", "Bad!", "--", "true"] })).exitCode,
     ).toBe(2);
+  });
+});
+
+describe("volley lease with a supervisor that never answers", () => {
+  it("run: gives up after three unanswered re-sends and runs unleased", async () => {
+    const tb = await startTestBroker();
+    const sup = await fakeVolleyd(tb.url, { p: 1 }, { ignoreRequests: true });
+    try {
+      const r = await runCli({
+        argv: [
+          "lease",
+          "run",
+          "--pool",
+          "p",
+          "--holder",
+          "agent-a",
+          "--broker-url",
+          tb.url,
+          "--",
+          "sh",
+          "-c",
+          "exit 9",
+        ],
+        env: { VOLLEY_LEASE_RESEND_MS: "100" },
+      });
+      expect(r.exitCode).toBe(9);
+      expect(r.stderr).toContain("never queued");
+      expect(sup.requests.filter((q) => q.op === "acquire")).toHaveLength(4);
+    } finally {
+      await sup.close();
+      await tb.close();
+    }
   });
 });
 

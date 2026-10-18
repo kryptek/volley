@@ -59,6 +59,11 @@ export const DAEMON_DEFAULTS = {
   /** Kill a pressure sampler (sysctl, docker, gh) after this long; its signal is then unknown. */
   sampler_timeout_ms: 5_000,
   /**
+   * Re-sample a repo's CI queue (`gh api`, which spends the agents' GitHub rate limit) at most
+   * this often; ticks in between reuse the cached sample.
+   */
+  ci_queue_sample_ms: 60_000,
+  /**
    * `memory_pressure` fallback (no sysctl level): free percentage at or below which the level is
    * 4 (critical) or 2 (warn). Heuristic thresholds, not tunables.
    */

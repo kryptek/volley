@@ -29,8 +29,14 @@ const CONFIG_TOPIC = "volley/_waves/_config";
 const LIVE = new Set(["spawning", "registered", "working"]);
 const poolTopic = (pool: string) => `volley/_system/leases/${pool}`;
 
-/** SPEC §4.6.5: re-send `acquire` when the lease is in neither `held` nor `queue` after 30 s. */
+/**
+ * SPEC §4.6.5: re-send `acquire` when the lease is in neither `held` nor `queue` after 30 s.
+ * Every such interval the waiter also checks that a volleyd is still live and the pool still
+ * configured. `VOLLEY_LEASE_RESEND_MS` overrides it (tests).
+ */
 const RESEND_MS = 30_000;
+/** Re-sends with no sign of the request in the pool state before giving up (fail open). */
+const MAX_UNANSWERED = 3;
 /** How long retained supervisor state (config, status) may take to arrive. */
 const PROBE_MS = 500;
 /** How long `release` waits to see the lease leave the pool state. */
@@ -49,12 +55,15 @@ interface PoolState {
 const HELP = `Usage:
   volley lease run --pool <pool> [options] -- <command> [args...]
   volley lease acquire --pool <pool> [options]
-  volley lease release --pool <pool> --lease-id <id> [--holder <id>]
+  volley lease release --pool <pool> --lease-id <id> [--holder <id>]  (holder default: the id's prefix)
   volley lease status [--pool <pool>] [--json]
 
-run      Wait for a lease, run the command, release the lease when it exits (or on SIGINT/SIGTERM).
-         Prints "lease granted after N s" to stderr; exits with the command's exit code. If no
-         volleyd is live, or the pool is not configured, it warns and runs the command unleased.
+run      Wait for a lease, run the command, release the lease when it exits (or on
+         SIGINT/SIGTERM/SIGHUP, which are forwarded to the command's process group). Prints
+         "lease granted after N s" to stderr; exits with the command's exit code. It never waits
+         on a supervisor that is gone: if no volleyd is live (now, or at any 30 s check while
+         queued), the pool is not or no longer configured, or the request goes unanswered, it
+         warns and runs the command unleased. If this process dies, the broker releases the lease.
 acquire  Wait for a lease and print {"pool","lease_id","holder","waited_s"}; release it later.
 release  Release a held lease, or cancel a queued request.
 status   Print every pool's holders, queue and reasons.
@@ -90,6 +99,8 @@ interface Resolved {
   pool: string | undefined;
   ttl: number | undefined;
   holder: string;
+  /** --holder was given (not derived from identity or random). */
+  holderGiven: boolean;
   leaseId: string | undefined;
   timeoutMs: number | undefined;
   brokerUrl: string;
@@ -140,15 +151,32 @@ export async function lease({ argv, env, io }: LeaseArgs): Promise<ExitCode> {
     return EXIT.USAGE;
   }
 
-  if (action === "run") return run(r as Resolved & { pool: string }, command, io);
-  const broker = await connectAsClient(r.brokerUrl, io, r.auth);
+  const resendMs = parsePositiveInt(env.VOLLEY_LEASE_RESEND_MS ?? String(RESEND_MS), "resend");
+  if (action === "run") return run(r as Resolved & { pool: string }, command, io, resendMs);
+  if (action === "release" && !r.holderGiven) {
+    // A lease id defaults to `<holder>.<random>`, so it names its holder.
+    const prefix = r.leaseId?.split(".")[0] ?? "";
+    if (r.leaseId?.includes(".") === true && isValidAgentId(prefix)) r.holder = prefix;
+  }
+  const leaseId = action === "acquire" ? (r.leaseId ?? `${r.holder}.${randomSuffix(8)}`) : "";
+  const broker = await connectAsClient(
+    r.brokerUrl,
+    io,
+    r.auth,
+    action === "acquire" ? releaseWill(r.pool as string, leaseId, r.holder) : undefined,
+  );
   if (broker === null) return EXIT.ERROR;
   try {
     if (action === "status") return await status(broker, r, io);
     if (action === "release") {
       return await releaseCmd(broker, r as Resolved & { pool: string; leaseId: string }, io);
     }
-    return await acquireCmd(broker, r as Resolved & { pool: string }, io);
+    return await acquireCmd(
+      broker,
+      { ...r, leaseId } as Resolved & { pool: string; leaseId: string },
+      io,
+      resendMs,
+    );
   } finally {
     await broker.disconnect();
   }
@@ -165,6 +193,7 @@ function resolve(
   }
   const dir = str(values["project-dir"]) ?? process.cwd();
   let holder = str(values.holder);
+  const holderGiven = holder !== undefined;
   if (holder === undefined) {
     try {
       // Only a supervisor-assigned identity is stable enough to hold a lease; otherwise use a
@@ -189,6 +218,7 @@ function resolve(
     pool,
     ttl: ttlS,
     holder,
+    holderGiven,
     leaseId,
     timeoutMs: timeout !== undefined ? parsePositiveInt(timeout, "--timeout") * 1000 : undefined,
     brokerUrl: resolveBrokerUrl(str(values["broker-url"]), env),
@@ -203,6 +233,19 @@ function identityAgentId(env: Record<string, string | undefined>, dir: string): 
   return loadConfig(env, dir).agentId;
 }
 
+/**
+ * The MQTT will for a lease client: a `release` of its lease, published (not retained) by the
+ * broker if the connection drops without a clean DISCONNECT — the process was killed, or lost
+ * its network — so the slot is freed now instead of at TTL expiry. A clean disconnect (after
+ * the explicit release, or after `acquire` printed its lease) suppresses it.
+ */
+function releaseWill(pool: string, leaseId: string, holder: string) {
+  return {
+    topic: `${poolTopic(pool)}/requests`,
+    payload: JSON.stringify(requestEnvelope({ op: "release", lease_id: leaseId, holder })),
+  };
+}
+
 function parsePool(raw: string): PoolState | null {
   const env = parseEnvelope(raw);
   if (env === null || env.type !== "lease_pool") return null;
@@ -210,24 +253,28 @@ function parsePool(raw: string): PoolState | null {
   return Array.isArray(p?.held) && Array.isArray(p.queue) ? p : null;
 }
 
-async function sendRequest(
-  broker: VolleyBroker,
-  pool: string,
-  payload: {
-    op: "acquire" | "release" | "renew";
-    lease_id: string;
-    holder: string;
-    ttl_s?: number;
-  },
-): Promise<void> {
-  const env = buildEnvelope({
+interface RequestPayload {
+  op: "acquire" | "release" | "renew";
+  lease_id: string;
+  holder: string;
+  ttl_s?: number;
+}
+
+const requestEnvelope = (payload: RequestPayload) =>
+  buildEnvelope({
     agentId: payload.holder,
     parentId: null,
     channel: "_system/leases/requests",
     type: "lease_request",
     payload,
   });
-  await broker.publish(`${poolTopic(pool)}/requests`, JSON.stringify(env), {
+
+async function sendRequest(
+  broker: VolleyBroker,
+  pool: string,
+  payload: RequestPayload,
+): Promise<void> {
+  await broker.publish(`${poolTopic(pool)}/requests`, JSON.stringify(requestEnvelope(payload)), {
     qos: 1,
     retain: false,
   });
@@ -259,27 +306,37 @@ type WaitResult =
   | { kind: "rejected"; reason: string }
   | { kind: "timeout" }
   | { kind: "aborted" }
-  | { kind: "supervisor-gone" };
+  /** No supervisor to wait for (gone, unreachable, or never answering): fail open. */
+  | { kind: "gone"; reason: string };
 
 /**
  * Send `acquire` and wait until the lease is held. Prints the queue reasons once when queued.
- * Re-sends every 30 s while the lease is in neither `held` nor `queue`; gives up (supervisor
- * gone) if, at a re-send, no volleyd is live.
+ * Every `resendMs` it checks the supervisor: none live → gone; the pool no longer configured
+ * → rejected; the lease still in neither `held` nor `queue` → re-send `acquire`, giving up
+ * (gone) after MAX_UNANSWERED re-sends. A queued lease that leaves the pool state without a
+ * grant (or whose pool state is cleared) was dropped by the supervisor → rejected. So no wait
+ * outlives the supervisor that would end it.
  */
 async function waitForGrant(
   broker: VolleyBroker,
   opts: { pool: string; leaseId: string; holder: string; ttl?: number | undefined },
   io: IO,
-  limits: { timeoutMs?: number | undefined; signal: AbortSignal },
+  limits: { timeoutMs?: number | undefined; signal: AbortSignal; resendMs: number },
 ): Promise<WaitResult> {
   const { pool, leaseId, holder } = opts;
   let seen = false;
   let toldQueued = false;
+  let unanswered = 0;
   let settle!: (r: WaitResult) => void;
   const done = new Promise<WaitResult>((r) => {
     settle = r;
   });
   const unsubscribe = await broker.subscribeStream(poolTopic(pool), ({ payload }) => {
+    if (payload === "") {
+      // volleyd clears the topic of a pool that left its config and its book.
+      if (seen) settle({ kind: "rejected", reason: `pool ${pool} removed from config` });
+      return;
+    }
     const p = parsePool(payload);
     if (p === null) return;
     const held = p.held.find((h) => h.lease_id === leaseId);
@@ -298,6 +355,8 @@ async function waitForGrant(
     }
     const rejected = p.reasons.find((r) => r.startsWith(`rejected ${leaseId}:`));
     if (rejected !== undefined) settle({ kind: "rejected", reason: rejected });
+    else if (seen)
+      settle({ kind: "rejected", reason: `${leaseId} was dropped from ${pool} without a grant` });
   });
   const acquire = () =>
     sendRequest(broker, pool, {
@@ -312,12 +371,28 @@ async function waitForGrant(
     limits.timeoutMs !== undefined
       ? setTimeout(() => settle({ kind: "timeout" }), limits.timeoutMs)
       : undefined;
-  const resend = setInterval(() => {
+  const check = async () => {
+    const s = await probeSupervisor(broker);
+    if (!s.live) return settle({ kind: "gone", reason: "volleyd went away" });
+    if (s.pools !== null && !s.pools.includes(pool))
+      return settle({ kind: "rejected", reason: `pool ${pool} removed from config` });
     if (seen) return;
-    void probeSupervisor(broker)
-      .then((s) => (s.live ? acquire() : settle({ kind: "supervisor-gone" })))
-      .catch(() => {});
-  }, RESEND_MS);
+    if (++unanswered > MAX_UNANSWERED) {
+      return settle({
+        kind: "gone",
+        reason: `volleyd never queued ${leaseId} after ${MAX_UNANSWERED} re-sends`,
+      });
+    }
+    await acquire();
+  };
+  const resend = setInterval(() => {
+    check().catch((e: unknown) =>
+      settle({
+        kind: "gone",
+        reason: `lost the broker (${e instanceof Error ? e.message : String(e)})`,
+      }),
+    );
+  }, limits.resendMs);
   try {
     if (limits.signal.aborted) return { kind: "aborted" };
     await acquire();
@@ -326,11 +401,15 @@ async function waitForGrant(
     clearTimeout(timer);
     clearInterval(resend);
     limits.signal.removeEventListener("abort", onAbort);
-    await unsubscribe();
+    await unsubscribe().catch(() => {});
   }
 }
 
-/** Abort on SIGINT/SIGTERM while installed; `remove()` uninstalls. Remembers the signal. */
+/** Abort on SIGINT/SIGTERM/SIGHUP while installed; `remove()` uninstalls. Remembers the signal. */
+const TRAPPED: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+type Traps = ReturnType<typeof trapSignals>;
+
 function trapSignals(): {
   signal: AbortSignal;
   caught: () => NodeJS.Signals | null;
@@ -342,16 +421,13 @@ function trapSignals(): {
     caught = sig;
     ac.abort();
   };
-  const int = on("SIGINT");
-  const term = on("SIGTERM");
-  process.on("SIGINT", int);
-  process.on("SIGTERM", term);
+  const handlers = TRAPPED.map((sig) => [sig, on(sig)] as const);
+  for (const [sig, h] of handlers) process.on(sig, h);
   return {
     signal: ac.signal,
     caught: () => caught,
     remove: () => {
-      process.off("SIGINT", int);
-      process.off("SIGTERM", term);
+      for (const [sig, h] of handlers) process.off(sig, h);
     },
   };
 }
@@ -359,15 +435,35 @@ function trapSignals(): {
 const signalExit = (sig: NodeJS.Signals | null): ExitCode =>
   (128 + (sig !== null ? (constants.signals[sig] ?? 15) : 15)) as ExitCode;
 
-async function run(r: Resolved & { pool: string }, command: string[], io: IO): Promise<ExitCode> {
-  const broker = await connectAsClient(r.brokerUrl, io, r.auth);
-  if (broker === null) {
-    io.stderr("volley lease: broker unreachable; running without a lease\n");
-    return exec(command, null);
-  }
-  const traps = trapSignals();
+async function run(
+  r: Resolved & { pool: string },
+  command: string[],
+  io: IO,
+  resendMs: number,
+): Promise<ExitCode> {
   const leaseId = r.leaseId ?? `${r.holder}.${randomSuffix(8)}`;
+  const will = releaseWill(r.pool, leaseId, r.holder);
+  // Installed for the whole run: an unleased command is forwarded our signals too.
+  const traps = trapSignals();
+  const first = await connectAsClient(r.brokerUrl, io, r.auth, will);
+  if (first === null) {
+    io.stderr("volley lease: broker unreachable; running without a lease\n");
+    try {
+      return await exec(command, traps);
+    } finally {
+      traps.remove();
+    }
+  }
+  let broker = first;
   let granted = false;
+  /** A fresh connection (with the will) when the current one dropped; null if that fails too. */
+  const reconnect = async (): Promise<VolleyBroker | null> => {
+    if (broker.connected) return broker;
+    io.stderr("volley lease: lost the broker connection; reconnecting\n");
+    const b = await connectAsClient(r.brokerUrl, io, r.auth, will);
+    if (b !== null) broker = b;
+    return b;
+  };
   try {
     const sup = await probeSupervisor(broker);
     if (!sup.live || sup.pools === null || !sup.pools.includes(r.pool)) {
@@ -377,15 +473,14 @@ async function run(r: Resolved & { pool: string }, command: string[], io: IO): P
           : `volley lease: no lease pool '${r.pool}' configured; running without a lease\n`,
       );
       await broker.disconnect();
-      traps.remove();
-      return exec(command, null);
+      return await exec(command, traps);
     }
     const started = io.now().getTime();
     const res = await waitForGrant(
       broker,
       { pool: r.pool, leaseId, holder: r.holder, ttl: r.ttl },
       io,
-      { timeoutMs: r.timeoutMs, signal: traps.signal },
+      { timeoutMs: r.timeoutMs, signal: traps.signal, resendMs },
     );
     if (res.kind !== "granted") {
       await cancel(broker, r.pool, leaseId, r.holder);
@@ -394,42 +489,53 @@ async function run(r: Resolved & { pool: string }, command: string[], io: IO): P
         io.stderr(`volley lease: no ${r.pool} lease within ${(r.timeoutMs ?? 0) / 1000} s\n`);
         return EXIT.TIMEOUT;
       }
-      io.stderr(
-        res.kind === "rejected"
-          ? `volley lease: ${res.reason}; running without a lease\n`
-          : "volley lease: volleyd went away; running without a lease\n",
-      );
-      traps.remove();
-      return exec(command, null);
+      io.stderr(`volley lease: WARNING: ${res.reason}; running without a lease\n`);
+      return await exec(command, traps);
     }
     granted = true;
     const waited = Math.round((io.now().getTime() - started) / 1000);
     io.stderr(`volley lease: ${r.pool} lease granted after ${waited} s\n`);
-    // Renew at half the TTL so a long command keeps its lease.
+    // Renew at half the TTL so a long command keeps its lease. After a dropped connection the
+    // will has released the lease, so the fresh connection asks for it again instead.
+    let renewing = false;
     const renew = setInterval(
-      () =>
-        void sendRequest(broker, r.pool, {
-          op: "renew",
-          lease_id: leaseId,
-          holder: r.holder,
-        }).catch(() => {}),
+      () => {
+        if (renewing) return;
+        renewing = true;
+        void (async () => {
+          const wasConnected = broker.connected;
+          const b = await reconnect();
+          if (b === null) return;
+          await sendRequest(b, r.pool, {
+            op: wasConnected ? "renew" : "acquire",
+            lease_id: leaseId,
+            holder: r.holder,
+            ...(!wasConnected && r.ttl !== undefined ? { ttl_s: r.ttl } : {}),
+          });
+        })()
+          .catch(() => {})
+          .finally(() => {
+            renewing = false;
+          });
+      },
       Math.max(1, res.ttlS / 2) * 1000,
     );
     try {
-      return await exec(command, traps.signal);
+      return await exec(command, traps);
     } finally {
       clearInterval(renew);
     }
   } finally {
     traps.remove();
-    if (broker.connected) {
-      if (granted) await cancel(broker, r.pool, leaseId, r.holder);
-      await broker.disconnect();
+    const b = granted ? await reconnect().catch(() => null) : broker;
+    if (b?.connected === true) {
+      if (granted) await cancel(b, r.pool, leaseId, r.holder);
+      await b.disconnect();
     }
   }
 }
 
-/** Release (or cancel a queued request); errors are swallowed — TTL is the fallback. */
+/** Release (or cancel a queued request); errors are swallowed — the will, then TTL, are the fallback. */
 async function cancel(broker: VolleyBroker, pool: string, leaseId: string, holder: string) {
   try {
     await sendRequest(broker, pool, { op: "release", lease_id: leaseId, holder });
@@ -440,20 +546,31 @@ async function cancel(broker: VolleyBroker, pool: string, leaseId: string, holde
 
 /**
  * Run the command with inherited stdio and resolve with its exit code (128 + n when killed by a
- * signal). SIGINT/SIGTERM delivered to us (`signal` aborts) are forwarded to the child.
+ * signal). It runs in its own process group, and a signal delivered to us (`traps` aborts) is
+ * forwarded to that whole group, so `sh -c 'cd x && mvn verify'` stops `mvn` too, not just the
+ * shell.
  */
-function exec(command: string[], signal: AbortSignal | null): Promise<ExitCode> {
+function exec(command: string[], traps: Traps): Promise<ExitCode> {
   const [cmd, ...args] = command as [string, ...string[]];
+  // Signalled before the command started: do not start it.
+  if (traps.signal.aborted) return Promise.resolve(signalExit(traps.caught()));
   return new Promise((resolveExit) => {
-    const child = spawn(cmd, args, { stdio: "inherit" });
-    const forward = () => child.kill("SIGTERM");
-    signal?.addEventListener("abort", forward, { once: true });
+    const child = spawn(cmd, args, { stdio: "inherit", detached: true });
+    const forward = () => {
+      const sig = traps.caught() ?? "SIGTERM";
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, sig);
+      } catch {
+        child.kill(sig);
+      }
+    };
+    traps.signal.addEventListener("abort", forward, { once: true });
     child.on("error", (e) => {
       process.stderr.write(`volley lease: ${e.message}\n`);
       resolveExit(127 as ExitCode);
     });
     child.on("close", (code, sig) => {
-      signal?.removeEventListener("abort", forward);
+      traps.signal.removeEventListener("abort", forward);
       resolveExit((code ?? signalExit(sig)) as ExitCode);
     });
   });
@@ -461,8 +578,9 @@ function exec(command: string[], signal: AbortSignal | null): Promise<ExitCode> 
 
 async function acquireCmd(
   broker: VolleyBroker,
-  r: Resolved & { pool: string },
+  r: Resolved & { pool: string; leaseId: string },
   io: IO,
+  resendMs: number,
 ): Promise<ExitCode> {
   const sup = await probeSupervisor(broker);
   if (sup.pools === null || !sup.pools.includes(r.pool)) {
@@ -474,14 +592,14 @@ async function acquireCmd(
     return EXIT.ERROR;
   }
   const traps = trapSignals();
-  const leaseId = r.leaseId ?? `${r.holder}.${randomSuffix(8)}`;
+  const leaseId = r.leaseId;
   const started = io.now().getTime();
   try {
     const res = await waitForGrant(
       broker,
       { pool: r.pool, leaseId, holder: r.holder, ttl: r.ttl },
       io,
-      { timeoutMs: r.timeoutMs, signal: traps.signal },
+      { timeoutMs: r.timeoutMs, signal: traps.signal, resendMs },
     );
     if (res.kind === "granted") {
       const waited_s = Math.round((io.now().getTime() - started) / 1000);
@@ -496,9 +614,7 @@ async function acquireCmd(
       io.stderr(`volley lease acquire: no ${r.pool} lease within ${(r.timeoutMs ?? 0) / 1000} s\n`);
       return EXIT.TIMEOUT;
     }
-    io.stderr(
-      `volley lease acquire: ${res.kind === "rejected" ? res.reason : "volleyd went away"}\n`,
-    );
+    io.stderr(`volley lease acquire: ${res.reason}\n`);
     return EXIT.ERROR;
   } finally {
     traps.remove();
@@ -513,6 +629,8 @@ async function releaseCmd(
   const gone = broker.subscribeUntil(
     poolTopic(r.pool),
     (payload) => {
+      // An empty retained payload: the pool left config and its last lease is gone.
+      if (payload === "") return true;
       const p = parsePool(payload);
       return (
         p !== null &&

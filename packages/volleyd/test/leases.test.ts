@@ -250,6 +250,32 @@ describe("leases: hot-reloaded pool config", () => {
   });
 });
 
+describe("leases: a pool removed with requests still queued", () => {
+  it("drops the queued request (it never started: not preemption) and the pool leaves the book once its holders release", () => {
+    const h = harness({ build: { capacity: 1 } });
+    h.acquire("build", "l-1", "agent-a");
+    h.acquire("build", "l-2", "agent-b");
+    expect(h.queued("build")).toEqual(["l-2"]);
+    // biome-ignore lint/performance/noDelete: removing a key is the config change under test
+    delete h.pools.build;
+
+    const r = h.tick(at(1));
+    expect(r.events).toEqual([
+      {
+        type: "lease_released",
+        at: at(1).toISOString(),
+        data: { pool: "build", lease_id: "l-2", holder: "agent-b", reason: "pool removed" },
+      },
+    ]);
+    expect(h.held("build")).toEqual(["l-1"]);
+    expect(h.queued("build")).toEqual([]);
+
+    h.release("build", "l-1", "agent-a", at(2));
+    expect(h.book.build).toBeUndefined();
+    expect(replayLeases(h.journal)).toEqual({});
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 // The daemon over MQTT (in-process Aedes broker)
 // ---------------------------------------------------------------------------------------------
@@ -377,6 +403,19 @@ describe("volleyd daemon: lease requests over MQTT", () => {
     await t.start();
     const p = await until("build", (x) => x.held.length === 1);
     expect(ids(p.held)).toEqual(["l-a"]);
+  });
+
+  it("a release sent while volleyd is down is processed on restart", async () => {
+    const a = await connect("agent-a");
+    await request(a, "agent-a", "build", { op: "acquire", lease_id: "l-a", holder: "agent-a" });
+    await until("build", (p) => ids(p.held).includes("l-a"));
+    await daemon.stop();
+    // Queued by the broker in volleyd's persistent session while it is down.
+    await request(a, "agent-a", "build", { op: "release", lease_id: "l-a", holder: "agent-a" });
+    daemon = await t.start();
+    await daemon.tick();
+    await until("build", (p) => p.held.length === 0);
+    expect(systemEvents().at(-1)).toBe("lease_released");
   });
 
   it("a hot capacity increase grants the queued request on the next tick", async () => {

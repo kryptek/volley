@@ -19,7 +19,8 @@ export interface Sample {
  * Rules: a signal over its threshold sets `allow` to 0 (throttle starts only — nothing running
  * is ever touched); after a breach the signal must be clear for `hysteresis_samples`
  * consecutive samples before the allowance rises; a signal that cannot be measured never
- * throttles; every verdict carries one reason per signal holding starts back.
+ * trips (on an already tripped signal it counts toward recovery); every verdict carries one
+ * reason per signal holding starts back.
  */
 
 export const SIGNALS = [
@@ -122,19 +123,27 @@ export function decide(samples: Samples, state: AdmissionState, cfg: AdmissionCo
       signals[name] = { state: "over", value, max };
       continue;
     }
-    // Clear, or unknown: an unmeasurable signal must not hold starts back forever.
+    // Clear, or unknown. An unknown sample never trips a signal; on a tripped one it counts
+    // toward recovery like a clear sample (an unmeasurable signal must not hold starts back
+    // forever), and the signal reports `recovering` until the count is reached.
     const clean = prev.tripped ? prev.clean + 1 : 0;
     const tripped = prev.tripped && clean < need;
     next[name] = { tripped, clean: tripped ? clean : 0 };
+    const error = sample?.error !== undefined ? { error: sample.error } : {};
     if (tripped) {
-      reasons.push(`recovering: ${LABEL[name]} clear for ${clean}/${need} samples`);
+      const why = value === undefined ? " (last sample unknown)" : "";
+      reasons.push(`recovering: ${LABEL[name]} clear for ${clean}/${need} samples${why}`);
+      signals[name] = {
+        state: "recovering",
+        ...(value !== undefined ? { value } : {}),
+        max,
+        clean_samples: clean,
+        ...(value === undefined ? error : {}),
+      };
+    } else {
+      signals[name] =
+        value === undefined ? { state: "unknown", ...error } : { state: "clear", value, max };
     }
-    signals[name] =
-      value === undefined
-        ? { state: "unknown", ...(sample?.error !== undefined ? { error: sample.error } : {}) }
-        : tripped
-          ? { state: "recovering", value, max, clean_samples: clean }
-          : { state: "clear", value, max };
   }
   return {
     allow: reasons.length > 0 ? 0 : Number.POSITIVE_INFINITY,

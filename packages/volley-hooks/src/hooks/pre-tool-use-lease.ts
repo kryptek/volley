@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnvelope } from "volley-mcp/envelope";
+import { isValidAgentId } from "volley-mcp/topics";
 import { type HookContext, type HookResult, runHook } from "../lib/hook-io";
 import { writeFileAtomic } from "../lib/seq";
 
@@ -30,9 +31,14 @@ const WRAPPED = /(^|[\s'"/])(volley|cli\.ts['"]?)\s+lease\s+run\s/;
 
 type Pools = Record<string, { match?: unknown }>;
 
-/** The first pool (config order) with a `match` regex that hits `command`; null when none. */
+/**
+ * The first pool (config order) with a `match` regex that hits `command`; null when none. Pool
+ * names come from a retained broker topic, so one that is not a valid pool id (§2.1 grammar,
+ * which volleyd enforces) is skipped: it never reaches the shell command we build.
+ */
 export function leaseFor(command: string, pools: Pools): string | null {
   for (const [pool, def] of Object.entries(pools)) {
+    if (!isValidAgentId(pool)) continue;
     const patterns = Array.isArray(def?.match) ? def.match : [];
     for (const p of patterns) {
       if (typeof p !== "string") continue;
@@ -76,7 +82,8 @@ export function wrapCommand(
 ): string {
   const dir = o.projectDir !== undefined ? ` --project-dir ${shellQuote(o.projectDir)}` : "";
   return (
-    `${o.cli} lease run --pool ${o.pool} --holder ${o.holder} --broker-url ${shellQuote(o.brokerUrl)}${dir}` +
+    `${o.cli} lease run --pool ${shellQuote(o.pool)} --holder ${shellQuote(o.holder)}` +
+    ` --broker-url ${shellQuote(o.brokerUrl)}${dir}` +
     ` -- "\${SHELL:-/bin/sh}" -c ${shellQuote(command)}`
   );
 }

@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
-import { leaseFor, shellQuote, wrapCommand } from "../src/hooks/pre-tool-use-lease";
+import { leaseCli, leaseFor, shellQuote, wrapCommand } from "../src/hooks/pre-tool-use-lease";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   PACKAGE_ROOT,
@@ -71,7 +72,7 @@ describe("pre-tool-use-lease hook", () => {
     const out = await hook("cd x && mvn -q verify");
     expect(out?.hookSpecificOutput.hookEventName).toBe("PreToolUse");
     const cmd = out?.hookSpecificOutput.updatedInput?.command ?? "";
-    expect(cmd).toContain(" lease run --pool backend-it --holder w1-t1-implementer-1 ");
+    expect(cmd).toContain(" lease run --pool 'backend-it' --holder 'w1-t1-implementer-1' ");
     expect(cmd).toContain(`--broker-url ${shellQuote(broker.url)}`);
     expect(cmd).toContain(`--project-dir ${shellQuote(dir)}`);
     expect(cmd.endsWith(`-- "\${SHELL:-/bin/sh}" -c 'cd x && mvn -q verify'`)).toBe(true);
@@ -103,7 +104,43 @@ describe("pre-tool-use-lease hook", () => {
     expect(await hook("mvn verify", { tool_name: "Read" })).toBeNull();
   });
 
-  it("the wrapped command really runs the original through the shell", () => {
+  it("never puts a pool name from the broker into the command unless it is a valid pool id", async () => {
+    await publishEnvelope(
+      client,
+      "volley/_waves/_config",
+      {
+        agentId: "volleyd",
+        parentId: null,
+        channel: "_waves/_config",
+        type: "config",
+        payload: {
+          version: 2,
+          lease_pools: { "x;touch pwned;#": { capacity: 1, match: ["mvn"] } },
+        },
+      },
+      { qos: 1, retain: true },
+    );
+    expect(await hook("mvn -q verify")).toBeNull();
+    expect(existsSync(join(dir, "pwned"))).toBe(false);
+  });
+
+  it("the full wrapped command runs end to end: no volleyd → the CLI fails open and runs the original", async () => {
+    const original = `printf '%s' "it's" && echo " ok"`;
+    const wrapped = wrapCommand(original, {
+      pool: "build",
+      holder: AGENT,
+      brokerUrl: broker.url,
+      cli: leaseCli({}),
+    });
+    // Async: the Aedes broker runs in this process and must keep serving the CLI.
+    const { stdout, stderr } = await promisify(execFile)("sh", ["-c", wrapped], {
+      env: { ...process.env, SHELL: "/bin/sh" },
+    });
+    expect(stdout).toBe("it's ok\n");
+    expect(stderr).toContain("no live volleyd; running without a lease");
+  });
+
+  it("quotes the original so the shell runs it verbatim", () => {
     const original = `printf '%s' "it's" && echo " ok"`;
     const wrapped = wrapCommand(original, {
       pool: "p",
@@ -119,7 +156,21 @@ describe("pre-tool-use-lease hook", () => {
   });
 });
 
-describe("leaseFor", () => {
+describe("leaseFor / wrapCommand", () => {
+  it("skips a pool whose name is not a valid pool id", () => {
+    expect(
+      leaseFor("mvn verify", { "a b": { match: ["mvn"] }, "$(x)": { match: ["mvn"] } }),
+    ).toBeNull();
+    expect(leaseFor("mvn verify", { "Bad;": { match: ["mvn"] }, ok: { match: ["mvn"] } })).toBe(
+      "ok",
+    );
+  });
+
+  it("shell-quotes the pool and holder", () => {
+    const w = wrapCommand("true", { pool: "p", holder: "h", brokerUrl: "u", cli: "volley" });
+    expect(w).toContain("--pool 'p' --holder 'h' ");
+  });
+
   it("picks the first pool whose match regex hits; skips invalid regexes", () => {
     const pools = { bad: { match: ["("] }, ...POOLS };
     expect(leaseFor("npm run build && npm test", pools)).toBe("build");

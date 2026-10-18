@@ -74,7 +74,7 @@ tasks:
 # namespace: dispatch        # Volley namespace for the wave's agents
 # spawn_budget: 20           # default: spawn_budget_multiplier × task count
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
-# config: { hard_ceiling: 4 }  # per-wave overrides of any tunable (see Configuration)
+# config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, and `files` (a scheduling hint:
@@ -169,15 +169,17 @@ commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
   1 hour; `renew` restarts it — `volley lease run` renews at half the TTL), or when the holder's
   retained `status` turns `reaped`, `done` or `failed`.
 - **Hot config, never preempt**: a capacity increase grants queued requests on the next tick; a
-  decrease stops granting until holders release; a removed pool keeps its holders, reports
-  capacity 0 with `pool <p> removed from config: new requests rejected`, rejects new acquires and
-  disappears when its last holder releases. Pools are machine-global, so capacity always comes
-  from the global config; a wave's `config.lease_pools.<pool>.ttl_s` override applies to leases its
-  own agents take.
+  decrease stops granting until holders release; a removed pool keeps its holders, drops its
+  queued requests (they never started; each gets `rejected <lease_id>: pool <p> removed from
+  config`, and `volley lease run` then runs its command unleased), reports capacity 0 with
+  `pool <p> removed from config: new requests rejected`, rejects new acquires and disappears when
+  its last holder releases. Pools are machine-global: they come only from the global config, and a
+  wave file that sets `config.lease_pools` is rejected.
 - **Durable**: every grant/release/expiry is journaled as `lease_requested`, `lease_granted`,
   `lease_released` or `lease_expired` in the `_system` journal (mirrored on
   `volley/_waves/_system/events`); a restart replays it, so held leases survive. Requests sent
-  while the daemon is down wait in its persistent session.
+  while the daemon is down wait in its persistent session and are handled on the next start
+  (the daemon drains them like its mailbox).
 
 ## Spawn admission
 
@@ -191,13 +193,17 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `cmux_ping` | wall time of `cmux ping` (a ping that hangs counts as the time waited) | ms > `cmux_ping_max_ms` |
 | `containers` | `docker info --format {{json .}}` → `ContainersRunning` | > `container_max` |
 | `api_overload` | agents' progress (via the hooks): `awaiting_input` with `quota_auto_resume_*`, `idle` text matching `overloaded\|rate limit\|usage limit` | count in the last `api_overload_window_s` > `api_overload_max` |
-| `ci_queue` | `gh api repos/{owner}/{repo}/actions/runs?status=queued` in the wave's repo → `total_count` | > `ci_queue_max` |
+| `ci_queue` | `gh api repos/{owner}/{repo}/actions/runs?status=queued` in the wave's repo → `total_count`, at most once a minute per repo (it spends the agents' GitHub API quota; ticks in between reuse the last sample) | > `ci_queue_max` |
 
 - **Throttle starts only**: an over signal sets `allow` to 0; nothing running is touched.
 - **Hysteresis**: after a breach a signal must be clear for `hysteresis_samples` consecutive
   samples (`recovering: cmux ping clear for 1/3 samples`) before the allowance rises again.
 - **Unknown never throttles**: a tool that is missing (Linux has no memory-pressure sysctl, no
-  cmux, docker or gh) makes its signal `unknown`.
+  cmux, docker or gh) makes its signal `unknown`. On a signal that is already recovering, an
+  unknown sample counts toward the clean samples (`… clear for 2/3 samples (last sample
+  unknown)`), so a tool that breaks after a breach cannot hold starts back forever.
+- **Nothing starts before the first sample**: the daemon samples once before its first
+  admission, so a daemon restarted on an overloaded machine does not admit every ready task.
 - **Reasons everywhere**: the verdict's reasons become `why_waiting` on the wave's ready tasks
   (`memory pressure critical (level 4 > max 2)`), joined by the ceiling/budget reasons, and are
   published retained on `volley/_system/admission` (`spec/schemas/admission.schema.json`) with

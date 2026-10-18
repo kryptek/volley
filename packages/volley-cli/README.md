@@ -156,10 +156,10 @@ that `volleyd` hands out FIFO up to each pool's capacity (SPEC §4.6.5; pools ar
 volley lease run --pool backend-it -- mvn -q verify
 # volley lease: queued for a backend-it lease (queued: 3/3 backend-it leases held)
 # volley lease: backend-it lease granted after 42 s
-# ...mvn output...                   exit code = mvn's; the lease is released on exit or SIGINT/SIGTERM
+# ...mvn output...                   exit code = mvn's; the lease is released on exit or SIGINT/SIGTERM/SIGHUP
 
 volley lease acquire --pool build --lease-id nightly-1     # {"pool":"build","lease_id":"nightly-1","holder":"lease-x1y2z3","waited_s":0}
-volley lease release --pool build --lease-id nightly-1 --holder lease-x1y2z3
+volley lease release --pool build --lease-id nightly-1 --holder lease-x1y2z3   # default holder: a <holder>.<rand> id's prefix
 volley lease status                                        # every pool: holders, queue, reasons
 ```
 
@@ -167,12 +167,19 @@ volley lease status                                        # every pool: holders
   random `lease-xxxxxx` (`acquire` prints it so `release` can name it). The supervisor only accepts
   requests whose holder is the sender, and frees a holder's leases when its `status` turns
   `reaped`/`done`/`failed`.
-- `run` renews the lease at half its TTL while the command runs, and forwards SIGINT/SIGTERM to it.
-  A signal during the wait cancels the queued request (exit `128 + signal`); `--timeout <s>` gives
-  up with `124`.
-- **`run` fails open**: with the broker unreachable, no live `volleyd`, or a pool that is not
-  configured, it warns on stderr and runs the command unleased — a lease is a courtesy to the
-  machine, never a reason an agent's build cannot run. `acquire` fails (exit `1`) instead.
+- `run` renews the lease at half its TTL while the command runs (after a dropped broker connection
+  it reconnects and asks for the lease again), and forwards SIGINT/SIGTERM/SIGHUP to the command's
+  whole process group. A signal during the wait cancels the queued request (exit `128 + signal`);
+  `--timeout <s>` gives up with `124`.
+- **A dead client frees its slot**: `run` and `acquire` connect with an MQTT will that releases
+  their lease, so a client that is killed (SIGKILL, OOM, a closed terminal) or loses its network
+  releases it at once instead of at TTL expiry.
+- **`run` fails open, and never waits on nobody**: with the broker unreachable, no live `volleyd`,
+  or a pool that is not configured, it warns on stderr and runs the command unleased — a lease is
+  a courtesy to the machine, never a reason an agent's build cannot run. While queued it checks
+  every 30 s: if volleyd went away, the pool was removed (or dropped the request), or volleyd never
+  queued the request after 3 re-sends, it prints a `WARNING` and runs the command unleased.
+  `acquire` fails (exit `1`) instead.
 - The [volley-hooks](../volley-hooks/README.md) PreToolUse lease hook wraps matching `Bash`
   commands in `volley lease run` automatically.
 

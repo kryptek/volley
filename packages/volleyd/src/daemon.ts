@@ -66,7 +66,7 @@ export interface DaemonOptions {
   tickMs?: number;
   /**
    * Override the spawn admission verdict per wave (tests). Default: the pressure-based verdict
-   * from the last sample (`pressure`), open until the first sample.
+   * from the last sample (`pressure`); nothing is admitted until the first sample is in.
    */
   admission?: (wave: WaveId) => Admission;
   /** Machine-pressure sampler, run once per tick. Default: the fenced src/pressure samplers. */
@@ -92,16 +92,33 @@ export type PressureSource = (ctx: {
   config: Tunables;
 }) => Promise<PressureReading>;
 
-/** The fenced samplers in src/pressure, run concurrently; a failing one is an unknown signal. */
-export function systemPressure(exec: ExecFn = realExec): PressureSource {
+/**
+ * The fenced samplers in src/pressure, run concurrently; a failing one is an unknown signal.
+ * A repo's CI queue is re-sampled at most every `ci_queue_sample_ms` (it spends GitHub API
+ * quota); ticks in between reuse its last sample.
+ */
+export function systemPressure(
+  exec: ExecFn = realExec,
+  now: () => number = Date.now,
+): PressureSource {
+  const ciCache = new Map<string, { at: number; sample: Promise<Sample> }>();
+  const ciQueue = (repo: string, timeout: number) => {
+    const t = now();
+    const hit = ciCache.get(repo);
+    if (hit !== undefined && t - hit.at < DAEMON_DEFAULTS.ci_queue_sample_ms) return hit.sample;
+    const sample = sampleCiQueue(exec, repo, timeout);
+    ciCache.set(repo, { at: t, sample });
+    return sample;
+  };
   return async ({ repos, config }) => {
     const timeout = DAEMON_DEFAULTS.sampler_timeout_ms;
+    for (const repo of ciCache.keys()) if (!repos.includes(repo)) ciCache.delete(repo);
     const [memory_pressure, cmux_ping, containers, ...ci] = await Promise.all([
       sampleMemory(exec, timeout),
       // Above the threshold, so a hung socket reads as over it rather than as unknown.
       sampleCmuxPing(exec, config.admission.cmux_ping_max_ms + timeout),
       sampleContainers(exec, timeout),
-      ...repos.map((r) => sampleCiQueue(exec, r, timeout)),
+      ...repos.map((r) => ciQueue(r, timeout)),
     ]);
     return {
       samples: { memory_pressure, cmux_ping, containers },
@@ -125,6 +142,8 @@ export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+/** Before the first pressure sample nothing is known about load, so nothing starts. */
+const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
@@ -372,13 +391,17 @@ export class Daemon {
     for (const wave of this.waves.keys()) await this.publishState(wave);
     await this.subscribeLeaseInputs();
     await this.publishAllPools();
+    // One pressure sample before the first admission: a daemon restarted on an overloaded
+    // machine must not admit every ready task (admissions are journaled, so they would stick).
+    await this.sample();
     await this.enqueue(() => this.tickNow());
 
     // Mailbox messages are never retained (SPEC §4.1); clear a stray retained one so it cannot be
     // replayed on every subscribe. Then drain: on a resumed session this first returns what the
-    // broker queued while the daemon was down.
+    // broker queued while the daemon was down. Lease requests are drained the same way.
     await this.broker.publish(this.mailboxTopic, "", { qos: 1, retain: true });
     void this.mailboxLoop();
+    void this.leaseRequestLoop();
 
     await this.publish(
       this.statusTopic,
@@ -387,10 +410,7 @@ export class Daemon {
     );
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
-    if (tickMs > 0) {
-      this.timer = setInterval(() => void this.tick(), tickMs);
-      void this.tick(); // first pressure sample now, not one interval from now
-    }
+    if (tickMs > 0) this.timer = setInterval(() => void this.tick(), tickMs);
     this.watchdog = setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
@@ -399,10 +419,28 @@ export class Daemon {
 
   /** Hand each mailbox message to the serial queue, one at a time, until the daemon stops. */
   private async mailboxLoop(): Promise<void> {
+    await this.drainLoop(this.mailboxTopic, (m) => this.onMailbox(m.payload));
+  }
+
+  /**
+   * Lease requests, drained like the mailbox: the subscription lives in the persistent session,
+   * so a request sent while the daemon was down (a `release` from a command that finished
+   * meanwhile) is queued by the broker and handled here on the next start.
+   */
+  private async leaseRequestLoop(): Promise<void> {
+    await this.drainLoop(LEASE_REQUESTS_FILTER, (m) =>
+      this.onLeaseRequest(m.topic.split("/")[3] ?? "", m.payload),
+    );
+  }
+
+  private async drainLoop(
+    filter: string,
+    handle: (m: { topic: string; payload: string }) => Promise<void>,
+  ): Promise<void> {
     while (this.running) {
-      let msgs: { payload: string }[];
+      let msgs: { topic: string; payload: string }[];
       try {
-        msgs = await this.broker.drainQueued(this.mailboxTopic, {
+        msgs = await this.broker.drainQueued(filter, {
           idleMs: DAEMON_DEFAULTS.mailbox_idle_ms,
           maxMessages: 1,
         });
@@ -410,7 +448,7 @@ export class Daemon {
         if (this.running) this.fail(e instanceof Error ? e : new Error(String(e)));
         return;
       }
-      for (const m of msgs) void this.enqueue(() => this.onMailbox(m.payload));
+      for (const m of msgs) void this.enqueue(() => handle(m));
     }
   }
 
@@ -567,26 +605,24 @@ export class Daemon {
   // -------------------------------------------------------------------------------------------
 
   /**
-   * Subscribe (in the persistent session, so requests sent while the daemon is down are
-   * delivered on restart) to lease requests, to every agent's status (a holder that turns
-   * reaped/done/failed loses its leases; the retained statuses arrive on subscribe, so a holder
-   * that died while the daemon was down is caught too) and to every agent's progress (the
-   * hooks' API overload signals).
+   * Subscribe to every agent's status (a holder that turns reaped/done/failed loses its leases;
+   * the retained statuses arrive on subscribe, so a holder that died while the daemon was down
+   * is caught too) and to every agent's progress (the hooks' API overload signals). Lease
+   * requests themselves are drained by `leaseRequestLoop`.
    */
   private async subscribeLeaseInputs(): Promise<void> {
-    await this.broker.subscribeStream(LEASE_REQUESTS_FILTER, (m) => {
-      const pool = m.topic.split("/")[3] ?? "";
-      void this.enqueue(() => this.onLeaseRequest(pool, m.payload));
-    });
     await this.broker.subscribeStream("volley/+/+/status", (m) => {
       const holder = m.topic.split("/")[2] ?? "";
-      const holds = Object.values(this.leases).some((p) =>
-        [...p.held, ...p.queue].some((l) => l.holder === holder),
-      );
-      if (!holds) return;
       const env = parseEnvelope(m.payload);
       if (env === null || !HOLDER_GONE.has(env.type)) return;
-      void this.enqueue(() => this.runLeases({ kind: "holder_status", holder, status: env.type }));
+      // Checked in queue order, so an `acquire` from this holder still waiting in the queue
+      // is applied first and then freed here.
+      void this.enqueue(async () => {
+        const holds = Object.values(this.leases).some((p) =>
+          [...p.held, ...p.queue].some((l) => l.holder === holder),
+        );
+        if (holds) await this.runLeases({ kind: "holder_status", holder, status: env.type });
+      });
     });
     await this.broker.subscribeStream("volley/+/+/progress", (m) => {
       const env = parseEnvelope(m.payload);
@@ -607,30 +643,13 @@ export class Daemon {
       return;
     }
     const env = msg as Envelope;
-    let req = env.payload as LeaseRequest;
+    const req = env.payload as LeaseRequest;
     // An agent may only acquire, renew or release its own leases (SPEC §4.6.5).
     if (req.holder !== env.agent_id) {
       this.log(`ignored lease request: holder ${req.holder} is not the sender ${env.agent_id}`);
       return;
     }
-    // Pools are machine-global, so capacity is the global one; a wave's override of a pool's
-    // ttl_s applies to the leases its own agents take.
-    if (req.op === "acquire" && req.ttl_s === undefined) {
-      const wave = this.holderWave(req.holder);
-      const ttl =
-        wave !== undefined ? this.config.effective(wave).lease_pools[pool]?.ttl_s : undefined;
-      if (ttl !== undefined) req = { ...req, ttl_s: ttl };
-    }
     await this.runLeases({ kind: "request", pool, req });
-  }
-
-  /** The wave one of whose tasks has `agentId` as an agent. */
-  private holderWave(agentId: string): WaveId | undefined {
-    for (const [wave, log] of this.waves) {
-      if (log.record.state?.tasks.some((t) => Object.values(t.agents).includes(agentId)))
-        return wave;
-    }
-    return undefined;
   }
 
   /** Step the lease book: journal + mirror every event, re-publish the pools it touched. */
@@ -657,13 +676,20 @@ export class Daemon {
       );
     }
     this.leases = r.book;
-    for (const pool of touched) {
-      const extra =
-        input.kind === "request" && pool === input.pool && r.rejected !== undefined
-          ? [`rejected ${input.req.lease_id}: ${r.rejected}`]
-          : [];
-      await this.publishPool(pool, extra);
+    // `rejected <lease_id>: …` tells a waiting client its request is gone for good.
+    const extra = new Map<string, string[]>();
+    const reject = (pool: string, line: string) =>
+      extra.set(pool, [...(extra.get(pool) ?? []), line]);
+    if (input.kind === "request" && r.rejected !== undefined)
+      reject(input.pool, `rejected ${input.req.lease_id}: ${r.rejected}`);
+    for (const ev of r.events) {
+      if (ev.data.reason === "pool removed")
+        reject(
+          String(ev.data.pool),
+          `rejected ${ev.data.lease_id}: pool ${ev.data.pool} removed from config`,
+        );
     }
+    for (const pool of touched) await this.publishPool(pool, extra.get(pool) ?? []);
   }
 
   /**
@@ -718,7 +744,10 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
-      const pressure = this.opts.admission?.(wave) ?? this.verdicts.get(wave) ?? OPEN_ADMISSION;
+      const pressure =
+        this.opts.admission?.(wave) ??
+        this.verdicts.get(wave) ??
+        (this.lastReading === null ? AWAITING_SAMPLE : OPEN_ADMISSION);
       const verdict = admit(candidates, pressure, {
         live,
         hardCeiling: eff.hard_ceiling,

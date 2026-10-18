@@ -173,14 +173,16 @@ returns `hookSpecificOutput.updatedInput` with the command wrapped:
 
 ```
 cd x && mvn -q verify
-  → bun '<repo>/packages/volley-cli/src/cli.ts' lease run --pool backend-it --holder <agent id> \
+  → bun '<repo>/packages/volley-cli/src/cli.ts' lease run --pool 'backend-it' --holder '<agent id>' \
       --broker-url '<url>' --project-dir '<project>' -- "${SHELL:-/bin/sh}" -c 'cd x && mvn -q verify'
 ```
 
 plus `additionalContext` "command queued for a backend-it lease". `volley lease run` waits for the
 lease *inside* the Bash tool call — the agent sees the wait (`queued … granted after 42 s`), and no
 hook timeout is involved — then runs the original command and releases the lease when it exits. It
-fails open: with no live volleyd or an unconfigured pool it runs the command unleased. A command
+fails open: with no live volleyd or an unconfigured pool it runs the command unleased. Pool names
+come from a retained broker topic, so a name that is not a valid pool id is ignored, and every
+value spliced into the wrapped command is shell-quoted. A command
 that is already wrapped, matches no pool, or arrives while no pools are configured passes through
 untouched (empty output). The hook never changes the permission decision. Because the original
 runs in a child shell, a `cd` inside it does not carry over to the next Bash call.

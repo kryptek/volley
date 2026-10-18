@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { systemPressure } from "../src/daemon";
 import type { ExecFn, ExecOptions, ExecResult } from "../src/exec";
 import { assertAllowed } from "../src/fence";
 import { countApiSignals, isApiSignal } from "../src/pressure/api-signals";
@@ -100,6 +102,27 @@ describe("CI queue", () => {
     expect(await sampleCiQueue(f.exec, "/tmp/some-repo", 1000)).toMatchObject({ value: 4 });
     expect(f.calls[0]?.argv).toEqual(CI_QUEUE_ARGV);
     expect(f.calls[0]?.opts?.cwd).toBe("/tmp/some-repo");
+  });
+});
+
+describe("systemPressure: CI queue cadence", () => {
+  it("asks gh at most once per ci_queue_sample_ms per repo, reusing the cached sample in between", async () => {
+    const f = fakeExec({ gh: ok(fixture("gh-runs-queued.json")) });
+    let now = 0;
+    const source = systemPressure(f.exec, () => now);
+    const read = () => source({ repos: ["/tmp/a", "/tmp/b"], config: CONFIG_DEFAULTS });
+    const gh = () => f.calls.filter((c) => c.argv[0] === "gh").length;
+
+    expect((await read()).ci["/tmp/a"]).toMatchObject({ ok: true, value: 4 });
+    expect(gh()).toBe(2);
+    now = DAEMON_DEFAULTS.tick_ms;
+    expect((await read()).ci["/tmp/b"]).toMatchObject({ ok: true, value: 4 });
+    now = DAEMON_DEFAULTS.ci_queue_sample_ms - 1;
+    await read();
+    expect(gh()).toBe(2);
+    now = DAEMON_DEFAULTS.ci_queue_sample_ms;
+    await read();
+    expect(gh()).toBe(4);
   });
 });
 
