@@ -97,6 +97,12 @@
         },
         "pipeline": { "$ref": "#/$defs/pipeline" },
         "model": { "type": "string", "minLength": 1 },
+        "host": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+          "default": "local",
+          "description": "Where the task's agents run: local (the supervisor's own host), or a remote host the supervisor is configured with."
+        },
         "files": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },

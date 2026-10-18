@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-18T12:00:02.000Z",
+  "channel": "_system/registry",
+  "type": "registered",
+  "payload": {
+    "capabilities": [],
+    "cwd": "/wt/w1/T1-implementer",
+    "started_at": "2026-10-18T12:00:01.000Z",
+    "model_source": "unknown"
+  },
+  "correlation_id": null,
+  "namespace": "volleyd-test"
+}

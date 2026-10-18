@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { ARRANGE_ANIM_MS } from "../src/layout/useAutoArrange";
 import { DeskStoreProvider } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
@@ -321,5 +322,72 @@ describe("App attention (live store)", () => {
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
     expect(within(coords).getByText("Complete")).toBeInTheDocument();
     expect(within(coords).queryByText(/claim it/)).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------ live auto-arrange
+
+describe("App auto-arrange (live store)", () => {
+  const wait = (ms: number) => act(() => new Promise((r) => setTimeout(r, ms)));
+  const mount = (c: ReturnType<typeof scriptedClient>) =>
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        clientFactory={c.factory}
+        settleMs={SETTLE}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+  const at = (name: string) => {
+    const el = screen.getByRole("region", { name });
+    return { left: el.style.left, top: el.style.top };
+  };
+
+  it("a reconnect resync and replay of the same windows keeps drags and the view", async () => {
+    const c = scriptedClient();
+    const { container } = mount(c);
+    const world = () => container.querySelector(".world") as HTMLElement;
+    await c.deliver(retained());
+    await settle();
+    await wait(ARRANGE_ANIM_MS);
+    expect(world()).not.toHaveClass("world--anim");
+    const bar = screen.getByRole("region", { name: "w1" }).querySelector(".win-bar") as Element;
+    fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(bar, { clientX: 300, clientY: 260 });
+    fireEvent.pointerUp(bar);
+    const dragged = at("w1");
+    const view = world().style.transform;
+
+    await c.reconnect();
+    await c.deliver(retained());
+    await settle();
+    await wait(300);
+    expect(world()).not.toHaveClass("world--anim");
+    expect(at("w1")).toEqual(dragged);
+    expect(world().style.transform).toBe(view);
+  });
+
+  it("a window that does not come back after a reconnect re-arranges once settled", async () => {
+    const c = scriptedClient();
+    const { container } = mount(c);
+    const world = () => container.querySelector(".world") as HTMLElement;
+    await c.deliver(retained());
+    await settle();
+    await wait(ARRANGE_ANIM_MS);
+    const bar = screen.getByRole("region", { name: "w1" }).querySelector(".win-bar") as Element;
+    fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(bar, { clientX: 300, clientY: 260 });
+    fireEvent.pointerUp(bar);
+    const dragged = at("w1");
+
+    // impl-1's registry entry is gone: the prune after settling removes its window
+    await c.reconnect();
+    await c.deliver(retained().filter((m) => !m.topic.endsWith("/impl-1")));
+    await settle();
+    await wait(130);
+    expect(world()).toHaveClass("world--anim");
+    expect(at("w1")).not.toEqual(dragged);
   });
 });

@@ -100,6 +100,10 @@
         },
         "waiting_on": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "why_waiting": { "type": "string" },
+        "screen_stale": {
+          "type": "boolean",
+          "description": "True while the supervisor's screen capture for one of the task's agents is backed off (slow or failing), so its retained screen topic may be out of date."
+        },
         "pr": {
           "type": "object",
           "required": ["number", "url"],

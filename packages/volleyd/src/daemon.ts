@@ -64,6 +64,8 @@ import {
   writeDecisionsFile,
 } from "./decisions";
 import { type ExecFn, exec as realExec } from "./exec";
+import type { Host } from "./hosts/host";
+import { LocalCmuxHost } from "./hosts/local-cmux";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -96,12 +98,32 @@ import type {
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
+import { type Role, briefGatePath, isRole } from "./brief";
+import { HOOKS_DIR } from "./launch";
+import { type AgentProbe, FINAL_STATUS, lockPath } from "./locks";
+import { retireAgent } from "./retire";
+import { ScreenPublisher } from "./screen-publisher";
+import {
+  type SpawnDecision,
+  type SpawnDeps,
+  type SpawnOutcome,
+  type SpawnResult,
+  spawnAgent,
+} from "./spawn";
+import { SpawnError } from "./spawn-error";
+import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
+import { type AgentWatch, watchAgent } from "./verify";
+import { expandHome, worktreePath } from "./worktree";
+
 export interface DaemonOptions {
   brokerUrl: string;
   namespace: string;
   /** $VOLLEYD_HOME — journals live under `<home>/waves/<wave>/`, config at `<home>/config.yaml`. */
   home: string;
-  /** Admission/monitor tick interval; 0 disables the timer (tests drive `tick()`). */
+  /**
+   * Admission/monitor tick interval; 0 disables the admission and screen timers (tests drive
+   * `tick()` / `tickScreens()`).
+   */
   tickMs?: number;
   /**
    * Override the spawn admission verdict per wave (tests). Default: the pressure-based verdict
@@ -118,14 +140,61 @@ export interface DaemonOptions {
    */
   protocolVersion?: 4 | 5;
   /**
+   * Spawn admitted tasks' implementers (T4). Absent: tasks are admitted but nothing is spawned
+   * (and the `spawn` op is refused) — the default, so tests never launch anything by accident.
+   */
+  spawner?: SpawnerOptions;
+  /**
    * Fetches a task issue's body at submit; its `Files` section feeds the overlap warning and the
    * task's files hint. Default: none (wave-file `files` only); `volleyd daemon` wires `gh`.
    */
   issueBody?: IssueBodyFn;
-  /** Interrupts an agent's session on `stop` (e.g. Escape via cmux). Default: none. */
+  /**
+   * Interrupts an agent's session on `stop`. Default: with a spawner, Escape into the agent's
+   * workspace (from its `agent_spawned`); without one, none.
+   */
   interrupt?: (agentId: string) => Promise<void>;
-  /** Where a task's `.volley/decisions.md` goes. Default `<home>/waves/<wave>/tasks/<task>`. */
+  /**
+   * Where a task's `.volley/decisions.md` goes. Default: with a spawner, the task's latest
+   * worktree; otherwise (or before any spawn) `<home>/waves/<wave>/tasks/<task>`.
+   */
   taskDir?: (wave: WaveId, task: TaskId) => string;
+  /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
+  now?: () => number;
+  /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
+  screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
+}
+
+/** How the daemon spawns agents. Every field has a production default. */
+export interface SpawnerOptions {
+  /** The `local` host (default: cmux on this machine, through the fenced exec). */
+  host?: Host;
+  /** Claude Code's folder-trust file (default `~/.claude.json`). */
+  claudeJsonPath?: string;
+  /** `packages/volley-hooks` (default: the one in this checkout). */
+  hooksDir?: string;
+  /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
+  mintCredentials?: boolean;
+  briefsDir?: string;
+  /**
+   * How long an agent whose status is `reaped` (its LWT) stays supervised before it is retired,
+   * waiting for a fresh status or heartbeat. Default `heartbeat_alarm_s` (tests shorten it).
+   */
+  reapGraceMs?: number;
+}
+
+/** A spawned agent the daemon watches until it is retired. */
+interface Supervised {
+  wave: WaveId;
+  task: string;
+  role: Role;
+  namespace: string;
+  watch: AgentWatch;
+  lockPath: string;
+  minted: boolean;
+  workspace: string;
+  /** Armed while the status is `reaped`: retires the agent unless it comes back first. */
+  reapTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
 /** What one pressure sample measured: machine-global signals, plus the CI queue per repo dir. */
@@ -320,11 +389,20 @@ export class Daemon {
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
   private watchdog: ReturnType<typeof setInterval> | undefined;
+  private screenTimer: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
+  private readonly spawning = new Set<string>();
+  /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
+  private readonly refused = new Map<string, { n: number; until: number }>();
+  /** Live spawned agents by agent id. */
+  private readonly supervised = new Map<string, Supervised>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
   private readonly deferred = new Set<string>();
+  /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
+  private readonly screens: ScreenPublisher;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -344,6 +422,16 @@ export class Daemon {
     this.config = ConfigStore.load({ home: opts.home, system: this.system });
     this.leases = replayLeases(this.system.readAll());
     this.killSwitch = killSwitchEngaged(this.system.readAll());
+    this.screens = new ScreenPublisher({
+      publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+      ...opts.screenTimeouts,
+      onStale: (agentId) => {
+        const a = this.supervised.get(agentId);
+        if (a !== undefined) void this.enqueue(() => this.publishState(a.wave));
+      },
+      log: this.log,
+    });
     for (const log of loadWaves(opts.home)) {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
@@ -501,7 +589,10 @@ export class Daemon {
     );
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
-    if (tickMs > 0) this.timer = setInterval(() => void this.tick(), tickMs);
+    if (tickMs > 0) {
+      this.timer = setInterval(() => void this.tick(), tickMs);
+      this.screenTimer = setInterval(() => void this.tickScreens(), DAEMON_DEFAULTS.screen_tick_ms);
+    }
     this.watchdog = setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
@@ -564,6 +655,13 @@ export class Daemon {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
+    clearInterval(this.screenTimer);
+    this.screens.clear();
+    for (const a of this.supervised.values()) {
+      clearTimeout(a.reapTimer);
+      void a.watch.close();
+    }
+    this.supervised.clear();
   }
 
   /** Die on our own: drop the dead connection, free the home lock, resolve `closed`. */
@@ -617,6 +715,11 @@ export class Daemon {
     const run = this.queue.then(fn);
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /** Capture the screens of supervised agents that are due (beside the serial queue). */
+  tickScreens(): Promise<void> {
+    return this.screens.tick();
   }
 
   /** One tick: sample pressure (outside the queue: samplers can be slow), then lease + admission. */
@@ -881,6 +984,383 @@ export class Daemon {
         await this.publishState(wave);
       }
     }
+    if (this.opts.spawner !== undefined) {
+      await this.resolveTrustedRepos();
+      for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Spawning (T4): admitted tasks get an implementer; other roles are sequenced by the pipeline.
+  // -------------------------------------------------------------------------------------------
+
+  /** Start an implementer for every admitted task that has none (runs beside the queue). */
+  private spawnAdmitted(wave: WaveId): void {
+    const rec = this.waves.get(wave)?.record;
+    if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
+    for (const id of rec.admitted) {
+      const t = rec.state.tasks.find((x) => x.id === id);
+      if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
+      const key = `${wave}/${id}/implementer`;
+      if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > Date.now()) continue;
+      void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
+        this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    }
+  }
+
+  /**
+   * Run one spawn's launch half and hand its verification to `supervise`. Journal appends go
+   * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
+   * serial queue and the queue never waits on a spawn's verification window.
+   */
+  private async startSpawn(wave: WaveId, task: string, role: Role): Promise<SpawnResult> {
+    const log = this.waves.get(wave);
+    const w = log?.record.wave;
+    if (log === undefined || w == null) throw new Error(`unknown wave '${wave}'`);
+    const t = w.tasks[task];
+    if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
+    const key = `${wave}/${task}/${role}`;
+    if (t.host !== "local") {
+      // Remote hosts plug in behind the same Host interface; none is configured yet.
+      this.noteRefusal(key);
+      const e = new SpawnError("LAUNCH_FAILED", `host '${t.host}' is not configured`, {
+        host: t.host,
+      });
+      await this.append(wave, {
+        type: "alarm_raised",
+        task,
+        data: { code: e.code, message: e.message, role, ...e.detail },
+      });
+      throw e;
+    }
+    this.spawning.add(key);
+    try {
+      const attempt =
+        log.journal
+          .readAll()
+          .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
+          .length + 1;
+      // spawnAgent journals its own refusals.
+      const res = await spawnAgent({ wave: w, task, role, attempt }, this.spawnDeps(wave));
+      if (res.kind === "launched") {
+        this.refused.delete(key);
+        void res.verified.then(
+          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path),
+          (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      }
+      return res;
+    } catch (e) {
+      this.noteRefusal(key);
+      throw e;
+    } finally {
+      this.spawning.delete(key);
+    }
+  }
+
+  /** Back off an automatic spawn that was refused: retried after 2^(n-1) × base, capped. */
+  private noteRefusal(key: string): void {
+    const n = (this.refused.get(key)?.n ?? 0) + 1;
+    const wait = Math.min(
+      DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
+      DAEMON_DEFAULTS.spawn_retry_max_ms,
+    );
+    this.refused.set(key, { n, until: Date.now() + wait });
+  }
+
+  /** The `local` host agents run on. */
+  private get host(): Host {
+    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
+    return this.localHost;
+  }
+  private localHost: Host | undefined;
+
+  private get claudeJsonPath(): string {
+    return this.opts.spawner?.claudeJsonPath ?? join(homedir(), ".claude.json");
+  }
+
+  /** The latest `agent_spawned` facts for an agent id (any wave), or for a wave's task. */
+  private spawnedRecord(
+    match: (e: JournalEvent) => boolean,
+    wave?: WaveId,
+  ): Record<string, unknown> | undefined {
+    const logs = wave !== undefined ? [this.waves.get(wave)] : [...this.waves.values()];
+    for (const log of logs) {
+      const e = log?.journal
+        .readAll()
+        .filter((x) => x.type === "agent_spawned" && match(x))
+        .at(-1);
+      if (e !== undefined) return e.data;
+    }
+    return undefined;
+  }
+
+  /** `stop`'s interrupt: the configured one, else Escape into the agent's workspace. */
+  private async interruptAgent(agentId: string): Promise<void> {
+    if (this.opts.interrupt !== undefined) return this.opts.interrupt(agentId);
+    if (this.opts.spawner === undefined) return;
+    const ws =
+      this.supervised.get(agentId)?.workspace ??
+      this.spawnedRecord((e) => e.data.agent_id === agentId)?.workspace;
+    if (typeof ws === "string") await this.host.sendKeys(ws, "Escape");
+  }
+
+  /** Where a task's `.volley/decisions.md` goes (its worktree once it has one). */
+  private taskDirFor(wave: WaveId, task: TaskId): string {
+    if (this.opts.taskDir !== undefined) return this.opts.taskDir(wave, task);
+    const wt =
+      this.opts.spawner !== undefined
+        ? this.spawnedRecord((e) => e.task === task, wave)?.worktree
+        : undefined;
+    return typeof wt === "string" ? wt : join(this.opts.home, "waves", wave, "tasks", task);
+  }
+
+  /**
+   * A `repo_untrusted` decision resolves itself once its repo is trusted: the owner accepted the
+   * dialog by hand (in any worktree of it), or answered `trust`. Covers decisions opened before
+   * a launch and those raised from a pane's trust dialog (whose task is no longer queued).
+   */
+  private async resolveTrustedRepos(): Promise<void> {
+    let cfg: Record<string, unknown> | null | undefined;
+    for (const [wave, log] of this.waves) {
+      for (const d of openDecisions(log.record)) {
+        if (d.kind !== "repo_untrusted") continue;
+        const root = (d as { repo?: unknown }).repo;
+        const repo = typeof root === "string" ? root : log.record.wave?.repo;
+        if (repo === undefined) continue;
+        cfg ??= readClaudeJson(this.claudeJsonPath);
+        if (!isRepoTrusted(cfg, expandHome(repo))) continue;
+        await this.resolveNow(wave, d.decision_id, {
+          answer: "trusted",
+          by: "claude-trust-dialog",
+        });
+      }
+    }
+  }
+
+  /**
+   * Open a spawn's decision through the decision store (outside the serial queue: spawns run
+   * beside it). A base id already used by a resolved decision is re-opened as `<id>-<n>`.
+   */
+  private async openSpawnDecision(wave: WaveId, d: SpawnDecision): Promise<string> {
+    const decisions = this.waves.get(wave)?.record.decisions ?? {};
+    let id = d.id;
+    for (let n = 2; decisions[id] !== undefined; n++) id = `${d.id}-${n}`;
+    const rec = await this.openDecisionNow(
+      wave,
+      {
+        kind: d.kind,
+        task: d.task,
+        question: d.question,
+        options: d.options,
+        pointers: d.pointers,
+        id,
+      },
+      d.data,
+    );
+    return rec.decision_id;
+  }
+
+  private spawnDeps(wave: WaveId): SpawnDeps {
+    const spawner = this.opts.spawner as SpawnerOptions;
+    const log = this.waves.get(wave) as WaveLog;
+    const eff = this.config.effective(wave);
+    const host = this.host;
+    const probe: AgentProbe = {
+      status: async (id) => {
+        const ns = this.supervised.get(id)?.namespace ?? log.record.wave?.namespace;
+        const raw = await this.broker.queryRetained(
+          buildTopic(ns ?? this.opts.namespace, id, "status"),
+          DAEMON_DEFAULTS.probe_ms,
+        );
+        return raw === null || raw === "" ? null : (parseEnvelope(raw)?.type ?? null);
+      },
+      registered: async (id) => {
+        const raw = await this.broker.queryRetained(registryTopic(id), DAEMON_DEFAULTS.probe_ms);
+        return raw !== null && raw !== "";
+      },
+      lastHeartbeat: (id) => this.supervised.get(id)?.watch.state.lastHeartbeatAt ?? null,
+    };
+    return {
+      host,
+      home: this.opts.home,
+      namespace: this.opts.namespace,
+      brokerUrl: this.opts.brokerUrl,
+      claudeJsonPath: this.claudeJsonPath,
+      hooksDir: spawner.hooksDir ?? HOOKS_DIR,
+      mintCredentials: spawner.mintCredentials ?? true,
+      tunables: eff,
+      owner: log.record.state?.owner ?? null,
+      journal: (ev) => this.append(wave, ev),
+      get openDecisions() {
+        return log.record.state?.open_decisions ?? [];
+      },
+      probe,
+      watch: (ns, id) => watchAgent(this.broker, ns, id),
+      briefGate: briefGatePath(this.opts.home),
+      ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
+      clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      openDecision: (d) => this.openSpawnDecision(wave, d),
+      resolveDecision: async (id, answer, by) => {
+        await this.resolveNow(wave, id, { answer, by });
+      },
+    };
+  }
+
+  /**
+   * Keep watching a spawned agent; retire it once it is gone: at once on `done`/`failed`, and on
+   * `reaped` (its LWT, which a network blip also fires) only after a grace period in which no
+   * fresh status or heartbeat arrived — an assigned identity may reconnect (SPEC §6.5).
+   */
+  private supervise(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    outcome: SpawnOutcome,
+    lock: string,
+  ): void {
+    const { agentId, watch } = outcome;
+    if (!this.running) {
+      void watch.close();
+      return;
+    }
+    const a: Supervised = {
+      wave,
+      task,
+      role,
+      namespace: watch.namespace,
+      watch,
+      lockPath: lock,
+      minted: outcome.minted,
+      workspace: outcome.workspace,
+    };
+    this.supervised.set(agentId, a);
+    const alarm = this.config.effective(wave).heartbeat_alarm_s;
+    const graceMs = this.opts.spawner?.reapGraceMs ?? alarm * 1000;
+    const armReap = (since: number) => {
+      a.reapTimer = setTimeout(() => {
+        a.reapTimer = undefined;
+        if (this.supervised.get(agentId) !== a || watch.state.status?.type !== "reaped") return;
+        const beat = watch.state.lastHeartbeatAt ?? 0;
+        // A heartbeat after the LWT: the session is alive and its MCP server reconnecting.
+        if (beat > since) armReap(beat);
+        else void this.enqueue(() => this.retire(agentId, "reaped"));
+      }, graceMs);
+    };
+    const host = this.host;
+    this.screens.track({
+      agentId,
+      namespace: watch.namespace,
+      workspace: outcome.workspace,
+      host,
+      source: host.name === "local" ? "cmux" : "tmux",
+      intervalS: () => this.config.effective(wave).screen_tail_interval_s,
+    });
+    const check = (type: string) => {
+      if (this.supervised.get(agentId) !== a) return;
+      if (type === "reaped") {
+        if (a.reapTimer === undefined) armReap(Date.now());
+        return;
+      }
+      clearTimeout(a.reapTimer);
+      a.reapTimer = undefined;
+      if (FINAL_STATUS.has(type)) void this.enqueue(() => this.retire(agentId, type));
+    };
+    watch.onStatus(check);
+    if (watch.state.status !== null) check(watch.state.status.type);
+  }
+
+  private async retire(agentId: string, status: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    const log = a !== undefined ? this.waves.get(a.wave) : undefined;
+    if (a === undefined || log === undefined) return;
+    this.supervised.delete(agentId);
+    clearTimeout(a.reapTimer);
+    const terminal = a.watch.state.status?.payload;
+    await a.watch.close();
+    // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
+    // Bounded: untrack waits only for a publish in flight, never for a (possibly hung) read.
+    await this.screens.untrack(agentId);
+    const resultRaw = await this.broker
+      .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
+      .catch(() => null);
+    const result =
+      resultRaw !== null && resultRaw !== "" ? parseEnvelope(resultRaw)?.payload : undefined;
+    const waveAgents = new Set(
+      log.journal
+        .readAll()
+        .filter((e) => e.type === "agent_spawned")
+        .map((e) => e.data.agent_id as string),
+    );
+    await retireAgent(
+      {
+        wave: a.wave,
+        task: a.task,
+        role: a.role,
+        agentId,
+        namespace: a.namespace,
+        status,
+        waveAgents,
+        lockPath: a.lockPath,
+        minted: a.minted,
+        ...(terminal !== undefined ? { terminal } : {}),
+        ...(result !== undefined ? { result } : {}),
+      },
+      {
+        exec: this.host.exec,
+        clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+        journal: (ev) => this.append(a.wave, ev),
+        releaseLock: (path) => {
+          try {
+            unlinkSync(path);
+          } catch {}
+        },
+      },
+    );
+  }
+
+  /** `spawn` op (`volleyd spawn`): spawn one task's agent now, outside admission. */
+  private async manualSpawn(p: Record<string, unknown>): Promise<Reply> {
+    if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
+    if (this.killSwitch)
+      return {
+        ok: false,
+        error: `${KILL_SWITCH_REASON}: spawns are refused until \`volleyd resume --all\``,
+      };
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const task = typeof p.task === "string" ? p.task : "";
+    const role = typeof p.role === "string" ? p.role : "implementer";
+    if (!this.waves.has(wave)) return { ok: false, error: `unknown wave '${wave}'` };
+    if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
+      return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
+    if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    this.refused.delete(`${wave}/${task}/${role}`);
+    try {
+      const res = await this.startSpawn(wave, task, role);
+      return {
+        ok: true,
+        result:
+          res.kind === "launched"
+            ? {
+                kind: res.kind,
+                agent_id: res.agentId,
+                workspace: res.workspace,
+                worktree: res.worktree,
+              }
+            : { kind: res.kind, decision: res.decision, decision_id: res.decisionId },
+      };
+    } catch (e) {
+      const eff = this.config.effective(wave);
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        result: {
+          code: e instanceof SpawnError ? e.code : "SPAWN_FAILED",
+          lock: lockPath(this.opts.home, worktreePath(eff.worktree_root, wave, task, role)),
+        },
+      };
+    }
   }
 
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
@@ -915,6 +1395,11 @@ export class Daemon {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
       if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
+    }
+    for (const t of state.tasks) {
+      if (Object.values(t.agents).some((id) => id !== undefined && this.screens.isStale(id))) {
+        t.screen_stale = true;
+      }
     }
     return state;
   }
@@ -958,23 +1443,30 @@ export class Daemon {
    * bridge. Throws on an unknown wave/task or a bad input.
    */
   openDecision(wave: WaveId, input: DecisionInput): Promise<DecisionRecord> {
-    return this.serial(async () => {
-      const log = this.waves.get(wave);
-      if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-      const r = openEvent(log.record, input, new Date());
-      if ("error" in r) throw new Error(r.error);
-      await this.append(wave, r.event);
-      const d = log.record.decisions[r.id] as DecisionRecord;
-      await this.publishDecision(wave, d);
-      // SPEC §4.1: progress is QoS 0, not retained.
-      await this.broker.publish(
-        buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
-        JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
-        { qos: 0, retain: false },
-      );
-      this.log(`opened ${describeDecision(d)}`);
-      return d;
-    });
+    return this.serial(() => this.openDecisionNow(wave, input));
+  }
+
+  /** `openDecision` without the queue; `extra` facts are kept on the decision (journal + topic). */
+  private async openDecisionNow(
+    wave: WaveId,
+    input: DecisionInput,
+    extra: Record<string, unknown> = {},
+  ): Promise<DecisionRecord> {
+    const log = this.waves.get(wave);
+    if (log === undefined) throw new Error(`unknown wave '${wave}'`);
+    const r = openEvent(log.record, input, new Date());
+    if ("error" in r) throw new Error(r.error);
+    await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
+    const d = log.record.decisions[r.id] as DecisionRecord;
+    await this.publishDecision(wave, d);
+    // SPEC §4.1: progress is QoS 0, not retained.
+    await this.broker.publish(
+      buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
+      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
+      { qos: 0, retain: false },
+    );
+    this.log(`opened ${describeDecision(d)}`);
+    return d;
   }
 
   /** Resolve a decision (no ownership check — the control op does that). Idempotent. */
@@ -1012,8 +1504,7 @@ export class Daemon {
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);
     let dir = `the brief for ${wave}/${d.task}`;
     try {
-      dir =
-        this.opts.taskDir?.(wave, d.task) ?? join(this.opts.home, "waves", wave, "tasks", d.task);
+      dir = this.taskDirFor(wave, d.task);
       const brief = writeDecisionsFile(dir, renderDecisionsMd(wave, d.task, all));
       return { decision: d, already_resolved: false, brief };
     } catch (e) {
@@ -1137,6 +1628,8 @@ export class Daemon {
         return this.submit(p);
       case "admission":
         return { ok: true, result: this.summary };
+      case "spawn":
+        return this.manualSpawn(p);
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -1364,6 +1857,8 @@ export class Daemon {
       };
     const refused = guardMutation(state, by, "resolve");
     if (refused !== null) return { ok: false, error: refused };
+    const trust = this.trustAnswer(wave, id, p.answer);
+    if (trust !== null) return { ok: false, error: trust };
     const r = await this.resolveNow(wave, id, {
       answer: p.answer,
       by,
@@ -1379,6 +1874,25 @@ export class Daemon {
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
+  }
+
+  /**
+   * The owner's explicit `trust` answer to an open `repo_untrusted` decision records the dialog's
+   * acceptance in `~/.claude.json` (that key only) before the decision resolves. Returns an error
+   * message when that write fails, else null. No other answer, and nothing else, ever writes it.
+   */
+  private trustAnswer(wave: WaveId, id: string, answer: string): string | null {
+    const d = this.waves.get(wave)?.record.decisions[id];
+    if (d?.kind !== "repo_untrusted" || d.resolved !== undefined) return null;
+    if (answer.trim().toLowerCase() !== "trust" || this.opts.spawner === undefined) return null;
+    const root = (d as { repo?: unknown }).repo;
+    if (typeof root !== "string") return `decision '${id}' names no repo to trust`;
+    try {
+      recordRepoTrust(this.claudeJsonPath, root);
+      return null;
+    } catch (e) {
+      return `recording trust for ${root}: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   /** `claim`: take a wave over when its owner is gone (status, registry age, heartbeats). */
@@ -1504,7 +2018,7 @@ export class Daemon {
         task: a.task,
         data: { agent_id: a.agent_id, role: a.role, type: "cancel", message_id: messageId, by },
       });
-      await this.opts.interrupt?.(a.agent_id).catch((e: unknown) => {
+      await this.interruptAgent(a.agent_id).catch((e: unknown) => {
         this.log(`interrupt ${a.agent_id} failed: ${e instanceof Error ? e.message : String(e)}`);
       });
       cancelled.push(a.agent_id);

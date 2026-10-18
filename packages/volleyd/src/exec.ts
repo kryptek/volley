@@ -38,7 +38,10 @@ export type ExecFn = (argv: readonly string[], opts?: ExecOptions) => Promise<Ex
  * (command not found) reject.
  */
 export const exec: ExecFn = async (argv, opts = {}) => {
-  assertAllowed(argv, opts.consent !== undefined ? { consent: opts.consent } : {});
+  assertAllowed(argv, {
+    ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
+    ...(opts.script !== undefined ? { script: opts.script } : {}),
+  });
   const [cmd, ...args] = argv as string[];
   return new Promise<ExecResult>((resolve, reject) => {
     const child = spawn(cmd as string, args, {

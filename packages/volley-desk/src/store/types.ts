@@ -174,6 +174,7 @@ export interface Tunables {
   worktree_root?: string;
   spawn_timeout_s?: number;
   wake_grace_s?: number;
+  screen_tail_interval_s?: number;
   [key: string]: unknown;
 }
 

@@ -39,7 +39,9 @@ export type ControlOp =
   | "stop"
   | "steer"
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
-  | "admission";
+  | "admission"
+  // Spawn one task's agent now (spawn.ts).
+  | "spawn";
 
 export interface ControlResponse {
   text: string;
