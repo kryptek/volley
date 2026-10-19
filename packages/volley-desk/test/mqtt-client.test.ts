@@ -52,6 +52,9 @@ describe("createMqttClient (desk)", () => {
       "volley/_waves/_config",
       "volley/_system/leases/+",
       "volley/_system/admission",
+      "volley/+/+/usage",
+      "volley/_system/claude-accounts/+",
+      "volley/_system/claude/+/signin",
     ]);
     client = createMqttClient({ url: broker.url, reconnectPeriod: 0 });
     const received: DeskMessage[] = [];
@@ -70,6 +73,9 @@ describe("createMqttClient (desk)", () => {
       "volley/_waves/_config",
       "volley/_system/leases/build",
       "volley/_system/admission",
+      "volley/demo/a/usage",
+      "volley/_system/claude-accounts/work",
+      "volley/_system/claude/work/signin",
     ];
     const pub = await mqtt.connectAsync(broker.url, { reconnectPeriod: 0 });
     for (const t of topics) await pub.publishAsync(t, envelope("a"));
