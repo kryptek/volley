@@ -25,9 +25,10 @@ const usage: UsagePayload = {
 };
 
 const accounts = [
-  { id: "work", label: "Work", fivePct: 91 },
-  { id: "personal", label: "Personal", fivePct: 12 },
-  { id: "fresh", label: "Fresh", fivePct: null },
+  { id: "work", label: "Work", fivePct: 91, weeklyPct: 40 },
+  { id: "personal", label: "Personal", fivePct: 12, weeklyPct: 22 },
+  { id: "fresh", label: "Fresh", fivePct: null, weeklyPct: null },
+  { id: "spare", label: "Spare", fivePct: null, weeklyPct: 20 },
 ];
 
 function renderPicker(props: Partial<AgentWindowProps> = {}) {
@@ -56,7 +57,12 @@ describe("agent window account picker", () => {
     const pick = screen.getByRole("combobox", { name: "Claude account for T1" });
     expect(pick).toHaveValue("work");
     const names = [...pick.querySelectorAll("option")].map((o) => o.textContent);
-    expect(names).toEqual(["Work · 91%", "Personal · 12%", "Fresh · no usage yet"]);
+    expect(names).toEqual([
+      "Work · 91%",
+      "Personal · 12%",
+      "Fresh · no usage yet",
+      "Spare · no 5-hour usage yet",
+    ]);
   });
 
   it("choosing another account asks for confirmation then calls agent_move_account", async () => {

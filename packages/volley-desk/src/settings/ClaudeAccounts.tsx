@@ -21,9 +21,9 @@ import type { ControlReply } from "../steer/transport";
 import {
   type AccountInfo,
   LOCAL_MACHINE,
-  NO_USAGE_YET,
   type RegistryAccount,
   accountList,
+  fiveHourLabel,
   moveAnswer,
   notNowAnswer,
   openLimitDecisions,
@@ -435,9 +435,12 @@ export function ClaudeAccounts({
               {d.suggested ? (
                 <>
                   Move wave <b>{d.wave}</b> to <b>{labelOf(d.suggested)}</b>
-                  {target?.fiveHour
-                    ? ` (${Math.round(target.fiveHour.pct)}% used)`
-                    : ` (${NO_USAGE_YET})`}
+                  {/* nothing until the Desk has the account (its record may arrive later) */}
+                  {target === undefined
+                    ? ""
+                    : target.fiveHour
+                      ? ` (${Math.round(target.fiveHour.pct)}% used)`
+                      : ` (${fiveHourLabel(null, target.weekly?.pct ?? null)})`}
                   ? New agents start on {labelOf(d.suggested)}; running agents finish where they
                   are.
                 </>

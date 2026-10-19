@@ -26,7 +26,7 @@ import { type NoSignal, SYNCING_LABEL } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
-import { type AccountChoice, NO_USAGE_YET } from "../../store/claude";
+import { type AccountChoice, fiveHourLabel } from "../../store/claude";
 import { UNASSIGNED } from "../../store/reducer";
 import type { AgentView, FeedEntry, Role, UsagePayload, WaveView } from "../../store/types";
 import { Feed, feedChannel } from "./Feed";
@@ -114,9 +114,8 @@ export function contextMeter(
   return { pct, tone, text: `ctx ${pct}%${amounts}` };
 }
 
-/** `Work · 34%`; `Fresh · no usage yet` until the account has reported usage. */
-const choiceLabel = (a: AccountChoice) =>
-  `${a.label} · ${a.fivePct === null ? NO_USAGE_YET : `${Math.round(a.fivePct)}%`}`;
+/** `Work · 34%`; `Fresh · no usage yet` until the account has reported usage (`fiveHourLabel`). */
+const choiceLabel = (a: AccountChoice) => `${a.label} · ${fiveHourLabel(a.fivePct, a.weeklyPct)}`;
 
 /**
  * The title's account picker. The current account is the usage sample's (else

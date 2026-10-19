@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   ClaudeAccounts,
@@ -179,12 +179,18 @@ describe("ClaudeAccounts", () => {
 
   it("labels a suggested account with no usage yet (a newly signed-in profile) as such", async () => {
     const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
-    const { control } = setup([], {
+    const control = vi.fn(async (op: string) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: [{ id: "fresh", label: "fresh", machine: "local" }] } }
+        : { ok: true },
+    );
+    setup([], {
       waves: { w1: wave({ [fresh.decision_id]: fresh }) },
+      control,
       onRegistry: () => {},
     });
     const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?");
+    await waitFor(() => expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?"));
     await act(async () => {
       fireEvent.click(within(banner).getByRole("button", { name: "Move to fresh" }));
     });
@@ -192,6 +198,22 @@ describe("ClaudeAccounts", () => {
       "resolve",
       { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to fresh" },
       expect.any(String),
+    );
+  });
+
+  it("says nothing of the suggestion's usage while the Desk has no record of it", () => {
+    const ghost = { ...limit, options: ["move wave w1 to ghost", "not now"], suggested: "ghost" };
+    setup([], { waves: { w1: wave({ [ghost.decision_id]: ghost }) } });
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Move wave w1 to ghost? New agents");
+    expect(banner).not.toHaveTextContent("no usage yet");
+  });
+
+  it("a suggestion that reported only weekly usage reads no 5-hour usage yet", () => {
+    const weeklyOnly = { ...personal, five_hour: null };
+    setup([accountMsg(weeklyOnly)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Move wave w1 to Personal (no 5-hour usage yet)?",
     );
   });
 

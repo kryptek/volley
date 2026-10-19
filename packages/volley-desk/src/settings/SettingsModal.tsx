@@ -17,7 +17,7 @@ import { useFocusTrap } from "../a11y/keys";
 import { PrimaryAction } from "../look/PrimaryAction";
 import {
   type AccountInfo,
-  NO_USAGE_YET,
+  fiveHourLabel,
   moveAnswer,
   openLimitDecisions,
   resolveFields,
@@ -75,7 +75,7 @@ function WaveAccount({
           <option value="">Move new agents to…</option>
           {targets.map((a) => (
             <option key={a.id} value={a.id}>
-              {`${a.label} · ${a.fiveHour ? `${Math.round(a.fiveHour.pct)}%` : NO_USAGE_YET}`}
+              {`${a.label} · ${fiveHourLabel(a.fiveHour?.pct ?? null, a.weekly?.pct ?? null)}`}
             </option>
           ))}
         </select>
