@@ -11,6 +11,7 @@
  * in, in volleyd's namespace (its registry entry); without one the settings
  * modal stays read-only and offers `copyCommand` instead.
  */
+import { newId as defaultNewId } from "../lib/id";
 import type { DeskMessage, Envelope } from "../store/types";
 
 export const DAEMON_AGENT_ID = "volleyd";
@@ -102,7 +103,7 @@ export function createConfigTransport(
 ): ConfigTransport {
   const namespace = opts.namespace ?? "default";
   const timeoutMs = opts.timeoutMs ?? CONFIG_ACK_TIMEOUT_MS;
-  const newId = opts.newId ?? (() => crypto.randomUUID());
+  const newId = opts.newId ?? defaultNewId;
   const now = opts.now ?? (() => new Date());
   const replies = mailbox(namespace, opts.identity);
 

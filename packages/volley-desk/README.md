@@ -27,6 +27,10 @@ The broker requires credentials (`examples/mosquitto-auth/`), so on first load t
 
 localStorage is readable by any script on the Desk's origin, the same trust boundary as the Desk itself.
 
+### One-time links
+
+A link with `#signin=<token>` skips the form (SPEC §4.6.10): `volley setup`'s phone QR, a link made in Settings › Setup & Security, or `<desk>#signin=<admin token>` with the token `volley auth token` printed. The token leaves the address bar at once (it is single use) and the card reads *Signing in with your one-time link…* while `store/control.ts` redeems it: it connects as the token's own short-lived login (username = the token id), publishes `token_redeem` on `volley-auth/redeem/<id>` with a fresh RSA-OAEP `reply_key`, and opens the login volleyd seals into its answer on `.../reply`. The account is bound to "Desk on <device>" and stored like a typed sign-in, with its role; an admin token also opens Settings › Setup & Security once. A used or expired link shows the form with the reason and what to do next. Over plain `http://` from another device (an insecure context, where browsers hide `crypto.subtle` and `crypto.randomUUID`) the key pair comes from `lib/rsa.ts`, a small RSA-OAEP implementation on `crypto.getRandomValues`, and every request id (steering, config changes, account ops) from `lib/id.ts`, also on `getRandomValues`.
+
 ![The Desk's sign-in: Line Waves behind a tilted glass card](docs/sign-in.png)
 
 The look is the approved prototype's (`auth/SignInGate.tsx`, `styles/signin.css`): React Bits Line Waves behind a vignette, a deep glass card that tilts toward the pointer, recessed fields and a Specular Button that reads *Signing in…* and stays disabled until the first connect settles (connected, or disconnected: the Desk then shows its own offline state). Line Waves is lazy-loaded (`auth/SignInBackdrop.tsx`); without WebGL (`hasWebGL`), under `prefers-reduced-motion`, while its chunk loads or if it throws, the plain gradient stands in. Below 700 px the card fills the width inside a 16 px margin, does not tilt, and Line Waves draws 8 lines instead of 14.
@@ -136,8 +140,8 @@ src/styles/attention.css    pulse (default Needs-you effect), banners, coordinat
 src/settings/SettingsWindow  Settings window (macOS System Settings style, from the dock): searchable
                             sidebar (sections.ts: labels, tiles, keywords, account role), primitives
                             (Group/Row/Seg/Toggle), General, Appearance, Supervisor, Claude
-                            accounts & usage (ClaudeAccounts), About; the other Onboarding
-                            sections are placeholders
+                            accounts & usage (ClaudeAccounts), Broker accounts (BrokerAccounts),
+                            Setup & Security (Setup, SetupWizard), About; Machines is a placeholder
 src/settings/ConfigRows     volleyd config rows built from spec/schemas/config.schema.json (schemaRows),
                             config_set requests + acks (configTransport); Supervisor = global scope,
                             SettingsModal (wave gear) = that wave's effective config, read-only
@@ -171,7 +175,7 @@ scripts/sync-react-bits-backgrounds.ts
 
 ### Subscriptions
 
-`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen,usage}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`, `volley/_system/claude-accounts/+`, `volley/_system/claude/+/signin`.
+`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen,usage}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`, `volley/_system/claude-accounts/+`, `volley/_system/claude/+/signin`, `volley/_system/auth/replies/+` (volleyd's answers to account ops; secrets in them are sealed to the requesting browser).
 
 ### Store semantics
 
@@ -214,7 +218,7 @@ The no-coordinator banner's **Claim this wave** sends `volleyd claim <wave>` as 
 
 ## Settings
 
-The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config), Claude accounts & usage (below) and About (version, licences). Broker accounts, Machines and Setup & Security are listed (and searchable) but come with Onboarding. The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
+The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config), Claude accounts & usage (below), Broker accounts and Setup & Security (below) and About (version, licences). Machines is listed (and searchable) but comes with Onboarding. The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
 
 The config rows (Supervisor, and a wave's gear) come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
 
@@ -226,6 +230,7 @@ The config rows (Supervisor, and a wave's gear) come from the config schema, so 
 
 ![The same section at phone width](docs/claude-accounts-phone.png) ![An agent window's account picker and context meter](docs/agent-ctx-picker.png)
 
+- **Settings › Broker accounts and Setup & Security** talk to volleyd over the admin channel (`store/control.ts`, SPEC §4.6.10): each request goes to the account's own `volley/_system/auth/ops/<username>` with a `reply_key`, and the answer on `volley/_system/auth/replies/<correlation_id>` is accepted only from `volleyd`; a password or token in it is sealed to this browser. Only an admin account may send them: the Desk knows it is one from the stored role (a redeemed admin token) or, the first time an admin-only section opens, from one `account_list` volleyd answers. **Broker accounts** lists `account_list` (name, role chip, where, last seen) with an Agents row (the supervisor's per-spawn logins on every machine, with the live count: nothing to manage); **New account** (Desk → can steer, Coordinator → can steer, Viewer → watch only) is `account_create`, **Rotate** is `account_rotate`, and both show the new password once with a QR code and Copy; **Revoke…** asks, then `account_revoke`. Your own account has no actions. **Setup & Security** shows the broker (where the Desk connects; for an admin, from `setup_plan`: whether accounts are required, read from what each listener does with an anonymous client, pending Security changes apart, when setup last ran) and the admin block: **Issue new token** (`admin_token`: the token comes back sealed to this browser and is shown once), **Preview** of the sign-in screen and **Run setup again**, which closes Settings and opens the wizard in its own modal as `volley setup --repair`: `volley setup`'s five steps (Broker, Security with its LAN question above the changes it plans for, Accounts with the one-time admin token shown once, Services, Phone with a QR code of a one-time `signin_link`, never spent while a phone could not reach the broker). Each step is planned by `setup_plan` and applied only on **Apply** (`setup_apply` with the step's `plan_id`, so volleyd applies exactly the plan shown or refuses); a change only a terminal can make shows why and the command. Applying waits up to two minutes, and an answer that arrives later (a broker restart drops the connection for a moment) still shows, token included. A volleyd that answers `unknown op` to `setup_plan` or `admin_token` gets `volley setup` / `volley auth token` to run in a terminal instead. A browser that is not an admin cannot list accounts: it sees its own row and the Agents row, and can paste an admin token to sign in with it.
 - **Without broker credentials** (an anonymous sign-in) or in demo mode Supervisor sends nothing. A global row still takes a new value, and then offers the exact `volleyd config set <path> <value>` line that sets it to copy (nothing to copy until the value differs from the current one). Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand.
 
 ## React Bits

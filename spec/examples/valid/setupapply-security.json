@@ -1,0 +1,11 @@
+{
+  "step": "security",
+  "lines": [
+    "Wrote /opt/homebrew/etc/mosquitto/mosquitto.conf.",
+    "Backed the previous config up to /opt/homebrew/etc/mosquitto/mosquitto.conf.bak-20261019 (rollback: copy it back, restart).",
+    "The broker restarts after this answer (brew services restart mosquitto)."
+  ],
+  "problems": [],
+  "terminal": [],
+  "restarting": true
+}

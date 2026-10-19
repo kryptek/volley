@@ -4,8 +4,8 @@
  * over the section labels and keywords (`matchSections`), the signed-in
  * broker account and the sections in three groups with coloured icon tiles;
  * the main pane shows the picked section (General, Appearance, Supervisor,
- * Claude accounts & usage, About; the other Onboarding sections are
- * placeholders for now). Escape, the
+ * Claude accounts & usage, Broker accounts, Setup & Security, About; Machines
+ * is a placeholder for now). Escape, the
  * close button and a scrim click close it (Escape in a search box with a
  * query clears the query instead); focus moves in on open (and Tab stays
  * inside) and goes back to the opener on close. It is built like a Desk
@@ -17,11 +17,14 @@ import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
+import type { AuthOps } from "../store/control";
 import type { ConfigPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
+import { BrokerAccounts } from "./BrokerAccounts";
 import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
+import { Setup, useAdminRole } from "./Setup";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
 import { clearOnEscape } from "./primitives";
@@ -55,7 +58,23 @@ export interface SettingsWindowProps {
   initial?: SectionKey;
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
   claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
+  /** Settings › Broker accounts and Setup & Security: volleyd's admin channel and where the Desk is. */
+  onboarding?: {
+    /** `null` when the Desk cannot send admin ops (anonymous, demo). */
+    ops: AuthOps | null;
+    brokerUrl: string | null;
+    /** This Desk's URL without a fragment (what a sign-in link opens). */
+    deskUrl: string;
+    onPreviewSignIn?: () => void;
+    /** Agents with a live status now (Broker accounts' Agents row). */
+    liveAgents?: number;
+    /** Setup & Security › Open setup…: Settings closes and the wizard opens in its own modal. */
+    onOpenSetup?: (repair: boolean) => void;
+  };
 }
+
+/** The account row's second line for an admin session (a redeemed admin token). */
+const ADMIN_ROLE = "Admin · manages accounts and setup";
 
 const Tile = ({ s, size }: { s: SectionDef; size: number }) => (
   <span className={`tile${size > 13 ? " tile--lg" : ""}`} style={{ background: s.tint }}>
@@ -77,6 +96,9 @@ export function SettingsWindow(p: SettingsWindowProps) {
   const dialog = useRef<HTMLDivElement>(null);
   const shown = matchSections(q);
   const cur = sectionDef(sec);
+  const ops = p.onboarding?.ops ?? null;
+  // Asked only once an admin-only section is open: a non-admin's ask is never answered.
+  const { admin, role } = useAdminRole(ops, p.identity, sec === "accounts" || sec === "setup");
 
   useFocusTrap(dialog);
   // Focus moves into the window so Escape works at once; it goes back on close.
@@ -127,13 +149,13 @@ export function SettingsWindow(p: SettingsWindowProps) {
             <div
               className="avatar"
               aria-hidden="true"
-              title={`${p.identity ?? "Not signed in"} · ${accountRole(p.identity, p.demo)}`}
+              title={`${p.identity ?? "Not signed in"} · ${admin ? ADMIN_ROLE : accountRole(p.identity, p.demo)}`}
             >
               {p.identity ? initials(p.identity) : "?"}
             </div>
             <div className="min0">
               <div className="ms-name">{p.identity ?? "Not signed in"}</div>
-              <div className="s-hint">{accountRole(p.identity, p.demo)}</div>
+              <div className="s-hint">{admin ? ADMIN_ROLE : accountRole(p.identity, p.demo)}</div>
             </div>
           </div>
           <nav aria-label="Settings sections">
@@ -198,6 +220,28 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 {...(p.claude?.onRegistry ? { onRegistry: p.claude.onRegistry } : {})}
                 config={p.config}
                 configTransport={p.transport}
+              />
+            )}
+            {sec === "accounts" && (
+              <BrokerAccounts
+                ops={ops}
+                admin={admin}
+                identity={p.identity}
+                role={role}
+                liveAgents={p.onboarding?.liveAgents ?? null}
+              />
+            )}
+            {sec === "setup" && (
+              <Setup
+                ops={ops}
+                admin={admin}
+                identity={p.identity}
+                brokerUrl={p.onboarding?.brokerUrl ?? null}
+                deskUrl={p.onboarding?.deskUrl ?? ""}
+                {...(p.onboarding?.onPreviewSignIn
+                  ? { onPreviewSignIn: p.onboarding.onPreviewSignIn }
+                  : {})}
+                {...(p.onboarding?.onOpenSetup ? { onOpenSetup: p.onboarding.onOpenSetup } : {})}
               />
             )}
             {sec === "about" && <About />}
