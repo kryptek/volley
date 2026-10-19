@@ -100,7 +100,7 @@
                 { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
                 { "type": "null" }
               ],
-              "description": "account_limit: the account with the most 5-hour headroom, or null when no other account has usage data."
+              "description": "account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, or null when there is none."
             },
             "resolved": {
               "type": "object",

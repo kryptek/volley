@@ -49,6 +49,13 @@ describe("parseUsage", () => {
     expect(parseUsage({ ...p, rate_limits: { five_hour: { pct: "high" } } })).toBeNull();
     expect(parseUsage("nope")).toBeNull();
   });
+
+  it("rejects an account outside the id grammar (it becomes a topic level)", () => {
+    const p = sample("work", 11, "2026-10-18T14:00:00.000Z");
+    for (const account of ["a/b", "x#", "+", "Work", "-x", ""])
+      expect(parseUsage({ ...p, account })).toBeNull();
+    expect(parseUsage({ ...p, account: null })).toEqual({ ...p, account: null });
+  });
 });
 
 describe("account aggregation", () => {
@@ -187,6 +194,21 @@ describe("limitDecisions", () => {
     const [only] = limitDecisions({ ...base, warnAtPct: 90 });
     expect(only?.input.options).toEqual(["not now"]);
     expect(only?.extra.suggested).toBeNull();
+  });
+
+  it("does not suggest an account that is itself at or over the threshold", () => {
+    const at = "2026-10-18T14:00:00.000Z";
+    const base = { candidates: ["work", "spare"], existing: [], now: NOW, warnAtPct: 90 };
+    let hot = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
+    hot = fold(hot, "x", null, sample("spare", 91, at));
+    let weeklyHot = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
+    weeklyHot = fold(weeklyHot, "x", null, sample("spare", 10, at, 97));
+    for (const b of [hot, weeklyHot]) {
+      const out = limitDecisions({ ...base, accounts: accountRecords(b) });
+      const mine = out.find((d) => d.extra.acct === "work");
+      expect(mine?.input.options).toEqual(["not now"]);
+      expect(mine?.extra.suggested).toBeNull();
+    }
   });
 });
 

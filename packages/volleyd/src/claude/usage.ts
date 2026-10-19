@@ -1,4 +1,4 @@
-import type { DecisionInput } from "../decisions";
+import { type DecisionInput, ID_RE } from "../decisions";
 import type { JournalEvent } from "../types";
 
 /**
@@ -50,7 +50,8 @@ export function parseUsage(v: unknown): UsagePayload | null {
   const cw = obj(p?.context_window);
   const rl = obj(p?.rate_limits);
   if (p === null || cw === null || rl === null || !isDate(p.captured_at)) return null;
-  if (!nullOr(p.account, (x) => typeof x === "string" && x !== "")) return null;
+  // the account becomes a topic level (`volley/_system/claude-accounts/<acct>`)
+  if (!nullOr(p.account, (x) => typeof x === "string" && ID_RE.test(x))) return null;
   if (!nullOr(p.model, (x) => typeof x === "string")) return null;
   const isNum = (x: unknown) => typeof x === "number";
   if (!nullOr(cw.used_percentage, isPct) || !nullOr(cw.used, isNum) || !nullOr(cw.size, isNum))
@@ -178,7 +179,8 @@ function livePct(w: UsageWindow | null, now: number): number | null {
 /**
  * `most_headroom`: among `candidates` (accounts an agent could start under), the one with the
  * lowest 5-hour percentage (then the lowest weekly, then candidate order). Candidates without
- * usage data are not ranked; null when none has any.
+ * usage data are not ranked (a primary that has not reported yet loses to a signed-in profile
+ * at 80%); null when none has any.
  */
 export function mostHeadroom(
   accounts: Record<string, AccountUsage>,
@@ -238,11 +240,17 @@ export function limitDecisions(o: {
     const w = a.five_hour;
     const pct = livePct(w, o.now);
     if (w === null || pct === null || pct < o.warnAtPct) continue;
-    const suggested = mostHeadroom(
-      o.accounts,
-      o.candidates.filter((c) => c !== a.account),
-      o.now,
-    );
+    // only an account with room in both windows is worth moving to
+    const roomy = o.candidates.filter((c) => {
+      const r = o.accounts[c];
+      return (
+        c !== a.account &&
+        r !== undefined &&
+        (livePct(r.five_hour, o.now) ?? 0) < o.warnAtPct &&
+        (livePct(r.weekly, o.now) ?? 0) < o.warnAtPct
+      );
+    });
+    const suggested = mostHeadroom(o.accounts, roomy, o.now);
     for (const wave of a.waves) {
       const seen = o.existing.filter((e) => e.wave === wave && e.acct === a.account);
       if (seen.some((e) => e.open || e.resets_at === w.resets_at)) continue;
@@ -250,7 +258,7 @@ export function limitDecisions(o: {
       const ask =
         suggested !== null
           ? ` Move wave ${wave} to ${suggested} (${Math.round(livePct(o.accounts[suggested]?.five_hour ?? null, o.now) ?? 0)}%)? New agents would start there; running agents finish where they are.`
-          : " No other account has usage data to suggest; nothing moves unless you move the wave.";
+          : " No other account has known headroom to suggest; nothing moves unless you move the wave.";
       out.push({
         wave,
         input: {

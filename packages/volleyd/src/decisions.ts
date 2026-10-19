@@ -94,7 +94,7 @@ export const parksTask = (d: { parks?: boolean }): boolean => d.parks !== false;
 /** Task stages a task-level decision may not park: their dependents already moved on. */
 const SETTLED = new Set<TaskStage>(["done", "merge_ready", "cancelled"]);
 
-const ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 export const decisionTopic = (wave: WaveId, id: string) => `volley/_waves/${wave}/decisions/${id}`;
 

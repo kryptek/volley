@@ -410,7 +410,8 @@ URL; while a sign-in waits, `claude_accounts` returns its URL for a client that 
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
 `claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
 signed-in account with the lowest 5-hour usage (see "Usage metering"), or the primary while no
-account has usage data. A spawn under an unknown account, one
+account has usage data. An account that has not reported usage yet is not ranked, so a profile
+at 80% wins over a primary that simply has not reported (it may be at 0%). A spawn under an unknown account, one
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
@@ -469,7 +470,7 @@ account's windows stay.
 When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
 can override it), each running wave with agents on that account gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
-most headroom, with the options `move wave <w> to <suggested>` and `not now`. It is not asked
+most headroom among those under the threshold in both windows (none: only `not now`), with the options `move wave <w> to <suggested>` and `not now`. It is not asked
 again while open, nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
 one is refused and the decision stays open) journals `wave_account_moved { from, to, by,

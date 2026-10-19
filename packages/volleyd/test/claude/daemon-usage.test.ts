@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -62,29 +62,43 @@ async function recordWhen(
   return r;
 }
 
+/** A registry with one signed-in local profile, `spare`; returns its profile dir. */
+function spareProfile(base: string): { root: string; primary: string; spare: string } {
+  const root = join(base, "claude");
+  const primary = join(base, ".claude");
+  mkdirSync(join(root, "spare"), { recursive: true });
+  mkdirSync(primary, { recursive: true });
+  writeFileSync(
+    join(root, "accounts.json"),
+    JSON.stringify({
+      version: 1,
+      accounts: [
+        {
+          id: "spare",
+          label: "Spare",
+          machine: "local",
+          created: "2026-10-18T12:00:00.000Z",
+          plan: "max",
+          signed_in_at: "2026-10-18T12:00:00.000Z",
+        },
+      ],
+    }),
+  );
+  return { root, primary, spare: join(root, "spare") };
+}
+
+/** Cross the threshold on the primary with the wave's agent; the account_limit decision id. */
+async function limitOnPrimary(): Promise<string> {
+  await publishUsage(AGENT, usage("primary", 93));
+  const limit = () =>
+    s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "account_limit");
+  await s.until(() => limit().length === 1);
+  return limit()[0]?.data.decision_id as string;
+}
+
 describe("usage metering (daemon)", () => {
   it("folds samples per account, opens one account_limit decision, and moves the wave only on an answer", async () => {
-    const base = mkdtempSync(join(tmpdir(), "volleyd-usage-"));
-    const root = join(base, "claude");
-    const primary = join(base, ".claude");
-    mkdirSync(join(root, "spare"), { recursive: true });
-    mkdirSync(primary, { recursive: true });
-    writeFileSync(
-      join(root, "accounts.json"),
-      JSON.stringify({
-        version: 1,
-        accounts: [
-          {
-            id: "spare",
-            label: "Spare",
-            machine: "local",
-            created: "2026-10-18T12:00:00.000Z",
-            plan: "max",
-            signed_in_at: "2026-10-18T12:00:00.000Z",
-          },
-        ],
-      }),
-    );
+    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
     s = await makeSupervisedEnv({ daemon: { claude: { root, primaryDir: primary } } });
 
     // An agent of another wave (not supervised here) reports the spare account, by profile dir.
@@ -104,10 +118,9 @@ describe("usage metering (daemon)", () => {
     });
 
     // The wave's agent crosses the 5-hour threshold on the primary.
-    await publishUsage(AGENT, usage("primary", 93));
+    await limitOnPrimary();
     const limit = () =>
       s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "account_limit");
-    await s.until(() => limit().length === 1);
     expect(limit()[0]?.data).toMatchObject({
       acct: "primary",
       pct: 93,
@@ -148,5 +161,37 @@ describe("usage metering (daemon)", () => {
       agents: [],
       waves: [],
     });
+  }, 20_000);
+
+  it("after a wave move, the wave's next agent spawns under the target profile", async () => {
+    const { root, primary, spare } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary } },
+      reapGraceMs: 200,
+    });
+    writeFileSync(
+      join(spare, ".claude.json"),
+      JSON.stringify({ projects: { [s.repo]: { hasTrustDialogAccepted: true } } }),
+    );
+    const id = await limitOnPrimary();
+    await s.daemon.resolveDecision("w1", id, { answer: "move wave w1 to spare", by: "o" });
+
+    // The running agent is reaped; its respawn is a new agent of the wave.
+    s.host.onLaunch = () => {};
+    await s.status("reaped", { reason: "lwt" });
+    const blocked = () =>
+      s.journal().find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+    await s.until(() => blocked() !== undefined);
+    await s.daemon.resolveDecision("w1", blocked()?.data.decision_id as string, {
+      answer: "respawn",
+      by: "o",
+    });
+    const spawned = () => s.journal().filter((e) => e.type === "agent_spawned");
+    await s.until(() => spawned().length === 2);
+    expect(spawned().map((e) => e.data.claude_account)).toEqual(["primary", "spare"]);
+    const wt = join(s.env.home, "wt", "w1", "T1-implementer");
+    expect(readFileSync(join(wt, ".volley", "launch.sh"), "utf-8")).toContain(
+      `export CLAUDE_CONFIG_DIR='${spare}'`,
+    );
   }, 20_000);
 });
