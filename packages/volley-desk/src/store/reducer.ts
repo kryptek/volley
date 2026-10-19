@@ -798,13 +798,14 @@ export function endedWaves(state: DeskState): Set<string> {
 
 /**
  * The top bar's "N agents working": agents (not coordinators, never
- * supervisors) whose status is `working`, or still `spawning` / `registered`
+ * supervisors, none of a stopped / complete wave) whose status is `working`, or still `spawning` / `registered`
  * while they publish progress — an agent the MCP server left at `registered`
  * (it never set `working` itself) that is narrating is at work.
  */
 export function workingCount(state: DeskState): number {
   return Object.values(state.agents).filter((a) => {
-    if (state.coordinators[a.id]) return false;
+    // Nothing runs in a stopped / complete wave, whatever an agent's last status said.
+    if (state.coordinators[a.id] || isEndedWave(state.waves[a.wave])) return false;
     const t = a.status?.type;
     if (t === "working") return true;
     return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;

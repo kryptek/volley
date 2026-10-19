@@ -4,7 +4,7 @@ import App from "../src/App";
 import { agentAttention, waveAttention } from "../src/attention";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
-import { endedWaves, initialState, reduceAll } from "../src/store/reducer";
+import { endedWaves, initialState, reduceAll, workingCount } from "../src/store/reducer";
 import { WaveWindow } from "../src/windows/wave/WaveWindow";
 import {
   NOW,
@@ -58,6 +58,18 @@ describe("stopped / complete wave — attention", () => {
     if (!a) throw new Error("no agent");
     expect(agentAttention(a, w, ctx)).toEqual({ tier: "none" });
     expect(endedWaves(state)).toEqual(new Set(["w1"]));
+  });
+});
+
+describe("stopped / complete wave — the top bar's working count", () => {
+  it("does not count an agent of an ended wave, whatever its last status said", () => {
+    const s = reduceAll(initialState(), [
+      waveMsg(stopped()),
+      registry("impl-1", NOW - H),
+      status("impl-1", "working", NOW - 3 * H),
+    ]);
+    expect(s.agents["impl-1"]?.wave).toBe("w1");
+    expect(workingCount(s)).toBe(0);
   });
 });
 
