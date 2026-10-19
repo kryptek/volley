@@ -303,7 +303,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
-| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], sharing }` |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan? }, sharing }` |
 | `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct`, `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
@@ -363,8 +363,11 @@ command, from the host), volleyd's own service or password (either would stop th
 answering: `volley setup --step services` / `--step accounts`), and the macOS keychain copy of the
 coordinator's login (the logged-in session's: `volley setup --step accounts`). volleyd never reads
 the keychain, so once the coordinator's login is on file the accounts step plans no keychain change
-at all: it notes that the keychain can't be checked from the Desk and that `volley setup` checks it
-in a terminal (only a login that is new, or gets a new password, plans the copy there). On a brew layout the
+at all: its `notes` say that the keychain can't be checked from the Desk and that `volley setup`
+checks it in a terminal (only a login that is new, or gets a new password, plans the copy there).
+A Desk apply logs what it leaves for a terminal (`left` in `setup.log`); while a password the Desk
+gave the coordinator has not been stored by a terminal's `--step accounts` since, the keychain copy
+stays a terminal's change, and the note says it is stale and names the command. On a brew layout the
 broker restart is applied last, after the answer is published (`restarting: true`); its result and
 the step's checks land in `setup.log`, and the Desk re-plans once it has reconnected. Setup ops are
 answered beside the daemon's serial queue, so a long step (the Desk build) never holds up waves.
@@ -407,6 +410,9 @@ profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` move
 the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
 `CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
 `~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
+The primary is never in it: `claude_accounts` asks `claude auth status` of the default profile and
+answers its plan as `primary: { plan? }` (none when it is not logged in or names no plan), and the
+primary's usage record carries that plan from then on.
 SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
 evidence behind each choice below.
 

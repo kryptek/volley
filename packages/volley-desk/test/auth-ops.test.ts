@@ -183,6 +183,23 @@ describe("the setup-op contract", () => {
     expect(plan && accountsRequired(plan)).toBe(true);
   });
 
+  it("parses a step's notes (what volleyd cannot check), and leaves them out when none", () => {
+    const plan = parseSetupPlan({
+      steps: [
+        {
+          step: "accounts",
+          title: "Accounts",
+          found: ["The 5 shared roles match this Volley"],
+          notes: ["The macOS keychain can't be checked from the Desk", ""],
+          changes: [],
+        },
+        { step: "services", title: "Services", found: [], changes: [] },
+      ],
+    });
+    expect(plan?.steps[0]?.notes).toEqual(["The macOS keychain can't be checked from the Desk"]);
+    expect(plan?.steps[1]).not.toHaveProperty("notes");
+  });
+
   it("reads accounts-required from the listeners' probes, not from pending changes", () => {
     const plan = parseSetupPlan({
       steps: [

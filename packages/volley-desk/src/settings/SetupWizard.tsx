@@ -92,13 +92,6 @@ const RECONNECT_TRIES = 30;
 
 const icon = (i: typeof Tick02Icon) => <HugeiconsIcon icon={i} size={12} strokeWidth={1.8} />;
 
-/**
- * A `found` line volleyd could not check (its `KEYCHAIN_UNCHECKED`: the keychain is the logged-in
- * session's), shown as a note rather than a tick. `found` is display text, so this keys on
- * volleyd's words, which its setup-ops test pins.
- */
-const UNCHECKED = /can't be checked from the Desk/;
-
 type Load =
   | { state: "loading" }
   | { state: "ready"; plan: SetupPlan }
@@ -615,19 +608,19 @@ function PlanStep({
   return (
     <>
       <h3>{plan.title}</h3>
-      {plan.found.length > 0 && (
+      {plan.found.length + (plan.notes?.length ?? 0) > 0 && (
         <ul className="checks">
-          {plan.found.map((f) =>
-            UNCHECKED.test(f) ? (
-              <li key={f} className="dim" data-kind="note">
-                {icon(InformationCircleIcon)} <span>{f}</span>
-              </li>
-            ) : (
-              <li key={f} data-kind="found">
-                {icon(Tick02Icon)} <span>{f}</span>
-              </li>
-            ),
-          )}
+          {plan.found.map((f) => (
+            <li key={f} data-kind="found">
+              {icon(Tick02Icon)} <span>{f}</span>
+            </li>
+          ))}
+          {/* What volleyd cannot check (the step's `notes`): neither a tick nor a warning. */}
+          {plan.notes?.map((f) => (
+            <li key={f} className="dim" data-kind="note">
+              {icon(InformationCircleIcon)} <span>{f}</span>
+            </li>
+          ))}
         </ul>
       )}
       {plan.blocked === undefined && plan.lan !== undefined && lan !== null && report === null && (

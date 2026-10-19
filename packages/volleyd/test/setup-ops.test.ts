@@ -23,6 +23,7 @@ import { Daemon } from "../src/daemon";
 import type { ExecFn } from "../src/exec";
 import { readJournalFile } from "../src/journal";
 import {
+  KEYCHAIN_STALE,
   KEYCHAIN_UNCHECKED,
   SetupOps,
   type SetupOpsOptions,
@@ -56,6 +57,7 @@ interface WireStep {
   step: string;
   title: string;
   found: string[];
+  notes?: string[];
   changes: { summary: string; detail?: string; terminal?: { reason: string; command: string } }[];
   blocked?: string;
   skipped?: string;
@@ -476,7 +478,11 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       ["accounts", "planned", "desk:admin-1"],
       ["accounts", "applied", "desk:admin-1"],
       ["accounts", "applied", "desk:admin-1"],
+      ["accounts", "left", "desk:admin-1"],
     ]);
+    expect(setupLog()[3]?.summary).toBe(
+      "Store the coordinator's broker login in the macOS keychain (service volley-broker)",
+    );
     expect(setupLog()[0]?.summary).toBe(accounts.changes.map((c) => c.summary).join("; "));
     const ev = systemEvents().find((e) => e.type === "setup_step_applied");
     expect(ev?.data).toEqual({
@@ -492,11 +498,13 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       expect(text).not.toContain(token as string);
       expect(text).not.toContain(coordinator.password);
     }
-    // The plan after it: the step is done. volleyd cannot read the keychain, so the copy there
-    // is neither pending nor done: a neutral note, never a change (a terminal's setup checks it).
+    // The plan after it: the Desk wrote the coordinator a password no terminal has stored in the
+    // keychain since, so the copy there is stale. The plan says so, with the command.
     const again = step((await plan()).steps, "accounts");
-    expect(again.changes).toEqual([]);
-    expect(again.found).toContain(KEYCHAIN_UNCHECKED);
+    expect(schemaErrors("setup-result.schema.json#/$defs/step", again)).toEqual([]);
+    expect(again.changes.map((c) => c.terminal?.command)).toEqual(["volley setup --step accounts"]);
+    expect(again.notes).toEqual([KEYCHAIN_STALE]);
+    expect(again.found).not.toContain(KEYCHAIN_STALE);
     expect(m.fake.argvs(["security"])).toEqual([]);
     expect(existsSync(join(m.volleydHome, "broker.json"))).toBe(true);
     expect(existsSync(join(m.volleydHome, "dynsec-admin.json"))).toBe(true);
@@ -504,25 +512,23 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(step((await plan()).steps, "detect").found).toContain("2 agents running on the broker");
   });
 
-  it("a keychain copy volleyd cannot check is a neutral note, in the Desk's words; Linux has none", async () => {
-    // The Desk shows this line as a note, not a check that passed: it keys on these words.
-    expect(KEYCHAIN_UNCHECKED).toBe(
-      "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)",
-    );
+  it("a keychain copy volleyd cannot check is a note, in its own field; one the Desk made stale says so; Linux has none", async () => {
     const ops = direct();
     const planAccountsStep = async () => {
       const r = await ops.handle("admin-1", { op: "setup_plan" });
       expect(r.reply.ok, r.reply.error).toBe(true);
-      return step((r.reply.result as { steps: WireStep[] }).steps, "accounts");
+      const s = step((r.reply.result as { steps: WireStep[] }).steps, "accounts");
+      expect(schemaErrors("setup-result.schema.json#/$defs/step", s)).toEqual([]);
+      return s;
     };
+    const keychainChange = (s: WireStep) =>
+      s.changes.find((c) =>
+        c.summary.startsWith("Store the coordinator's broker login in the macOS keychain"),
+      );
     // A fresh coordinator login is new: its keychain copy is a terminal's change, not unknown.
     const fresh = await planAccountsStep();
-    expect(
-      fresh.changes.find((c) =>
-        c.summary.startsWith("Store the coordinator's broker login in the macOS keychain"),
-      )?.terminal?.command,
-    ).toBe("volley setup --step accounts");
-    expect(fresh.found).not.toContain(KEYCHAIN_UNCHECKED);
+    expect(keychainChange(fresh)?.terminal?.command).toBe("volley setup --step accounts");
+    expect(fresh.notes).toBeUndefined();
     const applied = await ops.handle("admin-1", {
       op: "setup_apply",
       step: "accounts",
@@ -530,13 +536,44 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       reply_key: replyKey,
     });
     expect(applied.reply.ok, applied.reply.error).toBe(true);
+    // The Desk made the login, so the keychain cannot hold its password: stale, for a terminal.
+    const stale = await planAccountsStep();
+    expect(keychainChange(stale)?.terminal?.command).toBe("volley setup --step accounts");
+    expect(stale.notes).toEqual([KEYCHAIN_STALE]);
+    expect(KEYCHAIN_STALE).toContain("`volley setup --step accounts`");
+    // The terminal's run of the accounts step stores it (setup.log: its line has no `by`).
+    const log = join(m.volleydHome, "setup.log");
+    writeFileSync(
+      log,
+      `${readFileSync(log, "utf-8")}${JSON.stringify({ at: new Date().toISOString(), step: "accounts", event: "verified" })}\n`,
+    );
+    // From then on volleyd cannot tell: neither pending nor done, a note in `notes`, never in
+    // `found` (display text the Desk never parses).
     const after = await planAccountsStep();
     expect(after.changes).toEqual([]);
-    expect(after.found).toContain(KEYCHAIN_UNCHECKED);
+    expect(after.notes).toEqual([KEYCHAIN_UNCHECKED]);
+    expect(after.found).not.toContain(KEYCHAIN_UNCHECKED);
+    // The Desk rotates the coordinator's password (its file is gone): stale again.
+    rmSync(join(m.layout.authDir, "coordinator.json"));
+    const rotate = await planAccountsStep();
+    expect(rotate.changes.map((c) => c.summary)).toEqual([
+      expect.stringMatching(/^New password for coordinator, /),
+      expect.stringMatching(/^Store the coordinator's broker login in the macOS keychain/),
+    ]);
+    const rotated = await ops.handle("admin-1", {
+      op: "setup_apply",
+      step: "accounts",
+      plan_id: rotate.plan_id,
+      reply_key: replyKey,
+    });
+    expect(rotated.reply.ok, rotated.reply.error).toBe(true);
+    const staleAgain = await planAccountsStep();
+    expect(staleAgain.notes).toEqual([KEYCHAIN_STALE]);
+    expect(keychainChange(staleAgain)?.terminal).toBeDefined();
     platform = "linux";
     const linux = await direct().handle("admin-1", { op: "setup_plan" });
     const onLinux = step((linux.reply.result as { steps: WireStep[] }).steps, "accounts");
-    expect(onLinux.found).not.toContain(KEYCHAIN_UNCHECKED);
+    expect(onLinux.notes).toBeUndefined();
     expect(onLinux.found.join("\n")).toContain("no OS keychain here");
     expect(m.fake.argvs(["security"])).toEqual([]);
   });

@@ -649,6 +649,8 @@ export interface SetupStepPlan {
   title: string;
   /** What the step found (always shown). */
   found: string[];
+  /** What volleyd notes but cannot check itself (the keychain): neither a check nor a change. */
+  notes?: string[];
   /** What applying it changes; empty when it is already done. */
   changes: SetupChange[];
   /** Why this step (and every later one) cannot run now. */
@@ -721,10 +723,12 @@ export function parseSetupPlan(result: unknown): SetupPlan | null {
           })
       : [];
     const lan = raw.lan as { planned?: unknown; current?: unknown } | undefined;
+    const notes = strings(raw.notes).filter((n) => n !== "");
     steps.push({
       step: raw.step as SetupStepName,
       title: typeof raw.title === "string" ? raw.title : String(raw.step),
       found: strings(raw.found),
+      ...(notes.length > 0 ? { notes } : {}),
       changes,
       ...(typeof raw.blocked === "string" ? { blocked: raw.blocked } : {}),
       ...(typeof raw.skipped === "string" ? { skipped: raw.skipped } : {}),

@@ -11,9 +11,14 @@ import { PLAN, fakeOps } from "./helpers/auth-ops";
 const TOKEN = "vly_admin_89abcdef_0123456789abcdef0123456789abcdef";
 const SIGNIN = "vly_signin_0a1b2c3d_00112233445566778899aabbccddeeff";
 const DESK = "http://desk.example:5199/";
-/** volleyd's note for a keychain it cannot read (`KEYCHAIN_UNCHECKED` in its setup ops). */
+/**
+ * volleyd's notes for the keychain (`KEYCHAIN_UNCHECKED` / `KEYCHAIN_STALE` in its setup ops). The
+ * Desk keys on the step's `notes` field, never on these words: they are sample data here.
+ */
 const KEYCHAIN_UNCHECKED =
   "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)";
+const KEYCHAIN_STALE =
+  "The Desk gave the coordinator's login a new password, so the copy in the macOS keychain is stale (or missing): run `volley setup --step accounts` in a terminal to store the new one";
 
 function wizard(ops: AuthOps, extra: { repair?: boolean } = {}) {
   const onClose = vi.fn();
@@ -238,15 +243,13 @@ describe("SetupWizard", () => {
   });
 
   it("a keychain volleyd cannot check is a neutral note: no warning, no Apply, no attention badge", async () => {
+    // As volleyd sends it: the found lines in the planner's order, the note in `notes`.
     const { ops } = fakeOps({
       setup_plan: () => ({
         ok: true,
         result: planWith("accounts", (s) => ({
-          found: [
-            ...s.found,
-            KEYCHAIN_UNCHECKED,
-            "An admin account exists (admin account admin-1)",
-          ],
+          found: [...s.found, "An admin account exists (admin account admin-1)"],
+          notes: [KEYCHAIN_UNCHECKED],
           changes: [],
         })),
       }),
@@ -257,18 +260,74 @@ describe("SetupWizard", () => {
     next();
     const note = screen.getByText(KEYCHAIN_UNCHECKED).closest("li");
     expect(note).toHaveAttribute("data-kind", "note");
-    // Not a check that passed, and not a warning either.
-    for (const f of [
+    // Not a check that passed, and not a warning either; the notes come after the checks.
+    const found = [
       "Volley's shared roles are on the broker",
       "An admin account exists (admin account admin-1)",
-    ]) {
+    ];
+    for (const f of found) {
       expect(screen.getByText(f).closest("li")).toHaveAttribute("data-kind", "found");
     }
+    expect(
+      [...(note?.parentElement?.children ?? [])].map((li) => li.getAttribute("data-kind")),
+    ).toEqual(["found", "found", "note"]);
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByText(/Already done: nothing to change/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Apply/ })).toBeNull();
     next();
     expect(screen.getByLabelText(/^Step 3: Accounts/)).toHaveAttribute("data-status", "complete");
+  });
+
+  it("a note is known by its field, not its words: a found line that reads like one is a check", async () => {
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("accounts", (s) => ({
+          found: [...s.found, KEYCHAIN_UNCHECKED],
+          changes: [],
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    expect(screen.getByText(KEYCHAIN_UNCHECKED).closest("li")).toHaveAttribute(
+      "data-kind",
+      "found",
+    );
+  });
+
+  it("a keychain copy the Desk made stale: the note says so, the command is shown, no Apply", async () => {
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("accounts", (s) => ({
+          found: [...s.found, "An admin account exists (admin account admin-1)"],
+          notes: [KEYCHAIN_STALE],
+          changes: [
+            {
+              summary:
+                "Store the coordinator's broker login in the macOS keychain (service volley-broker)",
+              terminal: {
+                reason:
+                  "the macOS keychain opens only in your logged-in session, which volleyd running as a service may not have",
+                command: "volley setup --step accounts",
+              },
+            },
+          ],
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    expect(screen.getByText(KEYCHAIN_STALE).closest("li")).toHaveAttribute("data-kind", "note");
+    expect(screen.getAllByText("volley setup --step accounts").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /^Apply/ })).toBeNull();
+    next();
+    expect(screen.getByLabelText(/^Step 3: Accounts/)).toHaveAttribute("data-status", "attention");
   });
 
   it("shows the reconnecting notice while the broker restarts, until the plan answers", async () => {

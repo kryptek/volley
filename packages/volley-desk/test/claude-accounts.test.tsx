@@ -442,6 +442,8 @@ describe("ClaudeAccounts review fixes", () => {
 });
 
 describe("ClaudeAccounts › this machine's own login (the primary)", () => {
+  // volleyd's record for the primary, once `claude_accounts` has asked `claude auth status` (its
+  // `describe("primary")`): the plan beside the windows.
   const primary: ClaudeAccountPayload = {
     account: "primary",
     plan: "max",
@@ -451,9 +453,20 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     waves: ["w1"],
     sampled_at: "2026-10-18T14:06:00.000Z",
   };
-  const registry = (rows: unknown[]) =>
+  /** volleyd's `claude_accounts` answer: the registry, the primary's plan (when known), sharing. */
+  const registry = (rows: unknown[], primary: { plan?: string } = {}) =>
     vi.fn(async (op: string) =>
-      op === "claude_accounts" ? { ok: true, result: { accounts: rows } } : { ok: true },
+      op === "claude_accounts"
+        ? {
+            ok: true,
+            result: {
+              root: "/home/owner/.volley/claude",
+              accounts: rows,
+              primary,
+              sharing: { mcp: "copy" },
+            },
+          }
+        : { ok: true },
     ) as unknown as ControlFn;
 
   it("shows a primary card from the start, before any usage, next to a newly added profile", async () => {
@@ -482,6 +495,44 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
       expect(m).toHaveAttribute("aria-valuetext", "no usage reported yet");
       expect(m.closest(".meter")).toHaveTextContent("no usage reported yet");
     }
+  });
+
+  it("before any usage, the primary card shows the plan claude_accounts reports for it", async () => {
+    render(
+      <ClaudeAccounts
+        accounts={{}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={registry([], { plan: "max" })}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    const card = screen.getByRole("article", { name: "This machine's Claude login" });
+    expect(await within(card).findByText("max")).toHaveClass("chip");
+    expect(within(card).getByRole("meter", { name: "5-hour window" })).toHaveAttribute(
+      "aria-valuetext",
+      "no usage reported yet",
+    );
+  });
+
+  it("a primary whose plan volleyd does not know shows none, never a guess", async () => {
+    const control = registry([{ id: "team", label: "Team", machine: "local", plan: "pro" }]);
+    render(
+      <ClaudeAccounts
+        accounts={{}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={control}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    await screen.findByRole("article", { name: "Team" });
+    const card = screen.getByRole("article", { name: "This machine's Claude login" });
+    expect(within(card).queryByText((_, el) => el?.classList.contains("chip") === true)).toBeNull();
   });
 
   it("read-only, with nothing reported, still shows the primary card", () => {
