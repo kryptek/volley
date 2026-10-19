@@ -8,6 +8,7 @@ import { readJournalFile } from "../../src/journal";
 import { SYSTEM_WAVE } from "../../src/types";
 import type { JournalEvent } from "../../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
+import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./fake-host";
 import { runCli } from "./run-cli";
@@ -22,6 +23,8 @@ export interface SupervisedEnv {
   env: DaemonEnv;
   daemon: Daemon;
   host: FakeHost;
+  /** The agent logins the daemon minted and revoked. */
+  creds: MemoryCredentials;
   repo: string;
   /** The simulated agent's own broker connection. */
   agent: VolleyBroker;
@@ -53,6 +56,8 @@ export interface SupervisedEnvOptions {
   namespace?: string;
   /** Extra fake-exec replies (prefix, reply). */
   exec?: [string[], Parameters<FakeExec["on"]>[1]][];
+  /** The agent-login store the daemon uses (default: a fresh in-memory one). */
+  creds?: MemoryCredentials;
   /** Runs when the implementer is launched (credentials minted, not yet supervised). */
   onLaunch?: (daemon: Daemon) => void;
 }
@@ -76,12 +81,10 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-    })
-    .on(["volley", "auth", "add-agent"], (argv) => ({
-      stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-    }));
+    });
   for (const [prefix, reply] of o.exec ?? []) fake.on(prefix, reply);
   const host = fakeHost(fake);
+  const creds = o.creds ?? memoryCredentials();
   const ns = o.namespace ?? NS;
 
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
@@ -136,6 +139,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
       claudeJsonPath: claudeJson,
       hooksDir: "/opt/volley-hooks",
       reapGraceMs: o.reapGraceMs ?? 300,
+      credentials: creds,
     },
     ...o.daemon,
   };
@@ -164,6 +168,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     env,
     daemon,
     host,
+    creds,
     repo,
     agent,
     pub,

@@ -165,7 +165,7 @@ describe("daemon: sleep/wake and reap suppression", () => {
     // Ten minutes is ten reap graces: the agent was never retired.
     for (let i = 0; i < 10; i++) await tickAfter(clock, 60_000);
     expect(retired()).toBe(false);
-    expect(s.host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([]);
+    expect(s.creds.revoked).toEqual([]);
   });
 
   it("a new LWT after a suppressed one is held again and accepted once its grace runs out quietly", async () => {

@@ -51,7 +51,10 @@
             "claude_signin_done",
             "claude_signin_failed",
             "claude_profile_synced",
-            "agent_account_moved"
+            "agent_account_moved",
+            "agent_reaped_by_supervisor",
+            "credentials_revoked",
+            "credentials_swept"
           ]
         },
         "payload": {

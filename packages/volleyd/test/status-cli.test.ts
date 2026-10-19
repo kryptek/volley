@@ -15,12 +15,13 @@ import {
   renderPlist,
   uninstallService,
 } from "../src/commands/install";
-import { formatWave } from "../src/commands/status";
+import { formatLogins, formatWave } from "../src/commands/status";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
 import type { NewEvent } from "../src/types";
 import { makeDaemonEnv } from "./helpers/daemon-env";
+import { memoryCredentials } from "./helpers/fake-dynsec";
 import { runCli } from "./helpers/run-cli";
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -269,6 +270,47 @@ describe("volleyd status formatting", () => {
       expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
         `  brief preface: ${join(repo, ".volley", "brief-preface.md")} (`,
       );
+    } finally {
+      await env.cleanup();
+    }
+  });
+});
+
+describe("volleyd status: agent logins", () => {
+  it("formats the header line", () => {
+    expect(formatLogins({ live: 1, swept: 2 })).toBe("agent logins: 1 live, 2 swept");
+  });
+
+  it("the header counts the logins left after the sweep and the total swept; --json too", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      // Two logins of finished agents from an earlier run, one that is still being spawned.
+      const creds = memoryCredentials();
+      for (const id of ["w0-t1-implementer-1", "w0-t2-implementer-1", "w9-t1-implementer-1"]) {
+        creds.logins.add(id);
+      }
+      creds.mintedAt.set("w0-t1-implementer-1", 0);
+      creds.mintedAt.set("w0-t2-implementer-1", 0);
+      creds.mintedAt.set("w9-t1-implementer-1", Date.now());
+      const d = await env.start({
+        spawner: { credentials: creds },
+        credentialSweepMs: 3_600_000,
+      });
+      await d.sweepCredentials();
+      const out = (await runCli(["status"], env.env)).stdout;
+      expect(out.split("\n")[0]).toBe("agent logins: 1 live, 2 swept");
+      const json = JSON.parse((await runCli(["status", "--json"], env.env)).stdout);
+      expect(json.agent_logins).toEqual({ live: 1, swept: 2 });
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("without a credential store there is no login line", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      await env.start();
+      expect((await runCli(["status"], env.env)).stdout).toBe("no waves\n");
     } finally {
       await env.cleanup();
     }

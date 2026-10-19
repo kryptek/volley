@@ -15,6 +15,7 @@ import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent } from "../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { runCli } from "./helpers/run-cli";
@@ -179,10 +180,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     local = fakeHost(fake);
     const spec: RemoteHostSpec = {
       name: "box",
@@ -243,6 +241,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         reapGraceMs: 150,
         remoteHost: (s) => boxFor(s),
         remoteExec: tunnelExec,
+        credentials: memoryCredentials(),
       },
     });
   });
@@ -287,7 +286,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(identity).toMatchObject({
       agent_id: "w1-t1-implementer-1",
       broker_url: "mqtt://127.0.0.1:21883",
-      broker: { username: "w1-t1-implementer-1", password: "pw" },
+      broker: { username: "w1-t1-implementer-1", password: "pw-w1-t1-implementer-1" },
     });
     const launch = readFileSync(join(wt, ".volley", "launch.sh"), "utf-8");
     expect(launch).toContain("export VOLLEY_HOOKS_DIR='/opt/volley/packages/volley-hooks'");

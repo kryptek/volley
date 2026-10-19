@@ -83,6 +83,10 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** Window collecting broker login changes into one Dynamic Security control message. */
+  dynsec_batch_ms: number;
+  /** Seconds between credential sweeps (credential-sweep.ts). */
+  credential_sweep_interval_s: number;
   /** Claude account profiles (src/claude/): which account an agent runs under by default. */
   claude: { default_account: string | null };
   hosts: Record<string, RemoteHostConfig>;
@@ -273,6 +277,10 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_failed",
   "claude_profile_synced",
   "agent_account_moved",
+  // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
+  "agent_reaped_by_supervisor",
+  "credentials_revoked",
+  "credentials_swept",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

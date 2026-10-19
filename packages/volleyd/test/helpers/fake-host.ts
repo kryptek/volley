@@ -16,6 +16,7 @@ import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
 import type { NewEvent, Wave } from "../../src/types";
 import type { AgentWatch, SignalState } from "../../src/verify";
 import { parseWaveFile } from "../../src/wave-file";
+import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
 
 export interface FakeHost extends Host {
@@ -147,6 +148,8 @@ export interface SpawnEnv {
   /** Topics the spawn cleared with an empty retained payload (a superseded attempt's). */
   cleared: string[];
   deps: SpawnDeps;
+  /** The logins the spawn minted and revoked. */
+  creds: MemoryCredentials;
   request: (over?: Partial<SpawnRequest>) => SpawnRequest;
   /** The worktree a T1 implementer spawn uses. */
   worktree: string;
@@ -189,11 +192,9 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, o.issueFixture ?? "gh-issue-42.json"), "utf-8"),
-    })
-    .on(["volley", "auth", "add-agent"], (argv) => ({
-      stdout: JSON.stringify({ username: argv[3], password: `pw-${argv[3]}` }),
-    }));
+    });
   const host = fakeHost(fake);
+  const creds = memoryCredentials();
   const events: NewEvent[] = [];
   const openDecisions: string[] = [];
   const cleared: string[] = [];
@@ -206,6 +207,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     hooksDir: "/opt/volley/packages/volley-hooks",
     mcpEntry: "/opt/volley/packages/volley-mcp/src/index.ts",
     mintCredentials: o.mint ?? true,
+    credentials: creds,
     tunables: {
       worktree_root: join(dir, "wt"),
       spawn_timeout_s: o.spawnTimeoutS ?? 1,
@@ -236,6 +238,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     openDecisions,
     cleared,
     deps,
+    creds,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),
     worktree: join(dir, "wt", "w1", "T1-implementer"),
     cleanup: async () => rmSync(dir, { recursive: true, force: true }),

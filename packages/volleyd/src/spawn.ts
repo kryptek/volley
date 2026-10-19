@@ -18,6 +18,7 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
+  type AgentCredentials,
   type BrokerCredentials,
   agentIdFor,
   mintCredentials,
@@ -110,8 +111,10 @@ export interface SpawnDeps {
   hooksDir: string;
   /** `packages/volley-mcp/src/index.ts` on the agent's host: its `.volley/mcp.json` server. */
   mcpEntry: string;
-  /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
+  /** Mint per-agent broker logins; false for an open broker. */
   mintCredentials: boolean;
+  /** Where the logins come from: volleyd's Dynamic Security control connection (dynsec.ts). */
+  credentials?: AgentCredentials;
   tunables: Pick<
     Tunables,
     "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
@@ -215,8 +218,6 @@ const secondsMs = (s: number) => s * 1000;
 
 /** The volleyd agent id, the parent of agents in a wave without an owner. */
 const SUPERVISOR = "volleyd";
-/** The Desk's fixed identity: it steers agents, so they ack to its mailbox. */
-const DESK = "desk";
 
 interface Ctx {
   req: SpawnRequest;
@@ -413,9 +414,8 @@ async function launchAttempt(
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
-    // Everyone who may steer it: the owner (or volleyd), volleyd, and the Desk. A later owner
-    // (`claim`) is granted then (daemon.ts extendAckGrants).
-    creds = await mintCredentials(host.exec, agentId, [parent, SUPERVISOR, DESK]);
+    // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
+    creds = await mintCredentials(deps.credentials, agentId);
   }
   try {
     await writeAgentJson(host, ctx.worktree, {
@@ -496,7 +496,7 @@ async function launchAttempt(
     }
     return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
-    if (creds !== undefined) await revokeCredentials(host.exec, agentId);
+    if (creds !== undefined) await revokeCredentials(deps.credentials, agentId);
     throw e;
   }
 }
@@ -620,7 +620,7 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
-  const revoked = prev.minted ? await revokeCredentials(deps.host.exec, prev.agentId) : null;
+  const revoked = prev.minted ? await revokeCredentials(deps.credentials, prev.agentId) : null;
   if (deps.clearRetained !== undefined) {
     for (const topic of retainedTopics(ctx.namespace, prev.agentId))
       await deps.clearRetained(topic);

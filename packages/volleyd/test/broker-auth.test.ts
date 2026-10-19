@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { BROKER_FILE, daemonAuth } from "../src/broker-auth";
+import { ADMIN_FILE, BROKER_FILE, daemonAdminAuth, daemonAuth } from "../src/broker-auth";
 import { daemonStartOptions } from "../src/commands/daemon";
 import { Daemon } from "../src/daemon";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
@@ -27,6 +27,57 @@ function writeBrokerFile(contents: string, mode = 0o600): string {
   chmodSync(path, mode);
   return path;
 }
+
+describe("daemonAdminAuth: the dynsec admin login volleyd mints with", () => {
+  const admin = (dir: string, name: string, mode = 0o600) => {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify({ username: "dynsec-admin", password: "a" }), { mode });
+    chmodSync(path, mode);
+    return path;
+  };
+
+  it("reads $VOLLEYD_HOME/dynsec-admin.json, else $VOLLEY_AUTH_DIR/admin.json, else none", () => {
+    expect(daemonAdminAuth(home, {})).toBeNull();
+    const authDir = mkdtempSync(join(tmpdir(), "volleyd-authdir-"));
+    try {
+      admin(authDir, "admin.json");
+      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })).toEqual({
+        username: "dynsec-admin",
+        password: "a",
+      });
+      writeFileSync(
+        join(home, ADMIN_FILE),
+        JSON.stringify({ username: "dynsec-admin", password: "h" }),
+        {
+          mode: 0o600,
+        },
+      );
+      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })?.password).toBe("h");
+    } finally {
+      rmSync(authDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a file other users can read", () => {
+    admin(home, ADMIN_FILE, 0o644);
+    expect(() => daemonAdminAuth(home, {})).toThrow(/chmod 600/);
+  });
+
+  it("volleyd daemon passes it on, unless --no-mint", () => {
+    admin(home, ADMIN_FILE);
+    const env = { VOLLEYD_HOME: home };
+    expect(
+      daemonStartOptions({ brokerUrl: "mqtt://x", namespace: NS }, env, {}).dynsecAdmin,
+    ).toEqual({
+      username: "dynsec-admin",
+      password: "a",
+    });
+    expect(
+      daemonStartOptions({ brokerUrl: "mqtt://x", namespace: NS }, env, { mintCredentials: false })
+        .dynsecAdmin,
+    ).toBeUndefined();
+  });
+});
 
 describe("daemonAuth: volleyd's broker credentials", () => {
   it("reads a 0600 $VOLLEYD_HOME/broker.json", () => {

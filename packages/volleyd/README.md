@@ -621,7 +621,7 @@ lists every key with its default and example pools, commented out.
 | 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
-| 5 | **Identity** `volley auth add-agent <id> --ack-to <parent> --ack-to volleyd --json` → `.volley/agent.json` (mode 0600) | `identity.ts` | `CREDENTIALS_FAILED` |
+| 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
 | 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
@@ -1299,9 +1299,10 @@ ALLOW (program by bare name only — never a path):
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
-  volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
-  volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
-  volley auth rm-agent <agent_id> [--no-reload]
+  (agent logins are minted and deleted over volleyd's own Dynamic Security control
+  connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+  mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
+    retains no $SYS/broker/version)
   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
   volley auth add <agent_id> --role ROLE [--kind KIND] --json
   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json

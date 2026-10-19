@@ -11,18 +11,19 @@ import type { ExecFn } from "./exec";
 
 /**
  * Account management over the control channel (SPEC §4.6.10). The account registry and the
- * one-time tokens belong to `volley auth` (it owns the password file, the ACL and
+ * one-time tokens belong to `volley auth` (it owns the accounts' and tokens' broker logins and
  * `accounts.json` / `tokens.json`); the daemon only runs it through the fenced exec.
  *
  * Two kinds of request topic, both outside the mailbox so the broker ACL names the sender:
- *   - `volley/_system/auth/ops/<username>`: account ops. Only an admin account's ACL block
- *     grants it, and only for its own username, so the topic identifies the sender; the daemon
+ *   - `volley/_system/auth/ops/<username>`: account ops. Only the admin role grants it, and
+ *     only for its own username (`%u`), so the topic identifies the sender; the daemon
  *     also checks that username's role in the registry. Answered on
  *     `volley/_system/auth/replies/<correlation_id>`.
  *   - `volley-auth/redeem/<id>`: `token_redeem`, published by one-time token `<id>`'s own
- *     short-lived broker login (`redeem-<id>`), answered on `volley-auth/redeem/<id>/reply`.
+ *     short-lived broker login (username `<id>`), answered on `volley-auth/redeem/<id>/reply`.
  *     The token is the credential; no account needed. The login may touch nothing else: its
- *     ACL block denies `volley/#` (every shared pattern lives there), hence the separate root.
+ *     role grants only these two topics (`%u`) and nothing under `volley/`, hence the separate
+ *     root.
  *
  * Every account may read the whole `volley/` tree, so a secret (a password, a sign-in token) is
  * never in a reply's clear text: it is sealed (RSA-OAEP, SHA-256) to the `reply_key` the request
@@ -234,12 +235,12 @@ export async function accountOp(
     args.push("add", name, "--role", p.role as string);
     if (p.kind !== undefined) args.push("--kind", p.kind as string);
   } else {
-    // mosquitto disconnects a client whose password changed when it reloads, which happens
-    // before the answer is published: rotating your own account would lose the new password.
+    // mosquitto disconnects a client whose password changes, before the answer is published:
+    // rotating your own account would lose the new password.
     if (name === sender) {
       return refuse(
         op,
-        "cannot rotate your own account over the control channel (its reload disconnects you " +
+        "cannot rotate your own account over the control channel (the new password disconnects you " +
           "before the answer); run `volley auth rotate` in a terminal or ask another admin",
       );
     }

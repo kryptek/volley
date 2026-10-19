@@ -12,6 +12,7 @@ import { SpawnError } from "../src/spawn-error";
 import type { JournalEvent, TaskState } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { runCli } from "./helpers/run-cli";
@@ -23,6 +24,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   let env: DaemonEnv;
   let agent: VolleyBroker;
   let host: FakeHost;
+  let creds: MemoryCredentials;
   let daemon: Daemon;
   let startOpts: Parameters<DaemonEnv["start"]>[0];
   /** The git argvs run in the wave's repo so far. */
@@ -98,10 +100,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     if (o.release === "missing" || o.release === "after-fetch") {
       const fetched = () => fake.argvs(["git", "-C", repo, "fetch"]).length > 0;
       fake
@@ -117,6 +116,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
         );
     }
     gitCalls = () => fake.argvs(["git", "-C", repo]);
+    creds = memoryCredentials();
     host = fakeHost(fake);
     const prepare = host.prepareWorktree.bind(host);
     host.prepareWorktree = async (spec) => {
@@ -172,6 +172,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
+        credentials: creds,
       },
     };
     daemon = await env.start(startOpts);

@@ -283,11 +283,8 @@ describe("verify through hook signals (Aedes)", () => {
       lock: spawned[0]?.data.lock,
     });
     // the first identity is revoked before the second is minted, and journaled as retired
-    expect(env.host.fake.argvs(["volley", "auth"]).map((a) => `${a[2]} ${a[3]}`)).toEqual([
-      "add-agent w1-t1-implementer-1",
-      "rm-agent w1-t1-implementer-1",
-      "add-agent w1-t1-implementer-2",
-    ]);
+    expect(env.creds.minted).toEqual(["w1-t1-implementer-1", "w1-t1-implementer-2"]);
+    expect(env.creds.revoked).toEqual(["w1-t1-implementer-1"]);
     expect(env.events.find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: "w1-t1-implementer-1",
       status: "superseded",

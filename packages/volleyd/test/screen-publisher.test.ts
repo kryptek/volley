@@ -345,7 +345,9 @@ describe("ScreenPublisher", () => {
         minted: false,
       },
       {
-        exec: fakeExec().exec,
+        credentials: undefined,
+        publishRetained: (topic, payload) =>
+          pubClient.publish(topic, payload, { qos: 1, retain: true }),
         clearRetained: (topic) => pubClient.publish(topic, "", { qos: 1, retain: true }),
         journal: () => {},
         releaseLock: () => {},

@@ -32,6 +32,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  dynsec_batch_ms: 50,
+  credential_sweep_interval_s: 600,
   claude: { default_account: null },
   hosts: {},
 };
@@ -135,6 +137,11 @@ export const DAEMON_DEFAULTS = {
    * (and redeemed) one-time tokens, when the daemon uses broker auth.
    */
   token_prune_ms: 60_000,
+  /** How long a Dynamic Security control message may wait for its answer (and the connect). */
+  dynsec_timeout_ms: 10_000,
+  /** Reconnect backoff of volleyd's control connection after a failed open: doubles up to max. */
+  dynsec_reconnect_base_ms: 1_000,
+  dynsec_reconnect_max_ms: 30_000,
   /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
   reply_key_min_bits: 2048,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */

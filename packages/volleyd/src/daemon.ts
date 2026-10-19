@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -68,6 +69,7 @@ import {
   runningAgents,
   steerTarget,
 } from "./controls";
+import { CredentialSweeper } from "./credential-sweep";
 import {
   type DecisionInput,
   type DecisionPayload,
@@ -82,6 +84,7 @@ import {
   resolveEvent,
   writeDecisionsFile,
 } from "./decisions";
+import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintModelSwitchToken } from "./fence";
 import type { Host } from "./hosts/host";
@@ -99,7 +102,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import { grantAckTo, revokeCredentials } from "./identity";
+import type { CredentialStore } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -201,7 +204,7 @@ import {
   switchModel,
   switchesSent,
 } from "./recovery";
-import { retireAgent } from "./retire";
+import { type ReapDeps, reapAndRevoke, retireAgent } from "./retire";
 import { ScreenPublisher } from "./screen-publisher";
 import {
   type SpawnDecision,
@@ -281,6 +284,14 @@ export interface DaemonOptions {
   clock?: () => ClockSample;
   /** Override of the model-switch verification window (tests; ms). */
   recoveryTimeouts?: { modelSwitchVerifyMs?: number };
+  /**
+   * The broker's Dynamic Security admin login (`$VOLLEYD_HOME/dynsec-admin.json`): volleyd keeps
+   * one control connection with it to mint, delete and sweep agent logins. Absent: no logins are
+   * minted (a spawn that needs one fails with CREDENTIALS_FAILED) and nothing is swept.
+   */
+  dynsecAdmin?: BrokerAuth;
+  /** The credential sweep's interval in ms (tests; default `credential_sweep_interval_s`). */
+  credentialSweepMs?: number;
   /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
   authExec?: ExecFn;
   /**
@@ -314,8 +325,13 @@ export interface SpawnerOptions {
   hooksDir?: string;
   /** volley-mcp's entry point for `.volley/mcp.json` (default: the one in this checkout). */
   mcpEntry?: string;
-  /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
+  /** Mint per-agent broker logins (default true). */
   mintCredentials?: boolean;
+  /**
+   * Where agent logins come from (tests). Default: volleyd's Dynamic Security control
+   * connection, when `DaemonOptions.dynsecAdmin` is set.
+   */
+  credentials?: CredentialStore;
   briefsDir?: string;
   /**
    * How long an agent whose status is `reaped` (its LWT) stays supervised before it is retired,
@@ -567,6 +583,14 @@ async function assertNotRunning(opts: DaemonOptions): Promise<void> {
  */
 export class Daemon {
   private readonly broker = new VolleyBroker();
+  /** The control connection to the broker's Dynamic Security plugin (dynsec.ts), if any. */
+  private readonly dynsec: DynsecControl | undefined;
+  /** Agent logins: minted on spawn, deleted on retire / stop / sweep. */
+  private readonly credentials: CredentialStore | undefined;
+  private readonly sweeper: CredentialSweeper | undefined;
+  private sweepTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The namespace each swept candidate's records live in (found while judging liveness). */
+  private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
@@ -687,6 +711,40 @@ export class Daemon {
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
+    if (opts.spawner?.credentials !== undefined) {
+      this.credentials = opts.spawner.credentials;
+    } else if (opts.dynsecAdmin !== undefined) {
+      this.dynsec = new DynsecControl({
+        connect: brokerControl(opts.brokerUrl, opts.dynsecAdmin),
+        batchMs: () => this.config.get("dynsec_batch_ms") as number,
+        binaryVersion: async () => {
+          const r = await realExec(["mosquitto", "-h"]).catch(() => null);
+          return r === null ? null : `${r.stdout}\n${r.stderr}`;
+        },
+        log: this.log,
+      });
+      this.credentials = new DynsecCredentials(this.dynsec);
+    }
+    if (this.credentials !== undefined && opts.spawner?.mintCredentials !== false) {
+      const store = this.credentials;
+      this.sweeper = new CredentialSweeper(
+        {
+          credentials: store,
+          live: (candidates) => this.liveAgents(candidates),
+          reap: (id) =>
+            reapAndRevoke(id, this.sweepNamespaces.get(id) ?? this.opts.namespace, this.reapDeps()),
+          journal: (ev) => this.appendSystem(ev),
+          graceMs: () => secondsMs(this.config.get("spawn_timeout_s") as number),
+        },
+        {
+          live: 0,
+          swept: this.system
+            .readAll()
+            .filter((e) => e.type === "credentials_swept")
+            .reduce((n, e) => n + ((e.data.agent_ids as unknown[] | undefined)?.length ?? 0), 0),
+        },
+      );
+    }
     this.claude = new ClaudeService({
       root: opts.claude?.root ?? claudeRoot(),
       ...(opts.claude?.primaryDir !== undefined ? { primaryDir: opts.claude.primaryDir } : {}),
@@ -820,6 +878,19 @@ export class Daemon {
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
       ...authFields(this.opts.auth),
     });
+    if (this.dynsec !== undefined) {
+      // Refuse a broker older than 2.1 at start (BrokerVersionError ends `start`). Any other
+      // failure only delays minting: the control connection reconnects on next use.
+      try {
+        await this.dynsec.open();
+        this.log(`dynsec: control connection up (mosquitto ${this.dynsec.version})`);
+      } catch (e) {
+        if (e instanceof BrokerVersionError) throw e;
+        this.log(
+          `dynsec: control connection failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
     this.running = true;
 
     await this.publish(this.statusTopic, this.envelope("status", "spawning", {}), true);
@@ -928,6 +999,8 @@ export class Daemon {
     if (pruneMs > 0) {
       this.pruneTimer = setInterval(() => void this.enqueue(() => this.pruneTokens()), pruneMs);
     }
+    // The sweep is mandatory (no login ever expires): at start, then every interval.
+    if (this.sweeper !== undefined) this.scheduleSweep(0);
     this.log(`volleyd up: ${this.waves.size} wave(s), broker ${this.opts.brokerUrl}`);
   }
 
@@ -1083,6 +1156,77 @@ export class Daemon {
     }
   }
 
+  /** Run a credential sweep after `ms`, then again every `credential_sweep_interval_s`. */
+  private scheduleSweep(ms: number): void {
+    clearTimeout(this.sweepTimer);
+    this.sweepTimer = setTimeout(async () => {
+      await this.sweepCredentials().catch((e: unknown) =>
+        this.log(`credential sweep: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      if (this.running) {
+        this.scheduleSweep(
+          this.opts.credentialSweepMs ??
+            secondsMs(this.config.get("credential_sweep_interval_s") as number),
+        );
+      }
+    }, ms);
+  }
+
+  /** One credential sweep now (also the interval's body; tests call it). The swept agent ids. */
+  async sweepCredentials(): Promise<string[]> {
+    if (this.sweeper === undefined) return [];
+    const swept = await this.sweeper.sweep();
+    if (swept.length > 0) this.log(`credential sweep: deleted ${swept.join(", ")}`);
+    return swept;
+  }
+
+  /** What the delete path (retire.ts reapAndRevoke) needs from the daemon. */
+  private reapDeps(journal?: ReapDeps["journal"]): ReapDeps {
+    return {
+      credentials: this.credentials,
+      publishRetained: (topic, payload) =>
+        this.broker.publish(topic, payload, { qos: 1, retain: true }),
+      clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      journal: journal ?? ((ev) => this.appendSystem(ev)),
+    };
+  }
+
+  /**
+   * Which of `candidates` (agent logins) belong to a live agent: supervised; non-terminal in a
+   * wave that is neither stopped nor complete; holding its worktree lock; or with a retained
+   * `spawning` / `registered` / `working` status. Records where each one's channels live.
+   */
+  private async liveAgents(candidates: readonly string[]): Promise<Set<string>> {
+    const live = new Set<string>(this.supervised.keys());
+    for (const [wave, log] of this.waves) {
+      for (const e of log.journal.readAll()) {
+        if (e.type !== "agent_spawned") continue;
+        const id = e.data.agent_id as string;
+        this.sweepNamespaces.set(id, this.agentNamespace(wave, id));
+        const lock = e.data.lock;
+        if (typeof lock === "string" && readLock(lock)?.agent_id === id) live.add(id);
+      }
+      const status = log.record.state?.status;
+      if (status === "stopped" || status === "complete") continue;
+      for (const a of runningAgents(log.record, retiredAgents(log))) live.add(a.agent_id);
+    }
+    const unknown = candidates.filter((id) => !live.has(id));
+    await Promise.all(
+      unknown.map(async (id) => {
+        const got = await this.broker
+          .subscribeCollect(`volley/+/${id}/status`, 1, DAEMON_DEFAULTS.probe_ms)
+          .catch(() => []);
+        const m = got.find((x) => x.payload !== "");
+        if (m === undefined) return;
+        const ns = m.topic.split("/")[1];
+        if (ns !== undefined && !this.sweepNamespaces.has(id)) this.sweepNamespaces.set(id, ns);
+        const type = parseEnvelope(m.payload)?.type;
+        if (type === "spawning" || type === "registered" || type === "working") live.add(id);
+      }),
+    );
+    return live;
+  }
+
   /** Stop timers and the mailbox loop; nothing is published. */
   private halt(): void {
     this.running = false;
@@ -1090,6 +1234,8 @@ export class Daemon {
     clearInterval(this.watchdog);
     clearInterval(this.screenTimer);
     clearInterval(this.pruneTimer);
+    clearTimeout(this.sweepTimer);
+    void this.dynsec?.close();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -1589,16 +1735,7 @@ export class Daemon {
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
-          (outcome) => {
-            this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
-            // Minted for the owner `deps` captured: a claim since then missed this agent (it was
-            // not supervised yet), so grant the current owner here.
-            const owner = this.waves.get(wave)?.record.state?.owner ?? null;
-            const a = this.supervised.get(outcome.agentId);
-            if (a?.minted === true && owner !== null && owner !== deps.owner) {
-              void this.grantAck(wave, outcome.agentId, a, owner);
-            }
-          },
+          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel),
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
         // Best effort, after supervision is attached: the agent is launched whatever it says.
@@ -1965,6 +2102,7 @@ export class Daemon {
       hooksDir: spawner.hooksDir ?? HOOKS_DIR,
       mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
+      ...(this.credentials !== undefined ? { credentials: this.credentials } : {}),
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
@@ -2383,9 +2521,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
       },
       {
-        exec: a.host.exec,
-        clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
-        journal: (ev) => this.append(a.wave, ev),
+        ...this.reapDeps((ev) => this.append(a.wave, ev)),
         releaseLock: (path) => {
           try {
             unlinkSync(path);
@@ -2970,7 +3106,15 @@ export class Daemon {
       (e) => e.type === "agent_retired" && e.data.agent_id === agentId,
     );
     if (done) return;
-    const revoked = d.minted === true ? await revokeCredentials(this.host.exec, agentId) : null;
+    const revoked =
+      d.minted === true
+        ? await reapAndRevoke(
+            agentId,
+            this.agentNamespace(wave, agentId),
+            this.reapDeps((ev) => this.append(wave, ev)),
+            task,
+          )
+        : null;
     await this.append(wave, {
       type: "agent_retired",
       task,
@@ -3804,6 +3948,7 @@ export class Daemon {
           result: {
             waves: [...this.waves.keys()].map((w) => this.snapshot(w)),
             ...(this.killSwitch ? { kill_switch: true } : {}),
+            ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
           },
         };
       }
@@ -4236,48 +4381,8 @@ export class Daemon {
         data: { owner: by, previous: owner, why: verdict.why },
       });
       this.log(`wave ${w.wave} claimed by ${by} from ${owner ?? "-"}: ${verdict.why}`);
-      // Its live agents may now ack the new owner's steers; the grant runs beside the queue.
-      void this.extendAckGrants(w.wave, by);
     }
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
-  }
-
-  /**
-   * A wave changed owner: let each of its live agents with minted credentials ack the new owner
-   * too (`volley auth grant`, password kept). A failure is journaled as an alarm.
-   */
-  private async extendAckGrants(wave: WaveId, owner: string): Promise<void> {
-    for (const [agentId, a] of [...this.supervised]) {
-      if (a.wave !== wave || !a.minted) continue;
-      if (!(await this.grantAck(wave, agentId, a, owner))) return;
-    }
-  }
-
-  /** Let one minted agent ack `owner`; false once the daemon is stopping. */
-  private async grantAck(
-    wave: WaveId,
-    agentId: string,
-    a: Supervised,
-    owner: string,
-  ): Promise<boolean> {
-    try {
-      await grantAckTo(a.host.exec, agentId, [owner]);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      this.log(`ack grant ${agentId} → ${owner}: ${message}`);
-      if (!this.running) return false;
-      await this.recordEvent(wave, {
-        type: "alarm_raised",
-        task: a.task,
-        data: {
-          code: "ACK_GRANT_FAILED",
-          message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
-          agent_id: agentId,
-          owner,
-        },
-      }).catch(() => {});
-    }
-    return true;
   }
 
   /** The owner's retained status and registry timestamps. */
@@ -4364,12 +4469,50 @@ export class Daemon {
     if (status === "stopped" || status === "complete") return null;
     await this.append(wave, { type: "wave_stopped", data: { by } });
     const cancelled: string[] = [];
-    for (const a of runningAgents(log.record, retiredAgents(log))) {
+    const running = runningAgents(log.record, retiredAgents(log));
+    for (const a of running) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
+    // No login outlives a stop (finding 13): every agent of the wave is retired through the
+    // delete path now, its session having been told to stop and interrupted above.
+    for (const a of running) await this.retireStopped(wave, a);
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
     return cancelled;
+  }
+
+  /** Retire one agent of a stopped wave: supervised through `retire`, else directly. */
+  private async retireStopped(
+    wave: WaveId,
+    a: { task: TaskId; role: string; agent_id: string },
+  ): Promise<void> {
+    if (this.supervised.has(a.agent_id)) {
+      await this.retire(a.agent_id, "stopped");
+      return;
+    }
+    const spawned = this.journalEvents(wave)
+      .filter((e) => e.type === "agent_spawned" && e.data.agent_id === a.agent_id)
+      .at(-1);
+    const minted = spawned?.data.credentials === "minted";
+    const revoked = minted
+      ? await reapAndRevoke(
+          a.agent_id,
+          this.agentNamespace(wave, a.agent_id),
+          this.reapDeps((ev) => this.append(wave, ev)),
+          a.task,
+        )
+      : null;
+    await this.append(wave, {
+      type: "agent_retired",
+      task: a.task,
+      data: {
+        agent_id: a.agent_id,
+        role: a.role,
+        status: "stopped",
+        credentials_revoked: revoked,
+        lock_released: false,
+      },
+    });
   }
 
   /** Send one running agent a mailbox `cancel` (journaled) and interrupt its session. */
