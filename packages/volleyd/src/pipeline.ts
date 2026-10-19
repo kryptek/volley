@@ -125,11 +125,19 @@ export interface TaskPipeline {
   rereview: ReviewerRole[];
   /** The owner's answer to a `reviewers_disagree` decision, for the round it was asked in. */
   disagreement?: { round: number; answer: string; by?: string };
+  /** Why the task is `blocked` (its stage_entered's `why`), while it is. */
+  why?: string | undefined;
 }
 
 export type SteerReason = "artifacts" | "result";
 
-/** What a pipeline decision is about; kept on the decision as `pipeline`. */
+/**
+ * What a pipeline decision is about; kept on the decision as `pipeline`. The single mechanism
+ * by which a decision's answer reaches its consumer: every decision whose answer the pipeline
+ * acts on carries one. Spawn-type decisions (spawn.ts: hooks_auth_failed, mcp_not_registered,
+ * unknown_screen; the daemon's spawn_failed) carry `relaunch` / `spawn_failed` with the run they
+ * are about (`wave`, `task`, `role`, `attempt`, `agent_id`).
+ */
 export interface PipelineMarker {
   on:
     | "verify"
@@ -139,11 +147,18 @@ export interface PipelineMarker {
     | "fixup_result"
     | "agent_failed"
     | "reviewers_disagree"
-    | "merge_ready_invariant";
+    | "merge_ready_invariant"
+    | "relaunch"
+    | "spawn_failed";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
   touched?: string[];
+  /** Spawn-type decisions: the run they are about. */
+  wave?: WaveId;
+  task?: TaskId;
+  attempt?: number;
+  agent_id?: string;
 }
 
 /** Decisions whose `respawn` answer replaces the role's run (the next advance spawns it). */
@@ -198,6 +213,7 @@ export function reducePipeline(
       if (role === "implementer" && typeof d.branch === "string") p.branch = d.branch;
       break;
     case "stage_entered":
+      p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
@@ -306,6 +322,15 @@ export function reducePipeline(
       // A respawn replaces the run; advance spawns the role again (and retries a held spawn).
       if (m !== undefined && RESPAWNABLE.has(m.on) && isRole(m.role) && isAnswer(answer, "respawn"))
         delete p.runs[m.role];
+      // A relaunch replaces the run it names (never a newer one): the next advance spawns the
+      // role at the next attempt, once the old agent is retired.
+      if (
+        m?.on === "relaunch" &&
+        isRole(m.role) &&
+        p.runs[m.role]?.agent_id === m.agent_id &&
+        isAnswer(answer, "relaunch")
+      )
+        delete p.runs[m.role];
       break;
     }
   }
@@ -389,7 +414,10 @@ export type PipelineAction =
       marker: PipelineMarker;
       data?: Record<string, unknown>;
     }
-  | { kind: "retire"; agent_id: string }
+  /** Retire an agent; `status` is a DAEMON_ENDED one for an agent that never ended itself. */
+  | { kind: "retire"; agent_id: string; status?: string }
+  /** Replace `agent_id` (a spawn decision's run): retire it, journal `relaunched`. */
+  | { kind: "relaunch"; role: Role; agent_id: string }
   | { kind: "check_rebase" }
   /** At the gate: has a human merged the PR? (volleyd only ever reads this.) */
   | { kind: "check_merged" }
@@ -874,6 +902,7 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   const m = (d as { pipeline?: PipelineMarker }).pipeline;
   const answer = d.resolved?.answer ?? "";
   if (m === undefined || d.task !== v.task) return [];
+  if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
   if (isAnswer(answer, "cancel")) {
     return [
       {
@@ -959,6 +988,8 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "agent_failed":
       return isAnswer(answer, "respawn") ? [] : reask();
     case "reviewers_disagree":
+    case "spawn_failed":
+      // spawn_failed: the daemon's resolveNow acts on it (retry now / stop task).
       return [];
     case "merge_ready_invariant": {
       if (!isAnswer(answer, "rereview")) return reask();
@@ -972,6 +1003,56 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/**
+ * A spawn-type decision answered: `relaunch` retires the agent through the delete path and the
+ * next advance spawns the same role at the next attempt (the reducer dropped the run); `cancel`
+ * retires it and blocks the task with the decision text. Anything else is asked again.
+ */
+function onRelaunchResolved(
+  v: PipelineView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+  answer: string,
+): PipelineAction[] {
+  if (!isRole(m.role) || m.agent_id === undefined) return [];
+  if (isAnswer(answer, "relaunch")) {
+    // A newer run of the role already replaced it: nothing of this decision is left to do.
+    const run = v.p.runs[m.role];
+    if (run !== undefined && run.agent_id !== m.agent_id) return [];
+    return [{ kind: "relaunch", role: m.role, agent_id: m.agent_id }];
+  }
+  if (isAnswer(answer, "cancel")) {
+    return [
+      { kind: "retire", agent_id: m.agent_id, status: "stopped" },
+      {
+        kind: "journal",
+        event: {
+          type: "stage_entered",
+          task: v.task,
+          data: {
+            stage: "blocked",
+            why: `${d.kind} cancelled by ${d.resolved?.by}: ${d.question}`,
+            decision_id: d.decision_id,
+          },
+        },
+      },
+    ];
+  }
+  return [
+    {
+      kind: "decide",
+      marker: m,
+      decision: {
+        kind: d.kind,
+        task: v.task,
+        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(/^".*?" is not one of [^.]*\. /, "")}`,
+        pointers: d.pointers,
+        ...(d.options !== undefined ? { options: d.options } : {}),
+      },
+    },
+  ];
 }
 
 /** The spawn for `role` in the current step: reviewers at the head (detached), others from it. */
@@ -1205,7 +1286,10 @@ export interface PipelineDeps {
   ) => Promise<unknown>;
   /** Open a decision; `extra` facts (the `pipeline` marker) are kept on it. */
   decide: (input: DecisionInput, extra: Record<string, unknown>) => Promise<unknown>;
-  retire: (agentId: string) => Promise<unknown>;
+  /** Retire an agent (`status`: a DAEMON_ENDED one when it never ended itself; default done). */
+  retire: (agentId: string, status?: string) => Promise<unknown>;
+  /** The agent id and attempt the next spawn of `role` on `task` takes. */
+  nextAgent: (task: TaskId, role: Role) => { agent_id: string; attempt: number };
   /**
    * Run `fn` on the caller's serial queue (the daemon's). Git / gh checks run beside the queue
    * and hand their results back through this, so the queue never waits on the network.
@@ -1420,9 +1504,26 @@ export class PipelineDriver {
           progressed = true;
           break;
         case "retire":
-          await this.deps.retire(a.agent_id);
+          await this.deps.retire(a.agent_id, a.status);
           progressed = true;
           break;
+        case "relaunch": {
+          // The old run's lock, login and retained records go first: the new attempt needs them.
+          await this.deps.retire(a.agent_id, "relaunched");
+          const next = this.deps.nextAgent(task, a.role);
+          await this.deps.journal({
+            type: "relaunched",
+            task,
+            data: {
+              from_agent: a.agent_id,
+              to_agent: next.agent_id,
+              role: a.role,
+              attempt: next.attempt,
+            },
+          });
+          progressed = true;
+          break;
+        }
         case "verify": {
           const agent = this.view(task)?.p.runs[a.role]?.agent_id;
           if (agent === undefined) break;

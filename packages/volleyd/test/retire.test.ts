@@ -45,7 +45,7 @@ describe("retireAgent", () => {
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-  it("after a terminal status: revokes, clears the five retained records, releases the lock, journals", async () => {
+  it("after a terminal status: revokes, clears the six retained records, releases the lock, journals", async () => {
     const path = lockPath(home, "/wt/w1/T1-implementer");
     await acquireLock(
       path,
@@ -58,6 +58,7 @@ describe("retireAgent", () => {
     expect(cleared).toEqual([
       `volley/_system/registry/${ID}`,
       `volley/ns/${ID}/status`,
+      `volley/ns/${ID}/progress`,
       `volley/ns/${ID}/result`,
       `volley/ns/${ID}/capability`,
       `volley/ns/${ID}/screen`,
@@ -79,10 +80,13 @@ describe("retireAgent", () => {
     ]);
   });
 
-  it.each(["failed", "reaped", "moved"])("retires a %s agent too", async (status) => {
-    await retireAgent(req({ status }), deps());
-    expect(cleared).toHaveLength(5);
-  });
+  it.each(["failed", "reaped", "moved", "stopped", "relaunched"])(
+    "retires a %s agent too",
+    async (status) => {
+      await retireAgent(req({ status }), deps());
+      expect(cleared).toHaveLength(6);
+    },
+  );
 
   it.each([["working"], ["blocked"], [null]])(
     "a %s agent → refused, nothing touched",

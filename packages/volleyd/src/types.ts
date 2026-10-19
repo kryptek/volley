@@ -273,6 +273,15 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_failed",
   "claude_profile_synced",
   "agent_account_moved",
+  // Pipeline / lifecycle round 2: relaunches, CI holds, PR heads moved at a gate, merges outside
+  // GitHub's merge button, agents retired without their ack, alarms that no longer hold.
+  "relaunched",
+  "ci_pending",
+  "ci_green",
+  "pr_head_moved",
+  "merged_by_operator",
+  "agent_force_retired",
+  "alarm_cleared",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

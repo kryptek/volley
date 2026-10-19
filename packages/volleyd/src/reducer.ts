@@ -383,6 +383,9 @@ function derive(state: WaveState, rec: WaveRecord): void {
         ? { ...t, waiting_on: ids, why_waiting: `awaiting decision ${ids.join(", ")}` }
         : t;
     }
+    // Blocked on purpose (a cancelled relaunch decision): its stage_entered says why.
+    const blockedWhy = t.stage === "blocked" ? rec.pipeline[t.id]?.why : undefined;
+    if (blockedWhy !== undefined) return { ...t, why_waiting: blockedWhy };
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")

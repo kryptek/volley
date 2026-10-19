@@ -199,6 +199,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const attempts: Record<string, number> = {};
   /** The last result each agent reported (retire journals it, as retireAgent does). */
   const lastResult: Record<string, unknown> = {};
+  /** Every retire the driver asked for, with its status. */
+  const retired: { agent_id: string; status: string }[] = [];
   /** Role spawns the daemon holds (budget, admission, a refused launch) while this is true. */
   let holdSpawns = false;
   const spawnAgent = async (role: Role, start?: SpawnStart, files: Record<string, string> = {}) => {
@@ -268,7 +270,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       if ("error" in r) throw new Error(r.error);
       await journal({ ...r.event, data: { ...extra, ...r.event.data } });
     },
-    retire: async (agentId) => {
+    nextAgent: (_task, role) => {
+      const attempt = (attempts[role] ?? 0) + 1;
+      return { agent_id: agentIdFor("w1", "T1", role, attempt), attempt };
+    },
+    retire: async (agentId, status = "done") => {
+      retired.push({ agent_id: agentId, status });
       const role = Object.entries(rec.pipeline.T1?.runs ?? {}).find(
         ([, run]) => run?.agent_id === agentId,
       )?.[0];
@@ -278,7 +285,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         data: {
           agent_id: agentId,
           role,
-          status: "done",
+          status,
           ...(lastResult[agentId] !== undefined ? { result: lastResult[agentId] } : {}),
         },
       });
@@ -297,6 +304,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     events,
     spawns,
     steers,
+    retired,
     driver,
     exec,
     PR_BRANCH,

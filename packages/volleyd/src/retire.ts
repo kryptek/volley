@@ -5,19 +5,23 @@ import { TERMINAL_STATUS, readLock } from "./locks";
 import { SpawnError } from "./spawn-error";
 import type { NewEvent, TaskId } from "./types";
 
-/** The retained per-agent records a retire clears (registry + four retained channels). */
+/** The retained per-agent records volleyd clears (registry + five per-agent channels). */
 export function retainedTopics(namespace: string, agentId: string): string[] {
   return [
     registryTopic(agentId),
-    ...["status", "result", "capability", "screen"].map((c) => buildTopic(namespace, agentId, c)),
+    ...["status", "progress", "result", "capability", "screen"].map((c) =>
+      buildTopic(namespace, agentId, c),
+    ),
   ];
 }
 
 /**
  * Retire statuses that are not the agent's own: `moved` is an account move (claude/move.ts),
- * whose cancel stopped the session before its respawn under another profile.
+ * whose cancel stopped the session before its respawn under another profile; `stopped` is
+ * `volleyd stop` (or a cancelled relaunch decision) retiring an agent that never acked;
+ * `relaunched` is a spawn decision's `relaunch` replacing the agent with the next attempt.
  */
-const DAEMON_ENDED: ReadonlySet<string> = new Set(["moved"]);
+const DAEMON_ENDED: ReadonlySet<string> = new Set(["moved", "stopped", "relaunched"]);
 
 export interface RetireRequest {
   wave: string;
@@ -25,7 +29,7 @@ export interface RetireRequest {
   role: string;
   agentId: string;
   namespace: string;
-  /** The agent's terminal status type as the daemon consumed it, or `moved` (DAEMON_ENDED). */
+  /** The agent's terminal status type as the daemon consumed it, or a DAEMON_ENDED status. */
   status: string | null;
   /** Agent ids this wave spawned (from its journal). */
   waveAgents: ReadonlySet<string>;
@@ -51,7 +55,7 @@ export interface RetireDeps {
 /**
  * Retire one agent after the daemon has consumed its terminal status: revoke its broker
  * credentials, clear its retained records, release its worktree lock, journal `agent_retired`.
- * Only this wave's own agents, only terminal (or moved) ones. The worktree, branch and workspace stay:
+ * Only this wave's own agents, only terminal (or DAEMON_ENDED) ones. The worktree, branch and workspace stay:
  * removing them is `volleyd cleanup <wave> --yes`.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {

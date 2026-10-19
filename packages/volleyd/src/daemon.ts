@@ -99,7 +99,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import { grantAckTo, revokeCredentials } from "./identity";
+import { agentIdFor, grantAckTo, revokeCredentials } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -402,6 +402,10 @@ const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
 /** How volleyd resolves the decision it supersedes once the automatic retries stop. */
 const SPAWN_RETRIES_STOPPED = { answer: "retries_stopped", by: DAEMON_AGENT_ID };
+
+/** The steering an agent whose hooks the broker refused gets (with an Escape) right away. */
+const AUTH_FAILED_PAUSE =
+  "stop: your broker login is being repaired. Do not continue working, push or open anything: volleyd relaunches this role with a fresh login (or cancels it) once the owner answers.";
 
 /** What one pressure sample measured: machine-global signals, plus the CI queue per repo dir. */
 export interface PressureReading {
@@ -1651,6 +1655,10 @@ export class Daemon {
         void res.verified.then(
           (outcome) => {
             this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
+            // Refused by the broker: no work it does can be delivered. Pause it until the
+            // decision's answer (relaunch / cancel) replaces or retires it.
+            if (outcome.kind === "decision" && outcome.decision === "hooks_auth_failed")
+              void this.enqueue(() => this.pauseAuthFailed(outcome.agentId));
             // Minted for the owner `deps` captured: a claim since then missed this agent (it was
             // not supervised yet), so grant the current owner here.
             const owner = this.waves.get(wave)?.record.state?.owner ?? null;
@@ -1741,7 +1749,14 @@ export class Daemon {
       await this.openDecisionNow(
         wave,
         { kind: "spawn_failed", task, question, options: SPAWN_FAILED_OPTIONS, id, park: false },
-        { role, code, attempt: n, ...(stopped ? { stopped: true } : {}) },
+        {
+          role,
+          code,
+          attempt: n,
+          ...(stopped ? { stopped: true } : {}),
+          // resolveNow acts on its answer; the marker names the run it is about.
+          pipeline: { on: "spawn_failed", wave, task, role, attempt: spawnAttempt },
+        },
       );
     } catch (err) {
       // A settled task (a role spawned at merge_ready) takes no task-level decision.
@@ -2408,6 +2423,64 @@ export class Daemon {
     if (watch.state.status !== null) check(watch.state.status.type);
   }
 
+  /**
+   * An agent whose hooks the broker refused: Escape in its session and a steering that says why,
+   * so it stops before doing work it cannot deliver (the relaunch decision is already open).
+   */
+  private async pauseAuthFailed(agentId: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    if (a === undefined) return;
+    try {
+      await a.host.sendKeys(a.workspace, "Escape");
+    } catch (e) {
+      this.log(`pause ${agentId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.steerAgent(agentId, a, AUTH_FAILED_PAUSE, { reason: "auth_failed" });
+  }
+
+  /**
+   * Retire one of the wave's agents however it is held: a supervised one through `retire`, one
+   * the daemon is not watching (gone before a restart, never verified) from its journaled spawn
+   * — the same delete path (retireAgent), its lock released, its retained records cleared.
+   */
+  private async retireAny(wave: WaveId, agentId: string, status: string): Promise<void> {
+    if (this.supervised.has(agentId)) return this.retire(agentId, status);
+    const log = this.waves.get(wave);
+    if (log === undefined) return;
+    const events = log.journal.readAll();
+    if (events.some((e) => e.type === "agent_retired" && e.data.agent_id === agentId)) return;
+    const spawned = events.find((e) => e.type === "agent_spawned" && e.data.agent_id === agentId);
+    if (spawned?.task === undefined) return;
+    const d = spawned.data;
+    const [host] = this.hostOfTask(wave, spawned.task);
+    await this.screens.untrack(agentId);
+    await retireAgent(
+      {
+        wave,
+        task: spawned.task,
+        role: String(d.role),
+        agentId,
+        namespace: this.agentNamespace(wave, agentId),
+        status,
+        waveAgents: new Set(
+          events.filter((e) => e.type === "agent_spawned").map((e) => e.data.agent_id as string),
+        ),
+        ...(typeof d.lock === "string" ? { lockPath: d.lock } : {}),
+        minted: d.credentials === "minted",
+      },
+      {
+        exec: host.exec,
+        clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+        journal: (ev) => this.append(wave, ev),
+        releaseLock: (path) => {
+          try {
+            unlinkSync(path);
+          } catch {}
+        },
+      },
+    );
+  }
+
   private async retire(agentId: string, status: string): Promise<void> {
     const a = this.supervised.get(agentId);
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
@@ -2497,7 +2570,11 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
-      retire: (agentId) => this.retire(agentId, "done"),
+      retire: (agentId, status) => this.retireAny(wave, agentId, status ?? "done"),
+      nextAgent: (task, role) => {
+        const attempt = this.agentAttempt(wave, task, role);
+        return { agent_id: agentIdFor(wave, task, role, attempt), attempt };
+      },
       // Checks fold back in on the queue; after a stop there is nothing left to fold them into.
       enqueue: async (fn) => {
         if (this.running) await this.enqueue(fn);

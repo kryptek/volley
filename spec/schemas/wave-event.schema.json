@@ -51,7 +51,14 @@
             "claude_signin_done",
             "claude_signin_failed",
             "claude_profile_synced",
-            "agent_account_moved"
+            "agent_account_moved",
+            "relaunched",
+            "ci_pending",
+            "ci_green",
+            "pr_head_moved",
+            "merged_by_operator",
+            "agent_force_retired",
+            "alarm_cleared"
           ]
         },
         "payload": {
