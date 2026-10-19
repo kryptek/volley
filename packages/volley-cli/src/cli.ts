@@ -17,6 +17,7 @@ Subcommands:
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
   auth     Manage broker credentials (init, agents, accounts, one-time tokens)
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)
+  claude   Claude account profiles on volleyd (add, signin, list, sync, move)
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -62,6 +63,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/auth")).auth as Subcommand;
     case "lease":
       return (await import("./commands/lease")).lease as Subcommand;
+    case "claude":
+      return (await import("./commands/claude")).claude as Subcommand;
     default:
       return null;
   }

@@ -79,7 +79,7 @@ describe("retireAgent", () => {
     ]);
   });
 
-  it.each(["failed", "reaped"])("retires a %s agent too", async (status) => {
+  it.each(["failed", "reaped", "moved"])("retires a %s agent too", async (status) => {
     await retireAgent(req({ status }), deps());
     expect(cleared).toHaveLength(5);
   });

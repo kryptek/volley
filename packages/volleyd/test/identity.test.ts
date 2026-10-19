@@ -83,6 +83,7 @@ describe("spawn identity", () => {
       task: "T1",
       role: "implementer",
       broker_url: "mqtt://127.0.0.1:1",
+      claude_account: "primary",
       broker: { username: "w1-t1-implementer-1", password: "pw-w1-t1-implementer-1" },
     });
     expect(statSync(path).mode & 0o777).toBe(0o600);

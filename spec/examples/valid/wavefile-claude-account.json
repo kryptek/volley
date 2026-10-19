@@ -1,0 +1,13 @@
+{
+  "wave": "w1",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/w1",
+  "model": "claude-opus-5-5",
+  "account": "work",
+  "pipeline": ["implement", "merge_ready"],
+  "config": { "claude": { "default_account": "most_headroom" } },
+  "tasks": {
+    "T1": { "issue": 101 },
+    "T2": { "issue": 102, "account": "personal" }
+  }
+}

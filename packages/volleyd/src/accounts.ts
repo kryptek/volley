@@ -10,7 +10,7 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
 
 /**
- * Account management over the control channel (SPEC §4.6.9). The account registry and the
+ * Account management over the control channel (SPEC §4.6.10). The account registry and the
  * one-time tokens belong to `volley auth` (it owns the password file, the ACL and
  * `accounts.json` / `tokens.json`); the daemon only runs it through the fenced exec.
  *

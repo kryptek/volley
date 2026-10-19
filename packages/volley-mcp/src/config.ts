@@ -11,6 +11,8 @@ export interface VolleyConfig {
   parentId: string | null;
   /** Broker credentials; absent means connect anonymously. */
   auth?: BrokerAuth;
+  /** The Claude account profile a supervisor launched the agent under (agent.json `claude_account`). */
+  claudeAccount?: string;
 }
 
 /** MQTT username/password for brokers that require authentication (SPEC §11.5). */
@@ -48,6 +50,7 @@ interface AssignedIdentity {
   parentId?: string | null;
   brokerUrl?: string;
   auth?: BrokerAuth;
+  claudeAccount?: string;
 }
 
 /**
@@ -106,6 +109,14 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
       throw new Error(`${path}: broker_url must be a non-empty string`);
     }
     identity.brokerUrl = file.broker_url;
+  }
+  if (file.claude_account !== undefined) {
+    if (typeof file.claude_account !== "string" || !isValidAgentId(file.claude_account)) {
+      throw new Error(
+        `${path}: claude_account ${JSON.stringify(file.claude_account)} does not match [a-z0-9][a-z0-9_-]{0,62}`,
+      );
+    }
+    identity.claudeAccount = file.claude_account;
   }
   if (file.broker !== undefined) {
     const broker = file.broker as Record<string, unknown> | null;
@@ -247,5 +258,12 @@ export function loadConfig(
 
   const auth = identity?.auth ?? authFromEnv(env);
 
-  return { brokerUrl, namespace, agentId, parentId, ...(auth !== null ? { auth } : {}) };
+  return {
+    brokerUrl,
+    namespace,
+    agentId,
+    parentId,
+    ...(auth !== null ? { auth } : {}),
+    ...(identity?.claudeAccount !== undefined ? { claudeAccount: identity.claudeAccount } : {}),
+  };
 }

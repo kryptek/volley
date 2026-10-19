@@ -14,7 +14,7 @@ import {
 } from "../src/accounts";
 import { fakeExec } from "./helpers/fake-exec";
 
-/** The pure helpers behind the account ops (SPEC §4.6.9); the daemon wiring is control-accounts. */
+/** The pure helpers behind the account ops (SPEC §4.6.10); the daemon wiring is control-accounts. */
 
 const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = keys.publicKey.export({ format: "jwk" });

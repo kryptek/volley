@@ -34,6 +34,7 @@ interface RawTask {
   model?: string;
   host?: string | InlineHost;
   files?: string[];
+  account?: string;
 }
 
 interface RawWave {
@@ -49,6 +50,7 @@ interface RawWave {
   spawn_budget?: number;
   config?: TunablesPatch;
   brief_preface?: string;
+  account?: string;
 }
 
 /** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
@@ -160,6 +162,7 @@ function normalise(w: RawWave): Wave {
       model: t.model ?? w.model,
       ...normaliseHost(t.host),
       files: t.files ?? [],
+      ...(t.account !== undefined ? { account: t.account } : {}),
     };
   }
   return {
@@ -177,6 +180,7 @@ function normalise(w: RawWave): Wave {
     ...(w.spawn_budget !== undefined ? { spawn_budget: w.spawn_budget } : {}),
     config: w.config ?? {},
     ...(w.brief_preface !== undefined ? { brief_preface: w.brief_preface } : {}),
+    ...(w.account !== undefined ? { account: w.account } : {}),
   };
 }
 

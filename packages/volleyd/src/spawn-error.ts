@@ -10,7 +10,10 @@ export type SpawnErrorCode =
   | "RELEASE_BRANCH_MISSING"
   | "LAUNCH_FAILED"
   | "REMOTE_REPO_MISSING"
-  | "RETIRE_REFUSED";
+  | "RETIRE_REFUSED"
+  // Claude account profiles (src/claude/): unknown / not signed in / remote, or sharing failed.
+  | "CLAUDE_ACCOUNT_UNAVAILABLE"
+  | "CLAUDE_ACCOUNT_PREPARE_FAILED";
 
 /** A spawn (or retire) step refused. `detail` is journaled with the refusal. */
 export class SpawnError extends Error {

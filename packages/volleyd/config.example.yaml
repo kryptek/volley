@@ -47,6 +47,12 @@
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
 
+# Claude account profiles (README "Claude accounts"): the account an agent runs under when its
+# task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or
+# most_headroom (the primary until usage metering exists). null: primary.
+# claude:
+#   default_account: null
+
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and
 # must be absolute. See README "Remote hosts (ssh + tmux)".

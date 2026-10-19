@@ -13,13 +13,19 @@ export function retainedTopics(namespace: string, agentId: string): string[] {
   ];
 }
 
+/**
+ * Retire statuses that are not the agent's own: `moved` is an account move (claude/move.ts),
+ * whose cancel stopped the session before its respawn under another profile.
+ */
+const DAEMON_ENDED: ReadonlySet<string> = new Set(["moved"]);
+
 export interface RetireRequest {
   wave: string;
   task: TaskId;
   role: string;
   agentId: string;
   namespace: string;
-  /** The agent's terminal status type as the daemon consumed it. */
+  /** The agent's terminal status type as the daemon consumed it, or `moved` (DAEMON_ENDED). */
   status: string | null;
   /** Agent ids this wave spawned (from its journal). */
   waveAgents: ReadonlySet<string>;
@@ -45,7 +51,7 @@ export interface RetireDeps {
 /**
  * Retire one agent after the daemon has consumed its terminal status: revoke its broker
  * credentials, clear its retained records, release its worktree lock, journal `agent_retired`.
- * Only this wave's own agents, only terminal ones. The worktree, branch and workspace stay:
+ * Only this wave's own agents, only terminal (or moved) ones. The worktree, branch and workspace stay:
  * removing them is `volleyd cleanup <wave> --yes`.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {
@@ -54,7 +60,7 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
       agent_id: req.agentId,
     });
   }
-  if (req.status === null || !TERMINAL_STATUS.has(req.status)) {
+  if (req.status === null || !(TERMINAL_STATUS.has(req.status) || DAEMON_ENDED.has(req.status))) {
     throw new SpawnError(
       "RETIRE_REFUSED",
       `${req.agentId} is not terminal (status ${req.status ?? "none"})`,

@@ -199,6 +199,21 @@
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
         },
+        "claude": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Claude account profiles (spec section 4.6.11). Optional in the retained payload: a supervisor that predates them omits it.",
+          "properties": {
+            "default_account": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+              ],
+              "default": null,
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (resolved by usage metering when available, else primary). null: primary."
+            }
+          }
+        },
         "hosts": {
           "type": "object",
           "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",

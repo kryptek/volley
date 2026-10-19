@@ -40,6 +40,9 @@ import {
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
+import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
+import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
+import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
@@ -176,7 +179,7 @@ import {
   trackAgent,
   whyWaiting,
 } from "./liveness";
-import { type AgentProbe, FINAL_STATUS, lockPath, readLock } from "./locks";
+import { type AgentProbe, FINAL_STATUS, TERMINAL_STATUS, lockPath, readLock } from "./locks";
 import {
   type ReconcileProbes,
   type ReconcileTarget,
@@ -287,6 +290,18 @@ export interface DaemonOptions {
   tokenPruneMs?: number;
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
+  /**
+   * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
+   * primary profile's directory (default `~/.claude`), the exec sign-ins run through (default
+   * the fenced exec) and the sign-in poll / timeout (tests).
+   */
+  claude?: {
+    root?: string;
+    primaryDir?: string;
+    exec?: ExecFn;
+    signinPollMs?: number;
+    signinTimeoutMs?: number;
+  };
 }
 
 /** How the daemon spawns agents. Every field has a production default. */
@@ -641,6 +656,10 @@ export class Daemon {
   private tunnelsStopped: Promise<void> = Promise.resolve();
   /** Remote trust re-reads for open repo_untrusted decisions: when each last started. */
   private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
+  /** Claude account profiles: registry, sign-ins, sharing (src/claude/service.ts). */
+  private readonly claude: ClaudeService;
+  /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
+  private readonly moving = new Set<string>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
   private clock: ClockState = initialClock();
   /** Liveness clock (epoch ms). */
@@ -668,6 +687,21 @@ export class Daemon {
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
+    this.claude = new ClaudeService({
+      root: opts.claude?.root ?? claudeRoot(),
+      ...(opts.claude?.primaryDir !== undefined ? { primaryDir: opts.claude.primaryDir } : {}),
+      primaryJson: this.claudeJsonPath,
+      exec: opts.claude?.exec ?? realExec,
+      publish: (topic, e) => this.publish(topic, this.envelope(SIGNIN_CHANNEL, e.type, e), false),
+      journal: (ev) => this.appendSystem(ev),
+      log: this.log,
+      ...(opts.claude?.signinPollMs !== undefined
+        ? { signinPollMs: opts.claude.signinPollMs }
+        : {}),
+      ...(opts.claude?.signinTimeoutMs !== undefined
+        ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
+        : {}),
+    });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
       publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
@@ -1078,6 +1112,7 @@ export class Daemon {
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
     this.halt();
+    await this.claude.stop();
     await this.tunnelsStopped;
     await this.enqueue(async () => {});
     this.acks.clear();
@@ -1479,7 +1514,14 @@ export class Daemon {
     wave: WaveId,
     task: string,
     role: Role,
-    pipeline: { start?: SpawnStart; files?: Record<string, string> } = {},
+    pipeline: {
+      start?: SpawnStart;
+      files?: Record<string, string>;
+      /** An account move's resume note, appended to the brief. */
+      resumeNote?: string;
+      /** An account move of a pipeline role: the attempt whose worktree it continues in. */
+      worktreeAttempt?: number;
+    } = {},
   ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
@@ -1505,13 +1547,36 @@ export class Daemon {
         throw err;
       }
     }
+    let account: SelectedAccount;
+    try {
+      account = this.accountFor(wave, w, t, role);
+    } catch (e) {
+      if (!(e instanceof ClaudeAccountError)) throw e;
+      const err = new SpawnError("CLAUDE_ACCOUNT_UNAVAILABLE", e.message);
+      await this.append(wave, {
+        type: "alarm_raised",
+        task,
+        data: { code: err.code, message: err.message, role },
+      });
+      await this.spawnFailed(wave, task, role, err);
+      throw err;
+    }
     this.spawning.add(key);
     try {
       const attempt = this.agentAttempt(wave, task, role);
       // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
-      let req = { wave: w, task, role, attempt, ...pipeline };
+      const { resumeNote, ...rest } = pipeline;
+      let req = {
+        wave: w,
+        task,
+        role,
+        attempt,
+        ...rest,
+        account: { id: account.id, dir: account.dir },
+        ...(resumeNote !== undefined ? { resumeNote } : {}),
+      };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
         req = { ...req, wave: r.wave };
@@ -1678,6 +1743,35 @@ export class Daemon {
     );
   }
 
+  /**
+   * The Claude account a task role runs under: its last `agent_account_moved`, else the task's
+   * `account:`, the wave's, `claude.default_account`, the primary. A remote host's agents run
+   * under its own default profile: an account named for one is refused, and the config default
+   * does not apply there.
+   */
+  private accountFor(wave: WaveId, w: Wave, t: WaveTask, role: Role): SelectedAccount {
+    const journal = this.waves.get(wave)?.journal;
+    const moved =
+      journal !== undefined ? accountMoves(journal.readAll())[`${t.id}/${role}`] : undefined;
+    const task = moved ?? t.account;
+    if (t.host === "local") {
+      return this.claude.select({
+        ...(task !== undefined ? { task } : {}),
+        ...(w.account !== undefined ? { wave: w.account } : {}),
+        configDefault: this.config.effective(wave).claude.default_account,
+      });
+    }
+    const sel = this.claude.select({
+      ...(task !== undefined ? { task } : {}),
+      ...(w.account !== undefined ? { wave: w.account } : {}),
+    });
+    if (sel.dir !== null)
+      throw new ClaudeAccountError(
+        `Claude account '${sel.id}' is a profile on the supervisor's machine; task ${t.id} runs on host ${t.host}`,
+      );
+    return sel;
+  }
+
   /** The `local` host agents run on. */
   private get host(): Host {
     this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
@@ -1751,8 +1845,15 @@ export class Daemon {
           this.checkRemoteTrust(wave, d, repo);
           continue;
         }
-        cfg ??= readClaudeJson(this.claudeJsonPath);
-        if (!isRepoTrusted(cfg, expandHome(repo))) continue;
+        // A Claude account profile's own folder trust, else the primary's.
+        const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
+        let here: Record<string, unknown> | null;
+        if (typeof profile === "string") here = readClaudeJson(join(profile, ".claude.json"));
+        else {
+          cfg ??= readClaudeJson(this.claudeJsonPath);
+          here = cfg;
+        }
+        if (!isRepoTrusted(here, expandHome(repo))) continue;
         await this.resolveNow(wave, d.decision_id, {
           answer: "trusted",
           by: "claude-trust-dialog",
@@ -1876,6 +1977,9 @@ export class Daemon {
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
+      prepareAccount: async (a) => {
+        this.claude.prepare(a);
+      },
       resolveDecision: async (id, answer, by) => {
         await this.resolveNow(wave, id, { answer, by });
       },
@@ -2349,7 +2453,7 @@ export class Daemon {
    */
   private async onFinal(agentId: string, type: string): Promise<void> {
     const a = this.supervised.get(agentId);
-    if (a === undefined) return;
+    if (a === undefined || this.moving.has(agentId)) return;
     if (type !== "done") await this.retire(agentId, type);
     const raw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
@@ -3177,6 +3281,71 @@ export class Daemon {
     }
   }
 
+  /**
+   * `agent_move_account { agent, acct }` (claude/move.ts): journal, cancel, wait for the stop,
+   * retire (`moved`), respawn the role under the other profile with a resume note.
+   */
+  private async moveAccount(p: Record<string, unknown>, by: string): Promise<Reply> {
+    if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
+    const agentId = typeof p.agent === "string" ? p.agent : "";
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const a = this.supervised.get(agentId);
+    if (a === undefined) return { ok: false, error: `no supervised agent '${agentId}'` };
+    if (this.moving.has(agentId)) return { ok: false, error: `${agentId} is already moving` };
+    let to: SelectedAccount;
+    try {
+      to = this.claude.select({ task: acct });
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (to.dir !== null && a.host.name !== "local")
+      return {
+        ok: false,
+        error: `${agentId} runs on host ${a.host.name}: profiles are local only`,
+      };
+    const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, a.wave);
+    const from = typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
+    const stopped = new Set([...TERMINAL_STATUS, "blocked"]);
+    this.moving.add(agentId);
+    try {
+      return await moveAgentAccount(
+        { wave: a.wave, task: a.task, role: a.role, agentId, from, to, by },
+        {
+          journal: (ev) => this.serial(() => this.append(a.wave, ev)),
+          cancel: (text) =>
+            this.serial(() =>
+              this.cancelAgent(a.wave, { task: a.task, role: a.role, agent_id: agentId }, by, {
+                text,
+                from_agent_id: DAEMON_AGENT_ID,
+                wave: a.wave,
+                task: a.task,
+              }),
+            ),
+          waitStopped: () =>
+            a.watch.waitFor(
+              (s) => stopped.has(s.status?.type ?? ""),
+              DAEMON_DEFAULTS.account_move_stop_ms,
+            ),
+          retire: () => this.serial(() => this.retire(agentId, "moved")),
+          respawn: async (r) => {
+            const res = await this.serial(() =>
+              this.startSpawn(a.wave, a.task, a.role, {
+                ...moveRespawn(spawned),
+                resumeNote: r.resumeNote,
+              }),
+            );
+            return res.kind === "launched"
+              ? { agentId: res.agentId }
+              : { agentId: null, decision: res.decisionId };
+          },
+        },
+      );
+    } finally {
+      this.moving.delete(agentId);
+    }
+  }
+
   /** The worktree lock a spawn of `task`/`role` takes (per target for a remote host). */
   private lockFor(wave: WaveId, task: string, role: Role, worktreeRoot: string): string {
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
@@ -3648,6 +3817,17 @@ export class Daemon {
         return { ok: true, result: this.summary };
       case "spawn":
         return this.manualSpawn(p);
+      // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
+      case "claude_accounts":
+        return this.claude.list();
+      case "claude_account_add":
+        return { ok: true, defer: this.claude.add(p, by) };
+      case "claude_signin":
+        return { ok: true, defer: this.claude.signin(p, by) };
+      case "claude_sync":
+        return this.claude.sync(p, by);
+      case "agent_move_account":
+        return { ok: true, defer: this.moveAccount(p, by) };
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -4015,12 +4195,17 @@ export class Daemon {
     const root = (d as { repo?: unknown }).repo;
     if (typeof root !== "string") return `decision '${id}' names no repo to trust`;
     const target = (d as { target?: unknown }).target;
+    const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
     try {
       if (typeof target === "string") {
         const remote = this.remoteForDecision(wave, d);
         if (remote === undefined) return `no configured host reaches ${target} to trust ${root}`;
         await remote.recordTrust(root);
-      } else recordRepoTrust(this.claudeJsonPath, root);
+      } else
+        recordRepoTrust(
+          typeof profile === "string" ? join(profile, ".claude.json") : this.claudeJsonPath,
+          root,
+        );
       return null;
     } catch (e) {
       const where = typeof target === "string" ? ` on ${target}` : "";

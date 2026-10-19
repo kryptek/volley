@@ -1,0 +1,10 @@
+{
+  "agent_id": "w1-t1-implementer-2",
+  "namespace": "dispatch",
+  "parent_id": "volleyd",
+  "wave": "w1",
+  "task": "T1",
+  "role": "implementer",
+  "broker_url": "mqtt://localhost:1883",
+  "claude_account": "work"
+}
