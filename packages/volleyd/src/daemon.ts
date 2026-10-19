@@ -48,6 +48,7 @@ import {
   USAGE_FILTER,
   type UsageBook,
   accountRecords,
+  bookState,
   emptyBook,
   foldUsage,
   forgetAgent,
@@ -55,6 +56,8 @@ import {
   mostHeadroom,
   parseMoveAnswer,
   parseUsage,
+  restoreBook,
+  sampleAccount,
   usageAccountTopic,
   waveAccount,
   waveAccountMoves,
@@ -116,7 +119,7 @@ import {
   tunnelKey,
 } from "./hosts/tunnel";
 import { grantAckTo, revokeCredentials } from "./identity";
-import { Journal, WaveLog } from "./journal";
+import { Journal, WaveLog, writeFileAtomic } from "./journal";
 import {
   HOLDER_GONE,
   type LeaseBook,
@@ -689,8 +692,13 @@ export class Daemon {
   private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
   /** Claude account profiles: registry, sign-ins, sharing (src/claude/service.ts). */
   private readonly claude: ClaudeService;
-  /** Usage metering (claude/usage.ts): every agent's latest sample, folded per account. */
-  private usage: UsageBook = emptyBook();
+  /**
+   * Usage metering (claude/usage.ts): every agent's latest sample, folded per account. The
+   * accounts' windows are kept in `$VOLLEYD_HOME/claude-usage.json` across restarts.
+   */
+  private usage: UsageBook;
+  /** Every spawned agent's wave and host (from `agent_spawned`): where its usage belongs. */
+  private readonly spawnedAgents = new Map<string, { wave: WaveId; host: string }>();
   /** The account records last published, by account (an unchanged one is not re-published). */
   private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
@@ -784,6 +792,9 @@ export class Daemon {
         a.liveness = noteCapture(a.liveness, { hash: c.tail.hash, at: this.now() });
       }
     });
+    this.usage = existsSync(this.usageFile)
+      ? restoreBook(readFileSync(this.usageFile, "utf-8"))
+      : emptyBook();
     for (const log of loadWaves(opts.home)) {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
@@ -823,6 +834,10 @@ export class Daemon {
       release();
       throw e;
     }
+  }
+
+  private get usageFile(): string {
+    return join(this.opts.home, "claude-usage.json");
   }
 
   private get statusTopic(): string {
@@ -901,6 +916,8 @@ export class Daemon {
         void this.enqueue(() => this.onUsage(m.topic, m.payload));
       }),
     );
+    // The records restored from disk, also those no agent reports any more.
+    void this.enqueue(() => this.usagePass());
 
     this.config.onChange((c) => {
       this.log(`config v${c.version} by ${c.by}: ${JSON.stringify(c.patch)}`);
@@ -3471,9 +3488,18 @@ export class Daemon {
   }
 
   private observeJournal(wave: WaveId, journal: Journal): void {
+    if (wave !== SYSTEM_WAVE) for (const e of journal.readAll()) this.noteSpawn(wave, e);
     journal.onAppend((event) => {
+      if (wave !== SYSTEM_WAVE) this.noteSpawn(wave, event);
       for (const fn of this.journalListeners) fn(wave, event);
     });
+  }
+
+  /** An `agent_spawned`: the agent's wave and host, known before it is supervised. */
+  private noteSpawn(wave: WaveId, e: JournalEvent): void {
+    const { agent_id: id, host } = e.data as { agent_id?: unknown; host?: unknown };
+    if (e.type !== "agent_spawned" || typeof id !== "string") return;
+    this.spawnedAgents.set(id, { wave, host: typeof host === "string" ? host : "local" });
   }
 
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
@@ -3727,8 +3753,9 @@ export class Daemon {
   /**
    * One agent's retained usage sample (or its clearing): fold it into its account's record,
    * re-publish the records that changed, then open any `account_limit` decision it calls for.
-   * A sample is the agent's own (the envelope's `agent_id` is the topic's); its account is the
-   * one it names, else the profile its `config_dir` belongs to.
+   * A sample is the agent's own (the envelope's `agent_id` is the topic's); its wave and host are
+   * its spawn's (journaled, so known after a restart and before it is supervised), and its account
+   * record the one `sampleAccount` names for that host.
    */
   private async onUsage(topic: string, raw: string): Promise<void> {
     const [, ns, agent] = topic.split("/");
@@ -3738,15 +3765,22 @@ export class Daemon {
     } else {
       const env = parseEnvelope(raw);
       const p = env?.agent_id === agent ? parseUsage(env.payload) : null;
+      const spawn = this.spawnedAgents.get(agent);
       const account =
         p === null
           ? null
-          : (p.account ??
-            (p.config_dir !== undefined ? this.claude.accountForDir(p.config_dir) : null));
+          : sampleAccount(p, spawn?.host ?? "local", (dir) => this.claude.accountForDir(dir));
       if (p === null || account === null) return;
-      const wave = this.supervised.get(agent)?.wave ?? null;
-      this.usage = foldUsage(this.usage, { agent, wave, account, payload: p });
+      const before = bookState(this.usage);
+      this.usage = foldUsage(this.usage, { agent, wave: spawn?.wave ?? null, account, payload: p });
+      const after = bookState(this.usage);
+      if (after !== before) writeFileAtomic(this.usageFile, after);
     }
+    await this.usagePass();
+  }
+
+  /** Re-publish the account records that changed, then open the `account_limit`s they call for. */
+  private async usagePass(): Promise<void> {
     const records = accountRecords(this.usage);
     for (const rec of Object.values(records)) {
       const payload = { ...rec, ...this.claude.describe(rec.account) };

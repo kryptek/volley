@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { usageAccountTopic } from "../../src/claude/usage";
+import { Journal } from "../../src/journal";
+import type { ReconcileProbes } from "../../src/reconcile";
 import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
@@ -208,5 +210,98 @@ describe("usage metering (daemon)", () => {
     expect(readFileSync(join(wt, ".volley", "launch.sh"), "utf-8")).toContain(
       `export CLAUDE_CONFIG_DIR='${spare}'`,
     );
+  }, 20_000);
+});
+
+describe("usage metering across a restart and across hosts (daemon)", () => {
+  const limitOpened = (e: { type: string; data: Record<string, unknown> }) =>
+    e.type === "decision_opened" && e.data.kind === "account_limit";
+  const probes: ReconcileProbes = {
+    branch: async (_repo, branch) => ({ name: branch, exists: true, head: "abc123" }),
+    pr: async () => null,
+  };
+
+  it("an account's windows outlive a restart with nothing running on it", async () => {
+    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await publishUsage("other-agent", {
+      ...usage("spare", 10),
+      account: null,
+      config_dir: join(root, "spare"),
+    });
+    await recordWhen("spare", () => true);
+    // Its agent is gone (a retire clears the topic): the account keeps its windows.
+    await s.agent.publish(buildTopic(NS, "other-agent", "usage"), "", { qos: 1, retain: true });
+    await recordWhen("spare", (r) => (r.agents as unknown[]).length === 0);
+    await s.daemon.stop();
+    // Not read back from the broker: its retained record is gone too.
+    await s.agent.publish(usageAccountTopic("spare"), "", { qos: 1, retain: true });
+
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+    expect(await recordWhen("spare", () => true)).toMatchObject({
+      five_hour: { pct: 10 },
+      agents: [],
+    });
+    // most_headroom still knows spare: the primary's limit suggests it.
+    await publishUsage(AGENT, usage("primary", 93));
+    expect((await s.event(limitOpened)).data).toMatchObject({
+      acct: "primary",
+      suggested: "spare",
+    });
+  }, 20_000);
+
+  it("a sample retained while the daemon was down opens account_limit on restart, with no new sample", async () => {
+    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await s.daemon.stop();
+    await publishUsage(AGENT, usage("primary", 93));
+
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+    await s.consumed();
+    expect(
+      s
+        .journal()
+        .filter(limitOpened)
+        .map((e) => e.data),
+    ).toMatchObject([{ acct: "primary", pct: 93 }]);
+    expect(await accountRecord("primary")).toMatchObject({ agents: [AGENT], waves: ["w1"] });
+  }, 20_000);
+
+  it("a remote host's agent is metered on that host's account, never the local primary", async () => {
+    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await s.daemon.stop();
+    // The wave's reviewer ran on a remote host, under that host's own default login.
+    const remote = "w1-t1-spec-reviewer-1";
+    Journal.open(join(s.env.home, "waves", "w1")).append(
+      {
+        type: "agent_spawned",
+        task: "T1",
+        data: { agent_id: remote, role: "spec_reviewer", attempt: 1, host: "gpu-box" },
+      },
+      new Date(T0),
+    );
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+
+    await publishUsage(remote, usage("primary", 95));
+    await publishUsage(AGENT, usage("primary", 20));
+    expect(
+      await recordWhen("primary@gpu-box", (r) => (r.five_hour as { pct: number }).pct === 95),
+    ).toMatchObject({ account: "primary@gpu-box", agents: [remote], waves: ["w1"] });
+    expect(
+      await recordWhen("primary", (r) => (r.five_hour as { pct: number }).pct === 20),
+    ).toMatchObject({ agents: [AGENT], five_hour: { pct: 20 } });
+    // A wave move cannot reach a remote host's agents: its window opens no decision.
+    await s.consumed();
+    expect(s.journal().filter(limitOpened)).toEqual([]);
   }, 20_000);
 });

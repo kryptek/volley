@@ -3,6 +3,7 @@ import {
   type UsageBook,
   type UsagePayload,
   accountRecords,
+  bookState,
   emptyBook,
   foldUsage,
   forgetAgent,
@@ -10,6 +11,8 @@ import {
   mostHeadroom,
   parseMoveAnswer,
   parseUsage,
+  restoreBook,
+  sampleAccount,
   waveAccount,
   waveAccountMoves,
 } from "../../src/claude/usage";
@@ -17,6 +20,7 @@ import type { JournalEvent } from "../../src/types";
 
 const RESETS = "2026-10-18T18:10:00.000Z";
 const NOW = Date.parse("2026-10-18T14:00:00.000Z");
+const NOW_ISO = new Date(NOW).toISOString();
 
 function sample(
   account: string,
@@ -209,6 +213,62 @@ describe("limitDecisions", () => {
       expect(mine?.input.options).toEqual(["not now"]);
       expect(mine?.extra.suggested).toBeNull();
     }
+  });
+});
+
+describe("remote hosts", () => {
+  const profileOf = (dir: string) => (dir === "/p/spare" ? "spare" : null);
+
+  it("a remote host's agent folds into <acct>@<host>, never the local account of that name", () => {
+    const p = sample("primary", 95, "2026-10-18T14:00:00.000Z");
+    expect(sampleAccount(p, "local", profileOf)).toBe("primary");
+    expect(sampleAccount(p, "gpu-box", profileOf)).toBe("primary@gpu-box");
+    // A config_dir is a directory on the agent's own host: only a local one maps to a profile.
+    const dirOnly = { ...p, account: null, config_dir: "/p/spare" };
+    expect(sampleAccount(dirOnly, "local", profileOf)).toBe("spare");
+    expect(sampleAccount(dirOnly, "gpu-box", profileOf)).toBeNull();
+  });
+
+  it("a remote host's record opens no account_limit (a wave move cannot reach its agents)", () => {
+    const b = fold(
+      emptyBook(),
+      "w1-t1-implementer-1",
+      "w1",
+      sample("primary@gpu-box", 95, NOW_ISO),
+    );
+    expect(
+      limitDecisions({
+        accounts: accountRecords(b),
+        warnAtPct: 90,
+        candidates: ["primary"],
+        existing: [],
+        now: NOW,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("persistence", () => {
+  it("restores the accounts' windows from bookState, without agents", () => {
+    let b = fold(emptyBook(), "a1", "w1", sample("spare", 12, "2026-10-18T14:00:00.000Z"));
+    b = fold(b, "a2", null, sample("primary@gpu-box", 50, "2026-10-18T14:01:00.000Z", null));
+    const back = restoreBook(bookState(b));
+    expect(back).toEqual({ agents: {}, accounts: b.accounts });
+    expect(accountRecords(back).spare).toMatchObject({ five_hour: { pct: 12 }, agents: [] });
+  });
+
+  it("leaves out an unreadable file or entry", () => {
+    expect(restoreBook("not json")).toEqual(emptyBook());
+    const ok = restoreBook(bookState(fold(emptyBook(), "a", null, sample("spare", 1, NOW_ISO))));
+    const text = JSON.stringify({
+      version: 1,
+      accounts: {
+        ...ok.accounts,
+        "bad/id": ok.accounts.spare,
+        broken: { five_hour: { pct: 300 }, weekly: null, sampled_at: NOW_ISO, sampled_by: "a" },
+      },
+    });
+    expect(Object.keys(restoreBook(text).accounts)).toEqual(["spare"]);
   });
 });
 

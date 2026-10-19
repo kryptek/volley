@@ -14,7 +14,11 @@
           "type": "object",
           "required": ["account", "five_hour", "weekly", "agents", "waves", "sampled_at"],
           "properties": {
-            "account": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "account": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$",
+              "description": "A local account, or <acct>@<host> for a remote host's own login (its agents' samples are never folded into a local account)."
+            },
             "label": { "type": "string", "minLength": 1 },
             "plan": {
               "type": "string",

@@ -466,13 +466,19 @@ window wins) and publishes `volley/_system/claude-accounts/<acct>` retained: lab
 the registry, both windows, the agents on it and their waves. A sample that names no account
 but a `CLAUDE_CONFIG_DIR` (a coordinator session under a profile) is matched to that profile.
 Retiring an agent clears its `usage` topic, which drops it from its account's record; the
-account's windows stay.
+account's windows stay, across restarts too (`$VOLLEYD_HOME/claude-usage.json`, written on every
+change and read back at start, not from the broker). A sample's wave and host come from the
+agent's `agent_spawned`, so a sample retained while the daemon was down is attributed (and can
+open `account_limit`) as soon as the restarted daemon reads it. A remote host's agent runs under
+that host's own Claude login: its samples fold into `<acct>@<host>` (e.g. `primary@gpu-box`),
+never the local `primary`, and that record opens no decision (a wave move cannot reach it).
 
 When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
 can override it), each running wave with agents on that account gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
-most headroom among those under the threshold in both windows (none: only `not now`), with the options `move wave <w> to <suggested>` and `not now`. It is not asked
-again while open, nor for the same window once answered. **Nothing switches on its own.**
+most headroom among those under the threshold in both windows (none: only `not now`), with
+the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
+nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
 one is refused and the decision stays open) journals `wave_account_moved { from, to, by,
 decision_id }`: the wave's new agents that would have started under `from` start under `to`,

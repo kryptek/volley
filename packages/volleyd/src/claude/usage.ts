@@ -11,6 +11,11 @@ import type { JournalEvent } from "../types";
  * the account with the most headroom; only an answer moves the wave (`wave_account_moved`: its
  * new agents start under the other account, running ones finish where they are). Everything here
  * is pure; the daemon subscribes, publishes and journals.
+ *
+ * A remote host's agent runs under that host's own Claude login, not the supervisor's account of
+ * the same name: its samples fold into `<acct>@<host>`, a record of its own that opens no
+ * decision (a wave move cannot reach a remote host's agents). The book's account windows are kept
+ * on disk (`bookState` / `restoreBook`), so a restart forgets none.
  */
 
 export interface UsageWindow {
@@ -131,6 +136,62 @@ export function foldUsage(
   };
 }
 
+/** An account record's id: a local account, or `<acct>@<host>` for a remote host's login. */
+export const ACCOUNT_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$/;
+export const isRemoteAccount = (acct: string) => acct.includes("@");
+
+/**
+ * The account record a sample of an agent on `host` folds into. A local agent's is the account
+ * it names, else the profile its `config_dir` belongs to (`profileOf`); a remote host's agent's
+ * is `<acct>@<host>` (its `config_dir`, a directory on that host, maps to no local profile).
+ */
+export function sampleAccount(
+  p: UsagePayload,
+  host: string,
+  profileOf: (dir: string) => string | null,
+): string | null {
+  if (host !== "local") return p.account !== null ? `${p.account}@${host}` : null;
+  return p.account ?? (p.config_dir !== undefined ? profileOf(p.config_dir) : null);
+}
+
+/** The book's account windows, as kept on disk (agents come back from their retained samples). */
+export function bookState(book: UsageBook): string {
+  return `${JSON.stringify({ version: 1, accounts: book.accounts })}\n`;
+}
+
+function restoreWindow(v: unknown): SeenWindow | null | undefined {
+  if (v === null) return null;
+  const w = obj(v);
+  if (w === null || !isPct(w.pct) || !nullOr(w.resets_at, isDate) || !isDate(w.at)) return;
+  return { pct: w.pct as number, resets_at: w.resets_at as string | null, at: w.at as string };
+}
+
+/** A book from `bookState` text, no agents; an unreadable file or entry is left out. */
+export function restoreBook(text: string): UsageBook {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return emptyBook();
+  }
+  const accounts: UsageBook["accounts"] = {};
+  for (const [id, v] of Object.entries(obj(obj(raw)?.accounts) ?? {})) {
+    const a = obj(v);
+    if (a === null || !ACCOUNT_KEY_RE.test(id)) continue;
+    const five = restoreWindow(a.five_hour);
+    const weekly = restoreWindow(a.weekly);
+    if (five === undefined || weekly === undefined) continue;
+    if (!isDate(a.sampled_at) || typeof a.sampled_by !== "string") continue;
+    accounts[id] = {
+      five_hour: five,
+      weekly,
+      sampled_at: a.sampled_at as string,
+      sampled_by: a.sampled_by,
+    };
+  }
+  return { agents: {}, accounts };
+}
+
 /** Drop an agent (retired, or its usage topic cleared); its account keeps its windows. */
 export function forgetAgent(book: UsageBook, agent: string): UsageBook {
   if (book.agents[agent] === undefined) return book;
@@ -237,6 +298,8 @@ export function limitDecisions(o: {
 }): LimitDecision[] {
   const out: LimitDecision[] = [];
   for (const a of Object.values(o.accounts)) {
+    // a remote host's login: no wave move reaches its agents (the record is informational)
+    if (isRemoteAccount(a.account)) continue;
     const w = a.five_hour;
     const pct = livePct(w, o.now);
     if (w === null || pct === null || pct < o.warnAtPct) continue;
