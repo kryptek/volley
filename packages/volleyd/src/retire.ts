@@ -37,14 +37,14 @@ export interface ReapDeps {
 
 /**
  * The one way volleyd deletes an agent's login (retire, sweep, stop). Deleting a client
- * disconnects it WITHOUT its will (measured on 2.0.22 and 2.1.2), so nobody else would say it is gone:
- * volleyd publishes its retained `status: reaped { reason: "credentials_deleted" }` first, then
- * clears its retained records itself (registry, status, progress, result, capability, screen,
- * usage),
- * and only then deletes the login (batched with the other deletes of the moment). A still
- * connected agent can re-publish a record inside that window (a `stop` cancels it just before),
- * so once the login is gone, and the agent with it, the records are cleared once more. Journaled
- * as `agent_reaped_by_supervisor` and `credentials_revoked`. Returns whether the delete succeeded.
+ * disconnects it WITHOUT its will (measured on 2.0.22 and 2.1.2), so nobody else would say it is
+ * gone: volleyd publishes its retained `status: reaped { reason: "credentials_deleted" }` first,
+ * then clears its retained records itself (registry, status, progress, result, capability,
+ * screen, usage), and only then deletes the login (batched with the other deletes of the moment).
+ * A still connected agent can re-publish a record inside that window (a `stop` cancels it just
+ * before), so once the login is gone, and the agent with it, the records are cleared once more.
+ * Journaled as `agent_reaped_by_supervisor` and `credentials_revoked`. Returns whether the delete
+ * succeeded.
  */
 export async function reapAndRevoke(
   agentId: string,

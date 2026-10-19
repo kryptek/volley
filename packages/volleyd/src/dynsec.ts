@@ -7,6 +7,7 @@ import {
   classify,
   clientOf,
   cmd,
+  inspectRoles,
   listAllClients,
   sysVersion,
 } from "volley-cli/auth/dynsec";
@@ -152,6 +153,18 @@ export class DynsecControl {
   /** One command through the batching queue. */
   send(command: Parameters<DynsecBatcher["send"]>[0]) {
     return this.batcher.send(command);
+  }
+
+  /**
+   * Why the broker's shared agent role differs from this Volley's (missing, or its ACLs
+   * drifted), or null when it matches. Read-only: roles are never edited here.
+   */
+  async agentRoleDrift(): Promise<string | null> {
+    const { missing, drifted } = await inspectRoles(await this.session(), ["agent"]);
+    if (missing.length > 0) return "it does not exist";
+    const d = drifted[0];
+    if (d === undefined) return null;
+    return `${d.missing.length} ACL(s) missing, ${d.extra.length} extra`;
   }
 
   /** Every client with its roles (paged listClients, each page its own message). */

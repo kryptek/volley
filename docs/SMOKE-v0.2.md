@@ -152,6 +152,11 @@ export PATH=$SMOKE/bin:$PATH                           # the smoke's volley and 
   volley auth init --dir "$VOLLEY_AUTH_DIR" --no-config --state-file "$SMOKE/data/dynamic-security.json"
   volley auth list-agents --dir "$VOLLEY_AUTH_DIR"  # No agent logins.
   ```
+- [ ] **Reusing a broker initialised before v0.2.0's `usage` channel** (an earlier smoke or dev
+  broker): rerun `volley auth init` as above. If it reports a drifted role, run
+  `volley auth migrate --roles --yes` (the role's holders reconnect). Otherwise the old
+  `volley-agent` role silently drops every agent's `usage` samples, and volleyd logs
+  `dynsec: warning: the broker's volley-agent role differs from this version's` at start.
 - [ ] Both listeners are up, and the broker refuses anonymous and wrong-password clients:
   ```sh
   lsof -nP -iTCP:$BROKER_PORT -sTCP:LISTEN; lsof -nP -iTCP:$WS_PORT -sTCP:LISTEN
@@ -379,7 +384,9 @@ owned by the coordinator, so it comes before the claim). After each, note in Res
   `kill -STOP`), then `volleyd stop "$WAVE2"`. After `stop_grace_s` (30 s) the journal has
   `agent_force_retired { reason: "stop" }`, and the agent's registry, status, progress, result,
   capability, screen and usage records are gone: the Desk stops drawing it. Its screen is no longer read
-  (no `read timed out` lines in the daemon log). `kill -CONT` it afterwards and close it.
+  (no `read timed out` lines in the daemon log). `agent_reaped_by_supervisor` +
+  `credentials_revoked { ok: true }` follow, and `volley auth list-agents` no longer lists it.
+  `kill -CONT` it afterwards and close it.
 
 ### Urgent steer on a coordinator-owned wave
 

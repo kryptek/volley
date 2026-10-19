@@ -977,6 +977,14 @@ export class Daemon {
       try {
         await this.dynsec.open();
         this.log(`dynsec: control connection up (mosquitto ${this.dynsec.version})`);
+        // A broker initialised by an older Volley keeps its old shared roles (never edited at
+        // runtime): its agents' publishes on a newer channel are dropped without an error.
+        const drift = await this.dynsec.agentRoleDrift().catch(() => null);
+        if (drift !== null) {
+          this.log(
+            `dynsec: warning: the broker's volley-agent role differs from this version's (${drift}); run \`volley auth migrate --roles --yes\``,
+          );
+        }
       } catch (e) {
         if (e instanceof BrokerVersionError) throw e;
         this.log(

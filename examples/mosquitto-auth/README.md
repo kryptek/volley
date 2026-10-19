@@ -123,7 +123,9 @@ the broker because `mosquitto_ctrl dynsec init` already creates a role named `ad
 administer the plugin. **Roles are never edited while clients hold them**: an ACL change on a role
 disconnects every client holding it. After upgrading Volley, `init` reports a role that differs
 from this version's; `volley auth migrate --roles` shows the change and `--roles --yes` applies it
-(its holders reconnect).
+(its holders reconnect). On a broker initialised before v0.2.0's `usage` channel, rerun
+`volley auth init`; if it reports a drifted role, run `volley auth migrate --roles --yes`, or the
+old `volley-agent` role drops every agent's `usage` samples without an error (volleyd warns at start).
 
 Nobody but `volleyd` writes the supervisor topics SPEC §4.6 defines under `volley/_waves/*`. An
 agent login cannot write another agent's mailbox, status or registry entry; that guarantee does not

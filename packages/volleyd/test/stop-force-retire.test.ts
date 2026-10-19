@@ -80,5 +80,6 @@ describe("stop force-retires agents that never ack", () => {
     expect(reaped.data).toEqual({ agent_id: AGENT, reason: "credentials_deleted" });
     expect((await s.event("credentials_revoked")).data).toEqual({ agent_id: AGENT, ok: true });
   });
-  // The orphan sweep (stop-sweep.test.ts) deletes through the same delete path.
+  // The orphan sweep deletes through the same delete path, but calls reapAndRevoke directly, not
+  // through forceRetireWave: credential-sweep.test.ts proves its reaped-then-clear order.
 });

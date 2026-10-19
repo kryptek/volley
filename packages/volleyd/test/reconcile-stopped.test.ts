@@ -43,6 +43,9 @@ describe("reconcile skips stopped waves", () => {
     // workspace by now: left for `cleanup --yes`, never closed blind.
     const retired = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
     expect(retired.data).toMatchObject({ workspace: "workspace:1", workspace_closed: false });
+    // The grace ran out while volleyd was down: the force-retire deletes its login.
+    expect(retired.data).toMatchObject({ credentials_revoked: true });
+    expect(s.creds.revoked).toEqual([AGENT]);
     expect(s.host.closed).toEqual([]);
     await s.settled();
     expect(s.journal().some((e) => e.type === "decision_opened")).toBe(false);
@@ -55,11 +58,17 @@ describe("reconcile skips stopped waves", () => {
     await stoppedThenDown(10_000);
     await s.restart();
     await s.event("reconciled");
+    await clock.advance(0); // the start sweep
     await s.settled();
     expect(s.journal().some((e) => e.type === "agent_force_retired")).toBe(false);
+    // The sweep spares the login while grace remains (its worktree lock counts as live).
+    expect(s.creds.logins.has(AGENT)).toBe(true);
+    expect(s.creds.revoked).toEqual([]);
     await clock.armed(20_000);
     await clock.advance(20_000);
     await s.event((e) => e.type === "agent_force_retired" && e.data.agent_id === AGENT);
+    await s.event((e) => e.type === "credentials_revoked" && e.data.agent_id === AGENT);
+    expect(s.creds.revoked).toEqual([AGENT]);
   });
 });
 

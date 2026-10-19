@@ -2,7 +2,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DynsecSession, brokerTransport, ensureClients, ensureRoles } from "volley-cli/auth/dynsec";
+import {
+  DynsecSession,
+  brokerTransport,
+  cmd,
+  ensureClients,
+  ensureRoles,
+} from "volley-cli/auth/dynsec";
+import { ROLE_ACLS, type RoleAcl, roleName } from "volley-cli/auth/roles";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import { ControlClient } from "../src/control";
@@ -138,7 +145,31 @@ describe("Daemon.start with a dynsec admin login", () => {
   it("starts against 2.1.2", async () => {
     fake = await startFakeDynsec();
     await bootstrap();
-    const d = await Daemon.start(opts());
+    const logs: string[] = [];
+    const d = await Daemon.start({ ...opts(), log: (l) => logs.push(l) });
     await d.stop();
+    expect(logs.some((l) => l.includes("volley-agent"))).toBe(false);
+  });
+
+  it("warns at start when the broker's volley-agent role lacks this version's ACLs (no edit)", async () => {
+    fake = await startFakeDynsec();
+    await bootstrap();
+    // A broker initialised before the `usage` channel: its agent role has no usage grant.
+    const usage = ROLE_ACLS.agent.find((a) => a.topic.endsWith("/usage"));
+    expect(usage).toBeDefined();
+    const b = new VolleyBroker();
+    await b.connect({ url: fake.url, agentId: "bootstrap3", ...fake.admin });
+    const s = await DynsecSession.open(brokerTransport(b));
+    await s.run([cmd.removeRoleACL(roleName("agent"), usage as RoleAcl)]);
+    await s.close();
+    await b.disconnect();
+    const logs: string[] = [];
+    const d = await Daemon.start({ ...opts(), log: (l) => logs.push(l) });
+    await d.stop();
+    const warn = logs.filter((l) => l.includes("volley-agent"));
+    expect(warn).toHaveLength(1);
+    expect(warn[0]).toContain("volley auth migrate --roles --yes");
+    const agentAcls = fake.roles().get(roleName("agent")) ?? [];
+    expect(agentAcls.some((a) => a.topic === usage?.topic)).toBe(false); // volleyd edits no role
   });
 });
