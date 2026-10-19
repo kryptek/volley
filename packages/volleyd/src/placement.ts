@@ -10,8 +10,12 @@ import type { PlacementConfig, Wave, WaveTask } from "./types";
  *
  * The daemon assembles the `Snapshot` from what it already knows (F2's readiness inputs, F4's
  * per-machine lease counts, the usage meter, each host's own admission verdict) and journals the
- * result as `task_placed`. Memory is the record's `memory.available_pct`, as the machine reports
- * it (a peer's from its own sampler, the supervisor's from the OS); nothing here re-samples it.
+ * result as `task_placed`. Memory is the record's `memory.available_pct`, one definition on every
+ * machine (Linux: MemAvailable; macOS: vm_stat's free + inactive + speculative + purgeable pages),
+ * as the machine reports it; nothing here re-samples it.
+ *
+ * `machineIneligible` is the one machine filter: the published readiness verdict's `eligible` /
+ * `ineligible_reason` (readiness.ts) and placement both read it, so the two never disagree.
  */
 
 /** A task's `host:` (or a `placement: auto` wave's default) that asks the supervisor to place it. */
@@ -38,7 +42,11 @@ export interface MachineView {
   heavy: Record<string, { held: number; per_machine: number }>;
   /** Its account's 5-hour usage percentage; null: unknown. */
   usage_pct: number | null;
-  /** Its own admission verdict's reasons (a signal over, or recovering); empty: open. */
+  /**
+   * What its own admission holds back beyond the load and memory filter below: on the supervisor's
+   * own machine its local signals (memory pressure, cmux ping, containers), on a peer its per-host
+   * hysteresis (`recovering: …`). Without the machine's name (the caller adds it). Empty: open.
+   */
   held: string[];
 }
 
@@ -46,7 +54,12 @@ export interface Snapshot {
   machines: MachineView[];
   /** Placements made since `machines` was read (this tick), per machine name. */
   reservations: Record<string, number>;
+  /** Heavy placements among them: per machine name, per lease pool, the slots they will take. */
+  heavyReserved?: Record<string, Record<string, number>>;
 }
+
+/** The machine filter's options: placement's thresholds and the usage warning level. */
+export type FilterOptions = Pick<PlaceOptions, "placement" | "warn_at_pct">;
 
 export interface PlaceOptions {
   placement: Pick<
@@ -95,11 +108,21 @@ const line = (s: string) => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}�
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const pct = (n: number) => `${Math.round(n)}%`;
 
-/** A copy of `snap` with one more placement reserved on `host`. */
-export function reserve(snap: Snapshot, host: string): Snapshot {
+/**
+ * A copy of `snap` with one more placement reserved on `host`; a heavy task (of `wave`) also
+ * reserves one slot in each of the wave's heavy pools there, so the next heavy task does not stack.
+ */
+export function reserve(snap: Snapshot, host: string, task?: WaveTask, wave?: Wave): Snapshot {
+  const heavy = { ...(snap.heavyReserved ?? {}) };
+  if (task?.heavy === true && wave !== undefined) {
+    const on = { ...(heavy[host] ?? {}) };
+    for (const pool of wave.heavy_pools) on[pool] = (on[pool] ?? 0) + 1;
+    heavy[host] = on;
+  }
   return {
     machines: snap.machines,
     reservations: { ...snap.reservations, [host]: (snap.reservations[host] ?? 0) + 1 },
+    heavyReserved: heavy,
   };
 }
 
@@ -111,16 +134,69 @@ function placed(m: MachineView, snap: Snapshot): number {
   return m.agents + reserved;
 }
 
-/** The heavy pools the task needs a per-machine slot in, as `[pool, held, per_machine]`. */
-function heavySlots(m: MachineView, task: WaveTask, wave: Wave): [string, number, number][] {
+/**
+ * The heavy pools the task needs a per-machine slot in, as `[pool, held, per_machine]`: `held`
+ * counts the leases held there plus this tick's heavy reservations.
+ */
+function heavySlots(
+  m: MachineView,
+  task: WaveTask,
+  wave: Wave,
+  snap: Snapshot,
+): [string, number, number][] {
   if (task.heavy !== true) return [];
+  const reserved = snap.heavyReserved?.[m.name] ?? {};
   return wave.heavy_pools.flatMap((pool) => {
     const h = m.heavy[pool];
-    return h === undefined ? [] : [[pool, h.held, h.per_machine] as [string, number, number]];
+    return h === undefined
+      ? []
+      : [[pool, h.held + (reserved[pool] ?? 0), h.per_machine] as [string, number, number]];
   });
 }
 
-/** Every reason `m` may not take the task now, in the order a person fixes them. */
+/**
+ * Every reason `m` may take no new task now, whatever the task, in the order a person fixes them:
+ * readiness, drain, `max_agents`, its own admission, load per core, memory, disk and usage. The
+ * readiness verdict's `eligible` is this list being empty, its `ineligible_reason` the first entry.
+ */
+export function machineIneligible(m: MachineView, snap: Snapshot, o: FilterOptions): string[] {
+  const out: string[] = [];
+  // Every readiness blocker counts (a machine that needs several fixes is farther away); the
+  // line names the first.
+  if (!m.ready) {
+    const [first = "not ready", ...more] = m.reasons;
+    out.push(`${first} (readiness)`, ...more.map((reason) => `${reason} (readiness)`));
+  }
+  if (m.drain) out.push("draining");
+  const n = placed(m, snap);
+  if (n >= m.max_agents) out.push(`${n}/${m.max_agents} agents (max_agents)`);
+  out.push(...m.held);
+  const r = m.record;
+  if (r !== undefined) {
+    const perCore = r.load[0] / r.cores;
+    if (perCore > o.placement.load_per_core_max) {
+      out.push(
+        `load ${r.load[0].toFixed(1)} on ${r.cores} cores (${perCore.toFixed(2)} per core > max ${o.placement.load_per_core_max})`,
+      );
+    }
+    if (r.memory !== undefined && r.memory.available_pct < o.placement.mem_available_min_pct) {
+      out.push(
+        `memory available ${pct(r.memory.available_pct)} (min ${o.placement.mem_available_min_pct}%)`,
+      );
+    }
+    if (r.disk !== undefined && r.disk.free_gb < o.placement.disk_free_min_gb) {
+      out.push(
+        `disk free ${Math.floor(r.disk.free_gb)} GB (min ${o.placement.disk_free_min_gb} GB)`,
+      );
+    }
+  }
+  if (m.usage_pct !== null && m.usage_pct >= o.warn_at_pct) {
+    out.push(`usage ${pct(m.usage_pct)} (warn at ${o.warn_at_pct}%)`);
+  }
+  return out;
+}
+
+/** Every reason `m` may not take `task` now: the machine filter, then a heavy task's slots. */
 function ineligible(
   m: MachineView,
   task: WaveTask,
@@ -128,36 +204,8 @@ function ineligible(
   snap: Snapshot,
   o: PlaceOptions,
 ): string[] {
-  const out: string[] = [];
-  const r = m.record as MachineRecord;
-  // Every readiness blocker counts (a machine that needs several fixes is farther away); the
-  // line names the first.
-  if (!m.ready) {
-    const [first = "not ready", ...more] = m.reasons;
-    out.push(`${first} (readiness)`, ...more.map((r) => `${r} (readiness)`));
-  }
-  if (m.drain) out.push("draining");
-  const n = placed(m, snap);
-  if (n >= m.max_agents) out.push(`${n}/${m.max_agents} agents (max_agents)`);
-  out.push(...m.held);
-  const perCore = r.load[0] / r.cores;
-  if (perCore > o.placement.load_per_core_max) {
-    out.push(
-      `load ${r.load[0].toFixed(1)} on ${r.cores} cores (${perCore.toFixed(2)} per core > max ${o.placement.load_per_core_max})`,
-    );
-  }
-  if (r.memory !== undefined && r.memory.available_pct < o.placement.mem_available_min_pct) {
-    out.push(
-      `memory available ${pct(r.memory.available_pct)} (min ${o.placement.mem_available_min_pct}%)`,
-    );
-  }
-  if (r.disk !== undefined && r.disk.free_gb < o.placement.disk_free_min_gb) {
-    out.push(`disk free ${Math.floor(r.disk.free_gb)} GB (min ${o.placement.disk_free_min_gb} GB)`);
-  }
-  if (m.usage_pct !== null && m.usage_pct >= o.warn_at_pct) {
-    out.push(`usage ${pct(m.usage_pct)} (warn at ${o.warn_at_pct}%)`);
-  }
-  for (const [pool, held, per] of heavySlots(m, task, wave)) {
+  const out = machineIneligible(m, snap, o);
+  for (const [pool, held, per] of heavySlots(m, task, wave, snap)) {
     if (held >= per) out.push(`heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`);
   }
   return out;
@@ -194,7 +242,7 @@ function score(
     `${n}/${m.max_agents} agents`,
     r.memory !== undefined ? `${pct(r.memory.available_pct)} mem` : "mem unknown",
     m.usage_pct !== null ? `usage ${pct(m.usage_pct)}` : "usage unknown",
-    ...heavySlots(m, task, wave).map(
+    ...heavySlots(m, task, wave, snap).map(
       ([pool, held, per]) => `heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`,
     ),
   ];
@@ -339,7 +387,7 @@ export function preview(wave: Wave, snap: Snapshot, o: PlaceOptions): string | n
       continue;
     }
     parts.push(`${id} → ${p.local ? LOCAL_HOST : p.host} (${(p.score ?? 0).toFixed(2)})`);
-    s = reserve(s, p.host);
+    s = reserve(s, p.host, t, wave);
   }
   return parts.length === 0 ? null : `if admitted now: ${parts.join(", ")}`;
 }

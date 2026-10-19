@@ -15,6 +15,16 @@ import { envelope, schemaErrors } from "./helpers/schema";
 
 const CHECKED = new Date("2026-10-19T09:00:00.000Z");
 
+const FILTER = {
+  placement: {
+    load_per_core_max: 1.5,
+    mem_available_min_pct: 10,
+    disk_free_min_gb: 5,
+    weights: { cpu: 40, slots: 30, mem: 15, usage: 15 },
+  },
+  warn_at_pct: 85,
+};
+
 const VERSIONS = { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" };
 
 /** A peer whose doctor found everything an agent needs. */
@@ -46,6 +56,8 @@ const input = (over: Partial<ReadinessInput> = {}): ReadinessInput => ({
   placed: 0,
   heavy: {},
   usage: { account: null, five_hour_pct: null },
+  filter: FILTER,
+  held: [],
   checkedAt: CHECKED,
   ...over,
 });
@@ -74,7 +86,7 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     const r = readiness(input({ record: record({ versions: { ...VERSIONS, volley: "0.3.0" } }) }));
     expect(r.ready).toBe(false);
     expect(r.reasons).toEqual(["volley 0.3.0 on box-a, host runs 0.4.0"]);
-    expect(r).toMatchObject({ eligible: false, ineligible_reason: r.reasons[0] });
+    expect(r).toMatchObject({ eligible: false, ineligible_reason: `${r.reasons[0]} (readiness)` });
   });
 
   it("a probe without claude: path_ok.claude false and the PATH reason, saying the probe decides", () => {
@@ -141,9 +153,13 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     expect(r.ineligible_reason).toBe("draining");
   });
 
-  it("placed at max_agents is ineligible: 4/4 agents", () => {
+  it("placed at max_agents is ineligible: 4/4 agents (max_agents)", () => {
     const r = readiness(input({ placed: 4 }));
-    expect(r).toMatchObject({ ready: true, eligible: false, ineligible_reason: "4/4 agents" });
+    expect(r).toMatchObject({
+      ready: true,
+      eligible: false,
+      ineligible_reason: "4/4 agents (max_agents)",
+    });
     expect(readiness(input({ placed: 3 })).eligible).toBe(true);
   });
 

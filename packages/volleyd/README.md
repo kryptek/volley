@@ -1242,7 +1242,7 @@ backoff) and publishes the machine's retained record on `volley/_system/machines
 record with `tunnel: down` (built when it connected: volleyd keeps the last heartbeat's
 `last_seen`, load and agents). Every record also carries the Fleet fields (SPEC §4.6.15):
 `kind: peer`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat, `memory`
-too (on macOS, `available_pct` is the last doctor run's `memory_pressure` reading), and the last
+too (on macOS, `available_pct` is the last doctor run's `vm_stat` figure), and the last
 finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
 (`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
@@ -1326,9 +1326,14 @@ while its record is up; the doctor's own `claude_on_path` / `bun_on_path` only e
 (they are `warn` checks), and the reason says the probe decides. For volleyd's own machine the
 probe is its own agents' environment, with no ssh hop: volleyd's own `PATH`, which is an
 approximation (local sessions start through cmux, whose shell may set its own `PATH`; under
-launchd volleyd's `PATH` is the one its plist recorded). `eligible` adds placement's
-static filter: ready, not draining (`ineligible_reason: "draining"`), and `placed` under
-`max_agents` (`"4/4 agents"`). `requirements` is what a machine's doctor checks against:
+launchd volleyd's `PATH` is the one its plist recorded). `eligible` is placement's own
+machine filter (`machineIneligible` in `src/placement.ts`, the one function both read), under
+volleyd's config: ready, not draining (`ineligible_reason: "draining"`), `placed` under
+`max_agents` (`"4/4 agents (max_agents)"`), its own admission open, load, memory, disk and usage
+within the thresholds (see Fleet: placement). `ineligible_reason` is the machine's placement
+candidate line without `ineligible: `, so the verdict never says `eligible` about a machine
+placement skips; a blocker of `ready` reads `<reason> (readiness)` there. Only a heavy task's
+slots are per task: they show in `heavy`. `requirements` is what a machine's doctor checks against:
 volleyd's version, the bun the running wave's repo asks for (the same repo as the own doctor's;
 `engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
 
@@ -1383,9 +1388,10 @@ name a host, and a task's `host: auto` is placed in any wave. Every other task r
 
 **When.** A task is placed once, when the scheduler admits it, and never moved afterwards: every
 role of the task (implementer, reviewers, fixup, rebase) runs on that host. volleyd journals
-`task_placed { task, host, score, candidates, by }` before `task_admitted`, and the reducer folds
-it into the wave state's `tasks[].placement` and the task's host (`tasks[].host`, absent for its
-own machine). Under `placement: auto`, a task that names its host is journaled `by: "wave_file"`,
+`task_placed { task, host, score, candidates, by, local? }` before `task_admitted`
+(`local: true` on its own machine, so a replay needs no config and survives a `fleet.local_name`
+rename), and the reducer folds it into the wave state's `tasks[].placement` and the task's host
+(`tasks[].host`, absent for its own machine). Under `placement: auto`, a task that names its host is journaled `by: "wave_file"`,
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
 
@@ -1396,14 +1402,22 @@ its available memory is at least `placement.mem_available_min_pct` (10 %), its f
 `placement.disk_free_min_gb` (5 GB), its account's 5-hour usage is under `claude.warn_at_pct`
 (unknown usage passes), its own admission is not holding starts (below), and, for a `heavy: true`
 task, every pool of the wave's `heavy_pools` that sets `per_machine` has a free slot there.
-Memory is the record's `memory.available_pct` as the machine reports it (a peer's from its own
-sampler, volleyd's from the OS); placement does not re-sample it. Unknown memory or disk passes.
+Memory is the record's `memory.available_pct`, which has one definition on every machine: memory
+the kernel can hand out without paging anything active out, over total memory. On Linux that is
+`MemAvailable` (`os.freemem()`), for volleyd's own record and a peer's heartbeat alike. On macOS
+free pages alone under-count (a healthy Mac keeps them in single digits), so the figure is
+`vm_stat`'s free + inactive + speculative + purgeable pages times the page size, taken by the
+machine's doctor: a peer's heartbeat carries its last doctor run's, and volleyd's own record its
+own doctor's (re-run every heartbeat); with no doctor figure yet the record has no `memory` rather
+than the free pages. Placement does not re-sample it. Unknown memory or disk passes.
 
 **Score.** Each eligible machine scores, in 0..1 (two decimals), the weighted mean of its
 headrooms: CPU `max(0, 1 - load per core / load_per_core_max)`, slots
 `(max_agents - placed) / max_agents`, memory `available_pct / 100` and usage
 `1 - five_hour_pct / 100`, weighted by `placement.weights` (`cpu 40, slots 30, mem 15, usage 15`;
-relative, so they need not sum to 100). An unknown headroom (no memory figure, usage not metered)
+relative, so they need not sum to 100; all four at 0 is refused, in `config.yaml`, by `config_set`,
+and across the layers: a wave whose `config:` would bring them to 0 with the global config's is
+refused by `volleyd run` and `volleyd validate`). An unknown headroom (no memory figure, usage not metered)
 is left out and the other weights renormalised; with no weighted headroom known the machine
 scores 0 and its line says so. The order is: `placement_prefer` machines first,
 `placement_avoid` ones only when nothing else is eligible, then score, then fewer placed agents,
@@ -1427,19 +1441,29 @@ When no machine is eligible the task stays queued, its `why_waiting` naming the 
 placed again on the next tick.
 
 **Reservations.** A placement counts in its machine's `placed` (readiness and the next placement)
-from the moment it is admitted until its implementer spawns, so the second placement of one tick
-sees the first. volleyd's own machine counts every live agent and every reservation, wherever it
+from the moment it is admitted until its implementer is a live supervised agent, so the second
+placement of one tick sees the first; a `heavy: true` placement also counts in `heavy.<pool>.held`
+of each of the wave's heavy pools there, so two heavy tasks never stack on one per-machine slot.
+The machines placed on have their readiness verdicts re-computed and re-published right after the
+tick's placements. volleyd's own machine counts every live agent and every reservation, wherever it
 runs: `hard_ceiling` caps them all.
 
 **Per-host admission.** A task placed on a peer is admitted by that peer's own signals: memory
 available under `placement.mem_available_min_pct`, or load per core over
 `placement.load_per_core_max`, read from its record at each heartbeat with the same
 `admission.hysteresis_samples` hysteresis (a breach holds starts there until the machine is clear
-for that many heartbeats). The reasons name the host (`box-a: memory available 9% (min 10%)`,
-`box-a: recovering: memory available clear for 1/3 samples`), and a peer whose admission holds
-is not eligible. The global signals (API overload, CI queue) still hold starts everywhere;
+for that many heartbeats). volleyd keeps each peer's last heartbeats and decides at admission
+time, with the wave's own effective thresholds (its `config: placement:` overrides, a
+`config_set` that just landed); only a heartbeat with a newer `last_seen` is a new sample, so a
+reconnect's retained copy or a QoS 1 duplicate is not counted twice. A breach is placement's own
+load or memory line; while the peer recovers its candidate line and readiness verdict say
+`recovering: memory available clear for 1/3 samples`, and a task pinned there waits with
+`box-a: recovering: …`. The global signals (API overload, CI queue) still hold starts everywhere;
 volleyd's own machine signals (memory pressure, cmux ping, containers) hold only placements on
-its own machine. Tasks of a wave that does not opt in are admitted as before.
+its own machine, so in a placing wave agents may start on peers while the published admission
+verdict's `allow` is 0 for one of those. A paused wave, the kill switch or a global signal holds
+every task, and `why_waiting` says that, not a machine reason from an earlier tick. Tasks of a
+wave that does not opt in are admitted as before.
 
 **Preview.** `volleyd validate` and `volleyd run` print, for a wave that places tasks, where its
 auto tasks would go if admitted now, from the records and verdicts retained on the broker:

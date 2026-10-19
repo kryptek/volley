@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { memoryOf, vmStatAvailablePct } from "volley-cli/peer/machine";
+import { MAC_16GB_BYTES, VM_STAT_MAC_16GB } from "volley-cli/test/vm-stat";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
@@ -12,11 +14,12 @@ import { decisionTopic } from "../src/decisions";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
+import type { ReadinessPayload } from "../src/readiness";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
 import { addWorktree } from "../src/worktree";
 import { eventually } from "./helpers/broker-wait";
-import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { CALM_OS, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
@@ -432,7 +435,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
 
   const journal = (wave: string): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
-  const boxRecord = (): MachineRecord => ({
+  const boxRecord = (over: Partial<MachineRecord> = {}): MachineRecord => ({
     name: "box",
     os: "linux",
     cores: 16,
@@ -450,8 +453,9 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     auth: { gh: "ok", claude: "signed_in", trust: "ok" },
     doctor_at: GREEN_DOCTOR.doctor_at,
     last_seen: new Date(clock.now()).toISOString(),
+    ...over,
   });
-  const heartbeat = async () => {
+  const heartbeat = async (over: Partial<MachineRecord> = {}) => {
     await peer.publish(
       machineTopic("box"),
       JSON.stringify(
@@ -460,11 +464,23 @@ describe("placement at admission (SPEC §4.6.15)", () => {
           parentId: null,
           channel: MACHINE_CHANNEL,
           type: "machine",
-          payload: boxRecord(),
+          payload: boxRecord(over),
         }),
       ),
       { qos: 1, retain: true },
     );
+  };
+  type Verdict = { payload: ReadinessPayload };
+  const verdict = async (name: string) =>
+    (await env.retained(`${machineTopic(name)}/readiness`)) as Verdict | null;
+  /** A new heartbeat from the box (a later `last_seen`), folded in and its verdict re-computed. */
+  const beat = async (over: Partial<MachineRecord> = {}) => {
+    await clock.advance(1000);
+    await heartbeat(over);
+    await eventually(async () => {
+      await tick(0);
+      return (await verdict("box"))?.payload.checked_at === new Date(clock.now()).toISOString();
+    });
   };
   const tick = async (ms = 1000) => {
     await clock.advance(ms);
@@ -488,7 +504,14 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(r.exitCode).toBe(0);
   };
 
-  async function setup(o: { drain?: boolean } = {}) {
+  async function setup(
+    o: {
+      drain?: boolean;
+      extraConfig?: string;
+      os?: typeof CALM_OS;
+      doctor?: Partial<typeof GREEN_DOCTOR>;
+    } = {},
+  ) {
     env = await makeDaemonEnv();
     const dir = realpathSync(env.home);
     repo = join(dir, "repo");
@@ -509,16 +532,18 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     );
     writeFileSync(
       join(env.home, "config.yaml"),
-      `fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}`,
+      `fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
     );
     clock = fakeClock(1_000_000);
     daemon = await env.start({
       clock,
       fleet: {
+        os: o.os ?? CALM_OS,
         version: VERSION,
         localDoctor: async () => ({
           ...GREEN_DOCTOR,
           versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
+          ...o.doctor,
         }),
         localPath: () => ({ claude: localClaude, bun: localClaude }),
       },
@@ -554,7 +579,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     await env.cleanup();
   });
 
-  it("an auto task's agent_spawned carries the placed host, and a later role inherits it", async () => {
+  it("an auto task's agent_spawned carries the placed host, and a later role spawned for it inherits it", async () => {
     localClaude = true;
     await setup();
     await submit("w1", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
@@ -580,7 +605,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       schemaErrors("wave-state.schema.json", await env.retained("volley/_waves/w1/state")),
     ).toEqual([]);
 
-    // The pipeline's next role spawns where the task was placed.
+    // A later role spawned for the task (here by the operator's spawn op) runs where it was placed.
     const r = await client.request("spawn", { wave: "w1", task: "T1", role: "spec_reviewer" });
     expect(r).toMatchObject({ ok: true });
     await eventually(
@@ -618,6 +643,152 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       host: "box",
       by: "auto",
     });
+  });
+
+  it("a peer over its load: the verdict says ineligible with placement's own line, and placement skips it", async () => {
+    localClaude = false;
+    await setup();
+    await beat({ load: [32, 30, 28] });
+    expect((await verdict("box"))?.payload).toMatchObject({
+      ready: true,
+      eligible: false,
+      ineligible_reason: "load 32.0 on 16 cores (2.00 per core > max 1.5)",
+    });
+    await submit("w4", "", "  T1: { issue: 42, host: auto }\n");
+    await tick();
+    expect((await state("w4")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
+      "no eligible machine: box: load 32.0 on 16 cores (2.00 per core > max 1.5)",
+    );
+    // Back under the maximum: held by the same hysteresis as admission until it has been clear.
+    await beat();
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe(
+      "recovering: load per core clear for 1/3 samples",
+    );
+  });
+
+  it("a placement shows in the machine's verdict at once, not a heartbeat later", async () => {
+    localClaude = true;
+    await setup();
+    expect((await verdict("box"))?.payload.placed).toBe(0);
+    await submit("w5", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
+    // Stop at the tick that admits it: no later tick has re-computed the verdict.
+    await eventually(async () => {
+      await tick();
+      return journal("w5").some((e) => e.type === "task_admitted");
+    });
+    expect((await verdict("box"))?.payload.placed).toBe(1);
+    expect((await verdict("control"))?.payload.placed).toBe(1);
+  });
+
+  it("pausing a wave whose task waits on a machine shows the pause, not the stale machine reason", async () => {
+    localClaude = false;
+    await setup({ drain: true });
+    await submit("w6", "", "  T1: { issue: 42, host: auto }\n");
+    await tick();
+    const why = async () => (await state("w6")).tasks.find((t) => t.id === "T1")?.why_waiting;
+    expect(await why()).toBe("no eligible machine: box: draining");
+    expect(await client.request("pause", { wave: "w6" })).toMatchObject({ ok: true });
+    await tick();
+    expect(await why()).toBe("wave paused");
+  });
+
+  it("a re-delivered heartbeat is the same sample: only a newer one counts toward recovery", async () => {
+    localClaude = false;
+    await setup();
+    await beat({ memory: { total_mb: 65536, available_pct: 9 } });
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe("memory available 9% (min 10%)");
+    await beat();
+    // The same record again (a reconnect's retained copy, a QoS 1 duplicate): not a clean sample.
+    await heartbeat();
+    await heartbeat();
+    await tick(0);
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe(
+      "recovering: memory available clear for 1/3 samples",
+    );
+    await beat();
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe(
+      "recovering: memory available clear for 2/3 samples",
+    );
+    await beat();
+    expect((await verdict("box"))?.payload.eligible).toBe(true);
+  });
+
+  it("a wave's own placement minimum is the one its per-host admission holds to", async () => {
+    localClaude = false;
+    await setup();
+    await beat({ memory: { total_mb: 65536, available_pct: 8 } });
+    // The supervisor's minimum (10%) holds box for the verdict...
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe("memory available 8% (min 10%)");
+    // ...and a wave whose own minimum is 5% places there.
+    await submit(
+      "w7",
+      "placement: auto\nconfig:\n  placement:\n    mem_available_min_pct: 5\n",
+      "  T1: { issue: 42 }\n",
+    );
+    await tick();
+    await eventually(async () => (box?.launches.length ?? 0) === 1);
+    expect(journal("w7").find((e) => e.type === "task_placed")?.data).toMatchObject({
+      host: "box",
+    });
+  });
+
+  it("two heavy tasks admitted in one tick do not stack on one machine's heavy slot", async () => {
+    localClaude = false;
+    await setup({ extraConfig: "lease_pools:\n  backend-it: { capacity: 4, per_machine: 1 }\n" });
+    await submit(
+      "w8",
+      "placement: auto\nheavy_pools: [backend-it]\n",
+      "  T1: { issue: 42, heavy: true }\n  T2: { issue: 42, heavy: true }\n",
+    );
+    await eventually(async () => {
+      await tick();
+      return journal("w8").some((e) => e.type === "task_admitted");
+    });
+    const tasks = (await state("w8")).tasks;
+    expect(tasks.find((t) => t.id === "T1")?.placement?.host).toBe("box");
+    expect(tasks.find((t) => t.id === "T2")?.why_waiting).toBe(
+      "no eligible machine: box: heavy slots 0/1 free (backend-it)",
+    );
+  });
+
+  it("macOS: the own machine's memory is the doctor's vm_stat figure, so a Mac in normal use is eligible", async () => {
+    localClaude = true;
+    const available = vmStatAvailablePct(VM_STAT_MAC_16GB, MAC_16GB_BYTES);
+    expect(available).toBe(45);
+    await setup({
+      // Free pages alone: 3% (what os.freemem() reports on a Mac in normal use).
+      os: {
+        ...CALM_OS,
+        platform: () => "darwin",
+        freemem: () => 31457 * 16384,
+        totalmem: () => MAC_16GB_BYTES,
+      },
+      doctor: { memory: memoryOf(MAC_16GB_BYTES, 31457 * 16384, available) },
+    });
+    const own = (await env.retained(machineTopic("control"))) as { payload: MachineRecord };
+    expect(own.payload).toMatchObject({
+      os: "darwin",
+      memory: { total_mb: 16384, available_pct: 45 },
+    });
+    await eventually(async () => {
+      await tick();
+      return (await verdict("control"))?.payload.ready === true;
+    });
+    expect((await verdict("control"))?.payload.eligible).toBe(true);
+  });
+
+  it("macOS without a doctor figure: the own memory is unknown, never the free pages", async () => {
+    localClaude = true;
+    await setup({
+      os: {
+        ...CALM_OS,
+        platform: () => "darwin",
+        freemem: () => 31457 * 16384,
+        totalmem: () => MAC_16GB_BYTES,
+      },
+    });
+    const own = (await env.retained(machineTopic("control"))) as { payload: MachineRecord };
+    expect(own.payload.memory).toBeUndefined();
   });
 
   it("a wave that does not opt in journals no placement and runs locally as before", async () => {

@@ -66,7 +66,12 @@
               "required": ["total_mb", "available_pct"],
               "properties": {
                 "total_mb": { "type": "integer", "minimum": 1 },
-                "available_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+                "available_pct": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "Memory the kernel can hand out without paging anything active out, over total memory; one definition on every machine (Linux: MemAvailable; macOS: vm_stat free + inactive + speculative + purgeable pages)."
+                }
               }
             },
             "disk": {

@@ -399,3 +399,30 @@ describe("Fleet keys: hosts.<name>.max_agents / drain, fleet.local_name (SPEC §
     expect(c.retainedPayload().fleet.local_name).toBe("control");
   });
 });
+
+describe("placement.weights: never all four at 0 (SPEC §4.6.15)", () => {
+  const ZERO = "not all four weights may be 0 (cpu, slots, mem, usage)";
+
+  it("a config_set that zeroes them is refused with a plain reason at the field", () => {
+    const c = open();
+    const r = c.applyPatch(
+      { placement: { weights: { cpu: 0, slots: 0, mem: 0, usage: 0 } } },
+      "tester",
+    );
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([{ path: "placement.weights", reason: ZERO }]);
+  });
+
+  it("a wave's config: that zeroes them with the global config's is refused; one that does not passes", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "placement:\n  weights: { cpu: 100, slots: 0, mem: 0, usage: 0 }\n",
+    );
+    const c = open();
+    expect(c.waveOverrideErrors({ placement: { weights: { cpu: 0 } } } as never)).toEqual([
+      { path: "config.placement.weights", reason: `${ZERO} with the global config` },
+    ]);
+    expect(c.waveOverrideErrors({ placement: { weights: { mem: 1 } } } as never)).toEqual([]);
+    expect(c.waveOverrideErrors({})).toEqual([]);
+  });
+});

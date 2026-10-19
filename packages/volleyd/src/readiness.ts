@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import type { Sharing } from "./claude/sharing";
 import { PATH_PROBE_TOOLS } from "./fence";
 import { type MachineRecord, machineTopic } from "./machines";
+import { type FilterOptions, type MachineView, machineIneligible } from "./placement";
 
 /**
  * Readiness (SPEC §4.6.15), as pure logic: the supervisor's verdict on one machine, its own
@@ -12,8 +13,10 @@ import { type MachineRecord, machineTopic } from "./machines";
  * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
  * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
  * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
- * push access or Claude signed out. `eligible` adds placement's static filter: not draining and
- * under `max_agents`. Load, memory and usage headroom are placement's (F3), not checked here.
+ * push access or Claude signed out. `eligible` / `ineligible_reason` are placement's own machine
+ * filter (`machineIneligible`): ready, not draining, under `max_agents`, the machine's own
+ * admission open, load per core, memory, disk and usage within the supervisor's thresholds. So a
+ * verdict never says `eligible` about a machine placement skips, and its reason is the same line.
  */
 
 export const READINESS_CHANNEL = "_system/machines/readiness";
@@ -60,6 +63,10 @@ export interface ReadinessInput {
   bun?: string;
   /** The supervisor's `sharing.yaml` modes (`readSharing`). */
   sharing?: Sharing;
+  /** Placement's thresholds (the supervisor's effective config, without a wave's overrides). */
+  filter: FilterOptions;
+  /** What the machine's own admission holds back (`MachineView.held`). */
+  held: string[];
   checkedAt: Date;
 }
 
@@ -160,17 +167,45 @@ function blockers(i: ReadinessInput): string[] {
   return out;
 }
 
+/** What placement knows about the machine of `v` (its verdict without the eligibility). */
+export function machineView(
+  i: Pick<ReadinessInput, "name" | "local" | "record" | "held">,
+  v: Pick<ReadinessPayload, "ready" | "reasons" | "drain" | "max_agents" | "placed" | "heavy">,
+  usagePct: number | null,
+): MachineView {
+  return {
+    name: i.name,
+    local: i.local,
+    ...(i.record !== undefined ? { record: i.record } : {}),
+    ready: v.ready,
+    reasons: v.reasons,
+    drain: v.drain,
+    max_agents: v.max_agents,
+    agents: v.placed,
+    heavy: v.heavy,
+    usage_pct: usagePct,
+    held: i.held,
+  };
+}
+
 /** The verdict on one machine (pure). */
 export function readiness(i: ReadinessInput): ReadinessPayload {
   const reasons = blockers(i).slice(0, REASONS_MAX).map(line);
   const ready = reasons.length === 0;
-  const ineligible = !ready
-    ? reasons[0]
-    : i.host.drain
-      ? "draining"
-      : i.placed >= i.host.max_agents
-        ? `${i.placed}/${i.host.max_agents} agents`
-        : undefined;
+  const view = machineView(
+    i,
+    {
+      ready,
+      reasons,
+      drain: i.host.drain,
+      max_agents: i.host.max_agents,
+      placed: i.placed,
+      heavy: i.heavy,
+    },
+    i.usage.five_hour_pct,
+  );
+  const why = machineIneligible(view, { machines: [view], reservations: {} }, i.filter);
+  const ineligible = why[0] !== undefined ? line(why[0]) : undefined;
   return {
     name: i.name,
     ready,

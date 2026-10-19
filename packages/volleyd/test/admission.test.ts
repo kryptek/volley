@@ -11,6 +11,7 @@ import {
   decide,
   decideHost,
   emptyAdmissionState,
+  foldHost,
   forHost,
   hostSamples,
   summaryPayload,
@@ -258,6 +259,37 @@ describe("per-host admission (SPEC §4.6.15)", () => {
     ]);
     const noMem = decideHost("box-a", hostSamples({ cores: 16, load: [1, 1, 1] }), {}, T);
     expect(noMem.allow).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("recovering lists the hysteresis reasons alone, without the host's name", () => {
+    const tripped = decideHost("box-a", hostSamples(rec(9)), {}, T);
+    expect(tripped.recovering).toEqual([]);
+    const v = decideHost("box-a", hostSamples(rec(60)), tripped.state, T);
+    expect(v.recovering).toEqual(["recovering: memory available clear for 1/3 samples"]);
+  });
+
+  it("foldHost: the verdict from the last heartbeats, under the thresholds asked with", () => {
+    const history = [rec(9), rec(60), rec(60)].map(hostSamples);
+    expect(foldHost("box-a", history, T).reasons).toEqual([
+      "box-a: recovering: memory available clear for 2/3 samples",
+    ]);
+    // A wave whose own minimum is 5% was never breached by 9%.
+    expect(foldHost("box-a", history, { ...T, mem_available_min_pct: 5 })).toMatchObject({
+      allow: Number.POSITIVE_INFINITY,
+      reasons: [],
+    });
+    // A lowered load maximum (config_set) applies to the latest heartbeat at once.
+    expect(
+      foldHost("box-a", [hostSamples(rec(60, 20))], { ...T, load_per_core_max: 1 }).reasons,
+    ).toEqual(["box-a: load 1.25 per core (max 1)"]);
+    // Only the last hysteresis_samples heartbeats count: an older breach has cleared.
+    expect(
+      foldHost("box-a", [rec(9), rec(60), rec(60), rec(60)].map(hostSamples), T).reasons,
+    ).toEqual([]);
+    expect(foldHost("box-a", [], T)).toMatchObject({
+      allow: Number.POSITIVE_INFINITY,
+      reasons: [],
+    });
   });
 });
 

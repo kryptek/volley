@@ -84,7 +84,17 @@ const TUNABLES = "config.schema.json#/$defs/tunables";
  * whose errors (`must match "then" schema`) name neither the field nor the bound.
  */
 function tunablesErrors(value: unknown, host: string): PathError[] {
-  return [...fleetNameErrors(value, host), ...poolErrors(value)];
+  return [...fleetNameErrors(value, host), ...poolErrors(value).map(rewordWeights)];
+}
+
+/** The reason all four `placement.weights` at 0 are refused with (SPEC §4.6.15). */
+export const ALL_ZERO_WEIGHTS = "not all four weights may be 0 (cpu, slots, mem, usage)";
+
+/** The schema's `not` on all-zero weights (`must NOT be valid`), said plainly. */
+export function rewordWeights(e: PathError): PathError {
+  return e.path.endsWith("placement.weights") && e.reason === "must NOT be valid"
+    ? { path: e.path, reason: ALL_ZERO_WEIGHTS }
+    : e;
 }
 
 /**
@@ -211,6 +221,17 @@ export class ConfigStore {
       { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults, hostname: host },
       layer,
     );
+  }
+
+  /**
+   * What a wave's `config:` would make invalid once merged over the global config, which its own
+   * schema check cannot see: all four `placement.weights` at 0 between the two layers.
+   */
+  waveOverrideErrors(overrides: TunablesPatch): PathError[] {
+    const w = merge(this.global, overrides).placement.weights;
+    return Object.values(w).every((v) => v === 0)
+      ? [{ path: "config.placement.weights", reason: `${ALL_ZERO_WEIGHTS} with the global config` }]
+      : [];
   }
 
   /** Register (or replace) a wave's `config:` overrides. Validated by the wave-file schema. */

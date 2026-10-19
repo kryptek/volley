@@ -237,7 +237,7 @@ volley peer doctor --json                # the machine record's doctor fields (S
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
-| `machine.memory`, `machine.disk` | warn | available memory (macOS: `memory_pressure`), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
+| `machine.memory`, `machine.disk` | warn | available memory (Linux: `MemAvailable`; macOS: `vm_stat`'s free + inactive + speculative + purgeable pages, as free pages alone under-count), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
 
 Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
 shell's), so the doctor inside the `volley peer run` service reads the machine the way a terminal
@@ -276,7 +276,10 @@ beside the heartbeat, never in its way: a beat never waits for it, a run is give
 `PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
 heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
 text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`
-too except on macOS, whose `available_pct` is the last doctor run's `memory_pressure` reading.
+too except on macOS, whose `available_pct` is the last doctor run's `vm_stat` figure. Available memory
+has one definition on every machine, the supervisor's own included, so placement can compare them
+(SPEC §4.6.15): memory the kernel can hand out without paging anything active out, over total
+memory (Linux: `MemAvailable`; macOS: free + inactive + speculative + purgeable pages).
 
 ---
 

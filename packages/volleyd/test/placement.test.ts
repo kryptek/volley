@@ -12,6 +12,7 @@ import {
   reserve,
   snapshotFrom,
 } from "../src/placement";
+import { type ReadinessInput, machineView, readiness } from "../src/readiness";
 import { parseWaveFile } from "../src/wave-file";
 
 /**
@@ -187,10 +188,16 @@ describe("place: eligibility lines", () => {
     expect(only(machine("box-a", { agents: 4 })).candidates[0]?.line).toBe(
       "ineligible: 4/4 agents (max_agents)",
     );
-    expect(
-      only(machine("box-a", { held: ["box-a: memory available 9% (min 10%)"] })).candidates[0]
-        ?.line,
-    ).toBe("ineligible: box-a: memory available 9% (min 10%)");
+    const held = only(
+      machine("box-a", { held: ["recovering: memory available clear for 1/3 samples"] }),
+    );
+    expect(held.candidates[0]?.line).toBe(
+      "ineligible: recovering: memory available clear for 1/3 samples",
+    );
+    // The machine's name once, not twice.
+    expect(held).toMatchObject({
+      why: "no eligible machine: box-a: recovering: memory available clear for 1/3 samples",
+    });
   });
 
   it("usage at or over warn_at_pct is ineligible; unknown usage passes", () => {
@@ -249,6 +256,32 @@ describe("place: eligibility lines", () => {
 });
 
 describe("place: ranking, prefer, avoid, reservations", () => {
+  it("a heavy placement reserves its slot: two heavy tasks in one tick land on two machines", () => {
+    const w = wave(
+      "placement: auto\nheavy_pools: [backend-it]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2, heavy: true }\n  T3: { issue: 3 }\n",
+    );
+    const slot = { heavy: { "backend-it": { held: 0, per_machine: 1 } } };
+    let s = snap(
+      machine("box-a", slot),
+      machine("box-b", { ...slot, record: record("box-b", { load: [12, 12, 12] }) }),
+    );
+    const first = place(task(w, "T1"), w, s, OPTS);
+    expect(first.host).toBe("box-a");
+    s = reserve(s, "box-a", task(w, "T1"), w);
+    const second = place(task(w, "T2"), w, s, OPTS);
+    expect(second.host).toBe("box-b");
+    if (second.host === null) throw new Error("unplaced");
+    expect(second.candidates.find((c) => c.host === "box-a")?.line).toBe(
+      "ineligible: heavy slots 0/1 free (backend-it)",
+    );
+    // A task that is not heavy still fits on box-a; a placement of one reserves no slot.
+    expect(place(task(w, "T3"), w, s, OPTS).host).toBe("box-a");
+    expect(reserve(s, "box-b", task(w, "T3"), w).heavyReserved).toEqual({
+      "box-a": { "backend-it": 1 },
+    });
+  });
+
   it("reservations make the second admission in one tick land elsewhere", () => {
     let s = snap(machine("box-a", { max_agents: 1 }), machine("box-b", { max_agents: 1 }));
     const first = place(task(AUTO, "T1"), AUTO, s, OPTS);
@@ -296,6 +329,103 @@ describe("place: ranking, prefer, avoid, reservations", () => {
       machine("box-b", { max_agents: 100 }),
     );
     expect(place(task(), AUTO, fewer, OPTS).host).toBe("box-b");
+  });
+});
+
+describe("one machine filter: the readiness verdict agrees with placement", () => {
+  const FILTER = { placement: OPTS.placement, warn_at_pct: OPTS.warn_at_pct };
+  const ok = record("box-a", {
+    kind: "peer",
+    versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" },
+    auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+    repo: { path: "/srv/repo", exists: true, origin: "github.com/example-org/example-repo" },
+    checks: [],
+    doctor_at: "2026-10-19T08:59:00.000Z",
+  });
+  const input = (over: Partial<ReadinessInput> = {}): ReadinessInput => ({
+    name: "box-a",
+    record: ok,
+    local: false,
+    host: { max_agents: 4, drain: false },
+    hostVersion: "0.4.0",
+    hostOrigin: "github.com/example-org/example-repo",
+    probe: { claude: true, bun: true },
+    placed: 0,
+    heavy: {},
+    usage: { account: "dev@box-a", five_hour_pct: 34 },
+    filter: FILTER,
+    held: [],
+    checkedAt: new Date("2026-10-19T09:00:00.000Z"),
+    ...over,
+  });
+  /** Placement's view of the verdict's machine, and the candidate line for task `t` of `w`. */
+  const candidate = (i: ReadinessInput, w = AUTO, t = task(w)) => {
+    const v = readiness(i);
+    const view = machineView(i, v, v.usage.five_hour_pct);
+    const p = place(t, w, snap(view), OPTS);
+    return { v, line: p.candidates[0]?.line ?? "", placed: p.host !== null };
+  };
+  const cases: [string, Partial<ReadinessInput>, string | null][] = [
+    ["eligible", {}, null],
+    [
+      "load",
+      { record: { ...ok, load: [32, 30, 28] } },
+      "load 32.0 on 16 cores (2.00 per core > max 1.5)",
+    ],
+    [
+      "memory",
+      { record: { ...ok, memory: { total_mb: 8192, available_pct: 9 } } },
+      "memory available 9% (min 10%)",
+    ],
+    [
+      "disk",
+      { record: { ...ok, disk: { path: "/srv", free_gb: 3, free_pct: 2 } } },
+      "disk free 3 GB (min 5 GB)",
+    ],
+    ["usage", { usage: { account: "dev@box-a", five_hour_pct: 90 } }, "usage 90% (warn at 90%)"],
+    ["cap", { placed: 4 }, "4/4 agents (max_agents)"],
+    ["drain", { host: { max_agents: 4, drain: true } }, "draining"],
+    [
+      "own admission",
+      { held: ["recovering: load per core clear for 2/3 samples"] },
+      "recovering: load per core clear for 2/3 samples",
+    ],
+    [
+      "readiness",
+      { probe: { claude: false, bun: true } },
+      "claude not on the non-interactive ssh PATH (the supervisor's ssh probe decides; the doctor's claude_on_path only estimates it) (readiness)",
+    ],
+  ];
+  for (const [filter, over, reason] of cases) {
+    it(`${filter}: eligible and ineligible_reason are placement's own verdict and line`, () => {
+      const { v, line, placed } = candidate(input(over));
+      expect(v.eligible).toBe(reason === null);
+      expect(placed).toBe(reason === null);
+      if (reason === null) {
+        expect(v.ineligible_reason).toBeUndefined();
+        expect(line).not.toMatch(/^ineligible/);
+      } else {
+        expect(v.ineligible_reason).toBe(reason);
+        expect(line).toBe(`ineligible: ${reason}`.slice(0, 200));
+      }
+    });
+  }
+
+  it("heavy slots: the verdict says the machine takes work, a heavy task's line says the slots", () => {
+    const w = wave(
+      "placement: auto\nheavy_pools: [backend-it]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2 }\n",
+    );
+    const i = input({ heavy: { "backend-it": { held: 1, per_machine: 1 } } });
+    const heavy = candidate(i, w, task(w, "T1"));
+    // A task-independent verdict: eligible for work that needs no slot, and its `heavy` shows the
+    // slot taken, which is exactly why a heavy task is not placed there.
+    expect(heavy.v).toMatchObject({ eligible: true, heavy: { "backend-it": { held: 1 } } });
+    expect(heavy).toMatchObject({
+      placed: false,
+      line: "ineligible: heavy slots 0/1 free (backend-it)",
+    });
+    expect(candidate(i, w, task(w, "T2")).placed).toBe(true);
   });
 });
 

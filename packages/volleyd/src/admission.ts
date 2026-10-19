@@ -183,6 +183,11 @@ export interface HostThresholds {
 
 export interface HostVerdict extends Admission {
   state: HostAdmissionState;
+  /**
+   * The hysteresis reasons alone (`recovering: …`), without the host's name: what placement's
+   * filter adds to its own load and memory checks, which already cover a signal that is over.
+   */
+  recovering: string[];
 }
 
 const HOST_LABEL: Record<HostSignalName, string> = {
@@ -223,6 +228,7 @@ export function decideHost(
 ): HostVerdict {
   const next: HostAdmissionState = {};
   const reasons: string[] = [];
+  const recovering: string[] = [];
   for (const name of HOST_SIGNALS) {
     const sample = samples[name];
     const prev = state[name] ?? { tripped: false, clean: 0 };
@@ -243,12 +249,36 @@ export function decideHost(
     const tripped = prev.tripped && clean < t.hysteresis_samples;
     next[name] = { tripped, clean: tripped ? clean : 0 };
     if (tripped) {
-      reasons.push(
-        `${host}: recovering: ${HOST_LABEL[name]} clear for ${clean}/${t.hysteresis_samples} samples`,
-      );
+      const why = `recovering: ${HOST_LABEL[name]} clear for ${clean}/${t.hysteresis_samples} samples`;
+      recovering.push(why);
+      reasons.push(`${host}: ${why}`);
     }
   }
-  return { allow: reasons.length > 0 ? 0 : Number.POSITIVE_INFINITY, reasons, state: next };
+  return {
+    allow: reasons.length > 0 ? 0 : Number.POSITIVE_INFINITY,
+    reasons,
+    state: next,
+    recovering,
+  };
+}
+
+/**
+ * `host`'s verdict now, from its last heartbeats (oldest first) under thresholds `t`: `decideHost`
+ * folded over them from a clear state. Only the last `hysteresis_samples` heartbeats can hold
+ * starts back, so a history that long gives the exact verdict, and the thresholds are the caller's
+ * at the moment it asks (a wave's own `placement` overrides, a `config_set` that just landed).
+ */
+export function foldHost(host: string, history: HostSamples[], t: HostThresholds): HostVerdict {
+  let v: HostVerdict = {
+    allow: Number.POSITIVE_INFINITY,
+    reasons: [],
+    state: {},
+    recovering: [],
+  };
+  for (const samples of history.slice(-t.hysteresis_samples)) {
+    v = decideHost(host, samples, v.state, t);
+  }
+  return v;
 }
 
 /**

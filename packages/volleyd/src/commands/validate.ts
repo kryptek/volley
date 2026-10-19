@@ -8,7 +8,7 @@ import { parse } from "yaml";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
 import { authFields } from "../broker-auth";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
-import { volleydHome } from "../config-store";
+import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
 import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
@@ -65,6 +65,20 @@ function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base
   }
 }
 
+/** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
+function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weights"]> {
+  const file = join(volleydHome(env), "config.yaml");
+  if (!existsSync(file)) return {};
+  try {
+    const cfg = parse(readFileSync(file, "utf-8")) as {
+      placement?: { weights?: Partial<PlacementConfig["weights"]> };
+    } | null;
+    return cfg?.placement?.weights ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
@@ -88,6 +102,17 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
   }
   try {
     const wave = await loadWaveFile(file);
+    const weights = {
+      ...CONFIG_DEFAULTS.placement.weights,
+      ...globalWeights(env),
+      ...wave.config.placement?.weights,
+    };
+    if (Object.values(weights).every((w) => w === 0)) {
+      io.stderr(
+        `volleyd validate: config.placement.weights: ${ALL_ZERO_WEIGHTS} with the global config\n`,
+      );
+      return EXIT.ERROR;
+    }
     const repo = expandHome(wave.repo);
     let note = "";
     if (!spawnsLocally(wave)) {

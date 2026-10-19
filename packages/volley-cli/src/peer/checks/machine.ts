@@ -16,18 +16,35 @@ const pct = (n: number) => Math.min(100, Math.max(0, round(n, 1)));
 export const worktreeRoot = (repo: string | null, home: string) =>
   repo !== null ? join(dirname(repo), WORKTREE_DIR) : home;
 
-export function memoryOf(total: number, free: number, pressurePct: number | null = null): Memory {
+/** `available`: macOS's `vmStatAvailablePct`; otherwise `free` (Linux: MemAvailable) over `total`. */
+export function memoryOf(total: number, free: number, available: number | null = null): Memory {
   return {
     total_mb: Math.max(1, Math.round(total / 1024 ** 2)),
-    available_pct:
-      pressurePct !== null ? pct(pressurePct) : pct(total > 0 ? (free / total) * 100 : 0),
+    available_pct: available !== null ? pct(available) : pct(total > 0 ? (free / total) * 100 : 0),
   };
 }
 
-/** macOS: `memory_pressure`'s "System-wide memory free percentage: 63%" (free + reclaimable). */
-export function pressurePct(out: string): number | null {
-  const m = /memory free percentage:\s*(\d{1,3})%/i.exec(out);
-  return m !== null ? Number(m[1]) : null;
+/**
+ * macOS: the available-memory percentage from `vm_stat` (SPEC §4.6.15): free, inactive,
+ * speculative and purgeable pages (what the kernel can hand out without paging anything active
+ * out), times the page size, over the machine's total memory. Free pages alone under-count: a
+ * healthy Mac keeps them in single digits. Linux's figure is the kernel's MemAvailable
+ * (`os.freemem()`), the same notion. null: not `vm_stat` output.
+ */
+export function vmStatAvailablePct(out: string, totalBytes: number): number | null {
+  const size = /page size of (\d+) bytes/.exec(out);
+  if (size === null || totalBytes <= 0) return null;
+  const pages = (label: string) => {
+    const m = new RegExp(`^Pages ${label}:\\s+(\\d+)\\.?\\s*$`, "m").exec(out);
+    return m !== null ? Number(m[1]) : null;
+  };
+  const free = pages("free");
+  if (free === null) return null;
+  const counted = ["inactive", "speculative", "purgeable"].reduce(
+    (n, l) => n + (pages(l) ?? 0),
+    free,
+  );
+  return pct((counted * Number(size[1]) * 100) / totalBytes);
 }
 
 export function diskOf(path: string, st: StatFs): Disk {

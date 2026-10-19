@@ -114,6 +114,37 @@ describe("volleyd validate: the release branch", () => {
     expect(global.exitCode).toBe(0);
   });
 
+  it("placement weights that reach all four at 0 across config.yaml and the wave's config: are refused", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-weights");
+    mkdirSync(home);
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nplacement:\n  weights: { usage: 0 }\n",
+    );
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const zero = await runCli(
+      [
+        "validate",
+        waveFile(
+          repo,
+          "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0, slots: 0, mem: 0 } } }",
+        ),
+      ],
+      env,
+    );
+    expect(zero.exitCode).toBe(1);
+    expect(zero.stderr).toBe(
+      "volleyd validate: config.placement.weights: not all four weights may be 0 (cpu, slots, mem, usage) with the global config\n",
+    );
+    const ok = await runCli(
+      ["validate", waveFile(repo, "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0 } } }")],
+      env,
+    );
+    expect(ok.stderr).toBe("");
+    expect(ok.exitCode).toBe(0);
+  });
+
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {
     const r = await runCli(["validate", waveFile(join(dir, "elsewhere"))]);
     expect(r.exitCode).toBe(0);

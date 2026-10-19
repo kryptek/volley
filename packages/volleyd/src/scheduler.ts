@@ -1,4 +1,14 @@
+import { forHost } from "./admission";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import {
+  AUTO_HOST,
+  type PlaceOptions,
+  type Placement,
+  type Snapshot,
+  needsPlacement,
+  place,
+  reserve,
+} from "./placement";
 import type { WaveRecord } from "./reducer";
 import type { TaskId, TaskStage, Wave } from "./types";
 
@@ -103,6 +113,82 @@ export function admit(
     }
   }
   return { admit: readyTasks.slice(0, n), reasons };
+}
+
+/** One task `admitPlacing` admitted, and where. */
+export interface PlacedAdmission {
+  id: TaskId;
+  placement: Placement;
+  /** A placement to journal (`task_placed`): the wave places, or the task is `host: auto`. */
+  placed: boolean;
+}
+
+/**
+ * Admission for a wave that places its tasks (SPEC §4.6.15), as a pure function: the ready tasks
+ * in order, each within the hard ceiling and the spawn budget, placed (`place`), then admitted by
+ * its machine: the supervisor's own by the wave's verdict `gate` (its local allowance counted
+ * down), a peer by the global signals of `gate` plus its own verdict (`hostGate`). Each admission
+ * is reserved in the snapshot, so the next placement sees it (a heavy one takes its slots). A task
+ * with no eligible machine, or whose machine holds starts, is `held` with why, and does not stop
+ * the tasks after it. A closed gate (paused, kill switch, a global signal) admits nothing.
+ */
+export function admitPlacing(
+  readyTasks: TaskId[],
+  wave: Wave,
+  snap: Snapshot,
+  o: PlaceOptions,
+  gate: Admission,
+  hostGate: (host: string) => Admission,
+  ctx: AdmitContext,
+): {
+  admit: PlacedAdmission[];
+  held: Record<TaskId, string>;
+  reasons: string[];
+  budget: boolean;
+  snapshot: Snapshot;
+} {
+  const global = forHost(gate, { allow: Number.POSITIVE_INFINITY, reasons: [] });
+  const reasons = new Set(global.reasons);
+  const admitted: PlacedAdmission[] = [];
+  const held: Record<TaskId, string> = {};
+  if (global.allow <= 0) {
+    return { admit: admitted, held, reasons: [...reasons], budget: false, snapshot: snap };
+  }
+  let s = snap;
+  let localLeft = gate.allow;
+  let budget = false;
+  for (const id of readyTasks) {
+    const live = ctx.live + admitted.length;
+    if (live >= ctx.hardCeiling) {
+      reasons.add(`hard ceiling reached: ${live}/${ctx.hardCeiling} live agents`);
+      break;
+    }
+    const used = ctx.spawnsUsed + admitted.length;
+    if (used >= ctx.spawnBudget) {
+      reasons.add(`spawn budget exhausted: ${used}/${ctx.spawnBudget} spawns`);
+      budget = true;
+      break;
+    }
+    const def = wave.tasks[id];
+    if (def === undefined) continue;
+    const p = place(def, wave, s, o);
+    if (p.host === null) {
+      held[id] = p.why;
+      continue;
+    }
+    // A placement (not a task of a wave that does not opt in) is admitted by its machine.
+    const placed = needsPlacement(def) || wave.placement === AUTO_HOST;
+    const local = !placed || p.local;
+    const v = local ? gate : forHost(gate, hostGate(p.host));
+    if (v.allow <= 0 || (local && localLeft <= 0)) {
+      held[id] = v.reasons.join("; ") || `${p.host}: no start allowed now`;
+      continue;
+    }
+    s = reserve(s, p.host, def, wave);
+    admitted.push({ id, placement: p, placed });
+    if (local) localLeft--;
+  }
+  return { admit: admitted, held, reasons: [...reasons], budget, snapshot: s };
 }
 
 /** Agents one run of a task's pipeline spawns with no retry: one per stage (the gate spawns none). */

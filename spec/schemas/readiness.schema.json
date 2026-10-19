@@ -138,13 +138,13 @@
             },
             "eligible": {
               "type": "boolean",
-              "description": "Whether placement may put a new task there now: ready, not draining, under max_agents, not overloaded, enough memory and disk, Claude usage headroom."
+              "description": "Whether placement may put a new task there now: placement's own machine filter (ready, not draining, under max_agents, its own admission open, not overloaded, enough memory and disk, Claude usage headroom) under the supervisor's config; a heavy task's slots are shown in heavy."
             },
             "ineligible_reason": {
               "type": "string",
               "minLength": 1,
               "maxLength": 200,
-              "description": "Why eligible is false, in one line; required then, absent otherwise."
+              "description": "Why eligible is false, in one line: the same text as the machine's placement candidate line without its 'ineligible: ' prefix. Required then, absent otherwise."
             },
             "checked_at": {
               "type": "string",

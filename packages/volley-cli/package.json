@@ -10,6 +10,8 @@
     "./auth/version": "./src/auth/version.ts",
     "./auth/dynsec": "./src/auth/dynsec.ts",
     "./auth/roles": "./src/auth/roles.ts",
+    "./peer/machine": "./src/peer/checks/machine.ts",
+    "./test/vm-stat": "./test/fixtures/vm-stat.ts",
     "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts"
   },
   "scripts": {

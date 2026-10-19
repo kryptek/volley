@@ -81,6 +81,23 @@ describe("no tunable constants outside config-defaults.ts", () => {
     expect(violations("const room = Math.max(0, ctx.hardCeiling - live);")).toEqual([]);
     expect(violations("hardCeiling: eff.hard_ceiling,")).toEqual([]);
     expect(violations(" * e.g. hard_ceiling: 12 in a doc comment")).toEqual([]);
+    // The parent of the exempt weight names is still guarded.
+    expect(violations("weights: { cpu: 40, slots: 30 }")).toHaveLength(1);
+  });
+
+  it("the default placement weights are spelled only in config-defaults.ts", () => {
+    const w = TYPED_DEFAULTS.placement.weights;
+    const literal = new RegExp(
+      `\\b(?:cpu:\\s*${w.cpu}|slots:\\s*${w.slots}|mem:\\s*${w.mem}|usage:\\s*${w.usage})(?![\\w.])`,
+    );
+    const offenders = sourceFiles(SRC).flatMap((f) =>
+      readFileSync(f, "utf-8")
+        .split("\n")
+        .filter((l) => !/^\s*(\/\*|\*|\/\/)/.test(l) && literal.test(l))
+        .map((l) => `${f.slice(SRC.length)}: ${l.trim()}`),
+    );
+    expect(offenders).toEqual([]);
+    expect(literal.test("weights: { cpu: 40 }")).toBe(true);
   });
 
   it("src/ is clean", () => {

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { rewordWeights } from "./config-store";
 import { AUTO_HOST } from "./placement";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
@@ -74,7 +75,9 @@ export function parseWaveFile(text: string, source?: string): Wave {
   const errors = duplicateKeys(doc.contents, "");
   const raw = doc.toJS() as unknown;
   const validate = validator("wave-file.schema.json");
-  if (!validate(raw)) errors.push(...toPathErrors(validate.errors).map(rewordWaveId));
+  if (!validate(raw)) {
+    errors.push(...toPathErrors(validate.errors).map(rewordWaveId).map(rewordWeights));
+  }
   // Pools are shared by every wave on the machine, so a per-wave override could not take
   // effect; reject it rather than accept it and show it in effective_config (SPEC §4.6.4).
   const config = (raw as { config?: { lease_pools?: unknown } } | null)?.config;
