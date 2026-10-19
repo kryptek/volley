@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   constants,
   type KeyObject,
@@ -616,6 +616,13 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
       `${host} cannot ssh to ${target}: authorise its key here, or pass --target with an address it can reach. Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`,
     );
   }
+  if (redeemed.code === 127) {
+    // The shell found no such command: nothing ran on the host, so the code was not used.
+    const command = remoteVolley.split(" ").pop() ?? remoteVolley;
+    return fail(
+      `pairing refused on ${host}: ${redeemed.stderr.trim() || "command not found"}\n${command.includes("/") ? `\`${command}\` does not exist on ${host}.` : `\`${command}\` is not on ${host}'s PATH for a non-interactive ssh command.`} Pass the full path to volley there, e.g. --remote-volley ~/.volley/bin/volley (where \`volley setup\` links it). Nothing was redeemed: the code is still valid.`,
+    );
+  }
   if (redeemed.code !== 0) {
     return fail(`pairing refused on ${host}: ${redeemed.stderr.trim() || `exit ${redeemed.code}`}`);
   }
@@ -1069,6 +1076,22 @@ const realExec: PeerExec = (argv, opts = {}) =>
     child.stdin.end(opts.input ?? "");
   });
 
+/**
+ * This user's login name. Bun's `os.userInfo().username` is only `$USER` (or "unknown" without
+ * it, as in a container or a service), so `id -un` answers then.
+ */
+export function currentUser(
+  info: () => string = () => os.userInfo().username,
+  idUn: () => string | null = () => {
+    const r = spawnSync("id", ["-un"], { encoding: "utf-8" });
+    return r.status === 0 ? r.stdout : null;
+  },
+): string {
+  const name = info();
+  if (name !== "" && name !== "unknown") return name;
+  return idUn()?.trim() || "unknown";
+}
+
 function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
@@ -1076,7 +1099,7 @@ function realDeps(): PeerDeps {
     home: os.homedir(),
     platform: process.platform,
     hostname: () => os.hostname(),
-    user: () => os.userInfo().username,
+    user: () => currentUser(),
     uid: () => os.userInfo().uid,
     arch: process.arch,
     cpus: () => Math.max(1, os.cpus().length),

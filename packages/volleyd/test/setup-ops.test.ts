@@ -645,7 +645,10 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(result.lines).toContain(
       "The broker restarts after this answer (brew services restart mosquitto); the Desk reconnects on its own.",
     );
-    expect(readFileSync(m.layout.config, "utf-8")).toBe(generateConfig({ ...m.layout }));
+    // The Desk runs `volley setup`'s steps: the header names it.
+    expect(readFileSync(m.layout.config, "utf-8")).toBe(
+      generateConfig({ ...m.layout, by: "volley setup" }),
+    );
     expect(readdirSync(root).some((f) => f.startsWith("mosquitto.conf.volley-backup-"))).toBe(true);
     // One at a time: the step is still running until its restart is done.
     const second = await apply("accounts", "accounts-0");
@@ -828,6 +831,43 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
         prefix,
       ).toBe(true);
     }
+  });
+
+  it("plans with the install `volley setup` recorded, not the layout volleyd detects", () => {
+    // setup ran with --layout container --config … --dir …; volleyd itself would detect brew.
+    const c = join(root, "container");
+    mkdirSync(m.volleydHome, { recursive: true });
+    writeFileSync(
+      join(m.volleydHome, "setup.json"),
+      JSON.stringify({
+        layout: "container",
+        config: join(c, "mosquitto.conf"),
+        state_file: join(c, "dynamic-security.json"),
+        auth_dir: join(c, "volley"),
+      }),
+    );
+    const { authDir: _given, ...opts } = setupOptions();
+    const ctx = new SetupOps({
+      exec: m.exec,
+      volleydHome: m.volleydHome,
+      brokerUrl: BROKER,
+      env: {},
+      now: () => new Date(),
+      sleep: async () => {},
+      liveAgents: async () => 2,
+      brokerVersion: () => null,
+      ...opts,
+    }).context({}) as SetupContext;
+    expect(ctx.auth.layout.name).toBe("container");
+    expect(ctx.config).toBe(join(c, "mosquitto.conf"));
+    expect(ctx.stateFile).toBe(join(c, "dynamic-security.json"));
+    expect(ctx.auth.layout.stateFile).toBe(join(c, "dynamic-security.json"));
+    expect(ctx.auth.dir).toBe(join(c, "volley"));
+    // Without a record (a broker set up by hand) the detected layout stands.
+    rmSync(join(m.volleydHome, "setup.json"));
+    const detected = direct().context({}) as SetupContext;
+    expect(detected.auth.layout.name).toBe("brew-arm64");
+    expect(detected.config).toBe(m.layout.config);
   });
 
   it("a container broker's state file and restart are a terminal's (the fence runs neither)", () => {

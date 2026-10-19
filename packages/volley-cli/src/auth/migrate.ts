@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readAccounts } from "../commands/auth-accounts";
 import { EXIT, type ExitCode } from "../exit-codes";
-import { configTraps, generateConfig, writeConfig } from "./config";
+import { configTraps, generateConfig, sameConfig, writeConfig } from "./config";
 import {
   ADMIN_FILE,
   type AdminLink,
@@ -150,11 +150,11 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       );
       return EXIT.ERROR;
     }
-    const w = writeConfig(
-      f.config,
-      generateConfig({ ...layout, stateFile: f.stateFile }),
-      io.now(),
-    );
+    const wanted = generateConfig({ ...layout, stateFile: f.stateFile });
+    // A config `volley setup` wrote differs only in its header: leave it (no restart for that).
+    const w = sameConfig(current, wanted)
+      ? { written: false, backup: null }
+      : writeConfig(f.config, wanted, io.now());
     if (w.written) {
       restartNeeded = true;
       out.push(`Wrote ${f.config}.`);

@@ -20,6 +20,7 @@ import {
   type PeerDeps,
   type PeerExec,
   SYSTEMD_UNIT,
+  currentUser,
   defaultName,
   machineTopic,
   peerFile,
@@ -446,6 +447,31 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(existsSync(peerFile(home))).toBe(false);
   });
 
+  it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
+    const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("volley: command not found");
+    expect(r.stderr).toContain(
+      "`volley` is not on dev@host's PATH for a non-interactive ssh command",
+    );
+    expect(r.stderr).toContain("--remote-volley ~/.volley/bin/volley");
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+    // A --remote-volley that is missing too names that command.
+    const g = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /opt/volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const again = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "/opt/volley/bin/volley"],
+      deps(g.exec),
+    );
+    expect(again.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
+  });
+
   it("a refused code writes nothing and installs nothing", async () => {
     const f = fakeExec(
       hostSsh({ code: 1, stderr: "volley peer redeem: invalid or expired pairing code\n" }),
@@ -704,5 +730,35 @@ describe("volley peer run (the service)", () => {
     const io = makeBufferIO();
     expect(await runService(io, deps(fakeExec(() => ({})).exec))).toBe(1);
     expect(io.readStderr()).toContain("volley peer join");
+  });
+});
+
+describe("the current user's name", () => {
+  it("uses os.userInfo(), and `id -un` when bun's userInfo has only $USER's fallback", () => {
+    expect(
+      currentUser(
+        () => "dev",
+        () => "other",
+      ),
+    ).toBe("dev");
+    expect(
+      currentUser(
+        () => "unknown",
+        () => "owner\n",
+      ),
+    ).toBe("owner");
+    expect(
+      currentUser(
+        () => "",
+        () => "owner",
+      ),
+    ).toBe("owner");
+    // Neither knows: the name stays unknown rather than empty.
+    expect(
+      currentUser(
+        () => "unknown",
+        () => null,
+      ),
+    ).toBe("unknown");
   });
 });

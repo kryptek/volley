@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { connect as tcpConnect } from "node:net";
 import { join } from "node:path";
-import { configTraps, generateConfig, writeConfig } from "../auth/config";
+import { configTraps, generateConfig, sameConfig, writeConfig } from "../auth/config";
 import {
   ADMIN_FILE,
   type AdminCredentials,
@@ -217,14 +217,19 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
     return plan;
   }
   let restart = false;
-  const local = generateConfig({ ...layout, stateFile: ctx.stateFile });
-  const open = generateConfig({ ...layout, stateFile: ctx.stateFile, wsBind: "" });
+  const local = generateConfig({ ...layout, stateFile: ctx.stateFile, by: "volley setup" });
+  const open = generateConfig({
+    ...layout,
+    stateFile: ctx.stateFile,
+    wsBind: "",
+    by: "volley setup",
+  });
   // LAN reach: the flag decides; else what the config has; else ask (no question under --yes).
   let lan: boolean;
   if (local === open)
     lan = true; // the layout binds every interface already (a container)
   else if (ctx.lan !== undefined) lan = ctx.lan;
-  else if (current === open || current === local) lan = current === open;
+  else if (sameConfig(current, open) || sameConfig(current, local)) lan = sameConfig(current, open);
   else lan = ctx.yes ? false : await ctx.deps.confirm(LAN_QUESTION, true);
   ctx.lan = lan;
   if (local !== open) {
@@ -235,7 +240,9 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
     );
   }
   const wanted = lan ? open : local;
-  if (current === wanted) plan.found.push(`${ctx.config} is Volley's Dynamic Security config`);
+  // Only the header differs from a config `volley auth init` wrote: that one is in place too.
+  if (sameConfig(current, wanted))
+    plan.found.push(`${ctx.config} is Volley's Dynamic Security config`);
   else {
     restart = true;
     plan.changes.push({

@@ -353,8 +353,12 @@ function adminTokenChange(ctx: SetupContext): Change {
     apply: async () => {
       const deliver = ctx.deliverToken;
       if (deliver === undefined) {
-        const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
-          withAdmin(ctx.auth, fn),
+        const code = await accountVerb(
+          ctx.auth,
+          "token",
+          undefined,
+          { json: false, deskUrl: `http://localhost:${ctx.deskPort}/` },
+          (fn) => withAdmin(ctx.auth, fn),
         );
         if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
         return [];

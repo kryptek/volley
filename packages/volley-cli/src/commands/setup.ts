@@ -12,7 +12,7 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
-import { appendSetupLog, setupLogFile } from "../setup/journal";
+import { appendSetupLog, setupLogFile, writeSetupInstall } from "../setup/journal";
 import { planServices } from "../setup/services";
 import {
   type Planner,
@@ -248,6 +248,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   io.stdout(
     `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
   );
+  // volleyd plans the Desk's setup against this same install, flags included.
+  writeSetupInstall(ctx);
   const yes = ctx.yes;
   const skipped: string[] = [];
   for (const [i, [name, planner]] of STEPS.entries()) {

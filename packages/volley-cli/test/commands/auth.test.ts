@@ -528,6 +528,9 @@ describe("volley auth", () => {
         expect(r.code).toBe(0);
         expect(r.stdout).toContain(TOKEN);
         expect(r.stdout).toContain("10 minutes");
+        // The sign-in form has no token field: the link is what works.
+        expect(r.stdout).toContain(`http://localhost:5199/#signin=${TOKEN}`);
+        expect(r.stdout).not.toContain("paste it");
         expect(JSON.stringify(tokens())).not.toContain(TOKEN);
         expect(tokens().tokens).toEqual([
           {

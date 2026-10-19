@@ -21,6 +21,7 @@ import {
   SIGNIN_ROLES,
   tokenUser,
 } from "./auth-roles";
+import { DESK_PORT } from "./desk-serve";
 
 /**
  * The account registry (`$VOLLEY_AUTH_DIR/accounts.json`) and one-time tokens
@@ -60,6 +61,8 @@ export interface AccountFlags {
   label?: string;
   ttl?: string;
   json: boolean;
+  /** token: the Desk the admin token's link opens (default this machine's, port 5199). */
+  deskUrl?: string;
 }
 
 /** One-time admin tokens live 10 minutes unless `--ttl` says otherwise. */
@@ -207,6 +210,7 @@ async function issueToken(
   ttlS: number,
   label: string | undefined,
   json: boolean,
+  deskUrl = `http://localhost:${DESK_PORT}/`,
 ): Promise<ExitCode> {
   const taken = new Set(readJson<TokenEntry>(tokensFile(ctx.dir), "tokens").map((t) => t.id));
   for (let tries = 0; ; tries++) {
@@ -244,11 +248,19 @@ async function issueToken(
       ctx.io.stdout(
         [
           kind === "admin"
-            ? "One-time admin token (single use; paste it into the Desk's sign-in):"
+            ? "One-time admin token (single use):"
             : `One-time ${role} sign-in token${label !== undefined ? ` for "${label}"` : ""} (single use):`,
           "",
           `  ${token}`,
           "",
+          // The Desk's sign-in form takes a username and password: a token works as a link.
+          ...(kind === "admin"
+            ? [
+                `Open the Desk with it on this machine: ${deskUrl}#signin=${token}`,
+                "(from another device, use this machine's address instead of localhost)",
+                "",
+              ]
+            : []),
           `It expires in ${minutes} (${expiresAt}). Only its hash is stored.`,
           "",
         ].join("\n"),
@@ -443,7 +455,17 @@ export async function accountVerb(
       case "list":
         return listAccounts(ctx, flags.json);
       case "token":
-        return issueToken(ctx, link, now, "admin", "admin", ttl as number, undefined, flags.json);
+        return issueToken(
+          ctx,
+          link,
+          now,
+          "admin",
+          "admin",
+          ttl as number,
+          undefined,
+          flags.json,
+          flags.deskUrl,
+        );
       case "signin-link":
         return issueToken(
           ctx,

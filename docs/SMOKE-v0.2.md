@@ -54,10 +54,11 @@ Teardown (§8) prints what it will remove and asks before removing it.
   bash packages/volley-issues/scripts/install.sh
   bash packages/volley-skill/scripts/install.sh
   bash packages/volley-wait/scripts/install.sh
-  bash packages/volley-issues/scripts/install.sh --check   # "installed 0.2, repo 0.2", exit 0
+  bash packages/volley-issues/scripts/install.sh --check   # "installed X.Y, repo X.Y", exit 0
   ```
-  `--check` changes nothing and exits 1 when the installed `/volley-issues` is missing or older
-  than this checkout's (`version:` in its `SKILL.md` frontmatter).
+  X.Y is this checkout's major.minor, the `version:` in `packages/volley-issues/SKILL.md` (0.3
+  from v0.3.0 on). `--check` changes nothing and exits 1 when the installed `/volley-issues` is
+  missing or older than this checkout's.
 - [ ] **The flags this smoke needs exist in this build.** Broker auth for volleyd
   (`volley auth init --volleyd-file`, `$VOLLEYD_HOME/broker.json`) and the Desk's LAN flag
   (`volley dash --host <addr>`) land in separate fixes for this release. From the repo root:
