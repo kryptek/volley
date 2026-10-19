@@ -169,6 +169,11 @@ export interface DecisionPayload {
   pointers?: { diff?: string; transcript?: string; screen?: string; pr?: string };
   opened_at: string;
   resolved?: { answer: string; by: string; at: string };
+  /** `account_limit` extras (SPEC §4.6.12): the account, its 5-hour pct and reset, the suggestion. */
+  acct?: string;
+  pct?: number;
+  resets_at?: string | null;
+  suggested?: string | null;
 }
 
 // ------------------------------------------------------- config and leases
@@ -195,6 +200,8 @@ export interface Tunables {
   spawn_timeout_s?: number;
   wake_grace_s?: number;
   screen_tail_interval_s?: number;
+  /** Claude account profiles (SPEC §4.6.11); absent from a supervisor that predates them. */
+  claude?: { default_account?: string | null; warn_at_pct?: number };
   [key: string]: unknown;
 }
 
@@ -212,6 +219,56 @@ export interface LeasePoolPayload {
   held: { lease_id: string; holder: string; since: string; ttl_s: number }[];
   queue: { lease_id: string; holder: string; since: string }[];
   reasons: string[];
+}
+
+// ----------------------------------------------------- Claude accounts
+
+/** usage.schema.json `$defs/window`: one of an account's rate-limit windows. */
+export interface UsageWindow {
+  pct: number;
+  resets_at: string | null;
+}
+
+/** usage.schema.json payload: an agent's retained `usage` sample (SPEC §4.6.12). */
+export interface UsagePayload {
+  account: string | null;
+  config_dir?: string;
+  model: string | null;
+  context_window: { used_percentage: number | null; used: number | null; size: number | null };
+  rate_limits: { five_hour?: UsageWindow; weekly?: UsageWindow };
+  captured_at: string;
+}
+
+/** claude-account.schema.json payload: `volley/_system/claude-accounts/<acct>`. */
+export interface ClaudeAccountPayload {
+  account: string;
+  label?: string;
+  plan?: string;
+  five_hour: UsageWindow | null;
+  weekly: UsageWindow | null;
+  agents: string[];
+  waves: string[];
+  sampled_at: string;
+  sampled_by?: string;
+}
+
+/**
+ * A Claude account sign-in, folded from `volley/_system/claude/<acct>/signin`
+ * (`claude_signin_url` → waiting, then `claude_signin_done` / `_failed`). Only
+ * the provider's sign-in link ever travels there, never a credential.
+ */
+export interface ClaudeSignin {
+  acct: string;
+  state: "waiting" | "done" | "failed";
+  url?: string;
+  /** `browser`, or `manual_code` (the page shows a code for the sign-in terminal). */
+  flow?: string;
+  /** The tmux session to attach to for a `manual_code` sign-in. */
+  attach?: string;
+  plan?: string;
+  reason?: string;
+  /** Local receipt time (ms). */
+  at: number;
 }
 
 // ------------------------------------------------------------------- store
@@ -345,6 +402,12 @@ export interface DeskState {
   self?: string;
   /** Delivery receipts for mailbox messages (D4 steering); live-only. */
   steering?: SteeringReceipts;
+  /** Retained per-account usage records, by account id. */
+  claudeAccounts?: Record<string, ClaudeAccountPayload>;
+  /** Retained `usage` samples, by agent id (kept apart: they can arrive before the registry). */
+  usage?: Record<string, UsagePayload>;
+  /** Claude account sign-ins heard since the page loaded, by account id; live-only. */
+  signins?: Record<string, ClaudeSignin>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

@@ -4,7 +4,8 @@
  * over the section labels and keywords (`matchSections`), the signed-in
  * broker account and the sections in three groups with coloured icon tiles;
  * the main pane shows the picked section (General, Appearance, Supervisor,
- * About; the Onboarding sections are placeholders for now). Escape, the
+ * Claude accounts & usage, About; the other Onboarding sections are
+ * placeholders for now). Escape, the
  * close button and a scrim click close it (Escape in a search box with a
  * query clears the query instead); focus moves in on open (and Tab stays
  * inside) and goes back to the opener on close. It is built like a Desk
@@ -19,6 +20,7 @@ import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import type { ConfigPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
+import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
@@ -51,6 +53,8 @@ export interface SettingsWindowProps {
   onClose: () => void;
   /** The section shown first; General by default. */
   initial?: SectionKey;
+  /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
+  claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
 }
 
 const Tile = ({ s, size }: { s: SectionDef; size: number }) => (
@@ -185,6 +189,17 @@ export function SettingsWindow(p: SettingsWindowProps) {
               <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
             )}
             {sec === "supervisor" && <Supervisor config={p.config} transport={p.transport} />}
+            {sec === "claude" && (
+              <ClaudeAccounts
+                accounts={p.claude?.accounts ?? {}}
+                signins={p.claude?.signins ?? {}}
+                waves={p.claude?.waves ?? {}}
+                control={p.claude?.control ?? null}
+                {...(p.claude?.onRegistry ? { onRegistry: p.claude.onRegistry } : {})}
+                config={p.config}
+                configTransport={p.transport}
+              />
+            )}
             {sec === "about" && <About />}
             {cur.placeholder && (
               <div className="ms-placeholder">

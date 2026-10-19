@@ -1,8 +1,8 @@
 /**
  * The Settings window's sections, ported from the prototype `settings.tsx`
  * (`SECTIONS`): the sidebar label, the coloured icon tile, the sidebar group
- * and the extra words the sidebar search matches. Claude accounts, Broker
- * accounts, Machines and Setup are placeholders until Onboarding fills them,
+ * and the extra words the sidebar search matches. Broker accounts, Machines
+ * and Setup are placeholders until Onboarding fills them,
  * listed now so search and layout are final.
  */
 import {
@@ -70,7 +70,6 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     tint: "#d97757",
     group: 1,
     keywords: "claude usage limit 5h weekly plan max 20x switch account tokens",
-    placeholder: true,
   },
   {
     key: "accounts",

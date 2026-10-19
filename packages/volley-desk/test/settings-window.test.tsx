@@ -417,8 +417,16 @@ describe("SettingsWindow", () => {
     expect(body.getByText(/Backgrounds by React Bits/)).toBeInTheDocument();
   });
 
+  it("Claude accounts & usage shows the accounts section, read-only without a control channel", () => {
+    render(<Harness initial="claude" />);
+    expect(heading()).toHaveTextContent("Claude accounts & usage");
+    const body = within(dialog());
+    expect(body.queryByText(/Coming with Onboarding/)).toBeNull();
+    expect(body.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
+    expect(body.getByText("Warn me at")).toBeInTheDocument();
+  });
+
   it.each([
-    ["claude", "Claude accounts & usage"],
     ["accounts", "Broker accounts"],
     ["machines", "Machines"],
     ["setup", "Setup & Security"],

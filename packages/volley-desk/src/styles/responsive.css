@@ -33,7 +33,15 @@
     grid-template-columns: 1fr;
   }
 
-  .needs-you .ny-actions {
+  .claude-cards {
+    grid-template-columns: 1fr;
+  }
+  .acct-pick {
+    max-width: 96px;
+  }
+
+  .needs-you .ny-actions,
+  .pair .ny-actions {
     flex-wrap: wrap;
   }
   .needs-you .ny-actions > * {
@@ -51,8 +59,13 @@
   .clawd--wait,
   .win-attn-pulse,
   .caret,
+  .spinner,
   .win--born {
     animation: none !important;
+  }
+  .meter-bar > span,
+  .ctx-bar > span {
+    transition: none !important;
   }
   .world--anim,
   .world--anim .win,

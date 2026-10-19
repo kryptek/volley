@@ -135,8 +135,9 @@ src/notify/                 notification + chime on a move into "you" (volley-da
 src/styles/attention.css    pulse (default Needs-you effect), banners, coordinators, pill
 src/settings/SettingsWindow  Settings window (macOS System Settings style, from the dock): searchable
                             sidebar (sections.ts: labels, tiles, keywords, account role), primitives
-                            (Group/Row/Seg/Toggle), General, Appearance, Supervisor, About; the
-                            Onboarding sections are placeholders
+                            (Group/Row/Seg/Toggle), General, Appearance, Supervisor, Claude
+                            accounts & usage (ClaudeAccounts), About; the other Onboarding
+                            sections are placeholders
 src/settings/ConfigRows     volleyd config rows built from spec/schemas/config.schema.json (schemaRows),
                             config_set requests + acks (configTransport); Supervisor = global scope,
                             SettingsModal (wave gear) = that wave's effective config, read-only
@@ -170,7 +171,7 @@ scripts/sync-react-bits-backgrounds.ts
 
 ### Subscriptions
 
-`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`.
+`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen,usage}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`, `volley/_system/claude-accounts/+`, `volley/_system/claude/+/signin`.
 
 ### Store semantics
 
@@ -213,12 +214,18 @@ The no-coordinator banner's **Claim this wave** sends `volleyd claim <wave>` as 
 
 ## Settings
 
-The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config) and About (version, licences). Claude accounts, Broker accounts, Machines and Setup & Security are listed (and searchable) but come with Onboarding. The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
+The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config), Claude accounts & usage (below) and About (version, licences). Broker accounts, Machines and Setup & Security are listed (and searchable) but come with Onboarding. The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
 
 The config rows (Supervisor, and a wave's gear) come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
 
 - **Settings › Supervisor** shows the retained `volley/_waves/_config`. Once the Desk has signed in, a change sends one `config_set` request to the daemon's mailbox in volleyd's namespace (from its registry entry): `volley/<ns>/volleyd/mailbox`, `payload: { op, text, patch, by }`. Only volleyd's answer on the Desk's own mailbox counts. A slider sends once the user lets go: presses and drags within 400 ms of each other become one request with the settled value. The row then shows the ack: `applied · v<version>`, the rejected paths with their reasons, `failed ·` for a refused publish or daemon error, or `no answer ·` when volleyd does not reply in time (the change may still have applied).
 - **A wave's gear** shows that wave's `effective_config`, read-only, with a **Global settings…** link to Supervisor. volleyd applies `config_set` to the global config only. Per-wave values come from the wave file's `config:` block.
+- **Settings › Claude accounts & usage** has one card per Claude account: volleyd's retained usage records (`volley/_system/claude-accounts/+`) merged with its profile registry (the `claude_accounts` control op, so a profile that has not reported usage yet still shows). A card has the label, machine and plan, the 5-hour and weekly meters with their resets (amber from 70%, red from 90%), and the agents and waves on it. An open `account_limit` decision is a Needs-you banner: **Move to <account>** and **Not now** answer it (`resolve`). volleyd moves a wave only through that answer, so a card's **Move a wave here…** lists the waves with an open decision and answers it with that account (a local account only; the answers are disabled while one is in flight). **Add Claude account** is a Stepper: a label and **Sign in on this machine** (`claude_account_add`; volleyd adds profiles on its own machine only, so for a remote host the Stepper says to run `volley claude add` there), then **Open Anthropic sign-in ↗** with the link from the `claude_signin_url` event (`volley/_system/claude/<acct>/signin`), waiting until `claude_signin_done` (or saying why on `claude_signin_failed`). The Desk shows only the provider's sign-in link, never a credential. **Defaults** picks `claude.default_account` (Most headroom, Primary or an account; through `config_set`) with volleyd's answer under it (applied, rejected, failed or no answer, as in Supervisor), and shows `claude.warn_at_pct`.
+- **The agent window** shows a context meter in its footer from the agent's retained `usage` sample (`ctx 72% · 143K/200K`; amber from 65%, red from 85%), and a Claude account picker in its title listing each account's 5-hour usage. Picking another account asks to confirm (the agent restarts with a resume note), then sends `agent_move_account`. **A wave's gear** shows the account the wave's agents run under; only while the wave has an open `account_limit` decision can it pick a local account to move to, since that answer is the only way volleyd moves a wave.
+![Settings › Claude accounts & usage](docs/claude-accounts.png)
+
+![The same section at phone width](docs/claude-accounts-phone.png) ![An agent window's account picker and context meter](docs/agent-ctx-picker.png)
+
 - **Without broker credentials** (an anonymous sign-in) or in demo mode Supervisor sends nothing. A global row still takes a new value, and then offers the exact `volleyd config set <path> <value>` line that sets it to copy (nothing to copy until the value differs from the current one). Without the async Clipboard API (plain `http://` from another device) the button selects the line and falls back to a legacy copy, or asks you to copy it by hand.
 
 ## React Bits
@@ -238,6 +245,7 @@ The command was verified with Dock: `@react-bits/Dock-TS-CSS --path src/rb/Dock`
 | PromptBar | `bunx --bun shadcn@latest add @react-bits/PromptBar-TS-CSS --path src/rb/PromptBar --yes` | steering panel (`src/steer/SteerPanel.tsx`) |
 | Dock | `bunx --bun shadcn@latest add @react-bits/Dock-TS-CSS --path src/rb/Dock --yes` | dock (`src/look/DeskDock.tsx`) |
 | GlassSurface | `bunx --bun shadcn@latest add @react-bits/GlassSurface-TS-CSS --path src/rb/GlassSurface --yes` | liquid-glass chrome (`src/canvas/Frame.tsx`) |
+| Stepper | `bunx --bun shadcn@latest add @react-bits/Stepper-TS-CSS --path src/rb/Stepper --yes` (two local edits: a default for `noUncheckedIndexedAccess`, and `getAnimations?.()`) | add-account flow (`src/settings/ClaudeAccounts.tsx`) |
 | SpotlightCard | `bunx --bun shadcn@latest add @react-bits/SpotlightCard-TS-CSS --path src/rb/SpotlightCard --yes` | spotlight chrome (`src/canvas/Frame.tsx`) |
 | BorderGlow | `bunx --bun shadcn@latest add @react-bits/BorderGlow-TS-CSS --path src/rb/BorderGlow --yes` | border-glow chrome (`src/canvas/Frame.tsx`) |
 | ElectricBorder | `bunx --bun shadcn@latest add @react-bits/ElectricBorder-TS-CSS --path src/rb/ElectricBorder --yes` | electric Needs-you effect (`src/canvas/Frame.tsx`) |

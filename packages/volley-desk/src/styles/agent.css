@@ -255,3 +255,60 @@
 .env--heartbeats .env-type {
   grid-column: 3 / -1;
 }
+
+/* Claude account picker (title) and context meter (footer), SPEC §4.6.12. */
+.acct-pick {
+  font: inherit;
+  font-size: 11px;
+  color: var(--mute);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 4px;
+  max-width: 132px;
+}
+.acct-err {
+  font-size: 11px;
+  color: #ff8f86;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--mute);
+  flex: none;
+}
+.ctx-bar {
+  width: 46px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  display: inline-block;
+}
+.ctx-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.8s ease;
+}
+.ctx--ok .ctx-bar > span {
+  background: #8fb4ff;
+}
+.ctx--warn .ctx-bar > span {
+  background: #ffcc00;
+}
+.ctx--hot .ctx-bar > span {
+  background: #ff453a;
+}
+.ctx--hot .mono {
+  color: #ff8f86;
+}
+.ctx--warn .mono {
+  color: #ffd60a;
+}

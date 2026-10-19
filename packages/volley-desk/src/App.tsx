@@ -50,12 +50,14 @@ import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
+import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
+import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
 import {
   UNASSIGNED,
@@ -199,6 +201,12 @@ export default function App() {
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
   const steering = useSteering(state, writer, identity);
+  // volleyd's control channel for the Claude account ops; demo mode has no daemon to answer them.
+  const control = demo ? null : (steering.transport?.control ?? null);
+  // volleyd's profile registry, as Settings › Claude accounts last fetched it (nothing is asked at load).
+  const [registry, setRegistry] = useState<RegistryAccount[]>([]);
+  const accounts = accountList(state.claudeAccounts, registry);
+  const choices = accountChoices(accounts);
   /** The window whose steering panel is open (a wave id or an agent id). */
   const [steerOpen, setSteerOpen] = useState<string | null>(null);
   const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
@@ -614,6 +622,19 @@ export default function App() {
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
                   syncing={syncing && !ended.has(a.wave)}
                   stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
+                  usage={state.usage?.[a.id] ?? null}
+                  accounts={choices}
+                  {...(control
+                    ? {
+                        onMoveAccount: (acct: string) =>
+                          control(
+                            "agent_move_account",
+                            { agent: a.id, acct },
+                            `volley claude move ${a.id} ${acct}`,
+                            MOVE_ACCOUNT_TIMEOUT_MS,
+                          ),
+                      }
+                    : {})}
                   onChat={toggleSteer}
                   steerOpen={steerOpen === a.id}
                   steer={
@@ -688,6 +709,13 @@ export default function App() {
           demo={demo}
           config={state.config}
           transport={configTransport}
+          claude={{
+            accounts: state.claudeAccounts ?? {},
+            signins: state.signins ?? {},
+            waves: state.waves,
+            control,
+            onRegistry: setRegistry,
+          }}
           onArrange={arrange}
           onClose={() => setDeskSettings(null)}
         />
@@ -696,6 +724,8 @@ export default function App() {
       {settings !== null && state.waves[settings] && (
         <SettingsModal
           wave={state.waves[settings]}
+          accounts={accounts}
+          control={control}
           onClose={() => setSettings(null)}
           onOpenGlobal={() => {
             setSettings(null);
