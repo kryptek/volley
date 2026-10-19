@@ -165,6 +165,57 @@ describe("Settings › Broker accounts", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/desk-ipad can no longer connect/);
   });
 
+  it("flags device admin sign-ins idle over a day, and revokes them all in one confirmed click", async () => {
+    const STALE: BrokerAccount[] = [
+      ...ACCOUNTS,
+      // Headless browsers that redeemed admin tokens in a smoke and never came back.
+      {
+        name: "admin-0000aaaa",
+        role: "admin",
+        kind: "device",
+        created: "2026-10-17T09:00:00Z",
+        label: "Desk on HeadlessChrome",
+      },
+      {
+        name: "admin-0000bbbb",
+        role: "admin",
+        kind: "device",
+        created: "2026-10-16T09:00:00Z",
+        last_seen: "2026-10-17T10:00:00Z",
+      },
+      // Recent: not stale. A person's admin account: never flagged.
+      { name: "admin-0000cccc", role: "admin", kind: "device", created: "2026-10-19T10:00:00Z" },
+      { name: "ops-admin", role: "admin", kind: "human", created: "2026-10-01T00:00:00Z" },
+    ];
+    let list = [...STALE];
+    const { ops, calls } = fakeOps({
+      account_list: () => ({ ok: true, result: { accounts: list } }),
+      account_revoke: (f) => {
+        list = list.filter((a) => a.name !== f.name);
+        return { ok: true, result: { name: f.name } };
+      },
+    });
+    section(ops, true);
+    await screen.findByText("admin-0000aaaa");
+    expect(rowOf("admin-0000aaaa").getByText(/stale/)).toBeInTheDocument();
+    expect(rowOf("admin-0000bbbb").getByText(/stale/)).toBeInTheDocument();
+    expect(rowOf("admin-0000cccc").queryByText(/stale/)).not.toBeInTheDocument();
+    expect(rowOf("ops-admin").queryByText(/stale/)).not.toBeInTheDocument();
+    expect(rowOf(ME).queryByText(/stale/)).not.toBeInTheDocument();
+    expect(screen.getByText(/2 admin sign-ins on devices/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Revoke the 2 stale sign-ins…" }));
+    expect(calls.some((c) => c.op === "account_revoke")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Revoke 2" }));
+    await waitFor(() => expect(screen.queryByText("admin-0000aaaa")).not.toBeInTheDocument());
+    expect(screen.queryByText("admin-0000bbbb")).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.op === "account_revoke").map((c) => c.fields)).toEqual([
+      { name: "admin-0000aaaa" },
+      { name: "admin-0000bbbb" },
+    ]);
+    expect(screen.getByRole("status")).toHaveTextContent(/Revoked 2 stale sign-ins/);
+    expect(screen.queryByText(/admin sign-ins on devices/)).not.toBeInTheDocument();
+  });
+
   it("shows volleyd's refusal and keeps the row", async () => {
     const { ops } = admin({
       account_revoke: () => ({ ok: false, error: "volley auth revoke: no such account" }),
