@@ -157,25 +157,33 @@ export interface SelectedAccount {
 
 /**
  * The account an agent runs under: the task's `account:`, else the wave's, else
- * `claude.default_account`, else the primary. `most_headroom` resolves to the primary until usage
- * metering can rank accounts. Throws for an unknown account, one not signed in yet, or one whose
- * profile lives on another machine.
+ * `claude.default_account`, else the primary. `most_headroom` is the account `headroom` ranks
+ * first (usage metering, claude/usage.ts), else the primary. Throws for an unknown account, one
+ * not signed in yet, or one whose profile lives on another machine.
  */
 export function selectAccount(
   root: string,
   /** The registry, or how to read it: only read when a profile (not the primary) is picked. */
   registry: ClaudeRegistry | (() => ClaudeRegistry),
   want: { task?: string; wave?: string; configDefault?: string | null },
+  /** The account with the most usage headroom; null (or absent) when there is no usage data. */
+  headroom?: () => string | null,
 ): SelectedAccount {
   const pick: [AccountSource, string | null | undefined][] = [
     ["task", want.task],
     ["wave", want.wave],
     ["config", want.configDefault],
   ];
-  const [source, id] = pick.find(([, v]) => v !== undefined && v !== null) ?? ["default", null];
+  const [source, wanted] = pick.find(([, v]) => v !== undefined && v !== null) ?? ["default", null];
+  let id = wanted;
+  if (id === MOST_HEADROOM) {
+    const best = headroom?.() ?? null;
+    if (best === null || best === MOST_HEADROOM)
+      return { id: PRIMARY_ACCOUNT, dir: null, source, fallback: MOST_HEADROOM };
+    id = best;
+  }
   if (id === null || id === undefined || id === PRIMARY_ACCOUNT)
     return { id: PRIMARY_ACCOUNT, dir: null, source };
-  if (id === MOST_HEADROOM) return { id: PRIMARY_ACCOUNT, dir: null, source, fallback: id };
   const reg = typeof registry === "function" ? registry() : registry;
   const acct = reg.accounts.find((a) => a.id === id);
   if (acct === undefined) throw new ClaudeAccountError(`unknown Claude account '${id}'`);

@@ -408,8 +408,9 @@ is never used: it prints a bearer token Volley would have to carry. The `_system
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
 
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
-`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` falls
-back to the primary until usage metering can rank accounts. A spawn under an unknown account, one
+`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
+signed-in account with the lowest 5-hour usage (see "Usage metering"), or the primary while no
+account has usage data. A spawn under an unknown account, one
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
@@ -450,6 +451,31 @@ end of its brief. A reviewer, fixup or rebase keeps its start point and its own 
 with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
 the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
 alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
+
+### Usage metering
+
+Every spawned agent's `--settings` (the hooks template) carries volley-hooks' statusLine
+publisher, so Claude Code hands it the session's usage after each assistant message and it
+publishes a retained sample on `volley/<ns>/<agent>/usage` (SPEC §4.6.12): the context window
+(`used_percentage`, `used`, `size`) and the account's 5-hour and weekly windows (`pct`,
+`resets_at`), at most every 15 s unless a percentage moved by more than a point. The daemon
+folds the samples per account (the windows are the account's, so the newest sample carrying a
+window wins) and publishes `volley/_system/claude-accounts/<acct>` retained: label and plan from
+the registry, both windows, the agents on it and their waves. A sample that names no account
+but a `CLAUDE_CONFIG_DIR` (a coordinator session under a profile) is matched to that profile.
+Retiring an agent clears its `usage` topic, which drops it from its account's record; the
+account's windows stay.
+
+When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
+can override it), each running wave with agents on that account gets one wave-level
+`account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
+most headroom, with the options `move wave <w> to <suggested>` and `not now`. It is not asked
+again while open, nor for the same window once answered. **Nothing switches on its own.**
+Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
+one is refused and the decision stays open) journals `wave_account_moved { from, to, by,
+decision_id }`: the wave's new agents that would have started under `from` start under `to`,
+and running agents finish where they are. The weekly window is informational. The same data
+resolves `most_headroom`.
 
 ---
 
@@ -885,7 +911,7 @@ LWT) is retired only after the reap grace passes with no fresh status or heartbe
 [Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
-retained payloads on its `registry`, `status`, `result`, `capability` and `screen` topics, the
+retained payloads on its `registry`, `status`, `result`, `capability`, `screen` and `usage` topics, the
 lock released, and `agent_retired { status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>

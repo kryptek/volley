@@ -83,8 +83,8 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
-  /** Claude account profiles (src/claude/): which account an agent runs under by default. */
-  claude: { default_account: string | null };
+  /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
+  claude: { default_account: string | null; warn_at_pct: number };
   hosts: Record<string, RemoteHostConfig>;
 }
 
@@ -273,6 +273,8 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_failed",
   "claude_profile_synced",
   "agent_account_moved",
+  // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
+  "wave_account_moved",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

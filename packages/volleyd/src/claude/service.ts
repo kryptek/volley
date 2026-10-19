@@ -7,6 +7,7 @@ import {
   type ClaudeAccount,
   ClaudeAccountError,
   LOCAL_MACHINE,
+  PRIMARY_ACCOUNT,
   type SelectedAccount,
   addAccount,
   profileDir,
@@ -52,6 +53,11 @@ export interface ClaudeServiceDeps {
   sleep?: (ms: number) => Promise<void>;
   signinPollMs?: number;
   signinTimeoutMs?: number;
+  /**
+   * Usage metering's pick among `candidates` (claude/usage.ts mostHeadroom), for
+   * `most_headroom`; null when no candidate has usage data.
+   */
+  headroom?: (candidates: readonly string[]) => string | null;
 }
 
 type Reply = { ok: boolean; error?: string; result?: unknown };
@@ -74,7 +80,43 @@ export class ClaudeService {
 
   /** The account a spawn runs under (profiles.ts selectAccount over the current registry). */
   select(want: { task?: string; wave?: string; configDefault?: string | null }): SelectedAccount {
-    return selectAccount(this.d.root, () => readRegistry(this.d.root), want);
+    const headroom = this.d.headroom;
+    return selectAccount(
+      this.d.root,
+      () => readRegistry(this.d.root),
+      want,
+      headroom !== undefined ? () => headroom(this.candidates()) : undefined,
+    );
+  }
+
+  /** Accounts a local agent can start under: the primary, then every signed-in local profile. */
+  candidates(): string[] {
+    const ready = this.registry().filter(
+      (a) => a.machine === LOCAL_MACHINE && a.signed_in_at !== undefined,
+    );
+    return [PRIMARY_ACCOUNT, ...ready.map((a) => a.id)];
+  }
+
+  /** The registry account whose profile is `dir` (a usage sample's `config_dir`), if any. */
+  accountForDir(dir: string): string | null {
+    const canonical = dir.replace(/\/+$/, "");
+    return this.registry().find((a) => profileDir(this.d.root, a.id) === canonical)?.id ?? null;
+  }
+
+  /** A registry account's label and plan, for its usage record. */
+  describe(acct: string): { label?: string; plan?: string } {
+    const a = this.registry().find((x) => x.id === acct);
+    if (a === undefined) return {};
+    return { label: a.label, ...(a.plan !== undefined ? { plan: a.plan } : {}) };
+  }
+
+  /** The registry, or none when it cannot be read (usage metering never fails on it). */
+  private registry(): ClaudeAccount[] {
+    try {
+      return readRegistry(this.d.root).accounts;
+    } catch {
+      return [];
+    }
   }
 
   /**

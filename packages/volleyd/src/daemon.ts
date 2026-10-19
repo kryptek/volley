@@ -43,6 +43,22 @@ import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
+import {
+  type LimitSeen,
+  USAGE_FILTER,
+  type UsageBook,
+  accountRecords,
+  emptyBook,
+  foldUsage,
+  forgetAgent,
+  limitDecisions,
+  mostHeadroom,
+  parseMoveAnswer,
+  parseUsage,
+  usageAccountTopic,
+  waveAccount,
+  waveAccountMoves,
+} from "./claude/usage";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
@@ -658,6 +674,10 @@ export class Daemon {
   private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
   /** Claude account profiles: registry, sign-ins, sharing (src/claude/service.ts). */
   private readonly claude: ClaudeService;
+  /** Usage metering (claude/usage.ts): every agent's latest sample, folded per account. */
+  private usage: UsageBook = emptyBook();
+  /** The account records last published, by account (an unchanged one is not re-published). */
+  private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
   private readonly moving = new Set<string>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
@@ -701,6 +721,7 @@ export class Daemon {
       ...(opts.claude?.signinTimeoutMs !== undefined
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
+      headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
     });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -843,6 +864,12 @@ export class Daemon {
       await this.broker.subscribeStream(PROGRESS_FILTER, (m) =>
         this.onProgress(m.topic, m.payload),
       ),
+    );
+    // Every agent's retained usage sample (SPEC §4.6.12), folded per Claude account.
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(USAGE_FILTER, (m) => {
+        void this.enqueue(() => this.onUsage(m.topic, m.payload));
+      }),
     );
 
     this.config.onChange((c) => {
@@ -1755,11 +1782,18 @@ export class Daemon {
       journal !== undefined ? accountMoves(journal.readAll())[`${t.id}/${role}`] : undefined;
     const task = moved ?? t.account;
     if (t.host === "local") {
-      return this.claude.select({
+      const sel = this.claude.select({
         ...(task !== undefined ? { task } : {}),
         ...(w.account !== undefined ? { wave: w.account } : {}),
         configDefault: this.config.effective(wave).claude.default_account,
       });
+      // An answered account_limit moved the wave: its new agents start under the other account
+      // (an agent moved on its own keeps its own move).
+      const to =
+        moved === undefined && journal !== undefined
+          ? waveAccount(sel.id, waveAccountMoves(journal.readAll()))
+          : sel.id;
+      return to === sel.id ? sel : { ...this.claude.select({ task: to }), source: sel.source };
     }
     const sel = this.claude.select({
       ...(task !== undefined ? { task } : {}),
@@ -3517,8 +3551,16 @@ export class Daemon {
     const ev = resolveEvent(log.record, id, r, new Date());
     if ("error" in ev) throw new Error(ev.error);
     if ("already" in ev) return { decision: ev.already, already_resolved: true };
+    const move = this.accountLimitMove(wave, log.record.decisions[id], r.answer);
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
+    if (move !== null) {
+      await this.append(wave, {
+        type: "wave_account_moved",
+        data: { from: move.from, to: move.to, by: r.by, decision_id: id },
+      });
+      this.log(`wave ${wave}: new agents start under Claude account ${move.to} (was ${move.from})`);
+    }
     const topic = decisionTopic(wave, id);
     await this.publish(
       topic,
@@ -3574,6 +3616,96 @@ export class Daemon {
     } catch (e) {
       this.log(`resolved ${id}, but writing ${dir}: ${e instanceof Error ? e.message : String(e)}`);
       return { decision: d, already_resolved: false };
+    }
+  }
+
+  /**
+   * The wave move an `account_limit` answer asks for (`move wave <w> to <acct>`), or null for
+   * any other answer. Throws, before anything is journaled, for a move of another wave or to an
+   * account a spawn could not use, so the decision stays open.
+   */
+  private accountLimitMove(
+    wave: WaveId,
+    d: DecisionRecord | undefined,
+    answer: string,
+  ): { from: string; to: string } | null {
+    if (d?.kind !== "account_limit" || typeof d.acct !== "string") return null;
+    const m = parseMoveAnswer(answer);
+    if (m === null) return null;
+    if (m.wave !== wave)
+      throw new Error(`decision ${d.decision_id} is about wave ${wave}, not ${m.wave}`);
+    const to = this.claude.select({ task: m.to }).id;
+    if (to === d.acct) throw new Error(`wave ${wave} is already on Claude account '${to}'`);
+    return { from: d.acct, to };
+  }
+
+  /**
+   * One agent's retained usage sample (or its clearing): fold it into its account's record,
+   * re-publish the records that changed, then open any `account_limit` decision it calls for.
+   * A sample is the agent's own (the envelope's `agent_id` is the topic's); its account is the
+   * one it names, else the profile its `config_dir` belongs to.
+   */
+  private async onUsage(topic: string, raw: string): Promise<void> {
+    const [, ns, agent] = topic.split("/");
+    if (ns === undefined || ns.startsWith("_") || agent === undefined) return;
+    if (raw === "") {
+      this.usage = forgetAgent(this.usage, agent);
+    } else {
+      const env = parseEnvelope(raw);
+      const p = env?.agent_id === agent ? parseUsage(env.payload) : null;
+      const account =
+        p === null
+          ? null
+          : (p.account ??
+            (p.config_dir !== undefined ? this.claude.accountForDir(p.config_dir) : null));
+      if (p === null || account === null) return;
+      const wave = this.supervised.get(agent)?.wave ?? null;
+      this.usage = foldUsage(this.usage, { agent, wave, account, payload: p });
+    }
+    const records = accountRecords(this.usage);
+    for (const rec of Object.values(records)) {
+      const payload = { ...rec, ...this.claude.describe(rec.account) };
+      const text = JSON.stringify(payload);
+      if (this.publishedUsage.get(rec.account) === text) continue;
+      this.publishedUsage.set(rec.account, text);
+      await this.publish(
+        usageAccountTopic(rec.account),
+        this.envelope("_system/claude-accounts", "claude_account", payload),
+        true,
+      );
+    }
+    const existing: LimitSeen[] = [...this.waves].flatMap(([w, log]) =>
+      Object.values(log.record.decisions).flatMap((d) =>
+        d.kind === "account_limit" && typeof d.acct === "string"
+          ? [
+              {
+                wave: w,
+                acct: d.acct,
+                resets_at: d.resets_at ?? null,
+                open: d.resolved === undefined,
+              },
+            ]
+          : [],
+      ),
+    );
+    for (const lim of limitDecisions({
+      accounts: records,
+      // The lowest threshold any wave has; each wave's own is applied below.
+      warnAtPct: Math.min(
+        this.config.effective().claude.warn_at_pct,
+        ...[...this.waves.keys()].map((w) => this.config.effective(w).claude.warn_at_pct),
+      ),
+      candidates: this.claude.candidates(),
+      existing,
+      now: this.now(),
+    })) {
+      const status = this.waves.get(lim.wave)?.record.state?.status;
+      if (status === undefined || status === "complete" || status === "stopped") continue;
+      const warnAt = this.config.effective(lim.wave).claude.warn_at_pct;
+      if (lim.extra.pct < warnAt) continue;
+      await this.openDecisionNow(lim.wave, lim.input, lim.extra).catch((e: unknown) =>
+        this.log(`account_limit for ${lim.wave}: ${e instanceof Error ? e.message : String(e)}`),
+      );
     }
   }
 
