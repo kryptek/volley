@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/lease-pool.schema.json",
   "title": "Volley Lease Pool State",
-  "description": "Retained state of one heavy-operation lease pool, published by a supervisor to volley/_system/leases/<pool>. See spec section 4.6.5.",
+  "description": "Retained state of one heavy-operation lease pool, published by a supervisor to volley/_system/leases/<pool>. See spec sections 4.6.5 and 4.6.15.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -16,6 +16,10 @@
           "properties": {
             "pool": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
             "capacity": { "$ref": "config.schema.json#/$defs/leasePool/properties/capacity" },
+            "per_machine": {
+              "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine",
+              "description": "The pool's per-machine cap, when its config sets one; at most capacity."
+            },
             "held": {
               "type": "array",
               "items": {
@@ -24,6 +28,10 @@
                 "properties": {
                   "lease_id": { "$ref": "#/$defs/leaseId" },
                   "holder": { "$ref": "#/$defs/agentId" },
+                  "host": {
+                    "oneOf": [{ "$ref": "#/$defs/hostName" }, { "type": "null" }],
+                    "description": "The machine the holder runs on (a host name, the supervisor's own machine under its fleet.local_name), or null for a holder the supervisor did not spawn (a hand-run agent)."
+                  },
                   "since": { "type": "string", "format": "date-time" },
                   "ttl_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
                 }
@@ -31,13 +39,17 @@
             },
             "queue": {
               "type": "array",
-              "description": "FIFO: the first entry is granted next.",
+              "description": "FIFO: the earliest entry that both caps (capacity, per_machine) admit is granted next.",
               "items": {
                 "type": "object",
                 "required": ["lease_id", "holder", "since"],
                 "properties": {
                   "lease_id": { "$ref": "#/$defs/leaseId" },
                   "holder": { "$ref": "#/$defs/agentId" },
+                  "host": {
+                    "oneOf": [{ "$ref": "#/$defs/hostName" }, { "type": "null" }],
+                    "description": "The machine the holder runs on (a host name, the supervisor's own machine under its fleet.local_name), or null for a holder the supervisor did not spawn (a hand-run agent)."
+                  },
                   "since": { "type": "string", "format": "date-time" }
                 }
               }
@@ -45,9 +57,10 @@
             "reasons": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Human-readable reasons for the current queue (e.g. 'queued: 3/3 backend-it leases held')."
+              "description": "Human-readable reasons for the current queue, naming the cap that holds each request (e.g. 'queued: 3/3 backend-it leases held', 'queued l-004: 1/1 backend-it leases held on box-a (per machine)')."
             }
-          }
+          },
+          "allOf": [{ "$ref": "config.schema.json#/$defs/perMachineWithinCapacity" }]
         }
       },
       "required": ["channel", "type", "payload"]
@@ -55,6 +68,7 @@
   ],
   "$defs": {
     "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
-    "leaseId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" }
+    "leaseId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" },
+    "hostName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" }
   }
 }

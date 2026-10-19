@@ -1,0 +1,222 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "box-a",
+  "wall_time": "2026-10-19T09:30:00.000Z",
+  "channel": "_system/machines",
+  "type": "machine",
+  "payload": {
+    "name": "box-a",
+    "kind": "peer",
+    "os": "linux",
+    "cores": 16,
+    "tunnel": "up",
+    "load": [
+      1.25,
+      0.9,
+      0.7
+    ],
+    "agents": 3,
+    "checks": [
+      {
+        "id": "check-00",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-01",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-02",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-03",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-04",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-05",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-06",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-07",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-08",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-09",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-10",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-11",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-12",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-13",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-14",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-15",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-16",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-17",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-18",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-19",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-20",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-21",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-22",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-23",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-24",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-25",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-26",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-27",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-28",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-29",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-30",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-31",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      },
+      {
+        "id": "check-32",
+        "ok": true,
+        "severity": "warn",
+        "detail": "ok"
+      }
+    ],
+    "doctor_at": "2026-10-19T09:29:00.000Z",
+    "last_seen": "2026-10-19T09:30:00.000Z"
+  }
+}

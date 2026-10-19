@@ -243,20 +243,134 @@
         },
         "hosts": {
           "type": "object",
-          "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",
+          "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names. A host's name is never local or auto, which host: reserves; a paired machine's entry is added by peer_join (spec section 4.6.14).",
           "propertyNames": {
             "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
-            "not": { "const": "local" }
+            "not": { "enum": ["local", "auto"] }
           },
           "maxProperties": 32,
           "additionalProperties": { "$ref": "#/$defs/remoteHost" }
+        },
+        "require_fresh_base": {
+          "type": "boolean",
+          "default": true,
+          "description": "Before cutting an agent's worktree on any host, the supervisor fetches the release branch there; true: a fetch that fails fails the spawn, so no agent starts on a stale base (spec section 4.6.15). false: the host's last fetched copy is used. Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "placement": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Automatic placement across machines (spec section 4.6.15), for waves with placement: auto and tasks with host: auto. Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "load_per_core_max": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 16,
+              "default": 1.5,
+              "description": "A machine whose 1-minute load per core is above this takes no new placement."
+            },
+            "mem_available_min_pct": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 10,
+              "description": "A machine with less available memory, in percent, takes no new placement."
+            },
+            "disk_free_min_gb": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 5,
+              "description": "A machine with less free disk, in GB, where its worktrees live takes no new placement."
+            },
+            "down_decision_after_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 300,
+              "description": "Seconds a machine with unfinished tasks may stay down before the supervisor opens a machine_down decision. It never re-places a task without an answer."
+            },
+            "weights": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "How much each kind of headroom counts in a candidate's score, in percent of the score.",
+              "properties": {
+                "cpu": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 40,
+                  "description": "Weight of CPU headroom (1-minute load per core)."
+                },
+                "slots": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 30,
+                  "description": "Weight of free agent slots (max_agents minus placed)."
+                },
+                "mem": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 15,
+                  "description": "Weight of available memory."
+                },
+                "usage": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 15,
+                  "description": "Weight of Claude 5-hour usage headroom."
+                }
+              }
+            },
+            "nudge_on_merge": {
+              "type": "string",
+              "enum": ["files", "all", "off"],
+              "default": "files",
+              "description": "When a wave's PR merges, send one steering message to its running implementers: files (those whose task's files overlap the merged PR's), all, or off."
+            }
+          }
+        },
+        "fleet": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The supervisor's own machine as a placement candidate (spec section 4.6.15). Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "local_name": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                  "not": { "enum": ["local", "auto"] }
+                },
+                { "type": "null" }
+              ],
+              "default": null,
+              "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: the machine's host name, lowercased into the topic-segment grammar."
+            }
+          }
         }
       }
     },
     "remoteHost": {
       "type": "object",
       "$ref": "#/$defs/remoteHostProperties",
-      "properties": { "type": { "const": "ssh" } },
+      "properties": {
+        "type": { "const": "ssh" },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 4,
+          "description": "The most supervised agents this host runs at once (spec section 4.6.15); hard_ceiling still caps the total."
+        },
+        "drain": {
+          "type": "boolean",
+          "default": false,
+          "description": "true: the host takes no new placements and its running agents finish (spec section 4.6.15)."
+        }
+      },
       "unevaluatedProperties": false
     },
     "remoteHostProperties": {
@@ -310,8 +424,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["capacity"],
+      "allOf": [{ "$ref": "#/$defs/perMachineWithinCapacity" }],
       "properties": {
         "capacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "per_machine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "The most leases of this pool that holders on one machine may hold at once, at most capacity (spec section 4.6.5). Unset: capacity."
+        },
         "ttl_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
         "match": {
           "type": "array",
@@ -320,6 +441,267 @@
           "description": "Regular expressions over a command line; a match requires a lease from this pool."
         }
       }
+    },
+    "perMachineWithinCapacity": {
+      "description": "per_machine is at most capacity: one implication per capacity value below the bound (JSON Schema cannot compare two values).",
+      "allOf": [
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 0 } } },
+          "then": { "properties": { "per_machine": { "maximum": 0 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 1 } } },
+          "then": { "properties": { "per_machine": { "maximum": 1 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 2 } } },
+          "then": { "properties": { "per_machine": { "maximum": 2 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 3 } } },
+          "then": { "properties": { "per_machine": { "maximum": 3 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 4 } } },
+          "then": { "properties": { "per_machine": { "maximum": 4 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 5 } } },
+          "then": { "properties": { "per_machine": { "maximum": 5 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 6 } } },
+          "then": { "properties": { "per_machine": { "maximum": 6 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 7 } } },
+          "then": { "properties": { "per_machine": { "maximum": 7 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 8 } } },
+          "then": { "properties": { "per_machine": { "maximum": 8 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 9 } } },
+          "then": { "properties": { "per_machine": { "maximum": 9 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 10 } } },
+          "then": { "properties": { "per_machine": { "maximum": 10 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 11 } } },
+          "then": { "properties": { "per_machine": { "maximum": 11 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 12 } } },
+          "then": { "properties": { "per_machine": { "maximum": 12 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 13 } } },
+          "then": { "properties": { "per_machine": { "maximum": 13 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 14 } } },
+          "then": { "properties": { "per_machine": { "maximum": 14 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 15 } } },
+          "then": { "properties": { "per_machine": { "maximum": 15 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 16 } } },
+          "then": { "properties": { "per_machine": { "maximum": 16 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 17 } } },
+          "then": { "properties": { "per_machine": { "maximum": 17 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 18 } } },
+          "then": { "properties": { "per_machine": { "maximum": 18 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 19 } } },
+          "then": { "properties": { "per_machine": { "maximum": 19 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 20 } } },
+          "then": { "properties": { "per_machine": { "maximum": 20 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 21 } } },
+          "then": { "properties": { "per_machine": { "maximum": 21 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 22 } } },
+          "then": { "properties": { "per_machine": { "maximum": 22 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 23 } } },
+          "then": { "properties": { "per_machine": { "maximum": 23 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 24 } } },
+          "then": { "properties": { "per_machine": { "maximum": 24 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 25 } } },
+          "then": { "properties": { "per_machine": { "maximum": 25 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 26 } } },
+          "then": { "properties": { "per_machine": { "maximum": 26 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 27 } } },
+          "then": { "properties": { "per_machine": { "maximum": 27 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 28 } } },
+          "then": { "properties": { "per_machine": { "maximum": 28 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 29 } } },
+          "then": { "properties": { "per_machine": { "maximum": 29 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 30 } } },
+          "then": { "properties": { "per_machine": { "maximum": 30 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 31 } } },
+          "then": { "properties": { "per_machine": { "maximum": 31 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 32 } } },
+          "then": { "properties": { "per_machine": { "maximum": 32 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 33 } } },
+          "then": { "properties": { "per_machine": { "maximum": 33 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 34 } } },
+          "then": { "properties": { "per_machine": { "maximum": 34 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 35 } } },
+          "then": { "properties": { "per_machine": { "maximum": 35 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 36 } } },
+          "then": { "properties": { "per_machine": { "maximum": 36 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 37 } } },
+          "then": { "properties": { "per_machine": { "maximum": 37 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 38 } } },
+          "then": { "properties": { "per_machine": { "maximum": 38 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 39 } } },
+          "then": { "properties": { "per_machine": { "maximum": 39 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 40 } } },
+          "then": { "properties": { "per_machine": { "maximum": 40 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 41 } } },
+          "then": { "properties": { "per_machine": { "maximum": 41 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 42 } } },
+          "then": { "properties": { "per_machine": { "maximum": 42 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 43 } } },
+          "then": { "properties": { "per_machine": { "maximum": 43 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 44 } } },
+          "then": { "properties": { "per_machine": { "maximum": 44 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 45 } } },
+          "then": { "properties": { "per_machine": { "maximum": 45 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 46 } } },
+          "then": { "properties": { "per_machine": { "maximum": 46 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 47 } } },
+          "then": { "properties": { "per_machine": { "maximum": 47 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 48 } } },
+          "then": { "properties": { "per_machine": { "maximum": 48 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 49 } } },
+          "then": { "properties": { "per_machine": { "maximum": 49 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 50 } } },
+          "then": { "properties": { "per_machine": { "maximum": 50 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 51 } } },
+          "then": { "properties": { "per_machine": { "maximum": 51 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 52 } } },
+          "then": { "properties": { "per_machine": { "maximum": 52 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 53 } } },
+          "then": { "properties": { "per_machine": { "maximum": 53 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 54 } } },
+          "then": { "properties": { "per_machine": { "maximum": 54 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 55 } } },
+          "then": { "properties": { "per_machine": { "maximum": 55 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 56 } } },
+          "then": { "properties": { "per_machine": { "maximum": 56 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 57 } } },
+          "then": { "properties": { "per_machine": { "maximum": 57 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 58 } } },
+          "then": { "properties": { "per_machine": { "maximum": 58 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 59 } } },
+          "then": { "properties": { "per_machine": { "maximum": 59 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 60 } } },
+          "then": { "properties": { "per_machine": { "maximum": 60 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 61 } } },
+          "then": { "properties": { "per_machine": { "maximum": 61 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 62 } } },
+          "then": { "properties": { "per_machine": { "maximum": 62 } } }
+        },
+        {
+          "if": { "required": ["capacity"], "properties": { "capacity": { "maximum": 63 } } },
+          "then": { "properties": { "per_machine": { "maximum": 63 } } }
+        }
+      ]
     }
   }
 }

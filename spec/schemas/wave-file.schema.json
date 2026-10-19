@@ -52,6 +52,25 @@
       "items": { "$ref": "#/$defs/id" },
       "description": "Lease pools (config lease_pools keys) this wave's heavy operations draw from."
     },
+    "placement": {
+      "enum": ["auto", "local"],
+      "default": "local",
+      "description": "auto: the supervisor places every task without a host of its own across the eligible machines (spec section 4.6.15). local: those tasks run on the supervisor's own host."
+    },
+    "placement_prefer": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hostName" },
+      "description": "Host names placement ranks first among eligible machines."
+    },
+    "placement_avoid": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hostName" },
+      "description": "Host names placement uses only when no other machine is eligible."
+    },
     "spawn_budget": {
       "type": "integer",
       "minimum": 1,
@@ -84,7 +103,7 @@
         "type": { "const": "ssh" },
         "name": {
           "$ref": "#/$defs/hostName",
-          "not": { "const": "local" },
+          "not": { "enum": ["local", "auto"] },
           "description": "Host label (wave state, journal) and the hosts.<name> config entry layered under this one; default: the target."
         }
       },
@@ -129,7 +148,7 @@
         },
         "host": {
           "default": "local",
-          "description": "Where the task's agents run: local (the supervisor's own host), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one).",
+          "description": "Where the task's agents run: local (the supervisor's own host), auto (the supervisor places it, spec section 4.6.15), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one). Default: auto under a wave's placement: auto, else local.",
           "type": ["string", "object"],
           "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
           "$ref": "#/$defs/remoteHost"
@@ -137,6 +156,11 @@
         "account": {
           "$ref": "#/$defs/id",
           "description": "The Claude account this task's agents run under; overrides the wave's account."
+        },
+        "heavy": {
+          "type": "boolean",
+          "default": false,
+          "description": "The task runs heavy operations: placement puts it only on a machine with a free per-machine slot in the wave's heavy_pools (spec section 4.6.15)."
         },
         "files": {
           "type": "array",

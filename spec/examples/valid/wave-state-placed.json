@@ -1,0 +1,52 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T10:00:00.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": "coordinator-ab12",
+    "repo": "example-org/example-repo",
+    "release_branch": "release/w1",
+    "status": "running",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "implement",
+        "agents": { "implementer": "w1-t1-implementer-1" },
+        "host": "box-a",
+        "base_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "placement": {
+          "host": "box-a",
+          "by": "auto",
+          "score": 0.72,
+          "decided_at": "2026-10-19T09:59:58.000Z",
+          "candidates": [
+            { "host": "box-a", "score": 0.72, "line": "box-a 0.72: load 0.1/core, 2 of 4 slots free, 62% memory free, Claude 34%" },
+            { "host": "studio", "score": 0.41, "line": "studio 0.41: load 0.26/core, 7 of 12 slots free, 41% memory free, Claude 71%" },
+            { "host": "box-b", "score": null, "line": "box-b not eligible: claude is not on the non-interactive ssh PATH" }
+          ]
+        }
+      },
+      {
+        "id": "T2",
+        "issue": 102,
+        "stage": "queued",
+        "agents": {},
+        "placement": {
+          "host": "studio",
+          "by": "wave_file",
+          "score": null,
+          "decided_at": "2026-10-19T09:59:58.000Z",
+          "candidates": [{ "host": "studio", "score": null, "line": "studio: named by the wave file (host: local)" }]
+        }
+      }
+    ],
+    "open_decisions": [],
+    "gates": [],
+    "updated_at": "2026-10-19T10:00:00.000Z"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "wave": "w1",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/w1",
+  "model": "claude-opus-5-5",
+  "pipeline": ["implement", ["spec_review", "quality_review"], "merge_ready"],
+  "placement": "auto",
+  "placement_prefer": ["box-a"],
+  "placement_avoid": ["box-b"],
+  "heavy_pools": ["backend-it"],
+  "tasks": {
+    "T1": { "issue": 101, "heavy": true },
+    "T2": { "issue": 102, "host": "local" },
+    "T3": { "issue": 103, "host": "auto", "after": ["T1"] }
+  }
+}
