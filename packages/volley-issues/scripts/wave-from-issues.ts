@@ -30,6 +30,8 @@ export interface WaveResult {
   yaml: string;
   /** Issues whose body has no `Depends on:`/`deps:` line: their order must come from the human. */
   undeclared: number[];
+  /** Title tags dropped because two issues shared them; those issues fell back to `i<N>`. */
+  warnings: string[];
 }
 
 /** Wave id grammar (SPEC §2.1), the same one the wave-file schema enforces. */
@@ -63,10 +65,57 @@ const NONE = new Set(["none", "n/a", "-", "—"]);
  */
 const TITLE_TAG = /^([A-Z]{1,3}\d{1,3}[a-z]?)\s*[:—–-]/;
 
+/**
+ * Product, format and numeronym names that fit the tag grammar but name a subject, not a task
+ * (`S3: upload fails`). A title starting with one keeps the `i<N>` fallback id.
+ */
+const NOT_TAGS = new Set([
+  "S3",
+  "EC2",
+  "K8s",
+  "MP3",
+  "MP4",
+  "UTF8",
+  "H264",
+  "X11",
+  "V8",
+  "ES5",
+  "ES6",
+  "CSS3",
+  "MD5",
+  "I18n",
+  "L10n",
+  "A11y",
+]);
+
 /** The wave-file task id for an issue: its title's task tag, else `i<number>`. */
 export function taskIdFor(issue: number, title?: string): string {
-  const tag = typeof title === "string" ? TITLE_TAG.exec(title) : null;
-  return tag?.[1] ?? `i${issue}`;
+  const tag = typeof title === "string" ? TITLE_TAG.exec(title)?.[1] : undefined;
+  return tag !== undefined && !NOT_TAGS.has(tag) ? tag : `i${issue}`;
+}
+
+/**
+ * Task ids for a set of issues (unique numbers), never two that differ only in case (volleyd
+ * rejects those). Issues whose tags collide, with each other or with a fallback id, fall back
+ * to `i<N>`, which is unique, with a warning naming them.
+ */
+function assignTaskIds(issues: IssueInput[]): { ids: Map<number, string>; warnings: string[] } {
+  const ids = new Map(issues.map((i) => [i.number, taskIdFor(i.number, i.title)]));
+  const warnings: string[] = [];
+  for (;;) {
+    const owners = new Map<string, number[]>();
+    for (const [n, id] of ids) {
+      const key = id.toLowerCase();
+      owners.set(key, [...(owners.get(key) ?? []), n]);
+    }
+    const clash = [...owners.values()].find((ns) => ns.length > 1);
+    if (clash === undefined) return { ids, warnings };
+    const tagged = clash.filter((n) => ids.get(n) !== `i${n}`);
+    warnings.push(
+      `title tag '${ids.get(tagged[0] ?? 0)}' would name more than one task (${clash.map((n) => `#${n}`).join(", ")}); using ${tagged.map((n) => `i${n}`).join(", ")} instead (give them distinct title tags to keep tag ids)`,
+    );
+    for (const n of tagged) ids.set(n, `i${n}`);
+  }
 }
 
 /**
@@ -167,20 +216,8 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     if (inSet.has(i.number)) throw new Error(`duplicate issue #${i.number}`);
     inSet.add(i.number);
   }
-  // volleyd rejects task ids that differ only in case, so collisions are checked case-blind.
-  const ids = new Map<number, string>();
-  const owners = new Map<string, number>();
-  for (const i of issues) {
-    const id = taskIdFor(i.number, i.title);
-    const other = owners.get(id.toLowerCase());
-    if (other !== undefined) {
-      throw new Error(
-        `task id '${id}' is used by both #${other} and #${i.number} (give one of them a distinct title tag)`,
-      );
-    }
-    owners.set(id.toLowerCase(), i.number);
-    ids.set(i.number, id);
-  }
+  const { ids, warnings } = assignTaskIds(issues);
+  const idOf = (n: number) => ids.get(n) ?? `i${n}`;
   const satisfied = new Set(opts.satisfied ?? []);
   for (const n of satisfied) {
     // Dropping it would silently cut the edge to a task that is actually in the wave.
@@ -215,15 +252,15 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
           `#${issue.number} depends on #${ref}, which is not in this wave (add it, or pass it as satisfied if it is already merged)`,
         );
       }
-      after.push(ids.get(ref) as string);
+      after.push(idOf(ref));
     }
-    lines.push(`  ${ids.get(issue.number) as string}:`, `    issue: ${issue.number}`);
+    lines.push(`  ${idOf(issue.number)}:`, `    issue: ${issue.number}`);
     if (typeof issue.title === "string" && issue.title !== "") {
       lines.push(`    title: ${q(issue.title)}`);
     }
     if (after.length > 0) lines.push(`    after: [${after.join(", ")}]`);
   }
-  return { yaml: `${lines.join("\n")}\n`, undeclared };
+  return { yaml: `${lines.join("\n")}\n`, undeclared, warnings };
 }
 
 const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <id> --repo <path>
@@ -233,10 +270,11 @@ const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <i
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
 Each issue becomes a task named by its title's task tag ("O0: ...", "T3b - ..." -> O0, T3b),
-or i<number> when the title has none; two issues with the same id are an error. A
-"Depends on: #N" or "deps: #N" line in its body becomes after: [<id of #N>] (also "owner/repo#N" and issue URLs when --repo-slug names this repository,
-and "- #N" list items under an empty label). A dependency outside the set is an error unless
-listed in --satisfied; so is a dependency line it cannot read.
+or i<number> when the title has none or starts with a product name ("S3: ..."); issues that
+share a tag fall back to i<number>, with a warning. A "Depends on: #N" or "deps: #N" line in
+its body becomes after: [<id of #N>] (also "owner/repo#N" and issue URLs when --repo-slug
+names this repository, and "- #N" list items under an empty label). A dependency outside the
+set is an error unless listed in --satisfied; so is a dependency line it cannot read.
 Writes the wave YAML to --out (default stdout). Issues with no dependency line are listed on
 stderr: confirm their order with the human before submitting.
 `;
@@ -297,7 +335,7 @@ function main(argv: string[]): number {
   try {
     const issues = JSON.parse(readFileSync(input === "-" ? 0 : input, "utf-8")) as IssueInput[];
     if (!Array.isArray(issues)) throw new Error("issues file must hold a JSON array");
-    const { yaml, undeclared } = waveFromIssues(issues, {
+    const { yaml, undeclared, warnings } = waveFromIssues(issues, {
       wave: v.wave as string,
       repo: v.repo as string,
       releaseBranch: v["release-branch"] as string,
@@ -309,6 +347,7 @@ function main(argv: string[]): number {
     });
     if (v.out !== undefined) writeFileSync(v.out, yaml);
     else process.stdout.write(yaml);
+    for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
     if (undeclared.length > 0) {
       process.stderr.write(
         `note: no Depends on:/deps: line in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,

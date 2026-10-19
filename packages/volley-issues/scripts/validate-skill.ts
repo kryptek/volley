@@ -6,10 +6,18 @@ export interface ValidationResult {
 }
 
 /**
- * The skill's frontmatter `version:`. `scripts/install.sh --check` compares an installed copy's
- * version with this repo's, so bump it whenever the dispatch flow changes incompatibly.
+ * The skill's frontmatter `version:`: the `major.minor` of this package's version, so a release
+ * bump of `package.json` is what moves it (SKILL.md's field must follow). `scripts/install.sh
+ * --check` compares an installed copy's version with this repo's.
  */
-export const SKILL_VERSION = "0.2";
+export const SKILL_VERSION = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: string;
+  }
+).version
+  .split(".")
+  .slice(0, 2)
+  .join(".");
 
 /** Major section headings that must be present in the SKILL.md body. */
 export const REQUIRED_SECTIONS = [

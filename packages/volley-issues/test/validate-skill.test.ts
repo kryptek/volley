@@ -145,10 +145,11 @@ describe("validateSkill (end-to-end)", () => {
 });
 
 describe("skill version", () => {
-  it("the shipped SKILL.md declares version: 0.2", () => {
-    expect(SKILL_VERSION).toBe("0.2");
+  it("the shipped SKILL.md declares the package's major.minor version", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    expect(`${SKILL_VERSION}.`).toBe(pkg.version.replace(/\d+$/, ""));
     const { frontmatter } = splitFrontmatter(SHIPPED);
-    expect(frontmatter).toMatch(/^version: 0\.2$/m);
+    expect(parseSimpleYaml(frontmatter ?? "").version).toBe(SKILL_VERSION);
   });
 });
 

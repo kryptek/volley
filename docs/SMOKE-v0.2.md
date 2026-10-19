@@ -43,13 +43,7 @@ Teardown (§8) prints what it will remove and asks before removing it.
   3–4 small open issues. Make one depend on another (`Depends on: #<n>` in its body) and leave
   at least two independent. Push a release branch for the wave, e.g.
   `release/<yyyy-mm-dd>-smoke`.
-  **Tracking branch** (remove this note once volleyd fetches a release branch that exists only
-  on origin): a branch pushed from another clone is only `origin/release/<x>` in the laptop's
-  clone, and `volleyd run` needs it as a local branch. Before `volleyd run` (§5):
-  ```sh
-  git -C "$TEST_REPO" fetch origin
-  git -C "$TEST_REPO" branch --track release/<yyyy-mm-dd>-smoke origin/release/<yyyy-mm-dd>-smoke
-  ```
+  If you push it from another clone, §5 has a step that makes it a local branch here.
 - [ ] This repo at the release head, with `bun install` clean.
 - [ ] **Step 0: the skills are this release's.** An older `~/.claude/skills/volley-issues` (the
   v0.1 skill knows only the legacy cmux + `volley wait` path) makes the coordinator ignore
@@ -254,12 +248,13 @@ hard-code your everyday broker's credentials) are left alone.
   coordinator, or an agent volleyd spawns under the same profile) hangs on it. It is asked while
   `claudeInChromeDefaultEnabled` is unset in the profile's `~/.claude.json`
   (`$CLAUDE_CONFIG_DIR/.claude.json` with a custom config dir); answering records the choice
-  there. Check, and if it prints `null`, answer it
-  once in an interactive `claude` (or set *Claude in Chrome → Enabled by default* in `/config`),
-  then quit:
+  there. Check, in the environment the unattended start uses (same `HOME` and
+  `CLAUDE_CONFIG_DIR`); if it prints `null` (also printed when the file does not exist yet),
+  answer it once in an interactive `claude` (or set *Claude in Chrome → Enabled by default* in
+  `/config`), then quit:
   ```sh
-  bun -e 'console.log(require(`${process.env.HOME}/.claude.json`).claudeInChromeDefaultEnabled ?? null)'
-  # true or false, not null
+  bun -e 'const f = `${process.env.CLAUDE_CONFIG_DIR ?? process.env.HOME}/.claude.json`; let c = {}; try { c = JSON.parse(require("node:fs").readFileSync(f, "utf8")) } catch {} console.log(f, c.claudeInChromeDefaultEnabled ?? null)'
+  # <file> true, or <file> false; not null
   ```
   Passing `--no-chrome` to `claude` also skips it, for that session only. Do the same on the box
   for the user its agents run as.
@@ -311,10 +306,19 @@ hard-code your everyday broker's credentials) are left alone.
   ```sh
   cd "$TEST_REPO" && volleyd validate ".volley/waves/$WAVE.yaml"
   ```
-  Tell the session to continue: it submits with `volleyd run .volley/waves/$WAVE.yaml --owner
+- [ ] **Tracking branch** (remove this step once volleyd fetches a release branch that exists
+  only on origin): a release branch pushed from another clone is only `origin/release/<x>` in
+  the laptop's clone, and `volleyd run` needs it as a local branch. If
+  `git -C "$TEST_REPO" branch --list release/<yyyy-mm-dd>-smoke` prints nothing:
+  ```sh
+  git -C "$TEST_REPO" fetch origin
+  git -C "$TEST_REPO" branch --track release/<yyyy-mm-dd>-smoke origin/release/<yyyy-mm-dd>-smoke
+  ```
+- [ ] Tell the session to continue: it submits with `volleyd run .volley/waves/$WAVE.yaml --owner
   <its coordinator id>`.
 - [ ] Spawns: local tasks get a cmux workspace each; box tasks get a tmux session
-  (`ssh "$BOX" tmux ls` shows `$WAVE-<task>-implementer-1`). Each agent's worktree has
+  (`ssh "$BOX" tmux ls` shows `$WAVE-<task>-implementer-1`, with the task id as the wave file
+  spells it, e.g. `T1`; agent ids are its lower-cased form, `t1`). Each agent's worktree has
   `.volley/agent.json` (mode 0600; on the box with `broker_url mqtt://127.0.0.1:21883`, the
   reverse tunnel). `volley list` shows each agent under its assigned id with the real model;
   heartbeats flow (`volley sub --pattern 'volley/+/+/progress'`).

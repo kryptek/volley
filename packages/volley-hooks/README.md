@@ -212,9 +212,9 @@ coordinator's own mailbox is drained too, so acks for messages it sent land in i
 **Coordinator id.** The hooks take no id of their own: they publish as the newest live registry
 entry whose `cwd` is the session's directory, which is the id the session's MCP server
 registered. That server builds it from `VOLLEY_AGENT_ID` (a prefix, plus a fresh `-xxxx`), so
-the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"`
-(`claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator", …}}'`,
-the full line is in the [root README](../../README.md#4-register-the-mcp-server-with-claude-code)).
+the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"` in its `env` (the full
+`claude mcp add-json` line is in the
+[root README](../../README.md#4-register-the-mcp-server-with-claude-code)).
 Without it the id is named after the working directory (`<repo>-xxxx`), and the "needs you"
 items above land on an id that reads as an ordinary agent; the wave `--owner`, the Desk's
 owner chip and `★ yours`, and the v0.2 owner smoke all expect `coordinator-xxxx`. A separate
