@@ -39,7 +39,14 @@ export const CONFIG_DEFAULTS: Tunables = {
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
-  placement: { nudge_on_merge: "files" },
+  placement: {
+    nudge_on_merge: "files",
+    // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
+    load_per_core_max: 1.5,
+    mem_available_min_pct: 10,
+    disk_free_min_gb: 5,
+    weights: { cpu: 40, slots: 30, mem: 15, usage: 15 },
+  },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   fleet: { local_name: null },
 };

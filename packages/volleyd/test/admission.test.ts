@@ -6,9 +6,14 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import {
   type AdmissionState,
+  type HostAdmissionState,
   type Samples,
   decide,
+  decideHost,
   emptyAdmissionState,
+  foldHost,
+  forHost,
+  hostSamples,
   summaryPayload,
 } from "../src/admission";
 import { CONFIG_DEFAULTS } from "../src/config-defaults";
@@ -192,6 +197,99 @@ describe("decide reads thresholds from the config it is given", () => {
   it("lowering a threshold throttles on the next verdict", () => {
     const v = decide(CALM, emptyAdmissionState(), { ...CFG, container_max: 1 });
     expect(v.reasons).toEqual(["2 containers running > max 1"]);
+  });
+});
+
+describe("per-host admission (SPEC §4.6.15)", () => {
+  const T = {
+    mem_available_min_pct: CONFIG_DEFAULTS.placement.mem_available_min_pct,
+    load_per_core_max: CONFIG_DEFAULTS.placement.load_per_core_max,
+    hysteresis_samples: 3,
+  };
+  const rec = (available_pct: number, load1 = 2) => ({
+    cores: 16,
+    load: [load1, 1, 1] as [number, number, number],
+    memory: { total_mb: 8192, available_pct },
+  });
+
+  it("a task placed on box-a is held by box-a's memory sample, not the local cmux ping", () => {
+    // The supervisor's own machine: cmux ping over (a local-only signal).
+    const local = decide({ ...CALM, cmux_ping: s(9000) }, emptyAdmissionState(), CFG);
+    expect(local.allow).toBe(0);
+    const clean = decideHost("box-a", hostSamples(rec(60)), {}, T);
+    // box-a is fine: the local cmux ping does not hold a task placed there.
+    expect(forHost(local, clean)).toEqual({ allow: Number.POSITIVE_INFINITY, reasons: [] });
+    const low = decideHost("box-a", hostSamples(rec(9)), clean.state, T);
+    expect(forHost(local, low)).toEqual({
+      allow: 0,
+      reasons: ["box-a: memory available 9% (min 10%)"],
+    });
+  });
+
+  it("the global signals (API overload, CI queue) still apply on every host", () => {
+    const local = decide({ ...CALM, ci_queue: s(99), cmux_ping: s(9000) }, {}, CFG);
+    const host = decideHost("box-a", hostSamples(rec(60)), {}, T);
+    expect(forHost(local, host)).toEqual({ allow: 0, reasons: ["99 queued CI runs > max 10"] });
+    // A verdict without per-signal reasons (injected, or before the first sample) applies whole.
+    expect(forHost({ allow: 0, reasons: ["waiting for the first pressure sample"] }, host)).toEqual(
+      {
+        allow: 0,
+        reasons: ["waiting for the first pressure sample"],
+      },
+    );
+  });
+
+  it("load per core over the max holds too, naming the host", () => {
+    const v = decideHost("box-a", hostSamples(rec(60, 32)), {}, T);
+    expect(v.reasons).toEqual(["box-a: load 2.00 per core (max 1.5)"]);
+  });
+
+  it("three clean heartbeats clear it; an unknown memory sample never trips", () => {
+    let state: HostAdmissionState = decideHost("box-a", hostSamples(rec(9)), {}, T).state;
+    const reasons: string[][] = [];
+    for (let i = 0; i < 3; i++) {
+      const v = decideHost("box-a", hostSamples(rec(60)), state, T);
+      state = v.state;
+      reasons.push(v.reasons);
+    }
+    expect(reasons).toEqual([
+      ["box-a: recovering: memory available clear for 1/3 samples"],
+      ["box-a: recovering: memory available clear for 2/3 samples"],
+      [],
+    ]);
+    const noMem = decideHost("box-a", hostSamples({ cores: 16, load: [1, 1, 1] }), {}, T);
+    expect(noMem.allow).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("recovering lists the hysteresis reasons alone, without the host's name", () => {
+    const tripped = decideHost("box-a", hostSamples(rec(9)), {}, T);
+    expect(tripped.recovering).toEqual([]);
+    const v = decideHost("box-a", hostSamples(rec(60)), tripped.state, T);
+    expect(v.recovering).toEqual(["recovering: memory available clear for 1/3 samples"]);
+  });
+
+  it("foldHost: the verdict from the last heartbeats, under the thresholds asked with", () => {
+    const history = [rec(9), rec(60), rec(60)].map(hostSamples);
+    expect(foldHost("box-a", history, T).reasons).toEqual([
+      "box-a: recovering: memory available clear for 2/3 samples",
+    ]);
+    // A wave whose own minimum is 5% was never breached by 9%.
+    expect(foldHost("box-a", history, { ...T, mem_available_min_pct: 5 })).toMatchObject({
+      allow: Number.POSITIVE_INFINITY,
+      reasons: [],
+    });
+    // A lowered load maximum (config_set) applies to the latest heartbeat at once.
+    expect(
+      foldHost("box-a", [hostSamples(rec(60, 20))], { ...T, load_per_core_max: 1 }).reasons,
+    ).toEqual(["box-a: load 1.25 per core (max 1)"]);
+    // Only the last hysteresis_samples heartbeats count: an older breach has cleared.
+    expect(
+      foldHost("box-a", [rec(9), rec(60), rec(60), rec(60)].map(hostSamples), T).reasons,
+    ).toEqual([]);
+    expect(foldHost("box-a", [], T)).toMatchObject({
+      allow: Number.POSITIVE_INFINITY,
+      reasons: [],
+    });
   });
 });
 

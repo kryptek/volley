@@ -504,7 +504,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
       ready: true,
       placed: 1,
       eligible: false,
-      ineligible_reason: "1/1 agents",
+      ineligible_reason: "1/1 agents (max_agents)",
     });
   });
 });

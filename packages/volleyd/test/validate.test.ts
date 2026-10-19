@@ -4,6 +4,12 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { CONFIG_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_TOPIC } from "../src/control";
+import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
+import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { runCli } from "./helpers/run-cli";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -108,6 +114,37 @@ describe("volleyd validate: the release branch", () => {
     expect(global.exitCode).toBe(0);
   });
 
+  it("placement weights that reach all four at 0 across config.yaml and the wave's config: are refused", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-weights");
+    mkdirSync(home);
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nplacement:\n  weights: { usage: 0 }\n",
+    );
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const zero = await runCli(
+      [
+        "validate",
+        waveFile(
+          repo,
+          "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0, slots: 0, mem: 0 } } }",
+        ),
+      ],
+      env,
+    );
+    expect(zero.exitCode).toBe(1);
+    expect(zero.stderr).toBe(
+      "volleyd validate: config.placement.weights: not all four weights may be 0 (cpu, slots, mem, usage) with the global config\n",
+    );
+    const ok = await runCli(
+      ["validate", waveFile(repo, "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0 } } }")],
+      env,
+    );
+    expect(ok.stderr).toBe("");
+    expect(ok.exitCode).toBe(0);
+  });
+
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {
     const r = await runCli(["validate", waveFile(join(dir, "elsewhere"))]);
     expect(r.exitCode).toBe(0);
@@ -189,5 +226,120 @@ describe("volleyd validate: the brief preface", () => {
     const r = await runCli(["validate", waveFile(`brief_preface: ${file}\n`)]);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("not valid UTF-8");
+  });
+});
+
+describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
+  let dir: string;
+  let broker: TestBroker;
+  let pub: VolleyBroker;
+  beforeEach(async () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-place-")));
+    broker = await startTestBroker();
+    pub = new VolleyBroker();
+    await pub.connect({ url: broker.url, agentId: "volleyd" });
+  });
+  afterEach(async () => {
+    await pub.disconnect();
+    await broker.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const retain = (
+    topic: string,
+    channel: string,
+    type: string,
+    payload: unknown,
+    agentId = "volleyd",
+  ) =>
+    pub.publish(
+      topic,
+      JSON.stringify(buildEnvelope({ agentId, parentId: null, channel, type, payload })),
+      { qos: 1, retain: true },
+    );
+  const machine = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    os: "linux",
+    cores: 16,
+    tunnel: "up",
+    load: [3.2, 3, 2],
+    agents: 0,
+    memory: { total_mb: 65536, available_pct: 71 },
+    last_seen: "2026-10-19T09:00:00.000Z",
+    ...over,
+  });
+  const verdict = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    ready: true,
+    reasons: [],
+    drain: false,
+    max_agents: 4,
+    placed: 0,
+    path_ok: { claude: true, bun: true },
+    requirements: { volley: "0.4.0" },
+    heavy: {},
+    usage: { account: null, five_hour_pct: 34 },
+    eligible: true,
+    checked_at: "2026-10-19T09:00:00.000Z",
+    ...over,
+  });
+  const waveFile = (head: string) => {
+    const file = join(dir, "w.yaml");
+    // The repo is not on this machine and every task is placed: no release-branch check here.
+    writeFileSync(
+      file,
+      `wave: w1\nrepo: ${join(dir, "elsewhere")}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\n${head}tasks:\n  T1: { issue: 1 }\n  T3: { issue: 3 }\n`,
+    );
+    return file;
+  };
+  const env = () => ({ VOLLEY_BROKER_URL: broker.url, VOLLEYD_HOME: join(dir, "home") });
+
+  it("prints where each auto task would go if admitted now, and that admission decides", async () => {
+    await retain(CONFIG_TOPIC, "_waves/_config", "config", {
+      ...CONFIG_DEFAULTS,
+      fleet: { local_name: "control" },
+    });
+    await retain(machineTopic("box-a"), MACHINE_CHANNEL, "machine", machine("box-a"), "box-a");
+    await retain(
+      machineTopic("control"),
+      MACHINE_CHANNEL,
+      "machine",
+      machine("control", {
+        kind: "supervisor",
+        tunnel: "local",
+        cores: 8,
+        load: [6, 6, 6],
+        memory: { total_mb: 8192, available_pct: 40 },
+      }),
+    );
+    await retain(
+      `${machineTopic("box-a")}/readiness`,
+      "_system/machines/readiness",
+      "readiness",
+      verdict("box-a", { max_agents: 1 }),
+    );
+    await retain(
+      `${machineTopic("control")}/readiness`,
+      "_system/machines/readiness",
+      "readiness",
+      verdict("control", { max_agents: 12, placed: 2 }),
+    );
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "if admitted now: T1 → box-a (0.85), T3 → local (0.58)\n  (from the machines' records now; the real decision is made at admission)\n",
+    );
+  });
+
+  it("a wave that does not place prints no preview; no supervisor config says so", async () => {
+    const plain = await runCli(["validate", waveFile("")], env());
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout).not.toContain("admitted now");
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "placement preview unavailable (no supervisor config on the broker): tasks are placed at admission\n",
+    );
   });
 });

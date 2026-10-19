@@ -1,7 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { CONFIG_DEFAULTS } from "../src/config-defaults";
+import type { MachineView, PlaceOptions } from "../src/placement";
 import { type WaveRecord, replay } from "../src/reducer";
-import { admit, criticalPaths, ready, spawnBudget } from "../src/scheduler";
+import {
+  type Admission,
+  admit,
+  admitPlacing,
+  criticalPaths,
+  ready,
+  spawnBudget,
+} from "../src/scheduler";
 import type { JournalEvent, NewEvent, Wave } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 
@@ -132,5 +141,104 @@ describe("spawnBudget", () => {
     expect(spawnBudget(w, 10)).toBe(30);
     expect(spawnBudget({ ...w, spawn_budget: 5 }, 3)).toBe(5);
     expect(spawnBudget(epic, 3)).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe("admitPlacing (a wave that places its tasks)", () => {
+  const w = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\nplacement: auto\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n  T3: { issue: 3 }\n",
+  );
+  const view = (name: string, over: Partial<MachineView> = {}): MachineView => ({
+    name,
+    local: name === "control",
+    record: {
+      name,
+      os: "linux",
+      cores: 16,
+      tunnel: name === "control" ? "local" : "up",
+      load: [1, 1, 1],
+      agents: 0,
+      memory: { total_mb: 65536, available_pct: 70 },
+      last_seen: "2026-10-19T09:00:00.000Z",
+    },
+    ready: true,
+    reasons: [],
+    drain: false,
+    max_agents: 4,
+    agents: 0,
+    heavy: {},
+    usage_pct: null,
+    held: [],
+    ...over,
+  });
+  const O: PlaceOptions = {
+    placement: CONFIG_DEFAULTS.placement,
+    warn_at_pct: CONFIG_DEFAULTS.claude.warn_at_pct,
+    localName: "control",
+  };
+  const OPEN: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+  const CTX = { live: 0, hardCeiling: 10, spawnsUsed: 0, spawnBudget: 10 };
+  const run = (
+    machines: MachineView[],
+    over: Partial<typeof CTX> = {},
+    gate: Admission = OPEN,
+    hostGate = (_: string): Admission => OPEN,
+  ) =>
+    admitPlacing(["T1", "T2", "T3"], w, { machines, reservations: {} }, O, gate, hostGate, {
+      ...CTX,
+      ...over,
+    });
+
+  it("admits each ready task on its machine, reserving as it goes", () => {
+    const r = run([view("box-a", { max_agents: 1 }), view("box-b", { max_agents: 2 })]);
+    expect(r.admit.map((a) => [a.id, a.placement.host, a.placed])).toEqual([
+      ["T1", "box-a", true],
+      ["T2", "box-b", true],
+      ["T3", "box-b", true],
+    ]);
+    expect(r).toMatchObject({ held: {}, reasons: [], budget: false });
+    expect(r.snapshot.reservations).toEqual({ "box-a": 1, "box-b": 2 });
+  });
+
+  it("stops at the hard ceiling, with the reason", () => {
+    const r = run([view("box-a")], { live: 8 });
+    expect(r.admit.map((a) => a.id)).toEqual(["T1", "T2"]);
+    expect(r.reasons).toEqual(["hard ceiling reached: 10/10 live agents"]);
+  });
+
+  it("stops when the spawn budget is spent, and says the budget held it", () => {
+    const r = run([view("box-a")], { spawnsUsed: 9 });
+    expect(r.admit.map((a) => a.id)).toEqual(["T1"]);
+    expect(r).toMatchObject({ budget: true, reasons: ["spawn budget exhausted: 10/10 spawns"] });
+  });
+
+  it("a held task does not block the tasks after it", () => {
+    // box-a has one slot; T1 takes it, T2 finds no eligible machine, T3 too: then box-b recovers.
+    const r = run([view("box-a", { max_agents: 1 })]);
+    expect(r.admit.map((a) => a.id)).toEqual(["T1"]);
+    expect(r.held).toEqual({
+      T2: "no eligible machine: box-a: 1/1 agents (max_agents)",
+      T3: "no eligible machine: box-a: 1/1 agents (max_agents)",
+    });
+    // A peer whose own admission holds starts: held with its reason, and the next task still goes.
+    const held = run([view("box-a")], {}, OPEN, (h) =>
+      h === "box-a" ? { allow: 0, reasons: ["box-a: load 2.00 per core (max 1.5)"] } : OPEN,
+    );
+    expect(held.admit).toEqual([]);
+    expect(held.held.T1).toBe("box-a: load 2.00 per core (max 1.5)");
+  });
+
+  it("the supervisor's own machine is admitted by the wave's verdict, its allowance counted down", () => {
+    const r = run([view("control")], {}, { allow: 2, reasons: [] });
+    expect(r.admit.map((a) => [a.id, a.placement.host])).toEqual([
+      ["T1", "control"],
+      ["T2", "control"],
+    ]);
+    expect(r.held.T3).toBe("control: no start allowed now");
+  });
+
+  it("a closed gate (paused, kill switch, a global signal) admits nothing and holds nothing", () => {
+    const r = run([view("box-a")], {}, { allow: 0, reasons: ["wave paused"] });
+    expect(r).toMatchObject({ admit: [], held: {}, reasons: ["wave paused"] });
   });
 });

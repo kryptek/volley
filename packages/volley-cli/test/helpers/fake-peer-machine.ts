@@ -72,7 +72,8 @@ export interface FakeMachineOptions {
   trusted?: boolean;
   /** A token-shaped string appended to every output the box prints. */
   plant?: string;
-  memPressurePct?: number;
+  /** `vm_stat`'s output (macOS memory); the default reads 42% available on 16 GB. */
+  vmStat?: string;
   profile?: FakeProfile;
 }
 
@@ -394,9 +395,11 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       writeFileSync(claudeJsonFile, JSON.stringify({ ...j, mcpServers: servers }));
       return {};
     }
-    if (cmd === "memory_pressure") {
+    if (cmd === "vm_stat") {
       return {
-        stdout: `The system has 17179869184 (4194304 pages with a page size of 4096).\nSystem-wide memory free percentage: ${opts.memPressurePct ?? 42}%\n`,
+        stdout:
+          opts.vmStat ??
+          "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free:  1761608.\n",
       };
     }
     return {};

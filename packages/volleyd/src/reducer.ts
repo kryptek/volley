@@ -1,9 +1,12 @@
 import { type DecisionRecord, parksTask } from "./decisions";
+import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import { AUTO_HOST } from "./placement";
 import type {
   JournalEvent,
   TaskAgents,
   TaskId,
+  TaskPlacement,
   TaskStage,
   TaskState,
   TunablesPatch,
@@ -111,6 +114,16 @@ export function emptyRecord(): WaveRecord {
   };
 }
 
+/**
+ * Set task `id`'s host in the effective plan (copy on write: `wave` and `plan` may share task
+ * objects, and the submitted plan keeps what the file said).
+ */
+function setTaskHost(rec: WaveRecord, id: TaskId, host: string): void {
+  const def = rec.wave?.tasks[id];
+  if (rec.wave == null || def === undefined || def.host === host) return;
+  rec.wave = { ...rec.wave, tasks: { ...rec.wave.tasks, [id]: { ...def, host } } };
+}
+
 const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   wave_paused: "paused",
   wave_resumed: "running",
@@ -159,7 +172,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // plan-apply.ts: `plan` is the file as submitted, `wave` the effective plan.
       const wave = ev.data.wave as Wave;
       const plan = (ev.data.plan as Wave | undefined) ?? wave;
+      const before = next.wave;
       next.wave = wave;
+      // A task is placed once: a placed task the new version still leaves to placement keeps
+      // its host.
+      for (const t of state.tasks) {
+        const placed = before?.tasks[t.id]?.host;
+        if (
+          t.placement !== undefined &&
+          placed !== undefined &&
+          wave.tasks[t.id]?.host === AUTO_HOST
+        )
+          setTaskHost(next, t.id, placed);
+      }
       next.plan = plan;
       next.overrides = plan.config;
       state.version = plan.version;
@@ -183,9 +208,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
-        // issue the event names.
+        // issue the event names, and is placed afresh when its plan leaves it to placement.
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
+        const asWritten = next.plan?.tasks[ev.task]?.host;
+        if (task.placement !== undefined && asWritten === AUTO_HOST)
+          setTaskHost(next, ev.task, AUTO_HOST);
         const def = next.wave?.tasks[ev.task];
         if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
@@ -194,6 +222,21 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
+    case "task_placed": {
+      // Placement (SPEC §4.6.15): the effective plan runs every role of the task there (`local`
+      // for the supervisor's own machine), and the state shows where and why.
+      if (task === undefined || ev.task === undefined) break;
+      const d = ev.data as Omit<TaskPlacement, "decided_at"> & { local?: boolean };
+      task.placement = {
+        host: d.host,
+        by: d.by,
+        score: d.score,
+        decided_at: ev.at,
+        candidates: d.candidates,
+      };
+      setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
+      break;
+    }
     case "agent_spawned":
       next.spawns += 1;
       if (task !== undefined) {

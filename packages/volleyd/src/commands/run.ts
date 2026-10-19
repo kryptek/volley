@@ -8,6 +8,7 @@ import { formatDiff } from "../plan-diff";
 import type { WaveState } from "../types";
 import { parseWaveFile } from "../wave-file";
 import { formatWave } from "./status";
+import { places, previewPlacement } from "./validate";
 
 const HELP = `Usage: volleyd run <wave.yaml> [--owner <agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
@@ -21,6 +22,8 @@ If the daemon already runs a wave with this id, the file is that wave's next pla
 daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
 it (added tasks queue, removed queued tasks cancel, in-flight tasks get a plan_change decision).
 Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
+A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
+tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
 `;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -45,9 +48,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
 
   // Validate locally first: a bad file fails fast, with or without a daemon.
   let text: string;
+  let wave: ReturnType<typeof parseWaveFile>;
   try {
     text = await readFile(file, "utf-8");
-    parseWaveFile(text, file);
+    wave = parseWaveFile(text, file);
   } catch (e) {
     io.stderr(`volleyd run: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
@@ -71,17 +75,20 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     }
     const state = res.result as WaveState;
     const warnings = (res.warnings ?? []).map((w) => `warning: ${w}\n`).join("");
+    // Where its auto tasks would go if admitted now (the daemon places each at admission).
+    const placement =
+      parsed.values.json !== true && places(wave) ? await previewPlacement(wave, target) : "";
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
     } else if (res.plan !== undefined) {
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${placement}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

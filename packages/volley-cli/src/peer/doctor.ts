@@ -6,7 +6,13 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { claudeChecks, isRepoTrusted, parseClaudeStatus } from "./checks/claude";
 import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
-import { diskOf, machineChecks, memoryOf, pressurePct, worktreeRoot } from "./checks/machine";
+import {
+  diskOf,
+  machineChecks,
+  memoryOf,
+  vmStatAvailablePct,
+  worktreeRoot,
+} from "./checks/machine";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
 import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
 import {
@@ -435,9 +441,11 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     }
   }
 
-  // The machine: memory (macOS: memory_pressure, as free pages under-count) and the worktrees' disk.
-  let pressure: number | null = null;
-  if (deps.platform === "darwin") pressure = pressurePct((await sh(["memory_pressure"])).stdout);
+  // The machine: memory (macOS: vm_stat's reclaimable pages, as free pages under-count) and the
+  // worktrees' disk.
+  let available: number | null = null;
+  if (deps.platform === "darwin")
+    available = vmStatAvailablePct((await sh(["vm_stat"])).stdout, deps.totalmem());
   const root = worktreeRoot(path, deps.home);
   const st = deps.statfs(nearestExisting(root));
 
@@ -478,7 +486,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     github: { present: ghPresent, signedIn, user, slug, permission },
     claude: { ...claude, trust },
     machine: {
-      memory: memoryOf(deps.totalmem(), deps.freemem(), pressure),
+      memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
       limits: {
         mem_low_pct: DOCTOR_DEFAULTS.mem_low_pct,

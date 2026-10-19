@@ -47,11 +47,16 @@ import {
 import {
   type AdmissionState,
   type AdmissionSummary,
+  type HostSamples,
+  type HostThresholds,
   type Sample,
   type Samples,
   type Verdict,
   allowJson,
   decide,
+  foldHost,
+  hostSamples,
+  machineReasons,
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
@@ -165,6 +170,7 @@ import {
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
 import { type DoctorRun, type PeerReply, PeerService } from "./peers";
+import { AUTO_HOST, type MachineView, type Snapshot, needsPlacement } from "./placement";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -177,6 +183,8 @@ import {
   type PathProbe,
   READINESS_CHANNEL,
   type ReadinessInput,
+  type ReadinessPayload,
+  machineView,
   readiness,
   readinessKey,
   readinessTopic,
@@ -186,6 +194,7 @@ import {
   type Admission,
   activeTasks,
   admit,
+  admitPlacing,
   pipelineRoles,
   spawnBudget,
   spawnsUsed,
@@ -198,6 +207,7 @@ import type {
   NudgeOnMerge,
   TaskAgents,
   TaskId,
+  TaskState,
   Tunables,
   TunablesPatch,
   Wave,
@@ -394,6 +404,16 @@ export interface DaemonOptions {
     localDoctor?: (repo: string | null) => Promise<DoctorReport | null>;
     localPath?: () => PathProbe;
     version?: string;
+    /**
+     * The own machine's OS readings for its record (default: `node:os`'s). On macOS its memory
+     * figure is the own doctor's (`vm_stat`), not `freemem`.
+     */
+    os?: Partial<{
+      platform: () => NodeJS.Platform;
+      loadavg: () => number[];
+      freemem: () => number;
+      totalmem: () => number;
+    }>;
   };
   /**
    * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
@@ -630,6 +650,17 @@ type HandlerResult = Reply & {
 };
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+/** The per-host thresholds of `eff`: placement's minimums, admission's hysteresis. */
+const hostThresholds = (eff: Tunables): HostThresholds => ({
+  mem_available_min_pct: eff.placement.mem_available_min_pct,
+  load_per_core_max: eff.placement.load_per_core_max,
+  hysteresis_samples: eff.admission.hysteresis_samples,
+});
+/** Whether a wave places tasks (SPEC §4.6.15): `placement: auto`, or a task still `host: auto`. */
+const placing = (w: Wave): boolean =>
+  w.placement === AUTO_HOST ||
+  w.task_order.some((id) => needsPlacement(w.tasks[id] ?? { host: "" }));
+
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -883,6 +914,15 @@ export class Daemon {
   private readonly published = new Map<string, { key: string; at: number }>();
   /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
   private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
+  // --- Fleet (F3): placement ---
+  /**
+   * Each peer's last heartbeats (per-host admission), oldest first, at most the largest
+   * `hysteresis_samples` in force; `last_seen` is the newest one's, so a re-delivered record (a
+   * reconnect's retained copy, a QoS 1 duplicate) is not counted again.
+   */
+  private readonly hostHistory = new Map<string, { last_seen: string; samples: HostSamples[] }>();
+  /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
+  private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
   private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
@@ -1203,7 +1243,10 @@ export class Daemon {
         const name = m.topic.split("/")[3] ?? "";
         // A cleared record (peer_remove) forgets the machine, so a late `down` cannot revive it.
         if (m.payload === "") {
-          void this.enqueue(async () => this.machines.forget(name));
+          void this.enqueue(async () => {
+            this.machines.forget(name);
+            this.hostHistory.delete(name);
+          });
           return;
         }
         const record = parseMachine(m.topic, m.payload);
@@ -1215,6 +1258,7 @@ export class Daemon {
             return;
           }
           this.machines.observe(record);
+          if (record.tunnel === "up") this.sampleHost(name, record);
           await this.publishReadiness(name);
         });
       }),
@@ -1907,6 +1951,18 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
+      // --- Fleet (F3): a wave that places its tasks admits them one by one, each on its machine ---
+      if (placing(rec.wave)) {
+        const before = JSON.stringify(this.heldBack.get(wave) ?? []);
+        const r = await this.admitPlaced(wave, rec, candidates, live, eff);
+        live += r.admitted;
+        this.heldBack.set(wave, r.reasons);
+        if (r.budget) await this.budgetExhausted(wave, null);
+        if (r.changed || (r.admitted === 0 && before !== JSON.stringify(r.reasons)))
+          await this.publishState(wave);
+        continue;
+      }
+      // --- end Fleet (F3) ---
       const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
         live,
         hardCeiling: eff.hard_ceiling,
@@ -1945,6 +2001,180 @@ export class Daemon {
         }
       }
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F3, SPEC §4.6.15): placement at admission, per-host admission
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Admit a placing wave's ready tasks (`admitPlacing`): each placed, then admitted by its
+   * machine, journaled `task_placed` then `task_admitted`. A task with no eligible machine stays
+   * queued with the closest machine's reason, and is placed again next tick. With the gate closed
+   * (paused, kill switch, a global signal) no task keeps a stale placement reason: the wave's own
+   * reason is what `why_waiting` shows. The verdicts of the machines placed on are re-computed at
+   * once (their `placed` and `heavy` count the reservations).
+   */
+  private async admitPlaced(
+    wave: WaveId,
+    rec: WaveRecord,
+    candidates: TaskId[],
+    live: number,
+    eff: Tunables,
+  ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
+    const w = rec.wave as Wave;
+    const prefix = `${wave}/`;
+    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const r = admitPlacing(
+      candidates,
+      w,
+      this.placementSnapshot(gate, eff),
+      {
+        placement: eff.placement,
+        warn_at_pct: eff.claude.warn_at_pct,
+        localName: this.config.localName(),
+      },
+      gate,
+      (host) => this.hostVerdict(host, eff),
+      {
+        live,
+        hardCeiling: eff.hard_ceiling,
+        spawnsUsed: spawnsUsed(rec),
+        spawnBudget: spawnBudget(w, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+      },
+    );
+    let changed = false;
+    for (const k of [...this.heldTask.keys()]) {
+      if (k.startsWith(prefix) && r.held[k.slice(prefix.length)] === undefined) {
+        this.heldTask.delete(k);
+        changed = true;
+      }
+    }
+    for (const [id, why] of Object.entries(r.held)) {
+      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
+      this.heldTask.set(`${prefix}${id}`, why);
+      changed = true;
+    }
+    for (const { id, placement: p, placed } of r.admit) {
+      if (placed && rec.state?.tasks.find((t) => t.id === id)?.placement === undefined) {
+        await this.append(wave, {
+          type: "task_placed",
+          task: id,
+          data: {
+            task: id,
+            host: p.host,
+            score: p.score,
+            candidates: p.candidates,
+            by: p.by,
+            ...(p.local ? { local: true } : {}),
+          },
+        });
+      }
+      await this.append(wave, { type: "task_admitted", task: id, data: {} });
+    }
+    if (r.admit.length > 0) {
+      // The own machine counts every reservation; a peer its own.
+      const hosts = new Set([this.config.localName(), ...r.admit.map((a) => a.placement.host)]);
+      for (const host of hosts) await this.publishReadiness(host);
+    }
+    return { admitted: r.admit.length, reasons: r.reasons, budget: r.budget, changed };
+  }
+
+  /**
+   * One machine's readiness input and verdict, and placement's view of it: one computation, so
+   * the published `eligible` and placement read the same filter. `filter` and `held` come from
+   * `eff` (a wave's effective config when placing for it; the supervisor's for the verdict) and
+   * `gate` (the own machine's admission).
+   */
+  private machineState(
+    name: string,
+    isLocal: boolean,
+    cfg: Tunables,
+    extra: Pick<ReadinessInput, "bun" | "sharing">,
+    eff: Tunables,
+    gate: Admission,
+  ): { verdict: ReadinessPayload; view: MachineView } {
+    const input = this.readinessInput(name, isLocal, cfg, extra, eff, gate);
+    const verdict = readiness(input);
+    return { verdict, view: machineView(input, verdict, verdict.usage.five_hour_pct) };
+  }
+
+  /** What placement knows now: the own machine and every configured host, with their verdicts. */
+  private placementSnapshot(gate: Admission, eff: Tunables): Snapshot {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const extra = this.requirementsExtra();
+    const names = [local, ...Object.keys(cfg.hosts).filter((n) => n !== local)];
+    return {
+      machines: names.map(
+        (name) => this.machineState(name, name === local, cfg, extra, eff, gate).view,
+      ),
+      reservations: {},
+    };
+  }
+
+  /** Peer `name`'s own admission now, from its last heartbeats under `eff`'s thresholds. */
+  private hostVerdict(name: string, eff: Tunables) {
+    return foldHost(name, this.hostHistory.get(name)?.samples ?? [], hostThresholds(eff));
+  }
+
+  /**
+   * A peer's heartbeat is one per-host admission sample (memory available, load per core). A
+   * record whose `last_seen` is not newer than the last one counted is the same heartbeat again.
+   */
+  private sampleHost(name: string, record: MachineRecord): void {
+    const prior = this.hostHistory.get(name);
+    if (prior !== undefined && Date.parse(record.last_seen) <= Date.parse(prior.last_seen)) return;
+    const keep = Math.max(
+      this.config.effective().admission.hysteresis_samples,
+      ...this.runningWaves().map(([w]) => this.config.effective(w).admission.hysteresis_samples),
+    );
+    this.hostHistory.set(name, {
+      last_seen: record.last_seen,
+      samples: [...(prior?.samples ?? []), hostSamples(record)].slice(-keep),
+    });
+  }
+
+  /**
+   * Whether task `t` of `rec` is a placement reserved on its machine: placed and admitted, and its
+   * implementer not a live supervised agent (not spawned yet, or spawned and not supervised yet),
+   * so no other count has it.
+   */
+  private isReserved(rec: WaveRecord, t: TaskState): boolean {
+    if (t.placement === undefined || !rec.admitted.includes(t.id)) return false;
+    if (t.stage !== "queued" && t.stage !== "implement") return false;
+    const agent = t.agents.implementer;
+    return agent === undefined || !this.supervised.has(agent);
+  }
+
+  /** Placements reserved on machine `name` (null: on any) that have no live agent yet. */
+  private reservedOn(name: string | null): number {
+    let n = 0;
+    for (const log of this.waves.values()) {
+      const rec = log.record;
+      for (const t of rec.state?.tasks ?? []) {
+        if (!this.isReserved(rec, t)) continue;
+        if (name === null || t.placement?.host === name) n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Heavy placements reserved on machine `name` in lease pool `pool` (`isReserved`): each will
+   * take a per-machine slot there, so placement counts it as held already.
+   */
+  private heavyReservedOn(name: string, pool: string): number {
+    let n = 0;
+    for (const log of this.waves.values()) {
+      const rec = log.record;
+      if (rec.wave?.heavy_pools.includes(pool) !== true) continue;
+      for (const t of rec.state?.tasks ?? []) {
+        if (t.placement?.host !== name || rec.wave.tasks[t.id]?.heavy !== true) continue;
+        if (this.isReserved(rec, t)) n++;
+      }
+    }
+    return n;
   }
 
   /**
@@ -2792,22 +3022,31 @@ export class Daemon {
       await this.clearRetained(machineTopic(prior.name));
       await this.clearReadiness(prior.name);
     }
-    const total = totalmem();
+    const sys = this.opts.fleet?.os;
+    const total = (sys?.totalmem ?? totalmem)();
     const round = (n: number) => Math.round(n * 100) / 100;
-    const memory = {
-      total_mb: Math.max(1, Math.round(total / (1024 * 1024))),
-      available_pct: round((freemem() / total) * 100),
-    };
+    const os = (sys?.platform ?? platform)();
+    // Available memory has one definition on every machine (SPEC §4.6.15). Linux: `freemem()` is
+    // MemAvailable. macOS: free pages alone under-count, so the figure is the own doctor's
+    // (`vm_stat`, as every macOS peer reports it); none yet: unknown, never the free pages.
+    const available =
+      os === "darwin"
+        ? (this.localReport?.memory?.available_pct ?? null)
+        : round(((sys?.freemem ?? freemem)() / total) * 100);
+    const memory =
+      available === null
+        ? undefined
+        : { total_mb: Math.max(1, Math.round(total / (1024 * 1024))), available_pct: available };
     const base: MachineRecord = {
       name,
       kind: "supervisor",
-      os: platform(),
+      os,
       arch: osArch(),
       cores: Math.max(1, availableParallelism()),
       tunnel: "local",
-      load: loadavg().map(round) as [number, number, number],
+      load: (sys?.loadavg ?? loadavg)().slice(0, 3).map(round) as [number, number, number],
       agents: this.placedOn(name),
-      memory,
+      ...(memory !== undefined ? { memory } : {}),
       uptime_s: Math.floor(uptime()),
       last_seen: dateOf(this.time).toISOString(),
     };
@@ -2818,7 +3057,7 @@ export class Daemon {
         : {
             ...base,
             ...doctorFields(report),
-            memory,
+            ...(memory !== undefined ? { memory } : {}),
             ...(report.versions !== undefined
               ? { versions: { ...report.versions, volley: this.version } }
               : {}),
@@ -2863,7 +3102,7 @@ export class Daemon {
       if (!isLocal) this.maybeProbe(name);
       // Inputs not gathered yet in this process: the last retained verdict stands.
       if (!this.isSettled(name, isLocal)) continue;
-      const v = readiness(this.readinessInput(name, isLocal, cfg, shared));
+      const v = this.machineState(name, isLocal, cfg, shared, cfg, this.pressure(GLOBAL)).verdict;
       const key = readinessKey(v);
       const now = this.now();
       const prior = this.published.get(name);
@@ -2931,6 +3170,8 @@ export class Daemon {
     isLocal: boolean,
     cfg: Tunables,
     extra: Pick<ReadinessInput, "bun" | "sharing">,
+    eff: Tunables,
+    gate: Admission,
   ): ReadinessInput {
     const h = Object.hasOwn(cfg.hosts, name) ? cfg.hosts[name] : undefined;
     const probe = this.probes.get(name);
@@ -2958,18 +3199,30 @@ export class Daemon {
       ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
-      placed: isLocal ? this.supervised.size : this.placedOn(name),
+      placed: isLocal
+        ? this.supervised.size + this.reservedOn(null)
+        : this.placedOn(name) + this.reservedOn(name),
       heavy: Object.fromEntries(
         Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
           c.per_machine === undefined
             ? []
-            : [[pool, { held: heldOn(this.leases, pool, name), per_machine: c.per_machine }]],
+            : [
+                [
+                  pool,
+                  {
+                    held: heldOn(this.leases, pool, name) + this.heavyReservedOn(name, pool),
+                    per_machine: c.per_machine,
+                  },
+                ],
+              ],
         ),
       ),
       usage: {
         account,
         five_hour_pct: account !== null ? (records[account]?.five_hour?.pct ?? null) : null,
       },
+      filter: { placement: eff.placement, warn_at_pct: eff.claude.warn_at_pct },
+      held: isLocal ? machineReasons(gate) : this.hostVerdict(name, eff).recovering,
       ...extra,
       checkedAt: dateOf(this.time),
     };
@@ -4432,6 +4685,11 @@ export class Daemon {
     if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
       return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
     if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    if (this.waves.get(wave)?.record.wave?.tasks[task]?.host === AUTO_HOST)
+      return {
+        ok: false,
+        error: `task ${task} is not placed yet (host: auto): it is placed when the scheduler admits it`,
+      };
     this.refused.delete(`${wave}/${task}/${role}`);
     try {
       const res = await this.startSpawn(wave, task, role);
@@ -4603,7 +4861,7 @@ export class Daemon {
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
       const host = rec.wave?.tasks[t.id]?.host;
-      if (host !== undefined && host !== "local") t.host = host;
+      if (host !== undefined && host !== "local" && host !== AUTO_HOST) t.host = host;
       // A paired machine that is down: its running agents too (SPEC §4.6.14).
       const machine = t.host !== undefined ? this.machines.record(t.host) : undefined;
       if (machine?.tunnel === "down" && t.stage !== "done" && t.stage !== "cancelled") {
@@ -4622,6 +4880,8 @@ export class Daemon {
       const parked = this.parked.get(`${wave}/${t.id}`);
       if (parked !== undefined) t.why_waiting = parked;
       else if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
+      else if (candidates.has(t.id) && this.heldTask.has(`${wave}/${t.id}`))
+        t.why_waiting = this.heldTask.get(`${wave}/${t.id}`) as string;
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
     }
     for (const t of state.tasks) {
@@ -5365,6 +5625,14 @@ export class Daemon {
       return refuse({ ok: false, error: `owner '${owner}' is not a valid agent id` });
     const wave = this.parseRequestWave(p, "run");
     if ("ok" in wave) return refuse(wave);
+    const merged = this.config.waveOverrideErrors(wave.config);
+    if (merged.length > 0) {
+      return refuse({
+        ok: false,
+        error: merged.map((e) => `${e.path}: ${e.reason}`).join("; "),
+        errors: merged,
+      });
+    }
     const log = this.waves.get(wave.wave);
     const existing = log?.record.state;
     if (log === undefined || existing == null) return { wave, owner };

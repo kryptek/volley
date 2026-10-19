@@ -1001,7 +1001,7 @@ function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
     if (existsSync(p)) st = deps.statfs(p);
     if (dirname(p) === p) break;
   }
-  // macOS counts reclaimable memory as used: keep the doctor's memory_pressure reading there.
+  // macOS: the doctor's vm_stat figure (free pages alone under-count reclaimable memory).
   const memory =
     deps.platform === "darwin" && d !== null
       ? memoryOf(deps.totalmem(), deps.freemem(), d.memory.available_pct)

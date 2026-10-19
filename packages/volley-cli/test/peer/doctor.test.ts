@@ -9,6 +9,7 @@ import {
   normalizeOrigin,
   runDoctor,
 } from "../../src/peer/doctor";
+import { VM_STAT_MAC_16GB } from "../fixtures/vm-stat";
 import {
   type FakeMachineOptions,
   type FakePeerMachine,
@@ -562,10 +563,10 @@ describe("volley peer doctor: machine and secrets", () => {
     expect(check(r, "machine.disk")).toMatchObject({ ok: true, severity: "warn" });
   });
 
-  it("on macOS the memory comes from memory_pressure", async () => {
-    const m = machine({ platform: "darwin", memPressurePct: 63 });
+  it("on macOS the memory comes from vm_stat: free + inactive + speculative + purgeable pages", async () => {
+    const m = machine({ platform: "darwin", vmStat: VM_STAT_MAC_16GB });
     const r = await report(m);
-    expect(r.memory.available_pct).toBe(63);
+    expect(r.memory).toEqual({ total_mb: 16384, available_pct: 45 });
   });
 
   for (const token of [

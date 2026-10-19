@@ -242,7 +242,7 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |
 | `mcp` | warn | `~/.claude.json`'s `mcpServers.volley` runs this checkout's `packages/volley-mcp/src/index.ts` with bun, with `VOLLEY_BROKER_URL` at the tunnel's port and the peer's namespace (`mcp: own`: left as is) |
 | `sharing` | warn | the three rows above follow the sharing modes (SPEC §4.6.11): `--sharing`, else the supervisor's readiness `requirements.sharing`, read through the tunnel, else the defaults; the detail names where they came from and which items are left as is |
-| `machine.memory`, `machine.disk` | warn | available memory (macOS: `memory_pressure`), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
+| `machine.memory`, `machine.disk` | warn | available memory (Linux: `MemAvailable`; macOS: `vm_stat`'s free + inactive + speculative + purgeable pages, as free pages alone under-count), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
 
 Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
 shell's), so the doctor inside the `volley peer run` service reads the machine the way a terminal
@@ -306,7 +306,10 @@ beside the heartbeat, never in its way: a beat never waits for it, a run is give
 `PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
 heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
 text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`
-too except on macOS, whose `available_pct` is the last doctor run's `memory_pressure` reading.
+too except on macOS, whose `available_pct` is the last doctor run's `vm_stat` figure. Available memory
+has one definition on every machine, the supervisor's own included, so placement can compare them
+(SPEC §4.6.15): memory the kernel can hand out without paging anything active out, over total
+memory (Linux: `MemAvailable`; macOS: free + inactive + speculative + purgeable pages).
 
 ---
 
