@@ -218,3 +218,56 @@ describe("failingTests (pure)", () => {
     ]);
   });
 });
+
+describe("PR head moved: answers that must not go wrong", () => {
+  it("an answer that is not an option re-asks, and the re-ask keeps the directive", async () => {
+    await gatedAtA();
+    pushB("running");
+    await poll();
+    redOnB();
+    await poll();
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "maybe");
+    const [again] = h.openDecisions();
+    expect(again?.decision_id).not.toBe(d?.decision_id);
+    await h.resolve(again?.decision_id as string, "fixup");
+    const f2 = h.spawns.filter((s) => s.role === "fixup")[1];
+    expect(f2?.files["findings.md"]).toContain("CI / test (volleyd)");
+    expect(JSON.parse(f2?.files["findings.json"] as string)).toEqual([]);
+  });
+
+  it("a red moved head with no fixup stage after the reviews is not offered rereview", async () => {
+    h = pipelineHarness({ pipeline: "[implement, [spec_review, quality_review], merge_ready]" });
+    await h.start();
+    h.openPr(A);
+    await h.finish("implementer", { head: A, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(h.task()?.stage).toBe("merge_ready");
+    pushB();
+    redOnB();
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["fixup", "cancel"]);
+    await h.resolve(d?.decision_id as string, "rereview");
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+  });
+
+  it("merged while its pr_head_moved decision is open: the late answer spawns nothing", async () => {
+    await gatedAtA();
+    pushB("green");
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    await h.driver.handle("T1", {
+      kind: "operator_merged",
+      sha: B,
+      by: "coord-1",
+      how: "ancestor",
+    });
+    await h.resolve(d?.decision_id as string, "fixup");
+    expect(h.task()?.stage).toBe("done");
+    expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+  });
+});

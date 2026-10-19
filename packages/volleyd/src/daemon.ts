@@ -2575,7 +2575,24 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
-      retire: (agentId, status) => this.retireAny(wave, agentId, status ?? "done"),
+      retire: async (agentId, status) => {
+        // Replaced or cancelled without having ended itself: stop its session first, so it does
+        // nothing next to (or instead of) the new attempt.
+        const a = this.supervised.get(agentId);
+        if (a !== undefined && (status === "relaunched" || status === "stopped"))
+          await this.cancelAgent(
+            wave,
+            { task: a.task, role: a.role, agent_id: agentId },
+            DAEMON_AGENT_ID,
+            {
+              text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
+              from_agent_id: DAEMON_AGENT_ID,
+              wave,
+              task: a.task,
+            },
+          );
+        await this.retireAny(wave, agentId, status ?? "done");
+      },
       nextAgent: (task, role) => {
         const attempt = this.agentAttempt(wave, task, role);
         return { agent_id: agentIdFor(wave, task, role, attempt), attempt };
@@ -4377,21 +4394,30 @@ export class Daemon {
     const defer = (async (): Promise<Reply> => {
       const r = await driver.verifyMerge(task, sha);
       if (!r.ok) return { ok: false, error: r.error };
+      const full = r.sha;
       // The record describes the commit that merged, and its own CI.
-      const merged_ci = await driver.ciOf(task, driver.headCwd(task), sha);
+      const merged_ci = await driver.ciOf(task, driver.headCwd(task), full);
       await this.serial(async () => {
+        // The merge settles every open question about the task (a pr_closed is answered
+        // landed; any other is superseded, and a done task acts on no answer).
         for (const d of openDecisions(w.log.record)) {
+          if (d.task !== task) continue;
           const marker = (d as { pipeline?: { on?: string } }).pipeline;
-          if (d.task === task && marker?.on === "pr_closed")
-            await this.resolveNow(w.wave, d.decision_id, {
-              answer: "landed",
-              by,
-              rationale: `volleyd merged --sha ${sha}`,
-            });
+          await this.resolveNow(w.wave, d.decision_id, {
+            answer: marker?.on === "pr_closed" ? "landed" : "superseded",
+            by,
+            rationale: `volleyd merged --sha ${full}`,
+          });
         }
-        await driver.handle(task, { kind: "operator_merged", sha, by, how: r.how, merged_ci });
+        await driver.handle(task, {
+          kind: "operator_merged",
+          sha: full,
+          by,
+          how: r.how,
+          merged_ci,
+        });
       });
-      return { ok: true, result: { wave: w.wave, task, sha, how: r.how } };
+      return { ok: true, result: { wave: w.wave, task, sha: full, how: r.how } };
     })();
     return { ok: true, defer };
   }

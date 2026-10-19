@@ -5,7 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
-import { openEvent } from "../src/decisions";
+import { type DecisionRecord, openEvent, resolveEvent } from "../src/decisions";
 import { agentIdFor } from "../src/identity";
 import { readJournalFile } from "../src/journal";
 import { retainedTopics } from "../src/retire";
@@ -294,7 +294,18 @@ describe("relaunch of a pipeline role (the review stage continues)", () => {
         },
       },
     });
-    await h.resolve(r.id, "relaunch");
+    // The answer is journaled, and a tick runs before the pipeline handles it: the old run is
+    // kept until it is retired, so nothing spawns beside it.
+    const ans = resolveEvent(h.record(), r.id, { answer: "relaunch", by: "coord-1" }, new Date());
+    if (!("event" in ans)) throw new Error("cannot resolve");
+    await h.journal(ans.event);
+    await h.tick();
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    await h.driver.handle("T1", {
+      kind: "decision_resolved",
+      decision: h.record().decisions[r.id] as DecisionRecord,
+    });
+    await h.driver.settled();
     expect(h.retired).toContainEqual({ agent_id: spec1, status: "relaunched" });
     const spec2 = agentIdFor("w1", "T1", "spec_reviewer", 2);
     expect(h.events.find((e) => e.type === "relaunched")?.data).toEqual({

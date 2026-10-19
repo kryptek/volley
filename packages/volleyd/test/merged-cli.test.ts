@@ -33,6 +33,11 @@ describe("volleyd merged", () => {
     s = await makeSupervisedEnv({ exec: ARTIFACTS_OK });
     s.host.fake.on(["git"], (argv) => {
       const [verb, ...rest] = argv.slice(3);
+      // A short sha resolves to the full one.
+      if (verb === "rev-parse" && rest.at(-1)?.endsWith("^{commit}"))
+        return SHA.startsWith((rest.at(-1) as string).replace("^{commit}", ""))
+          ? { stdout: `${SHA}\n` }
+          : { code: 1 };
       if (verb === "merge-base" && rest[0] === "--is-ancestor") {
         if (rest[1] === SHA && rest[2] === RELEASE) return { code: onBranch ? 0 : 1 };
         if (rest[1] === PR_HEAD && rest[2] === SHA) return { code: headInSha ? 0 : 1 };
@@ -66,6 +71,18 @@ describe("volleyd merged", () => {
       .journal()
       .find((e) => e.type === "artifact_verified" && e.data.role === "merged");
     expect(verified?.data).toMatchObject({ via: "operator", sha: SHA, by: "coord-1" });
+  });
+
+  it("a short sha is recorded as its full sha", async () => {
+    const r = await merged("coord-1", SHA.slice(0, 7));
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect((await s.event("merged_by_operator")).data.sha).toBe(SHA);
+  });
+
+  it("an unknown sha is refused", async () => {
+    const r = await merged("coord-1", "abcdef0");
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("not a known commit");
   });
 
   it("a squash commit whose patch is the PR's whole diff counts", async () => {

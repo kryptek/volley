@@ -436,8 +436,8 @@ export function samePatch(a: string, b: string): boolean {
 }
 
 export type OperatorMergeCheck =
-  | { ok: true; how: "ancestor" | "patch" | "squash" }
-  | { ok: false; error: string };
+  /** `sha`: the commit, resolved to its full sha. */
+  { ok: true; how: "ancestor" | "patch" | "squash"; sha: string } | { ok: false; error: string };
 
 /**
  * `volleyd merged --sha <sha>`: is `sha` on the release branch, and does it carry the gated
@@ -451,16 +451,21 @@ export async function verifyOperatorMerge(
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
   await git("fetch", "origin", o.release_branch);
-  const on = await git("merge-base", "--is-ancestor", o.sha, release);
+  // A short sha is the same commit as its full one: compare (and record) the full sha.
+  const full = await git("rev-parse", "--verify", "--quiet", `${o.sha}^{commit}`);
+  const sha = full.code === 0 ? line(full.stdout) : "";
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, error: `${o.sha} is not a known commit` };
+  const on = await git("merge-base", "--is-ancestor", sha, release);
   if (on.code !== 0) return { ok: false, error: `${o.sha} is not on ${release}` };
-  if ((await git("merge-base", "--is-ancestor", o.head, o.sha)).code === 0)
-    return { ok: true, how: "ancestor" };
-  if ((await unmatchedCommits(git, o.sha, o.head)).length === 0) return { ok: true, how: "patch" };
-  const squash = await git("show", "--format=", o.sha);
-  const base = line((await git("merge-base", o.head, `${o.sha}~1`)).stdout);
+  if (sha === o.head || (await git("merge-base", "--is-ancestor", o.head, sha)).code === 0)
+    return { ok: true, how: "ancestor", sha };
+  if ((await unmatchedCommits(git, sha, o.head)).length === 0)
+    return { ok: true, how: "patch", sha };
+  const squash = await git("show", "--format=", sha);
+  const base = line((await git("merge-base", o.head, `${sha}~1`)).stdout);
   const whole = base !== "" ? await git("diff", base, o.head) : null;
   if (squash.code === 0 && whole?.code === 0 && samePatch(squash.stdout, whole.stdout))
-    return { ok: true, how: "squash" };
+    return { ok: true, how: "squash", sha };
   return {
     ok: false,
     error: `${o.sha} does not contain the gated head ${o.head}'s changes (not an ancestor, no equivalent patches, not its squash)`,
