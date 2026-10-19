@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:30:00.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": null,
+    "repo": "example-org/example-repo",
+    "release_branch": "release/2026-10-18-example",
+    "status": "running",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "queued",
+        "agents": {},
+        "last_error": { "code": "WORKTREE_FAILED", "message": "boom", "at": "2026-10-18T14:29:00.000Z" },
+        "attempt": 0,
+        "next_retry_at": "soon"
+      }
+    ],
+    "open_decisions": [],
+    "gates": [],
+    "updated_at": "2026-10-18T14:30:00.000Z"
+  }
+}

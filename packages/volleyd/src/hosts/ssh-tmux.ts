@@ -72,6 +72,8 @@ export interface RemoteHost extends Host {
   readonly spec: RemoteHostSpec;
   /** `$VOLLEY_HOOKS_DIR` on the box. */
   readonly hooksDir: string;
+  /** The box's volley-mcp entry point (its `.volley/mcp.json` server). */
+  readonly mcpEntry: string;
   /** The broker URL agents on the box use (the tunnel's remote end). */
   readonly brokerUrl: string;
   /** True / false for a clone / none at `repo`; throws LAUNCH_FAILED when ssh itself fails. */
@@ -119,6 +121,11 @@ export class SshTmuxHost implements RemoteHost {
   /** `$VOLLEY_HOOKS_DIR` on the box: its volley checkout's hooks. */
   get hooksDir(): string {
     return posix.join(this.spec.volley_dir, "packages", "volley-hooks");
+  }
+
+  /** The box's volley checkout's MCP server: what its agents' `.volley/mcp.json` runs. */
+  get mcpEntry(): string {
+    return posix.join(this.spec.volley_dir, "packages", "volley-mcp", "src", "index.ts");
   }
 
   /** The broker as the box sees it: the tunnel's remote end. */

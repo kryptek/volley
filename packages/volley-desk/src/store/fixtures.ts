@@ -453,6 +453,8 @@ function globals(now: number): DeskMessage[] {
     mailbox: { session_expiry_s: 604800 },
     worktree_root: "~/.volley/worktrees",
     spawn_timeout_s: 120,
+    spawn_retry_max_s: 900,
+    spawn_retry_max: 8,
     wake_grace_s: 60,
     idle_grace_s: 180,
     screen_tail_interval_s: 5,

@@ -87,6 +87,8 @@ export class ConfigStore {
   private readonly file: string;
   private readonly system: Journal;
   private readonly now: () => Date;
+  /** The bottom layer (CONFIG_DEFAULTS, or `defaultsFor` the daemon's env). */
+  private readonly defaults: Tunables;
   private fileLayer: TunablesPatch;
   private global: Tunables;
   private readonly waves = new Map<WaveId, TunablesPatch>();
@@ -96,14 +98,15 @@ export class ConfigStore {
   private readonly listeners: ((c: ConfigChange) => void)[] = [];
 
   private constructor(
-    opts: { home: string; system: Journal; now: () => Date },
+    opts: { home: string; system: Journal; now: () => Date; defaults: Tunables },
     layer: TunablesPatch,
   ) {
     this.file = join(opts.home, "config.yaml");
     this.system = opts.system;
     this.now = opts.now;
+    this.defaults = opts.defaults;
     this.fileLayer = layer;
-    this.global = merge(CONFIG_DEFAULTS, layer);
+    this.global = merge(this.defaults, layer);
     const changes = opts.system.readAll().filter((e) => e.type === "config_changed");
     const last = changes.at(-1);
     this.version = 1 + changes.length;
@@ -112,7 +115,13 @@ export class ConfigStore {
   }
 
   /** Load and validate `config.yaml` (absent = defaults). Throws ConfigError naming the path. */
-  static load(opts: { home: string; system: Journal; now?: () => Date }): ConfigStore {
+  static load(opts: {
+    home: string;
+    system: Journal;
+    now?: () => Date;
+    defaults?: Tunables;
+  }): ConfigStore {
+    const defaults = opts.defaults ?? CONFIG_DEFAULTS;
     const file = join(opts.home, "config.yaml");
     let layer: TunablesPatch = {};
     if (existsSync(file)) {
@@ -126,10 +135,10 @@ export class ConfigStore {
       }
       layer = (parsed ?? {}) as TunablesPatch;
       // The file is a patch over the defaults: what must be valid is the merged result.
-      const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(CONFIG_DEFAULTS, layer) : layer);
+      const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(defaults, layer) : layer);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
-    return new ConfigStore({ ...opts, now: opts.now ?? (() => new Date()) }, layer);
+    return new ConfigStore({ ...opts, now: opts.now ?? (() => new Date()), defaults }, layer);
   }
 
   /** Register (or replace) a wave's `config:` overrides. Validated by the wave-file schema. */
@@ -191,7 +200,7 @@ export class ConfigStore {
       rejected.push({ path: "(root)", reason: "patch must set at least 1 key" });
     else rejected.push(...emptyObjects(patch));
     const nextLayer = merge(this.fileLayer, patch);
-    const nextGlobal = merge(CONFIG_DEFAULTS, nextLayer);
+    const nextGlobal = merge(this.defaults, nextLayer);
     if (rejected.length === 0) rejected.push(...errorsFor(TUNABLES, nextGlobal));
     if (rejected.length > 0) return { applied: false, rejected };
 

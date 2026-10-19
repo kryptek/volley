@@ -19,6 +19,8 @@ export const DECISION_KINDS = [
   "agent_stalled",
   "unknown_screen",
   "hooks_auth_failed",
+  "mcp_not_registered",
+  "spawn_failed",
   "model_switch",
   "repo_untrusted",
   "remote_repo_missing",

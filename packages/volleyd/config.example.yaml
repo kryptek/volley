@@ -39,8 +39,10 @@
 # idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
 # fallback_model: null
 # mailbox: { session_expiry_s: 604800 }
-# worktree_root: ~/.volley/worktrees
+# worktree_root: ~/.volley/worktrees  # default $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set
 # spawn_timeout_s: 120
+# spawn_retry_max_s: 900        # cap on a failed spawn's retry delay (30 s, doubling)
+# spawn_retry_max: 8            # failed attempts in a row before retries stop (decision says so)
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
 

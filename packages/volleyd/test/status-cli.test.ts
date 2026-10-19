@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import pkg from "../package.json";
+import type { AdmissionSummary } from "../src/admission";
+import { admissionFor, formatAdmission } from "../src/commands/admission";
 import { patchFor } from "../src/commands/config";
 import {
   findBun,
@@ -17,6 +19,7 @@ import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
 import type { NewEvent } from "../src/types";
+import { makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -166,10 +169,100 @@ describe("volleyd status formatting", () => {
       updated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(out).toBe(
-      "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 0\n" +
+      "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 0  alarms: 0\n" +
         "  T1  #101   spec_review     PR #7\n" +
         "  T2  #102   queued          after: T1\n",
     );
+  });
+
+  it("counts the open alarms (tasks whose spawn failed) in the header", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        {
+          id: "T1",
+          issue: 101,
+          stage: "queued",
+          agents: {},
+          why_waiting: "spawn failed: WORKTREE_FAILED — retry in 30s (attempt 1)",
+          last_error: { code: "WORKTREE_FAILED", message: "x", at: "2026-10-18T12:00:00.000Z" },
+          attempt: 1,
+          next_retry_at: "2026-10-18T12:00:30.000Z",
+        },
+        { id: "T2", issue: 102, stage: "queued", agents: {} },
+      ],
+      open_decisions: ["spawn_failed-abc"],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n")[0]).toBe(
+      "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 1  alarms: 1",
+    );
+    expect(out).toContain("spawn failed: WORKTREE_FAILED — retry in 30s (attempt 1)");
+  });
+});
+
+describe("volleyd admission [wave]", () => {
+  const summary: AdmissionSummary = {
+    throttled: false,
+    allow: null,
+    reasons: [],
+    signals: {},
+    sampled_at: "2026-10-18T12:00:00.000Z",
+    waves: {
+      w1: { allow: 2, reasons: ["2 ci runs queued"] },
+      w2: { allow: null, reasons: [] },
+    },
+  } as unknown as AdmissionSummary;
+
+  it("accepts the wave positional every other command takes", async () => {
+    // No daemon here: the point is that the argument parses (usage errors exit 2).
+    const r = await runCli(["admission", "w1"]);
+    expect(r.exitCode).not.toBe(2);
+    expect(r.stderr).not.toContain("Unexpected argument");
+    expect((await runCli(["admission", "w1", "w2"])).exitCode).toBe(2);
+  });
+
+  it("against a running daemon: only that wave's verdict; an unknown wave is an error", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      const daemon = await env.start();
+      for (const w of ["w1", "w2"]) {
+        const file = join(env.home, `${w}.yaml`);
+        writeFileSync(
+          file,
+          `wave: ${w}\nrepo: /tmp/r\nrelease_branch: release/${w}\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`,
+        );
+        expect((await runCli(["run", file], env.env)).exitCode).toBe(0);
+      }
+      await daemon.tick();
+      const all = await runCli(["admission", "--json"], env.env);
+      expect(Object.keys(JSON.parse(all.stdout).waves).sort()).toEqual(["w1", "w2"]);
+      const one = await runCli(["admission", "w1", "--json"], env.env);
+      expect(one.exitCode).toBe(0);
+      expect(Object.keys(JSON.parse(one.stdout).waves)).toEqual(["w1"]);
+      const text = await runCli(["admission", "w1"], env.env);
+      expect(text.stdout).toContain("  w1  ");
+      expect(text.stdout).not.toContain("  w2  ");
+      const unknown = await runCli(["admission", "nope"], env.env);
+      expect(unknown.exitCode).toBe(1);
+      expect(unknown.stderr).toContain("unknown wave 'nope'");
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it("with a wave, shows only that wave's verdict", () => {
+    const one = formatAdmission(admissionFor(summary, "w1"));
+    expect(one).toContain("  w1  allow 2  2 ci runs queued");
+    expect(one).not.toContain("w2");
+    expect(admissionFor(summary, "w3").waves).toEqual({});
+    expect(formatAdmission(summary)).toContain("  w2  open");
   });
 });
 
