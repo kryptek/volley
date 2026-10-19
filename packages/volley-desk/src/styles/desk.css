@@ -473,12 +473,11 @@ input.recessed:focus {
   font-family: var(--f-mono);
   white-space: nowrap;
 }
-.sup-pill i,
-.coord--sup .coord-dot {
+/* The coordinators row shows health as a chip; its bar stays neutral (attention.css). */
+.sup-pill i {
   background: var(--ok);
 }
-.sup-pill.chip--hot i,
-.coord--sup.st-gone .coord-dot {
+.sup-pill.chip--hot i {
   background: var(--hot);
 }
 .a-nosignal {

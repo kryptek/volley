@@ -328,7 +328,9 @@ describe("App attention (live store)", () => {
     expect(container.querySelector(".needs-you")).toBeNull();
     expect(container.querySelector(".topbar .ny-pill")).toBeNull();
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    fireEvent.click(within(coords).getByRole("button", { name: "Ended · 1" }));
     expect(within(coords).getByText("Complete")).toBeInTheDocument();
+    expect(within(coords).getByText("completed")).toHaveClass("st-chip--completed");
     expect(within(coords).queryByText(/claim it/)).toBeNull();
   });
 });
