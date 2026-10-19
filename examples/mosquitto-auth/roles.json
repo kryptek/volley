@@ -66,6 +66,12 @@
         {
           "priority": 0,
           "acltype": "publishClientSend",
+          "topic": "volley/+/+/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
           "topic": "volley/+/+/control",
           "allow": true
         },
@@ -165,6 +171,12 @@
         {
           "priority": 0,
           "acltype": "publishClientSend",
+          "topic": "volley/+/+/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
           "topic": "volley/+/+/control",
           "allow": true
         },
@@ -241,6 +253,12 @@
         {
           "priority": 0,
           "acltype": "publishClientSend",
+          "topic": "volley/+/%u/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
           "topic": "volley/+/%u/control",
           "allow": true
         },
@@ -307,6 +325,12 @@
           "priority": 0,
           "acltype": "publishClientSend",
           "topic": "volley/+/%u/capability",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/usage",
           "allow": true
         },
         {

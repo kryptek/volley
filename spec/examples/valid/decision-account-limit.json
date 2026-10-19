@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:06:01.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "d-7k2m9q4x",
+    "wave": "w1",
+    "task": null,
+    "kind": "account_limit",
+    "question": "Needs you: Claude account work is at 91% of its 5-hour window (resets 2026-10-18T18:10:00.000Z). Move wave w1 to personal (12%)? Running agents finish where they are.",
+    "options": ["move wave w1 to personal", "not now"],
+    "pointers": {},
+    "opened_at": "2026-10-18T14:06:01.000Z",
+    "acct": "work",
+    "pct": 91,
+    "resets_at": "2026-10-18T18:10:00.000Z",
+    "suggested": "personal"
+  }
+}

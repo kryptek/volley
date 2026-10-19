@@ -62,7 +62,10 @@ export interface Host {
   sendKeys(workspace: string, key: string): Promise<void>;
   /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
   sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
-  /** Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`. */
+  /**
+   * Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`, or a
+   * retire's for the retired agent's own workspace.
+   */
   close(workspace: string, consent: ConsentToken): Promise<void>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
   readonly screenSource?: string;

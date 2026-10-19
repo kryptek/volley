@@ -26,6 +26,8 @@ export interface FakeHost extends Host {
   screenReads: { workspace: string; lines: number }[];
   keys: { workspace: string; key: string }[];
   texts: { workspace: string; text: string }[];
+  /** Workspaces closed (retire, cleanup). */
+  closed: string[];
   /** Screens returned by successive readScreen calls (the last one repeats); null = unreadable. */
   screens: (string | null)[];
   /** Called after each launch, e.g. to publish the hook signals a real agent would. */
@@ -47,6 +49,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     screenReads: [],
     keys: [],
     texts: [],
+    closed: [],
     screens: [],
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
@@ -76,7 +79,9 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     async sendText(workspace, text) {
       host.texts.push({ workspace, text });
     },
-    async close(_workspace: string, _consent: ConsentToken) {},
+    async close(workspace: string, _consent: ConsentToken) {
+      host.closed.push(workspace);
+    },
   };
   return host;
 }

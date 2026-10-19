@@ -118,6 +118,15 @@ export function reconcileTargets(
   return out;
 }
 
+/**
+ * Why a wave is not reconciled at all: a stopped or complete wave runs nothing, so none of its
+ * agents is re-waited or respawned (the report lists them `skipped: stopped`). Pure.
+ */
+export function reconcileSkip(rec: WaveRecord): "stopped" | null {
+  const status = rec.state?.status;
+  return status === "stopped" || status === "complete" ? "stopped" : null;
+}
+
 /** git and GitHub, as reconciliation asks them. Each answer may be null: unknown. */
 export interface ReconcileProbes {
   branch(repo: string, branch: string): Promise<TaskFacts["branch"]>;

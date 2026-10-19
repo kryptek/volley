@@ -85,9 +85,18 @@ export function runHook(
   stdin: string,
   opts: { cwd: string; env?: Record<string, string> },
 ): Promise<HookRun> {
+  return runScript(join("src", "hooks", `${name}.ts`), stdin, opts);
+}
+
+/** Run a package script (path relative to the package root) with JSON on stdin. */
+export function runScript(
+  path: string,
+  stdin: string,
+  opts: { cwd: string; env?: Record<string, string> },
+): Promise<HookRun> {
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const proc = spawn("bun", [join(PACKAGE_ROOT, "src", "hooks", `${name}.ts`)], {
+    const proc = spawn("bun", [join(PACKAGE_ROOT, path)], {
       cwd: opts.cwd,
       env: hookEnv(opts.env),
     });

@@ -42,7 +42,8 @@ export interface PrRef {
 }
 
 export type ArtifactReport =
-  | { kind: "missing"; missing: "push" | "pr" | "base"; detail: string }
+  /** `remote_head`: origin's branch is at another commit than the local head (a push from elsewhere). */
+  | { kind: "missing"; missing: "push" | "pr" | "base"; detail: string; remote_head?: string }
   | {
       kind: "ok";
       head: string;
@@ -97,6 +98,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
       kind: "missing",
       missing: "push",
       detail: `origin/${spec.branch} is ${remoteHead.slice(0, 12)}, the local head is ${head.slice(0, 12)}`,
+      remote_head: remoteHead,
     };
   }
 
@@ -152,6 +154,11 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
       .filter((s) => s !== "");
   }
   return report;
+}
+
+/** The aggregate CI state on exactly `head` (e.g. a head merged other than the gated one). */
+export async function ciStateOf(exec: ExecFn, cwd: string, head: string): Promise<CiState> {
+  return (await ciOn(exec, cwd, head)).state;
 }
 
 /** CI on exactly `head`: its runs, the aggregate state, failed job names, infra-shaped or not. */
@@ -278,7 +285,14 @@ export function artifactOutcome(
         pointers: { pr: pr.url },
         options: ["re-verify", "cancel"],
       },
-      data: { head_sha: head, run_urls: urls, failed_jobs: ci.failed_jobs, infra: ci.infra, role },
+      data: {
+        head_sha: head,
+        run_urls: urls,
+        failed_jobs: ci.failed_jobs,
+        infra: ci.infra,
+        role,
+        pr: { number: pr.number, url: pr.url },
+      },
     };
   }
   if (ci.state === "running" || ci.state === "none")
@@ -327,4 +341,219 @@ export async function checkRebase(
   const log = await git("log", "--oneline", `${base}..${tip}`);
   const behind = log.stdout.split("\n").filter((l) => l.trim() !== "").length;
   return { release_sha: tip, merge_base: base, behind: Math.max(behind, 1) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Merges outside GitHub's merge button (a local squash + push closes the PR with mergedAt: null)
+// ---------------------------------------------------------------------------------------------
+
+/** What the release branch says about a closed PR's gated head (probeLanded). */
+export interface LandedFacts {
+  /** The head is an ancestor of the release branch. */
+  ancestor: boolean;
+  /** The head's commits with no equivalent patch on the release branch (cherry-pick marks). */
+  unmatched: string[];
+  /**
+   * The release branch's commits since it and the head forked, newest first. `patch`: the commit's
+   * own diff is the PR's whole diff (probed only for a subject that names the PR).
+   */
+  subjects: { sha: string; subject: string; patch?: boolean }[];
+}
+
+export interface Landed {
+  how: "ancestor" | "patch" | "subject";
+  /** The commit that carries it: the head itself, the release tip, or the commit naming the PR. */
+  sha: string;
+}
+
+/**
+ * A release commit's subject names the PR the way GitHub's squash does: `(#<pr>)` at its end, and
+ * it is not a revert. A subject that merely mentions the PR (`follow-up to (#7)`, `replaces (#7)
+ * (#9)`, `Revert "… (#7)"`) does not. Pure.
+ */
+export function namesPr(subject: string, pr: number): boolean {
+  return new RegExp(`\\(#${pr}\\)$`).test(subject.trim()) && !/^revert\b/i.test(subject.trim());
+}
+
+/**
+ * Did `head` land on the release branch (at `releaseSha`) without GitHub's merge? It is an
+ * ancestor; or every one of its commits has an equivalent patch there; or a release commit's
+ * subject names the PR (namesPr, a squash's default) AND that commit's diff is the PR's whole
+ * diff — a subject alone is never enough. Null: nothing says so. Pure.
+ */
+export function landed(
+  f: LandedFacts,
+  head: string,
+  releaseSha: string,
+  pr: number,
+): Landed | null {
+  if (f.ancestor) return { how: "ancestor", sha: head };
+  if (f.unmatched.length === 0) return { how: "patch", sha: releaseSha };
+  const named = f.subjects.find((c) => namesPr(c.subject, pr) && c.patch === true);
+  return named !== undefined ? { how: "subject", sha: named.sha } : null;
+}
+
+type Git = (...a: string[]) => Promise<{ code: number; stdout: string }>;
+
+/** Is commit `sha`'s own diff the whole diff of `head` since it forked from `sha`'s parent? */
+async function isSquashOf(git: Git, head: string, sha: string): Promise<boolean> {
+  const squash = await git("show", "--format=", sha);
+  const base = line((await git("merge-base", head, `${sha}~1`)).stdout);
+  const whole = base !== "" ? await git("diff", base, head) : null;
+  return squash.code === 0 && whole?.code === 0 && samePatch(squash.stdout, whole.stdout);
+}
+
+/** The head-side commits of `<base>...<head>` that have no equivalent patch on the base side. */
+async function unmatchedCommits(git: Git, base: string, head: string): Promise<string[]> {
+  const r = await git("log", "--left-right", "--cherry-pick", "--format=%m%H", `${base}...${head}`);
+  if (r.code !== 0) throw new Error(`git log ${base}...${head} exited ${r.code}`);
+  return r.stdout
+    .split("\n")
+    .filter((l) => l.startsWith(">"))
+    .map((l) => l.slice(1).trim());
+}
+
+/** Gather LandedFacts for `head` against `origin/<release_branch>` (read-only git). */
+export async function probeLanded(
+  exec: ExecFn,
+  o: { cwd: string; head: string; release_branch: string; pr: number },
+): Promise<LandedFacts & { release_sha: string }> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const release = `origin/${o.release_branch}`;
+  await git("fetch", "origin", o.release_branch);
+  const tip = line(
+    (await git("rev-parse", "--verify", "--quiet", `refs/remotes/${release}`)).stdout,
+  );
+  if (tip === "") throw new Error(`${release} not found`);
+  const anc = await git("merge-base", "--is-ancestor", o.head, release);
+  if (anc.code === 0) return { ancestor: true, unmatched: [], subjects: [], release_sha: tip };
+  if (anc.code !== 1) throw new Error(`git merge-base --is-ancestor exited ${anc.code}`);
+  const unmatched = await unmatchedCommits(git, release, o.head);
+  const mb = line((await git("merge-base", o.head, release)).stdout);
+  const log = await git("log", "--format=%H %s", mb !== "" ? `${mb}..${release}` : release);
+  const subjects = log.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+    .map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) }));
+  for (const c of subjects)
+    if (namesPr(c.subject, o.pr)) Object.assign(c, { patch: await isSquashOf(git, o.head, c.sha) });
+  return { ancestor: false, unmatched, subjects, release_sha: tip };
+}
+
+/**
+ * Two diffs carry the same change: equal once the blob ids (`index` lines) and hunk positions
+ * (`@@ -a,b +c,d @@`) are dropped — what `git patch-id` compares, without its stdin. Pure.
+ */
+export function samePatch(a: string, b: string): boolean {
+  const norm = (d: string) =>
+    d
+      .split("\n")
+      .filter((l) => !l.startsWith("index "))
+      .map((l) => (l.startsWith("@@") ? l.replace(/^@@ [^@]* @@/, "@@") : l))
+      .join("\n")
+      .trim();
+  const x = norm(a);
+  return x !== "" && x === norm(b);
+}
+
+export type OperatorMergeCheck =
+  /** `sha`: the commit, resolved to its full sha. */
+  { ok: true; how: "ancestor" | "patch" | "squash"; sha: string } | { ok: false; error: string };
+
+/**
+ * `volleyd merged --sha <sha>`: is `sha` on the release branch, and does it carry the gated
+ * `head` — as an ancestor, as equivalent patches of every head commit, or as one squashed patch
+ * equal to the PR's whole diff? Read-only git through the fenced exec.
+ */
+export async function verifyOperatorMerge(
+  exec: ExecFn,
+  o: { cwd: string; head: string; sha: string; release_branch: string },
+): Promise<OperatorMergeCheck> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const release = `origin/${o.release_branch}`;
+  await git("fetch", "origin", o.release_branch);
+  // A short sha is the same commit as its full one: compare (and record) the full sha.
+  const full = await git("rev-parse", "--verify", "--quiet", `${o.sha}^{commit}`);
+  const sha = full.code === 0 ? line(full.stdout) : "";
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, error: `${o.sha} is not a known commit` };
+  const on = await git("merge-base", "--is-ancestor", sha, release);
+  if (on.code !== 0) return { ok: false, error: `${o.sha} is not on ${release}` };
+  if (sha === o.head || (await git("merge-base", "--is-ancestor", o.head, sha)).code === 0)
+    return { ok: true, how: "ancestor", sha };
+  if ((await unmatchedCommits(git, sha, o.head)).length === 0)
+    return { ok: true, how: "patch", sha };
+  if (await isSquashOf(git, o.head, sha)) return { ok: true, how: "squash", sha };
+  return {
+    ok: false,
+    error: `${o.sha} does not contain the gated head ${o.head}'s changes (not an ancestor, no equivalent patches, not its squash)`,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// A PR head that moved after a gate: CI on the new head, what failed, what changed
+// ---------------------------------------------------------------------------------------------
+
+/** CI on exactly `head` (runs, aggregate state, failed job names), for a head the pipeline did not push. */
+export async function ciReport(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+): Promise<{ state: CiState; runs: CiRun[]; failed_jobs: string[]; infra: boolean }> {
+  return ciOn(exec, cwd, head);
+}
+
+/** The completed runs that failed a head. */
+export const failedRuns = (runs: CiRun[]): CiRun[] =>
+  runs.filter((r) => r.status === "completed" && FAILED.has(r.conclusion ?? ""));
+
+const MAX_FAILING_TESTS = 20;
+
+/**
+ * Failing test ids in a `gh run view --log-failed` log (`<job>\t<step>\t<line>`): vitest's
+ * `FAIL  <file> > <suite> > <name>` and bun's `(fail) <name>` lines, each once, in log order. Pure.
+ */
+export function failingTests(log: string): string[] {
+  const out: string[] = [];
+  for (const raw of log.split("\n")) {
+    const text = (raw.split("\t").at(-1) ?? "").replace(/^\S*\d{2}:\d{2}:\d{2}\S*Z\s/, "").trim();
+    const m = /^FAIL\s+(.+)$/.exec(text) ?? /^\(fail\)\s+(.+?)(\s+\[[\d.]+\s*m?s\])?$/.exec(text);
+    const id = m?.[1]?.trim();
+    if (id !== undefined && id !== "" && !out.includes(id)) out.push(id);
+    if (out.length >= MAX_FAILING_TESTS) break;
+  }
+  return out;
+}
+
+/** What a moved PR head brings: CI on it (and, when red, the failing tests), and the diff. */
+export interface MovedHeadFacts {
+  ci: { state: CiState; runs: CiRun[]; failed_jobs: string[]; failing_tests: string[] };
+  /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
+  log: string;
+  diffstat: string;
+}
+
+/** Gather MovedHeadFacts (read-only git / gh through the fenced exec). */
+export async function probeMovedHead(
+  exec: ExecFn,
+  o: { cwd: string; branch: string; from: string; to: string },
+): Promise<MovedHeadFacts> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  await git("fetch", "origin", o.branch);
+  const ci = await ciOn(exec, o.cwd, o.to);
+  const tests: string[] = [];
+  if (ci.state === "red") {
+    for (const run of failedRuns(ci.runs)) {
+      const r = await exec(["gh", "run", "view", String(run.id), "--log-failed"], { cwd: o.cwd });
+      if (r.code === 0)
+        for (const t of failingTests(r.stdout)) if (!tests.includes(t)) tests.push(t);
+    }
+  }
+  const log = await git("log", "--oneline", `${o.from}..${o.to}`);
+  const stat = await git("diff", "--stat", o.from, o.to);
+  return {
+    ci: { state: ci.state, runs: ci.runs, failed_jobs: ci.failed_jobs, failing_tests: tests },
+    log: log.code === 0 ? log.stdout.trim() : "",
+    diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",
+  };
 }

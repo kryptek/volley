@@ -8,6 +8,8 @@ Read `ISSUE.md` (the issue, {{issue_url}}) and the review findings you were give
 
     vol_publish(channel="result", type="fixup", payload={ "resolved": [{ "finding": "S1", "how": "<what you changed, or why not>" }] })
 
+When `.volley/findings.md` opens with **Directive: the PR head moved**, the PR head was pushed outside the pipeline after a gate and the owner sent it to you: that directive (CI on the new head, its failed jobs and failing tests, the diff since the gated head) is your first job, and it is resolved in `resolved` like a finding (`CI`, or `MOVE` when CI was green).
+
 volleyd then verifies the push, the PR and CI on the new head before anything moves on.
 
 ## Rules

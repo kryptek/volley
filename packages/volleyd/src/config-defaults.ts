@@ -32,9 +32,10 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  stop_grace_s: 30,
   dynsec_batch_ms: 50,
   credential_sweep_interval_s: 600,
-  claude: { default_account: null },
+  claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
 };
 
@@ -146,6 +147,9 @@ export const DAEMON_DEFAULTS = {
   dynsec_reconnect_max_ms: 30_000,
   /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
   reply_key_min_bits: 2048,
+  /** Retry headroom of the derived spawn budget: this share of the wave's pipeline roles, at least `spawn_budget_retry_min`. */
+  spawn_budget_retry_headroom: 0.5,
+  spawn_budget_retry_min: 2,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */
@@ -170,6 +174,10 @@ export const DAEMON_DEFAULTS = {
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */
   screen_backoff_s: 30,
+  /** Consecutive timed-out reads after which an agent's workspace is taken for closed. */
+  screen_closed_after_timeouts: 3,
+  /** Capture interval of a workspace taken for closed (at most hourly). */
+  screen_closed_backoff_s: 3600,
   /** The broker port when the broker URL names none (MQTT's registered port). */
   mqtt_default_port: 1883,
   /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */

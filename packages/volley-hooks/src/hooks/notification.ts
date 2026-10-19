@@ -4,7 +4,9 @@
  * → `awaiting_input`; `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`;
  * `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only.
  * Coordinators add `question` (the last Stop's whole question, else the whole message),
- * `session_url` and `workspace`.
+ * `session_url` and `workspace`. An `idle_prompt` after a Stop
+ * that left a background task running carries `background_wait: true`: the session waits on
+ * that task's events, not on a person.
  */
 import { type HookContext, boundQuestion, clip, runHook } from "../lib/hook-io";
 import {
@@ -26,16 +28,20 @@ export async function handle(ctx: HookContext): Promise<string | null> {
   const session = await openSession(identity, ctx.event, ctx.env);
   try {
     let state: Activity["state"] | null = null;
+    const prev = readActivity(identity.stateDir);
+    // Only the idle prompt: a permission prompt or a direct question always wants a person.
+    const wait = prev?.background_wait === true && type === "idle_prompt";
     if (AWAITING.has(type) || type.startsWith("quota_auto_resume")) {
       const coordinator: Record<string, unknown> = {};
       if (identity.mode === "coordinator") {
-        const question = readActivity(identity.stateDir)?.question ?? boundQuestion(message);
+        const question = prev?.question ?? boundQuestion(message);
         if (question !== "") coordinator.question = question;
         Object.assign(coordinator, coordinatorFields(identity, ctx.env));
       }
       await session.progress("awaiting_input", {
         ...base,
         ...(AWAITING.has(type) ? {} : { class: "credit" }),
+        ...(wait ? { background_wait: true } : {}),
         ...coordinator,
       });
       state = "awaiting_input";
@@ -44,12 +50,12 @@ export async function handle(ctx: HookContext): Promise<string | null> {
       state = "idle";
     }
     if (state !== null) {
-      const prev = readActivity(identity.stateDir);
       writeActivity(identity.stateDir, {
         state,
         at: new Date().toISOString(),
         hook_event: ctx.event,
         ...(prev?.question !== undefined ? { question: prev.question } : {}),
+        ...(prev?.background_wait === true ? { background_wait: true } : {}),
       });
     }
     await session.heartbeat();

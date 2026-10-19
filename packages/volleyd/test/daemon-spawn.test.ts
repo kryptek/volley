@@ -224,19 +224,17 @@ describe("daemon spawn loop", () => {
     const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
     expect(existsSync(lock)).toBe(false);
 
-    // cleanup: dry run lists the worktree; --yes removes it with consent.
+    // The retire closed its workspace; cleanup: dry run lists the worktree, --yes removes it.
+    expect(host.closed).toEqual(["workspace:1"]);
     const io = makeBufferIO();
     const worktree = join(env.home, "wt", "w1", "T1-implementer");
     expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
-    expect(io.readStdout()).toContain(`would remove ${worktree} and workspace(s) workspace:1`);
+    expect(io.readStdout()).toContain(`would remove ${worktree}\n`);
     const fx = fakeExec();
     expect(await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io)).toBe(
       0,
     );
-    expect(fx.argvs()).toEqual([
-      ["cmux", "close-workspace", "--workspace", "workspace:1"],
-      ["git", "-C", repo, "worktree", "remove", worktree],
-    ]);
+    expect(fx.argvs()).toEqual([["git", "-C", repo, "worktree", "remove", worktree]]);
   });
 
   it("cleanup skips worktrees whose agent is not retired", async () => {

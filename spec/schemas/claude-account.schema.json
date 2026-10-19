@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/claude-account.schema.json",
+  "title": "Volley Claude Account Usage",
+  "description": "A supervisor's retained per-account fold of its agents' usage samples, published to volley/_system/claude-accounts/<acct>. The rate-limit windows belong to the account, not the agent, so the newest sample wins. See spec section 4.6.12.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/claude-accounts" },
+        "type": { "const": "claude_account" },
+        "payload": {
+          "type": "object",
+          "required": ["account", "five_hour", "weekly", "agents", "waves", "sampled_at"],
+          "properties": {
+            "account": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$",
+              "description": "A local account, or <acct>@<host> for a remote host's own login (its agents' samples are never folded into a local account)."
+            },
+            "label": { "type": "string", "minLength": 1 },
+            "plan": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The plan label Claude Code reported at sign-in (registry accounts only)."
+            },
+            "five_hour": {
+              "oneOf": [{ "$ref": "usage.schema.json#/$defs/window" }, { "type": "null" }],
+              "description": "The 5-hour window from the newest sample that carried one; null when none has."
+            },
+            "weekly": {
+              "oneOf": [{ "$ref": "usage.schema.json#/$defs/window" }, { "type": "null" }],
+              "description": "The weekly window from the newest sample that carried one; null when none has."
+            },
+            "agents": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+              "description": "Agents whose latest sample is on this account."
+            },
+            "waves": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+              "description": "Waves those agents belong to."
+            },
+            "sampled_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "captured_at of the newest sample folded in."
+            },
+            "sampled_by": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "The agent that published that sample."
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

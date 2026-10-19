@@ -351,6 +351,17 @@ describe("createSteerTransport", () => {
       error: expect.stringMatching(/did not answer/),
     });
   });
+  it("control() takes a per-request timeout in place of the default", async () => {
+    const { transport } = setup();
+    await expect(transport.control("claim", { wave: "w" }, undefined, 5)).resolves.toEqual({
+      ok: false,
+      error: "volleyd did not answer within 0.005s",
+    });
+    await expect(transport.control("claim", { wave: "w" })).resolves.toEqual({
+      ok: false,
+      error: "volleyd did not answer within 0.05s",
+    });
+  });
 });
 
 describe("copySteerCommand", () => {

@@ -103,13 +103,13 @@ The plugin rewrites its **whole** state file after every change (once per contro
 so the file size, about 300 bytes per login, drives the cost of every mint. No login ever expires.
 volleyd therefore batches simultaneous changes into one message (`dynsec_batch_ms`) and **sweeps**:
 at start and every `credential_sweep_interval_s` it deletes the logins of agents that are no longer
-live, so the file holds only live agents, the fixed identities and the accounts (SPEC §4.6.12).
+live, so the file holds only live agents, the fixed identities and the accounts (SPEC §4.6.13).
 
 ## Roles and identities
 
 | Role (broker name) | Held by | Writes |
 |---|---|---|
-| `agent` (`volley-agent`) | each dispatched agent (username = agent id) | its own `status`, `progress`, `result`, `capability`, `control`, `_user/*` and registry entry (`%u`), lease requests, and the mailboxes of `volleyd` and `desk` (acks) |
+| `agent` (`volley-agent`) | each dispatched agent (username = agent id) | its own `status`, `progress`, `result`, `capability`, `usage`, `control`, `_user/*` and registry entry (`%u`), lease requests, and the mailboxes of `volleyd` and `desk` (acks) |
 | `account` | the Desk, coordinators, every account | its own channels, registry entry and `volley/_system/machines/%u[/#]`, lease requests |
 | `desk` | the Desk, `steer` accounts | any agent's `mailbox` (steering; control requests to the daemon); reads `volley/_system/desk-probe/%c` (the Desk's resume probe, its own client id) |
 | `coordinator` | coordinator sessions | any agent's `mailbox`, standard channels and registry entry |
@@ -191,7 +191,7 @@ volley auth list-agents                             # what is left
 ```
 
 `rm-agent` deletes only agent logins. Deleting a login disconnects the agent **without its will**,
-so publish its retained `reaped` status yourself before deleting it (volleyd does, SPEC §4.6.12).
+so publish its retained `reaped` status yourself before deleting it (volleyd does, SPEC §4.6.13).
 volleyd's sweep deletes any agent login with no live agent behind it, including ones another tool
 minted, once it has seen it for `spawn_timeout_s`.
 

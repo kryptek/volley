@@ -118,8 +118,16 @@ export interface SteerTransport {
   identity: string;
   /** Publish to `target`'s mailbox; returns the message as first logged. */
   send(target: SteerTarget, input: string, opts?: { urgent?: boolean }): SentSteer;
-  /** A volleyd control request (`claim`, …); resolves with its answer. */
-  control(op: string, fields: Record<string, unknown>, text?: string): Promise<ControlReply>;
+  /**
+   * A volleyd control request (`claim`, …); resolves with its answer. `timeoutMs`
+   * overrides the default wait for an op volleyd answers late (`agent_move_account`).
+   */
+  control(
+    op: string,
+    fields: Record<string, unknown>,
+    text?: string,
+    timeoutMs?: number,
+  ): Promise<ControlReply>;
 }
 
 const mailbox = (namespace: string, agentId: string) => `volley/${namespace}/${agentId}/mailbox`;
@@ -199,14 +207,19 @@ export function createSteerTransport(
       : { interrupted: false, reason: "volleyd has no interrupt for this agent" };
   };
 
-  const control: SteerTransport["control"] = (op, fields, text = `volleyd ${op}`) => {
+  const control: SteerTransport["control"] = (
+    op,
+    fields,
+    text = `volleyd ${op}`,
+    wait = timeoutMs,
+  ) => {
     const id = newId();
     const daemonNs = opts.daemonNamespace?.() ?? "default";
     return new Promise<ControlReply>((resolve) => {
       let off = () => {};
       const timer = setTimeout(
-        () => done({ ok: false, error: `volleyd did not answer within ${timeoutMs / 1000}s` }),
-        timeoutMs,
+        () => done({ ok: false, error: `volleyd did not answer within ${wait / 1000}s` }),
+        wait,
       );
       function done(reply: ControlReply) {
         clearTimeout(timer);

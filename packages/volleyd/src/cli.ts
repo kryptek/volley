@@ -27,6 +27,7 @@ Commands:
   resume      Resume a wave, or release the kill switch (--all)
   stop        Stop a wave and cancel its agents; --all is the kill switch
   steer       Send mailbox steering to a task's agent and report the ack
+  merged      Record a gated task merged outside GitHub's merge button (verified; owner only)
 
 Global flags (daemon/install/run/diff/status/config and the wave controls):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -60,6 +61,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   resume: async () => (await import("./commands/resume")).resume,
   stop: async () => (await import("./commands/stop")).stop,
   steer: async () => (await import("./commands/steer")).steer,
+  merged: async () => (await import("./commands/merged")).merged,
 };
 
 export async function main(args: CommandArgs): Promise<ExitCode> {

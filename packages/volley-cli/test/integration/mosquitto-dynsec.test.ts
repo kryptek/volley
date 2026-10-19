@@ -157,6 +157,15 @@ describe.skipIf(!RUN)("Volley roles on mosquitto 2.1 Dynamic Security", () => {
     expect(await delivered(screen)).toBe(false);
   });
 
+  it("%u: agent X publishes its own usage sample (SPEC §4.6.12), never Y's", async () => {
+    const own = probe("own-usage");
+    const forge = probe("x-forges-y-usage");
+    await attempt(X, `volley/${NS}/${X}/usage`, own);
+    await attempt(X, `volley/${NS}/${Y}/usage`, forge);
+    expect(await delivered(own)).toBe(true);
+    expect(await delivered(forge)).toBe(false);
+  });
+
   it("an agent acks volleyd's and the desk's mailboxes (SPEC §4.4)", async () => {
     const toVolleyd = probe("ack-volleyd");
     const toDesk = probe("ack-desk");

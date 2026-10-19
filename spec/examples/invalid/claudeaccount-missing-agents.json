@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:06:01.000Z",
+  "channel": "_system/claude-accounts",
+  "type": "claude_account",
+  "payload": {
+    "account": "work",
+    "five_hour": null,
+    "weekly": null,
+    "waves": [],
+    "sampled_at": "2026-10-18T14:06:00.000Z"
+  }
+}

@@ -4,10 +4,23 @@
  * steering panel and settings tasks), a banner slot for the Needs-you / claim
  * banners, the dependency graph above the wave file, and a footer rail with
  * one segment per task, the wave's completion and its counts.
+ *
+ * A `stopped` or `complete` wave renders dimmed with a `Stopped` / `Complete`
+ * chip, its stages as they were (struck through) and its clock frozen at the
+ * last state update (`stopped 2.8h ago`). That is an approximation of the stop
+ * time: volleyd bumps `updated_at` for every journaled event, so one after
+ * `wave_stopped` (an agent reaped, a decision resolved) moves it on; the wave
+ * state carries no stop time of its own yet. A task volleyd holds for CI (its
+ * `why_waiting` reads `CI pending on <sha> (n/m checks)`) shows `waiting for
+ * CI` in the graph, a `waiting for CI` chip in the title and a row under the
+ * graph with its pipeline (`implement ✓ · CI ⟳ · review`) and the reason; no
+ * agent window is needed for it. On a phone the graph wraps to the window's
+ * width (`dagWidthFor`).
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
+import { ciPending } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
@@ -19,6 +32,18 @@ import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
 
 export const WAVE_W = 620;
+/** The window body's horizontal padding (desk.css `.win-body`), left plus right. */
+const BODY_PAD_X = 28;
+
+/** The graph's width inside a wave window capped at `maxWidth` (a phone). */
+export function dagWidthFor(maxWidth: number): number {
+  return Math.min(WAVE_W, maxWidth) - BODY_PAD_X;
+}
+
+const ENDED_CHIP: Partial<Record<WaveStatePayload["status"], string>> = {
+  stopped: "Stopped",
+  complete: "Complete",
+};
 
 export interface WaveWindowProps {
   wave: WaveView;
@@ -137,6 +162,11 @@ export function WaveWindow(p: WaveWindowProps) {
   // Count unresolved decisions from the store, not state.open_decisions: a resolved decision can linger in the
   // retained state until the supervisor re-publishes it (D0 fixup, "ghost" decisions).
   const openDecisions = Object.values(p.wave.decisions).filter((d) => !d.resolved).length;
+  const ended = s ? ENDED_CHIP[s.status] : undefined;
+  // Frozen at the last state update: the supervisor published it when the wave ended.
+  const endedAt = Date.parse(s?.updated_at ?? "");
+  const ci = s?.tasks.filter(ciPending) ?? [];
+  const ciLabels = Object.fromEntries(ci.map((t) => [t.id, "waiting for CI"]));
 
   const title = (
     <>
@@ -145,6 +175,15 @@ export function WaveWindow(p: WaveWindowProps) {
       {s && (
         <span className={`chip${mine ? " chip--mine" : ""}`}>
           {mine ? "★ yours" : (s.owner ?? "no owner")}
+        </span>
+      )}
+      {ended && <span className="chip chip--ended">{ended}</span>}
+      {!ended && ci.length > 0 && (
+        <span
+          className="chip chip--ci"
+          title={ci.map((t) => `${t.id}: ${t.why_waiting}`).join("\n")}
+        >
+          waiting for CI
         </span>
       )}
     </>
@@ -163,7 +202,7 @@ export function WaveWindow(p: WaveWindowProps) {
   );
 
   const footer = s && (
-    <div className="rail">
+    <div className={`rail${ended ? " wave-ended" : ""}`}>
       {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a read-only status, not a control */}
       <div
         className="rail-bar"
@@ -191,7 +230,15 @@ export function WaveWindow(p: WaveWindowProps) {
         <span>
           {plural(openDecisions, "decision")} · {plural(s.gates.length, "gate")}
         </span>
-        {p.startedAt != null && <span className="mono dim">running {ago(now - p.startedAt)}</span>}
+        {ended
+          ? !Number.isNaN(endedAt) && (
+              <span className="mono dim">
+                {s.status} {ago(now - endedAt)} ago
+              </span>
+            )
+          : p.startedAt != null && (
+              <span className="mono dim">running {ago(now - p.startedAt)}</span>
+            )}
       </div>
     </div>
   );
@@ -209,10 +256,27 @@ export function WaveWindow(p: WaveWindowProps) {
     >
       {p.banner}
       {s ? (
-        <div className="wave-grid">
-          <div>
+        <div className={`wave-grid${ended ? " wave-ended" : ""}`}>
+          <div className="min0">
             <div className="lbl">Dependency graph</div>
-            <Dag tasks={tasks} accent={accent} />
+            <Dag
+              tasks={tasks}
+              accent={accent}
+              ended={!!ended}
+              labels={ciLabels}
+              maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
+            />
+            {!ended && ci.length > 0 && (
+              <ul className="wave-ci">
+                {ci.map((t) => (
+                  <li key={t.id} aria-label={`${t.id} CI pending`}>
+                    <span className="mono">{t.id}</span>
+                    <span className="wave-ci-pipe">implement ✓ · CI ⟳ · review</span>
+                    <span className="dim">{t.why_waiting}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           <div className="min0">
             <div className="lbl">

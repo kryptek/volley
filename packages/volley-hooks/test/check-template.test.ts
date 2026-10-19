@@ -10,6 +10,19 @@ describe("settings template", () => {
     const result = checkTemplate(join(PACKAGE_ROOT, "settings.volley-hooks.json"), PACKAGE_ROOT);
     expect(result.missing).toEqual([]);
     expect(result.commands.length).toBeGreaterThanOrEqual(7);
+    expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/statusline/publish.ts"');
+  });
+
+  it("reports a statusLine command whose script does not exist", () => {
+    const dir = mkdtempSync(join(tmpdir(), "volley-hooks-tpl-"));
+    const path = join(dir, "settings.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        statusLine: { type: "command", command: 'bun "$VOLLEY_HOOKS_DIR/src/statusline/nope.ts"' },
+      }),
+    );
+    expect(checkTemplate(path, PACKAGE_ROOT).missing).toEqual(["src/statusline/nope.ts"]);
   });
 
   it("reports a command whose script does not exist", () => {

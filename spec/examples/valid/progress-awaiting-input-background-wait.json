@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T14:20:00.000Z",
+  "channel": "progress",
+  "type": "awaiting_input",
+  "payload": {
+    "seq": 112,
+    "source": "harness-hook",
+    "hook_event": "Notification",
+    "notification_type": "idle_prompt",
+    "text": "Claude is waiting for your input",
+    "question": "Claude is waiting for your input",
+    "background_wait": true,
+    "session_url": "https://claude.ai/code/session-example",
+    "workspace": "coordinator"
+  }
+}

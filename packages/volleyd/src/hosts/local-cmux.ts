@@ -10,7 +10,8 @@ import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } 
 
 /**
  * The local host: worktrees on this machine, agents in cmux workspaces. Every command goes
- * through the fenced `exec`; closing a workspace needs the `cleanup --yes` consent token.
+ * through the fenced `exec`; closing a workspace needs a consent token (`cleanup --yes`, or a
+ * retire for its agent's own workspace).
  */
 export class LocalCmuxHost implements Host {
   readonly name = "local";

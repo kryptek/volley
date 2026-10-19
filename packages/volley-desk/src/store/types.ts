@@ -153,6 +153,10 @@ export const DECISION_KINDS = [
   "ci_failed",
   "wave_complete",
   "plan_change",
+  "pr_closed",
+  "pr_head_moved",
+  "spawn_budget_exhausted",
+  "account_limit",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -168,6 +172,11 @@ export interface DecisionPayload {
   pointers?: { diff?: string; transcript?: string; screen?: string; pr?: string };
   opened_at: string;
   resolved?: { answer: string; by: string; at: string };
+  /** `account_limit` extras (SPEC §4.6.12): the account, its 5-hour pct and reset, the suggestion. */
+  acct?: string;
+  pct?: number;
+  resets_at?: string | null;
+  suggested?: string | null;
 }
 
 // ------------------------------------------------------- config and leases
@@ -194,6 +203,8 @@ export interface Tunables {
   spawn_timeout_s?: number;
   wake_grace_s?: number;
   screen_tail_interval_s?: number;
+  /** Claude account profiles (SPEC §4.6.11); absent from a supervisor that predates them. */
+  claude?: { default_account?: string | null; warn_at_pct?: number };
   [key: string]: unknown;
 }
 
@@ -213,6 +224,56 @@ export interface LeasePoolPayload {
   reasons: string[];
 }
 
+// ----------------------------------------------------- Claude accounts
+
+/** usage.schema.json `$defs/window`: one of an account's rate-limit windows. */
+export interface UsageWindow {
+  pct: number;
+  resets_at: string | null;
+}
+
+/** usage.schema.json payload: an agent's retained `usage` sample (SPEC §4.6.12). */
+export interface UsagePayload {
+  account: string | null;
+  config_dir?: string;
+  model: string | null;
+  context_window: { used_percentage: number | null; used: number | null; size: number | null };
+  rate_limits: { five_hour?: UsageWindow; weekly?: UsageWindow };
+  captured_at: string;
+}
+
+/** claude-account.schema.json payload: `volley/_system/claude-accounts/<acct>`. */
+export interface ClaudeAccountPayload {
+  account: string;
+  label?: string;
+  plan?: string;
+  five_hour: UsageWindow | null;
+  weekly: UsageWindow | null;
+  agents: string[];
+  waves: string[];
+  sampled_at: string;
+  sampled_by?: string;
+}
+
+/**
+ * A Claude account sign-in, folded from `volley/_system/claude/<acct>/signin`
+ * (`claude_signin_url` → waiting, then `claude_signin_done` / `_failed`). Only
+ * the provider's sign-in link ever travels there, never a credential.
+ */
+export interface ClaudeSignin {
+  acct: string;
+  state: "waiting" | "done" | "failed";
+  url?: string;
+  /** `browser`, or `manual_code` (the page shows a code for the sign-in terminal). */
+  flow?: string;
+  /** The tmux session to attach to for a `manual_code` sign-in. */
+  attach?: string;
+  plan?: string;
+  reason?: string;
+  /** Local receipt time (ms). */
+  at: number;
+}
+
 // ------------------------------------------------------------------- store
 
 export interface FeedEntry {
@@ -229,6 +290,13 @@ export interface AgentAttention {
   sessionUrl?: string;
   workspace?: string;
   at: number;
+  /**
+   * The hooks saw a live background wait (`background_wait: true`): the agent
+   * ended its turn waiting on events, not on a person.
+   */
+  backgroundWait?: boolean;
+  /** The Notification hook's `notification_type` (`idle_prompt`, `permission_prompt`, …). */
+  notificationType?: string;
 }
 
 export interface AgentView {
@@ -251,6 +319,12 @@ export interface AgentView {
   narration: string | null;
   /** ms of the last `progress/heartbeat`. */
   heartbeat: number | null;
+  /** How many heartbeats arrived: they update liveness only and are kept out of `feed`. */
+  heartbeats?: number;
+  /** When the narration was current (ms). */
+  narrationAt?: number;
+  /** The narration was restored from this browser's session, not heard since the page loaded. */
+  narrationRestored?: boolean;
   /** The last `progress` envelope's type and time (ms), any type: a sign the agent is on this broker. */
   lastProgress?: { type: string; at: number };
   /** ms of the last message on any of the agent's topics. */
@@ -282,6 +356,8 @@ export interface CoordinatorView {
   id: string;
   waves: string[];
   state: CoordinatorState;
+  /** `working` but idle with a background wait armed: waiting on wave events, not on the owner. */
+  waitingOnEvents?: boolean;
   question?: string;
   text?: string;
   sessionUrl?: string;
@@ -329,6 +405,12 @@ export interface DeskState {
   self?: string;
   /** Delivery receipts for mailbox messages (D4 steering); live-only. */
   steering?: SteeringReceipts;
+  /** Retained per-account usage records, by account id. */
+  claudeAccounts?: Record<string, ClaudeAccountPayload>;
+  /** Retained `usage` samples, by agent id (kept apart: they can arrive before the registry). */
+  usage?: Record<string, UsagePayload>;
+  /** Claude account sign-ins heard since the page loaded, by account id; live-only. */
+  signins?: Record<string, ClaudeSignin>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

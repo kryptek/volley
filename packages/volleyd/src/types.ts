@@ -83,12 +83,14 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
+  stop_grace_s: number;
   /** Window collecting broker login changes into one Dynamic Security control message. */
   dynsec_batch_ms: number;
   /** Seconds between credential sweeps (credential-sweep.ts). */
   credential_sweep_interval_s: number;
-  /** Claude account profiles (src/claude/): which account an agent runs under by default. */
-  claude: { default_account: string | null };
+  /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
+  claude: { default_account: string | null; warn_at_pct: number };
   hosts: Record<string, RemoteHostConfig>;
 }
 
@@ -179,7 +181,19 @@ export interface TaskState {
     url: string;
     head_sha?: string;
     ci?: "green" | "red" | "running" | "none";
+    /** While the pipeline holds for CI on `head_sha`: its runs completed / all of them. */
+    checks?: { done: number; total: number };
   };
+  /** While a parallel stage group runs: its label (`review (spec + quality)`); `stage` stays the enum. */
+  stage_label?: string;
+  /** While a parallel stage group runs: each role, its agent and how far it is. */
+  stage_group?: {
+    role: string;
+    agent_id?: string;
+    state: "pending" | "running" | "done" | "retired";
+  }[];
+  /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
+  alarms?: { alarm: string; message: string }[];
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
   last_error?: { code: string; message: string; at: string };
@@ -277,6 +291,17 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_failed",
   "claude_profile_synced",
   "agent_account_moved",
+  // Pipeline / lifecycle round 2: relaunches, CI holds, PR heads moved at a gate, merges outside
+  // GitHub's merge button, agents retired without their ack, alarms that no longer hold.
+  "relaunched",
+  "ci_pending",
+  "ci_green",
+  "pr_head_moved",
+  "merged_by_operator",
+  "agent_force_retired",
+  "alarm_cleared",
+  // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
+  "wave_account_moved",
   // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
   "agent_reaped_by_supervisor",
   "credentials_revoked",

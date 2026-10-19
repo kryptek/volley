@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * CI check: every hook command in settings.volley-hooks.json must point at a file that exists
- * under the package root (`$VOLLEY_HOOKS_DIR/<path>`).
+ * CI check: every hook command (and the statusLine command) in settings.volley-hooks.json must
+ * point at a file that exists under the package root (`$VOLLEY_HOOKS_DIR/<path>`).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -14,20 +14,23 @@ export function checkTemplate(
   packageRoot: string,
 ): { commands: string[]; missing: string[] } {
   const settings = JSON.parse(readFileSync(templatePath, "utf-8")) as {
+    statusLine?: { command?: string };
     hooks?: Record<string, { hooks?: { command?: string }[] }[]>;
   };
+  const entries = [
+    settings.statusLine,
+    ...Object.values(settings.hooks ?? {}).flatMap((groups) =>
+      groups.flatMap((group) => group.hooks ?? []),
+    ),
+  ];
   const commands: string[] = [];
   const missing: string[] = [];
-  for (const groups of Object.values(settings.hooks ?? {})) {
-    for (const group of groups) {
-      for (const hook of group.hooks ?? []) {
-        if (typeof hook.command !== "string") continue;
-        commands.push(hook.command);
-        const ref = SCRIPT_REF.exec(hook.command)?.[1];
-        if (ref === undefined || !existsSync(join(packageRoot, ref))) {
-          missing.push(ref ?? hook.command);
-        }
-      }
+  for (const entry of entries) {
+    if (typeof entry?.command !== "string") continue;
+    commands.push(entry.command);
+    const ref = SCRIPT_REF.exec(entry.command)?.[1];
+    if (ref === undefined || !existsSync(join(packageRoot, ref))) {
+      missing.push(ref ?? entry.command);
     }
   }
   return { commands, missing };

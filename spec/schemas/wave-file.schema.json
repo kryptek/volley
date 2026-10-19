@@ -56,7 +56,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 10000,
-      "description": "Maximum agent spawns for the wave (retries and reviewers included); default spawn_budget_multiplier x task count."
+      "description": "Maximum agent spawns for the wave (retries and reviewers included); default: every task's pipeline roles plus retry headroom, or spawn_budget_multiplier x task count when that is more."
     },
     "config": {
       "$ref": "config.schema.json#/$defs/tunables",

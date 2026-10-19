@@ -224,6 +224,33 @@ describe("merge_ready invariant: never without both reviews for the current head
     expect(kinds(gateFor(view(moved)))).not.toContain("gate");
   });
 
+  it("an outside push the owner accepted without a re-review (pr_head_moved → fixup) keeps the reviews; an unaccepted one does not (SPEC §4.6.8)", () => {
+    const reviews = {
+      spec_reviewer: { round: 1, head: H1, result: approve },
+      quality_reviewer: { round: 1, head: H1, result: approve },
+    };
+    // H1 reviewed, H2 pushed outside the pipeline and accepted by the owner, fixup H2 → H3.
+    const accepted = at(H3, {
+      round: 2,
+      reviews,
+      moves: [{ from: H1, to: H2, touched: [], accepted_by: "owner" }],
+      fixups: [{ round: 2, from: H2, to: H3 }],
+    });
+    expect(mergeReadyCheck(DEFAULT, accepted).ok).toBe(true);
+    expect(kinds(gateFor(view(accepted)))).toEqual(["gate"]);
+    // The same push with nobody's acceptance voids both reviews.
+    const unaccepted = at(H3, {
+      round: 2,
+      reviews,
+      moves: [{ from: H1, to: H2, touched: [] }],
+      fixups: [{ round: 2, from: H2, to: H3 }],
+    });
+    expect(mergeReadyCheck(DEFAULT, unaccepted)).toMatchObject({
+      ok: false,
+      stale: ["spec_reviewer", "quality_reviewer"],
+    });
+  });
+
   it("a fixup that ran before a re-review only counts for the reviews it followed", () => {
     // Round 1 at H1, fixup H1→H2, round 2 re-reviews spec at H2 with findings and no fixup yet:
     // quality's H1 review still leads to H2 through the fixup; spec's H2 review is at the head.

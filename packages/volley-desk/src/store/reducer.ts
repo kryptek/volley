@@ -9,7 +9,9 @@
  *
  * Retained replays (`retained: true`, on page load and after every reconnect)
  * are not news: their times come from the envelope, not local receipt, and a
- * replay of an envelope already in an agent's feed is not appended again.
+ * replay of an envelope already in an agent's feed (same topic, type,
+ * `wall_time` and `payload.seq`) is not appended again. Heartbeats update an
+ * agent's liveness and count only; they never take a place in its feed.
  * After a reconnect the store calls `resync` first, so topics cleared while
  * the Desk was offline do not linger.
  *
@@ -18,9 +20,17 @@
  * never gets an agent window. volleyd's control channel — a mailbox `query`
  * with `payload.op` and the daemon's `ack` echoing it — is kept out of every
  * agent's feed.
+ *
+ * Claude accounts (SPEC §4.6.11–12): an agent's retained `usage` sample is
+ * kept in `usage` by agent id (never a feed row: it is a meter, not news), the
+ * supervisor's per-account records in `claudeAccounts`, and sign-in events in
+ * `signins` by account (live-only).
  */
 import {
+  type AgentAttention,
   type AgentView,
+  type ClaudeAccountPayload,
+  type ClaudeSignin,
   type ConfigPayload,
   type CoordinatorView,
   type DecisionPayload,
@@ -35,6 +45,7 @@ import {
   type ScreenPayload,
   type SteeringReceipts,
   type SupervisorView,
+  type UsagePayload,
   type WaveStatePayload,
   type WaveView,
 } from "./types";
@@ -74,7 +85,10 @@ export type Route =
   | { kind: "decision"; wave: string; decisionId: string }
   | { kind: "config" }
   | { kind: "lease"; pool: string }
-  | { kind: "admission" };
+  | { kind: "admission" }
+  | { kind: "claudeAccount"; acct: string }
+  | { kind: "signin"; acct: string }
+  | { kind: "usage"; agentId: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
@@ -85,6 +99,8 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 4 && b === "registry" && c) return { kind: "registry", agentId: c };
     if (p.length === 4 && b === "leases" && c) return { kind: "lease", pool: c };
     if (p.length === 3 && b === "admission") return { kind: "admission" };
+    if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
+    if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
     return null;
   }
   if (a === "_waves") {
@@ -96,6 +112,7 @@ export function routeTopic(topic: string): Route | null {
     return null;
   }
   if (p.length === 4 && a && b && !a.startsWith("_")) {
+    if (c === "usage") return { kind: "usage", agentId: b };
     const channel = AGENT_CHANNELS.find((ch) => ch === c);
     if (channel) return { kind: "agent", namespace: a, agentId: b, channel };
   }
@@ -158,7 +175,57 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
         ...state,
         admission: (m.envelope?.payload as Record<string, unknown> | undefined) ?? null,
       };
+    case "claudeAccount":
+      return {
+        ...state,
+        claudeAccounts: keyed(
+          state.claudeAccounts,
+          route.acct,
+          m.envelope?.payload as ClaudeAccountPayload | undefined,
+        ),
+      };
+    case "usage":
+      return {
+        ...state,
+        usage: keyed(state.usage, route.agentId, m.envelope?.payload as UsagePayload | undefined),
+      };
+    case "signin":
+      return reduceSignin(state, route.acct, m);
   }
+}
+
+/** `map` with `key` set to `value`, or removed when `value` is undefined (a cleared topic). */
+function keyed<V>(map: Record<string, V> | undefined, key: string, value: V | undefined) {
+  const next = { ...map };
+  if (value === undefined) delete next[key];
+  else next[key] = value;
+  return next;
+}
+
+const SIGNIN_STATE: Record<string, ClaudeSignin["state"]> = {
+  claude_signin_url: "waiting",
+  claude_signin_done: "done",
+  claude_signin_failed: "failed",
+};
+
+/** A sign-in event: the URL (waiting), then done or failed. The link is kept until a new URL. */
+function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  const next = env ? SIGNIN_STATE[env.type] : undefined;
+  if (!env || next === undefined) return state;
+  const p = record(env.payload);
+  const prev = next === "waiting" ? undefined : state.signins?.[acct];
+  const signin: ClaudeSignin = {
+    acct,
+    state: next,
+    at: m.receivedAt,
+    ...optional("url", str(p.url) ?? prev?.url),
+    ...optional("flow", str(p.flow) ?? prev?.flow),
+    ...optional("attach", str(p.attach) ?? prev?.attach),
+    ...optional("plan", str(p.plan)),
+    ...optional("reason", str(p.reason)),
+  };
+  return { ...state, signins: { ...state.signins, [acct]: signin } };
 }
 
 // ------------------------------------------------------------------ resync
@@ -166,11 +233,11 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 /**
  * Forget everything that retained topics hold, ahead of the replay that
  * follows a reconnect: waves (with their decisions), config, leases,
- * admission, each agent's registry, status and screen, and each supervisor's
- * registry and status. Live-only parts — feed, narration, progress,
- * heartbeat, attention, a supervisor's namespace — are kept. Agents and
- * supervisors that were registered become `unconfirmed` until their registry
- * entry is replayed.
+ * admission, Claude account records and usage samples, each agent's
+ * registry, status and screen, and each supervisor's registry and status.
+ * Live-only parts — feed, narration, progress, heartbeat, attention, a
+ * supervisor's namespace — are kept. Agents and supervisors that were
+ * registered become `unconfirmed` until their registry entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
   const agents: Record<string, AgentView> = {};
@@ -203,6 +270,8 @@ export function resync(state: DeskState): DeskState {
     config: null,
     leases: {},
     admission: null,
+    claudeAccounts: {},
+    usage: {},
     unconfirmed: [...unconfirmed],
   };
 }
@@ -252,7 +321,9 @@ function pushFeed(a: AgentView, topic: string, envelope: Envelope, receivedAt: n
   return feed.length > FEED_LIMIT ? feed.slice(feed.length - FEED_LIMIT) : feed;
 }
 
-/** A retained replay of an envelope the agent's feed already holds. */
+const seqOf = (env: Envelope): unknown => record(env.payload).seq;
+
+/** A retained replay of an envelope the agent's feed already holds: same topic, type, `wall_time` and `seq`. */
 function isReplay(a: AgentView | undefined, m: DeskMessage, env: Envelope): boolean {
   return (
     m.retained === true &&
@@ -261,7 +332,8 @@ function isReplay(a: AgentView | undefined, m: DeskMessage, env: Envelope): bool
       (f) =>
         f.topic === m.topic &&
         f.envelope.type === env.type &&
-        f.envelope.wall_time === env.wall_time,
+        f.envelope.wall_time === env.wall_time &&
+        seqOf(f.envelope) === seqOf(env),
     )
   );
 }
@@ -351,9 +423,11 @@ function reduceAgent(
       lastSeen: touch(prev, at),
     });
   }
+  // A heartbeat is liveness, not news: it is counted, never a feed row.
+  const beat = channel === "progress" && env.type === "heartbeat";
   const next: AgentView = {
     ...base,
-    feed: replay ? prev.feed : pushFeed(prev, m.topic, env, m.receivedAt),
+    feed: replay || beat ? prev.feed : pushFeed(prev, m.topic, env, m.receivedAt),
   };
   if (channel === "mailbox" || channel === "result") {
     if (channel === "result" && !replay) next.lastSeen = touch(prev, at);
@@ -365,7 +439,13 @@ function reduceAgent(
     next.lastProgress = { type: env.type, at };
   }
   const narration = str(payload.msg);
-  if (narration !== undefined) next.narration = narration;
+  // Live traffic is the newest by definition; only a replay can be older than what is shown
+  // (and its `wall_time` is the sender's clock, which may run ahead of ours).
+  if (narration !== undefined && (!m.retained || at >= (prev.narrationAt ?? at))) {
+    next.narration = narration;
+    next.narrationAt = at;
+    next.narrationRestored = false;
+  }
   if (typeof payload.progress === "number") next.progress = payload.progress;
   if (channel === "status") {
     next.status = {
@@ -378,7 +458,10 @@ function reduceAgent(
   }
   // progress: hook activity events (SPEC §4.3)
   // Heartbeats are never retained; local receipt avoids cross-machine clock skew.
-  if (env.type === "heartbeat") next.heartbeat = at;
+  if (beat) {
+    next.heartbeat = at;
+    next.heartbeats = (prev.heartbeats ?? 0) + 1;
+  }
   if (env.type === "awaiting_input") {
     next.attentionObserved = true;
     next.attention = {
@@ -388,6 +471,8 @@ function reduceAgent(
       ...optional("question", str(payload.question)),
       ...optional("sessionUrl", str(payload.session_url)),
       ...optional("workspace", str(payload.workspace)),
+      ...optional("notificationType", str(payload.notification_type)),
+      ...(payload.background_wait === true ? { backgroundWait: true } : {}),
     };
   }
   if (env.type === "resumed") {
@@ -646,6 +731,17 @@ function reduceDecision(state: DeskState, wave: string, id: string, m: DeskMessa
 // ------------------------------------------------------------- coordinators
 
 /**
+ * An outstanding `awaiting_input` waits on a person unless the hooks flagged
+ * a live background wait (`background_wait: true`: the session ended its turn
+ * with a background task armed, so the next event wakes it). A
+ * `permission_prompt` always waits on a person.
+ */
+export function waitsOnPerson(att: AgentAttention | null): boolean {
+  if (att === null) return false;
+  return att.backgroundWait !== true || att.notificationType === "permission_prompt";
+}
+
+/**
  * Coordinator state per wave owner. A wave the Desk itself owns (it claimed
  * it, so the owner is `state.self`) is coordinated by the person at this Desk:
  * `working`. Otherwise the owner's own topics win when they say
@@ -678,6 +774,9 @@ function withCoordinators(state: DeskState): DeskState {
       view = { id, waves: [w.id], state: "working" };
     } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
       view = { id, waves: [w.id], state: "gone", ...fallbacks };
+    } else if (a?.attention && !waitsOnPerson(a.attention)) {
+      // Idle with a background wait armed: it wakes on the wave's events, nobody has to answer.
+      view = { id, waves: [w.id], state: "working", waitingOnEvents: true, ...fallbacks };
     } else if (a?.attention) {
       view = {
         id,
@@ -745,4 +844,72 @@ export function agentsByWave(state: DeskState): Record<string, AgentView[]> {
     list.sort((x, y) => order(x) - order(y) || x.id.localeCompare(y.id));
   }
   return groups;
+}
+
+/** Wave statuses after which nothing runs: the wave window renders dimmed and folds under Show finished. */
+const ENDED_WAVE = new Set(["stopped", "complete"]);
+
+export function isEndedWave(w: WaveView | undefined): boolean {
+  return ENDED_WAVE.has(w?.state?.status ?? "");
+}
+
+/** Waves that are `stopped` or `complete`. */
+export function endedWaves(state: DeskState): Set<string> {
+  return new Set(
+    Object.values(state.waves)
+      .filter(isEndedWave)
+      .map((w) => w.id),
+  );
+}
+
+/**
+ * The top bar's "N agents working": agents (not coordinators, never
+ * supervisors, none of a stopped / complete wave) whose status is `working`, or still `spawning` / `registered`
+ * while they publish progress — an agent the MCP server left at `registered`
+ * (it never set `working` itself) that is narrating is at work.
+ */
+export function workingCount(state: DeskState): number {
+  return Object.values(state.agents).filter((a) => {
+    // Nothing runs in a stopped / complete wave, whatever an agent's last status said.
+    if (state.coordinators[a.id] || isEndedWave(state.waves[a.wave])) return false;
+    const t = a.status?.type;
+    if (t === "working") return true;
+    return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;
+  }).length;
+}
+
+const REVIEW_LABEL = { spec_reviewer: "spec review", quality_reviewer: "quality review" } as const;
+
+/**
+ * The stage chip of a task in review: `review (spec + quality)` while both
+ * reviewers run in parallel, else the one still running; `null` outside
+ * review or with no reviewer running.
+ */
+export function stageChip(state: DeskState, wave: string, task: string): string | null {
+  const t = state.waves[wave]?.state?.tasks.find((x) => x.id === task);
+  if (!t || (t.stage !== "spec_review" && t.stage !== "quality_review")) return null;
+  const running = (["spec_reviewer", "quality_reviewer"] as const).filter((role) => {
+    const id = t.agents[role];
+    const type = id ? state.agents[id]?.status?.type : undefined;
+    return type !== undefined && !TERMINAL_STATUS.has(type) && type !== "blocked";
+  });
+  if (running.length === 2) return "review (spec + quality)";
+  const [one] = running;
+  return one ? REVIEW_LABEL[one] : null;
+}
+
+/**
+ * Put back an agent's last narration from this browser's session (a cold
+ * load hears only retained topics); marked `narrationRestored` until a live
+ * one replaces it. A newer narration already in the store wins.
+ */
+export function restoreNarration(
+  state: DeskState,
+  id: string,
+  text: string,
+  at: number,
+): DeskState {
+  const a = state.agents[id];
+  if (!a || (a.narration !== null && (a.narrationAt ?? 0) >= at)) return state;
+  return putAgent(state, { ...a, narration: text, narrationAt: at, narrationRestored: true });
 }

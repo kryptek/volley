@@ -64,7 +64,8 @@ const refuse = (topic: string): RoleAcl => ({
 });
 
 /** The per-agent channels an identity may publish on (never `mailbox`, never `screen`). */
-const OWN_CHANNELS = ["status", "progress", "result", "capability", "control", "_user/#"];
+// `usage` is the sample the agent's statusLine publishes (SPEC §4.6.12).
+const OWN_CHANNELS = ["status", "progress", "result", "capability", "usage", "control", "_user/#"];
 
 /** Its own channels, its own registry entry and lease requests: what every login may write. */
 const ownIdentity: RoleAcl[] = [
@@ -167,6 +168,9 @@ export const RESERVED_AGENT_IDS = [
   "control",
   "mailbox",
   "screen",
+  "usage",
+  // `volley/+/%u/<channel>` would match `volley/_system/claude-accounts/<channel>` (SPEC §4.6.12).
+  "claude-accounts",
 ] as const;
 
 /** Why `id` cannot be an agent login (`add-agent` and `migrate` refuse it), or null. */
