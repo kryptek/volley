@@ -18,6 +18,7 @@ import {
   trackAgent,
   whyWaiting,
 } from "../src/liveness";
+import { fakeClock } from "./helpers/fake-clock";
 import { FIXTURES } from "./helpers/fake-host";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -365,18 +366,20 @@ describe("daemon: hook-signal liveness", () => {
   });
   const decisions = (kind: string) =>
     s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === kind);
+  const opened = (kind: string, n = 1) =>
+    s.event((e) => e.type === "decision_opened" && e.data.kind === kind, n);
 
   it("a permission_prompt opens agent_question (no screen read); resolving steers the answer; resumed is then a no-op", async () => {
     s = await makeSupervisedEnv();
     await s.hook("idle-stop.json");
     await s.hook("awaiting-permission-prompt.json");
-    await s.until(() => decisions("agent_question").length === 1);
-    const d = decisions("agent_question")[0];
+    const d = await opened("agent_question");
+    await s.settled();
     expect(d?.data).toMatchObject({ class: "agent_question", agent_id: AGENT });
     expect(d?.data.question).toContain("Should I add the column");
     expect(s.host.screenReads).toEqual([]);
     const why = `question pending (decision ${d?.data.decision_id})`;
-    await s.until(() => s.daemon.snapshot("w1")?.tasks[0]?.why_waiting === why);
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe(why);
     const retained = (await s.env.retained("volley/_waves/w1/state")) as {
       payload: { tasks: { why_waiting?: string }[] };
     };
@@ -386,14 +389,13 @@ describe("daemon: hook-signal liveness", () => {
       answer: "Create a new table.",
       by: "tester",
     });
-    await s.until(() => s.journal().some((e) => e.type === "steering_sent"));
-    expect(s.journal().find((e) => e.type === "steering_sent")?.data).toMatchObject({
+    expect((await s.event("steering_sent")).data).toMatchObject({
       agent_id: AGENT,
       type: "steering",
       text: "Create a new table.",
     });
     await s.hook("resumed.json");
-    await new Promise((r) => setTimeout(r, 100));
+    await s.consumed();
     expect(s.journal().filter((e) => e.type === "decision_resolved")).toHaveLength(1);
     expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBeUndefined();
   });
@@ -401,10 +403,9 @@ describe("daemon: hook-signal liveness", () => {
   it("resumed before anyone answers closes the question itself", async () => {
     s = await makeSupervisedEnv();
     await s.hook("awaiting-permission-prompt.json");
-    await s.until(() => decisions("agent_question").length === 1);
+    await opened("agent_question");
     await s.hook("resumed.json");
-    await s.until(() => s.journal().some((e) => e.type === "decision_resolved"));
-    expect(s.journal().find((e) => e.type === "decision_resolved")?.data).toMatchObject({
+    expect((await s.event("decision_resolved")).data).toMatchObject({
       by: AGENT,
     });
     expect(s.journal().some((e) => e.type === "steering_sent")).toBe(false);
@@ -412,24 +413,26 @@ describe("daemon: hook-signal liveness", () => {
   });
 
   it("an idle agent is nudged once past idle_grace_s, but never in a stopped wave", async () => {
-    let now = Date.now();
-    s = await makeSupervisedEnv({ daemon: { now: () => now } });
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
     await s.hook("idle-stop.json");
-    await new Promise((r) => setTimeout(r, 100));
-    now += 4 * MIN;
+    await s.consumed();
+    await clock.advance(4 * MIN);
     await s.daemon.tick();
     const steers = () =>
       s.journal().filter((e) => e.type === "steering_sent" && e.data.type === "steering");
-    await s.until(() => steers().length === 1);
+    await s.event((e) => e.type === "steering_sent" && e.data.type === "steering");
+    await s.settled();
     expect(steers()[0]?.data).toMatchObject({ agent_id: AGENT, by: "volleyd", reason: "idle" });
     expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe("idle 4 min: nudged to continue");
 
     await s.hook("resumed.json");
     await s.hook("idle-stop.json");
-    await new Promise((r) => setTimeout(r, 100));
+    await s.consumed();
     await s.daemon.recordEvent("w1", { type: "wave_stopped", data: { by: "tester" } });
-    now += 30 * MIN;
+    await clock.advance(30 * MIN);
     await s.daemon.tick();
+    await s.settled();
     expect(steers()).toHaveLength(1);
     expect(decisions("agent_stalled")).toEqual([]);
   });
@@ -442,7 +445,7 @@ describe("daemon: hook-signal liveness", () => {
       got.push({ type: e.type, text: e.payload.text });
     });
     await s.hook("awaiting-permission-prompt.json");
-    await s.until(() => decisions("agent_question").length === 1);
+    await opened("agent_question");
     await s.daemon.resolveDecision(
       "w1",
       decisions("agent_question")[0]?.data.decision_id as string,
@@ -451,30 +454,35 @@ describe("daemon: hook-signal liveness", () => {
         by: "tester",
       },
     );
+    // The steer's mailbox delivery reaches this subscriber over the broker.
     await s.until(() => got.length === 1);
     expect(got[0]).toEqual({ type: "steering", text: "Create a new table." });
 
     await s.hook("resumed.json");
     await s.hook("idle-stop.json");
     await s.hook("idle-prompt.json"); // confirms the idle: the next tick nudges
-    // Ticks until the daemon has consumed the hooks (the clock stands still: one nudge, ever).
-    for (let i = 0; i < 100 && got.length < 2; i++) {
-      await s.daemon.tick();
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    await s.consumed();
+    // The clock stands still: one nudge, ever, however many ticks.
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    await s.until(() => got.length === 2);
+    await s.daemon.tick();
+    await s.consumed();
     expect(got.map((m) => m.text)).toEqual(["Create a new table.", CONTINUE_TEXT]);
   });
 
   it("silence past heartbeat_alarm_s reads the screen once per tick and opens hooks_silent", async () => {
-    let now = Date.now();
-    s = await makeSupervisedEnv({ daemon: { now: () => now } });
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
     s.host.screens = ["● step one\n✶ Working… (3s)", "● step two\n✶ Working… (9s)"];
-    now += 11 * MIN;
+    await clock.advance(11 * MIN);
     await s.daemon.tick();
-    await s.until(() => s.host.screenReads.length === 1);
-    now += 10_000;
+    await s.settled();
+    expect(s.host.screenReads).toHaveLength(1);
+    await clock.advance(10_000);
     await s.daemon.tick();
-    await s.until(() => decisions("unknown_screen").length === 1);
+    await opened("unknown_screen");
+    await s.settled();
     expect(decisions("unknown_screen")[0]?.data).toMatchObject({
       class: "hooks_silent",
       agent_id: AGENT,

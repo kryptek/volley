@@ -144,14 +144,16 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
         return true;
       },
     };
-    const slow = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const later = async (turns: number) => {
+      for (let i = 0; i < turns; i++) await Promise.resolve();
+    };
     await withJointRevokes(store, [
       async (c) => c?.revoke("a"),
       async (c) => {
-        await slow(30);
+        await later(5);
         await c?.revoke("b");
       },
-      async () => slow(10), // a job with no login to delete
+      async () => later(2), // a job with no login to delete
     ]);
     expect(sent).toEqual([["a", "b"]]);
   });

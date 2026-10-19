@@ -48,8 +48,12 @@ describe("mintCredentials", () => {
 });
 
 describe("spawn identity", () => {
-  let env: SpawnEnv;
-  afterEach(() => env.cleanup());
+  let env: SpawnEnv | undefined;
+  afterEach(async () => {
+    // Not every case builds an env ("retire calls …" does not): shuffled order runs it first.
+    await env?.cleanup();
+    env = undefined;
+  });
 
   it("agent.json has id/namespace/parent/role/broker_url and the minted broker block, mode 0600", async () => {
     env = await makeSpawnEnv();

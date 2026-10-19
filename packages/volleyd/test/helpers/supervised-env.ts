@@ -3,14 +3,17 @@ import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import { ControlClient } from "../../src/control";
 import type { Daemon, DaemonOptions } from "../../src/daemon";
 import { readJournalFile } from "../../src/journal";
 import { SYSTEM_WAVE } from "../../src/types";
 import type { JournalEvent } from "../../src/types";
+import { eventually } from "./broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
 import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./fake-host";
+import { type EventMatch, journalWait } from "./journal-wait";
 import { runCli } from "./run-cli";
 
 export const AGENT = "w1-t1-implementer-1";
@@ -40,7 +43,18 @@ export interface SupervisedEnv {
   hook: (name: string, payload?: Record<string, unknown>) => Promise<void>;
   status: (type: string, payload?: Record<string, unknown>) => Promise<void>;
   journal: (wave?: string) => JournalEvent[];
-  until: (pred: () => boolean, ms?: number) => Promise<void>;
+  /** The `n`-th journal event of `wave` (default w1) matching `match`, as it is appended. */
+  event: (match: EventMatch, n?: number, wave?: string) => Promise<JournalEvent>;
+  /** The daemon is idle (journal-wait.ts `settled`). */
+  settled: () => Promise<void>;
+  /**
+   * Everything published before this call (the agent's hooks, statuses) has been read by the
+   * daemon, and what it set off is done: a control round-trip queued behind them on the daemon's
+   * broker connection, then `settled`. For messages that journal nothing of their own.
+   */
+  consumed: () => Promise<void>;
+  /** Broker round-trips only (broker-wait.ts `eventually`): state no journal event marks. */
+  until: (pred: () => boolean) => Promise<void>;
   /** Start a second daemon on the same home (after `daemon.stop()`). */
   restart: (extra?: Partial<DaemonOptions>) => Promise<Daemon>;
   daemonOptions: Partial<DaemonOptions>;
@@ -120,7 +134,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   host.onLaunch = (spec) => {
     if (!spec.cwd.endsWith("/T1-implementer")) return; // an extra task's agent: silent
     o.onLaunch?.(daemon);
-    setTimeout(async () => {
+    // Started at once: the daemon subscribed to the agent before launching it.
+    void (async () => {
       await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
@@ -137,7 +152,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
         { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
         false,
       );
-    }, 20);
+    })();
   };
   const daemonOptions: Partial<DaemonOptions> = {
     spawner: {
@@ -160,19 +175,20 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
 
   const journal = (wave = "w1"): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
-  const until = async (pred: () => boolean, ms = 5000) => {
-    const end = Date.now() + ms;
-    while (!pred()) {
-      if (Date.now() > end) throw new Error("timed out waiting");
-      await new Promise((res) => setTimeout(res, 25));
-    }
+  let current = daemon;
+  const waits = journalWait(env.home, () => current);
+  let control: ControlClient | undefined;
+  const consumed = async () => {
+    control ??= await ControlClient.connect(env.broker.url, NS);
+    const r = await control.request("status", {});
+    if (!r.ok) throw new Error(`status: ${r.error}`);
+    await waits.settled();
   };
-  await until(() => journal().some((e) => e.type === "agent_registered"));
-  await until(
-    () => journal().filter((e) => e.type === "agent_spawned").length >= 1 + (o.tasks ?? []).length,
-  );
+  const event = (match: EventMatch, n = 1, wave = "w1") => waits.event(wave, match, n);
+  await event("agent_registered");
+  await event("agent_spawned", 1 + (o.tasks ?? []).length);
   // Supervision starts once the daemon has consumed the verification outcome.
-  await new Promise((res) => setTimeout(res, 100));
+  await waits.settled();
   return {
     env,
     daemon,
@@ -184,10 +200,17 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     hook,
     status,
     journal,
-    until,
-    restart: (extra = {}) => env.start({ ...daemonOptions, ...extra }),
+    event,
+    settled: waits.settled,
+    consumed,
+    until: eventually,
+    restart: async (extra = {}) => {
+      current = await env.start({ ...daemonOptions, ...extra });
+      return current;
+    },
     daemonOptions,
     cleanup: async () => {
+      await control?.close();
       await agent.disconnect();
       await env.cleanup();
     },

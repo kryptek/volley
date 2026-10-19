@@ -108,6 +108,7 @@ describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", (
     const run = startDaemon(home);
     try {
       for (let i = 0; i < 200 && (await status()) !== "working"; i++) {
+        // broker round-trip: the daemon child process's retained status on the real mosquitto.
         await new Promise((r) => setTimeout(r, 100));
       }
       expect(await status(), run.out()).toBe("working");

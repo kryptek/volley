@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -601,6 +601,8 @@ describe("exec + the remote fence", () => {
     env = { PATH: `${dir}:/usr/bin:/bin` };
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  // Each case starts with no record of ssh running (an allowed script leaves one behind).
+  beforeEach(() => rmSync(marker, { force: true }));
 
   it("a remote script containing git push or rm -rf is refused before ssh runs", async () => {
     for (const argv of [

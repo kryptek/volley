@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { FenceError, type FenceOptions, assertAllowed, renderRemoteScript } from "./fence";
 
@@ -80,13 +81,16 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     };
     child.stdout?.on("data", collect("stdout"));
     child.stderr?.on("data", collect("stderr"));
-    let killer: ReturnType<typeof setTimeout> | undefined;
+    // Real timers: they bound a real child process.
+    // real clock: a child process runs on the real clock, so its timeout does too
+    const clock = systemClock;
+    let killer: TimerHandle | undefined;
     let settled = false;
     const settle = (code: number) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      clearTimeout(killer);
+      clock.clearTimeout(timer);
+      clock.clearTimeout(killer);
       opts.signal?.removeEventListener("abort", abort);
       resolve({
         code,
@@ -98,10 +102,10 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     };
     const timer =
       opts.timeoutMs !== undefined
-        ? setTimeout(() => {
+        ? clock.setTimeout(() => {
             timedOut = true;
             child.kill("SIGTERM");
-            killer = setTimeout(() => {
+            killer = clock.setTimeout(() => {
               child.kill("SIGKILL");
               child.stdout?.destroy();
               child.stderr?.destroy();
@@ -111,7 +115,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
         : undefined;
     const abort = () => {
       child.kill("SIGTERM");
-      killer ??= setTimeout(() => {
+      killer ??= clock.setTimeout(() => {
         child.kill("SIGKILL");
         child.stdout?.destroy();
         child.stderr?.destroy();
@@ -123,8 +127,8 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     child.on("error", (e) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      clearTimeout(killer);
+      clock.clearTimeout(timer);
+      clock.clearTimeout(killer);
       reject(e);
     });
     child.on("close", (code) => settle(code ?? 1));

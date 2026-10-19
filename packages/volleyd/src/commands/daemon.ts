@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { daemonAdminAuth, daemonAuth } from "../broker-auth";
+import { dateOf, systemClock } from "../clock";
 import { defaultsFor } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
@@ -57,7 +58,8 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       ...daemonStartOptions(target, env, spawner),
       // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
       // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
-      log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
+      // real clock: the log line's timestamp, for the human reading the log
+      log: (line) => io.stdout(`${dateOf(systemClock).toISOString()} ${line}\n`),
     });
   } catch (e) {
     io.stderr(`volleyd daemon: ${e instanceof Error ? e.message : String(e)}\n`);

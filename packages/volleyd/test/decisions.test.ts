@@ -83,10 +83,15 @@ describe("decision lifecycle", () => {
   it("open fires a volley-notify-compatible attention event on the daemon's progress topic", async () => {
     const sub = new VolleyBroker();
     await sub.connect({ url: t.broker.url, agentId: "test-notify" });
-    const got = sub.subscribeCollect(`volley/${NS}/volleyd/progress`, 1, 3000);
-    await new Promise((r) => setTimeout(r, 100));
+    let first!: (m: { payload: string }) => void;
+    const got = new Promise<{ payload: string }>((r) => {
+      first = r;
+    });
+    // Subscribed (SUBACKed) before the decision is opened, so its event cannot be missed.
+    const unsub = await sub.subscribeStream(`volley/${NS}/volleyd/progress`, (m) => first(m));
     const d = await openOnB();
-    const [msg] = await got;
+    const msg = await got;
+    await unsub();
     await sub.disconnect();
     const env = JSON.parse(msg?.payload ?? "{}");
     // `blocked` is in `volley notify`'s default --on set, so existing watchers ring on it.

@@ -3,11 +3,14 @@ import { DynsecSession, brokerTransport, ensureClients, ensureRoles } from "voll
 import { ACCOUNT_ROLE_MAP, FIXED_CLIENTS } from "volley-cli/auth/roles";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildTopic } from "volley-mcp/topics";
+import { systemClock } from "../src/clock";
 import { CredentialSweeper, planSweep } from "../src/credential-sweep";
 import { DynsecControl, DynsecCredentials, brokerControl } from "../src/dynsec";
 import { reapAndRevoke } from "../src/retire";
 import type { NewEvent } from "../src/types";
+import { eventually } from "./helpers/broker-wait";
 import { makeDaemonEnv } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { type FakeDynsec, memoryCredentials, startFakeDynsec } from "./helpers/fake-dynsec";
 import { makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -63,6 +66,8 @@ describe("the sweep on Dynamic Security", () => {
   let fake: FakeDynsec;
   let control: DynsecControl;
   let creds: DynsecCredentials;
+  // Real timers: the deletes' batch window and broker round-trips, not daemon timing, are tested.
+  const clock = systemClock;
   let observer: VolleyBroker;
   const statuses: { topic: string; payload: string }[] = [];
   const events: NewEvent[] = [];
@@ -106,8 +111,9 @@ describe("the sweep on Dynamic Security", () => {
     control = new DynsecControl({
       connect: brokerControl(fake.url, fake.admin),
       batchMs: () => 30,
+      clock,
     });
-    creds = new DynsecCredentials(control);
+    creds = new DynsecCredentials(control, clock);
   });
   afterEach(async () => {
     await observer.disconnect();
@@ -115,7 +121,7 @@ describe("the sweep on Dynamic Security", () => {
     await fake.close();
   });
 
-  function sweeper(live: string[], now = Date.now) {
+  function sweeper(live: string[], now = () => clock.now()) {
     return new CredentialSweeper({
       credentials: creds,
       live: async () => new Set(live),
@@ -138,7 +144,7 @@ describe("the sweep on Dynamic Security", () => {
 
   it("deletes the finished agents' logins, spares the live, the just-minted and every non-agent login", async () => {
     await creds.mint("w1-t4-implementer-1"); // just minted: its spawn is not journaled yet
-    const later = () => Date.now() + 200_000; // the leftovers were first seen long ago
+    const later = () => clock.now() + 200_000; // the leftovers were first seen long ago
     const sw = sweeper(["w1-t3-implementer-1"], later);
     // First listing: the leftovers become known; minted-by-us age comes from mintedAt.
     creds.mintedAt.set("w0-t1-implementer-1", 0);
@@ -177,7 +183,7 @@ describe("the sweep on Dynamic Security", () => {
       "w0-t2-implementer-1",
     ]);
     // `reaped` (no LWT comes) published before the delete, then the records cleared.
-    await new Promise((r) => setTimeout(r, 100));
+    await eventually(() => statuses.filter((m) => m.payload !== "").length >= 2);
     const reaped = statuses.filter((m) => m.payload !== "").map((m) => JSON.parse(m.payload));
     expect(reaped.map((e) => [e.agent_id, e.type, e.payload.reason])).toEqual([
       ["w0-t1-implementer-1", "reaped", "credentials_deleted"],
@@ -203,16 +209,21 @@ describe("the sweep on Dynamic Security", () => {
 
 describe("the daemon sweeps at start and on the interval", () => {
   it("a stale login is deleted without anyone asking; credentials_swept is journaled", async () => {
-    const s = await makeSupervisedEnv({ daemon: { credentialSweepMs: 150 } });
+    const clock = fakeClock(Date.now());
+    const s = await makeSupervisedEnv({ daemon: { credentialSweepMs: 60_000, clock } });
     try {
+      await clock.advance(1); // the start sweep: nothing stale yet
+      await s.settled();
       // A login from an earlier run (not live, minted long ago) appears after start.
       s.creds.logins.add("w0-t1-implementer-1");
       s.creds.mintedAt.set("w0-t1-implementer-1", 0);
-      await s.until(() => s.creds.revoked.includes("w0-t1-implementer-1"), 3_000);
+      expect(s.creds.revoked).toEqual([]);
+      await clock.advance(60_000); // the interval
+      await s.event("credentials_swept", 1, "_system");
+      expect(s.creds.revoked).toContain("w0-t1-implementer-1");
       // The live, supervised implementer is spared.
       expect(s.creds.revoked).not.toContain("w1-t1-implementer-1");
       expect(s.creds.logins.has("w1-t1-implementer-1")).toBe(true);
-      await s.until(() => s.journal("_system").some((e) => e.type === "credentials_swept"));
       expect(s.journal("_system").find((e) => e.type === "credentials_swept")?.data).toEqual({
         agent_ids: ["w0-t1-implementer-1"],
       });
@@ -246,7 +257,8 @@ describe("the daemon sweeps at start and on the interval", () => {
     creds.mintedAt.set("w0-t1-implementer-1", 0);
     const s = await makeSupervisedEnv({ creds, daemon: { credentialSweepMs: 3_600_000 } });
     try {
-      await s.until(() => creds.revoked.includes("w0-t1-implementer-1"), 3_000);
+      await s.event("credentials_swept", 1, "_system");
+      expect(creds.revoked).toContain("w0-t1-implementer-1");
     } finally {
       await s.cleanup();
     }

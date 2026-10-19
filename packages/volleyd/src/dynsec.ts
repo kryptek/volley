@@ -14,6 +14,7 @@ import { isAgentClient } from "volley-cli/auth/roles";
 import { requireBrokerVersion } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
+import type { Clock, TimerHandle } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { BrokerCredentials, CredentialStore } from "./identity";
 
@@ -64,7 +65,8 @@ export interface DynsecControlOptions {
   /** `mosquitto -h` through the fenced exec: the version when the broker retains none. */
   binaryVersion?: () => Promise<string | null>;
   log?: (line: string) => void;
-  now?: () => number;
+  /** The daemon's clock: the reconnect backoff and the drop watchdog run on it. */
+  clock: Clock;
 }
 
 export class DynsecControl {
@@ -72,7 +74,7 @@ export class DynsecControl {
   private opening: Promise<ControlLink> | null = null;
   private failures = 0;
   private retryAt = 0;
-  private watchdog: ReturnType<typeof setInterval> | null = null;
+  private watchdog: TimerHandle | null = null;
   private closed = false;
   readonly batcher: DynsecBatcher;
   /** Control connections opened so far (one, unless the broker dropped it). */
@@ -81,11 +83,11 @@ export class DynsecControl {
   version: string | null = null;
 
   constructor(private readonly o: DynsecControlOptions) {
-    this.batcher = new DynsecBatcher(() => this.session(), o.batchMs);
+    this.batcher = new DynsecBatcher(() => this.session(), o.batchMs, o.clock);
   }
 
   private now(): number {
-    return (this.o.now ?? Date.now)();
+    return this.o.clock.now();
   }
 
   /**
@@ -109,7 +111,7 @@ export class DynsecControl {
       this.opened++;
       this.failures = 0;
       this.link = link;
-      this.watchdog ??= setInterval(() => this.check(), DAEMON_DEFAULTS.watchdog_ms);
+      this.watchdog ??= this.o.clock.setInterval(() => this.check(), DAEMON_DEFAULTS.watchdog_ms);
       return link;
     })();
     try {
@@ -159,7 +161,7 @@ export class DynsecControl {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.watchdog !== null) clearInterval(this.watchdog);
+    if (this.watchdog !== null) this.o.clock.clearInterval(this.watchdog);
     await this.batcher.flush();
     await this.link?.close().catch(() => {});
     this.link = null;
@@ -173,8 +175,8 @@ export class DynsecCredentials implements CredentialStore {
 
   constructor(
     private readonly control: DynsecControl,
+    private readonly clock: Clock,
     private readonly password: () => string = () => randomBytes(24).toString("base64url"),
-    private readonly now: () => number = Date.now,
   ) {}
 
   /**
@@ -196,7 +198,7 @@ export class DynsecCredentials implements CredentialStore {
     } else if (o !== "ok") {
       throw new Error(`createClient: ${r.error ?? "failed"}`);
     }
-    this.mintedAt.set(agentId, this.now());
+    this.mintedAt.set(agentId, this.clock.now());
     return { username: agentId, password };
   }
 

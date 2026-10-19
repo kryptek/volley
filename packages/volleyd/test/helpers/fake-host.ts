@@ -114,11 +114,8 @@ export function fakeWatch(
     agentId,
     namespace,
     state,
-    waitFor: async (pred, ms) => {
-      if (pred(state)) return true;
-      await new Promise((r) => setTimeout(r, Math.min(ms, 50)));
-      return pred(state);
-    },
+    // The signals are fixed: waiting changes nothing, so the window is over at once.
+    waitFor: async (pred) => pred(state),
     onStatus: () => {},
     onProgress: () => {},
     close: async () => {},

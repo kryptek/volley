@@ -694,6 +694,7 @@ describe("exec", () => {
       killGraceMs: 200,
     });
     expect(r.timedOut).toBe(true);
+    // real process: exec's kill of a real child, on the real clock.
     expect(Date.now() - started).toBeLessThan(3000);
   });
 });

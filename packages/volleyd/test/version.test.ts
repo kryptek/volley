@@ -8,6 +8,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { Daemon } from "../src/daemon";
 import { DynsecControl, brokerControl } from "../src/dynsec";
 import { NO_PRESSURE } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { type FakeDynsec, startFakeDynsec } from "./helpers/fake-dynsec";
 
 describe("volleyd refuses a broker older than 2.1 (control-connection open)", () => {
@@ -18,7 +19,11 @@ describe("volleyd refuses a broker older than 2.1 (control-connection open)", ()
 
   it("$SYS/broker/version 2.0.22 → BROKER_TOO_OLD with the install instructions; nothing sent", async () => {
     fake = await startFakeDynsec({ version: "mosquitto version 2.0.22" });
-    const c = new DynsecControl({ connect: brokerControl(fake.url, fake.admin), batchMs: () => 0 });
+    const c = new DynsecControl({
+      connect: brokerControl(fake.url, fake.admin),
+      batchMs: () => 0,
+      clock: fakeClock(),
+    });
     const err = await c.open().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BrokerVersionError);
     expect((err as BrokerVersionError).code).toBe("BROKER_TOO_OLD");
@@ -31,7 +36,11 @@ describe("volleyd refuses a broker older than 2.1 (control-connection open)", ()
 
   it("2.1.2 → proceeds", async () => {
     fake = await startFakeDynsec({ version: "mosquitto version 2.1.2" });
-    const c = new DynsecControl({ connect: brokerControl(fake.url, fake.admin), batchMs: () => 0 });
+    const c = new DynsecControl({
+      connect: brokerControl(fake.url, fake.admin),
+      batchMs: () => 0,
+      clock: fakeClock(),
+    });
     await c.open();
     expect(c.version).toBe("2.1.2");
     await c.close();
@@ -42,6 +51,7 @@ describe("volleyd refuses a broker older than 2.1 (control-connection open)", ()
     const old = new DynsecControl({
       connect: brokerControl(fake.url, fake.admin),
       batchMs: () => 0,
+      clock: fakeClock(),
       binaryVersion: async () => "mosquitto version 2.0.22\n\nmosquitto is an MQTT broker.",
     });
     await expect(old.open()).rejects.toMatchObject({ code: "BROKER_TOO_OLD" });
@@ -49,6 +59,7 @@ describe("volleyd refuses a broker older than 2.1 (control-connection open)", ()
     const ok = new DynsecControl({
       connect: brokerControl(fake.url, fake.admin),
       batchMs: () => 0,
+      clock: fakeClock(),
       binaryVersion: async () => "mosquitto version 2.1.2",
     });
     await ok.open();

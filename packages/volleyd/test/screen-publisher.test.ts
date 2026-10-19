@@ -6,7 +6,6 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
 import { SshTmuxHost } from "../src/hosts/ssh-tmux";
-import { readJournalFile } from "../src/journal";
 import { retireAgent } from "../src/retire";
 import {
   type ScreenCapture,
@@ -14,25 +13,19 @@ import {
   type ScreenPublisherDeps,
   type ScreenTarget,
 } from "../src/screen-publisher";
-import type { JournalEvent } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock, flushMicrotasks } from "./helpers/fake-clock";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
+import { type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
 const SCREEN = buildTopic(NS, ID, "screen");
 const session = readFileSync(join(FIXTURES, "screens", "claude-session.txt"), "utf-8");
-
-const until = async (pred: () => boolean | Promise<boolean>, ms = 5000) => {
-  const end = Date.now() + ms;
-  while (!(await pred())) {
-    if (Date.now() > end) throw new Error("timed out waiting");
-    await new Promise((r) => setTimeout(r, 25));
-  }
-};
 
 /** Every message seen on one topic (retained replays included), raw. */
 async function collect(broker: VolleyBroker, topic: string): Promise<string[]> {
@@ -46,7 +39,12 @@ describe("ScreenPublisher", () => {
   let pubClient: VolleyBroker;
   let reader: VolleyBroker;
   let host: FakeHost;
+  /** The capture schedule's wall clock (moved by hand). */
   let clock: number;
+  /** The read bounds' timers (slow / hard timeout): virtual. */
+  let timers: FakeClock;
+  /** Topics the publisher handed to the broker. */
+  let sent: string[];
   let publisher: ScreenPublisher;
   let staleChanges: [string, boolean][];
   let captures: ScreenCapture[];
@@ -76,12 +74,18 @@ describe("ScreenPublisher", () => {
     await reader.connect({ url: mq.url, agentId: "test-reader" });
     host = fakeHost();
     clock = 1_000_000;
+    timers = fakeClock(clock);
+    sent = [];
     interval = 5;
     staleChanges = [];
     captures = [];
     makePublisher = (extra = {}) => {
       const p = new ScreenPublisher({
-        publish: (topic, payload) => pubClient.publish(topic, payload, { qos: 0, retain: true }),
+        publish: (topic, payload) => {
+          sent.push(topic);
+          return pubClient.publish(topic, payload, { qos: 0, retain: true });
+        },
+        clock: timers,
         now: () => clock,
         onStale: (id, stale) => staleChanges.push([id, stale]),
         ...extra,
@@ -104,7 +108,7 @@ describe("ScreenPublisher", () => {
     publisher.track(target());
 
     await publisher.tick();
-    await until(() => seen.length === 1);
+    await eventually(() => seen.length === 1);
     const first = JSON.parse(seen[0] as string);
     expect(first).toMatchObject({
       agent_id: "volleyd",
@@ -131,7 +135,7 @@ describe("ScreenPublisher", () => {
     // Changed screen: a second publish with a new hash.
     clock += 5_000;
     await publisher.tick();
-    await until(() => seen.length === 2);
+    await eventually(() => seen.length === 2);
     const second = JSON.parse(seen[1] as string);
     expect(second.payload.hash).not.toBe(first.payload.hash);
     expect(second.payload.lines.at(-1)).toBe("● Second step");
@@ -179,7 +183,7 @@ describe("ScreenPublisher", () => {
     const { source: _cmux, ...rest } = target();
     publisher.track({ ...rest, workspace: "w1-T1-implementer", host: box });
     await publisher.tick();
-    await until(() => seen.length === 1);
+    await eventually(() => seen.length === 1);
     const msg = JSON.parse(seen[0] as string);
     expect(msg.payload).toMatchObject({ workspace: "w1-T1-implementer", source: "tmux" });
     expect(msg.payload.lines.at(-1)).toBe("✳ Sautéing… (34s · ↓ 2.1k tokens · esc to interrupt)");
@@ -233,7 +237,7 @@ describe("ScreenPublisher", () => {
       [ID, true],
       [ID, false],
     ]);
-    await until(async () => (await retained()) !== null);
+    await eventually(async () => (await retained()) !== null);
   });
 
   it("a read slower than 2 s backs the agent off at once", async () => {
@@ -281,9 +285,11 @@ describe("ScreenPublisher", () => {
     host.readScreen = hang;
     publisher.track(target());
     const ticking = publisher.tick();
-    await until(() => publisher.isStale(ID), 1_000);
+    await timers.advance(40); // screen_slow_ms
+    expect(publisher.isStale(ID)).toBe(true);
     expect(staleChanges).toEqual([[ID, true]]);
-    await ticking; // the hard timeout settles the capture
+    await timers.advance(110); // the hard timeout settles the capture
+    await ticking;
     expect(captures).toHaveLength(1);
     expect(captures[0]).toMatchObject({ screen: null, changed: false, stale: true });
     // The timed-out read counts: the agent is backed off to 30 s, then read again.
@@ -306,7 +312,9 @@ describe("ScreenPublisher", () => {
     void publisher.untrack(ID).then(() => {
       untracked = true;
     });
-    await until(() => untracked, 100);
+    await flushMicrotasks(); // the read stays hung: no timer moves
+    expect(untracked).toBe(true);
+    await timers.advance(150);
     await ticking;
     expect(captures).toHaveLength(0); // an untracked agent's capture reaches no listener
   });
@@ -329,8 +337,7 @@ describe("ScreenPublisher", () => {
     release();
     await ticking;
     expect(captures).toHaveLength(0);
-    await new Promise((r) => setTimeout(r, 50));
-    expect(seen).toEqual([]);
+    expect(sent).toEqual([]);
 
     // Retire clears every retained record, the screen included.
     await retireAgent(
@@ -353,7 +360,7 @@ describe("ScreenPublisher", () => {
         releaseLock: () => {},
       },
     );
-    await until(() => seen.at(-1) === "");
+    await eventually(() => seen.at(-1) === "");
     expect(await retained()).toBeNull();
     clock += 60_000;
     await publisher.tick();
@@ -366,10 +373,11 @@ describe("daemon screen tails", () => {
   let agent: VolleyBroker;
   let host: FakeHost;
   let daemon: Daemon;
-  let clock: number;
+  /** The daemon's clock: capture schedule, read bounds, reap graces. */
+  let clock: FakeClock;
+  let waits: JournalWait;
+  const sessions = new Set<Promise<void>>();
 
-  const journal = (): JournalEvent[] =>
-    readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
     agent.publish(
       topic,
@@ -379,12 +387,15 @@ describe("daemon screen tails", () => {
       }),
       { qos: 1, retain },
     );
-  const taskState = async () =>
-    (
+  /** The task as last published (read once the daemon is idle, so the publish is on the broker). */
+  const taskState = async () => {
+    await waits.settled();
+    return (
       (await env.retained("volley/_waves/w1/state")) as {
         payload: { tasks: { id: string; screen_stale?: boolean }[] };
       }
     ).payload.tasks[0];
+  };
 
   beforeEach(async () => {
     env = await makeDaemonEnv();
@@ -407,7 +418,7 @@ describe("daemon screen tails", () => {
       });
     host = fakeHost(fake);
     host.onLaunch = () => {
-      setTimeout(async () => {
+      const session = (async () => {
         await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
         await pub(registryTopic(ID), "registered", "_system/registry", {
           capabilities: [],
@@ -424,11 +435,13 @@ describe("daemon screen tails", () => {
           { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
           false,
         );
-      }, 20);
+      })();
+      sessions.add(session);
+      void session.finally(() => sessions.delete(session));
     };
-    clock = 5_000_000;
+    clock = fakeClock(5_000_000);
     daemon = await env.start({
-      now: () => clock,
+      clock,
       screenTimeouts: { slowMs: 100, readTimeoutMs: 3_000 },
       spawner: {
         host,
@@ -442,20 +455,19 @@ describe("daemon screen tails", () => {
       wave,
       `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}, screen_tail_interval_s: 7 }\n`,
     );
+    waits = journalWait(env.home, () => daemon);
     expect((await runCli(["run", wave], env.env)).exitCode).toBe(0);
-    await until(() => journal().some((e) => e.type === "agent_registered")).catch((e) => {
-      throw new Error(`${e}: ${JSON.stringify(journal().map((x) => [x.type, x.data]))}`);
-    });
+    await waits.event("w1", "agent_registered");
     // Supervision (and screen tracking) starts once the verification promise settles.
+    await waits.settled();
     host.screens = [""];
-    await until(async () => {
-      await daemon.tickScreens();
-      return host.screenReads.length > 0;
-    });
-    clock += 60_000;
+    await daemon.tickScreens();
+    expect(host.screenReads.length).toBeGreaterThan(0);
+    await clock.advance(60_000);
   });
 
   afterEach(async () => {
+    await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
   });
@@ -464,7 +476,7 @@ describe("daemon screen tails", () => {
     host.screens = [session];
     await daemon.tickScreens();
     // Wait on the content: beforeEach's empty capture is already retained.
-    await until(
+    await eventually(
       async () =>
         ((await env.retained(SCREEN)) as { payload: { lines: string[] } } | null)?.payload
           .lines[0] === "> fix the flaky retry test in packages/api",
@@ -476,17 +488,18 @@ describe("daemon screen tails", () => {
 
     // The per-wave interval (7 s) applies.
     const reads = host.screenReads.length;
-    clock += 6_000;
+    await clock.advance(6_000);
     await daemon.tickScreens();
     expect(host.screenReads).toHaveLength(reads);
-    clock += 1_000;
+    await clock.advance(1_000);
     await daemon.tickScreens();
     expect(host.screenReads).toHaveLength(reads + 1);
 
     await pub(buildTopic(NS, ID, "status"), "failed", "status", { reason: "x" });
-    await until(() => journal().some((e) => e.type === "agent_retired"));
+    await waits.event("w1", "agent_retired");
+    await waits.settled();
     expect(await env.retained(SCREEN)).toBeNull();
-    clock += 60_000;
+    await clock.advance(60_000);
     await daemon.tickScreens();
     expect(host.screenReads).toHaveLength(reads + 1);
   });
@@ -496,33 +509,35 @@ describe("daemon screen tails", () => {
     expect((await taskState())?.screen_stale).toBeUndefined();
     for (let i = 0; i < 3; i++) {
       await daemon.tickScreens();
-      clock += 7_000;
+      await clock.advance(7_000);
     }
-    await until(async () => (await taskState())?.screen_stale === true);
+    expect((await taskState())?.screen_stale).toBe(true);
     expect(daemon.snapshot("w1")?.tasks[0]?.screen_stale).toBe(true);
     expect(
       schemaErrors("wave-state.schema.json", await env.retained("volley/_waves/w1/state")),
     ).toEqual([]);
 
     host.screens = [session];
-    clock += 30_000;
+    await clock.advance(30_000);
     await daemon.tickScreens();
-    await until(async () => (await taskState())?.screen_stale === undefined);
+    expect((await taskState())?.screen_stale).toBeUndefined();
   });
 
   it("a hung read marks the task screen_stale and never blocks retire", async () => {
     host.readScreen = () => new Promise<string | null>(() => {});
     const ticking = daemon.tickScreens();
-    await until(async () => (await taskState())?.screen_stale === true, 2_000);
+    await clock.advance(100); // screenTimeouts.slowMs
+    expect((await taskState())?.screen_stale).toBe(true);
 
-    // Retire completes while the read is still hung (well before its 3 s hard timeout).
-    const t0 = Date.now();
+    // Retire completes while the read is still hung: its 3 s hard timeout is never reached (the
+    // clock stands still), so a retire that waited for the read would never land.
     await pub(buildTopic(NS, ID, "status"), "failed", "status", { reason: "x" });
-    await until(() => journal().some((e) => e.type === "agent_retired"), 1_500);
-    expect(Date.now() - t0).toBeLessThan(1_500);
+    await waits.event("w1", "agent_retired");
+    await waits.settled();
     expect(await env.retained(SCREEN)).toBeNull();
     // Later control work still runs: the serial queue is not wedged.
     await daemon.tick();
+    await clock.advance(3_000); // now the hung read times out
     await ticking;
-  }, 10_000);
+  });
 });

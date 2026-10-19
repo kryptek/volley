@@ -37,22 +37,22 @@ describe("volleyd stop retires the wave's agents; a sweep then leaves no agent l
   });
 
   it("stop <wave> deletes all its agents' logins in ONE batched control message", async () => {
-    // The store batches like DynsecControl: deletes sent within the window share one message.
+    // The store records which deletes arrive in the same tick: those share a batch window (and
+    // so one control message) whatever the window's length.
     const creds = memoryCredentials();
     const revoke = creds.revoke;
     const batches: string[][] = [];
-    let pending: { id: string; done: (ok: boolean) => void }[] = [];
-    creds.revoke = (id) =>
-      new Promise((done) => {
-        pending.push({ id, done });
-        if (pending.length > 1) return;
-        setTimeout(() => {
-          const batch = pending;
+    let pending: string[] = [];
+    creds.revoke = (id) => {
+      pending.push(id);
+      if (pending.length === 1) {
+        queueMicrotask(() => {
+          batches.push(pending.sort());
           pending = [];
-          batches.push(batch.map((b) => b.id).sort());
-          for (const b of batch) void revoke(b.id).then(b.done);
-        }, 100);
-      });
+        });
+      }
+      return revoke(id);
+    };
     s = await makeSupervisedEnv({
       creds,
       tasks: ["T2: { issue: 42 }", "T3: { issue: 42 }"],

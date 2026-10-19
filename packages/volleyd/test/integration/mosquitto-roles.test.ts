@@ -44,6 +44,7 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
   async function delivered(payload: string): Promise<boolean> {
     for (let i = 0; i < 20; i++) {
       if (seen.includes(payload)) return true;
+      // broker round-trip: delivery through the real mosquitto to the observer.
       await new Promise((r) => setTimeout(r, 25));
     }
     return false;
@@ -150,6 +151,7 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
     await attempt("volleyd", tokenRedeemTopic("0000beef"), otherRequest);
     await attempt("volleyd", tokenReplyTopic("0000abcd"), ownReply);
     for (let i = 0; i < 40 && !got.includes(ownReply); i++) {
+      // broker round-trip: delivery through the real mosquitto to the reply subscriber.
       await new Promise((r) => setTimeout(r, 25));
     }
     expect(got).toEqual([ownReply]);
@@ -160,6 +162,7 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
     for (const who of ["admin-test", "steer-test", "supervisor-test", "0000abcd"]) {
       await attempt(who, tokenReplyTopic("0000abcd"), forged);
     }
+    // broker round-trip: an ACL-denied publish is dropped silently; give a delivery time to show.
     await new Promise((r) => setTimeout(r, 300));
     expect(seen).not.toContain(forged);
   });
@@ -178,6 +181,7 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
     await attempt("admin-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
     await attempt("steer-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
     await attempt("supervisor-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
+    // broker round-trip: an ACL-denied publish is dropped silently; give a delivery time to show.
     await new Promise((r) => setTimeout(r, 300));
     expect(seen).not.toContain(forged);
   });

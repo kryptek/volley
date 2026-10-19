@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DynsecSession, brokerTransport, roleDrift } from "volley-cli/auth/dynsec";
 import { VOLLEY_ROLES } from "volley-cli/auth/roles";
 import { VolleyBroker } from "volley-mcp/broker";
+import { systemClock } from "../../src/clock";
 import { DynsecControl, DynsecCredentials, brokerControl } from "../../src/dynsec";
 import { reapAndRevoke } from "../../src/retire";
 
@@ -27,8 +28,9 @@ describe.skipIf(!RUN)("volleyd agent logins on mosquitto 2.1", () => {
     control = new DynsecControl({
       connect: brokerControl(URL as string, ADMIN),
       batchMs: () => 50,
+      clock: systemClock,
     });
-    creds = new DynsecCredentials(control);
+    creds = new DynsecCredentials(control, systemClock);
     observer = new VolleyBroker();
     await observer.connect({
       url: URL as string,
@@ -78,6 +80,7 @@ describe.skipIf(!RUN)("volleyd agent logins on mosquitto 2.1", () => {
       willPayload: JSON.stringify({ type: "reaped", payload: { reason: "disconnect" } }),
     });
     await agent.publish(statusTopic, JSON.stringify({ type: "working" }), { qos: 1, retain: true });
+    // broker round-trip: the agent's retained status reaches the broker before the delete path runs.
     await new Promise((r) => setTimeout(r, 100));
     seen.length = 0;
     const ok = await reapAndRevoke(id, NS, {
@@ -87,6 +90,7 @@ describe.skipIf(!RUN)("volleyd agent logins on mosquitto 2.1", () => {
       journal: () => {},
     });
     expect(ok).toBe(true);
+    // real process: the broker drops the deleted client and delivers what was published.
     await new Promise((r) => setTimeout(r, 400));
     expect(agent.connected).toBe(false);
     const mine = seen.filter((m) => m.topic === statusTopic);

@@ -16,6 +16,7 @@ import { ADMISSION_TOPIC, waveStateTopic } from "../src/control";
 import type { PressureReading } from "../src/daemon";
 import { admit } from "../src/scheduler";
 import type { AdmissionConfig, WaveState } from "../src/types";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 import { envelope, schemaErrors } from "./helpers/schema";
@@ -352,16 +353,14 @@ describe("volleyd daemon: pressure-based admission", () => {
           retain: false,
         });
       }
-      const deadline = Date.now() + 3000;
-      for (;;) {
+      // The signals reach the daemon over MQTT; each tick re-decides on what it has seen so far.
+      let sum: Awaited<ReturnType<typeof summary>>;
+      await eventually(async () => {
         await daemon.tick();
-        const sum = await summary();
-        if ((sum?.reasons as string[] | undefined)?.length === 1) {
-          expect(sum?.reasons).toEqual(["4 API overload signals in 300 s > max 3"]);
-          break;
-        }
-        if (Date.now() > deadline) throw new Error(`no overload verdict: ${JSON.stringify(sum)}`);
-      }
+        sum = await summary();
+        return (sum?.reasons as string[] | undefined)?.length === 1;
+      });
+      expect(sum?.reasons).toEqual(["4 API overload signals in 300 s > max 3"]);
     } finally {
       await agent.disconnect();
     }

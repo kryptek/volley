@@ -62,7 +62,8 @@ export interface SweeperDeps {
   /** The `_system` journal. */
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
   graceMs: () => number;
-  now?: () => number;
+  /** Wall-clock ms (the daemon's clock). */
+  now: () => number;
 }
 
 export interface SweepCounts {
@@ -108,7 +109,7 @@ export class CredentialSweeper {
       live,
       mintedAt: this.d.credentials.mintedAt,
       firstSeen: this.firstSeen,
-      now: (this.d.now ?? Date.now)(),
+      now: this.d.now(),
       graceMs: this.d.graceMs(),
     });
     const swept: string[] = [];

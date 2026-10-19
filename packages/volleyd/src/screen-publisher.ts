@@ -1,5 +1,6 @@
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { type Clock, type TimerHandle, systemClock, withNow } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { DAEMON_AGENT_ID } from "./control";
 import type { Host } from "./hosts/host";
@@ -55,6 +56,9 @@ export interface ScreenCapture {
 export interface ScreenPublisherDeps {
   /** Publish a retained QoS 0 message. */
   publish: (topic: string, payload: string) => Promise<void>;
+  /** Timers and wall clock (default: real). */
+  clock?: Clock;
+  /** Wall clock override on top of `clock`. */
   now?: () => number;
   /** Called when an agent's capture becomes stale or recovers. */
   onStale?: (agentId: string, stale: boolean) => void;
@@ -78,13 +82,16 @@ interface Tracked {
 export class ScreenPublisher {
   private readonly agents = new Map<string, Tracked>();
   private readonly listeners = new Set<(c: ScreenCapture) => void>();
+  private readonly clock: Clock;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
   private readonly slowMs: number;
   private readonly readTimeoutMs: number;
 
   constructor(private readonly deps: ScreenPublisherDeps) {
-    this.now = deps.now ?? Date.now;
+    // real clock: the default when the daemon injects no clock
+    this.clock = withNow(deps.clock ?? systemClock, deps.now);
+    this.now = this.clock.now;
     this.log = deps.log ?? (() => {});
     this.slowMs = deps.slowMs ?? DAEMON_DEFAULTS.screen_slow_ms;
     this.readTimeoutMs = deps.readTimeoutMs ?? DAEMON_DEFAULTS.screen_read_timeout_ms;
@@ -147,14 +154,14 @@ export class ScreenPublisher {
     const started = this.now();
     let slowFired = false;
     let timedOut = false;
-    let slowTimer: ReturnType<typeof setTimeout> | undefined;
-    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    let slowTimer: TimerHandle | undefined;
+    let hardTimer: TimerHandle | undefined;
     const screen = await new Promise<string | null>((resolve) => {
-      slowTimer = setTimeout(() => {
+      slowTimer = this.clock.setTimeout(() => {
         slowFired = true;
         this.setStale(a, true);
       }, this.slowMs);
-      hardTimer = setTimeout(() => {
+      hardTimer = this.clock.setTimeout(() => {
         timedOut = true;
         resolve(null);
       }, this.readTimeoutMs);
@@ -162,8 +169,8 @@ export class ScreenPublisher {
         .readScreen(target.workspace, DAEMON_DEFAULTS.screen_capture_lines)
         .then(resolve, () => resolve(null));
     }).finally(() => {
-      clearTimeout(slowTimer);
-      clearTimeout(hardTimer);
+      this.clock.clearTimeout(slowTimer);
+      this.clock.clearTimeout(hardTimer);
     });
     if (timedOut) this.log(`screen ${target.agentId}: read timed out`);
     const finished = this.now();

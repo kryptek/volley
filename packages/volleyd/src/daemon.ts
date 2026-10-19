@@ -154,15 +154,20 @@ import {
   readBriefPreface,
 } from "./brief";
 import {
-  type ClockSample,
+  type Clock,
   type ClockState,
   type PendingReap,
+  type TimerHandle,
+  dateOf,
   heartbeatSuppresses,
   holdReap,
   inWakeGrace,
   initialClock,
   reapVerdict,
   sampleClock,
+  sampleOf,
+  systemClock,
+  withNow,
 } from "./clock";
 import { HOOKS_DIR, MCP_ENTRY } from "./launch";
 import {
@@ -274,14 +279,17 @@ export interface DaemonOptions {
    * worktree; otherwise (or before any spawn) `<home>/waves/<wave>/tasks/<task>`.
    */
   taskDir?: (wave: WaveId, task: TaskId) => string;
-  /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
+  /**
+   * Every daemon timer and wall-clock read (clock.ts). Default: real timers. Tests pass a fake
+   * one (test/helpers/fake-clock.ts) and move time by hand.
+   */
+  clock?: Clock;
+  /** Wall clock override on top of `clock` (tests that only fix the time). */
   now?: () => number;
   /** The config's bottom layer (default CONFIG_DEFAULTS; `volleyd daemon`: `defaultsFor` env). */
   configDefaults?: Tunables;
   /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
   screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
-  /** Monotonic + wall clock sampled every tick for sleep/wake detection (tests inject a jump). */
-  clock?: () => ClockSample;
   /** Override of the model-switch verification window (tests; ms). */
   recoveryTimeouts?: { modelSwitchVerifyMs?: number };
   /**
@@ -344,6 +352,16 @@ export interface SpawnerOptions {
   remoteExec?: ExecFn;
 }
 
+/** How the pipeline (or an account move) starts a spawn (startSpawn). */
+interface SpawnPipelineOptions {
+  start?: SpawnStart;
+  files?: Record<string, string>;
+  /** An account move's resume note, appended to the brief. */
+  resumeNote?: string;
+  /** An account move of a pipeline role: the attempt whose worktree it continues in. */
+  worktreeAttempt?: number;
+}
+
 /** A spawned agent the daemon watches until it is retired. */
 interface Supervised {
   wave: WaveId;
@@ -360,7 +378,7 @@ interface Supervised {
   minted: boolean;
   workspace: string;
   /** Armed while the status is `reaped`: retires the agent unless it comes back first. */
-  reapTimer?: ReturnType<typeof setTimeout> | undefined;
+  reapTimer?: TimerHandle | undefined;
   /** The `reaped` status being re-verified (clock.ts). */
   pendingReap?: PendingReap | undefined;
   /** `wall_time` of a `reaped` status a heartbeat suppressed: never accepted, even re-delivered. */
@@ -383,8 +401,6 @@ const SLOT_OF: Record<string, DecisionSlot> = {
   hooks_silent: "silent",
   screen_static: "silent",
 };
-
-const defaultClock = (): ClockSample => ({ mono: performance.now(), wall: Date.now() });
 
 const secondsMs = (s: number) => s * 1000;
 
@@ -420,10 +436,7 @@ export type PressureSource = (ctx: {
  * A repo's CI queue is re-sampled at most every `ci_queue_sample_ms` (it spends GitHub API
  * quota); ticks in between reuse its last sample.
  */
-export function systemPressure(
-  exec: ExecFn = realExec,
-  now: () => number = Date.now,
-): PressureSource {
+export function systemPressure(exec: ExecFn, now: () => number): PressureSource {
   const ciCache = new Map<string, { at: number; sample: Promise<Sample> }>();
   const ciQueue = (repo: string, timeout: number) => {
     const t = now();
@@ -588,7 +601,7 @@ export class Daemon {
   /** Agent logins: minted on spawn, deleted on retire / stop / sweep. */
   private readonly credentials: CredentialStore | undefined;
   private readonly sweeper: CredentialSweeper | undefined;
-  private sweepTimer: ReturnType<typeof setTimeout> | undefined;
+  private sweepTimer: TimerHandle | undefined;
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
@@ -601,7 +614,7 @@ export class Daemon {
   private readonly system: Journal;
   /** `stop --all` engaged: every wave admits nothing and `run` is refused until `resume --all`. */
   private killSwitch: boolean;
-  private readonly acks = new AckTracker();
+  private readonly acks: AckTracker;
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
@@ -610,7 +623,7 @@ export class Daemon {
    * When this process started. `lastSeen` is in memory only, so for `claim` every owner counts
    * as seen at least at daemon start: a restart never makes a live owner instantly claimable.
    */
-  private readonly startedAt = Date.now();
+  private readonly startedAt: number;
   /** Subscriptions released on `stop` (never the mailbox: it lives in the persistent session). */
   private readonly unsubscribers: (() => Promise<void>)[] = [];
   private leases: LeaseBook;
@@ -643,10 +656,12 @@ export class Daemon {
   private sampling = false;
   private readonly log: (line: string) => void;
   private queue: Promise<unknown> = Promise.resolve();
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private watchdog: ReturnType<typeof setInterval> | undefined;
-  private screenTimer: ReturnType<typeof setInterval> | undefined;
+  private timer: TimerHandle | undefined;
+  private watchdog: TimerHandle | undefined;
+  private screenTimer: TimerHandle | undefined;
   private running = false;
+  /** Spawn launch halves and journal appends (with their publishes) in flight: `settled`. */
+  private readonly inflight = new Set<Promise<unknown>>();
   /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
   private readonly spawning = new Set<string>();
   /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
@@ -663,7 +678,7 @@ export class Daemon {
   private readonly authAnswered = new Map<string, AuthReply>();
   /** When each account last sent an auth request (account_list's `last_seen`). */
   private readonly authSeen = new Map<string, string>();
-  private pruneTimer: ReturnType<typeof setInterval> | undefined;
+  private pruneTimer: TimerHandle | undefined;
   /** The last token-prune failure logged, so a broker without `volley auth` logs it once. */
   private pruneError: string | null = null;
   /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
@@ -686,8 +701,14 @@ export class Daemon {
   private readonly moving = new Set<string>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
   private clock: ClockState = initialClock();
-  /** Liveness clock (epoch ms). */
+  /** `onJournal` listeners. */
+  private readonly journalListeners = new Set<(wave: WaveId, event: JournalEvent) => void>();
+  /** Every timer and wall-clock read (DaemonOptions.clock). */
+  private readonly time: Clock;
+  /** Liveness clock (epoch ms): `time.now`. */
   private readonly now: () => number;
+  /** The admission samplers (one CI-queue cache across ticks), on the daemon's clock. */
+  private readonly samplePressure: PressureSource;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -703,11 +724,18 @@ export class Daemon {
     private readonly releaseLock: () => void,
   ) {
     this.log = opts.log ?? (() => {});
-    this.now = opts.now ?? Date.now;
+    // real clock: the default of DaemonOptions.clock
+    this.time = withNow(opts.clock ?? systemClock, opts.now);
+    this.now = this.time.now;
+    this.samplePressure = opts.pressure ?? systemPressure(realExec, this.now);
+    this.startedAt = this.now();
+    this.acks = new AckTracker(this.time);
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
+    this.observeJournal(SYSTEM_WAVE, this.system);
     this.config = ConfigStore.load({
       home: opts.home,
       system: this.system,
+      now: () => dateOf(this.time),
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
@@ -722,8 +750,9 @@ export class Daemon {
           return r === null ? null : `${r.stdout}\n${r.stderr}`;
         },
         log: this.log,
+        clock: this.time,
       });
-      this.credentials = new DynsecCredentials(this.dynsec);
+      this.credentials = new DynsecCredentials(this.dynsec, this.time);
     }
     if (this.credentials !== undefined && opts.spawner?.mintCredentials !== false) {
       const store = this.credentials;
@@ -735,6 +764,7 @@ export class Daemon {
             reapAndRevoke(id, this.sweepNamespaces.get(id) ?? this.opts.namespace, this.reapDeps()),
           journal: (ev) => this.appendSystem(ev),
           graceMs: () => secondsMs(this.config.get("spawn_timeout_s") as number),
+          now: () => this.time.now(),
         },
         {
           live: 0,
@@ -750,6 +780,7 @@ export class Daemon {
       ...(opts.claude?.primaryDir !== undefined ? { primaryDir: opts.claude.primaryDir } : {}),
       primaryJson: this.claudeJsonPath,
       exec: opts.claude?.exec ?? realExec,
+      clock: this.time,
       publish: (topic, e) => this.publish(topic, this.envelope(SIGNIN_CHANNEL, e.type, e), false),
       journal: (ev) => this.appendSystem(ev),
       log: this.log,
@@ -763,7 +794,7 @@ export class Daemon {
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
       publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
-      ...(opts.now !== undefined ? { now: opts.now } : {}),
+      clock: this.time,
       ...opts.screenTimeouts,
       onStale: (agentId) => {
         const a = this.supervised.get(agentId);
@@ -774,11 +805,11 @@ export class Daemon {
     this.tunnels = new TunnelSupervisor({
       exec: opts.spawner?.remoteExec ?? realExec,
       log: this.log,
-      now: opts.now ?? Date.now,
+      clock: this.time,
       onExit: (x) => this.onTunnelExit(x),
     });
     this.tunnelChecks = new TunnelChecks({
-      now: opts.now ?? Date.now,
+      now: this.now,
       log: this.log,
       onChange: (key, status) => {
         // A check that lands after shutdown changes nothing.
@@ -796,6 +827,7 @@ export class Daemon {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
       this.waves.set(wave, log);
+      this.observeJournal(wave, log.journal);
       this.config.setWaveOverrides(wave, log.record.overrides);
       this.issueFiles.set(wave, journaledIssueFiles(log.journal.readAll()));
       // The backoff carries over a restart: a retry is due when the journal said it was, and
@@ -900,7 +932,7 @@ export class Daemon {
         ...this.envelope("_system/registry", "registered", {
           capabilities: ["supervisor"],
           cwd: this.opts.home,
-          started_at: new Date().toISOString(),
+          started_at: dateOf(this.time).toISOString(),
         }),
         namespace,
       },
@@ -988,16 +1020,22 @@ export class Daemon {
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) {
-      this.timer = setInterval(() => void this.tick(), tickMs);
-      this.screenTimer = setInterval(() => void this.tickScreens(), DAEMON_DEFAULTS.screen_tick_ms);
+      this.timer = this.time.setInterval(() => void this.tick(), tickMs);
+      this.screenTimer = this.time.setInterval(
+        () => void this.tickScreens(),
+        DAEMON_DEFAULTS.screen_tick_ms,
+      );
     }
-    this.watchdog = setInterval(() => {
+    this.watchdog = this.time.setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
     const pruneMs =
       this.opts.tokenPruneMs ?? (this.opts.auth !== undefined ? DAEMON_DEFAULTS.token_prune_ms : 0);
     if (pruneMs > 0) {
-      this.pruneTimer = setInterval(() => void this.enqueue(() => this.pruneTokens()), pruneMs);
+      this.pruneTimer = this.time.setInterval(
+        () => void this.enqueue(() => this.pruneTokens()),
+        pruneMs,
+      );
     }
     // The sweep is mandatory (no login ever expires): at start, then every interval.
     if (this.sweeper !== undefined) this.scheduleSweep(0);
@@ -1019,11 +1057,12 @@ export class Daemon {
     }
     if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
-    if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
+    if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     if (env !== null) this.noteAttention(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
-    this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
+    const now = this.now();
+    this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
@@ -1158,8 +1197,8 @@ export class Daemon {
 
   /** Run a credential sweep after `ms`, then again every `credential_sweep_interval_s`. */
   private scheduleSweep(ms: number): void {
-    clearTimeout(this.sweepTimer);
-    this.sweepTimer = setTimeout(async () => {
+    this.time.clearTimeout(this.sweepTimer);
+    this.sweepTimer = this.time.setTimeout(async () => {
       await this.sweepCredentials().catch((e: unknown) =>
         this.log(`credential sweep: ${e instanceof Error ? e.message : String(e)}`),
       );
@@ -1238,16 +1277,16 @@ export class Daemon {
    */
   private halt(closeControl = true): void {
     this.running = false;
-    clearInterval(this.timer);
-    clearInterval(this.watchdog);
-    clearInterval(this.screenTimer);
-    clearInterval(this.pruneTimer);
-    clearTimeout(this.sweepTimer);
+    this.time.clearInterval(this.timer);
+    this.time.clearInterval(this.watchdog);
+    this.time.clearInterval(this.screenTimer);
+    this.time.clearInterval(this.pruneTimer);
+    this.time.clearTimeout(this.sweepTimer);
     if (closeControl) void this.dynsec?.close();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
-      clearTimeout(a.reapTimer);
+      this.time.clearTimeout(a.reapTimer);
       void a.watch.close();
     }
     this.supervised.clear();
@@ -1338,7 +1377,7 @@ export class Daemon {
       ].filter((r) => r !== "");
       let reading: PressureReading;
       try {
-        reading = await (this.opts.pressure ?? systemPressure())({
+        reading = await this.samplePressure({
           repos,
           config: this.config.effective(),
         });
@@ -1348,7 +1387,7 @@ export class Daemon {
       }
       await this.enqueue(async () => {
         this.lastReading = reading;
-        this.sampledAt = new Date();
+        this.sampledAt = dateOf(this.time);
         // The state the new verdicts start from; kept so a config change can re-decide this
         // same sample with new thresholds without counting it twice for hysteresis.
         this.prevAdmission = new Map(
@@ -1366,7 +1405,7 @@ export class Daemon {
   private evaluate(): void {
     const reading = this.lastReading;
     if (reading === null) return;
-    const now = (this.sampledAt ?? new Date()).getTime();
+    const now = (this.sampledAt ?? dateOf(this.time)).getTime();
     const windows: number[] = [];
     const samplesFor = (cfg: Tunables, ci: Sample | undefined): Samples => {
       windows.push(cfg.admission.api_overload_window_s);
@@ -1403,7 +1442,7 @@ export class Daemon {
     for (const [key, v] of this.verdicts) {
       if (key !== GLOBAL) waves[key] = { allow: allowJson(v.allow), reasons: v.reasons };
     }
-    this.summary = summaryPayload(global, this.sampledAt ?? new Date(), waves);
+    this.summary = summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves);
     await this.publish(
       ADMISSION_TOPIC,
       this.envelope("_system/admission", "admission", this.summary),
@@ -1477,12 +1516,12 @@ export class Daemon {
     const pools = this.config.effective().lease_pools;
     const r = leaseStep(this.leases, input, {
       pools,
-      now: new Date(),
+      now: dateOf(this.time),
       defaultTtlS: DAEMON_DEFAULTS.lease_default_ttl_s,
     });
     const touched = new Set<string>(input.kind === "request" ? [input.pool] : []);
     for (const ev of r.events) {
-      const e = this.system.append(ev);
+      const e = this.system.append(ev, dateOf(this.time));
       touched.add(String(e.data.pool));
       await this.publish(
         waveEventsTopic(SYSTEM_WAVE),
@@ -1665,18 +1704,41 @@ export class Daemon {
    * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
    * serial queue and the queue never waits on a spawn's verification window.
    */
-  private async startSpawn(
+  private startSpawn(
     wave: WaveId,
     task: string,
     role: Role,
-    pipeline: {
-      start?: SpawnStart;
-      files?: Record<string, string>;
-      /** An account move's resume note, appended to the brief. */
-      resumeNote?: string;
-      /** An account move of a pipeline role: the attempt whose worktree it continues in. */
-      worktreeAttempt?: number;
-    } = {},
+    pipeline: SpawnPipelineOptions = {},
+  ): Promise<SpawnResult> {
+    return this.track(this.launchSpawn(wave, task, role, pipeline));
+  }
+
+  private track<T>(p: Promise<T>): Promise<T> {
+    this.inflight.add(p);
+    const done = () => this.inflight.delete(p);
+    void p.then(done, done);
+    return p;
+  }
+
+  /**
+   * Resolves once the serial queue is drained, no spawn's launch half is running and every journal
+   * append (a wave's, or `_system`'s through appendSystem) has been published (a spawn's
+   * verification waits on the agent, so it is not counted).
+   * Tests await it before reading the published state or asserting that nothing happened.
+   */
+  async settled(): Promise<void> {
+    for (let q = this.queue; ; q = this.queue) {
+      await q;
+      await Promise.allSettled([...this.inflight]);
+      if (q === this.queue && this.inflight.size === 0) return;
+    }
+  }
+
+  private async launchSpawn(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    pipeline: SpawnPipelineOptions,
   ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
@@ -2014,7 +2076,7 @@ export class Daemon {
    * beside the serial queue and only the resolution is queued.
    */
   private checkRemoteTrust(wave: WaveId, d: DecisionRecord, repo: string): void {
-    const now = (this.opts.now ?? Date.now)();
+    const now = this.now();
     const c = this.trustChecks.get(d.decision_id);
     if (
       c?.inFlight === true ||
@@ -2115,11 +2177,12 @@ export class Daemon {
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
+      now: this.now,
       get openDecisions() {
         return log.record.state?.open_decisions ?? [];
       },
       probe,
-      watch: (ns, id) => watchAgent(this.broker, ns, id, Date.now, this.progressFeed),
+      watch: (ns, id) => watchAgent(this.broker, ns, id, this.time, this.progressFeed),
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
@@ -2180,10 +2243,10 @@ export class Daemon {
       const port = tunnel.remote_port;
       const key = forwardOf(h);
       if (tunnel.supervise && !this.tunnels.has(target, port)) {
-        this.tunnelChecks.poke(key, () => this.startTunnel(h));
+        void this.track(this.tunnelChecks.poke(key, () => this.startTunnel(h)));
         continue;
       }
-      this.tunnelChecks.poke(key, async (): Promise<TunnelStatus> => {
+      const checked = this.tunnelChecks.poke(key, async (): Promise<TunnelStatus> => {
         // Only the supervised ssh having stayed up says the port is the tunnel: a forward whose
         // ssh keeps failing is down whatever answers there (the box's own broker, a stale
         // forward), and one still coming up is not known either way yet.
@@ -2197,6 +2260,7 @@ export class Daemon {
         this.tunnelDownWhy.delete(key);
         return "down";
       });
+      void this.track(checked);
     }
   }
 
@@ -2477,7 +2541,7 @@ export class Daemon {
         if (a.pendingReap === undefined) holdReaped();
         return;
       }
-      clearTimeout(a.reapTimer);
+      this.time.clearTimeout(a.reapTimer);
       a.reapTimer = undefined;
       a.reapDeferred = false;
       a.pendingReap = undefined;
@@ -2504,7 +2568,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
     // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
@@ -2592,6 +2656,7 @@ export class Daemon {
         if (this.running) await this.enqueue(fn);
       },
       log: (line) => this.log(line),
+      now: this.now,
     });
     this.pipelines.set(wave, d);
     return d;
@@ -2684,15 +2749,15 @@ export class Daemon {
   }
 
   private wallNow(): number {
-    return (this.opts.clock ?? defaultClock)().wall;
+    return this.now();
   }
 
   /** (Re-)arm the timer that accepts a pending reap unless a heartbeat moved it. */
   private scheduleReap(agentId: string, a: Supervised): void {
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     const p = a.pendingReap;
     if (p === undefined) return;
-    a.reapTimer = setTimeout(
+    a.reapTimer = this.time.setTimeout(
       () => {
         a.reapTimer = undefined;
         if (!this.acceptReap(agentId, a)) this.scheduleReap(agentId, a);
@@ -2728,7 +2793,7 @@ export class Daemon {
       a.pendingReap = { ...pending, until: this.now() + this.reapGrace(a.wave).ms };
       return false;
     }
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     a.reapTimer = undefined;
     a.pendingReap = undefined;
     // Through the pipeline, like `failed`: a reaped role opens its respawn / cancel decision.
@@ -2748,7 +2813,7 @@ export class Daemon {
     const p = a.pendingReap;
     if (p !== undefined && (sig !== null || env.type === "heartbeat")) {
       if (heartbeatSuppresses(p, now)) {
-        clearTimeout(a.reapTimer);
+        this.time.clearTimeout(a.reapTimer);
         a.reapTimer = undefined;
         a.pendingReap = undefined;
         a.suppressedReap = a.watch.state.status?.wall_time;
@@ -2776,7 +2841,7 @@ export class Daemon {
 
   /** The monitor half of a tick: sleep/wake, then every supervised agent's liveness. */
   private async monitor(): Promise<void> {
-    const r = sampleClock(this.clock, (this.opts.clock ?? defaultClock)());
+    const r = sampleClock(this.clock, sampleOf(this.time));
     this.clock = r.state;
     const now = this.now();
     if (r.wake !== null) {
@@ -2948,14 +3013,17 @@ export class Daemon {
 
   private readScreenBounded(workspace: string, host: Host = this.host): Promise<string | null> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), DAEMON_DEFAULTS.screen_read_timeout_ms);
+      const timer = this.time.setTimeout(
+        () => resolve(null),
+        DAEMON_DEFAULTS.screen_read_timeout_ms,
+      );
       host.readScreen(workspace, DAEMON_DEFAULTS.screen_lines).then(
         (s) => {
-          clearTimeout(timer);
+          this.time.clearTimeout(timer);
           resolve(s);
         },
         () => {
-          clearTimeout(timer);
+          this.time.clearTimeout(timer);
           resolve(null);
         },
       );
@@ -3270,7 +3338,7 @@ export class Daemon {
   ): Promise<void> {
     const id = t.agent_id;
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
-    const watch = await watchAgent(this.broker, ns, id, this.now, this.progressFeed);
+    const watch = await watchAgent(this.broker, ns, id, this.time, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
     const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
     const role =
@@ -3520,11 +3588,30 @@ export class Daemon {
     return lockPath(this.opts.home, worktreePath(worktreeRoot, wave, task, role));
   }
 
+  /**
+   * Observe every journal append (any wave, `_system` included) as it is made durable; returns
+   * the unsubscribe. Tests await the event they expect through it instead of polling.
+   */
+  onJournal(fn: (wave: WaveId, event: JournalEvent) => void): () => void {
+    this.journalListeners.add(fn);
+    return () => this.journalListeners.delete(fn);
+  }
+
+  private observeJournal(wave: WaveId, journal: Journal): void {
+    journal.onAppend((event) => {
+      for (const fn of this.journalListeners) fn(wave, event);
+    });
+  }
+
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
   private async append(wave: WaveId, ev: NewEvent): Promise<JournalEvent> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const event = log.append(ev);
+    return this.track(this.publishAppended(wave, log.append(ev, dateOf(this.time))));
+  }
+
+  /** An appended event's `/events` mirror, then the wave state it changed. */
+  private async publishAppended(wave: WaveId, event: JournalEvent): Promise<JournalEvent> {
     await this.publish(
       waveEventsTopic(wave),
       this.envelope("_waves/events", event.type, {
@@ -3642,7 +3729,7 @@ export class Daemon {
   ): Promise<DecisionRecord> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const r = openEvent(log.record, input, new Date());
+    const r = openEvent(log.record, input, dateOf(this.time));
     if ("error" in r) throw new Error(r.error);
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     const d = log.record.decisions[r.id] as DecisionRecord;
@@ -3673,7 +3760,7 @@ export class Daemon {
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const ev = resolveEvent(log.record, id, r, new Date());
+    const ev = resolveEvent(log.record, id, r, dateOf(this.time));
     if ("error" in ev) throw new Error(ev.error);
     if ("already" in ev) return { decision: ev.already, already_resolved: true };
     await this.append(wave, ev.event);
@@ -3889,7 +3976,7 @@ export class Daemon {
         out = await redeemToken(exec, tokenId, payload);
       } else {
         const sender = topic.split("/")[4] ?? "";
-        this.authSeen.set(sender, new Date().toISOString());
+        this.authSeen.set(sender, dateOf(this.time).toISOString());
         const registry = payload.op === "account_list" ? await this.registrySeen() : new Map();
         // The later of the account's last auth request and its registry entry (an agent id).
         const lastSeen = (name: string) =>
@@ -3911,7 +3998,7 @@ export class Daemon {
         },
       };
     }
-    if (out.event !== undefined) this.system.append(out.event);
+    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
     if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
     this.authAnswered.set(key, out.reply);
     if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
@@ -4173,7 +4260,9 @@ export class Daemon {
     preface: { info: BriefPrefaceInfo | null; path: string },
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
-    this.waves.set(wave.wave, WaveLog.open(join(this.opts.home, "waves", wave.wave)));
+    const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
+    this.waves.set(wave.wave, log);
+    this.observeJournal(wave.wave, log.journal);
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
     this.storeVersion(this.versionFile(wave.wave, 1), text);
@@ -4385,8 +4474,8 @@ export class Daemon {
       status: info?.status ?? null,
       registryAt: info?.registryAt ?? null,
       heartbeatAt: owner !== null ? (this.lastSeen.get(owner) ?? this.startedAt) : null,
-      ownedSince: ownedSince(this.journalEvents(w.wave)),
-      now: Date.now(),
+      ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
+      now: this.now(),
       claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
@@ -4593,8 +4682,11 @@ export class Daemon {
   }
 
   /** Journal a global event in `_system` and mirror it on `volley/_waves/_system/events`. */
-  private async appendSystem(ev: NewEvent): Promise<void> {
-    const event = this.system.append(ev);
+  private appendSystem(ev: NewEvent): Promise<void> {
+    return this.track(this.publishSystem(this.system.append(ev, dateOf(this.time))));
+  }
+
+  private async publishSystem(event: JournalEvent): Promise<void> {
     await this.publish(
       waveEventsTopic(SYSTEM_WAVE),
       this.envelope("_waves/events", event.type, {
@@ -4760,7 +4852,7 @@ export class Daemon {
       };
     }
     const file = this.versionFile(wave.wave, state.version + 1);
-    const now = new Date().toISOString();
+    const now = dateOf(this.time).toISOString();
     let res: ReturnType<typeof applyPlan>;
     try {
       const spawning = [...this.spawning]
@@ -4871,12 +4963,12 @@ function clipText(text: string): string {
 }
 
 /** When the current owner got the wave: the latest `owner_claimed`, else `wave_submitted`. */
-function ownedSince(events: readonly JournalEvent[]): string {
+function ownedSince(events: readonly JournalEvent[], now: number): string {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i] as JournalEvent;
     if (e.type === "owner_claimed" || e.type === "wave_submitted") return e.at;
   }
-  return new Date().toISOString();
+  return new Date(now).toISOString();
 }
 
 /** Open every wave journal under `<home>/waves/`, oldest submission first. */

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import { type Clock, systemClock } from "./clock";
 import type { Host } from "./hosts/host";
 import { type ScreenClass, classifyScreen, modelFromScreen } from "./screens";
 
@@ -83,7 +84,8 @@ export async function watchAgent(
   broker: VolleyBroker,
   namespace: string,
   agentId: string,
-  now: () => number = Date.now,
+  // real clock: the default when the daemon injects no clock
+  clock: Clock = systemClock,
   progressFeed: ProgressFeed = (topic, deliver) => broker.subscribeStream(topic, deliver),
 ): Promise<AgentWatch> {
   const state: SignalState = {
@@ -117,7 +119,7 @@ export async function watchAgent(
       for (const cb of statusCbs) cb(env.type, env.payload);
     } else if (topic === progressTopic) {
       if (env.type === "heartbeat") {
-        state.lastHeartbeatAt = now();
+        state.lastHeartbeatAt = clock.now();
         if (p.hook_event === "SessionStart") state.sessionStart = true;
       }
       for (const cb of progressCbs) cb(payload);
@@ -147,11 +149,11 @@ export async function watchAgent(
           done(true);
         };
         const done = (v: boolean) => {
-          clearTimeout(timer);
+          clock.clearTimeout(timer);
           waiters.delete(check);
           resolve(v);
         };
-        const timer = setTimeout(() => done(false), timeoutMs);
+        const timer = clock.setTimeout(() => done(false), timeoutMs);
         waiters.add(check);
       });
     },

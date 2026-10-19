@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { systemClock } from "../src/clock";
 import { ControlClient } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
 import { watchAgent } from "../src/verify";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 
 /**
@@ -79,13 +81,8 @@ async function withRunningAgent(): Promise<void> {
   });
 }
 
-async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
-  const until = Date.now() + ms;
-  while (!cond()) {
-    if (Date.now() > until) throw new Error("waitFor: condition never held");
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
+/** Mailbox deliveries reach the test's subscriber over MQTT. */
+const waitFor = eventually;
 
 describe("a wave's namespace", () => {
   it("stop sends the cancel to the agent's mailbox in the wave's namespace", async () => {
@@ -158,8 +155,15 @@ describe("two daemons on one broker", () => {
       const res = await client.request("run", { wave_yaml: yaml, owner: "coord-a" });
       expect(res.error).toBeUndefined();
       expect(existsSync(join(home, "waves", WAVE))).toBe(true);
-      // Give the other daemon every chance to (wrongly) pick the request up.
-      await new Promise((r) => setTimeout(r, 200));
+      // The other daemon answers a request of its own: it has read (and dropped) the earlier one
+      // on its connection, and handled whatever that set off.
+      const otherClient = await ControlClient.connect(broker.url, "other-ns");
+      try {
+        expect((await otherClient.request("status", {})).ok).toBe(true);
+      } finally {
+        await otherClient.close();
+      }
+      await other.settled();
       expect(existsSync(join(otherHome, "waves", WAVE))).toBe(false);
     } finally {
       await other.stop();
@@ -204,7 +208,7 @@ describe("one progress subscription", () => {
     await b.connect({ url: broker.url, agentId: "watcher", clientId: "watcher-client" });
     const fed: string[] = [];
     let deliver: ((m: { topic: string; payload: string }) => void) | undefined;
-    const w = await watchAgent(b, WNS, AGENT, Date.now, async (topic, d) => {
+    const w = await watchAgent(b, WNS, AGENT, systemClock, async (topic, d) => {
       fed.push(topic);
       deliver = d;
       return async () => {};
@@ -250,11 +254,8 @@ describe("one progress subscription", () => {
       return (res.result as { signals: { api_overload?: { value?: number } } }).signals.api_overload
         ?.value;
     };
-    let n = await count();
-    for (let i = 0; i < 50 && n === 0; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-      n = await count();
-    }
-    expect(n).toBe(1);
+    // A control round-trip behind the signals on the daemon's connection: both copies were read.
+    expect((await client.request("status", {})).ok).toBe(true);
+    expect(await count()).toBe(1);
   });
 });

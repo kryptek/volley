@@ -11,6 +11,7 @@ import { Daemon as DaemonClass } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
 
 const NS = "accounts-test";
@@ -140,7 +141,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       ).toString("utf-8"),
     );
 
-  const startDaemon = (extra: { tokenPruneMs?: number } = {}) =>
+  const startDaemon = (extra: { tokenPruneMs?: number; clock?: FakeClock } = {}) =>
     DaemonClass.start({
       brokerUrl: broker.url,
       namespace: NS,
@@ -164,6 +165,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
   afterEach(async () => {
     for (const c of clients.splice(0)) {
       // A client the ACL refused was disconnected by Aedes: do not wait on its clean DISCONNECT.
+      // broker round-trip: a refused client's DISCONNECT may never complete; bound the wait.
       await Promise.race([c.disconnect().catch(() => {}), new Promise((r) => setTimeout(r, 300))]);
       c.simulateCrash();
     }
@@ -208,6 +210,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     });
     // Not awaited: a publish the broker ACL refuses is never PUBACKed by Aedes.
     void c.publish(topic, JSON.stringify(env), { qos: 1, retain }).catch(() => {});
+    // broker round-trip: a request the ACL refuses is never answered; bound the wait for its ack.
     const timer = setTimeout(() => resolve(null), timeoutMs);
     const r = await reply;
     clearTimeout(timer);
@@ -366,15 +369,17 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     await c.connect({ url: broker.url, agentId, username: "steer-1", password: pw("steer-1") });
     clients.push(c);
     const cid = randomUUID();
-    const answer = new Promise<Record<string, unknown>>((resolve) => {
-      void c.subscribeStream(`volley/${NS}/${agentId}/mailbox`, ({ payload: raw }) => {
-        const env = parseEnvelope(raw);
-        if (env?.type === "ack" && env.correlation_id === cid) {
-          resolve(env.payload as Record<string, unknown>);
-        }
-      });
+    let resolve!: (r: Record<string, unknown>) => void;
+    const answer = new Promise<Record<string, unknown>>((r) => {
+      resolve = r;
     });
-    await new Promise((r) => setTimeout(r, 100));
+    // Subscribed (SUBACKed) before the query goes out, so its answer cannot be missed.
+    await c.subscribeStream(`volley/${NS}/${agentId}/mailbox`, ({ payload: raw }) => {
+      const env = parseEnvelope(raw);
+      if (env?.type === "ack" && env.correlation_id === cid) {
+        resolve(env.payload as Record<string, unknown>);
+      }
+    });
     const env = buildEnvelope({
       agentId,
       parentId: null,
@@ -395,8 +400,10 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
 
   it("prunes expired token logins on a timer, with no request needed", async () => {
     await daemon.stop();
-    daemon = await startDaemon({ tokenPruneMs: 50 });
-    await new Promise((r) => setTimeout(r, 400));
+    const clock = fakeClock();
+    daemon = await startDaemon({ tokenPruneMs: 50, clock });
+    await clock.advance(100); // two prune intervals
+    await daemon.settled();
     expect(auth.argvs(["volley", "auth", "list"]).length).toBeGreaterThanOrEqual(2);
     expect(auth.argvs(["volley", "auth", "list"])[0]).toEqual(["volley", "auth", "list", "--json"]);
   });

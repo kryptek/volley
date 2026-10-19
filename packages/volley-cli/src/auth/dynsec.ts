@@ -166,6 +166,13 @@ export class DynsecSession {
   }
 }
 
+/** A timer scheduler for the batch window (a subset of volleyd's Clock). */
+export interface BatchTimers {
+  setTimeout(fn: () => void, ms: number): unknown;
+  /** Method syntax on purpose: a Clock's typed handle is accepted (parameter bivariance). */
+  clearTimeout(handle: unknown): void;
+}
+
 /**
  * Commands collected for `windowMs` and sent as ONE control message: a wave's simultaneous mints
  * (or deletes) then cost one state-file rewrite instead of one each. Each caller gets its own
@@ -178,11 +185,16 @@ export class DynsecBatcher {
     resolve: (r: DynsecResponse) => void;
     reject: (e: unknown) => void;
   }[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: unknown = null;
 
   constructor(
     private readonly session: () => Promise<DynsecSession>,
     private readonly windowMs: () => number,
+    /** Where the window's timer runs (volleyd passes its injected clock). */
+    private readonly timers: BatchTimers = {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout> | undefined),
+    },
   ) {}
 
   /** Queue `command` for the next control message; resolves with its answer. */
@@ -190,14 +202,14 @@ export class DynsecBatcher {
     return new Promise((resolve, reject) => {
       this.queue.push({ command, resolve, reject });
       if (this.timer === null) {
-        this.timer = setTimeout(() => void this.flush(), Math.max(0, this.windowMs()));
+        this.timer = this.timers.setTimeout(() => void this.flush(), Math.max(0, this.windowMs()));
       }
     });
   }
 
   /** Send everything queued now. */
   async flush(): Promise<void> {
-    if (this.timer !== null) clearTimeout(this.timer);
+    if (this.timer !== null) this.timers.clearTimeout(this.timer);
     this.timer = null;
     const batch = this.queue;
     this.queue = [];
