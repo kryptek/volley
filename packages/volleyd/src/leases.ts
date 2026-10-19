@@ -112,6 +112,7 @@ export function applyLeaseEvent(book: LeaseBook, ev: JournalEvent | NewEvent): L
     ttl_s?: number;
     renewed?: boolean;
   };
+  // real clock: the fallback for an event without `at` (lease steps always stamp one)
   const at = ev.at ?? dateOf(systemClock).toISOString();
   const prev = book[d.pool] ?? { held: [], queue: [] };
   const p: PoolLeases = { held: [...prev.held], queue: [...prev.queue] };

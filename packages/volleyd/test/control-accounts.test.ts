@@ -208,6 +208,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     });
     // Not awaited: a publish the broker ACL refuses is never PUBACKed by Aedes.
     void c.publish(topic, JSON.stringify(env), { qos: 1, retain }).catch(() => {});
+    // broker round-trip: a request the ACL refuses is never answered; bound the wait for its ack.
     const timer = setTimeout(() => resolve(null), timeoutMs);
     const r = await reply;
     clearTimeout(timer);

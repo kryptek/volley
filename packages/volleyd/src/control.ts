@@ -174,6 +174,7 @@ export class ControlClient {
       return await Promise.race([
         reply,
         new Promise<never>((_, reject) => {
+          // real clock: the CLI's own request timeout, in the CLI process
           timer = systemClock.setTimeout(
             () => reject(new ControlTimeoutError(op, timeoutMs)),
             timeoutMs,
@@ -181,6 +182,7 @@ export class ControlClient {
         }),
       ]);
     } finally {
+      // real clock: the CLI's own request timeout, in the CLI process
       systemClock.clearTimeout(timer);
       await unsubscribe();
     }

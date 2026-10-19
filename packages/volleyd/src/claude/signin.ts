@@ -1,6 +1,5 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dateOf, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import { sealSigninScript } from "../fence";
@@ -203,7 +202,7 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
         d.root,
         d.acct,
         s.plan !== undefined ? { plan: s.plan } : {},
-        dateOf(systemClock).toISOString(),
+        new Date(d.now()).toISOString(),
       );
       return finish({
         type: "claude_signin_done",

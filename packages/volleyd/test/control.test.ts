@@ -6,12 +6,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
 import { SYSTEM_WAVE } from "../src/types";
 import { startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
@@ -96,6 +98,7 @@ describe("volleyd daemon + control channel", () => {
   it("exits 1 with 'not running' within 2 s when no daemon is registered", async () => {
     const started = Date.now();
     const r = await runCli(["status", "--json"], t.env);
+    // real process: the CLI's own control timeout, in a child process on the real clock.
     expect(Date.now() - started).toBeLessThan(2000);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("volleyd not running");
@@ -149,12 +152,19 @@ describe("volleyd daemon + control channel", () => {
   });
 
   it("exits (closed resolves) when the broker drops its connection, freeing the home", async () => {
-    const d = await t.start();
+    // The watchdog interval runs on the fake clock: each step is one virtual watchdog period.
+    const clock = fakeClock();
+    const d = await t.start({ clock });
+    let reason: Error | undefined;
+    void d.closed.then((r) => {
+      reason = r;
+    });
     expect(t.broker.dropClient(daemonClientId(NS))).toBe(true);
-    const reason = await Promise.race([
-      d.closed,
-      new Promise<null>((r) => setTimeout(() => r(null), 3000)),
-    ]);
+    // The daemon's client sees the socket close on its own I/O: step the watchdog until it has.
+    await eventually(async () => {
+      await clock.advance(DAEMON_DEFAULTS.watchdog_ms);
+      return reason !== undefined;
+    });
     expect(reason?.message).toMatch(/broker connection lost/);
     // The LWT marked it dead and the lock is free: a restart comes straight back.
     expect(((await t.retained(`volley/${NS}/volleyd/status`)) as { type: string }).type).toBe(

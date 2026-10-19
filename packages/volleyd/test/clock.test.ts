@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
@@ -11,8 +13,13 @@ import {
   sampleOf,
   sleep,
 } from "../src/clock";
+import { lockPath, readLock } from "../src/locks";
+import { spawnAgent } from "../src/spawn";
+import { worktreePath } from "../src/worktree";
 import { NS } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { runCli } from "./helpers/run-cli";
 import {
   AGENT,
   type SupervisedEnv,
@@ -302,5 +309,75 @@ describe("daemon: sleep/wake and reap suppression", () => {
       status: "reaped",
     });
     expect(s.journal().some((e) => e.type === "reap_suppressed")).toBe(false);
+  });
+});
+
+describe("one clock per comparison: the daemon stamps with the clock it is given", () => {
+  /** Far from real time, so a stamp from the real clock cannot pass for the fake one. */
+  const PAST = Date.parse("2020-01-01T00:00:00.000Z");
+  let s: SupervisedEnv | undefined;
+  let spawn: SpawnEnv | undefined;
+  afterEach(async () => {
+    await s?.cleanup();
+    await spawn?.cleanup();
+    s = undefined;
+    spawn = undefined;
+  });
+
+  it("wave and _system journal events, config changes and the worktree lock carry the fake time", async () => {
+    const clock = fakeClock(PAST);
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const cli = await runCli(["config", "set", "hard_ceiling", "3", "--by", "tester"], s.env.env);
+    expect(cli.exitCode).toBe(0);
+    await s.settled();
+    const at = new Date(PAST).toISOString();
+    const stamps = [...s.journal(), ...systemJournal(s.env)].map((e) => [e.type, e.at]);
+    expect(stamps.length).toBeGreaterThan(3);
+    expect(stamps.filter(([, a]) => a !== at)).toEqual([]);
+    expect(systemJournal(s.env).some((e) => e.type === "config_changed")).toBe(true);
+    const lock = readLock(
+      lockPath(s.env.home, worktreePath(join(s.env.home, "wt"), "w1", "T1", "implementer")),
+    );
+    expect(lock?.at).toBe(at);
+  });
+
+  it("a spawn judges a held lock stale on its own clock, and stamps the decisions it opens with it", async () => {
+    const clock = fakeClock(PAST);
+    spawn = await makeSpawnEnv({ trusted: false });
+    const deps = { ...spawn.deps, now: clock.now };
+    // An untrusted repo: the decision a spawn opens itself is stamped with the injected clock.
+    const out = await spawnAgent(spawn.request(), deps);
+    expect(out.kind).toBe("decision");
+    const opened = spawn.events.find((e) => e.type === "decision_opened");
+    expect(opened?.data.opened_at).toBe(new Date(PAST).toISOString());
+
+    // A holder that wrote its lock an hour ago and heartbeat a minute ago (both on the fake
+    // clock) is live: a spawn reading "now" off the real clock would call it quiet and take over.
+    spawn.deps.claudeJsonPath = spawn.claudeJson;
+    writeFileSync(
+      spawn.claudeJson,
+      JSON.stringify({ projects: { [spawn.repo]: { hasTrustDialogAccepted: true } } }),
+    );
+    const path = lockPath(spawn.home, spawn.worktree);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        wave: "w1",
+        task: "T1",
+        role: "implementer",
+        attempt: 1,
+        agent_id: "w1-t1-implementer-1",
+        pid: 0,
+        at: new Date(PAST - 3_600_000).toISOString(),
+      })}\n`,
+    );
+    const held = {
+      ...deps,
+      openDecisions: [],
+      probe: { ...deps.probe, lastHeartbeat: () => PAST - 60_000 },
+    };
+    const err = await spawnAgent(spawn.request({ attempt: 2 }), held).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("SPAWN_LOCKED");
   });
 });

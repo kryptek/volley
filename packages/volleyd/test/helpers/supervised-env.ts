@@ -125,7 +125,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
   host.onLaunch = () => {
     o.onLaunch?.(daemon);
-    setTimeout(async () => {
+    // Started at once: the daemon subscribed to the agent before launching it.
+    void (async () => {
       await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
@@ -142,7 +143,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
         { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
         false,
       );
-    }, 20);
+    })();
   };
   const daemonOptions: Partial<DaemonOptions> = {
     spawner: {

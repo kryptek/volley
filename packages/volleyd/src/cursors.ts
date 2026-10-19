@@ -58,6 +58,7 @@ export function ackCursor(
   wave: string,
   name: string,
   seq: number,
+  // real clock: a CLI ack's stamp, in the CLI process
   now: Date = dateOf(systemClock),
 ): { previous: number; seq: number } {
   const dir = waveDir(home, wave);

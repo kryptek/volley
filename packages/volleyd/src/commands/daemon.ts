@@ -56,6 +56,7 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       ...daemonStartOptions(target, env, spawner),
       // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
       // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
+      // real clock: the log line's timestamp, for the human reading the log
       log: (line) => io.stdout(`${dateOf(systemClock).toISOString()} ${line}\n`),
     });
   } catch (e) {

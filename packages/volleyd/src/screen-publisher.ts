@@ -89,6 +89,7 @@ export class ScreenPublisher {
   private readonly readTimeoutMs: number;
 
   constructor(private readonly deps: ScreenPublisherDeps) {
+    // real clock: the default when the daemon injects no clock
     this.clock = withNow(deps.clock ?? systemClock, deps.now);
     this.now = this.clock.now;
     this.log = deps.log ?? (() => {});

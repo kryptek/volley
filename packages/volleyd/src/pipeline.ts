@@ -1257,6 +1257,7 @@ export class PipelineDriver {
   ) {}
 
   private now(): number {
+    // real clock: the default when the daemon injects no clock
     return (this.deps.now ?? systemClock.now)();
   }
 

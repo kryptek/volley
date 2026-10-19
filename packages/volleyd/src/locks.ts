@@ -10,7 +10,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { dateOf, systemClock } from "./clock";
+import { systemClock } from "./clock";
 import { SpawnError } from "./spawn-error";
 
 /**
@@ -128,6 +128,8 @@ function writeAtomic(path: string, info: LockInfo): void {
 /**
  * Take the lock at `path` for `info`. An existing lock is asked about through `probe`: a live
  * holder → SpawnError SPAWN_LOCKED (detail.holder); a stale one is removed and taken over.
+ * `now` is the clock staleness is judged on and `update` stamps with: the one the probe's
+ * heartbeats are recorded on.
  */
 export async function acquireLock(
   path: string,
@@ -135,6 +137,8 @@ export async function acquireLock(
   probe: AgentProbe,
   opts: { staleAfterMs: number; now?: () => number },
 ): Promise<WorktreeLock> {
+  // real clock: the default when the caller injects none (spawn passes the daemon's)
+  const now = opts.now ?? systemClock.now;
   mkdirSync(dirname(path), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     let fd: number;
@@ -149,7 +153,7 @@ export async function acquireLock(
           registered: await probe.registered(holder.agent_id),
           lastHeartbeat: probe.lastHeartbeat(holder.agent_id),
           pidAlive: pidAliveOther(holder.pid),
-          now: (opts.now ?? systemClock.now)(),
+          now: now(),
           staleAfterMs: opts.staleAfterMs,
         });
         if (verdict === "live") {
@@ -183,7 +187,7 @@ export async function acquireLock(
         return current;
       },
       update(patch) {
-        current = { ...current, ...patch, at: dateOf(systemClock).toISOString() };
+        current = { ...current, ...patch, at: new Date(now()).toISOString() };
         writeAtomic(path, current);
       },
       release() {

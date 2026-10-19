@@ -202,6 +202,7 @@ function editClaudeJson(
       break;
     } catch {
       try {
+        // real clock: compared with a lock file's mtime, which the filesystem stamps
         if (systemClock.now() - statSync(lock).mtimeMs > staleMs) {
           rmdirSync(lock);
           continue;

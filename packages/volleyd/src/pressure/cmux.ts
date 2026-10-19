@@ -15,6 +15,7 @@ export const CMUX_PING_ARGV = ["cmux", "ping"] as const;
 export async function sampleCmuxPing(
   exec: ExecFn,
   timeoutMs: number,
+  // real clock: the default: the ping times a real child process
   now: () => number = systemClock.mono,
 ): Promise<Sample> {
   const started = now();

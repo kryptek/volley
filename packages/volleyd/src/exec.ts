@@ -82,6 +82,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     child.stdout?.on("data", collect("stdout"));
     child.stderr?.on("data", collect("stderr"));
     // Real timers: they bound a real child process.
+    // real clock: a child process runs on the real clock, so its timeout does too
     const clock = systemClock;
     let killer: TimerHandle | undefined;
     let settled = false;

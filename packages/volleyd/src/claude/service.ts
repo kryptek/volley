@@ -71,6 +71,7 @@ export class ClaudeService {
   private readonly signins = new Map<string, Pending>();
   private readonly clock: Clock;
   constructor(private readonly d: ClaudeServiceDeps) {
+    // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
   }
 

@@ -90,6 +90,7 @@ export class Journal {
   }
 
   /** Append one event durably. Assigns `seq`; `at` defaults to now. */
+  // real clock: the default for a caller without a clock (the daemon passes its own)
   append(ev: NewEvent, now: Date = dateOf(systemClock)): JournalEvent {
     const event: JournalEvent = {
       seq: this.last + 1,

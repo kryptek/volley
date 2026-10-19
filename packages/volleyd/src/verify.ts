@@ -84,6 +84,7 @@ export async function watchAgent(
   broker: VolleyBroker,
   namespace: string,
   agentId: string,
+  // real clock: the default when the daemon injects no clock
   clock: Clock = systemClock,
   progressFeed: ProgressFeed = (topic, deliver) => broker.subscribeStream(topic, deliver),
 ): Promise<AgentWatch> {

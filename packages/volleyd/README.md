@@ -1412,10 +1412,15 @@ Every timer volleyd arms and every wall-clock read it makes goes through one `Cl
 The daemon takes it as `DaemonOptions.clock` (default: `systemClock`, real timers) and hands it to
 everything it runs: the admission tick, the spawn-refusal backoff, verification windows, reap
 graces, steer ack waits, tunnel restarts and checks, screen captures and their read bounds, the
-token-prune interval, sign-in polls, and the sleep/wake sampler. `systemClock` holds the only
-real timers in `src/`; `test/no-wall-clock.test.ts` fails on any `setTimeout`, `setInterval`,
-`Date.now()`, `performance.now()` or `new Date()` elsewhere. Code that bounds a real child process
-(`exec.ts`) or compares with another process's wall clock uses `systemClock` explicitly.
+token-prune interval, sign-in polls, and the sleep/wake sampler. The times it stamps and compares
+come from the same clock: journal events (wave and `_system`), decisions, config changes, worktree
+locks and their staleness check, so a daemon on a fake clock journals fake time. `systemClock`
+holds the only real timers in `src/`; `test/no-wall-clock.test.ts` fails on any `setTimeout`,
+`setInterval`, `Date.now()`, `performance.now()` or `new Date()` elsewhere, and on any use of
+`systemClock` (or a `globalThis` timer) not on a line commented `// real clock: <why>`. Those are
+the defaults of an injectable clock and code that runs on the real one: a real child process
+(`exec.ts`), the CLI's own timeouts, file mtimes, a hooks process's own stamps. In `daemon.ts`
+`systemClock` appears only as the default of `DaemonOptions.clock`.
 
 A test that depends on daemon timing never waits for real time to pass:
 
@@ -1424,7 +1429,9 @@ A test that depends on daemon timing never waits for real time to pass:
   with pending promise continuations flushed after each. Nothing global is faked: the MQTT client
   and the Aedes broker keep running on real I/O. `armed(ms)` resolves once the daemon has
   scheduled a timer of that length — the sync point between "it consumed the message" and "move
-  past what it scheduled". `sleepHost(ms)` moves the wall clock only (a host sleep, for wake
+  past what it scheduled". It matches any armed timer of that length, intervals included and
+  ones armed before the call, so on a daemon clock (whose watchdog interval is always armed) use
+  a length only the awaited step schedules. `sleepHost(ms)` moves the wall clock only (a host sleep, for wake
   detection).
 - **Await the event, never poll for it.** `journalWait(home, () => daemon)`
   (`test/helpers/journal-wait.ts`) resolves `event(wave, type | predicate, n)` from the append
@@ -1434,8 +1441,9 @@ A test that depends on daemon timing never waits for real time to pass:
 - **Broker round-trips only** may be re-checked: `eventually(pred)` (`test/helpers/broker-wait.ts`)
   has no deadline of its own (vitest's test timeout bounds it). To prove the daemon has read what
   was published before, prefer a control round-trip behind it on the daemon's connection
-  (`SupervisedEnv.consumed()`). Any remaining sleep or deadline in `test/` carries a
-  `broker round-trip:` comment saying why, or the grep-guard fails.
+  (`SupervisedEnv.consumed()`). Any remaining real timer (a sleep, a race, a delayed start),
+  deadline or elapsed-time bound in `test/` carries a `broker round-trip:` or `real process:`
+  comment saying why, or the grep-guard fails.
 
 ```ts
 const clock = fakeClock(T0);

@@ -152,6 +152,7 @@ interface AckWaiter {
  */
 export class AckTracker {
   private readonly waiters = new Map<string, AckWaiter>();
+  // real clock: the default when the daemon injects no clock
   constructor(private readonly clock: Clock = systemClock) {}
 
   /** Resolves once `agent` acts on `messageId`, or after `ms` with what was heard so far. */

@@ -22,7 +22,8 @@ export interface FakeClock extends Clock {
   /**
    * Resolves once a timer of exactly `ms` (any timer, without `ms`) is armed — at once if one
    * already is: the sync point between "the daemon consumed a message" and "move time past what
-   * it scheduled".
+   * it scheduled". Intervals and timers armed before the call count too, so on a daemon clock
+   * (its watchdog interval is always armed) pass a length only the awaited step schedules.
    */
   armed(ms?: number): Promise<void>;
 }

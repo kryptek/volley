@@ -420,10 +420,7 @@ export type PressureSource = (ctx: {
  * A repo's CI queue is re-sampled at most every `ci_queue_sample_ms` (it spends GitHub API
  * quota); ticks in between reuse its last sample.
  */
-export function systemPressure(
-  exec: ExecFn = realExec,
-  now: () => number = systemClock.now,
-): PressureSource {
+export function systemPressure(exec: ExecFn, now: () => number): PressureSource {
   const ciCache = new Map<string, { at: number; sample: Promise<Sample> }>();
   const ciQueue = (repo: string, timeout: number) => {
     const t = now();
@@ -686,6 +683,8 @@ export class Daemon {
   private readonly time: Clock;
   /** Liveness clock (epoch ms): `time.now`. */
   private readonly now: () => number;
+  /** The admission samplers (one CI-queue cache across ticks), on the daemon's clock. */
+  private readonly samplePressure: PressureSource;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -701,8 +700,10 @@ export class Daemon {
     private readonly releaseLock: () => void,
   ) {
     this.log = opts.log ?? (() => {});
+    // real clock: the default of DaemonOptions.clock
     this.time = withNow(opts.clock ?? systemClock, opts.now);
     this.now = this.time.now;
+    this.samplePressure = opts.pressure ?? systemPressure(realExec, this.now);
     this.startedAt = this.now();
     this.acks = new AckTracker(this.time);
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
@@ -710,6 +711,7 @@ export class Daemon {
     this.config = ConfigStore.load({
       home: opts.home,
       system: this.system,
+      now: () => dateOf(this.time),
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
@@ -1218,7 +1220,7 @@ export class Daemon {
       ].filter((r) => r !== "");
       let reading: PressureReading;
       try {
-        reading = await (this.opts.pressure ?? systemPressure())({
+        reading = await this.samplePressure({
           repos,
           config: this.config.effective(),
         });
@@ -1362,7 +1364,7 @@ export class Daemon {
     });
     const touched = new Set<string>(input.kind === "request" ? [input.pool] : []);
     for (const ev of r.events) {
-      const e = this.system.append(ev);
+      const e = this.system.append(ev, dateOf(this.time));
       touched.add(String(e.data.pool));
       await this.publish(
         waveEventsTopic(SYSTEM_WAVE),
@@ -1563,7 +1565,8 @@ export class Daemon {
 
   /**
    * Resolves once the serial queue is drained, no spawn's launch half is running and every journal
-   * append has been published (a spawn's verification waits on the agent, so it is not counted).
+   * append (a wave's, or `_system`'s through appendSystem) has been published (a spawn's
+   * verification waits on the agent, so it is not counted).
    * Tests await it before reading the published state or asserting that nothing happened.
    */
   async settled(): Promise<void> {
@@ -2025,6 +2028,7 @@ export class Daemon {
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
+      now: this.now,
       get openDecisions() {
         return log.record.state?.open_decisions ?? [];
       },
@@ -3423,7 +3427,6 @@ export class Daemon {
     return lockPath(this.opts.home, worktreePath(worktreeRoot, wave, task, role));
   }
 
-  /** Append to a wave journal, then mirror the event and re-publish the retained state. */
   /**
    * Observe every journal append (any wave, `_system` included) as it is made durable; returns
    * the unsubscribe. Tests await the event they expect through it instead of polling.
@@ -3439,10 +3442,11 @@ export class Daemon {
     });
   }
 
+  /** Append to a wave journal, then mirror the event and re-publish the retained state. */
   private async append(wave: WaveId, ev: NewEvent): Promise<JournalEvent> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    return this.track(this.publishAppended(wave, log.append(ev)));
+    return this.track(this.publishAppended(wave, log.append(ev, dateOf(this.time))));
   }
 
   /** An appended event's `/events` mirror, then the wave state it changed. */
@@ -3833,7 +3837,7 @@ export class Daemon {
         },
       };
     }
-    if (out.event !== undefined) this.system.append(out.event);
+    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
     if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
     this.authAnswered.set(key, out.reply);
     if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
@@ -4514,8 +4518,11 @@ export class Daemon {
   }
 
   /** Journal a global event in `_system` and mirror it on `volley/_waves/_system/events`. */
-  private async appendSystem(ev: NewEvent): Promise<void> {
-    const event = this.system.append(ev);
+  private appendSystem(ev: NewEvent): Promise<void> {
+    return this.track(this.publishSystem(this.system.append(ev, dateOf(this.time))));
+  }
+
+  private async publishSystem(event: JournalEvent): Promise<void> {
     await this.publish(
       waveEventsTopic(SYSTEM_WAVE),
       this.envelope("_waves/events", event.type, {

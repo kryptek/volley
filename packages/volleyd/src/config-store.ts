@@ -140,6 +140,7 @@ export class ConfigStore {
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
     return new ConfigStore(
+      // real clock: the default when the daemon injects no clock
       { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults },
       layer,
     );

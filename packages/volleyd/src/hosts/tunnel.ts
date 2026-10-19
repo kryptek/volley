@@ -90,6 +90,7 @@ export class TunnelSupervisor {
   private readonly tunnels = new Map<string, Supervised>();
   private readonly clock: Clock;
   constructor(private readonly deps: TunnelSupervisorDeps) {
+    // real clock: the default when the daemon injects no clock
     this.clock = withNow(deps.clock ?? systemClock, deps.now);
   }
 
