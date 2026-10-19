@@ -1,18 +1,21 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readlinkSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DESK_STAMP,
+  commandScript,
   deskStamp,
   planServices,
   renderLaunchd,
@@ -24,7 +27,11 @@ import { type FakeMachine, HOOKED_SETTINGS, fakeMachine } from "../helpers/setup
 
 /** The change that puts `volley` and `volleyd` on a PATH (volleyd runs `volley auth`). */
 const LINK_SUMMARY = (m: FakeMachine) =>
-  `Link the volley and volleyd commands into ${join(m.ctx.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`;
+  `Install the volley and volleyd commands in ${join(m.ctx.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`;
+
+/** What setup writes as ~/.volley/bin/<name> for this fake checkout (its bun is "bun"). */
+const SCRIPT = (m: FakeMachine, pkg: "volley-cli" | "volleyd") =>
+  commandScript("bun", join(m.deps.repoRoot as string, "packages", pkg, "src", "cli.ts"));
 
 /** Commands that only read state. */
 const READ_ONLY = (a: string[]) =>
@@ -143,19 +150,15 @@ describe("setup: services", () => {
       expect(out.join("\n")).toContain(".volley-backup-20261018T120000Z");
     });
 
-    it("links volley and volleyd from this checkout and puts the links on volleyd's PATH", async () => {
+    it("installs volley and volleyd scripts from this checkout and puts them on volleyd's PATH", async () => {
       const bin = join(m.ctx.home, ".volley", "bin");
-      const repo = m.deps.repoRoot as string;
       const out = await applyAll(await planServices(m.ctx));
-      expect(readlinkSync(join(bin, "volley"))).toBe(
-        join(repo, "packages", "volley-cli", "src", "cli.ts"),
-      );
-      expect(readlinkSync(join(bin, "volleyd"))).toBe(
-        join(repo, "packages", "volleyd", "src", "cli.ts"),
-      );
+      expect(readFileSync(join(bin, "volley"), "utf-8")).toBe(SCRIPT(m, "volley-cli"));
+      expect(readFileSync(join(bin, "volleyd"), "utf-8")).toBe(SCRIPT(m, "volleyd"));
+      expect(statSync(join(bin, "volley")).mode & 0o777).toBe(0o755);
       expect(out.join("\n")).toContain(`export PATH="${bin}:$PATH"`);
       // `volleyd install` writes the PATH and auth dir it runs with into the plist: the dry run
-      // (what the plan compares) and the install get the same ones, the links first on PATH.
+      // (what the plan compares) and the install get the same ones, the commands first on PATH.
       for (const dry of [true, false]) {
         const i = m.execCalls.findIndex(
           (a) => a[2] === "install" && a.includes("--dry-run") === dry,
@@ -163,61 +166,61 @@ describe("setup: services", () => {
         expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin`);
         expect(m.execEnvs[i]?.VOLLEY_AUTH_DIR).toBe(m.ctx.auth.dir);
       }
-      // volleyd's own service change is in this plan: the link says sign-in waits for it.
+      // volleyd's own service change is in this plan: the commands change says sign-in waits for it.
       expect(out.join("\n")).toContain(
         "Sign-in links work once volleyd runs with it on its PATH: the change “Install volleyd as a launchd service (volleyd install)” in this step does that",
       );
       const again = await planServices(m.ctx);
       expect(again.changes).toEqual([]);
-      expect(again.found.join("\n")).toContain(`volley, volleyd: linked in ${bin}`);
+      expect(again.found.join("\n")).toContain(`volley, volleyd: installed in ${bin}`);
     });
 
-    it("relinks commands that point at another checkout", async () => {
+    it("replaces a symlink (an earlier setup's, another checkout's) and setup's own older script", async () => {
       const bin = join(m.ctx.home, ".volley", "bin");
       mkdirSync(bin, { recursive: true });
       symlinkSync("/elsewhere/volley-cli/src/cli.ts", join(bin, "volley"));
+      writeFileSync(
+        join(bin, "volleyd"),
+        commandScript("/old/bun", "/elsewhere/volleyd/src/cli.ts"),
+      );
       const p = await planServices(m.ctx);
       expect(p.changes[0]?.summary).toBe(LINK_SUMMARY(m));
-      expect(p.changes[0]?.detail).toContain("/elsewhere/volley-cli/src/cli.ts");
-      await applyAll(p);
-      expect(readlinkSync(join(bin, "volley"))).toBe(
-        join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts"),
+      expect(p.changes[0]?.detail).toContain("(now: a link to /elsewhere/volley-cli/src/cli.ts)");
+      expect(p.changes[0]?.detail).toContain(
+        "(now: volley setup's script for another checkout or bun)",
       );
+      const out = await applyAll(p);
+      expect(readFileSync(join(bin, "volley"), "utf-8")).toBe(SCRIPT(m, "volley-cli"));
+      expect(readFileSync(join(bin, "volleyd"), "utf-8")).toBe(SCRIPT(m, "volleyd"));
+      // Setup's own script and a symlink are replaced, never backed up.
+      expect(out.join("\n")).not.toContain("Moved");
+      expect(readdirSync(bin).sort()).toEqual(["volley", "volleyd"]);
     });
 
-    it("backs up a file or directory at a link's path instead of deleting it", async () => {
+    it("backs up a file or directory at a command's path instead of deleting it", async () => {
       const bin = join(m.ctx.home, ".volley", "bin");
       mkdirSync(join(bin, "volleyd"), { recursive: true });
+      writeFileSync(join(bin, "volleyd", "inside"), "kept\n");
       writeFileSync(join(bin, "volley"), "#!/bin/sh\necho my own wrapper\n");
+      // A backup from this same second already exists: the new one gets its own name.
+      const backup = (name: string) => `${join(bin, name)}.volley-backup-20261018T120000Z`;
+      writeFileSync(backup("volley"), "an earlier backup\n");
       const p = await planServices(m.ctx);
-      expect(p.changes[0]?.detail).toContain(`${join(bin, "volley")} -> `);
+      expect(p.changes[0]?.detail).toContain(`${join(bin, "volley")}: runs this checkout's volley`);
       expect(p.changes[0]?.detail).toContain("(now: a file; backed up first)");
       expect(p.changes[0]?.detail).toContain("(now: a directory; backed up first)");
       const out = (await p.changes[0]?.apply()) ?? [];
-      const backup = (name: string) => `${join(bin, name)}.volley-backup-20261018T120000Z`;
-      expect(readFileSync(backup("volley"), "utf-8")).toBe("#!/bin/sh\necho my own wrapper\n");
-      expect(existsSync(backup("volleyd"))).toBe(true);
-      expect(out.join("\n")).toContain(`Moved ${join(bin, "volley")} aside to ${backup("volley")}`);
-      expect(readlinkSync(join(bin, "volley"))).toBe(
-        join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts"),
+      expect(readFileSync(backup("volley"), "utf-8")).toBe("an earlier backup\n");
+      expect(readFileSync(`${backup("volley")}-1`, "utf-8")).toBe(
+        "#!/bin/sh\necho my own wrapper\n",
       );
-    });
-
-    it("counts a relative link to the right file as in place", async () => {
-      const bin = join(m.ctx.home, ".volley", "bin");
-      mkdirSync(bin, { recursive: true });
-      const repo = m.deps.repoRoot as string;
-      symlinkSync(
-        relative(bin, join(repo, "packages", "volley-cli", "src", "cli.ts")),
-        join(bin, "volley"),
+      expect(statSync(backup("volleyd")).isDirectory()).toBe(true);
+      expect(readFileSync(join(backup("volleyd"), "inside"), "utf-8")).toBe("kept\n");
+      expect(out.join("\n")).toContain(
+        `Moved ${join(bin, "volley")} aside to ${backup("volley")}-1`,
       );
-      symlinkSync(
-        relative(bin, join(repo, "packages", "volleyd", "src", "cli.ts")),
-        join(bin, "volleyd"),
-      );
-      const p = await planServices(m.ctx);
-      expect(p.changes.map((c) => c.summary)).not.toContain(LINK_SUMMARY(m));
-      expect(p.found.join("\n")).toContain(`volley, volleyd: linked in ${bin}`);
+      expect(readFileSync(join(bin, "volley"), "utf-8")).toBe(SCRIPT(m, "volley-cli"));
+      expect(readFileSync(join(bin, "volleyd"), "utf-8")).toBe(SCRIPT(m, "volleyd"));
     });
 
     it("moves the links to the front of a PATH that has them further back", async () => {
@@ -228,7 +231,7 @@ describe("setup: services", () => {
       expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/opt/old-volley/bin:/usr/bin`);
     });
 
-    it("with volleyd's service already in place, the link alone fixes sign-in", async () => {
+    it("with volleyd's service already in place, the commands alone fix sign-in", async () => {
       await applyAll(await planServices(m.ctx));
       rmSync(join(m.ctx.home, ".volley", "bin"), { recursive: true });
       const p = await planServices(m.ctx);
@@ -261,7 +264,10 @@ describe("setup: services", () => {
         "Build the Desk (vite build in packages/volley-desk)",
         "Install `volley desk serve` as a systemd user service (volley-desk.service) on 0.0.0.0:5199",
       ]);
-      await applyAll(p);
+      const out = await applyAll(p);
+      expect(out.join("\n")).toContain(
+        "the change “Install volleyd as a systemd user service (volleyd.service)” in this step does that",
+      );
       const unit = readFileSync(
         join(m.ctx.home, ".config", "systemd", "user", "volleyd.service"),
         "utf-8",
@@ -298,6 +304,25 @@ describe("setup: services", () => {
       "Build the Desk (vite build in packages/volley-desk)",
     ]);
     expect(p.found.join("\n")).toContain("no launchd or systemd here");
+    const out = (await p.changes[0]?.apply()) ?? [];
+    expect(out.join("\n")).toContain(
+      `Run volleyd with ${join(m.ctx.home, ".volley", "bin")} first on its PATH, or the Desk's sign-in links fail.`,
+    );
+  });
+
+  it("a command script runs its cli with setup's bun, whatever the PATH, quoting both paths", () => {
+    const d = join(dir, "it's here");
+    mkdirSync(d, { recursive: true });
+    const bun = join(d, "fake bun");
+    writeFileSync(bun, '#!/bin/sh\nfor a in "$@"; do echo "[$a]"; done\n', { mode: 0o755 });
+    const script = join(d, "volley");
+    writeFileSync(script, commandScript(bun, "/x/it's cli.ts"), { mode: 0o755 });
+    const r = spawnSync(script, ["peer", "a b"], {
+      env: { PATH: "/nonexistent" },
+      encoding: "utf-8",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("[/x/it's cli.ts]\n[peer]\n[a b]\n");
   });
 
   it("renders units with their arguments quoted and escaped", () => {

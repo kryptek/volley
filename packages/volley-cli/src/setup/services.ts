@@ -9,10 +9,9 @@ import {
   renameSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { backupPath, writeConfig } from "../auth/config";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
@@ -234,79 +233,120 @@ function serviceEnv(ctx: SetupContext): Record<string, string> {
   };
 }
 
-/** What is at a link's path: a symlink (its target, resolved), something else, or nothing. */
-function atPath(path: string): { link: string } | { other: "a file" | "a directory" } | null {
+/** The first line after the shebang of a command script `volley setup` wrote. */
+const SCRIPT_MARK = "# Written by `volley setup`";
+
+const shQuote = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
+
+/**
+ * The script setup installs as ~/.volley/bin/<name>: it runs `cli` with setup's own `bun` by its
+ * full path, so it works on any PATH, a non-interactive ssh session's too (where `bun` usually
+ * is not, and `#!/usr/bin/env bun` would fail).
+ */
+export function commandScript(bun: string, cli: string): string {
+  return `#!/bin/sh
+${SCRIPT_MARK}: this checkout's command, run with the bun setup found, so it works on any
+# PATH (a non-interactive ssh session's too). Rerun \`volley setup --step services\` to update it.
+exec ${shQuote(bun)} ${shQuote(cli)} "$@"
+`;
+}
+
+type AtPath =
+  | { kind: "script"; text: string; ours: boolean }
+  | { kind: "link"; target: string }
+  | { kind: "directory" }
+  | null;
+
+/** What is at a command's path: a file (setup's script or not), a symlink, a directory, nothing. */
+function atPath(path: string): AtPath {
   try {
     const st = lstatSync(path);
-    if (st.isSymbolicLink()) return { link: resolve(dirname(path), readlinkSync(path)) };
-    return { other: st.isDirectory() ? "a directory" : "a file" };
+    if (st.isSymbolicLink()) return { kind: "link", target: readlinkSync(path) };
+    if (st.isDirectory()) return { kind: "directory" };
+    const text = readFileSync(path, "utf-8");
+    return { kind: "script", text, ours: text.split("\n")[1]?.startsWith(SCRIPT_MARK) === true };
   } catch {
     return null;
   }
 }
 
+/** `<path>.volley-backup-<timestamp>`, with `-1`, `-2`… when one from this second exists. */
+function freeBackup(path: string, now: Date): string {
+  const base = backupPath(path, now);
+  let candidate = base;
+  for (let i = 1; existsSync(candidate); i++) candidate = `${base}-${i}`;
+  return candidate;
+}
+
 /**
- * `volley` and `volleyd` linked into ~/.volley/bin from this checkout. volleyd runs `volley auth`
+ * `volley` and `volleyd` installed in ~/.volley/bin from this checkout. volleyd runs `volley auth`
  * by name (redeeming the Desk's sign-in links and admin tokens), so the services need it on their
- * PATH; a fresh machine has it nowhere else.
+ * PATH; a fresh machine has it nowhere else. `volleydService` is read when the change is applied:
+ * the plan's change to volleyd's own service (null: none needed), or undefined where there is no
+ * service manager.
  */
-function linkChange(
+function commandsChange(
   ctx: SetupContext,
   repo: string,
   found: string[],
-  volleydChange: () => string | null,
+  volleydService: () => Change | null | undefined,
 ): Change | null {
   const bin = binDir(ctx);
-  const links: [string, string][] = [
-    ["volley", join(repo, "packages", "volley-cli", "src", "cli.ts")],
-    ["volleyd", join(repo, "packages", "volleyd", "src", "cli.ts")],
+  const commands: [string, string][] = [
+    ["volley", commandScript(ctx.deps.bun, join(repo, "packages", "volley-cli", "src", "cli.ts"))],
+    ["volleyd", commandScript(ctx.deps.bun, join(repo, "packages", "volleyd", "src", "cli.ts"))],
   ];
-  const linked = (path: string, target: string) => {
-    const at = atPath(path);
-    return at !== null && "link" in at && at.link === target;
-  };
-  const wrong = links.filter(([name, target]) => !linked(join(bin, name), target));
+  const wrong = commands.filter(([name, text]) => {
+    const at = atPath(join(bin, name));
+    return !(at?.kind === "script" && at.text === text);
+  });
   if (wrong.length === 0) {
-    found.push(`volley, volleyd: linked in ${bin}`);
+    found.push(`volley, volleyd: installed in ${bin}`);
     return null;
   }
+  const describe = (at: AtPath) =>
+    at === null
+      ? "nothing"
+      : at.kind === "link"
+        ? `a link to ${at.target}`
+        : at.kind === "directory"
+          ? "a directory; backed up first"
+          : at.ours
+            ? "volley setup's script for another checkout or bun"
+            : "a file; backed up first";
   return {
-    summary: `Link the volley and volleyd commands into ${bin} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+    summary: `Install the volley and volleyd commands in ${bin} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
     detail: wrong
-      .map(([name, target]) => {
+      .map(([name]) => {
         const path = join(bin, name);
-        const at = atPath(path);
-        const now =
-          at === null ? "nothing" : "link" in at ? at.link : `${at.other}; backed up first`;
-        return `${path} -> ${target} (now: ${now})`;
+        return `${path}: runs this checkout's ${name} with ${ctx.deps.bun} (now: ${describe(atPath(path))})`;
       })
       .join("\n"),
     apply: async () => {
       mkdirSync(bin, { recursive: true });
       const lines: string[] = [];
-      for (const [name, target] of wrong) {
+      for (const [name, text] of wrong) {
         const path = join(bin, name);
         const at = atPath(path);
-        if (at !== null && "other" in at) {
-          // Never delete what someone put here (a wrapper script, a directory): move it aside.
-          const backup = backupPath(path, ctx.auth.io.now());
+        if (at?.kind === "directory" || (at?.kind === "script" && !at.ours)) {
+          // Never delete what someone put here (their own script, a directory): move it aside.
+          const backup = freeBackup(path, ctx.auth.io.now());
           renameSync(path, backup);
-          lines.push(`Moved ${path} aside to ${backup} (${at.other}).`);
+          lines.push(
+            `Moved ${path} aside to ${backup} (${at.kind === "directory" ? "a directory" : "a file"}).`,
+          );
         } else if (at !== null) rmSync(path);
-        symlinkSync(target, path);
+        writeFileSync(path, text, { mode: 0o755 });
       }
-      const pending = volleydChange();
-      const managed = ctx.deps.platform === "darwin" || ctx.deps.platform === "linux";
+      const service = volleydService();
       return [
         ...lines,
-        `Linked ${wrong.map(([name]) => name).join(" and ")} into ${bin}.`,
-        ...(!managed
-          ? [`Run volleyd with ${bin} first on its PATH, or the Desk's sign-in links fail.`]
-          : pending === null
-            ? ["volleyd already runs with it on its PATH: sign-in links work now."]
-            : [
-                `Sign-in links work once volleyd runs with it on its PATH: the change “${pending}” in this step does that (from a terminal, when the Desk lists it there).`,
-              ]),
+        `Installed ${wrong.map(([name]) => name).join(" and ")} in ${bin} (scripts that run this checkout with ${ctx.deps.bun}).`,
+        service === undefined
+          ? `Run volleyd with ${bin} first on its PATH, or the Desk's sign-in links fail.`
+          : service === null
+            ? "volleyd already runs with it on its PATH: sign-in links work now."
+            : `Sign-in links work once volleyd runs with it on its PATH: the change “${service.summary}” in this step does that (from a terminal, when the Desk lists it there).`,
         `To run them from your shell, add it to your PATH (in ~/.zshrc or ~/.bashrc): export PATH="${bin}:$PATH"`,
       ];
     },
@@ -379,10 +419,10 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     if (c !== null) plan.changes.push(c);
   };
 
-  // Whether this plan also (re)installs volleyd's service, read when the link is applied.
-  let volleydSummary: string | null = null;
-  push(linkChange(ctx, repo, plan.found, () => volleydSummary));
-  const volleydAt = plan.changes.length;
+  // volleyd's own service change in this plan (undefined: no service manager here), which the
+  // commands change names when it is applied.
+  let volleydService: Change | null | undefined;
+  push(commandsChange(ctx, repo, plan.found, () => volleydService));
 
   // volleyd.
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
@@ -402,41 +442,40 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     const loaded =
       (await ctx.deps.exec(["launchctl", "print", `gui/${ctx.deps.uid}/systems.volley.volleyd`]))
         .code === 0;
+    volleydService = null;
     if (current === text && loaded) plan.found.push(`volleyd: installed and loaded (${path})`);
     else {
-      plan.changes.push({
+      volleydService = {
         summary: "Install volleyd as a launchd service (volleyd install)",
         detail: current === text ? "installed, not loaded" : unifiedDiff(path, current, text),
         apply: async () => {
           const r = await must(ctx, install, { env: installEnv });
           return [r.stdout.trim()];
         },
-      });
+      };
+      plan.changes.push(volleydService);
     }
   } else if (platform === "linux") {
-    push(
-      await systemdChange(
-        ctx,
-        {
-          name: "volleyd",
-          label: "systems.volley.volleyd",
-          description: "Volley wave supervisor (volleyd)",
-          args: [bun, volleydCli, "daemon"],
-          env,
-          log: join(ctx.volleydHome, "volleyd.log"),
-          workdir: ctx.volleydHome,
-        },
-        "Install volleyd as a systemd user service (volleyd.service)",
-        plan.found,
-      ),
+    volleydService = await systemdChange(
+      ctx,
+      {
+        name: "volleyd",
+        label: "systems.volley.volleyd",
+        description: "Volley wave supervisor (volleyd)",
+        args: [bun, volleydCli, "daemon"],
+        env,
+        log: join(ctx.volleydHome, "volleyd.log"),
+        workdir: ctx.volleydHome,
+      },
+      "Install volleyd as a systemd user service (volleyd.service)",
+      plan.found,
     );
+    push(volleydService);
   } else {
     plan.found.push(
       `no launchd or systemd here (${platform}): run \`volleyd daemon\` and \`volley desk serve --host 0.0.0.0\` yourself`,
     );
   }
-
-  if (plan.changes.length > volleydAt) volleydSummary = plan.changes[volleydAt]?.summary ?? null;
 
   // The hooks, for coordinator sessions.
   const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");

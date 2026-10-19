@@ -373,7 +373,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     const services = step(r.steps, "services");
     expect(services.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
       [
-        `Link the volley and volleyd commands into ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+        `Install the volley and volleyd commands in ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
         undefined,
       ],
       ["Install volleyd as a launchd service (volleyd install)", "volley setup --step services"],
@@ -693,7 +693,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     const services = step((await plan()).steps, "services");
     expect(services.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
       [
-        `Link the volley and volleyd commands into ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+        `Install the volley and volleyd commands in ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
         undefined,
       ],
       [
