@@ -62,6 +62,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
  *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
  *     LABEL 1..64 printable characters, not starting with `-`
+ *   volley peer doctor --json   (the supervisor's own machine's doctor report, SPEC §4.6.15:
+ *     never --fix, which runs only on a box through ssh)
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -108,6 +110,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
  *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
+ *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+ *   volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
+ *     the `peer_doctor` op); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json
@@ -967,6 +972,9 @@ const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
 function volley(args: string[]): Verdict {
   const [group, verb] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
+  // The supervisor is its own machine's doctor (SPEC §4.6.15): a report, never a fix.
+  if (group === "peer" && verb === "doctor" && args.length === 3 && args[2] === "--json")
+    return ALLOW;
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
@@ -1059,6 +1067,15 @@ function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
     return [deny("ssh bash -s (without a fenced remote script)")];
   return script.steps.map((s) => remoteStep(s, opts));
 }
+
+/** The tools the readiness PATH probe resolves on a box (`command -v claude bun`). */
+export const PATH_PROBE_TOOLS = ["claude", "bun"] as const;
+/** `volley peer doctor` on a box (the Desk's Repair, `peer_doctor`): these argv only. */
+const REMOTE_DOCTOR: readonly (readonly string[])[] = [
+  ["peer", "doctor", "--json"],
+  ["peer", "doctor", "--json", "--fix", "--yes"],
+  ["peer", "doctor", "--json", "--fix", "--yes", "--clone"],
+];
 
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
@@ -1284,6 +1301,20 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         : deny("nc (only -z 127.0.0.1 <port>)");
     case "base64":
       return deny("base64 (only as a file write)");
+    // --- Fleet (F2): the PATH probe and the doctor on a paired machine ---
+    case "command":
+      return args[0] === "-v" &&
+        args.length > 1 &&
+        args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
+        ? ALLOW
+        : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
+    case "volley":
+      // The one remote volley step: elsewhere volley is a local program (`volley auth`).
+      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape))
+        ? ALLOW
+        : deny(
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone]])`,
+          );
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
       const v = evaluate([prog, ...args], opts);

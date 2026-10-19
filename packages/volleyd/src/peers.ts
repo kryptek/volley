@@ -6,7 +6,8 @@ import { listAccounts, replyKey, seal, volleyAuth } from "./accounts";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import type { PatchResult } from "./config-store";
 import type { ExecFn } from "./exec";
-import type { MachineRecord } from "./machines";
+import type { RemoteHost } from "./hosts/ssh-tmux";
+import type { DoctorReport, MachineRecord } from "./machines";
 import type { PathError } from "./schemas";
 import type { NewEvent, RemoteHostConfig } from "./types";
 
@@ -30,8 +31,12 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     machine's retained record; the machine's tunnel service stops at its next check. Only a
  *     paired machine (or a `peer` account): a host configured by hand is never removed.
  *   - `peers` → the paired machines' records and names.
+ *   - `peer_doctor {name, fix?, clone?}` → runs `volley peer doctor --json [--fix --yes]
+ *     [--clone]` on the configured host `name` over ssh (the Desk's Repair) and answers with the
+ *     doctor's report; without `fix`, also its `plan` (each failing check with its fix), so the
+ *     sheet shows what a fix would do before anyone runs it.
  *
- * `peer_invite` and `peer_remove` are admin ops: the daemon answers them only on the account-op
+ * `peer_invite`, `peer_remove` and `peer_doctor` are admin ops: the daemon answers them only on the account-op
  * topic, after the same admin check as the account ops (accounts.ts `adminRefusal`). The code is
  * the credential for a join: anyone may send one, but a wrong code counts, and
  * `peer_join_max_failures` wrong codes revoke every outstanding code.
@@ -94,8 +99,12 @@ export interface PeerDeps {
   hosts: () => Record<string, RemoteHostConfig>;
   setHost: (name: string, host: RemoteHostConfig, by: string) => PatchResult;
   removeHost: (name: string, by: string) => PatchResult;
-  /** Clear the machine's retained record and forget its health. */
+  /** Clear the machine's retained record and readiness verdict, and forget its health. */
   clearMachine: (name: string) => Promise<void>;
+  /** The supervisor's own machine name (SPEC §4.6.15): never a peer's. */
+  localName?: () => string;
+  /** The configured host `name` as a remote host (`peer_doctor`); a string: why it cannot be. */
+  remote?: (name: string) => RemoteHost | string;
   machines: () => MachineRecord[];
   journal: (ev: NewEvent) => unknown;
   /** Tests: deterministic codes. */
@@ -164,6 +173,9 @@ export class PeerService {
       return refuse(
         `name must match [a-z0-9][a-z0-9_-]{0,62} and not be one of ${[...RESERVED_NAMES].join(", ")}`,
       );
+    }
+    if (name === this.deps.localName?.()) {
+      return refuse(`"${name}" is the supervisor's own machine name (fleet.local_name)`);
     }
     if (typeof p.target !== "string" || p.target === "" || p.target.startsWith("-")) {
       return refuse("target (how the supervisor's machine reaches this one over ssh) is required");
@@ -302,6 +314,35 @@ export class PeerService {
     return { ok: true, result: { name, revoked: data.revoked, host_removed: isHost } };
   }
 
+  async doctor(p: Fields): Promise<PeerReply> {
+    const name = p.name;
+    if (typeof name !== "string" || !isValidAgentId(name)) {
+      return refuse("name must match [a-z0-9][a-z0-9_-]{0,62}");
+    }
+    if (p.fix !== undefined && typeof p.fix !== "boolean")
+      return refuse("fix must be true or false");
+    if (p.clone !== undefined && typeof p.clone !== "boolean") {
+      return refuse("clone must be true or false");
+    }
+    const fix = p.fix === true;
+    const clone = p.clone === true;
+    if (clone && !fix) return refuse("clone needs fix: true (the doctor clones only as a fix)");
+    if (!Object.hasOwn(this.deps.hosts(), name))
+      return refuse(`no configured host named "${name}"`);
+    const host = this.deps.remote?.(name) ?? "remote hosts are not available";
+    if (typeof host === "string") return refuse(host);
+    let report: DoctorReport;
+    try {
+      report = await host.runDoctor({ fix, clone });
+    } catch (e) {
+      return refuse(e instanceof Error ? e.message : String(e));
+    }
+    return {
+      ok: true,
+      result: { name, fix, ...report, ...(fix ? {} : { plan: doctorPlan(report) }) },
+    };
+  }
+
   list(): PeerReply {
     const paired = Object.keys(this.paired());
     return {
@@ -374,6 +415,17 @@ export class PeerService {
   private write(codes: StoredCode[]): void {
     writeJson(this.deps.file, { codes });
   }
+}
+
+/** What a fix would change: each failing check with its fix text, in the doctor's order. */
+export function doctorPlan(
+  r: DoctorReport,
+): { id: string; severity: string; detail: string; fix: string }[] {
+  return r.checks.flatMap((c) =>
+    !c.ok && typeof c.fix === "string"
+      ? [{ id: c.id, severity: c.severity, detail: c.detail, fix: c.fix }]
+      : [],
+  );
 }
 
 /** One `peers.json` entry. */

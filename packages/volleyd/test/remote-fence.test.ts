@@ -629,3 +629,59 @@ describe("exec + the remote fence", () => {
     ).rejects.toThrow(FenceError);
   });
 });
+
+describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", () => {
+  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, remote(s));
+  const DOCTOR = ["volley", "peer", "doctor"];
+  const VOLLEY_DIR = "/opt/volley";
+
+  it("allows `command -v` of the probed tools only", () => {
+    expect(allowed(step("command", "-v", "claude", "bun"))).not.toThrow();
+    expect(allowed(step("command", "-v", "claude"))).not.toThrow();
+    for (const argv of [
+      ["command", "-v", "$(rm -rf /)"],
+      ["command", "-v", "claude", "curl"],
+      ["command", "-v", "sh"],
+      ["command", "-v"],
+      ["command", "-p", "rm", "-rf", "/"],
+      ["command", "rm", "-rf", "/"],
+      ["command", "-v", "claude", "bun", "-p"],
+    ]) {
+      expect(allowed({ argv }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("allows `volley peer doctor --json` with exactly --fix --yes and --clone after it", () => {
+    for (const extra of [[], ["--fix", "--yes"], ["--fix", "--yes", "--clone"]]) {
+      expect(allowed({ argv: [...DOCTOR, "--json", ...extra], cwd: VOLLEY_DIR })).not.toThrow();
+    }
+  });
+
+  it("refuses every other volley argv on the box", () => {
+    for (const argv of [
+      [...DOCTOR, "--fix"],
+      [...DOCTOR, "--json", "--fix"],
+      [...DOCTOR, "--json", "--clone"],
+      [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--repo", "/"],
+      [...DOCTOR, "--json", "--origin", "ext::sh -c id"],
+      [...DOCTOR],
+      ["volley", "peer", "remove", "box-a"],
+      ["volley", "peer", "join", "ABCD-EFGH"],
+      ["volley", "auth", "list", "--json"],
+    ]) {
+      expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("renders the probe as one quoted line on /dev/null (the same bash -s that runs launch.sh)", () => {
+    expect(renderRemoteScript({ steps: [step("command", "-v", "claude", "bun")] })).toBe(
+      "set -euo pipefail\n'command' '-v' 'claude' 'bun' </dev/null\n",
+    );
+  });
+
+  it("the supervisor's own doctor: `volley peer doctor --json` locally, nothing more", () => {
+    expect(() => assertAllowed([...DOCTOR, "--json"])).not.toThrow();
+    expect(() => assertAllowed([...DOCTOR, "--json", "--fix", "--yes"])).toThrow(FenceError);
+    expect(() => assertAllowed(["volley", "peer", "remove", "box-a"])).toThrow(FenceError);
+  });
+});
