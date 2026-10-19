@@ -89,7 +89,7 @@ resolved per mode (`src/lib/auth.ts`):
 | coordinator | `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`, then `$VOLLEY_AUTH_DIR/coordinator.json` (`{ "username", "password" }`, mode 0600) |
 
 Neither: the hooks connect anonymously, which only an open broker accepts. Write the coordinator
-file with `volley auth init --coordinator-file` (`--force` rotates it with the passwd entry), so an
+file with `volley setup` or `volley auth init --coordinator-file` (`--force` rotates the login and the file), so an
 `install.sh` setup keeps no password in `settings.json`. Without `VOLLEY_AUTH_DIR` the file is
 looked for where `volley auth` keeps its files by default (`<mosquitto etc dir>/volley/`). A
 `volley auth init` run as root hands that directory to the broker's user; point

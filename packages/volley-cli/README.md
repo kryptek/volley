@@ -43,7 +43,9 @@ ln -s "$PWD/packages/volley-cli/src/cli.ts" /usr/local/bin/volley
 volley --help
 ```
 
-> Bun runs `.ts` natively — no build step. The shebang on `cli.ts` is `#!/usr/bin/env bun`, so the symlinked version invokes Bun automatically.
+`volley setup` installs `volley` and `volleyd` in `~/.volley/bin` for you: small scripts that run this checkout with the full path of your `bun`, so they also work where `bun` is not on the `PATH` (a non-interactive ssh session). Its services run with that directory first on their `PATH`; add it to your shell's to type `volley` yourself: `export PATH="$HOME/.volley/bin:$PATH"`.
+
+> Bun runs `.ts` natively — no build step. The shebang on `cli.ts` is `#!/usr/bin/env bun`, so the symlinked version invokes Bun automatically (when `bun` is on the `PATH`).
 
 ---
 
@@ -59,6 +61,7 @@ volley --help
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
 | `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
+| `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list`, `sync` (sharing + MCP servers), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
@@ -127,7 +130,7 @@ volley dash --host 0.0.0.0           # serve on the LAN (a phone opens http://<L
 volley dash --legacy                 # the classic dashboard (packages/volley-dash, :5173)
 ```
 
-On first load the Desk asks for broker credentials: sign in as the `desk` identity from `volley auth init`. With `--host` and no `--broker-url`, the Desk connects to port 9001 on the host it was loaded from, so a phone reaches this machine's broker, once mosquitto also has a WebSocket listener on the LAN address: the example conf binds `127.0.0.1` only. That listener exposes the broker to the LAN, so keep `allow_anonymous false` with the `volley auth` accounts, and note that `ws://` carries the password in cleartext. Open the page by IP, since Vite refuses other host names. See the Desk's [LAN use](../volley-desk/README.md#lan-use). `--build` drops `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD` from its environment, because Vite would inline them into the bundle.
+On first load the Desk asks for broker credentials: sign in as the `desk` identity from `volley setup` (or `volley auth init`), or open a one-time link (`<desk>#signin=<token>`: setup's phone QR, `volley auth signin-link`, or `volley auth token`'s admin token). With `--host` and no `--broker-url`, the Desk connects to port 9001 on the host it was loaded from, so a phone reaches this machine's broker, once mosquitto also has a WebSocket listener on the LAN address: the example conf binds `127.0.0.1` only. That listener exposes the broker to the LAN, so keep `allow_anonymous false` with the `volley auth` accounts, and note that `ws://` carries the password in cleartext. Open the page by IP, since Vite refuses other host names. See the Desk's [LAN use](../volley-desk/README.md#lan-use). `--build` drops `VITE_VOLLEY_BROKER_USERNAME` / `VITE_VOLLEY_BROKER_PASSWORD` from its environment, because Vite would inline them into the bundle.
 
 `--legacy` launches the classic [`volley-dash`](../volley-dash/) dashboard (status grid + event feed + per-agent drawer) instead. It is deprecated and will be removed in a later release; every other flag works with it.
 

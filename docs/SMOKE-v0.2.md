@@ -1,7 +1,8 @@
 # v0.2.0 owner smoke
 
 The release-level smoke for **v0.2.0**: `volleyd` + `volley-hooks` + broker auth + the Volley
-Desk, end to end, on real machines. Run it on the release head before tagging `v0.2.0`, top to
+Desk, end to end, on real machines. v0.2.0 was never tagged on its own: it ships in v0.3.0, so run
+this on the release head before tagging `v0.3.0` (with [`SMOKE.md`](../SMOKE.md) Plan 11), top to
 bottom, and record the results at the end. The narrower per-package checklists
 (`packages/*/SMOKE.md`) and the v0.1 notify smoke ([`SMOKE.md`](../SMOKE.md)) are separate.
 
@@ -97,7 +98,7 @@ export PATH=$SMOKE/bin:$PATH                           # the smoke's volley and 
   ```sh
   ln -s "$VOLLEY_REPO/packages/volley-cli/src/cli.ts" "$SMOKE/bin/volley"
   ln -s "$VOLLEY_REPO/packages/volleyd/src/cli.ts" "$SMOKE/bin/volleyd"
-  volley --version && volleyd --version     # both print 0.2.0
+  volley --version && volleyd --version     # both print 0.3.0
   ```
 - [ ] Nothing signals your everyday broker: logins are created and deleted over the smoke
   broker's own control topic, and neither `volley auth` nor volleyd sends any process a signal.
@@ -547,7 +548,7 @@ Removes only what this smoke created, after showing you the list.
 
 ## Results
 
-Record what you saw, step by step, with timings where a step has one, before tagging `v0.2.0`.
+Record what you saw, step by step, with timings where a step has one, before tagging `v0.3.0`.
 
 ```
 RESULTS (<date>, release head <sha>):

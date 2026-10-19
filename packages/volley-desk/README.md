@@ -6,6 +6,8 @@ The Desk: an infinite canvas of live wave and agent windows, driven straight off
 
 ## Run it
 
+On a machine set up with `volley setup`, the Desk is already running: setup builds it and serves it with `volley desk serve` on port 5199 (`http://localhost:5199`, or `http://<LAN IP>:5199` from a phone when you allowed LAN access), and its phone QR code signs a phone straight in. The commands below are for working on the Desk itself.
+
 ```sh
 bun install                         # from the repo root
 volley dash                         # = bun run dev in this package (see volley-cli's README for flags)
@@ -23,7 +25,7 @@ volley dash --host 0.0.0.0          # serve on the LAN: open http://<LAN IP>:517
 
 ## Sign-in
 
-The broker requires credentials (`examples/mosquitto-auth/`), so on first load the Desk asks for them before it connects: sign in as the `desk` identity that `volley auth init` printed. The username becomes the Desk's identity, the sender of everything it publishes; it must be a valid agent id. The credentials are kept in this browser's localStorage, so a reload signs straight in. If the broker refuses them (AUTH_FAILED), the Desk forgets the password and shows the form again with the broker's reason and the username filled in. An empty username connects anonymously, for a broker that still allows it; that Desk is read-only. Demo mode never asks.
+The broker requires credentials (`examples/mosquitto-auth/`), so on first load the Desk asks for them before it connects: sign in as the `desk` identity that `volley setup` (or `volley auth init`) printed, or open a one-time link (below). The username becomes the Desk's identity, the sender of everything it publishes; it must be a valid agent id. The credentials are kept in this browser's localStorage, so a reload signs straight in. If the broker refuses them (AUTH_FAILED), the Desk forgets the password and shows the form again with the broker's reason and the username filled in. An empty username connects anonymously, for a broker that still allows it; that Desk is read-only. Demo mode never asks.
 
 localStorage is readable by any script on the Desk's origin, the same trust boundary as the Desk itself.
 
@@ -44,7 +46,7 @@ listener 9001 192.0.2.10   # this machine's LAN IP (or no address for every inte
 protocol websockets
 ```
 
-- **Broker accounts are required.** That listener exposes the broker to everyone on the LAN. Keep `allow_anonymous false` and the `volley auth` password file and ACL (mosquitto's auth settings are global, so they cover the new listener too). Never open a LAN listener on an anonymous broker.
+- **Broker accounts are required.** That listener exposes the broker to everyone on the LAN. Keep `allow_anonymous false` and the Dynamic Security plugin `volley setup` / `volley auth init` configured (`per_listener_settings false`: one plugin covers every listener, the new one too). `volley setup --lan` makes this change for you: it opens 9001 to the LAN and keeps 1883 local. Never open a LAN listener on an anonymous broker.
 - **Cleartext.** Over `ws://` the `desk` password and every message cross the network unencrypted. Use a trusted network, or put TLS in front (mosquitto `certfile`/`keyfile` on the listener, the page over https, so the Desk dials `wss://`).
 - **Open the page by IP** (`http://192.0.2.10:5174`). Vite refuses host names other than `localhost` and IP addresses.
 
