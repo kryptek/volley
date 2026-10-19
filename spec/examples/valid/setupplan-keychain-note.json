@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "step": "accounts",
+      "title": "Accounts",
+      "found": [
+        "Identities on the broker: volleyd, desk and coordinator",
+        "The 5 shared roles match this Volley",
+        "An admin account exists (admin-1)"
+      ],
+      "notes": [
+        "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)"
+      ],
+      "changes": [],
+      "plan_id": "accounts-4b1e7c20"
+    }
+  ]
+}

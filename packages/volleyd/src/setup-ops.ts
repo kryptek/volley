@@ -9,7 +9,12 @@ import { realSetupDeps } from "volley-cli/commands/setup";
 import type { IO } from "volley-cli/io";
 import { PHONE_LABEL, newDeskPassword, planAccounts, planPhone } from "volley-cli/setup/accounts";
 import { planDetect, planSecurity } from "volley-cli/setup/broker";
-import { appendSetupLog, lastSetup, readSetupInstall } from "volley-cli/setup/journal";
+import {
+  appendSetupLog,
+  lastSetup,
+  readSetupInstall,
+  setupLogFile,
+} from "volley-cli/setup/journal";
 import { planServices } from "volley-cli/setup/services";
 import {
   type AnonymousProbe,
@@ -117,6 +122,22 @@ const RESTART = "Restart the broker (";
 const KEYCHAIN = "Store the coordinator's broker login in the macOS keychain";
 const VOLLEYD_PASSWORD = "New password for volleyd,";
 const VOLLEYD_SERVICE = "Install volleyd as a ";
+/**
+ * The accounts step's note (the step's `notes`, never `found`) in place of the keychain change
+ * when volleyd could not tell whether the login is stored (it never reads the keychain): neither
+ * pending nor done.
+ */
+export const KEYCHAIN_UNCHECKED =
+  "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)";
+/**
+ * The accounts step's note beside the keychain change it keeps for a terminal when the Desk wrote
+ * the coordinator a password (a new login, or a new password) that no terminal has stored since.
+ */
+export const KEYCHAIN_STALE =
+  "The Desk gave the coordinator's login a new password, so the copy in the macOS keychain is stale (or missing): run `volley setup --step accounts` in a terminal to store the new one";
+/** setup.log's event for a change a Desk's apply left for a terminal (its summary). */
+const LEFT = "left";
+
 const CMUX_PASSWORD = "Give volleyd the cmux socket password";
 const CMUX_REACH = "Make volleyd's service reach cmux";
 /** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
@@ -218,6 +239,61 @@ interface Run {
   out: { stdout: string; stderr: string };
   /** The token the accounts step issued, for `sealed`. */
   token?: IssuedToken;
+  /** A planner asked the keychain, which volleyd never reads: whether it holds the login is unknown. */
+  keychainAsked: boolean;
+}
+
+/** A step's plan with what volleyd notes but cannot check (`$defs/step` `notes`). */
+type Planned = StepPlan & { notes?: string[] };
+
+/**
+ * Whether the keychain's copy of the coordinator's login is known stale: setup.log has a Desk's
+ * apply that left the keychain copy for a terminal (it wrote the coordinator a password) after
+ * the terminal's last run of the accounts step that finished (its lines carry no `by`).
+ */
+function keychainStale(volleydHome: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(setupLogFile(volleydHome), "utf-8");
+  } catch {
+    return false;
+  }
+  let stale = false;
+  for (const line of text.split("\n")) {
+    let e: Record<string, unknown>;
+    try {
+      e = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue; // a blank or torn line
+    }
+    if (e.step !== "accounts") continue;
+    const keychain = typeof e.summary === "string" && e.summary.startsWith(KEYCHAIN);
+    if (e.by !== undefined) {
+      if (e.event === LEFT && keychain) stale = true;
+    } else if (
+      e.event === "done" ||
+      e.event === "verified" ||
+      (e.event === "applied" && keychain)
+    ) {
+      stale = false;
+    }
+  }
+  return stale;
+}
+
+/**
+ * The accounts plan when its keychain change stands only for a read volleyd refused. If a Desk
+ * wrote the coordinator a password since a terminal last stored it, the copy is stale: the change
+ * stays a terminal's, with a note that says so. Otherwise the login may well be stored: the change
+ * goes and a note says the keychain can't be checked here. A keychain change planned without a
+ * read (the coordinator's login is new or gets a new password in this plan) stays as it is.
+ */
+function uncheckedKeychain(run: Run, name: StepName, plan: StepPlan): Planned {
+  if (name !== "accounts" || !run.keychainAsked) return plan;
+  const changes = plan.changes.filter((c) => !c.summary.startsWith(KEYCHAIN));
+  if (changes.length === plan.changes.length) return plan;
+  if (keychainStale(run.ctx.volleydHome)) return { ...plan, notes: [KEYCHAIN_STALE] };
+  return { ...plan, notes: [KEYCHAIN_UNCHECKED], changes };
 }
 
 export class SetupOps {
@@ -418,6 +494,8 @@ export class SetupOps {
       applied.push(c.summary);
       lines.push(...unshownPasswords(run.out.stdout.slice(before)));
     }
+    // What a terminal still has to do, on record (a keychain copy left here is stale: keychainStale).
+    for (const l of leftover) log(LEFT, l.summary);
     let problems: string[] = [];
     let after: (() => Promise<void>) | undefined;
     if (restart !== undefined) {
@@ -468,11 +546,11 @@ export class SetupOps {
 
   /** Every step's plan up to `upto` (all five without it), in order; a planner's throw blocks it. */
   private async planSteps(run: Run, upto?: StepName) {
-    const out: { name: StepName; plan: StepPlan }[] = [];
+    const out: { name: StepName; plan: Planned }[] = [];
     for (const [name, planner] of STEPS) {
-      let plan: StepPlan;
+      let plan: Planned;
       try {
-        plan = await planner(run.ctx);
+        plan = uncheckedKeychain(run, name, await planner(run.ctx));
       } catch (e) {
         const title = name === "detect" ? "Broker" : name[0]?.toUpperCase() + name.slice(1);
         plan = {
@@ -490,7 +568,7 @@ export class SetupOps {
   }
 
   /** One step as `setup-result.schema.json` `$defs/step` has it. */
-  private wire(run: Run, name: StepName, plan: StepPlan) {
+  private wire(run: Run, name: StepName, plan: Planned) {
     const changes = plan.changes.map((c) => {
       const terminal = terminalOnly(name, c.summary, run.ctx);
       return {
@@ -515,6 +593,7 @@ export class SetupOps {
       step: name,
       title: plan.title,
       found: nonEmpty(plan.found),
+      ...(plan.notes !== undefined && plan.notes.length > 0 ? { notes: plan.notes } : {}),
       changes,
       ...(plan.blocked !== undefined ? { blocked: plan.blocked } : {}),
       ...(plan.skipped !== undefined ? { skipped: plan.skipped } : {}),
@@ -603,11 +682,16 @@ export class SetupOps {
       layout: () => layout,
     };
     // The keychain is the logged-in session's: never volleyd's (its change is terminal-only, and
-    // without a read the plan offers it there).
-    const desk: SetupExec = (argv, opts) =>
-      argv[0] === "security"
-        ? Promise.resolve({ code: 1, stdout: "", stderr: "the keychain is read from a terminal" })
-        : fenced(argv, opts);
+    // a plan that could only ask turns it into a note: `uncheckedKeychain`).
+    const desk: SetupExec = (argv, opts) => {
+      if (argv[0] !== "security") return fenced(argv, opts);
+      run.keychainAsked = true;
+      return Promise.resolve({
+        code: 1,
+        stdout: "",
+        stderr: "the keychain is read from a terminal",
+      });
+    };
     const exec = fencedExec(
       desk,
       setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun }),
@@ -638,6 +722,7 @@ export class SetupOps {
     const run: Run = {
       probes,
       out,
+      keychainAsked: false,
       ctx: {
         auth,
         deps,

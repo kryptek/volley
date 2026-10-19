@@ -15,7 +15,9 @@
  * plan again with `lan`, so the diff shown is the diff applied (and a broker
  * with nothing to change can still be opened to the LAN). A change only a
  * terminal can make (`terminal`) shows why and the command, and is never part
- * of Apply. Accounts can issue the one-time admin token, shown once (it is
+ * of Apply, and a step whose changes are all a terminal's has no Apply at all.
+ * What volleyd cannot check (the macOS keychain) is a neutral note, neither a
+ * check that passed nor a warning. Accounts can issue the one-time admin token, shown once (it is
  * gone when the step is left). Applying waits up to `SETUP_APPLY_TIMEOUT_MS`
  * and still takes a late answer (its token included); a broker restart shows
  * "reconnecting" until the plan answers again. Phone ends on a QR code of a
@@ -27,7 +29,12 @@
  * run `volley setup` in a terminal and still offers the phone link. Every
  * error says what to do next; nothing dead-ends.
  */
-import { Alert02Icon, Cancel01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+import {
+  Alert02Icon,
+  Cancel01Icon,
+  InformationCircleIcon,
+  Tick02Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type CSSProperties,
@@ -601,11 +608,17 @@ function PlanStep({
   return (
     <>
       <h3>{plan.title}</h3>
-      {plan.found.length > 0 && (
+      {plan.found.length + (plan.notes?.length ?? 0) > 0 && (
         <ul className="checks">
           {plan.found.map((f) => (
-            <li key={f}>
+            <li key={f} data-kind="found">
               {icon(Tick02Icon)} <span>{f}</span>
+            </li>
+          ))}
+          {/* What volleyd cannot check (the step's `notes`): neither a tick nor a warning. */}
+          {plan.notes?.map((f) => (
+            <li key={f} className="dim" data-kind="note">
+              {icon(InformationCircleIcon)} <span>{f}</span>
             </li>
           ))}
         </ul>
@@ -717,20 +730,21 @@ function PlanStep({
                 Check again
               </button>
             )}
-            <button
-              type="button"
-              className="btn btn--hot"
-              disabled={applying.state === "busy" || replanning || n === 0}
-              onClick={onApply}
-            >
-              {applying.state === "busy"
-                ? "Applying…"
-                : n === 1
-                  ? "Apply this change"
-                  : n === 0
-                    ? "Apply"
+            {/* Nothing here the Desk can apply: no Apply to press. */}
+            {n > 0 && (
+              <button
+                type="button"
+                className="btn btn--hot"
+                disabled={applying.state === "busy" || replanning}
+                onClick={onApply}
+              >
+                {applying.state === "busy"
+                  ? "Applying…"
+                  : n === 1
+                    ? "Apply this change"
                     : `Apply ${plural(n, "change")}`}
-            </button>
+              </button>
+            )}
           </div>
         </>
       )}
@@ -803,15 +817,28 @@ function PhoneStep({
       expiresAt: typeof expires === "string" ? expires : null,
     });
   };
-  const label = another ? "Make another link" : "Make the phone link";
+  const label = another
+    ? "Make another link"
+    : repair
+      ? "Make a phone link"
+      : "Make the phone link";
   return (
     <>
       <h3>Open the Desk on your phone</h3>
-      {plan?.found.map((f) => (
-        <p key={f} className="dim">
-          {f}
+      {repair ? (
+        // setup's own line says the step is skipped under --repair: true of the terminal's run,
+        // not beside a button that makes the link.
+        <p className="dim">
+          Run setup again checks and fixes; it makes no phone link by itself. If your phone needs
+          one, make it here.
         </p>
-      ))}
+      ) : (
+        plan?.found.map((f) => (
+          <p key={f} className="dim">
+            {f}
+          </p>
+        ))
+      )}
       {link.state === "ready" ? (
         <div className="pair-grid">
           <Qr text={link.link} label="QR code of the phone sign-in link" />

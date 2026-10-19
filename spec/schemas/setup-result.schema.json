@@ -67,6 +67,13 @@
             "$ref": "#/$defs/line"
           }
         },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          },
+          "description": "What the supervisor notes but cannot check itself (the macOS keychain, which only the logged-in session reads): neither a check that passed nor a change. A client shows each as a note."
+        },
         "changes": {
           "type": "array",
           "items": {

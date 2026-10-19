@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { parseEnvelope } from "volley-mcp/envelope";
+import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import { signinDir } from "../../src/claude/signin";
+import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
 import { readJournalFile } from "../../src/journal";
 import { eventually } from "../helpers/broker-wait";
@@ -23,7 +25,10 @@ const CALLBACK = readFileSync(
 let env: DaemonEnv;
 afterEach(() => env.cleanup());
 
-async function setup(opts: { signInAfter?: number } = {}) {
+/** What `claude auth status` says for Claude Code's default profile (no CLAUDE_CONFIG_DIR). */
+const PRIMARY_STATUS = { loggedIn: true, subscriptionType: "pro" };
+
+async function setup(opts: { signInAfter?: number; primary?: Record<string, unknown> } = {}) {
   env = await makeDaemonEnv();
   const base = mkdtempSync(join(tmpdir(), "volleyd-claude-"));
   const root = join(base, "claude");
@@ -38,10 +43,12 @@ async function setup(opts: { signInAfter?: number } = {}) {
       writeFileSync(join(argv[6] as string, "url"), CALLBACK);
       return {};
     })
-    .on(["claude", "auth", "status"], () =>
-      ++polls >= (opts.signInAfter ?? 3)
-        ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
-        : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
+    .on(["claude", "auth", "status"], (_argv, o) =>
+      o.env?.CLAUDE_CONFIG_DIR === undefined
+        ? { stdout: JSON.stringify(opts.primary ?? PRIMARY_STATUS) }
+        : ++polls >= (opts.signInAfter ?? 3)
+          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+          : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
     );
   // The sign-in's poll interval and timeout run on the daemon's clock: polls happen as it moves.
   const clock = fakeClock();
@@ -71,7 +78,8 @@ async function setup(opts: { signInAfter?: number } = {}) {
       if (!finished) await clock.advance(20);
     }
   };
-  return { root, primary, fx, client, watcher, seen, system, signedIn };
+  const reader = (acct: string) => env.retained(usageAccountTopic(acct));
+  return { root, primary, fx, client, watcher, seen, system, signedIn, reader };
 }
 
 describe("claude_* control ops", () => {
@@ -200,6 +208,64 @@ describe("claude_* control ops", () => {
       writeFileSync(join(t.root, "accounts.json"), "{ not json");
       const r = await t.client.request("claude_accounts", {});
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/not valid JSON/) });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("claude_accounts reports the primary's plan from `claude auth status`; its usage record carries it", async () => {
+    const t = await setup();
+    try {
+      const list = await t.client.request("claude_accounts", {});
+      expect(list.ok).toBe(true);
+      expect((list.result as { primary?: unknown }).primary).toEqual({ plan: "pro" });
+      // Asked of Claude Code's default profile: no CLAUDE_CONFIG_DIR.
+      const asked = t.fx.calls.filter((c) => c.argv.join(" ") === "claude auth status");
+      expect(asked.map((c) => c.opts.env?.CLAUDE_CONFIG_DIR)).toEqual([undefined]);
+      // The primary's usage record: the plan beside its windows.
+      const agent = "signin-watcher";
+      await t.watcher.publish(
+        buildTopic(NS, agent, "usage"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: agent,
+            parentId: null,
+            channel: "usage",
+            type: "usage",
+            payload: {
+              account: "primary",
+              model: "claude-opus-5-5",
+              context_window: { used_percentage: 20, used: 200_000, size: 1_000_000 },
+              rate_limits: { five_hour: { pct: 12, resets_at: null } },
+              captured_at: new Date().toISOString(),
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+      let record: Record<string, unknown> | null = null;
+      await eventually(async () => {
+        const env = (await t.reader("primary")) as { payload?: Record<string, unknown> } | null;
+        record = env?.payload ?? null;
+        return record !== null;
+      });
+      expect(record).toMatchObject({ account: "primary", plan: "pro", five_hour: { pct: 12 } });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it.each([
+    ["not logged in", { loggedIn: false, subscriptionType: "max" }],
+    ["logged in without a plan", { loggedIn: true }],
+  ])("a primary %s: claude_accounts claims no plan", async (_, primary) => {
+    const t = await setup({ primary });
+    try {
+      const list = await t.client.request("claude_accounts", {});
+      expect(list.ok).toBe(true);
+      expect((list.result as { primary?: unknown }).primary).toEqual({});
     } finally {
       await t.client.close();
       await t.watcher.disconnect();

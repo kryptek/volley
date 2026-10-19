@@ -61,6 +61,8 @@ export interface ClaudeServiceDeps {
    * `most_headroom`; null when no candidate has usage data.
    */
   headroom?: (candidates: readonly string[]) => string | null;
+  /** The primary's plan changed (`claude_accounts` asked): its usage record is out of date. */
+  onPrimaryPlan?: () => void;
 }
 
 type Reply = { ok: boolean; error?: string; result?: unknown };
@@ -76,6 +78,9 @@ interface Pending {
 export class ClaudeService {
   private readonly signins = new Map<string, Pending>();
   private readonly clock: Clock;
+  /** The primary's plan as `claude auth status` last said it; undefined: not known. */
+  private primaryPlan: string | undefined;
+  private primaryAsk: Promise<void> | undefined;
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
@@ -110,8 +115,10 @@ export class ClaudeService {
     return this.registry().find((a) => profileDir(this.d.root, a.id) === canonical)?.id ?? null;
   }
 
-  /** A registry account's label and plan, for its usage record. */
+  /** A registry account's label and plan, or the primary's plan once known, for its usage record. */
   describe(acct: string): { label?: string; plan?: string } {
+    if (acct === PRIMARY_ACCOUNT)
+      return this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {};
     const a = this.registry().find((x) => x.id === acct);
     if (a === undefined) return {};
     return { label: a.label, ...(a.plan !== undefined ? { plan: a.plan } : {}) };
@@ -139,13 +146,52 @@ export class ClaudeService {
     return { shared, mcp_servers: mcp.servers.length };
   }
 
-  /** `claude_accounts`: the registry, each account's running sign-in, and the sharing modes. */
-  list(): Reply {
+  /**
+   * The primary's plan, from `claude auth status` of Claude Code's default profile (no
+   * `CLAUDE_CONFIG_DIR`, as a primary agent runs). Never guessed: a profile that is not logged in,
+   * says no plan, or does not answer has none. Concurrent asks share one run.
+   */
+  private askPrimary(): Promise<void> {
+    this.primaryAsk ??= (async () => {
+      const env = Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== "CLAUDE_CONFIG_DIR"),
+      );
+      let plan: string | undefined;
+      try {
+        const r = await this.d.exec(["claude", "auth", "status"], {
+          env,
+          timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+        });
+        const status = parseAuthStatus(r.stdout);
+        plan = status?.loggedIn === true ? status.plan : undefined;
+      } catch {
+        plan = undefined; // no `claude` here
+      }
+      if (plan === this.primaryPlan) return;
+      this.primaryPlan = plan;
+      this.d.onPrimaryPlan?.();
+    })().finally(() => {
+      this.primaryAsk = undefined;
+    });
+    return this.primaryAsk;
+  }
+
+  /**
+   * `claude_accounts`: the registry, each account's running sign-in, the sharing modes, and the
+   * primary (`{ plan? }`: Claude Code's default profile, never in the registry).
+   */
+  async list(): Promise<Reply> {
+    await this.askPrimary();
     try {
       const accounts = readRegistry(this.d.root).accounts.map((a) => this.withSignin(a));
       return {
         ok: true,
-        result: { root: this.d.root, accounts, sharing: readSharing(this.d.root) },
+        result: {
+          root: this.d.root,
+          accounts,
+          primary: this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {},
+          sharing: readSharing(this.d.root),
+        },
       };
     } catch (e) {
       if (e instanceof ClaudeAccountError || e instanceof SharingError)

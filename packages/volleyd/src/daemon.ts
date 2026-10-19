@@ -880,6 +880,8 @@ export class Daemon {
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
+      // The primary's record carries its plan (describe) once claude_accounts has asked it.
+      onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -4725,7 +4727,7 @@ export class Daemon {
         return this.manualSpawn(p);
       // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
       case "claude_accounts":
-        return this.claude.list();
+        return { ok: true, defer: this.claude.list() };
       case "claude_account_add":
         return { ok: true, defer: this.claude.add(p, by) };
       case "claude_signin":
