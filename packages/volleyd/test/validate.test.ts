@@ -134,4 +134,29 @@ describe("volleyd validate: the brief preface", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain(`BRIEF_PREFACE_TOO_LARGE: ${file} is 1025 B`);
   });
+  it("the cap is the operator's: $VOLLEYD_HOME/config.yaml, then the wave's config:", async () => {
+    const home = join(dir, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.yaml"), "brief_preface_max_bytes: 1024\n");
+    const file = join(dir, "mid.md");
+    writeFileSync(file, "x".repeat(2000));
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const lowered = await runCli(["validate", waveFile(`brief_preface: ${file}\n`)], env);
+    expect(lowered.exitCode).toBe(1);
+    expect(lowered.stderr).toContain("brief_preface_max_bytes is 1024 B");
+    // The wave's own config: wins over the file.
+    const waved = await runCli(
+      ["validate", waveFile(`brief_preface: ${file}\nconfig: { brief_preface_max_bytes: 4096 }\n`)],
+      env,
+    );
+    expect(waved.exitCode).toBe(0);
+  });
+
+  it("a preface that is not valid UTF-8 fails validate", async () => {
+    const file = join(dir, "bad.md");
+    writeFileSync(file, Buffer.from([0x61, 0xff, 0x0a]));
+    const r = await runCli(["validate", waveFile(`brief_preface: ${file}\n`)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("not valid UTF-8");
+  });
 });

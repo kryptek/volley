@@ -52,16 +52,25 @@ const ID_PREFIX: Record<ReviewerRole, string> = { spec_reviewer: "S", quality_re
 
 /**
  * A reviewer's `result` payload, or null when it is not a review result (one without
- * `hygiene.checked` is not). Hygiene findings are folded into `findings` (once, if the reviewer
- * listed them in both), so the fixup and the disagreement check see them like any other.
+ * `hygiene.checked` is not). Every hygiene hit is a P1, whatever severity the reviewer gave it.
+ * Hygiene findings are folded into `findings` (once, as the P1, if the reviewer listed them in
+ * both), so the fixup and the disagreement check see them like any other.
  */
 export function parseReviewResult(payload: unknown): ReviewResult | null {
   if (!validator("review-result.schema.json#/$defs/review")(payload)) return null;
   const r = payload as ReviewResult & { hygiene: { findings: Finding[] } };
   const key = (f: Finding) => JSON.stringify([f.file, f.line, f.text]);
+  const hits = r.hygiene.findings.map((f): Finding => ({ ...f, severity: "P1" }));
+  const hit = new Set(hits.map(key));
   const listed = new Set(r.findings.map(key));
-  const extra = r.hygiene.findings.filter((f) => !listed.has(key(f)));
-  return extra.length === 0 ? r : { ...r, findings: [...r.findings, ...extra] };
+  return {
+    ...r,
+    findings: [
+      ...r.findings.map((f): Finding => (hit.has(key(f)) ? { ...f, severity: "P1" } : f)),
+      ...hits.filter((f) => !listed.has(key(f))),
+    ],
+    hygiene: { ...r.hygiene, findings: hits },
+  };
 }
 
 /** A fixup's `result` payload, or null when it is not a fixup result. */
@@ -190,6 +199,16 @@ export function renderFindingsMd(
     const note = it.note !== undefined ? ` _(${it.note})_` : "";
     lines.push(
       `- **${it.id} · ${it.finding.severity}** \`${where(it.finding)}\` (${it.role}): ${it.finding.text}${note}`,
+    );
+  }
+  // Hygiene hits in the PR text or a commit message: not in any file of the diff.
+  if (items.some((it) => it.finding.file === "PR" || it.finding.file === "COMMIT")) {
+    lines.push(
+      "",
+      "## Hits outside the diff",
+      "",
+      `- \`PR\`: the PR's title or body. Fix it with \`gh pr edit ${ctx.pr_url} --title …\` / \`--body …\`, and say so in \`how\`.`,
+      "- `COMMIT`: a commit message. You never rewrite pushed history (no amend, no force-push), so say in `how` that the owner must edit that message when squash-merging the PR.",
     );
   }
   return `${lines.join("\n")}\n`;

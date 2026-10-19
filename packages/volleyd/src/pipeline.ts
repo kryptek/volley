@@ -137,7 +137,8 @@ export interface PipelineMarker {
     | "review_result"
     | "fixup_result"
     | "agent_failed"
-    | "reviewers_disagree";
+    | "reviewers_disagree"
+    | "merge_ready_invariant";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -468,33 +469,64 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
 }
 
 /**
- * The gate, behind the merge_ready invariant. A violation is an alarm and no action: the task
- * stays where it is for the owner (volleyd never gates around a missing review).
+ * A merge_ready invariant violation: an alarm, and a decision for the owner (`rereview` runs the
+ * missing / stale reviewers at the current head; `cancel`). Never a gate: volleyd never gates
+ * around a missing review. A task already parked on a decision gets the alarm only.
  */
+function invariantViolation(
+  v: PipelineView,
+  c: Extract<MergeReadyCheck, { ok: false }>,
+): PipelineAction[] {
+  const alarm: PipelineAction = {
+    kind: "alarm",
+    key: `${v.task}/merge_ready_invariant/${v.p.head}`,
+    event: {
+      type: "alarm_raised",
+      task: v.task,
+      data: {
+        alarm: "merge_ready_invariant",
+        ...(c.head !== undefined ? { head: c.head } : {}),
+        missing: c.missing,
+        stale: c.stale,
+      },
+    },
+  };
+  if (v.stage === "awaiting_decision") return [alarm];
+  const at = c.head !== undefined ? c.head.slice(0, 12) : "no verified head";
+  const why = [
+    ...(c.missing.length > 0 ? [`no review from ${c.missing.join(", ")}`] : []),
+    ...(c.stale.length > 0 ? [`${c.stale.join(", ")} reviewed an older head`] : []),
+  ].join("; ");
+  return [
+    alarm,
+    {
+      kind: "decide",
+      marker: { on: "merge_ready_invariant", ...(c.head !== undefined ? { head: c.head } : {}) },
+      decision: {
+        kind: "agent_blocked",
+        task: v.task,
+        question: `merge_ready is blocked at ${at}: ${why} (e.g. a push outside the pipeline). rereview: run those reviewers at the current head; or cancel the task?`,
+        ...(v.p.pr !== undefined ? { pointers: { pr: v.p.pr.url } } : {}),
+        options: ["rereview", "cancel"],
+      },
+    },
+  ];
+}
+
+/** The end of the pipeline: the rebase check and gate when the invariant holds (no polling else). */
+function toGate(v: PipelineView): PipelineAction[] {
+  const c = mergeReadyCheck(v.stages, v.p);
+  return c.ok ? [{ kind: "check_rebase" }] : invariantViolation(v, c);
+}
+
+/** The gate, behind the merge_ready invariant (see invariantViolation). */
 function guardedGate(
   v: PipelineView,
   ev: Extract<PipelineEvent, { kind: "rebase_checked" }>,
 ): PipelineAction[] {
   const gate: PipelineAction = { kind: "gate", check: ev.check, diffstats: ev.diffstats };
   const c = mergeReadyCheck(v.stages, v.p);
-  if (!c.ok) {
-    return [
-      {
-        kind: "alarm",
-        key: `${v.task}/merge_ready_invariant/${v.p.head}`,
-        event: {
-          type: "alarm_raised",
-          task: v.task,
-          data: {
-            alarm: "merge_ready_invariant",
-            ...(c.head !== undefined ? { head: c.head } : {}),
-            missing: c.missing,
-            stale: c.stale,
-          },
-        },
-      },
-    ];
-  }
+  if (!c.ok) return invariantViolation(v, c);
   if (!c.skippedByPlan) return [gate];
   return [
     {
@@ -927,6 +959,17 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "respawn") ? [] : reask();
     case "reviewers_disagree":
       return [];
+    case "merge_ready_invariant": {
+      if (!isAnswer(answer, "rereview")) return reask();
+      const c = mergeReadyCheck(v.stages, v.p);
+      // Holds again (nothing to re-run): the next advance gates.
+      if (c.ok) return [];
+      const roles = REVIEWER_ROLES.filter((r) => c.missing.includes(r) || c.stale.includes(r));
+      const i = v.stages.findIndex((g) =>
+        g.some((s) => roles.includes(STAGE_ROLE[s] as ReviewerRole)),
+      );
+      return i >= 0 ? enterStep(v, i, roles) : [];
+    }
   }
 }
 
@@ -1020,7 +1063,7 @@ function advance(v: PipelineView): PipelineAction[] {
       );
       if (i >= 0) return enterStep(v, i, p.rereview);
     }
-    return [{ kind: "check_rebase" }];
+    return toGate(v);
   }
   return enter(v, p.step + 1);
 }
@@ -1028,7 +1071,7 @@ function advance(v: PipelineView): PipelineAction[] {
 /** Enter stage group `i` (skipping what has nothing to do); the end of the pipeline is the gate. */
 function enter(v: PipelineView, i: number): PipelineAction[] {
   const group = v.stages[i];
-  if (group === undefined || group.includes("merge_ready")) return [{ kind: "check_rebase" }];
+  if (group === undefined || group.includes("merge_ready")) return toGate(v);
   const roles = group.flatMap((s) => (s === "implement" ? [] : [STAGE_ROLE[s] as Role]));
   if (roles.length === 0) return enter(v, i + 1);
   if (roles.includes("fixup")) {

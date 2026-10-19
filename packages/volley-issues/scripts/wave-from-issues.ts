@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -283,8 +284,11 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
 export function ensureBriefPreface(
   repo: string,
   file: string = DEFAULT_BRIEF_PREFACE,
+  home: string = homedir(),
 ): { path: string; created: boolean } {
-  const path = isAbsolute(file) ? file : join(repo, file);
+  // `~` / `~/…` is the home directory, as volleyd reads it.
+  const tilde = (p: string) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
+  const path = isAbsolute(tilde(file)) ? tilde(file) : join(tilde(repo), file);
   if (existsSync(path)) return { path, created: false };
   mkdirSync(dirname(path), { recursive: true });
   try {

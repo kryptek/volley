@@ -192,4 +192,48 @@ describe("public hygiene (reviewer backstop)", () => {
       "Q1 P1 docs/setup.md",
     ]);
   });
+  it("a hygiene hit listed as P2 in findings and P1 in hygiene stays a P1 (never downgraded)", () => {
+    const hit = { severity: "P1" as const, file: "src/a.ts", line: 3, text: "a home path" };
+    const r = parseReviewResult({
+      findings: [{ ...hit, severity: "P2" }],
+      verdict: "changes_requested",
+      hygiene: { checked: true, findings: [hit] },
+    }) as ReviewResult;
+    expect(r.findings).toEqual([hit]);
+    // A hygiene hit is a P1 whatever severity the reviewer gave it.
+    const low = parseReviewResult({
+      findings: [],
+      verdict: "changes_requested",
+      hygiene: { checked: true, findings: [{ ...hit, severity: "P3" }] },
+    }) as ReviewResult;
+    expect(low.findings).toEqual([hit]);
+    expect(low.hygiene?.findings).toEqual([hit]);
+  });
+
+  it("COMMIT / PR hits tell the fixup how to handle them (gh pr edit; the owner edits the squash message)", () => {
+    const r = parseReviewResult({
+      findings: [],
+      verdict: "changes_requested",
+      hygiene: {
+        checked: true,
+        findings: [
+          { severity: "P1", file: "COMMIT", text: "a person's name in a commit message" },
+          { severity: "P1", file: "PR", text: "a home path in the PR body" },
+        ],
+      },
+    }) as ReviewResult;
+    const ctx = {
+      pr_branch: "w1/T1-implementer-1",
+      pr_url: "https://github.com/example/repo/pull/7",
+      head: "abc1234",
+      release_branch: "release/w1",
+    };
+    const md = renderFindingsMd(fixupItems({ spec_reviewer: r }), ctx);
+    expect(md).toContain("## Hits outside the diff");
+    expect(md).toContain("gh pr edit https://github.com/example/repo/pull/7");
+    expect(md).toMatch(/`COMMIT`.*never rewrite.*squash-merg/s);
+    // Only when there is such a hit.
+    const plain = renderFindingsMd(fixupItems({ spec_reviewer: review("spec-p1") }), ctx);
+    expect(plain).not.toContain("Hits outside the diff");
+  });
 });

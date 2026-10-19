@@ -14,7 +14,7 @@ import {
   runBriefGate,
   withPreface,
 } from "./brief";
-import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
@@ -100,8 +100,10 @@ export interface SpawnDeps {
   mcpEntry: string;
   /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
   mintCredentials: boolean;
-  tunables: Pick<Tunables, "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s"> &
-    Partial<Pick<Tunables, "brief_preface_max_bytes">>;
+  tunables: Pick<
+    Tunables,
+    "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
+  >;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -302,9 +304,8 @@ interface Launched {
  */
 function loadPreface(wave: Wave, deps: SpawnDeps) {
   const path = briefPrefacePath(wave.repo, wave.brief_preface);
-  const max = deps.tunables.brief_preface_max_bytes ?? CONFIG_DEFAULTS.brief_preface_max_bytes;
   try {
-    return readBriefPreface(path, max);
+    return readBriefPreface(path, deps.tunables.brief_preface_max_bytes);
   } catch (e) {
     if (!(e instanceof BriefPrefaceTooLarge)) throw e;
     throw new SpawnError("BRIEF_PREFACE_TOO_LARGE", e.message, e.detail);

@@ -69,6 +69,8 @@ const gateFor = (v: PipelineView): PipelineAction[] =>
     diffstats: {},
   });
 
+const accepted = { agent_id: "a-fixup", steers: {}, accepted: true, retired: "done" };
+
 const kinds = (as: PipelineAction[]) => as.map((a) => a.kind);
 const alarmOf = (as: PipelineAction[]) =>
   as.flatMap((a) => (a.kind === "alarm" || a.kind === "journal" ? [a.event.data] : []))[0];
@@ -88,6 +90,71 @@ describe("merge_ready invariant: never without both reviews for the current head
       head: H1,
       missing: ["quality_reviewer"],
     });
+  });
+
+  it("a violation opens a rereview / cancel decision naming the roles (one per parked task)", () => {
+    const p = at(H1, { reviews: { spec_reviewer: { round: 1, head: H1, result: approve } } });
+    const actions = gateFor(view(p));
+    const decide = actions.find((a) => a.kind === "decide");
+    expect(decide).toMatchObject({
+      marker: { on: "merge_ready_invariant", head: H1 },
+      decision: { kind: "agent_blocked", task: "T1", options: ["rereview", "cancel"] },
+    });
+    // Already parked on a decision: the alarm only.
+    expect(kinds(gateFor({ ...view(p), stage: "awaiting_decision" }))).toEqual(["alarm"]);
+  });
+
+  it("the end of the pipeline checks the invariant before polling GitHub (check_rebase)", () => {
+    const missing = at(H1, { reviews: { spec_reviewer: { round: 1, head: H1, result: approve } } });
+    const v = { ...view(missing), p: { ...missing, runs: { fixup: accepted } } };
+    expect(kinds(next(v, { kind: "advance" }))).toEqual(["alarm", "decide"]);
+    const both = at(H1, {
+      runs: { fixup: accepted },
+      reviews: {
+        spec_reviewer: { round: 1, head: H1, result: approve },
+        quality_reviewer: { round: 1, head: H1, result: approve },
+      },
+    });
+    expect(kinds(next(view(both), { kind: "advance" }))).toEqual(["check_rebase"]);
+  });
+
+  it("rereview re-enters the review step for the missing and stale roles at the current head", () => {
+    const p = at(H2, {
+      reviews: {
+        spec_reviewer: { round: 1, head: H2, result: approve },
+        quality_reviewer: { round: 1, head: H1, result: approve },
+      },
+    });
+    const resolved = (answer: string) =>
+      next(view(p), {
+        kind: "decision_resolved",
+        decision: {
+          decision_id: "d1",
+          wave: "w1",
+          task: "T1",
+          kind: "agent_blocked",
+          question: "q",
+          options: ["rereview", "cancel"],
+          pointers: {},
+          opened_at: "2026-10-18T12:00:00.000Z",
+          resolved: { answer, by: "owner", at: "2026-10-18T12:01:00.000Z" },
+          pipeline: { on: "merge_ready_invariant", head: H2 },
+        } as never,
+      });
+    const actions = resolved("rereview");
+    expect(kinds(actions)).toEqual(["journal", "spawn"]);
+    expect(actions[0]).toMatchObject({
+      event: {
+        type: "stage_entered",
+        data: { step: 1, roles: ["quality_reviewer"], review_round: 2 },
+      },
+    });
+    expect(actions[1]).toMatchObject({
+      role: "quality_reviewer",
+      start: { ref: H2, detach: true },
+    });
+    expect(kinds(resolved("cancel"))).toEqual(["journal"]);
+    expect(kinds(resolved("maybe"))).toEqual(["decide"]);
   });
 
   it("no review at all → no gate", () => {

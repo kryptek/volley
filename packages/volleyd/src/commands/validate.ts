@@ -1,7 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { parse } from "yaml";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
 import { CONFIG_DEFAULTS } from "../config-defaults";
+import { volleydHome } from "../config-store";
 import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { criticalPaths } from "../scheduler";
@@ -17,11 +20,29 @@ not here is noted, and the daemon checks it at \`run\`.
 
 It also prints the brief preface every agent of the wave would get — its path, size and sha256
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
-brief_preface_max_bytes (the wave's config: value, else the default; \`run\` re-checks it
-against the daemon's config).
+brief_preface_max_bytes (the wave's config: value, else $VOLLEYD_HOME/config.yaml's, else the
+default; \`run\` re-checks it against the running daemon's config).
 `;
 
-export async function validate({ argv, io }: CommandArgs): Promise<ExitCode> {
+/**
+ * `brief_preface_max_bytes` as \`run\` would see it with no `config:` in the wave: the operator's
+ * `$VOLLEYD_HOME/config.yaml` over the default. A file that does not parse is the daemon's to
+ * report; validate falls back to the default.
+ */
+function globalPrefaceCap(env: CommandArgs["env"]): number {
+  const fallback = CONFIG_DEFAULTS.brief_preface_max_bytes;
+  const file = join(volleydHome(env), "config.yaml");
+  if (!existsSync(file)) return fallback;
+  try {
+    const v = (parse(readFileSync(file, "utf-8")) as { brief_preface_max_bytes?: unknown } | null)
+      ?.brief_preface_max_bytes;
+    return typeof v === "number" && Number.isInteger(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -64,7 +85,7 @@ export async function validate({ argv, io }: CommandArgs): Promise<ExitCode> {
     const prefacePath = briefPrefacePath(wave.repo, wave.brief_preface);
     const preface = readBriefPreface(
       prefacePath,
-      wave.config.brief_preface_max_bytes ?? CONFIG_DEFAULTS.brief_preface_max_bytes,
+      wave.config.brief_preface_max_bytes ?? globalPrefaceCap(env),
     );
     const prefaceLine =
       preface === null

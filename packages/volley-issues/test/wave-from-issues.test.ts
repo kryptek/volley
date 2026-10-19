@@ -18,9 +18,13 @@ import {
 const VOLLEYD_CLI = fileURLToPath(new URL("../../volleyd/src/cli.ts", import.meta.url));
 const HELPER_CLI = fileURLToPath(new URL("../scripts/wave-from-issues.ts", import.meta.url));
 
+const tmp = mkdtempSync(join(tmpdir(), "wave-from-issues-"));
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
 const OPTS: WaveOptions = {
   wave: "2026-10-18-example",
-  repo: "/tmp/example-repo",
+  // Never created: the CLI writes a brief preface into a --repo that exists.
+  repo: join(tmp, "example-repo"),
   releaseBranch: "release/2026-10-18-example",
   model: "claude-opus-5-5",
 };
@@ -35,13 +39,14 @@ const THREE: IssueInput[] = [
   },
 ];
 
-const tmp = mkdtempSync(join(tmpdir(), "wave-from-issues-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-
 function volleydValidate(yaml: string): { code: number | null; out: string } {
   const file = join(tmp, `wave-${Math.random().toString(36).slice(2)}.yaml`);
   writeFileSync(file, yaml);
-  const r = spawnSync("bun", [VOLLEYD_CLI, "validate", file], { encoding: "utf-8" });
+  const r = spawnSync("bun", [VOLLEYD_CLI, "validate", file], {
+    encoding: "utf-8",
+    // Not the operator's config.yaml (validate reads its brief_preface_max_bytes).
+    env: { ...process.env, VOLLEYD_HOME: join(tmp, "no-volleyd-home") },
+  });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -519,6 +524,16 @@ describe("brief preface", () => {
     const abs = join(tmp, `rules-${Math.random().toString(36).slice(2)}.md`);
     expect(ensureBriefPreface(repo, abs)).toEqual({ path: abs, created: true });
     expect(ensureBriefPreface(repo, "docs/rules.md").path).toBe(join(repo, "docs", "rules.md"));
+  });
+
+  it("a ~/ path is under the home directory, as volleyd reads it (not under the repo)", () => {
+    const repo = mkdtempSync(join(tmp, "repo-"));
+    const home = mkdtempSync(join(tmp, "home-"));
+    expect(ensureBriefPreface(repo, "~/rules.md", home)).toEqual({
+      path: join(home, "rules.md"),
+      created: true,
+    });
+    expect(existsSync(join(repo, "~"))).toBe(false);
   });
 
   it("the CLI writes the preface into a repo on this machine, and says so", () => {

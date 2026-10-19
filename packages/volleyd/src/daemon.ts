@@ -4290,15 +4290,17 @@ export class Daemon {
     }
     this.storeVersion(file, text);
     this.config.setWaveOverrides(wave.wave, wave.config);
-    // Which preface this version's agents get; missing is journaled once per wave (it was there).
-    const hadPreface = state.brief_preface != null;
+    // Which preface this version's agents get; missing is journaled once per wave.
+    const journaledMissing = log.journal
+      .readAll()
+      .some((e) => e.type === "alarm_raised" && e.data.alarm === "brief_preface_missing");
     for (const ev of res.planEvents) {
       const versioned = ev.type === "wave_versioned";
       await this.append(
         wave.wave,
         versioned ? { ...ev, data: { ...ev.data, brief_preface: preface.info } } : ev,
       );
-      if (versioned && preface.info === null && hadPreface) {
+      if (versioned && preface.info === null && !journaledMissing) {
         await this.append(wave.wave, {
           type: "alarm_raised",
           data: { alarm: "brief_preface_missing", path: preface.path },

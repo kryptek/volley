@@ -112,16 +112,27 @@ export function briefPrefacePath(repo: string, configured?: string): string {
   return isAbsolute(file) || file.startsWith("~") ? expandHome(file) : join(expandHome(repo), file);
 }
 
-/** Read the preface at `path`: null when there is no file; over `maxBytes` throws. */
+/**
+ * Read the preface at `path`: null when there is no file, or a blank one (no agent would get
+ * anything, so it is reported and journaled as missing). Over `maxBytes`, or not valid UTF-8 (the
+ * brief carries the file's exact bytes), throws.
+ */
 export function readBriefPreface(path: string, maxBytes: number): BriefPreface | null {
   if (!existsSync(path)) return null;
   const bytes = readFileSync(path);
   if (bytes.length > maxBytes) throw new BriefPrefaceTooLarge(path, bytes.length, maxBytes);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(`brief preface ${path} is not valid UTF-8`);
+  }
+  if (text.trim() === "") return null;
   return {
     path,
     sha256: createHash("sha256").update(bytes).digest("hex"),
     bytes: bytes.length,
-    text: bytes.toString("utf-8"),
+    text,
   };
 }
 
@@ -131,10 +142,10 @@ export const prefaceInfo = (p: BriefPreface | null): BriefPrefaceInfo | null =>
 
 /**
  * The brief an agent gets: the preface verbatim (no placeholder expansion), the rule, then the
- * rendered role template. A blank preface adds nothing.
+ * rendered role template.
  */
 export function withPreface(preface: BriefPreface | null, brief: string): string {
-  if (preface === null || preface.text.trim() === "") return brief;
+  if (preface === null) return brief;
   return `${preface.text}${BRIEF_PREFACE_RULE}${brief}`;
 }
 

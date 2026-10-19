@@ -75,6 +75,16 @@ describe("brief preface: the loader", () => {
     );
   });
 
+  it("a blank file is no preface: null, as if missing (what the agents get is what is reported)", () => {
+    expect(readBriefPreface(put(dir, "blank.md", "  \n\t\n"), 16384)).toBeNull();
+    expect(readBriefPreface(put(dir, "empty.md", ""), 16384)).toBeNull();
+  });
+
+  it("a file that is not valid UTF-8 is refused (the brief carries its exact bytes or nothing)", () => {
+    const file = put(dir, "bad.md", Buffer.from([0x72, 0x75, 0x6c, 0x65, 0xff, 0xfe, 0x0a]));
+    expect(() => readBriefPreface(file, 16384)).toThrow(/not valid UTF-8/);
+  });
+
   it("formats the validate / status line", () => {
     expect(formatBriefPreface(null)).toBe("brief preface: none");
     expect(
@@ -230,6 +240,31 @@ describe("brief preface: submit, versions and the wave state (daemon)", () => {
     // A new plan version still without one: not journaled again.
     await client.request("run", { wave_yaml: wave("", 2) });
     expect(daemon.snapshot("w1")?.version).toBe(2);
+    expect(missing()).toHaveLength(1);
+  });
+
+  it("a version that loses the preface journals brief_preface_missing and nulls the state", async () => {
+    const file = put(repo, ".volley/brief-preface.md", "v1 rules\n");
+    await client.request("run", { wave_yaml: wave() });
+    expect(daemon.snapshot("w1")?.brief_preface?.sha256).toBe(sha256("v1 rules\n"));
+    expect(missing()).toEqual([]);
+    rmSync(file);
+    const res = await client.request("run", { wave_yaml: wave("", 2) });
+    expect(res.ok).toBe(true);
+    expect(daemon.snapshot("w1")?.brief_preface).toBeNull();
+    expect(missing()).toHaveLength(1);
+  });
+
+  it("brief_preface_missing is journaled once per wave, even across missing → present → missing", async () => {
+    await client.request("run", { wave_yaml: wave() });
+    expect(missing()).toHaveLength(1);
+    const file = put(repo, ".volley/brief-preface.md", "rules\n");
+    await client.request("run", { wave_yaml: wave("", 2) });
+    expect(daemon.snapshot("w1")?.brief_preface?.sha256).toBe(sha256("rules\n"));
+    rmSync(file);
+    await client.request("run", { wave_yaml: wave("", 3) });
+    expect(daemon.snapshot("w1")?.version).toBe(3);
+    expect(daemon.snapshot("w1")?.brief_preface).toBeNull();
     expect(missing()).toHaveLength(1);
   });
 

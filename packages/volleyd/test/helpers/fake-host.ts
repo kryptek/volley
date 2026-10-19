@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import type { ConsentToken } from "../../src/fence";
 import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "../../src/hosts/host";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
@@ -209,6 +210,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
       worktree_root: join(dir, "wt"),
       spawn_timeout_s: o.spawnTimeoutS ?? 1,
       heartbeat_alarm_s: 600,
+      brief_preface_max_bytes: CONFIG_DEFAULTS.brief_preface_max_bytes,
     },
     owner: null,
     journal: (ev) => {

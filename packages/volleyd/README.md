@@ -570,6 +570,10 @@ opposite end: optional notes (build commands, gates) rendered into the template'
 files it generates and creates the file from its public-repo hygiene template when it is missing
 (never overwriting one).
 
+- **Which repo.** The default path is under the wave's `repo:` as written. `brief-extra.md` is
+  looked up at the clone's top level instead (`git rev-parse --show-toplevel`). So if `repo:`
+  points at a subdirectory, name the preface with `brief_preface:` or point `repo:` at the top
+  level.
 - **Where it is read.** On volleyd's own host, at `run` (and each plan version) and again at
   every spawn, so an edit reaches the next spawn. A task on a remote host gets the preface read
   here.
@@ -577,8 +581,11 @@ files it generates and creates the file from its public-repo hygiene template wh
   `volleyd validate` exits 1 and `volleyd run` is refused with `BRIEF_PREFACE_TOO_LARGE`, and a
   spawn after the file grew is refused (journaled `alarm_raised { code }`, like any refusal).
 - **No file.** Briefs are the role templates alone; `brief_preface_missing { path }` is
-  journaled once per wave (at `run`, and again only if a later plan version loses a preface the
-  wave had).
+  journaled once per wave (at `run`, or at the first plan version without one). A blank file
+  (whitespace only) counts as no file, so what `validate` / `status` report is what the agents
+  get.
+- **Encoding.** The file must be UTF-8 (its exact bytes go into the brief): one that is not is
+  refused by `validate`, `run` and a spawn.
 - **Visibility.** `volleyd validate` prints `brief preface: <path> (<bytes> B, sha256 <12 hex>)`
   or `brief preface: none (no <path>)`. `wave_submitted` and every `wave_versioned` carry
   `brief_preface: { path, sha256, bytes } | null`, which is the wave state's `brief_preface`
@@ -1048,8 +1055,12 @@ have a stored review with a verdict that holds for the **current head** — a re
 head, or of one it descends from only through fixups that ran after that review (they worked
 from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
 re-verified) was reviewed by nobody, so reviews of the heads before it no longer count. A
-violation gates nothing: `alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`
-and the task stays where it is for the owner. The only way past the reviews is a wave file whose
+violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
+any GitHub check) and again at the gate, and journals
+`alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
+`agent_blocked` decision (`rereview` / `cancel`) that names the roles. `rereview` runs those
+reviewers again at the current head (the next review round; the fixup follows if they find
+anything), then the gate is checked again; `cancel` cancels the task. The only way past the reviews is a wave file whose
 pipeline for the task lists no review stage (`pipeline: [implement, merge_ready]`): that gate is
 journaled as `alarm_raised { alarm: "reviews_skipped_by_plan" }` and the task carries
 `reviews_skipped_by_plan: true` in the wave state (`volleyd status`: "reviews skipped by plan").
