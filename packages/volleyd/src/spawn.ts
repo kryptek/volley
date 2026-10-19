@@ -14,6 +14,7 @@ import {
   runBriefGate,
   withPreface,
 } from "./brief";
+import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
@@ -143,7 +144,17 @@ export interface SpawnDeps {
    * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
    */
   prepareAccount?: (account: { id: string; dir: string }) => Promise<void>;
+  /**
+   * The daemon's clock (epoch ms): lock staleness, lock and decision stamps, so they compare
+   * against the agent heartbeats the daemon records on it. Default: the system clock.
+   */
+  now?: () => number;
 }
+
+/** The spawn's "now" on the daemon's clock (SpawnDeps.now). */
+// real clock: the default when no daemon clock is injected
+const nowOf = (deps: Pick<SpawnDeps, "now">): (() => number) => deps.now ?? systemClock.now;
+const stampOf = (deps: Pick<SpawnDeps, "now">): string => new Date(nowOf(deps)()).toISOString();
 
 export type DecisionKind =
   | "repo_untrusted"
@@ -281,10 +292,10 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
         attempt: req.attempt,
         agent_id: agentId,
         pid: process.pid,
-        at: new Date().toISOString(),
+        at: stampOf(deps),
       },
       deps.probe,
-      { staleAfterMs: secondsMs(deps.tunables.heartbeat_alarm_s) },
+      { staleAfterMs: secondsMs(deps.tunables.heartbeat_alarm_s), now: nowOf(deps) },
     );
 
     // 2–5. Worktree, issue, brief, identity, launch.
@@ -447,7 +458,8 @@ async function launchAttempt(
 
     // Subscribe before launching, so no hook signal can be missed.
     const watch = await deps.watch(ctx.namespace, agentId);
-    const launchedAt = Date.now();
+    // real clock: the hooks process stamps its error file with its own.
+    const launchedAt = systemClock.now();
     let workspace: string;
     try {
       if (recovered !== undefined) {
@@ -745,7 +757,7 @@ async function openDecision(
       question: d.question,
       options: d.options,
       pointers,
-      opened_at: new Date().toISOString(),
+      opened_at: stampOf(ctx.deps),
       ...d.data,
     },
   });
@@ -757,7 +769,7 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   await ctx.deps.journal({
     type: "decision_resolved",
     task: ctx.req.task,
-    data: { decision_id: id, answer, by, at: new Date().toISOString() },
+    data: { decision_id: id, answer, by, at: stampOf(ctx.deps) },
   });
 }
 
@@ -797,7 +809,7 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   if (screen === null) return undefined;
   const dir = join(ctx.deps.home, "waves", ctx.req.wave.wave, "screens");
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${agentId}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`);
+  const path = join(dir, `${agentId}-${stampOf(ctx.deps).replace(/[:.]/g, "-")}.txt`);
   writeFileSync(path, screen);
   return path;
 }

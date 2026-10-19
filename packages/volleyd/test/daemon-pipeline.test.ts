@@ -3,6 +3,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { NS } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 /**
@@ -17,9 +18,13 @@ afterEach(async () => {
 
 describe("daemon → pipeline", () => {
   it("a reaped agent goes through the pipeline: retired, then its respawn / cancel decision", async () => {
-    s = await makeSupervisedEnv({ reapGraceMs: 200 });
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ reapGraceMs: 200, daemon: { clock } });
     await s.status("reaped", { reason: "lwt" });
-    await s.until(() => s.journal().some((e) => e.type === "decision_opened"), 5_000);
+    // The daemon holds the reap for its grace; past it, the reap is accepted.
+    await clock.armed(200);
+    await clock.advance(200);
+    await s.event("decision_opened");
     expect(s.journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: AGENT,
       status: "reaped",
@@ -45,11 +50,13 @@ describe("daemon → pipeline", () => {
     );
     const topic = buildTopic(NS, AGENT, "status");
     await s.agent.publish(topic, done, { qos: 1, retain: true });
-    await s.until(() => s.journal().some((e) => e.data.reason === "artifacts"));
+    await s.event((e) => e.data.reason === "artifacts");
     await s.agent.publish(topic, done, { qos: 1, retain: true });
     // Long enough for a second claim to be checked and escalated: onFinal and retire each probe
-    // the retained result first.
+    // the retained result first. A re-delivery the daemon ignores journals nothing to await.
+    // broker round-trip: the duplicate's delivery and the retained-result probes (probe_ms each).
     await new Promise((r) => setTimeout(r, 3 * DAEMON_DEFAULTS.probe_ms + 500));
+    await s.settled();
     expect(s.journal().filter((e) => e.type === "steering_sent")).toHaveLength(1);
     expect(s.journal().some((e) => e.type === "decision_opened")).toBe(false);
   });

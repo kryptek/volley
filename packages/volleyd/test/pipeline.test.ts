@@ -626,11 +626,8 @@ describe("pipeline: I/O never blocks the queue", () => {
       agent_id: h.run("implementer")?.agent_id as string,
       status: "done",
     });
-    const raced = await Promise.race([
-      done.then(() => "returned"),
-      new Promise((r) => setTimeout(() => r("blocked"), 200)),
-    ]);
-    expect(raced).toBe("returned");
+    // The hung gh call never resolves: a handle() blocked on it would never return.
+    expect(await done.then(() => "returned")).toBe("returned");
     // A second observation of the same check while it is in flight starts nothing new.
     const n = h.calls.length;
     await h.driver.tick();

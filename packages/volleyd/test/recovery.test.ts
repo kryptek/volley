@@ -18,6 +18,8 @@ import {
 import type { JournalEvent } from "../src/types";
 import { watchAgent } from "../src/verify";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { FIXTURES, fakeHost } from "./helpers/fake-host";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -135,6 +137,8 @@ describe("model_switch decision (credit_exhausted)", () => {
 
 describe("switchModel: /model + Enter, verified by the PostModelSwitch registry re-publish (Aedes)", () => {
   let broker: TestBroker;
+  /** The watch's verification window runs on it: it closes only when the test says. */
+  let clock: FakeClock;
   let daemonSide: VolleyBroker;
   let agentSide: VolleyBroker;
   const registry = (model: string) => {
@@ -146,6 +150,7 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
   };
 
   beforeEach(async () => {
+    clock = fakeClock();
     broker = await startTestBroker();
     daemonSide = new VolleyBroker();
     await daemonSide.connect({ url: broker.url, agentId: "volleyd" });
@@ -160,21 +165,21 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
 
   it("types /model <m> and Enter; success once the registry is re-published with model == m", async () => {
     const host = fakeHost();
-    const watch = await watchAgent(daemonSide, NS, AGENT);
+    const watch = await watchAgent(daemonSide, NS, AGENT, clock);
     expect(host.texts).toEqual([]);
-    setTimeout(() => {
-      void agentSide.publish(registryTopic(AGENT), registry("claude-sonnet-5-5"), {
-        qos: 1,
-        retain: true,
-      });
-    }, 50);
-    const r = await switchModel({
+    const pending = switchModel({
       host,
       workspace: "workspace:1",
       watch,
       token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 2000,
     });
+    await agentSide.publish(registryTopic(AGENT), registry("claude-sonnet-5-5"), {
+      qos: 1,
+      retain: true,
+    });
+    // The window never closes on its own (the clock stands still): only the re-publish settles it.
+    const r = await pending;
     expect(r.ok).toBe(true);
     expect(host.texts).toEqual([{ workspace: "workspace:1", text: "/model claude-sonnet-5-5" }]);
     expect(host.keys).toEqual([{ workspace: "workspace:1", key: "Enter" }]);
@@ -183,21 +188,22 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
 
   it("a re-publish with another model, or none, is not a switch", async () => {
     const host = fakeHost();
-    const watch = await watchAgent(daemonSide, NS, AGENT);
-    setTimeout(() => {
-      void agentSide.publish(registryTopic(AGENT), registry("claude-opus-5-5"), {
-        qos: 1,
-        retain: true,
-      });
-    }, 30);
-    const wrong = await switchModel({
+    const watch = await watchAgent(daemonSide, NS, AGENT, clock);
+    const pending = switchModel({
       host,
       workspace: "workspace:1",
       watch,
       token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 300,
     });
-    expect(wrong.ok).toBe(false);
+    await agentSide.publish(registryTopic(AGENT), registry("claude-opus-5-5"), {
+      qos: 1,
+      retain: true,
+    });
+    await eventually(() => watch.state.hookRegistry?.model === "claude-opus-5-5");
+    await clock.armed(300); // the window opened once `/model` was typed
+    await clock.advance(300);
+    expect((await pending).ok).toBe(false);
     await watch.close();
   });
 
@@ -207,16 +213,18 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
       retain: true,
     });
     const host = fakeHost();
-    const watch = await watchAgent(daemonSide, NS, AGENT);
-    await watch.waitFor((s) => s.hookRegistry !== null, 1000);
-    const r = await switchModel({
+    const watch = await watchAgent(daemonSide, NS, AGENT, clock);
+    expect(await watch.waitFor((s) => s.hookRegistry !== null, 1000)).toBe(true);
+    const pending = switchModel({
       host,
       workspace: "workspace:1",
       watch,
       token: mintModelSwitchToken("claude-sonnet-5-5", "d-1"),
       timeoutMs: 300,
     });
-    expect(r.ok).toBe(false);
+    await clock.armed(300); // the window opened once `/model` was typed
+    await clock.advance(300);
+    expect((await pending).ok).toBe(false);
     await watch.close();
   });
 
@@ -224,8 +232,9 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
     const raw = registry("claude-sonnet-5-5");
     await agentSide.publish(registryTopic(AGENT), raw, { qos: 1, retain: true });
     const host = fakeHost();
-    const watch = await watchAgent(daemonSide, NS, AGENT);
-    await watch.waitFor((s) => s.hookRegistry !== null, 1000);
+    const watch = await watchAgent(daemonSide, NS, AGENT, clock);
+    expect(await watch.waitFor((s) => s.hookRegistry !== null, 1000)).toBe(true);
+    const first = watch.state.hookRegistry;
     const pending = switchModel({
       host,
       workspace: "workspace:1",
@@ -235,6 +244,9 @@ describe("switchModel: /model + Enter, verified by the PostModelSwitch registry 
     });
     // The identical envelope again (same wall_time): a new object in the watch, the same entry.
     await agentSide.publish(registryTopic(AGENT), raw, { qos: 1, retain: true });
+    await eventually(() => watch.state.hookRegistry !== first);
+    await clock.armed(1000);
+    await clock.advance(1000);
     expect((await pending).ok).toBe(false);
     await watch.close();
   });
@@ -248,12 +260,15 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
 
   const opened = () =>
     s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "model_switch");
+  const nth = (n: number) =>
+    s.event((e) => e.type === "decision_opened" && e.data.kind === "model_switch", n);
+  const alarm = (name: string) =>
+    s.event((e) => e.type === "alarm_raised" && e.data.alarm === name);
 
   it("opens model_switch; nothing is typed before resolve; 'switch to X' types /model X and is verified by the registry", async () => {
     s = await makeSupervisedEnv({ config: "fallback_model: claude-sonnet-5-5" });
     await s.hook("awaiting-credit.json");
-    await s.until(() => opened().length === 1);
-    const d = opened()[0] as JournalEvent;
+    const d = await nth(1);
     expect(d.data).toMatchObject({
       class: CREDIT_CLASS,
       agent_id: AGENT,
@@ -267,32 +282,33 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
       answer: "switch to claude-sonnet-5-5",
       by: "tester",
     });
-    await s.until(() => s.host.texts.length === 1);
+    await alarm("model_switch_sent");
+    await s.settled(); // the fake host has the keys typed right after
+    expect(s.host.texts).toHaveLength(1);
     expect(s.host.texts[0]?.text).toBe("/model claude-sonnet-5-5");
     expect(s.host.keys.at(-1)?.key).toBe("Enter");
     await s.hook("post-model-switch-registry.json");
-    await s.until(() =>
-      s
-        .journal()
-        .some((e) => e.type === "alarm_raised" && e.data.alarm === "model_switch_verified"),
-    );
+    await alarm("model_switch_verified");
     expect(opened()).toHaveLength(1);
   });
 
   it("no re-publish within the verify window → the decision is re-opened with the screen capture", async () => {
+    const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({
       config: "fallback_model: claude-sonnet-5-5",
-      daemon: { recoveryTimeouts: { modelSwitchVerifyMs: 200 } },
+      daemon: { clock, recoveryTimeouts: { modelSwitchVerifyMs: 200 } },
     });
     s.host.screens = ["… still at the usage-limit prompt …"];
     await s.hook("awaiting-credit.json");
-    await s.until(() => opened().length === 1);
-    await s.daemon.resolveDecision("w1", opened()[0]?.data.decision_id as string, {
+    await s.daemon.resolveDecision("w1", (await nth(1)).data.decision_id as string, {
       answer: "switch to claude-sonnet-5-5",
       by: "tester",
     });
-    await s.until(() => opened().length === 2);
-    const again = opened()[1] as JournalEvent;
+    await alarm("model_switch_sent");
+    // No re-publish: the verify window closes.
+    await clock.armed(200);
+    await clock.advance(200);
+    const again = await nth(2);
     expect(again.data).toMatchObject({ class: UNVERIFIED_CLASS, agent_id: AGENT });
     expect((again.data.pointers as { screen?: string }).screen).toMatch(/\.txt$/);
     expect(
@@ -306,7 +322,7 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
     s = await makeSupervisedEnv({ config: "fallback_model: claude-sonnet-5-5" });
     for (let n = 1; n <= 3; n++) {
       await s.hook("awaiting-credit.json", { seq: 10 + n });
-      await s.until(() => opened().length === n);
+      await nth(n);
       if (n === 3) break;
       await s.daemon.resolveDecision("w1", opened()[n - 1]?.data.decision_id as string, {
         answer: "wait",
@@ -328,16 +344,12 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
       answer: "switch to claude-sonnet-5-5",
       by: "tester",
     });
-    await s.until(() =>
-      s
-        .journal()
-        .some(
-          (e) => e.type === "decision_resolved" && e.data.decision_id === third.data.decision_id,
-        ),
+    await s.event(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === third.data.decision_id,
     );
     // A tick after the resolve: anything it started has run by then.
     await s.daemon.tick();
-    await s.daemon.tick();
+    await s.settled();
     expect(s.host.texts).toEqual([]);
     expect(
       s.journal().some((e) => e.type === "alarm_raised" && e.data.alarm === "model_switch_sent"),
@@ -347,21 +359,21 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
   it("'wait' types nothing; 'stop task' cancels the task's agent", async () => {
     s = await makeSupervisedEnv({ config: "fallback_model: claude-sonnet-5-5" });
     await s.hook("awaiting-credit.json");
-    await s.until(() => opened().length === 1);
-    await s.daemon.resolveDecision("w1", opened()[0]?.data.decision_id as string, {
+    await s.daemon.resolveDecision("w1", (await nth(1)).data.decision_id as string, {
       answer: "wait",
       by: "tester",
     });
     // A resumed agent, then a second credit prompt: a fresh decision; this one is stopped.
     await s.hook("resumed.json");
     await s.hook("awaiting-credit.json");
-    await s.until(() => opened().length === 2);
+    await nth(2);
     expect(s.host.texts).toEqual([]);
     await s.daemon.resolveDecision("w1", opened()[1]?.data.decision_id as string, {
       answer: "stop task",
       by: "tester",
     });
-    await s.until(() => s.journal().some((e) => e.type === "task_cancelled"));
+    await s.event("task_cancelled");
+    await s.settled();
     expect(
       s.journal().find((e) => e.type === "steering_sent" && e.data.type === "cancel")?.data,
     ).toMatchObject({ agent_id: AGENT });

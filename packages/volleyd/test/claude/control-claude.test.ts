@@ -7,8 +7,11 @@ import { parseEnvelope } from "volley-mcp/envelope";
 import { signinDir } from "../../src/claude/signin";
 import { ControlClient } from "../../src/control";
 import { readJournalFile } from "../../src/journal";
+import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
+import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
+import { journalWait } from "../helpers/journal-wait";
 
 /** The claude_* control ops end to end: a real daemon on Aedes, a fake tmux / claude. */
 
@@ -40,10 +43,14 @@ async function setup(opts: { signInAfter?: number } = {}) {
         ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
         : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
     );
-  await env.start({
+  // The sign-in's poll interval and timeout run on the daemon's clock: polls happen as it moves.
+  const clock = fakeClock();
+  const daemon = await env.start({
+    clock,
     claude: { root, primaryDir: primary, exec: fx.exec, signinPollMs: 20, signinTimeoutMs: 5000 },
     spawner: { claudeJsonPath: primaryJson },
   });
+  const waits = journalWait(env.home, () => daemon);
   const client = await ControlClient.connect(env.broker.url, NS);
   const watcher = new VolleyBroker();
   await watcher.connect({ url: env.broker.url, agentId: "signin-watcher" });
@@ -53,16 +60,19 @@ async function setup(opts: { signInAfter?: number } = {}) {
     if (e !== null) seen.push({ type: e.type, payload: e.payload as Record<string, unknown> });
   });
   const system = () => readJournalFile(join(env.home, "waves", "_system", "journal.jsonl"));
-  return { root, primary, fx, client, watcher, seen, system };
+  /** Poll after poll (each one waits on the clock) until the sign-in is journaled done. */
+  const signedIn = async () => {
+    let finished = false;
+    const done = waits.event("_system", "claude_signin_done").then(() => {
+      finished = true;
+    });
+    while (!finished) {
+      await Promise.race([clock.armed(20), done]);
+      if (!finished) await clock.advance(20);
+    }
+  };
+  return { root, primary, fx, client, watcher, seen, system, signedIn };
 }
-
-const until = async (pred: () => boolean, ms = 5000) => {
-  const end = Date.now() + ms;
-  while (!pred()) {
-    if (Date.now() > end) throw new Error("timed out waiting");
-    await new Promise((r) => setTimeout(r, 20));
-  }
-};
 
 describe("claude_* control ops", () => {
   it("claude_account_add answers with the sign-in URL; done flips the registry; nothing secret is journaled", async () => {
@@ -77,7 +87,10 @@ describe("claude_* control ops", () => {
         flow: "browser_callback",
         topic: "volley/_system/claude/work/signin",
       });
-      await until(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      await t.signedIn();
+      // The sign-in events reach the watcher over MQTT; the done one is published after its
+      // journal entry, so wait for it there.
+      await eventually(() => t.seen.some((e) => e.type === "claude_signin_done"));
       expect(t.seen.map((e) => e.type)).toEqual(["claude_signin_url", "claude_signin_done"]);
       // non-retained: nothing left on the topic
       expect(await env.retained("volley/_system/claude/work/signin")).toBeNull();
@@ -90,7 +103,6 @@ describe("claude_* control ops", () => {
         signin: { state: "signed_in" },
       });
 
-      await until(() => t.system().some((e) => e.type === "claude_signin_done"));
       const types = t.system().map((e) => e.type);
       expect(types).toEqual(
         expect.arrayContaining([
@@ -167,7 +179,7 @@ describe("claude_* control ops", () => {
     const t = await setup({ signInAfter: 1 });
     try {
       await t.client.request("claude_account_add", { label: "work" });
-      await until(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      await t.signedIn();
       const r = await t.client.request("claude_signin", { acct: "work" });
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/already signed in/) });
       expect(r.error).toContain("claude auth logout");

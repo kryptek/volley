@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
@@ -8,8 +10,16 @@ import {
   inWakeGrace,
   reapVerdict,
   sampleClock,
+  sampleOf,
+  sleep,
 } from "../src/clock";
+import { lockPath, readLock } from "../src/locks";
+import { spawnAgent } from "../src/spawn";
+import { worktreePath } from "../src/worktree";
 import { NS } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { runCli } from "./helpers/run-cli";
 import {
   AGENT,
   type SupervisedEnv,
@@ -49,6 +59,110 @@ describe("sampleClock: monotonic vs wall clock", () => {
   });
 });
 
+describe("fake clock (test/helpers/fake-clock.ts)", () => {
+  it("runs due timers in due order, each at its own instant", async () => {
+    const c = fakeClock(T0);
+    const ran: [string, number][] = [];
+    c.setTimeout(() => ran.push(["c", c.now()]), 30);
+    c.setTimeout(() => ran.push(["a", c.now()]), 10);
+    c.setTimeout(() => ran.push(["b", c.now()]), 20);
+    c.setTimeout(() => ran.push(["late", c.now()]), 31);
+    await c.advance(30);
+    expect(ran).toEqual([
+      ["a", T0 + 10],
+      ["b", T0 + 20],
+      ["c", T0 + 30],
+    ]);
+    expect(c.now()).toBe(T0 + 30);
+    expect(c.pending()).toBe(1);
+  });
+
+  it("flushes microtasks between timers: an earlier timer's promise chain lands first", async () => {
+    const c = fakeClock(T0);
+    const seen: string[] = [];
+    c.setTimeout(() => {
+      void Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => seen.push("first's continuation"));
+    }, 10);
+    c.setTimeout(() => seen.push("second"), 10);
+    c.setTimeout(() => seen.push("third"), 20);
+    await c.advance(20);
+    // Same instant: the second timer runs once the first's chain has settled.
+    expect(seen).toEqual(["first's continuation", "second", "third"]);
+  });
+
+  it("advanceToNext jumps exactly to the next due timer", async () => {
+    const c = fakeClock(T0);
+    expect(await c.advanceToNext()).toBeNull();
+    let fired = 0;
+    c.setTimeout(() => fired++, 30_000);
+    c.setTimeout(() => fired++, 60_000);
+    expect(c.nextDue()).toBe(30_000);
+    expect(await c.advanceToNext()).toBe(30_000);
+    expect([fired, c.now()]).toEqual([1, T0 + 30_000]);
+    expect(await c.advanceToNext()).toBe(30_000);
+    expect([fired, c.now()]).toEqual([2, T0 + 60_000]);
+  });
+
+  it("intervals repeat until cleared; a cleared timeout never runs", async () => {
+    const c = fakeClock(T0);
+    let ticks = 0;
+    const iv = c.setInterval(() => ticks++, 1000);
+    const t = c.setTimeout(() => {
+      ticks += 100;
+    }, 500);
+    c.clearTimeout(t);
+    await c.advance(3500);
+    expect(ticks).toBe(3);
+    c.clearInterval(iv);
+    await c.advance(10_000);
+    expect(ticks).toBe(3);
+    expect(c.pending()).toBe(0);
+  });
+
+  it("timers armed by a timer run in the same advance when they fall due within it", async () => {
+    const c = fakeClock(T0);
+    const at: number[] = [];
+    c.setTimeout(() => {
+      at.push(c.now());
+      c.setTimeout(() => at.push(c.now()), 100);
+    }, 100);
+    await c.advance(250);
+    expect(at).toEqual([T0 + 100, T0 + 200]);
+  });
+
+  it("sleep() resolves when the clock reaches it, or at once on abort", async () => {
+    const c = fakeClock(T0);
+    let done = false;
+    void sleep(c, 1000).then(() => {
+      done = true;
+    });
+    await c.advance(999);
+    expect(done).toBe(false);
+    await c.advance(1);
+    expect(done).toBe(true);
+    const abort = new AbortController();
+    const early = sleep(c, 60_000, abort.signal);
+    abort.abort();
+    await early;
+    expect(c.pending()).toBe(0);
+  });
+
+  it("T8's wake detection runs on the same interface: a host sleep moves the wall clock only", async () => {
+    const c = fakeClock(T0);
+    let st: ClockState = sampleClock({ last: null, wake: null }, sampleOf(c)).state;
+    await c.advance(10 * S);
+    let r = sampleClock(st, sampleOf(c));
+    expect(r.wake).toBeNull();
+    st = r.state;
+    c.sleepHost(300 * S);
+    expect(c.mono()).toBe(10 * S);
+    r = sampleClock(st, sampleOf(c));
+    expect(r.wake).toEqual({ at: T0 + 310 * S, jump_ms: 300 * S });
+  });
+});
+
 describe("pending reaps", () => {
   it("a reaped within grace for an agent whose heartbeat arrives 20 s later → reap_suppressed", () => {
     const p = holdReap(AGENT, T0, 120 * S, true);
@@ -76,37 +190,22 @@ describe("daemon: sleep/wake and reap suppression", () => {
   });
 
   /**
-   * A controllable clock shared by the daemon's `now` and its clock sampler: `advance(ms)` moves
-   * both clocks, `sleep(ms)` the wall clock only. Nothing in these tests waits on real time for
-   * a verdict: reaps are accepted (or not) on explicit ticks.
+   * The daemon runs on a fake clock (test/helpers/fake-clock.ts): `advance(ms)` moves both clocks
+   * and fires the daemon's due timers (reap graces), `sleepHost(ms)` moves the wall clock only.
+   * Nothing in these tests waits on real time for a verdict.
    */
-  function fakeClock() {
-    let mono = 0;
-    let wall = Date.now();
-    return {
-      read: () => ({ mono, wall }),
-      now: () => wall,
-      advance: (ms: number) => {
-        mono += ms;
-        wall += ms;
-      },
-      sleep: (ms: number) => {
-        wall += ms;
-      },
-    };
-  }
-  type Clock = ReturnType<typeof fakeClock>;
+  type Clock = FakeClock;
 
   /** Wake the daemon from a 300 s sleep (journals wake_detected). */
   async function wake(clock: Clock) {
     await s.daemon.tick();
-    clock.advance(10_000);
-    clock.sleep(300_000);
+    await clock.advance(10_000);
+    clock.sleepHost(300_000);
     await s.daemon.tick();
   }
   /** One tick at `ms` later, then a second one: anything the first enqueued has run. */
   async function tickAfter(clock: Clock, ms: number) {
-    clock.advance(ms);
+    await clock.advance(ms);
     await s.daemon.tick();
     await s.daemon.tick();
   }
@@ -138,11 +237,11 @@ describe("daemon: sleep/wake and reap suppression", () => {
     );
 
   it("journals wake_detected; a reaped agent that heartbeats is kept for good, even past many graces and a re-delivered LWT", async () => {
-    const clock = fakeClock();
+    const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({
       config: "wake_grace_s: 2",
       reapGraceMs: 60_000,
-      daemon: { clock: clock.read, now: clock.now },
+      daemon: { clock },
     });
     await wake(clock);
     expect(systemJournal(s.env).find((e) => e.type === "wake_detected")?.data).toMatchObject({
@@ -152,7 +251,7 @@ describe("daemon: sleep/wake and reap suppression", () => {
     const lwt = reapedRaw();
     await s.agent.publish(statusTopic, lwt, { qos: 1, retain: true });
     await consumed(1);
-    clock.advance(1000);
+    await clock.advance(1000);
     await s.hook("heartbeat.json");
     await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
     expect(s.journal().find((e) => e.type === "reap_suppressed")?.data).toMatchObject({
@@ -169,17 +268,17 @@ describe("daemon: sleep/wake and reap suppression", () => {
   });
 
   it("a new LWT after a suppressed one is held again and accepted once its grace runs out quietly", async () => {
-    const clock = fakeClock();
+    const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({
       reapGraceMs: 60_000,
-      daemon: { clock: clock.read, now: clock.now },
+      daemon: { clock },
     });
     await s.status("reaped", { reason: "lwt" });
     await consumed(1);
-    clock.advance(1000);
+    await clock.advance(1000);
     await s.hook("heartbeat.json");
     await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
-    clock.advance(1000);
+    await clock.advance(1000);
     await s.status("reaped", { reason: "lwt" });
     await consumed(2);
     await tickAfter(clock, 59_000);
@@ -192,11 +291,11 @@ describe("daemon: sleep/wake and reap suppression", () => {
   });
 
   it("a wake never shortens the reap grace: a quiet reaped agent is retired after the normal grace", async () => {
-    const clock = fakeClock();
+    const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({
       config: "wake_grace_s: 1",
       reapGraceMs: 60_000,
-      daemon: { clock: clock.read, now: clock.now },
+      daemon: { clock },
     });
     await wake(clock);
     await s.status("reaped", { reason: "lwt" });
@@ -210,5 +309,75 @@ describe("daemon: sleep/wake and reap suppression", () => {
       status: "reaped",
     });
     expect(s.journal().some((e) => e.type === "reap_suppressed")).toBe(false);
+  });
+});
+
+describe("one clock per comparison: the daemon stamps with the clock it is given", () => {
+  /** Far from real time, so a stamp from the real clock cannot pass for the fake one. */
+  const PAST = Date.parse("2020-01-01T00:00:00.000Z");
+  let s: SupervisedEnv | undefined;
+  let spawn: SpawnEnv | undefined;
+  afterEach(async () => {
+    await s?.cleanup();
+    await spawn?.cleanup();
+    s = undefined;
+    spawn = undefined;
+  });
+
+  it("wave and _system journal events, config changes and the worktree lock carry the fake time", async () => {
+    const clock = fakeClock(PAST);
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const cli = await runCli(["config", "set", "hard_ceiling", "3", "--by", "tester"], s.env.env);
+    expect(cli.exitCode).toBe(0);
+    await s.settled();
+    const at = new Date(PAST).toISOString();
+    const stamps = [...s.journal(), ...systemJournal(s.env)].map((e) => [e.type, e.at]);
+    expect(stamps.length).toBeGreaterThan(3);
+    expect(stamps.filter(([, a]) => a !== at)).toEqual([]);
+    expect(systemJournal(s.env).some((e) => e.type === "config_changed")).toBe(true);
+    const lock = readLock(
+      lockPath(s.env.home, worktreePath(join(s.env.home, "wt"), "w1", "T1", "implementer")),
+    );
+    expect(lock?.at).toBe(at);
+  });
+
+  it("a spawn judges a held lock stale on its own clock, and stamps the decisions it opens with it", async () => {
+    const clock = fakeClock(PAST);
+    spawn = await makeSpawnEnv({ trusted: false });
+    const deps = { ...spawn.deps, now: clock.now };
+    // An untrusted repo: the decision a spawn opens itself is stamped with the injected clock.
+    const out = await spawnAgent(spawn.request(), deps);
+    expect(out.kind).toBe("decision");
+    const opened = spawn.events.find((e) => e.type === "decision_opened");
+    expect(opened?.data.opened_at).toBe(new Date(PAST).toISOString());
+
+    // A holder that wrote its lock an hour ago and heartbeat a minute ago (both on the fake
+    // clock) is live: a spawn reading "now" off the real clock would call it quiet and take over.
+    spawn.deps.claudeJsonPath = spawn.claudeJson;
+    writeFileSync(
+      spawn.claudeJson,
+      JSON.stringify({ projects: { [spawn.repo]: { hasTrustDialogAccepted: true } } }),
+    );
+    const path = lockPath(spawn.home, spawn.worktree);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        wave: "w1",
+        task: "T1",
+        role: "implementer",
+        attempt: 1,
+        agent_id: "w1-t1-implementer-1",
+        pid: 0,
+        at: new Date(PAST - 3_600_000).toISOString(),
+      })}\n`,
+    );
+    const held = {
+      ...deps,
+      openDecisions: [],
+      probe: { ...deps.probe, lastHeartbeat: () => PAST - 60_000 },
+    };
+    const err = await spawnAgent(spawn.request({ attempt: 2 }), held).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("SPAWN_LOCKED");
   });
 });
