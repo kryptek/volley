@@ -352,6 +352,29 @@ describe("Settings › Supervisor (global config rows)", () => {
     expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
   });
 
+  it("sends a switch tunable on a click and a choice tunable on a pick", async () => {
+    const f = fakeClient();
+    const fleet = { ...config, require_fresh_base: true, placement: { nudge_on_merge: "files" } };
+    render(
+      <Supervisor
+        config={fleet}
+        transport={createConfigTransport(f.client, { identity: "desk" })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("switch", { name: "Require fresh base" }));
+    await flush();
+    expect(f.published[0]?.envelope.payload).toMatchObject({
+      patch: { require_fresh_base: false },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Placement nudge on merge" }), {
+      target: { value: "off" },
+    });
+    await flush();
+    expect(f.published[1]?.envelope.payload).toMatchObject({
+      patch: { placement: { nudge_on_merge: "off" } },
+    });
+  });
+
   it("without credentials a row drafts a new value and copies the command that sets it (P3-14)", async () => {
     const writeText = vi.fn(async () => {});
     setClipboard({ writeText });
