@@ -221,7 +221,7 @@ export function terminalOnly(
   if (step === "services" && summary.startsWith(CMUX_REACH)) {
     return {
       reason:
-        "it checks cmux again from outside cmux, which only a terminal on the supervisor's machine can do: open cmux (or set its socket password) first",
+        "it checks cmux again from outside cmux, which only a terminal on the supervisor's machine can do: open cmux and choose its Automation mode (or set its socket password) first",
       command: "volley setup --step services",
     };
   }

@@ -222,6 +222,29 @@ describe("volley setup", () => {
     expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
   });
 
+  it("records cmux's socket mode in setup.json, and a run that did not check cmux keeps it", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(
+          argv[4] as string,
+          '{"access_mode":"automation"}\nvolley-cmux-caps=0\nworkspace:1\nvolley-cmux-exit=0\n',
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    const r = await run(["--yes", "--lan"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("cmux's socket control mode: Automation mode");
+    expect(readSetupInstall(m.ctx.volleydHome)?.cmux_socket_mode).toBe("automation");
+    expect((await run(["--step", "security"])).code).toBe(0);
+    expect(readSetupInstall(m.ctx.volleydHome)?.cmux_socket_mode).toBe("automation");
+  });
+
   it("a later run without the flags (`--step services` as the user) keeps and uses the record", async () => {
     expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
     const file = join(m.ctx.volleydHome, "setup.json");
@@ -260,7 +283,11 @@ describe("volley setup", () => {
     const inner = m.deps.exec;
     m.deps.exec = async (argv, o) => {
       if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
-        writeFileSync(argv[4] as string, "ERROR: Invalid password\nvolley-cmux-exit=1\n");
+        // cmux in Password mode, and volleyd has no password.
+        writeFileSync(
+          argv[4] as string,
+          "ERROR: Invalid password\nvolley-cmux-caps=1\nERROR: Invalid password\nvolley-cmux-exit=1\n",
+        );
         return { code: 0, stdout: "", stderr: "" };
       }
       return inner(argv, o);
@@ -272,6 +299,8 @@ describe("volley setup", () => {
     expect(r.stdout).toContain("(cmux said: ERROR: Invalid password)");
     expect(r.stderr).toContain("Give volleyd the cmux socket password");
     expect(r.stderr).toContain("volley setup --step services");
+    // The run stopped, so no setup.json yet; the mode is what the check found.
+    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
     // Every other service is in place: only cmux is left.
     expect(
       existsSync(join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist")),

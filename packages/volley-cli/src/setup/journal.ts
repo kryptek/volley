@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
+import { type CmuxSocketMode, isCmuxSocketMode } from "./cmux";
 import type { SetupContext, StepName } from "./step";
 
 /**
@@ -79,6 +80,8 @@ export interface SetupInstall {
   desk_port?: number;
   /** Whether the WebSocket listener is open to the LAN (`--lan`); `volley auth init` keeps it. */
   lan?: boolean;
+  /** cmux's socket control mode, as the Services step last found it (macOS). */
+  cmux_socket_mode?: CmuxSocketMode;
 }
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
@@ -87,7 +90,10 @@ export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setu
 export function writeSetupInstall(ctx: SetupContext): void {
   const file = setupInstallFile(ctx.volleydHome);
   // A run that skipped the security step (`--step services`) keeps the LAN choice on record.
-  const lan = ctx.lan ?? readSetupInstall(ctx.volleydHome)?.lan;
+  const prior = readSetupInstall(ctx.volleydHome);
+  const lan = ctx.lan ?? prior?.lan;
+  // A run whose Services step did not check cmux keeps the mode on record too.
+  const cmux = ctx.cmuxSocketMode ?? prior?.cmux_socket_mode;
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -96,6 +102,7 @@ export function writeSetupInstall(ctx: SetupContext): void {
     desk_host: ctx.deskHost,
     desk_port: ctx.deskPort,
     ...(lan !== undefined ? { lan } : {}),
+    ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
   };
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
@@ -134,6 +141,7 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
         ? { desk_port: port }
         : {}),
       ...(typeof v.lan === "boolean" ? { lan: v.lan } : {}),
+      ...(isCmuxSocketMode(v.cmux_socket_mode) ? { cmux_socket_mode: v.cmux_socket_mode } : {}),
     };
   } catch {
     return null;
