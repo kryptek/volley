@@ -207,8 +207,12 @@ export function nudgeText(o: {
   files: string[];
 }): string {
   const moved = `origin/${o.release_branch} moved${o.sha !== null ? ` to ${o.sha.slice(0, 7)}` : ""} with #${o.pr}`;
+  const shown = o.files.slice(0, DAEMON_DEFAULTS.nudge_files_shown).join(", ");
+  const more = o.files.length - DAEMON_DEFAULTS.nudge_files_shown;
   const touches =
-    o.files.length > 0 ? ` (touches ${o.files.length} of your files: ${o.files.join(", ")})` : "";
+    o.files.length > 0
+      ? ` (touches ${o.files.length} of your files: ${shown}${more > 0 ? ` and ${more} more` : ""})`
+      : "";
   return `${moved}${touches}; rebase when convenient, before you push again.`;
 }
 

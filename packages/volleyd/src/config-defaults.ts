@@ -240,4 +240,7 @@ export const DAEMON_DEFAULTS = {
   machine_heartbeat_ms: 30_000,
   /** A machine whose record is older than this is down: its tunnel is marked down, spawns park. */
   machine_down_after_ms: 90_000,
+  // --- Fleet: merge nudge (overlap.ts) ---
+  /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
+  nudge_files_shown: 5,
 } as const;

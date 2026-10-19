@@ -294,14 +294,22 @@ describe("pipeline: the merge nudge", () => {
   const T3 = "w1-t3-implementer-1";
   const T4 = "w1-t4-implementer-1";
 
-  /** T1 gated; T2 (hint overlaps the merged PR), T3 (hint does not), T4 (no hint) implementing. */
-  async function mergedWith(nudgeOnMerge?: "files" | "all" | "off") {
+  /**
+   * T1 gated; T2 (hint overlaps the merged PR), T3 (hint does not), T4 (no hint) implementing;
+   * T5 (hint overlaps) starts only after the merge. `filesFail`: the PR's file list does not
+   * parse until the test restores it.
+   */
+  async function mergedWith(
+    nudgeOnMerge?: "files" | "all" | "off",
+    o: { filesFail?: boolean } = {},
+  ) {
     h = pipelineHarness({
       pipeline: "[implement, merge_ready]",
       siblings: {
         T2: ["packages/volleyd/src/daemon.ts", "packages/volleyd/test/daemon.test.ts"],
         T3: ["packages/volley-desk/src/app.tsx"],
         T4: null,
+        T5: ["packages/volleyd/src/overlap.ts"],
       },
       ...(nudgeOnMerge !== undefined ? { nudgeOnMerge } : {}),
     });
@@ -310,11 +318,13 @@ describe("pipeline: the merge nudge", () => {
     await h.finish("implementer", { head: H1, ci: "green" });
     for (const t of ["T2", "T3", "T4"]) await h.startSibling(t);
     expect(stage()).toBe("merge_ready");
+    if (o.filesFail === true) h.world.prFiles[7] = "<html>rate limited</html>";
     h.world.prState[7] = "MERGED";
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
     expect(stage()).toBe("done");
   }
+  const filesCalls = () => h.calls.filter((c) => c[1] === "pr" && c.at(-1) === "files");
   const nudges = () => h.events.filter((e) => e.type === "merge_nudge_sent");
 
   it("files (the default): one steering to the implementer whose files hint overlaps the merged PR, none to the others", async () => {
@@ -362,6 +372,84 @@ describe("pipeline: the merge nudge", () => {
     await h.driver.settled();
     expect(h.steers).toHaveLength(1);
     expect(nudges()).toHaveLength(1);
+  });
+
+  it("a failed file list is retried on a later tick: exactly one nudge, and no re-read once sent", async () => {
+    await mergedWith("files", { filesFail: true });
+    expect(nudges()).toEqual([]);
+    expect(
+      h.events.filter((e) => e.data.alarm === "pipeline_error" && e.data.check === "merge_nudge"),
+    ).toHaveLength(1);
+    // Not before the re-check interval.
+    await h.tick();
+    expect(filesCalls()).toHaveLength(1);
+    h.world.prFiles = {};
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.steers.map((x) => x.agent_id)).toEqual([T2]);
+    expect(nudges()).toHaveLength(1);
+    // Sent: later ticks neither nudge again nor read the file list again.
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(filesCalls()).toHaveLength(2);
+    expect(nudges()).toHaveLength(1);
+  });
+
+  it("a restart after the merge was journaled but before the nudge went out: sent once on the next start", async () => {
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      siblings: { T2: ["packages/volleyd/src/daemon.ts"] },
+    });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.startSibling("T2");
+    // The file list never comes back: the daemon dies with the nudge unsent.
+    h.world.hang = (a) => a[1] === "pr" && a.at(-1) === "files";
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.driver.tick();
+    expect(stage()).toBe("done");
+    expect(nudges()).toEqual([]);
+    h.world.hang = undefined;
+    h.restart();
+    await h.tick();
+    expect(h.steers.map((x) => x.agent_id)).toEqual([T2]);
+    expect(nudges()).toHaveLength(1);
+    // A second restart finds it journaled: nothing more.
+    h.restart();
+    await h.tick();
+    expect(nudges()).toHaveLength(1);
+  });
+
+  it("an implementer spawned after the merge is never nudged about it (its base already has it)", async () => {
+    await mergedWith("files", { filesFail: true });
+    const T5 = await h.startSibling("T5");
+    h.world.prFiles = {};
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.steers.map((x) => x.agent_id)).toEqual([T2]);
+    expect(h.steers.map((x) => x.agent_id)).not.toContain(T5);
+  });
+
+  it("the nudge lists at most 5 of the overlapping files; merge_nudge_sent keeps them all", async () => {
+    const many = Array.from({ length: 8 }, (_, i) => `packages/volleyd/src/m${i}.ts`);
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      siblings: { T2: ["packages/volleyd/**"] },
+    });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.startSibling("T2");
+    h.world.prFiles[7] = JSON.stringify({ files: many.map((path) => ({ path })) });
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    const text = h.steers[0]?.text ?? "";
+    expect(text).toContain(`touches 8 of your files: ${many.slice(0, 5).join(", ")} and 3 more`);
+    expect(text).not.toContain(many[5] as string);
+    expect(nudges()[0]?.data.files).toEqual(many);
   });
 
   it("all: every running implementer of the wave, a task without a files hint included", async () => {

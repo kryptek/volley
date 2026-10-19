@@ -105,6 +105,8 @@ export interface RoleRun {
   result?: FixupResult;
   /** The PR moved past this run's verified head: re-verify the PR branch's head as it is now. */
   adopt?: boolean;
+  /** The journal seq of its `agent_spawned` (a merge after it is one its base lacks). */
+  spawned_seq?: number;
 }
 
 export interface StoredReview {
@@ -160,6 +162,8 @@ export interface TaskPipeline {
   directive?: Directive | undefined;
   /** The commit the task's PR merged as (its `artifact_verified { role: merged }`), once merged. */
   merged_sha?: string | null;
+  /** The journal seq of that `artifact_verified { role: merged }`: who was cut before it. */
+  merged_seq?: number;
   /** Merge nudges this task's implementers got, as `<agent_id>#<merged PR>` (one each). */
   nudged?: string[];
 }
@@ -282,6 +286,7 @@ export function reducePipeline(
         ...(typeof d.start === "string" ? { start: d.start } : {}),
         steers: {},
         accepted: false,
+        spawned_seq: ev.seq,
       };
       if (role === "implementer" && typeof d.branch === "string") p.branch = d.branch;
       break;
@@ -317,8 +322,10 @@ export function reducePipeline(
     case "artifact_verified": {
       if (p.ci_hold?.role === role) p.ci_hold = undefined;
       if (role === "merged") {
-        const sha = [d.merge_sha, d.sha, d.merged_head_sha].find((x) => typeof x === "string");
+        // Where the release branch moved to; never the PR head (a squash or rebase merge is not it).
+        const sha = [d.merge_sha, d.sha].find((x) => typeof x === "string");
         p.merged_sha = (sha as string | undefined) ?? null;
+        p.merged_seq = ev.seq;
       }
       if (role === "gate" && typeof d.head_sha === "string") {
         p.gated = p.gated ?? [];
@@ -1954,6 +1961,9 @@ export function roleSpawnHold(o: {
   return null;
 }
 
+/** The merge-nudge re-check's rate-limit key: outside `<task>/`, so `forget` keeps it. */
+const nudgeKey = (task: TaskId) => `merge_nudge:${task}`;
+
 /** Executes the interpreter's actions for one wave. Call it from one serial queue. */
 export class PipelineDriver {
   /** Last level-triggered re-check per `<task>/<what>` (verify, check_rebase, check_merged). */
@@ -1966,6 +1976,8 @@ export class PipelineDriver {
   private readonly inflight = new Set<string>();
   /** Every check until its result has been folded back in (what `settled` waits for). */
   private readonly chains = new Set<Promise<void>>();
+  /** Merged `<task>#<pr>` whose nudges this process has sent (or found none left to send). */
+  private readonly nudgesDone = new Set<string>();
 
   constructor(
     private readonly wave: WaveId,
@@ -2026,6 +2038,8 @@ export class PipelineDriver {
     for (const t of this.deps.record().state?.tasks ?? []) {
       if (t.stage === "done" || t.stage === "cancelled") {
         this.forget(t.id);
+        if (t.stage === "done")
+          await this.renudge(t.id).catch((e: unknown) => this.alarmError(t.id, "merge_nudge", e));
         continue;
       }
       try {
@@ -2199,6 +2213,8 @@ export class PipelineDriver {
           break;
         }
         case "merge_nudge":
+          // A failure is retried by a later tick (`renudge`), no sooner than the re-check interval.
+          this.due(nudgeKey(task));
           await this.nudgeMerged(task);
           break;
         case "evidence_stale":
@@ -2386,14 +2402,38 @@ export class PipelineDriver {
     this.chains.add(p);
   }
 
-  /** The wave's running implementers (other tasks) not yet nudged about merged PR `pr`. */
+  /**
+   * A merged task's nudges that never went out (the daemon stopped before they were sent, or the
+   * PR's file list could not be read): send them, once per re-check interval until they are.
+   * Idempotent through `merge_nudge_sent`; what is left after a restart is re-read once.
+   */
+  private async renudge(task: TaskId): Promise<void> {
+    const p = this.deps.record().pipeline[task];
+    if (p?.merged_seq === undefined || p.pr === undefined) return;
+    const done = `${task}#${p.pr.number}`;
+    if (this.nudgesDone.has(done)) return;
+    if (this.unnudged(task, p.pr.number).length === 0) {
+      // No implementer cut before the merge is left to tell: none ever will be.
+      this.nudgesDone.add(done);
+      this.lastCheck.delete(nudgeKey(task));
+      return;
+    }
+    if (this.due(nudgeKey(task))) await this.nudgeMerged(task);
+  }
+
+  /**
+   * The wave's running implementers (other tasks) not yet nudged about merged PR `pr`, cut from
+   * the release branch before the merge (one spawned after it already has it).
+   */
   private unnudged(task: TaskId, pr: number): RunningImplementer[] {
     const rec = this.deps.record();
+    const mergedSeq = rec.pipeline[task]?.merged_seq;
     return (rec.state?.tasks ?? []).flatMap((t) => {
       if (t.id === task || t.stage === "done" || t.stage === "cancelled") return [];
       const p = rec.pipeline[t.id];
       const run = p?.runs.implementer;
       if (run === undefined || run.retired !== undefined) return [];
+      if (mergedSeq !== undefined && (run.spawned_seq ?? 0) > mergedSeq) return [];
       if ((p?.nudged ?? []).includes(`${run.agent_id}#${pr}`)) return [];
       return [{ task: t.id, agent_id: run.agent_id, files: rec.wave?.tasks[t.id]?.files ?? [] }];
     });
@@ -2430,6 +2470,7 @@ export class PipelineDriver {
         },
       });
     }
+    this.nudgesDone.add(`${task}#${pr.number}`);
   }
 
   /** Beside the queue: is the closed PR's head on the release branch anyway? */

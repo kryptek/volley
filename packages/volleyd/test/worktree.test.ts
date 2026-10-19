@@ -128,6 +128,30 @@ describe("release base resolution", () => {
     expect(fake.argvs(["git", "-C", REPO, "branch"])).toEqual([]);
   });
 
+  it("a BASE_STALE refusal carries git's first line only, then what to do", async () => {
+    const fake = fakeExec()
+      .on(["git", "-C", REPO, "fetch"], {
+        code: 128,
+        stderr:
+          "\nfatal: unable to access 'https://example.com/repo.git/': Could not resolve host\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+      })
+      .on(LOCAL, { stdout: `${SHA_A}\n` });
+    const err = (await resolveReleaseBase(fake.exec, REPO, B).catch(
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(err.code).toBe("BASE_STALE");
+    expect(err.message).not.toContain("\n");
+    expect(err.message).not.toContain("access rights");
+    expect(err.message).toContain("Could not resolve host");
+    expect(err.message).toContain(
+      `Fix: check that origin is reachable and has ${B}, or work from the local copy: \`volleyd config set require_fresh_base false\``,
+    );
+    expect(err.detail).toMatchObject({
+      fetch_error:
+        "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host",
+    });
+  });
+
   it("require_fresh_base off: a failed fetch resolves what the repo has, marked not fresh", async () => {
     const fake = fakeExec()
       .on(["git", "-C", REPO, "fetch"], { code: 128, stderr: "fatal: no remote" })

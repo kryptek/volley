@@ -315,7 +315,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
 
   let clock = Date.parse("2026-10-18T12:00:00.000Z");
   let queue: Promise<unknown> = Promise.resolve();
-  const driver = new PipelineDriver("w1", {
+  const deps: ConstructorParameters<typeof PipelineDriver>[1] = {
     now: () => clock,
     ...(o.nudgeOnMerge !== undefined ? { nudgeOnMerge: () => o.nudgeOnMerge as NudgeOnMerge } : {}),
     exec,
@@ -376,7 +376,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         },
       });
     },
-  });
+  };
+  let driver = new PipelineDriver("w1", deps);
 
   const run = (role: Role) => rec.pipeline.T1?.runs[role];
   const PR_BRANCH = branchName("w1", "T1", "implementer", 1);
@@ -391,7 +392,13 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     spawns,
     steers,
     retired,
-    driver,
+    get driver() {
+      return driver;
+    },
+    /** A daemon restart: a new driver (no in-memory state) over the same journal and world. */
+    restart() {
+      driver = new PipelineDriver("w1", deps);
+    },
     exec,
     PR_BRANCH,
     record: () => rec,

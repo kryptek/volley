@@ -154,7 +154,7 @@ import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
-import { type SpawnFailure, type WaveRecord, latestSpawnFailure } from "./reducer";
+import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import {
   type Admission,
   activeTasks,
@@ -270,6 +270,7 @@ import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
+  checkFreshBase,
   checkReleaseBranch,
   expandHome,
   fetchRelease,
@@ -4763,13 +4764,19 @@ export class Daemon {
    * `origin/<branch>` once it is fetched (a branch pushed from another clone counts), so a wave
    * whose every spawn would fail is refused before any task is admitted. Checked only where
    * volleyd spawns into that repo: with a spawner, and a task on the local host (a remote host's
-   * clone is fetched and checked on the box).
+   * clone is fetched and checked on the box). With require_fresh_base on, also BASE_STALE when no
+   * spawn could get a fresh base (no `origin` remote, or a branch origin does not have), instead
+   * of admitting tasks that would each retry a refusal for the whole spawn backoff.
    */
   private async releaseBranchMissing(wave: Wave): Promise<string | null> {
     if (this.opts.spawner === undefined || !spawnsLocally(wave)) return null;
     const repo = expandHome(wave.repo);
-    await fetchRelease(this.host.exec, repo, wave.release_branch);
-    return checkReleaseBranch(this.host.exec, repo, wave.release_branch);
+    const fetchError = await fetchRelease(this.host.exec, repo, wave.release_branch);
+    const missing = await checkReleaseBranch(this.host.exec, repo, wave.release_branch);
+    if (missing !== null) return missing;
+    // --- Fleet fresh base (SPEC §4.6.15): no origin, or a branch never pushed, is refused now. ---
+    const fresh = wave.config.require_fresh_base ?? this.config.effective().require_fresh_base;
+    return fresh ? checkFreshBase(this.host.exec, repo, wave.release_branch, fetchError) : null;
   }
 
   /**
@@ -5358,7 +5365,10 @@ export class Daemon {
     extra: Record<string, unknown> = {},
   ): Promise<void> {
     const log = this.waves.get(wave) as WaveLog;
-    const { seq, supersedes } = nextSteer(log.record, task);
+    // A merge nudge is additive: it never supersedes an earlier (owner or pipeline) steer.
+    const { seq, supersedes } = nextSteer(log.record, task, {
+      additive: isAdditiveSteer(extra.reason),
+    });
     await this.publish(
       buildTopic(target.namespace, target.agent_id, "mailbox"),
       this.envelope(

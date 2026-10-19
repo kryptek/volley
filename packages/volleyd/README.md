@@ -573,7 +573,9 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
 `volleyd steer <wave> <task> "<text>"` sends a mailbox `steering` envelope to the task's current
 agent (the current stage's role, else the implementer; `--role` picks one). Its `correlation_id`
 is the message id; `payload.seq` counts steers to that task (1, 2, …) and `payload.supersedes`
-names the previous steer, so the recipient can drop stale guidance. The steer is journaled as
+names the previous steer, so the recipient can drop stale guidance (a [merge
+nudge](#the-pipeline-and-the-merge-ready-gate) is additive: it supersedes nothing, and the next
+steer supersedes the one before the nudge). The steer is journaled as
 `steering_sent`. The command then waits up to `--wait-ack-ms` (default 30000) and reports:
 
 - `acked by <agent>`: the recipient published `type: "steering_acked"` on its own `progress`
@@ -699,11 +701,18 @@ volleyd runs `git -C <repo> fetch origin <release_branch>`, then picks the base:
 `git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
 fetch. A failed fetch (offline, no remote, a timeout) refuses the spawn while
 `require_fresh_base` is on (the default, on every host): `BASE_STALE: git fetch origin <b> failed
-in <repo> (<why>)`, a [spawn failure](#spawn-failures-and-retries) like any other, retried with
-the usual backoff, so no agent starts from a stale copy of the release branch. With
-`require_fresh_base: false` the base is picked from what the repo has and the spawn goes on; the
-wave journals a warning, `alarm_raised { code: "BASE_STALE", severity: "warning", base_sha,
-fetch_error }`.
+in <repo> (<git's first line>); … Fix: …`, a [spawn failure](#spawn-failures-and-retries) like any
+other, retried with the usual backoff, so no agent starts from a stale copy of the release branch.
+A failure no retry can fix is refused up front instead, by `volleyd validate` and `run` (before
+any task is admitted): a repo with no `origin` remote (validate reads its git config, offline),
+or (`run`, after its fetch) an `origin` without `<b>`. The refusal is one sentence and the fix:
+add the remote and push the branch, or `volleyd config set require_fresh_base false` (or
+`config: { require_fresh_base: false }` in the wave file) to work from the local copy, which is
+the setting for a repo that lives on this machine only. With `require_fresh_base: false` the base
+is picked from what the repo has and the spawn goes on; the wave journals a warning,
+`alarm_raised { code: "BASE_STALE", severity: "warning", base_sha, fetch_error }`. That warning is
+in the journal and the `/events` mirror only (not in `tasks[].alarms`); the task's `base_sha`
+says where it started.
 
 The commit the worktree was cut from is the spawn's `base_sha`: on its `agent_spawned` event, on
 the task in the wave state (`tasks[].base_sha`, kept across restarts and pipeline roles cut from
@@ -1487,9 +1496,15 @@ above), each running implementer of the same wave whose task's wave-file `files`
 the merged PR's changed files (`gh pr view <n> --json files`, read-only, beside the queue) gets
 exactly one mailbox steering, through the same path as `volleyd steer` (`steering_sent { reason:
 "merge_nudge" }`): `origin/<release> moved to <sha7> with #<n> (touches N of your files: …);
-rebase when convenient, before you push again.` Each is journaled on the nudged task as
-`merge_nudge_sent { task, agent_id, merged_pr, files, merged_task, pr_url }`, and an agent is
-nudged at most once per merged PR, however often the merge is observed. `placement.nudge_on_merge`
+rebase when convenient, before you push again.` (at most 5 files are named, then `and N more`).
+The nudge is additive: it carries no `supersedes`, so it never hides an owner's or the
+pipeline's steer the agent has not read yet. Each is journaled on the nudged task as
+`merge_nudge_sent { task, agent_id, merged_pr, files, merged_task, pr_url }` (every touched
+file), and an agent is nudged at most once per merged PR, however often the merge is observed.
+Only implementers spawned before the merge are nudged (a later one's base already has it). A
+nudge that did not go out (the PR's file list could not be read, or the daemon stopped first) is
+sent by a later tick, at most once per CI re-check interval and once after a restart.
+`placement.nudge_on_merge`
 chooses who: `files` (the default; a task with no `files` hint is never nudged), `all` (every
 running implementer of the wave, `files: []`, no PR file list read) or `off`. The agent rebases
 in its own session; the fence denies volleyd `git rebase` anyway.

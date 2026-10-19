@@ -65,7 +65,11 @@ describe("volleyd validate: the release branch", () => {
     expect(r.exitCode).toBe(0);
   });
 
+  /** An origin remote (never contacted: validate stays offline). */
+  const addOrigin = () => git(repo, "remote", "add", "origin", "https://example.com/repo.git");
+
   it("only origin/release/x (pushed from another clone) is enough", async () => {
+    addOrigin();
     git(repo, "update-ref", "refs/remotes/origin/release/x", "HEAD");
     const r = await runCli(["validate", waveFile(repo)]);
     expect(r.stderr).toBe("");
@@ -73,8 +77,35 @@ describe("volleyd validate: the release branch", () => {
   });
 
   it("the local branch is enough", async () => {
+    addOrigin();
     git(repo, "branch", "release/x");
     expect((await runCli(["validate", waveFile(repo)])).exitCode).toBe(0);
+  });
+
+  it("a local-only repo (no origin) with require_fresh_base on → BASE_STALE in one line, with the fix", async () => {
+    git(repo, "branch", "release/x");
+    const r = await runCli(["validate", waveFile(repo)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe(
+      `volleyd validate: BASE_STALE: ${repo} has no origin remote, so volleyd cannot fetch release/x before it cuts each agent's worktree (require_fresh_base is on). Fix: add the remote and push the branch (\`git -C ${repo} remote add origin <url>\`, then \`git -C ${repo} push -u origin release/x\`), or work from the local copy: \`volleyd config set require_fresh_base false\` (or \`config: { require_fresh_base: false }\` in the wave file).\n`,
+    );
+  });
+
+  it("a local-only repo is fine with require_fresh_base off: the wave's config:, or $VOLLEYD_HOME/config.yaml", async () => {
+    git(repo, "branch", "release/x");
+    const waved = await runCli([
+      "validate",
+      waveFile(repo, "{ issue: 1 }\nconfig: { require_fresh_base: false }"),
+    ]);
+    expect(waved.stderr).toBe("");
+    expect(waved.exitCode).toBe(0);
+    const home = join(dir, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.yaml"), "require_fresh_base: false\n");
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const global = await runCli(["validate", waveFile(repo)], env);
+    expect(global.stderr).toBe("");
+    expect(global.exitCode).toBe(0);
   });
 
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {

@@ -49,6 +49,72 @@ const missingText = (repo: string, branch: string) =>
 export const releaseBranchMissing = (repo: string, branch: string) =>
   `RELEASE_BRANCH_MISSING: ${missingText(repo, branch)}`;
 
+/** The opt-out every BASE_STALE refusal names: work from the local copy of the release branch. */
+const OPT_OUT =
+  "or work from the local copy: `volleyd config set require_fresh_base false` (or `config: { require_fresh_base: false }` in the wave file)";
+
+/** The end of a per-spawn BASE_STALE refusal (a fetch that failed, e.g. offline): what to do. */
+export const freshBaseFix = (branch: string) =>
+  `Fix: check that ${REMOTE} is reachable and has ${branch}, ${OPT_OUT}.`;
+
+/**
+ * `volleyd validate` / `run`, with require_fresh_base on: the refusal when no spawn could ever get
+ * a fresh base — the repo has no `origin` remote, or (`run`, after its fetch) `origin` has no
+ * such branch. One sentence, then the exact fix.
+ */
+export const freshBaseImpossible = (
+  repo: string,
+  branch: string,
+  why: "no_remote" | "not_pushed",
+) =>
+  why === "no_remote"
+    ? `BASE_STALE: ${repo} has no ${REMOTE} remote, so volleyd cannot fetch ${branch} before it cuts each agent's worktree (require_fresh_base is on). Fix: add the remote and push the branch (\`git -C ${repo} remote add ${REMOTE} <url>\`, then \`git -C ${repo} push -u ${REMOTE} ${branch}\`), ${OPT_OUT}.`
+    : `BASE_STALE: ${REMOTE} has no ${branch} for ${repo}, so volleyd cannot fetch it before it cuts each agent's worktree (require_fresh_base is on). Fix: push it (\`git -C ${repo} push -u ${REMOTE} ${branch}\`), ${OPT_OUT}.`;
+
+/** The first non-empty line of git's stderr (the rest is advice), else `fallback`. */
+export const firstLine = (text: string, fallback: string): string =>
+  text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l !== "") ?? fallback;
+
+/**
+ * Whether `repo` has an `origin` remote, read offline from its git config (the fence allows no
+ * `git remote` / `git config`): false only when the config was read and names none; true when it
+ * does, or when it cannot tell (not a repo, an `[include]` that may define it).
+ */
+export async function hasOriginRemote(exec: ExecFn, repo: string): Promise<boolean> {
+  const r = await exec(["git", "-C", repo, "rev-parse", "--git-common-dir"]);
+  const dir = r.stdout.trim();
+  if (r.code !== 0 || dir === "") return true;
+  let config: string;
+  try {
+    // Relative (`.git`) to the repo directory, or absolute from a linked worktree.
+    config = readFileSync(join(resolve(repo, dir), "config"), "utf-8");
+  } catch {
+    return true;
+  }
+  if (/^\s*\[include/im.test(config)) return true;
+  return new RegExp(`^\\s*\\[remote\\s+"${REMOTE}"\\]`, "m").test(config);
+}
+
+/**
+ * `volleyd validate` (`fetchError` undefined: offline) / `run` (after its fetch): null, or the
+ * refusal when require_fresh_base is on and no spawn could get a fresh base (`freshBaseImpossible`).
+ * A fetch that failed for any other reason (offline, a timeout) is a spawn's to retry.
+ */
+export async function checkFreshBase(
+  exec: ExecFn,
+  repo: string,
+  branch: string,
+  fetchError?: string | null,
+): Promise<string | null> {
+  if (!(await hasOriginRemote(exec, repo))) return freshBaseImpossible(repo, branch, "no_remote");
+  if (fetchError != null && /couldn't find remote ref/i.test(fetchError))
+    return freshBaseImpossible(repo, branch, "not_pushed");
+  return null;
+}
+
 /** The commit `ref` names in `repo`, or null when it does not resolve. */
 async function commitOf(exec: ExecFn, repo: string, ref: string): Promise<string | null> {
   const r = await exec(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref]);
@@ -71,7 +137,7 @@ export async function fetchRelease(
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   if (r.timedOut) return "git fetch timed out";
-  return r.code === 0 ? null : r.stderr.trim() || `git fetch exited ${r.code}`;
+  return r.code === 0 ? null : firstLine(r.stderr, `git fetch exited ${r.code}`);
 }
 
 /** The local release branch's and origin's tracking ref's commits (null where absent). */
@@ -141,7 +207,7 @@ export async function resolveReleaseBase(
   if (fetchError !== null && opts.requireFresh !== false) {
     throw new SpawnError(
       "BASE_STALE",
-      `git fetch ${REMOTE} ${branch} failed in ${repo} (${fetchError}); require_fresh_base is on, so no worktree is cut from the local copy`,
+      `git fetch ${REMOTE} ${branch} failed in ${repo} (${fetchError}); require_fresh_base is on, so no worktree is cut from the local copy. ${freshBaseFix(branch)}`,
       { repo, branch, fetch_error: fetchError },
     );
   }
