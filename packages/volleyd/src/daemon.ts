@@ -24,6 +24,8 @@ import {
   type AuthReply,
   TOKEN_REDEEM_FILTER,
   accountOp,
+  adminRefusal,
+  authReply,
   authReplyTopic,
   isValidCorrelationId,
   listAccounts,
@@ -133,8 +135,18 @@ import {
   poolPayload,
   replayLeases,
 } from "./leases";
+import {
+  MACHINES_FILTER,
+  MACHINE_CHANNEL,
+  MachineHealth,
+  type MachineRecord,
+  type MachineStatus,
+  machineTopic,
+  parseMachine,
+} from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
+import { PeerService } from "./peers";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -437,6 +449,8 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+/** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
+const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove"]);
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
@@ -739,6 +753,9 @@ export class Daemon {
   private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
   /** Claude account profiles: registry, sign-ins, sharing (src/claude/service.ts). */
   private readonly claude: ClaudeService;
+  /** Paired machines (peers.ts) and their heartbeats (machines.ts). */
+  private readonly peers: PeerService;
+  private readonly machines: MachineHealth;
   /**
    * Usage metering (claude/usage.ts): every agent's latest sample, folded per account. The
    * accounts' windows are kept in `$VOLLEYD_HOME/claude-usage.json` across restarts.
@@ -844,6 +861,29 @@ export class Daemon {
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
+    });
+    this.machines = new MachineHealth({
+      now: this.now,
+      onChange: (name, status, record) => {
+        if (this.running) void this.enqueue(() => this.onMachine(name, status, record));
+      },
+    });
+    this.peers = new PeerService({
+      exec: opts.authExec ?? realExec,
+      now: this.now,
+      file: join(opts.home, "peer-codes.json"),
+      pairedFile: join(opts.home, "peers.json"),
+      namespace: opts.namespace,
+      broker: () => brokerAddress(opts.brokerUrl),
+      hosts: () => this.config.effective().hosts,
+      setHost: (name, host, by) => this.config.applyPatch({ hosts: { [name]: host } }, by),
+      removeHost: (name, by) => this.config.removeHost(name, by),
+      clearMachine: async (name) => {
+        this.machines.forget(name);
+        await this.clearRetained(machineTopic(name));
+      },
+      machines: () => this.machines.all(),
+      journal: (ev) => this.appendSystem(ev),
     });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -1024,6 +1064,23 @@ export class Daemon {
     );
     // The records restored from disk, also those no agent reports any more.
     void this.enqueue(() => this.usagePass());
+    // Paired machines' retained health records (SPEC §4.6.14).
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(MACHINES_FILTER, (m) => {
+        const name = m.topic.split("/")[3] ?? "";
+        // A cleared record (peer_remove) forgets the machine, so a late `down` cannot revive it.
+        if (m.payload === "") {
+          void this.enqueue(async () => this.machines.forget(name));
+          return;
+        }
+        const record = parseMachine(m.topic, m.payload);
+        // Every account may publish its own record: only a configured host's is a machine.
+        if (record === null) return;
+        void this.enqueue(async () => {
+          if (Object.hasOwn(this.config.effective().hosts, name)) this.machines.observe(record);
+        });
+      }),
+    );
 
     this.config.onChange((c) => {
       this.log(`config v${c.version} by ${c.by}: ${JSON.stringify(c.patch)}`);
@@ -1691,6 +1748,7 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    await this.sweepMachines();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
@@ -2423,12 +2481,15 @@ export class Daemon {
     }
     const status = forward !== undefined ? this.tunnelChecks.status(forward) : "up";
     const before = this.parked.get(key);
+    const machine = def !== undefined ? this.machines.record(def.host) : undefined;
     const reason =
-      status === "up"
-        ? undefined
-        : status === "down"
-          ? `tunnel down to ${target}`
-          : `checking tunnel to ${target}`;
+      machine?.tunnel === "down"
+        ? `tunnel down to ${machine.name}: ${this.machines.whyDown(machine)}`
+        : status === "up"
+          ? undefined
+          : status === "down"
+            ? `tunnel down to ${target}`
+            : `checking tunnel to ${target}`;
     if (reason === undefined) this.parked.delete(key);
     else this.parked.set(key, reason);
     if (reason !== before) void this.enqueue(() => this.publishState(wave));
@@ -2475,6 +2536,59 @@ export class Daemon {
             tasks: ids,
           },
         });
+      }
+      await this.publishState(wave);
+    }
+    await this.tickNow();
+  }
+
+  /**
+   * Paired machines (SPEC §4.6.14): mark those whose heartbeat stopped down, republishing their
+   * retained record as volleyd (the machine's own LWT covers a clean disconnect).
+   */
+  private async sweepMachines(): Promise<void> {
+    for (const record of this.machines.sweep()) {
+      await this.publish(
+        machineTopic(record.name),
+        this.envelope(MACHINE_CHANNEL, "machine", record),
+        true,
+      );
+    }
+  }
+
+  /**
+   * A machine went down or came back: journal a drop for the waves with unfinished tasks on its
+   * host, re-publish their state (their spawns park or resume), then re-admit.
+   */
+  private async onMachine(
+    name: string,
+    status: MachineStatus,
+    record: MachineRecord,
+  ): Promise<void> {
+    if (!this.running) return;
+    for (const [wave, log] of this.waves) {
+      const tasks = (log.record.state?.tasks ?? [])
+        .filter((t) => t.stage !== "done" && t.stage !== "cancelled")
+        .filter((t) => log.record.wave?.tasks[t.id]?.host === name);
+      const ids = tasks.map((t) => t.id);
+      if (ids.length === 0) continue;
+      if (status === "down") {
+        await this.append(wave, {
+          type: "alarm_raised",
+          data: {
+            code: "MACHINE_DOWN",
+            message: `machine ${name} is down (${this.machines.whyDown(record)}): spawns on it wait; running agents are left alone`,
+            host: name,
+            reason: record.reason ?? "disconnect",
+            last_seen: record.last_seen,
+            tasks: ids,
+          },
+        });
+      }
+      // Only spawns wait (spawnAdmitted parks them the same way); running agents are untouched.
+      for (const t of tasks) {
+        if (t.stage === "queued" && t.agents.implementer === undefined)
+          this.parkOnTunnel(wave, t.id);
       }
       await this.publishState(wave);
     }
@@ -3945,6 +4059,11 @@ export class Daemon {
     for (const t of state.tasks) {
       const host = rec.wave?.tasks[t.id]?.host;
       if (host !== undefined && host !== "local") t.host = host;
+      // A paired machine that is down: its running agents too (SPEC §4.6.14).
+      const machine = t.host !== undefined ? this.machines.record(t.host) : undefined;
+      if (machine?.tunnel === "down" && t.stage !== "done" && t.stage !== "cancelled") {
+        t.host_down = this.machines.whyDown(machine);
+      }
     }
     // A failed spawn says so, with its countdown, ahead of anything a queued task waits on.
     for (const t of state.tasks) {
@@ -4409,7 +4528,9 @@ export class Daemon {
             .filter((t): t is string => t !== undefined)
             .sort()
             .pop();
-        out = await accountOp(exec, sender, payload, lastSeen);
+        out = PEER_ADMIN_OPS.has(payload.op as string)
+          ? await this.peerAdminOp(exec, sender, payload)
+          : await accountOp(exec, sender, payload, lastSeen);
       }
     } catch (e) {
       const op = typeof payload.op === "string" ? payload.op : "";
@@ -4430,6 +4551,23 @@ export class Daemon {
       this.authAnswered.delete(this.authAnswered.keys().next().value as string);
     }
     await send(out.reply);
+  }
+
+  /**
+   * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
+   * names: the account ops' admin check, then peers.ts (which journals them itself).
+   */
+  private async peerAdminOp(exec: ExecFn, sender: string, p: Record<string, unknown>) {
+    const op = p.op as string;
+    const accounts = await listAccounts(exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    const r =
+      op === "peer_invite"
+        ? await this.peers.invite(p, sender)
+        : await this.peers.remove(p, sender);
+    const { rejected: _r, ...answer } = r;
+    return { reply: authReply(op, answer) };
   }
 
   private async handle(
@@ -4503,6 +4641,12 @@ export class Daemon {
         return this.claude.sync(p, by);
       case "agent_move_account":
         return { ok: true, defer: this.moveAccount(p, by) };
+      // Machines + pairing (peers.ts): the code is a join's credential; the reply_key's holder
+      // gets the secret. Invite and remove are admin ops, answered only on the account-op topic.
+      case "peer_join":
+        return this.peers.join(p, by);
+      case "peers":
+        return this.peers.list();
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -4544,6 +4688,8 @@ export class Daemon {
       case "account_revoke":
       case "signin_link":
       case "token_redeem":
+      case "peer_invite":
+      case "peer_remove":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
@@ -5485,3 +5631,12 @@ function loadWaves(home: string): WaveLog[] {
 
 /** A remote host's forward (tunnelKey): what its tunnel and tunnel check are keyed by. */
 const forwardOf = (h: RemoteHost) => tunnelKey(h.spec.target, h.spec.tunnel.remote_port);
+
+/** The broker's host and port as this machine reaches it (a paired machine's tunnel target). */
+function brokerAddress(url: string): { host: string; port: number } {
+  const u = new URL(url);
+  return {
+    host: u.hostname,
+    port: u.port !== "" ? Number(u.port) : DAEMON_DEFAULTS.mqtt_default_port,
+  };
+}

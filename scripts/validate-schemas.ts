@@ -28,6 +28,7 @@
  *   - `authreq-*.json` -> auth-request.schema.json
  *   - `usage-*.json` -> usage.schema.json
  *   - `claudeaccount-*.json` -> claude-account.schema.json
+ *   - `machine-*.json` -> machine.schema.json
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -63,6 +64,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   authreq: "auth-request.schema.json",
   usage: "usage.schema.json",
   claudeaccount: "claude-account.schema.json",
+  machine: "machine.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

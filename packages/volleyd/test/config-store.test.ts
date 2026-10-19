@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-defaults";
 import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
-import { Journal } from "../src/journal";
+import { Journal, readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -223,5 +223,49 @@ describe("applyPatch", () => {
     c.applyPatch({ hard_ceiling: 2 }, "x");
     c.applyPatch({ hard_ceiling: 3 }, "x");
     expect(seqs).toEqual([1, 2]);
+  });
+});
+
+describe("ConfigStore.removeHost (volley peer remove)", () => {
+  const HOSTS =
+    "hosts:\n  box-a:\n    target: dev@box-a\n    tunnel: { remote_port: 21883, supervise: false }\n  box-b:\n    target: dev@box-b\n";
+
+  it("drops hosts.<name> from config.yaml, journals the null patch with `previous`, bumps the version and notifies", () => {
+    writeFileSync(join(home, "config.yaml"), HOSTS);
+    const c = open();
+    const changes: unknown[] = [];
+    c.onChange((ch) => changes.push(ch));
+    const before = c.effective().hosts["box-a"];
+    expect(before).toBeDefined();
+
+    const r = c.removeHost("box-a", "admin-1");
+    expect(r).toEqual({ applied: true, rejected: [], version: 2 });
+    expect(Object.keys(c.effective().hosts)).toEqual(["box-b"]);
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).not.toContain("box-a");
+    const ev = readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).find(
+      (e) => e.type === "config_changed",
+    );
+    expect(ev?.data).toEqual({
+      by: "admin-1",
+      patch: { hosts: { "box-a": null } },
+      previous: { hosts: { "box-a": before } },
+      version: 2,
+    });
+    expect(changes).toEqual([
+      expect.objectContaining({ version: 2, by: "admin-1", patch: { hosts: { "box-a": null } } }),
+    ]);
+    // The removal survives a restart (replayed from config.yaml and the journal).
+    expect(Object.keys(open().effective().hosts)).toEqual(["box-b"]);
+  });
+
+  it("refuses a name config.yaml does not have, and changes nothing", () => {
+    writeFileSync(join(home, "config.yaml"), HOSTS);
+    const c = open();
+    expect(c.removeHost("nobody", "admin-1")).toEqual({
+      applied: false,
+      rejected: [{ path: "hosts.nobody", reason: "not in config.yaml" }],
+    });
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).toBe(HOSTS);
+    expect(c.retainedPayload().version).toBe(1);
   });
 });

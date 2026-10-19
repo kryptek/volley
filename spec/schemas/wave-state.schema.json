@@ -110,6 +110,11 @@
           "minLength": 1,
           "description": "The remote host the task's agents run on (its name from the wave file); absent for the supervisor's own host."
         },
+        "host_down": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Set while the task's host is a paired machine whose tunnel is down (SPEC §4.6.14): why, e.g. 'no heartbeat for 90 s'. Covers running agents too, not only parked spawns; absent while the machine is up."
+        },
         "screen_stale": {
           "type": "boolean",
           "description": "True while the supervisor's screen capture for one of the task's agents is backed off (slow or failing), so its retained screen topic may be out of date."

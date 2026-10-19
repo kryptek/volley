@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "box-a",
+  "wall_time": "2026-10-19T09:30:00.000Z",
+  "channel": "_system/machines",
+  "type": "machine",
+  "payload": {
+    "name": "box-a",
+    "os": "linux",
+    "arch": "x64",
+    "cores": 16,
+    "tunnel": "up",
+    "load": [1.25, 0.9, 0.7],
+    "agents": 3,
+    "remote_port": 21883,
+    "last_seen": "2026-10-19T09:30:00.000Z"
+  }
+}

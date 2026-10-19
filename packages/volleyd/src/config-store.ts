@@ -208,8 +208,38 @@ export class ConfigStore {
     const nextGlobal = merge(this.defaults, nextLayer);
     if (rejected.length === 0) rejected.push(...errorsFor(TUNABLES, nextGlobal));
     if (rejected.length > 0) return { applied: false, rejected };
+    return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
+  }
 
-    const previous = pick(this.global, patch) as Record<string, unknown>;
+  /**
+   * Remove `hosts.<name>` (a removed peer, `volley peer remove`): config_set cannot delete a key.
+   * Journaled as `config_changed` with the patch `{ hosts: { <name>: null } }`.
+   */
+  removeHost(name: string, by: string): PatchResult {
+    const hosts = this.fileLayer.hosts;
+    if (hosts === undefined || !Object.hasOwn(hosts, name)) {
+      return {
+        applied: false,
+        rejected: [{ path: `hosts.${name}`, reason: "not in config.yaml" }],
+      };
+    }
+    const { [name]: _removed, ...rest } = hosts;
+    const nextLayer: TunablesPatch = { ...this.fileLayer, hosts: rest };
+    const previous = { hosts: { [name]: this.global.hosts[name] } };
+    // A null leaf is how a removal reads in the journal; it is never a valid config_set patch.
+    const patch = { hosts: { [name]: null } } as unknown as TunablesPatch;
+    return this.commit(nextLayer, merge(this.defaults, nextLayer), patch, previous, by);
+  }
+
+  /** Write config.yaml atomically, journal `config_changed`, bump `version`, notify listeners. */
+  private commit(
+    nextLayer: TunablesPatch,
+    nextGlobal: Tunables,
+    patch: TunablesPatch,
+    previousValues: unknown,
+    by: string,
+  ): PatchResult {
+    const previous = previousValues as Record<string, unknown>;
     mkdirSync(join(this.file, ".."), { recursive: true });
     writeFileAtomic(this.file, stringify(nextLayer));
 

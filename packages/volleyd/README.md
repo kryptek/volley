@@ -1126,6 +1126,79 @@ does not, it is reaped then, after the usual grace.
 The wave state labels remote tasks with `host` (the host's name), so the Desk can show where an
 agent runs.
 
+### Paired machines (`volley peer`)
+
+Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
+(SPEC §4.6.14). On the daemon's machine, as an admin account (`invite` and `remove` are admin
+ops: they go to volleyd on the admin's own `volley/_system/auth/ops/<username>` topic, never the
+mailbox, and volleyd checks the admin role as for the account ops):
+
+```sh
+VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
+  volley peer invite               # Pairing code: ABCD-EFGH (single use, 10 minutes)
+```
+
+On the new machine (bun, claude, gh, git, tmux and a volley checkout already there; key-based
+ssh to the daemon's machine):
+
+```sh
+volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
+```
+
+`join` checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
+daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
+there needs it; if not, the join stops before the code is used) and then runs
+`volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
+ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+account named after the machine (`--name`, default its short hostname) and adds
+`hosts.<name>`:
+
+```yaml
+hosts:
+  box-a:
+    target: dev@box-a           # --target: how this machine reaches the new one (default $USER@<hostname>)
+    repo: /home/dev/src/example-repo
+    volley_dir: /home/dev/src/volley
+    tunnel: { remote_port: 21883, supervise: false }   # the machine keeps its own tunnel
+```
+
+so a wave file can say `host: box-a` at once (volleyd also records the name in
+`$VOLLEYD_HOME/peers.json`). The machine then writes `~/.volley/peer.json` (mode 0600: it holds
+the peer password), installs `volley peer run` as a user service, prints whether Claude Code
+trusts `--repo` there (it or a parent folder; an untrusted one opens `repo_untrusted` at the
+first spawn; accept the dialog once by running `claude` in it), and registers itself.
+
+The service must outlive the ssh session the join runs in:
+
+- **Linux:** a systemd user unit `volley-peer.service`. systemd stops a user's services when
+  their last session ends unless the user *lingers*, so `join` runs `loginctl enable-linger
+  <user>` first. Where that is not allowed without root it warns: run
+  `sudo loginctl enable-linger <user>`, or the tunnel drops when you log out and comes back only
+  at your next login. A re-join restarts the unit with the new `peer.json`.
+- **macOS:** a launchd agent `systems.volley.peer`, bootstrapped into `gui/<uid>` when someone is
+  logged in at the console, else into `user/<uid>` (a Mac paired over ssh); the join says which.
+
+If the service cannot be installed, the pairing still stands on the host: the join says so and
+exits 1. Run `volley peer run` yourself, or `volley peer remove <name>` on the daemon's machine
+and join again with a new code.
+
+**The service** keeps `ssh -N -L 127.0.0.1:<remote_port>:<broker> <host>` up (restarting it with
+backoff) and publishes the machine's retained record on `volley/_system/machines/<name>` every
+30 s through it: os, cores, load averages, its tmux session count, `tunnel: up`. Its LWT is the
+record with `tunnel: down` (built when it connected: volleyd keeps the last heartbeat's
+`last_seen`, load and agents). volleyd only counts records for a configured host, and marks a
+machine whose record stopped for 90 s down (republishing the record with
+`reason: heartbeat_timeout`). While a machine is down its spawns park with
+`why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
+(running ones too) carries `host_down` in the wave state, and each wave on it journals
+`MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage.
+
+`volley peer list` shows the paired machines; `volley peer remove <name>` (`peer_remove`, an
+admin op) revokes the account, removes `hosts.<name>` and clears the record. It only removes a
+paired machine or a `peer` account: a host you configured by hand is refused. The machine's service stops on its own
+the next time the broker refuses the revoked account (exit 0, so the service manager leaves it
+stopped).
+
 ---
 
 ## Recovery

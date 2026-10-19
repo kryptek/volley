@@ -174,6 +174,8 @@ export interface TaskState {
   why_waiting?: string;
   /** The remote host the task's agents run on (absent for `local`). */
   host?: string;
+  /** Why the task's host, a paired machine, is down (machines.ts); absent while it is up. */
+  host_down?: string;
   /** Set while the screen capture of one of the task's agents is backed off (screen-publisher.ts). */
   screen_stale?: boolean;
   pr?: {
@@ -306,6 +308,10 @@ export const WAVE_EVENT_TYPES = [
   "agent_reaped_by_supervisor",
   "credentials_revoked",
   "credentials_swept",
+  // Machines + pairing (peers.ts), in the `_system` journal.
+  "peer_invited",
+  "peer_joined",
+  "peer_removed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

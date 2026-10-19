@@ -349,6 +349,35 @@ hard-code your everyday broker's credentials) are left alone.
   Both reviewer briefs also carry the `Public hygiene: flag as P1 …` line, and their `result`
   carries `hygiene: { checked: true, … }`.
 
+### Paired machine (`volley peer`)
+
+A real second machine paired with one code (volleyd README, "Paired machines"). Use a machine
+that is not yet in `hosts` (or `volleyd config` without the `box` entry above), with key-based
+ssh both ways between it and the laptop.
+
+- [ ] **Invite** (laptop, as an admin account: `volley auth add smoke-admin --role admin --json`
+  prints its password once):
+  ```sh
+  VOLLEY_AUTH_USERNAME=smoke-admin VOLLEY_AUTH_PASSWORD=<pw> volley peer invite
+  ```
+  prints `Pairing code: XXXX-XXXX` and the join command. The same command with the coordinator's
+  login (no `VOLLEY_AUTH_*`) is refused: invite is an admin op.
+- [ ] **Join** (on the machine): `volley peer join <code> --to <laptop> --repo <abs repo path>`.
+  It checks ssh to the laptop, the laptop's ssh back to the machine, redeems the code, writes
+  `~/.volley/peer.json` (0600), installs the service (Linux: `loginctl show-user $USER -p Linger`
+  says `Linger=yes`; macOS: the domain it names), prints the trust line and `Registered`.
+- [ ] **Up:** on the laptop, `volley peer list` shows the machine with `tunnel up`, its os, cores,
+  load and `last seen` within 30 s; `volleyd config get hosts` has its entry with
+  `supervise: false`. Log out of the machine's ssh session: it stays `up`.
+- [ ] **Down:** stop the service on the machine (`systemctl --user stop volley-peer.service`, or
+  `launchctl bootout <domain>/systems.volley.peer`). Within 90 s `volley peer list` shows
+  `tunnel down`; a wave task with `host: <name>` stays `queued` with
+  `why_waiting: tunnel down to <name>: …`, and a running one shows `host_down` in
+  `volley/_waves/<wave>/state`. Start the service again: `up`, and the spawn proceeds.
+- [ ] **Remove** (laptop, admin): `volley peer remove <name>` reports the account revoked and
+  `hosts.<name>` removed. On the machine the service exits 0 at its next heartbeat and stays
+  stopped (`systemctl --user status volley-peer.service` shows `inactive (dead)` with status 0).
+
 ---
 
 ## 6. Injected scenarios
@@ -526,6 +555,7 @@ RESULTS (<date>, release head <sha>):
   3. hooks + lease:
   4. Desk laptop / phone:
   5. wave spawn (local / box), brief preface on every role's brief:
+     paired machine (invite / join / up / down within 90 s / remove, service stopped):
   6. kill / urgent refused / claim / urgent / config / pause:
   7. gates, merges, completion, cleanup:
   Issues found:
