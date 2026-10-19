@@ -62,7 +62,10 @@
             "wave_account_moved",
             "agent_reaped_by_supervisor",
             "credentials_revoked",
-            "credentials_swept"
+            "credentials_swept",
+            "peer_invited",
+            "peer_joined",
+            "peer_removed"
           ]
         },
         "payload": {

@@ -55,7 +55,12 @@ export type ControlOp =
   | "claude_account_add"
   | "claude_signin"
   | "claude_sync"
-  | "agent_move_account";
+  | "agent_move_account"
+  // Machines + pairing (peers.ts).
+  | "peer_invite"
+  | "peer_join"
+  | "peer_remove"
+  | "peers";
 
 export interface ControlResponse {
   text: string;
@@ -73,6 +78,8 @@ export interface ControlResponse {
   warnings?: string[];
   /** run (a new version of a submitted wave) and diff: the structural plan change. */
   plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
+  /** peer_invite / peer_join: the secret, sealed to the request's `reply_key` (peers.ts). */
+  sealed?: string;
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);

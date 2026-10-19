@@ -1126,6 +1126,57 @@ does not, it is reaped then, after the usual grace.
 The wave state labels remote tasks with `host` (the host's name), so the Desk can show where an
 agent runs.
 
+### Paired machines (`volley peer`)
+
+Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
+(SPEC §4.6.14). On the daemon's machine:
+
+```sh
+volley peer invite                 # Pairing code: ABCD-EFGH (single use, 10 minutes)
+```
+
+On the new machine (bun, claude, gh, git, tmux and a volley checkout already there; key-based
+ssh to the daemon's machine):
+
+```sh
+volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
+```
+
+`join` checks ssh to `--to`, then redeems the code there by sending a script to
+`ssh <host> bash -s` that runs `volley peer redeem` (`--remote-volley <command>` when `volley`
+is not on that non-interactive ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the
+coordinator's `coordinator.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+account named after the machine (`--name`, default its short hostname) and adds
+`hosts.<name>`:
+
+```yaml
+hosts:
+  box-a:
+    target: dev@box-a           # --target: how this machine reaches the new one (default $USER@<hostname>)
+    repo: /home/dev/src/example-repo
+    volley_dir: /home/dev/src/volley
+    tunnel: { remote_port: 21883, supervise: false }   # the machine keeps its own tunnel
+```
+
+so a wave file can say `host: box-a` at once. The machine then writes `~/.volley/peer.json`
+(mode 0600: it holds the peer password), installs `volley peer run` as a user service (systemd
+unit `volley-peer.service`, or launchd agent `systems.volley.peer`), prints whether Claude Code
+trusts `--repo` there (an untrusted one opens `repo_untrusted` at the first spawn; accept the
+dialog once by running `claude` in it), and registers itself.
+
+**The service** keeps `ssh -N -L 127.0.0.1:<remote_port>:<broker> <host>` up (restarting it with
+backoff) and publishes the machine's retained record on `volley/_system/machines/<name>` every
+30 s through it: os, cores, load averages, its tmux session count, `tunnel: up`. Its LWT is the
+record with `tunnel: down`. volleyd marks a machine whose record stopped for 90 s down
+(republishing the record with `reason: heartbeat_timeout`); while a machine is down its spawns
+park with `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"` and each wave on it
+journals `MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage.
+
+`volley peer list` shows the machines; `volley peer remove <name>` (`peer_remove`) revokes the
+account, removes `hosts.<name>` and clears the record. The machine's service stops on its own
+the next time the broker refuses the revoked account (exit 0, so the service manager leaves it
+stopped).
+
 ---
 
 ## Recovery

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:31:31.000Z",
+  "channel": "_system/machines",
+  "type": "machine",
+  "payload": {
+    "name": "box-a",
+    "os": "linux",
+    "cores": 16,
+    "tunnel": "down",
+    "reason": "heartbeat_timeout",
+    "load": [1.25, 0.9, 0.7],
+    "agents": 3,
+    "last_seen": "2026-10-19T09:30:00.000Z"
+  }
+}

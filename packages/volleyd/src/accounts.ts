@@ -147,7 +147,7 @@ const refuse = (op: string, error: string): AuthOutcome => ({
 });
 
 /** `volley auth <args>` through the fenced exec; the parsed JSON stdout, or its error line. */
-async function volleyAuth(
+export async function volleyAuth(
   exec: ExecFn,
   args: string[],
   input?: string,

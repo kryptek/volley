@@ -306,6 +306,10 @@ export const WAVE_EVENT_TYPES = [
   "agent_reaped_by_supervisor",
   "credentials_revoked",
   "credentials_swept",
+  // Machines + pairing (peers.ts), in the `_system` journal.
+  "peer_invited",
+  "peer_joined",
+  "peer_removed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
