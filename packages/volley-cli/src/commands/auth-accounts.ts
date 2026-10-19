@@ -19,6 +19,7 @@ import {
   tokenBlockStart,
   tokenUser,
   withBlock,
+  withTokenTopicsGrant,
   withoutBlock,
 } from "./auth-roles";
 
@@ -244,7 +245,7 @@ async function issueToken(
     ...readJson<TokenEntry>(tokensFile(ctx.dir), "tokens"),
     entry,
   ]);
-  editAcl(ctx.aclFile, (a) => withBlock(a, tokenAclBlock(id)));
+  editAcl(ctx.aclFile, (a) => withBlock(withTokenTopicsGrant(a), tokenAclBlock(id)));
   await ctx.reload();
   if (json) {
     ctx.io.stdout(`${JSON.stringify({ token, username: tokenUser(id), expires_at: expiresAt })}\n`);

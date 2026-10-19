@@ -70,6 +70,8 @@ topic readwrite volley/#
 
 # >>> volley token 0000abcd (managed by `volley auth`; removed when redeemed or expired)
 user redeem-0000abcd
-topic write volley/_system/auth/redeem
+topic deny volley/#
+topic write volley-auth/redeem/0000abcd
+topic read volley-auth/redeem/0000abcd/reply
 # <<< volley token 0000abcd
 ACL

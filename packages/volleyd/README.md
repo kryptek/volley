@@ -260,8 +260,9 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
 | `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)). |
-| `volley/_system/auth/redeem` | no | A one-time token's redemption request. |
-| `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to either; secrets sealed to the requester's `reply_key`. |
+| `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
+| `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
+| `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -329,19 +330,20 @@ before the answer arrives (rotate yourself with `volley auth rotate` or through 
 
 **Token redemption.** `volley auth token` prints a one-time admin token in the operator's
 terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
-broker login `redeem-<id>` whose only write is `volley/_system/auth/redeem`, so the broker keeps
-`allow_anonymous false` (an anonymous client would inherit the ACL's read of the whole tree). The
-client connects as that login and publishes `{ op: "token_redeem", token, label, reply_key }`; the
-daemon pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
+broker login `redeem-<id>`, so the broker keeps `allow_anonymous false` (an anonymous client would
+inherit the ACL's read of the whole tree). That login may only write `volley-auth/redeem/<id>` and
+read `volley-auth/redeem/<id>/reply`: its ACL block denies `volley/#` (where every shared grant
+lives), so it sees nothing of the tree and nothing of other tokens. The client connects as that
+login, subscribes to the reply topic and publishes `{ op: "token_redeem", token, label, reply_key }`
+on the request topic; the daemon refuses a token whose id is not the topic's, then pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
 which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
 journaled as `token_redeemed { by, name, role, label }`. A used, expired or unknown token is
 refused. The token's login is not removed during redemption (mosquitto would disconnect the client
 on the reload before it hears the answer): `volley auth` drops it about a minute after redemption
 or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
-(when it uses broker auth) so that happens without anyone running a command. Until then the login
-can read the whole tree, like any authenticated client.
+(when it uses broker auth) so that happens without anyone running a command.
 
-**Answers** go to `volley/_system/auth/replies/<correlation_id>` as an `ack` from `volleyd` with
+**Answers** go to `volley/_system/auth/replies/<correlation_id>` (a `token_redeem`'s to `volley-auth/redeem/<id>/reply`) as an `ack` from `volleyd` with
 `{ text: "ACKED", acked_type: "query", op, ok, error?, result?, sealed? }`. Every authenticated
 client may read that topic, so passwords and sign-in tokens appear only in `sealed`: base64url
 RSA-OAEP (SHA-256) ciphertext for the request's `reply_key`, an RSA public JWK of at least 2048

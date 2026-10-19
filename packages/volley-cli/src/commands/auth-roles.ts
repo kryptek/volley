@@ -26,8 +26,16 @@ export const SIGNIN_ROLES = ["steer", "watch"] as const satisfies readonly Role[
 
 /** Where an admin sends account control ops: the broker ACL pins the last level to its username. */
 export const authOpsTopic = (user: string) => `volley/_system/auth/ops/${user}`;
-/** Where a token login sends its redemption request. */
-export const AUTH_REDEEM_TOPIC = "volley/_system/auth/redeem";
+/**
+ * Where token `id`'s login sends its redemption request, and where volleyd answers it. They live
+ * outside `volley/` on purpose: mosquitto applies the shared `pattern` grants (all under
+ * `volley/`) to every login and a `deny` overrides every grant, so a token login can be confined
+ * to these two topics only by denying `volley/#` and granting topics that pattern cannot reach.
+ */
+export const tokenRedeemTopic = (id: string) => `volley-auth/redeem/${id}`;
+export const tokenReplyTopic = (id: string) => `volley-auth/redeem/${id}/reply`;
+/** volleyd's grant on the token topics (the shipped acl.conf has it in its `user volleyd`). */
+export const TOKEN_TOPICS_GRANT = "topic readwrite volley-auth/#";
 
 /** The `topic` lines each role adds on top of the shared patterns. */
 function roleLines(name: string, role: Role): string[] {
@@ -92,15 +100,36 @@ export const tokenBlockStart = (id: string) =>
   `# >>> volley token ${id} (managed by \`volley auth\`; removed when redeemed or expired)`;
 export const tokenBlockEnd = (id: string) => `# <<< volley token ${id}`;
 
-/** The managed acl.conf block for a one-time token's login: it may only ask to be redeemed. */
+/**
+ * The managed acl.conf block for a one-time token's login: it may write its own redeem topic
+ * and read its own reply topic, nothing else (the deny shuts out every shared pattern).
+ */
 export function tokenAclBlock(id: string): string {
   return [
     tokenBlockStart(id),
     `user ${tokenUser(id)}`,
-    `topic write ${AUTH_REDEEM_TOPIC}`,
+    "topic deny volley/#",
+    `topic write ${tokenRedeemTopic(id)}`,
+    `topic read ${tokenReplyTopic(id)}`,
     tokenBlockEnd(id),
     "",
   ].join("\n");
+}
+
+export const TOKEN_TOPICS_START =
+  "# >>> volley token topics (managed by `volley auth`; do not edit)";
+export const TOKEN_TOPICS_END = "# <<< volley token topics";
+
+/**
+ * The ACL with volleyd granted the token topics: an acl.conf from before they existed lacks the
+ * grant, so it gets a managed `user volleyd` block (mosquitto merges a user's sections).
+ */
+export function withTokenTopicsGrant(acl: string): string {
+  if (acl.split("\n").includes(TOKEN_TOPICS_GRANT)) return acl;
+  return withBlock(
+    acl,
+    [TOKEN_TOPICS_START, "user volleyd", TOKEN_TOPICS_GRANT, TOKEN_TOPICS_END, ""].join("\n"),
+  );
 }
 
 /** Remove the block between `start` and `end` lines (and the blank line before it). */

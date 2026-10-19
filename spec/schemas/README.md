@@ -22,7 +22,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
 | `admission.schema.json` | `_system/admission` | section 4.6.7 |
-| `auth-request.schema.json` | `_system/auth/ops/<username>`, `_system/auth/redeem` | section 4.6.9 |
+| `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | section 4.6.9 |
 | `account.schema.json` | `accounts.json` account registry file (not an envelope) | section 4.6.9 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
 | `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | section 4.6 |

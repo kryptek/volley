@@ -14,21 +14,26 @@ import type { ExecFn } from "./exec";
  * one-time tokens belong to `volley auth` (it owns the password file, the ACL and
  * `accounts.json` / `tokens.json`); the daemon only runs it through the fenced exec.
  *
- * Two request topics, both outside the mailbox so the broker ACL names the sender:
+ * Two kinds of request topic, both outside the mailbox so the broker ACL names the sender:
  *   - `volley/_system/auth/ops/<username>`: account ops. Only an admin account's ACL block
  *     grants it, and only for its own username, so the topic identifies the sender; the daemon
- *     also checks that username's role in the registry.
- *   - `volley/_system/auth/redeem`: `token_redeem`, published by a one-time token's own
- *     short-lived broker login (`redeem-<id>`). The token is the credential; no account needed.
+ *     also checks that username's role in the registry. Answered on
+ *     `volley/_system/auth/replies/<correlation_id>`.
+ *   - `volley-auth/redeem/<id>`: `token_redeem`, published by one-time token `<id>`'s own
+ *     short-lived broker login (`redeem-<id>`), answered on `volley-auth/redeem/<id>/reply`.
+ *     The token is the credential; no account needed. The login may touch nothing else: its
+ *     ACL block denies `volley/#` (every shared pattern lives there), hence the separate root.
  *
- * Answers go to `volley/_system/auth/replies/<correlation_id>`. Every authenticated client may
- * read the whole tree, so a secret (a password, a sign-in token) is never in a reply's clear
- * text: it is sealed (RSA-OAEP, SHA-256) to the `reply_key` the request carries, a public JWK
- * whose private half only the requesting browser holds.
+ * Every account may read the whole `volley/` tree, so a secret (a password, a sign-in token) is
+ * never in a reply's clear text: it is sealed (RSA-OAEP, SHA-256) to the `reply_key` the request
+ * carries, a public JWK whose private half only the requesting browser holds.
  */
 
 export const AUTH_CHANNEL = "_system/auth";
-export const AUTH_REDEEM_TOPIC = "volley/_system/auth/redeem";
+/** Every token's redeem topic (`tokenRedeemTopic`); `+` stops short of the `/reply` level. */
+export const TOKEN_REDEEM_FILTER = "volley-auth/redeem/+";
+export const tokenRedeemTopic = (id: string) => `volley-auth/redeem/${id}`;
+export const tokenReplyTopic = (id: string) => `volley-auth/redeem/${id}/reply`;
 export const AUTH_OPS_FILTER = "volley/_system/auth/ops/+";
 export const authOpsTopic = (username: string) => `volley/_system/auth/ops/${username}`;
 export const authReplyTopic = (correlationId: string) =>
@@ -191,7 +196,7 @@ export async function accountOp(
     return refuse(op, `"${sender}" has role ${me.role}; account ops need the admin role`);
   }
   if (op === "token_redeem") {
-    return refuse(op, "token_redeem is answered only on volley/_system/auth/redeem");
+    return refuse(op, "token_redeem is answered only on volley-auth/redeem/<token id>");
   }
   if (!ACCOUNT_OPS.includes(op)) return refuse(op, `unknown op '${op}'`);
 
@@ -352,12 +357,21 @@ export function deskBase(raw: unknown): string | null {
   return `${u.origin}${u.pathname}${u.search}`;
 }
 
-/** `token_redeem {token, label, reply_key}` from the redeem topic. */
-export async function redeemToken(exec: ExecFn, p: Fields): Promise<AuthOutcome> {
+/**
+ * `token_redeem {token, label, reply_key}` from token `topicId`'s redeem topic. Only that token
+ * is redeemed there: the broker lets only its own login write the topic.
+ */
+export async function redeemToken(exec: ExecFn, topicId: string, p: Fields): Promise<AuthOutcome> {
   const op = "token_redeem";
   if (p.op !== op) return refuse(String(p.op ?? ""), "only token_redeem is answered here");
   if (typeof p.token !== "string" || p.token === "" || p.token.includes("\n")) {
     return refuse(op, "token is required");
+  }
+  if (
+    !p.token.startsWith(`vly_admin_${topicId}_`) &&
+    !p.token.startsWith(`vly_signin_${topicId}_`)
+  ) {
+    return refuse(op, `only token ${topicId} is redeemed on ${tokenRedeemTopic(topicId)}`);
   }
   if (!isValidLabel(p.label)) return refuse(op, "label must be 1..64 printable characters");
   const key = replyKey(p.reply_key);

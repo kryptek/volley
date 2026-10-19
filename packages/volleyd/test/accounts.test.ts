@@ -2,7 +2,6 @@ import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ACCOUNT_ROLES,
-  AUTH_REDEEM_TOPIC,
   SIGNIN_ROLES,
   accountOp,
   authOpsTopic,
@@ -10,6 +9,8 @@ import {
   isValidLabel,
   replyKey,
   seal,
+  tokenRedeemTopic,
+  tokenReplyTopic,
 } from "../src/accounts";
 import { fakeExec } from "./helpers/fake-exec";
 
@@ -189,7 +190,10 @@ describe("shared with volley-cli's auth-roles.ts", () => {
     );
     expect([...cli.ROLES]).toEqual([...ACCOUNT_ROLES]);
     expect([...cli.SIGNIN_ROLES]).toEqual([...SIGNIN_ROLES]);
-    expect(cli.AUTH_REDEEM_TOPIC).toBe(AUTH_REDEEM_TOPIC);
+    expect(cli.tokenRedeemTopic("0000abcd")).toBe(tokenRedeemTopic("0000abcd"));
+    expect(cli.tokenReplyTopic("0000abcd")).toBe(tokenReplyTopic("0000abcd"));
+    expect(tokenRedeemTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd");
+    expect(tokenReplyTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd/reply");
     expect(cli.authOpsTopic("admin-1")).toBe(authOpsTopic("admin-1"));
   });
 });

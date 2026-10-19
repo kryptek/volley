@@ -109,13 +109,23 @@ and block, `list` shows the registry.
 **One-time tokens.** `volley auth token` prints a single-use admin token (`vly_admin_…`, 10
 minutes; only its hash is stored in `tokens.json`); volleyd's `signin_link` op makes a `steer` or
 `watch` one for a phone. A token is also the password of a temporary login `redeem-<id>` with a
-managed `# >>> volley token <id>` block that allows exactly one write,
-`volley/_system/auth/redeem`. That is how a browser with nothing but the token reaches volleyd
-without the broker accepting anonymous clients: mosquitto applies `pattern` lines (including
-`pattern read volley/#`) to anonymous clients too, and a `deny` would also block the redeem topic,
-so an anonymous redeem topic would expose the whole tree to every web page. The token login keeps
-those shared patterns too: until it is removed it can **read** the whole tree (never a secret,
-which volleyd seals to the requester's key). Redeeming burns the token but keeps its login for
+managed `# >>> volley token <id>` block:
+
+```
+user redeem-<id>
+topic deny volley/#
+topic write volley-auth/redeem/<id>
+topic read volley-auth/redeem/<id>/reply
+```
+
+That is how a browser with nothing but the token reaches volleyd without the broker accepting
+anonymous clients (mosquitto applies `pattern` lines, including `pattern read volley/#`, to
+anonymous clients too, so an anonymous redeem topic would expose the whole tree to every web page).
+A `deny` overrides every grant, the login's own and the shared patterns, so the token topics live
+under a separate `volley-auth/` root that no pattern reaches: the login can write its own request
+topic and read its own answer, and nothing else, not the `volley/` tree and not another token's
+topics. `volley auth token` also grants `volleyd` `topic readwrite volley-auth/#` (the shipped
+`acl.conf` has it; an older one gets a managed `# >>> volley token topics` block). Redeeming burns the token but keeps its login for
 about a minute, because mosquitto disconnects a client whose user leaves the password file when it
 reloads, and the redeeming client is still connected as that login, waiting for its answer. The
 next `volley auth` account command after that (or after the token expires) removes the login;

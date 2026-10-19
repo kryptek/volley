@@ -726,10 +726,38 @@ describe("volley auth", () => {
         // The token is also a short-lived broker login that may only publish a redeem request.
         expect(passwdText()).toContain(`redeem-00000001:hashed(${TOKEN})`);
         expect(acl()).toContain(tokenAclBlock("00000001"));
+        // Its own redeem and reply topics only: the deny shuts out the shared `pattern` grants
+        // (read volley/#, its own %u channels, lease requests), which all live under volley/.
         expect(tokenAclBlock("00000001")).toContain(
-          "user redeem-00000001\ntopic write volley/_system/auth/redeem\n",
+          [
+            "user redeem-00000001",
+            "topic deny volley/#",
+            "topic write volley-auth/redeem/00000001",
+            "topic read volley-auth/redeem/00000001/reply",
+            "",
+          ].join("\n"),
+        );
+        // volleyd reads the requests and writes the answers there (the shipped ACL grants it).
+        expect(acl()).toMatch(
+          /^user volleyd\ntopic readwrite volley\/#\ntopic readwrite volley-auth\/#$/m,
         );
         expect(deps.reloads).toBe(1);
+      });
+
+      it("token grants volleyd the volley-auth/ topics in an ACL from before they existed", async () => {
+        const deps = await initDeps();
+        const file = join(dir, "acl.conf");
+        writeFileSync(
+          file,
+          readFileSync(file, "utf-8").replace("topic readwrite volley-auth/#\n", ""),
+        );
+        expect(acl()).not.toContain("volley-auth/#");
+        await run(["token", "--dir", dir], deps);
+        await run(["token", "--dir", dir], deps);
+        expect(acl()).toContain(
+          "# >>> volley token topics (managed by `volley auth`; do not edit)\nuser volleyd\ntopic readwrite volley-auth/#\n# <<< volley token topics\n",
+        );
+        expect(acl().match(/volley-auth\/#/g)).toHaveLength(1);
       });
 
       it("token --json prints the token, its broker login and expiry", async () => {

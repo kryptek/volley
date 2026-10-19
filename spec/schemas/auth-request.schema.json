@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/auth-request.schema.json",
   "title": "Volley Account / Token Request",
-  "description": "A request on volley/_system/auth/ops/<username> (account ops, admin accounts only) or volley/_system/auth/redeem (token_redeem). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.9.",
+  "description": "A request on volley/_system/auth/ops/<username> (account ops, admin accounts only) or volley-auth/redeem/<token_id> (token_redeem, published by that token's own login). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.9.",
   "allOf": [
     {
       "$ref": "envelope.schema.json"

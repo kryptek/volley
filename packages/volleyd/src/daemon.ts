@@ -19,14 +19,15 @@ import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
 import {
   AUTH_CHANNEL,
   AUTH_OPS_FILTER,
-  AUTH_REDEEM_TOPIC,
   type AuthOutcome,
   type AuthReply,
+  TOKEN_REDEEM_FILTER,
   accountOp,
   authReplyTopic,
   isValidCorrelationId,
   listAccounts,
   redeemToken,
+  tokenReplyTopic,
 } from "./accounts";
 import {
   type AdmissionState,
@@ -859,7 +860,7 @@ export class Daemon {
     await (await this.broker.subscribeStream(legacyProgress, () => {}))();
     void this.leaseRequestLoop();
     void this.drainLoop(AUTH_OPS_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
-    void this.drainLoop(AUTH_REDEEM_TOPIC, (m) => this.onAuthRequest(m.topic, m.payload));
+    void this.drainLoop(TOKEN_REDEEM_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
       this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`),
@@ -3517,10 +3518,11 @@ export class Daemon {
   }
 
   /**
-   * An account op (`volley/_system/auth/ops/<username>`) or a token redemption
-   * (`volley/_system/auth/redeem`), answered on `volley/_system/auth/replies/<correlation_id>`.
-   * The broker ACL lets only an admin account write its own ops topic, so the topic names the
-   * sender; accounts.ts checks that account's role again.
+   * An account op (`volley/_system/auth/ops/<username>`, answered on
+   * `volley/_system/auth/replies/<correlation_id>`) or a token redemption
+   * (`volley-auth/redeem/<id>`, answered on `volley-auth/redeem/<id>/reply`, the one topic that
+   * token's login may read). The broker ACL lets only an admin account write its own ops topic,
+   * so the topic names the sender; accounts.ts checks that account's role again.
    */
   private async onAuthRequest(topic: string, raw: string): Promise<void> {
     if (raw === "") return; // our own clear (below), or anyone's
@@ -3535,7 +3537,8 @@ export class Daemon {
       this.log(`dropped auth request on ${topic}: no usable correlation_id`);
       return;
     }
-    const replyTo = authReplyTopic(cid);
+    const tokenId = topic.startsWith("volley-auth/") ? (topic.split("/")[2] ?? "") : null;
+    const replyTo = tokenId !== null ? tokenReplyTopic(tokenId) : authReplyTopic(cid);
     const send = (r: AuthReply) =>
       this.publish(replyTo, this.envelope(AUTH_CHANNEL, "ack", r, cid), false);
     const key = `${topic}/${cid}`;
@@ -3545,8 +3548,8 @@ export class Daemon {
     const exec = this.opts.authExec ?? realExec;
     let out: AuthOutcome;
     try {
-      if (topic === AUTH_REDEEM_TOPIC) {
-        out = await redeemToken(exec, payload);
+      if (tokenId !== null) {
+        out = await redeemToken(exec, tokenId, payload);
       } else {
         const sender = topic.split("/")[4] ?? "";
         this.authSeen.set(sender, new Date().toISOString());
@@ -3680,7 +3683,7 @@ export class Daemon {
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
-          error: `${op} is answered only on volley/_system/auth/ops/<your username> (token_redeem: volley/_system/auth/redeem)`,
+          error: `${op} is answered only on volley/_system/auth/ops/<your username> (token_redeem: volley-auth/redeem/<token id>)`,
         };
       default:
         return { ok: false, error: `unknown op '${op}'` };

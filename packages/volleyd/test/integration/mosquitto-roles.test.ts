@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { AUTH_REDEEM_TOPIC, authOpsTopic } from "../../src/accounts";
+import { authOpsTopic, tokenRedeemTopic, tokenReplyTopic } from "../../src/accounts";
 
 /**
  * The account role templates (`volley auth add --role`) and a token login (`volley auth token`)
@@ -53,7 +53,12 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
 
   beforeAll(async () => {
     observer = await connectAs("volleyd");
-    stop = await observer.subscribeStream("volley/#", (m) => seen.push(m.payload));
+    const stopTree = await observer.subscribeStream("volley/#", (m) => seen.push(m.payload));
+    const stopAuth = await observer.subscribeStream("volley-auth/#", (m) => seen.push(m.payload));
+    stop = async () => {
+      await stopTree();
+      await stopAuth();
+    };
   });
 
   afterAll(async () => {
@@ -99,16 +104,61 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
     expect(seen).not.toContain(steerOwn);
   });
 
-  it("a token login may only ask to be redeemed; nobody else writes the redeem topic", async () => {
+  it("a token login writes only its own redeem topic; nobody else writes it", async () => {
     const redeem = probe("token-redeem");
+    const otherToken = probe("token-as-other-token");
     const tokenMailbox = probe("token-mailbox");
+    const tokenStatus = probe("token-own-status");
+    const tokenRegistry = probe("token-registry");
+    const tokenLease = probe("token-lease");
     const steerRedeem = probe("steer-redeem");
-    await attempt("redeem-0000abcd", AUTH_REDEEM_TOPIC, redeem);
+    await attempt("redeem-0000abcd", tokenRedeemTopic("0000abcd"), redeem);
+    await attempt("redeem-0000abcd", tokenRedeemTopic("0000beef"), otherToken);
     await attempt("redeem-0000abcd", `volley/${NS}/some-agent/mailbox`, tokenMailbox);
-    await attempt("steer-test", AUTH_REDEEM_TOPIC, steerRedeem);
+    // The shared %u patterns would grant these; the token block denies the whole tree.
+    await attempt("redeem-0000abcd", `volley/${NS}/redeem-0000abcd/status`, tokenStatus);
+    await attempt("redeem-0000abcd", "volley/_system/registry/redeem-0000abcd", tokenRegistry);
+    await attempt("redeem-0000abcd", "volley/_system/leases/gpu/requests", tokenLease);
+    await attempt("steer-test", tokenRedeemTopic("0000abcd"), steerRedeem);
     expect(await delivered(redeem)).toBe(true);
-    expect(seen).not.toContain(tokenMailbox);
-    expect(seen).not.toContain(steerRedeem);
+    for (const p of [
+      otherToken,
+      tokenMailbox,
+      tokenStatus,
+      tokenRegistry,
+      tokenLease,
+      steerRedeem,
+    ]) {
+      expect(seen, p).not.toContain(p);
+    }
+  });
+
+  it("a token login reads only its own reply topic: not volley/#, not another token's", async () => {
+    const c = await connectAs("redeem-0000abcd");
+    clients.push(c);
+    const got: string[] = [];
+    await c.subscribeStream("#", (m) => got.push(m.payload));
+    const tree = probe("tree-status");
+    const otherReply = probe("other-token-reply");
+    const otherRequest = probe("other-token-request");
+    const ownReply = probe("own-reply");
+    await attempt("volleyd", `volley/${NS}/some-agent/status`, tree);
+    await attempt("volleyd", tokenReplyTopic("0000beef"), otherReply);
+    await attempt("volleyd", tokenRedeemTopic("0000beef"), otherRequest);
+    await attempt("volleyd", tokenReplyTopic("0000abcd"), ownReply);
+    for (let i = 0; i < 40 && !got.includes(ownReply); i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(got).toEqual([ownReply]);
+  });
+
+  it("nobody but volleyd writes a token's reply topic", async () => {
+    const forged = probe("forged-token-reply");
+    for (const who of ["admin-test", "steer-test", "supervisor-test", "redeem-0000abcd"]) {
+      await attempt(who, tokenReplyTopic("0000abcd"), forged);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(seen).not.toContain(forged);
   });
 
   it("a supervisor account writes the tree but cannot impersonate an admin", async () => {
@@ -118,19 +168,6 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
     await attempt("supervisor-test", authOpsTopic("admin-test"), asAdmin);
     expect(await delivered(own)).toBe(true);
     expect(seen).not.toContain(asAdmin);
-  });
-
-  it("a token login can read the tree (the shared read pattern) until it is pruned", async () => {
-    const c = await connectAs("redeem-0000abcd");
-    clients.push(c);
-    const got: string[] = [];
-    await c.subscribeStream(`volley/${NS}/+/status`, (m) => got.push(m.payload));
-    const status = probe("status-seen-by-token");
-    await attempt("admin-test", `volley/${NS}/some-agent/status`, status);
-    for (let i = 0; i < 20 && !got.includes(status); i++) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(got).toContain(status);
   });
 
   it("only the fixed volleyd identity writes an answer on the reply topic", async () => {

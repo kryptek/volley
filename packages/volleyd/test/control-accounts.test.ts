@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
-import { AUTH_REDEEM_TOPIC, authOpsTopic, authReplyTopic } from "../src/accounts";
+import { authOpsTopic, authReplyTopic, tokenRedeemTopic, tokenReplyTopic } from "../src/accounts";
 import type { Daemon } from "../src/daemon";
 import { Daemon as DaemonClass } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
@@ -15,7 +15,14 @@ import { type FakeExec, fakeExec } from "./helpers/fake-exec";
 
 const NS = "accounts-test";
 const pw = (u: string) => `${u}-pw`;
-const USERS = ["volleyd", "admin-1", "steer-1", "redeem-0000abcd", "redeem-0000beef"];
+const USERS = [
+  "volleyd",
+  "admin-1",
+  "steer-1",
+  "redeem-0000abcd",
+  "redeem-0000beef",
+  "redeem-51600001",
+];
 
 /**
  * What `volley auth` does, in memory: the daemon only ever runs it through the fenced exec, so
@@ -109,8 +116,9 @@ interface Tok {
 function canPublish(user: string | undefined, topic: string): boolean {
   if (user === "volleyd") return true;
   if (topic.startsWith("volley/_system/auth/ops/")) return topic === authOpsTopic(user ?? "");
-  if (topic === AUTH_REDEEM_TOPIC) return user?.startsWith("redeem-") === true;
-  if (user?.startsWith("redeem-")) return false;
+  // A token login writes only its own redeem topic; nobody else writes under volley-auth/.
+  if (user?.startsWith("redeem-")) return topic === tokenRedeemTopic(user.slice("redeem-".length));
+  if (topic.startsWith("volley-auth/")) return false;
   return !topic.startsWith("volley/_system/auth/");
 }
 
@@ -168,7 +176,11 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     topic: string,
     payload: Record<string, unknown>,
     timeoutMs = 3000,
-    { cid = randomUUID(), retain = false }: { cid?: string; retain?: boolean } = {},
+    {
+      cid = randomUUID(),
+      retain = false,
+      replyTopic = authReplyTopic(cid),
+    }: { cid?: string; retain?: boolean; replyTopic?: string } = {},
   ): Promise<Record<string, unknown> | null> {
     const c = new VolleyBroker();
     const agentId = `desk-${randomUUID().slice(0, 6)}`;
@@ -178,7 +190,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     const reply = new Promise<Record<string, unknown> | null>((r) => {
       resolve = r;
     });
-    await c.subscribeStream(authReplyTopic(cid), ({ payload: raw }) => {
+    await c.subscribeStream(replyTopic, ({ payload: raw }) => {
       const env = parseEnvelope(raw);
       if (env?.type === "ack" && env.agent_id === "volleyd" && env.correlation_id === cid) {
         resolve(env.payload as Record<string, unknown>);
@@ -452,13 +464,35 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
   });
 
   describe("token_redeem", () => {
-    const redeem = (user: string, token: string) =>
-      request(user, AUTH_REDEEM_TOPIC, {
-        op: "token_redeem",
-        token,
-        label: "Desk on mac",
-        reply_key: replyKey,
-      });
+    /** Redeem `token` as token `id`'s own login, on its own topic; the answer on its reply topic. */
+    const redeemVia = (id: string, token: string) =>
+      request(
+        `redeem-${id}`,
+        tokenRedeemTopic(id),
+        { op: "token_redeem", token, label: "Desk on mac", reply_key: replyKey },
+        3000,
+        { replyTopic: tokenReplyTopic(id) },
+      );
+    const redeem = (user: string, token: string) => redeemVia(user.slice("redeem-".length), token);
+
+    it("a token is redeemed only on its own topic: another token's topic is refused", async () => {
+      const r = await redeemVia("0000beef", "vly_admin_0000abcd_secret");
+      expect(r).toMatchObject({ ok: false, op: "token_redeem" });
+      expect(r?.error).toContain("0000beef");
+      expect(auth.calls.some((c) => c.argv[2] === "redeem")).toBe(false);
+    });
+
+    it("the answer goes only to the token's reply topic, not the correlation_id one", async () => {
+      const cid = randomUUID();
+      const onCid = request(
+        "redeem-0000abcd",
+        tokenRedeemTopic("0000abcd"),
+        { op: "token_redeem", token: "vly_admin_0000abcd_secret", label: "x", reply_key: replyKey },
+        1500,
+        { cid },
+      );
+      expect(await onCid).toBeNull();
+    });
 
     it("a valid token mints an admin credential bound to the label and burns the token", async () => {
       const r = await redeem("redeem-0000abcd", "vly_admin_0000abcd_secret");
@@ -540,15 +574,17 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       label: "Owner's phone",
     });
 
-    // Who publishes the redeem request does not matter to the daemon, only the token: the
-    // token's own `redeem-<id>` login is the CLI's to mint, so use a known one here.
+    // The token's own `redeem-<id>` login is the CLI's to mint; the fake's first id is 51600001.
+    const id = secret.token.split("_")[2] as string;
+    expect(id).toBe("51600001");
     const redeemAs = () =>
-      request("redeem-0000abcd", AUTH_REDEEM_TOPIC, {
-        op: "token_redeem",
-        token: secret.token,
-        label: "iPhone",
-        reply_key: replyKey,
-      });
+      request(
+        `redeem-${id}`,
+        tokenRedeemTopic(id),
+        { op: "token_redeem", token: secret.token, label: "iPhone", reply_key: replyKey },
+        3000,
+        { replyTopic: tokenReplyTopic(id) },
+      );
     const redeemed = await redeemAs();
     expect(redeemed).toMatchObject({ ok: true, result: { role: "steer" } });
     const twice = await redeemAs();

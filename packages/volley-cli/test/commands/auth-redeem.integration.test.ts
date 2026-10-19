@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type AuthDeps, auth, realAuthDeps } from "../../src/commands/auth";
+import { tokenReplyTopic } from "../../src/commands/auth-roles";
 import { makeBufferIO } from "../../src/io";
 
 /**
@@ -133,9 +134,10 @@ describe.skipIf(!RUN)("volley auth redeem against a private mosquitto", () => {
       token: string;
       username: string;
     };
+    const reply = tokenReplyTopic(issued.username.slice("redeem-".length));
     const client = await connect("desk-redeem", issued.username, issued.token);
     const got: string[] = [];
-    await client.subscribeStream("volley/_system/auth/replies/it-0001", (m) => got.push(m.payload));
+    await client.subscribeStream(reply, (m) => got.push(m.payload));
 
     const redeemed = await run(["redeem", "--label", "Desk on laptop", "--json"], issued.token);
     expect(redeemed.code, redeemed.stderr).toBe(0);
@@ -147,7 +149,7 @@ describe.skipIf(!RUN)("volley auth redeem against a private mosquitto", () => {
       password: string;
     };
     const daemon = await connect("volleyd-it", daemonCreds.username, daemonCreds.password);
-    await daemon.publish("volley/_system/auth/replies/it-0001", "answer", {
+    await daemon.publish(reply, "answer", {
       qos: 1,
       retain: false,
     });
