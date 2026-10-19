@@ -1,0 +1,8 @@
+{
+  "files": [
+    { "path": "packages/volleyd/src/daemon.ts", "additions": 42, "deletions": 3 },
+    { "path": "packages/volleyd/src/overlap.ts", "additions": 30, "deletions": 0 },
+    { "path": "packages/volleyd/src/pipeline.ts", "additions": 12, "deletions": 4 },
+    { "path": "packages/volleyd/README.md", "additions": 8, "deletions": 1 }
+  ]
+}

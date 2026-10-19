@@ -74,6 +74,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       release?: "local" | "missing" | "after-fetch";
       /** The task's `host:` (default local). */
       taskHost?: string;
+      /** The repo's origin: unknown to the fake (default), absent, or without the branch. */
+      origin?: "none" | "unpushed";
     } = {},
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     clock = fakeClock(T0);
@@ -113,6 +115,23 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
               ? { stdout: `${"2".repeat(40)}\n` }
               : { code: 1 },
         );
+    }
+    if (o.origin !== undefined) {
+      // A real git config to read: origin absent, or present but without the release branch.
+      mkdirSync(join(repo, ".git"));
+      writeFileSync(
+        join(repo, ".git", "config"),
+        `[core]\n\tbare = false\n${o.origin === "unpushed" ? '[remote "origin"]\n\turl = https://example.com/repo.git\n' : ""}`,
+      );
+      fake
+        .on(["git", "-C", repo, "rev-parse", "--git-common-dir"], { stdout: ".git\n" })
+        .on(["git", "-C", repo, "fetch"], {
+          code: 128,
+          stderr:
+            o.origin === "unpushed"
+              ? "fatal: couldn't find remote ref release/w1\n"
+              : "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n",
+        });
     }
     gitCalls = () => fake.argvs(["git", "-C", repo]);
     creds = memoryCredentials();
@@ -176,7 +195,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42${o.taskHost !== undefined ? `, host: ${o.taskHost}` : ""} }\nconfig: { worktree_root: ${join(env.home, "wt")}, ${config} }\n`,
     );
     const r = await runCli(["run", wave], env.env);
-    if (o.release === "missing") return r;
+    if (o.release === "missing" || o.origin !== undefined) return r;
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
     return r;
@@ -438,6 +457,37 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect(daemon.snapshot("w1")).toBeNull();
     // it fetched before it looked
     expect(gitCalls().map((a) => a[3])).toContain("fetch");
+  });
+
+  it("run refuses a local-only repo (no origin) while require_fresh_base is on, in one line with the fix", async () => {
+    const r = await setup("spawn_retry_max: 5", { origin: "none" });
+    const repo = join(realpathSync(env.home), "repo");
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain(
+      `BASE_STALE: ${repo} has no origin remote, so volleyd cannot fetch release/w1 before it cuts each agent's worktree (require_fresh_base is on).`,
+    );
+    expect(r.stderr).toContain(`git -C ${repo} remote add origin <url>`);
+    expect(r.stderr).toContain("volleyd config set require_fresh_base false");
+    // git's own multi-line advice is not repeated.
+    expect(r.stderr).not.toContain("Could not read from remote repository");
+    // Nothing admitted: no 45 minutes of retries per task.
+    expect(existsSync(join(env.home, "waves", "w1", "journal.jsonl"))).toBe(false);
+  });
+
+  it("run refuses a release branch origin does not have (never pushed), with the push to run", async () => {
+    const r = await setup("spawn_retry_max: 5", { origin: "unpushed" });
+    const repo = join(realpathSync(env.home), "repo");
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain(`BASE_STALE: origin has no release/w1 for ${repo}`);
+    expect(r.stderr).toContain(`git -C ${repo} push -u origin release/w1`);
+    expect(existsSync(join(env.home, "waves", "w1", "journal.jsonl"))).toBe(false);
+  });
+
+  it("require_fresh_base off: a local-only repo is accepted (cut from the local copy)", async () => {
+    const r = await setup("spawn_retry_max: 5, require_fresh_base: false", { origin: "none" });
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    await event("task_admitted");
   });
 
   it("run accepts a release branch pushed from another clone but not fetched yet: it fetches first", async () => {

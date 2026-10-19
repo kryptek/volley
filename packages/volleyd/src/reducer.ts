@@ -36,8 +36,11 @@ export interface WaveRecord {
   overrides: TunablesPatch;
   /** Every decision opened in this wave (open and resolved), by id. */
   decisions: Record<string, DecisionRecord>;
-  /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
-  steers: Record<TaskId, { seq: number; message_id: string }>;
+  /**
+   * Per task: the last steering's `seq` (numbers the next one) and the last one a later steer may
+   * supersede (`message_id`; an additive steer such as a merge nudge never becomes it).
+   */
+  steers: Record<TaskId, { seq: number; message_id?: string }>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
   pipeline: Record<TaskId, TaskPipeline>;
   /**
@@ -195,6 +198,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+        // A worktree cut from the release branch (not a pipeline start ref): its base.
+        if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
@@ -307,9 +312,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "steering_sent":
       if (ev.task !== undefined && ev.data.type === "steering") {
+        // An additive steer takes the next seq but leaves what the next steer supersedes.
+        const prev = next.steers[ev.task]?.message_id;
+        const id = isAdditiveSteer(ev.data.reason) ? prev : (ev.data.message_id as string);
         next.steers[ev.task] = {
           seq: ev.data.seq as number,
-          message_id: ev.data.message_id as string,
+          ...(id !== undefined ? { message_id: id } : {}),
         };
       }
       break;
@@ -459,6 +467,12 @@ export function raiseBy(answer: string): number | null {
   const n = m !== null ? Number(m[1]) : 0;
   return n >= 1 ? n : null;
 }
+
+/**
+ * A steer that adds to what the agent was told and replaces nothing: a merge nudge (SPEC
+ * §4.6.15). It never carries `supersedes`, and no later steer supersedes it.
+ */
+export const isAdditiveSteer = (reason: unknown): boolean => reason === "merge_nudge";
 
 /** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */
 function surfacedAlarms(p: TaskPipeline | undefined): NonNullable<TaskState["alarms"]> {

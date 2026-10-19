@@ -300,10 +300,51 @@ describe("SshTmuxHost", () => {
     expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
   });
 
-  it("a failed fetch or worktree add is WORKTREE_FAILED", async () => {
+  it("a failed fetch is BASE_STALE (require_fresh_base); off, the box's copy is used and reported", async () => {
+    const tip = "c".repeat(40);
     const r = remote((s) =>
       argvIs("git", "-C", SPEC.repo, "fetch")(s)
         ? { code: 128, stderr: "couldn't find remote ref release/w1" }
+        : argvIs("git", "-C", "/wt", "rev-parse", "--is-inside-work-tree")(s)
+          ? { code: 128 }
+          : argvIs("git", "-C", "/wt", "rev-parse", "HEAD")(s)
+            ? { stdout: `${tip}\n` }
+            : undefined,
+    );
+    const spec = {
+      repo: SPEC.repo,
+      path: "/wt",
+      branch: "b",
+      base: "release/w1",
+      releaseBase: true,
+    };
+    const err = (await r.host.prepareWorktree(spec).then(
+      () => null,
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(err).toMatchObject({ code: "BASE_STALE" });
+    expect(err.message).toContain("couldn't find remote ref release/w1");
+    expect(err.message).toContain("volleyd config set require_fresh_base false");
+    expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
+    // A start ref (a reviewer's head), not the release base: the plain worktree failure.
+    const plain = (await r.host.prepareWorktree({ ...spec, releaseBase: false }).then(
+      () => null,
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(plain).toMatchObject({ code: "WORKTREE_FAILED" });
+    expect(plain.message).not.toContain("require_fresh_base");
+    const res = await r.host.prepareWorktree({ ...spec, requireFresh: false });
+    expect(res.base).toEqual({
+      sha: tip,
+      fresh: false,
+      fetch_error: "couldn't find remote ref release/w1",
+    });
+  });
+
+  it("a failed worktree add is WORKTREE_FAILED", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "worktree")(s)
+        ? { code: 128, stderr: "fatal: already exists" }
         : argvIs("git", "-C", "/wt", "rev-parse")(s)
           ? { code: 128 }
           : undefined,

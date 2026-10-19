@@ -37,6 +37,9 @@ export const CONFIG_DEFAULTS: Tunables = {
   credential_sweep_interval_s: 600,
   claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
+  // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
+  require_fresh_base: true,
+  placement: { nudge_on_merge: "files" },
 };
 
 /**
@@ -237,4 +240,7 @@ export const DAEMON_DEFAULTS = {
   machine_heartbeat_ms: 30_000,
   /** A machine whose record is older than this is down: its tunnel is marked down, spawns park. */
   machine_down_after_ms: 90_000,
+  // --- Fleet: merge nudge (overlap.ts) ---
+  /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
+  nudge_files_shown: 5,
 } as const;

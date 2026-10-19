@@ -94,6 +94,18 @@ export interface Tunables {
   /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
   claude: { default_account: string | null; warn_at_pct: number };
   hosts: Record<string, RemoteHostConfig>;
+  // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
+  /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
+  require_fresh_base: boolean;
+  placement: PlacementConfig;
+}
+
+/** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
+export type NudgeOnMerge = "files" | "all" | "off";
+
+/** Automatic placement across machines (config `placement`, SPEC §4.6.15). */
+export interface PlacementConfig {
+  nudge_on_merge: NudgeOnMerge;
 }
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
@@ -207,6 +219,8 @@ export interface TaskState {
   next_retry_at?: string | null;
   /** Gated without reviews because its wave-file pipeline lists no review stage. */
   reviews_skipped_by_plan?: boolean;
+  /** The release-branch commit the task's current worktree was cut from (`agent_spawned`). */
+  base_sha?: string;
 }
 
 export interface WaveSpec {
@@ -314,6 +328,8 @@ export const WAVE_EVENT_TYPES = [
   "peer_invited",
   "peer_joined",
   "peer_removed",
+  // Fleet (SPEC §4.6.15): a running implementer told that a sibling PR merged (pipeline.ts).
+  "merge_nudge_sent",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

@@ -8,15 +8,18 @@ import { volleydHome } from "../config-store";
 import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { criticalPaths } from "../scheduler";
+import type { Tunables } from "../types";
 import { loadWaveFile } from "../wave-file";
-import { checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
+import { checkFreshBase, checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
 const HELP = `Usage: volleyd validate <wave.yaml>
 
 Parse and validate a wave file locally (no daemon needed). Exit 0 when valid, 1 with
 path-qualified errors when not. When the wave's repo is on this machine, its release branch must
 exist there, locally or as origin/<branch> (RELEASE_BRANCH_MISSING otherwise); a repo that is
-not here is noted, and the daemon checks it at \`run\`.
+not here is noted, and the daemon checks it at \`run\`. With require_fresh_base on (the
+default), the repo must also have an origin remote (BASE_STALE otherwise: volleyd fetches the
+release branch before every worktree it cuts).
 
 It also prints the brief preface every agent of the wave would get — its path, size and sha256
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
@@ -25,18 +28,21 @@ default; \`run\` re-checks it against the running daemon's config).
 `;
 
 /**
- * `brief_preface_max_bytes` as \`run\` would see it with no `config:` in the wave: the operator's
+ * A top-level tunable as \`run\` would see it with no `config:` in the wave: the operator's
  * `$VOLLEYD_HOME/config.yaml` over the default. A file that does not parse is the daemon's to
  * report; validate falls back to the default.
  */
-function globalPrefaceCap(env: CommandArgs["env"]): number {
-  const fallback = CONFIG_DEFAULTS.brief_preface_max_bytes;
+function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base">(
+  env: CommandArgs["env"],
+  key: K,
+  valid: (v: unknown) => boolean,
+): Tunables[K] {
+  const fallback = CONFIG_DEFAULTS[key];
   const file = join(volleydHome(env), "config.yaml");
   if (!existsSync(file)) return fallback;
   try {
-    const v = (parse(readFileSync(file, "utf-8")) as { brief_preface_max_bytes?: unknown } | null)
-      ?.brief_preface_max_bytes;
-    return typeof v === "number" && Number.isInteger(v) ? v : fallback;
+    const v = (parse(readFileSync(file, "utf-8")) as Record<string, unknown> | null)?.[key];
+    return valid(v) ? (v as Tunables[K]) : fallback;
   } catch {
     return fallback;
   }
@@ -81,11 +87,21 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
         io.stderr(`volleyd validate: ${missing}${hint}\n`);
         return EXIT.ERROR;
       }
+      // require_fresh_base on and no origin: every spawn would be refused. Say so now.
+      const fresh =
+        wave.config.require_fresh_base ??
+        globalTunable(env, "require_fresh_base", (v) => typeof v === "boolean");
+      const stale = fresh ? await checkFreshBase(exec, repo, wave.release_branch) : null;
+      if (stale !== null) {
+        io.stderr(`volleyd validate: ${stale}\n`);
+        return EXIT.ERROR;
+      }
     }
     const prefacePath = briefPrefacePath(wave.repo, wave.brief_preface);
     const preface = readBriefPreface(
       prefacePath,
-      wave.config.brief_preface_max_bytes ?? globalPrefaceCap(env),
+      wave.config.brief_preface_max_bytes ??
+        globalTunable(env, "brief_preface_max_bytes", (v) => Number.isInteger(v)),
     );
     const prefaceLine =
       preface === null

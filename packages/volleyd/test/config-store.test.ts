@@ -76,6 +76,15 @@ describe("ConfigStore layering", () => {
     expect(c.get("hard_ceiling", "w1")).toBe(8);
   });
 
+  it("placement.nudge_on_merge: the default, config.yaml, then a wave's config: (what the pipeline reads)", () => {
+    expect(open().get("placement.nudge_on_merge")).toBe("files");
+    writeFileSync(join(home, "config.yaml"), "placement:\n  nudge_on_merge: all\n");
+    const c = open();
+    c.setWaveOverrides("w1", { placement: { nudge_on_merge: "off" } });
+    expect(c.get("placement.nudge_on_merge", "w1")).toBe("off");
+    expect(c.get("placement.nudge_on_merge", "w2")).toBe("all");
+  });
+
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });

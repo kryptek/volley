@@ -13,7 +13,7 @@ import {
 import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
-import { EXCLUDE_LINES } from "../worktree";
+import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
 import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
@@ -215,14 +215,26 @@ export class SshTmuxHost implements RemoteHost {
       return { path: spec.path, branch, reused: true };
     }
     // The box's clone must have the release branch as it is now: fetch it, cut from origin's.
+    // A failed fetch refuses the spawn unless require_fresh_base is off (then: the box's copy);
+    // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
     const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
-    if (fetch.code !== 0) {
+    const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
-        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetch.stderr.trim()}`,
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
+        { host: this.name, repo: spec.repo },
+      );
+    }
+    if (fetchError !== null && spec.requireFresh !== false) {
+      throw new SpawnError(
+        "BASE_STALE",
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}; require_fresh_base is on, so no worktree is cut from the box's copy. ${freshBaseFix(spec.base)}`,
         {
           host: this.name,
           repo: spec.repo,
+          branch: spec.base,
+          fetch_error: fetchError,
         },
       );
     }
@@ -249,7 +261,23 @@ export class SshTmuxHost implements RemoteHost {
       );
     }
     await this.excludeVolleyFiles(spec.repo);
-    return { path: spec.path, branch: spec.branch, reused: false };
+    // The commit it was cut from (the task's base_sha): the new branch's tip, as it is now.
+    const tip = spec.releaseBase === true ? await git("-C", spec.path, "rev-parse", "HEAD") : null;
+    const sha = tip?.code === 0 ? tip.stdout.trim() : "";
+    return {
+      path: spec.path,
+      branch: spec.branch,
+      reused: false,
+      ...(sha !== ""
+        ? {
+            base: {
+              sha,
+              fresh: fetchError === null,
+              ...(fetchError !== null ? { fetch_error: fetchError } : {}),
+            },
+          }
+        : {}),
+    };
   }
 
   /** Append `EXCLUDE_LINES` to the box repo's shared `info/exclude`, each at most once. */

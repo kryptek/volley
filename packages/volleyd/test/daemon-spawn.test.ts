@@ -5,12 +5,14 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { cleanupWave } from "../src/commands/cleanup";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent } from "../src/types";
+import { addWorktree } from "../src/worktree";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
@@ -35,6 +37,8 @@ describe("daemon spawn loop", () => {
   let waits: JournalWait;
   /** The simulated session's publishes (teardown waits for them). */
   const sessions = new Set<Promise<void>>();
+  /** With `freshBase`: while true, `git fetch origin release/w1` fails (offline). */
+  let fetchFails = false;
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
@@ -51,7 +55,15 @@ describe("daemon spawn loop", () => {
     );
 
   /** A daemon with the spawner on fakes, and wave w1 (one task, T1) submitted to it. */
-  async function setup(o: { trusted?: boolean } = {}) {
+  async function setup(
+    o: {
+      trusted?: boolean;
+      /** Cut worktrees through the real release-base resolution (worktree.ts) on the fake exec. */
+      freshBase?: boolean;
+      /** Extra per-wave `config:` entries. */
+      config?: string;
+    } = {},
+  ) {
     env = await makeDaemonEnv();
     repo = realpathSync(env.home);
     repo = join(repo, "repo");
@@ -104,8 +116,19 @@ describe("daemon spawn loop", () => {
         ]),
       })
       .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
+    fake.on(["git", "-C", repo, "fetch"], () =>
+      fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {},
+    );
     creds = memoryCredentials();
     host = fakeHost(fake);
+    if (o.freshBase === true) {
+      const prepare = host.prepareWorktree.bind(host);
+      host.prepareWorktree = async (spec) => {
+        const r = await addWorktree(fake.exec, spec);
+        await prepare(spec);
+        return r;
+      };
+    }
     // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
     host.onLaunch = () => {
       const session = (async () => {
@@ -144,13 +167,14 @@ describe("daemon spawn loop", () => {
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
       wave,
-      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")} }\n`,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
     );
     const r = await runCli(["run", wave], env.env);
     expect(r.exitCode).toBe(0);
   }
 
   afterEach(async () => {
+    fetchFails = false;
     await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
@@ -235,6 +259,55 @@ describe("daemon spawn loop", () => {
       0,
     );
     expect(fx.argvs()).toEqual([["git", "-C", repo, "worktree", "remove", worktree]]);
+  });
+
+  it("a failed release-branch fetch refuses with BASE_STALE, backs off like any spawn failure, and the retry records base_sha", async () => {
+    fetchFails = true;
+    await setup({ freshBase: true });
+    const failed = await event("spawn_failed");
+    expect(failed?.data).toMatchObject({ code: "BASE_STALE", role: "implementer", attempt: 1 });
+    expect(failed?.data.message).toContain("fatal: unable to access origin");
+    expect(typeof failed?.data.next_retry_at).toBe("string");
+    await waits.settled();
+    expect(host.launches).toHaveLength(0);
+    expect(daemon.snapshot("w1")?.tasks[0]).toMatchObject({
+      stage: "queued",
+      last_error: { code: "BASE_STALE" },
+    });
+
+    // The network is back: the backoff's retry fetches, cuts the worktree and records its base.
+    fetchFails = false;
+    await clock.advance(DAEMON_DEFAULTS.spawn_retry_base_ms);
+    await daemon.tick();
+    const spawned = await event("agent_spawned");
+    expect(spawned?.data.base_sha).toBe("1".repeat(40));
+    await event("agent_registered");
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.tasks[0]?.base_sha).toBe("1".repeat(40));
+    const state = (await env.retained("volley/_waves/w1/state")) as {
+      payload: { tasks: { base_sha?: string }[] };
+    };
+    expect(state.payload.tasks[0]?.base_sha).toBe("1".repeat(40));
+  });
+
+  it("require_fresh_base off: a failed fetch spawns from the local copy and journals a BASE_STALE warning", async () => {
+    fetchFails = true;
+    await setup({ freshBase: true, config: "require_fresh_base: false" });
+    const spawned = await event("agent_spawned");
+    expect(spawned?.data.base_sha).toBe("1".repeat(40));
+    await event("agent_registered");
+    await waits.settled();
+    expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
+    const warning = journal().find(
+      (e) => e.type === "alarm_raised" && e.data.code === "BASE_STALE",
+    );
+    expect(warning?.data).toMatchObject({
+      code: "BASE_STALE",
+      severity: "warning",
+      role: "implementer",
+      base_sha: "1".repeat(40),
+      fetch_error: "fatal: unable to access origin",
+    });
   });
 
   it("cleanup skips worktrees whose agent is not retired", async () => {

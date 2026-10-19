@@ -21,6 +21,11 @@ export interface WorktreeSpec {
    * the local branch and `origin/<base>` is current (worktree.ts `resolveReleaseBase`).
    */
   releaseBase?: boolean;
+  /**
+   * With `releaseBase`: a failed fetch refuses the spawn (SpawnError BASE_STALE) instead of
+   * cutting from the host's last copy (the `require_fresh_base` tunable; default true).
+   */
+  requireFresh?: boolean;
 }
 
 export interface WorktreeResult {
@@ -28,6 +33,11 @@ export interface WorktreeResult {
   branch: string;
   /** True when the worktree already existed (a relaunch into the same lock) and was reused. */
   reused: boolean;
+  /**
+   * A release base (`releaseBase`, a new worktree): the commit it was cut from, and whether the
+   * fetch before it succeeded (`fetch_error`: why not, when it did not).
+   */
+  base?: { sha: string; fresh: boolean; fetch_error?: string };
 }
 
 /** One terminal to open: the command is run by the pane's shell, nothing else is typed. */
