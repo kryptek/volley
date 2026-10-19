@@ -21,6 +21,11 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps its own tunnel as a
  *     service), records the name in `$VOLLEYD_HOME/peers.json`, and answers with the broker's
  *     address and the sealed `{username, password}`.
+ *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the paired machine `for`: it
+ *     re-pairs that machine only. `peer_join {..., name: <for>, replace: true}` with it rotates the
+ *     peer account's password and rewrites `hosts.<name>` (the join's fields; a hand-set
+ *     `max_agents` or `drain` stays) instead of refusing the configured name, and journals
+ *     `peer_joined { replaced: true }`. An unbound code for a configured name is still refused.
  *   - `peer_remove {name}` → revokes the peer account, removes `hosts.<name>` and clears the
  *     machine's retained record; the machine's tunnel service stops at its next check. Only a
  *     paired machine (or a `peer` account): a host configured by hand is never removed.
@@ -58,6 +63,8 @@ interface StoredCode {
   hash: string;
   expires_at: string;
   by: string;
+  /** `invite --for`: the paired machine this code re-pairs (and the only name it joins as). */
+  for?: string;
 }
 
 const hashCode = (code: string, salt: Buffer) => scryptSync(normalizeCode(code), salt, 32);
@@ -120,6 +127,15 @@ export class PeerService {
         `ttl_s must be a whole number of seconds in 1..${DAEMON_DEFAULTS.peer_code_ttl_s}`,
       );
     }
+    const bound = p.for;
+    if (bound !== undefined) {
+      if (typeof bound !== "string" || !isValidAgentId(bound)) {
+        return refuse("for must be a machine name ([a-z0-9][a-z0-9_-]{0,62})");
+      }
+      if (!Object.hasOwn(this.paired(), bound)) {
+        return refuse(`no paired machine named "${bound}" to re-pair`);
+      }
+    }
     const code = (this.deps.randomCode ?? newPairingCode)();
     const salt = randomBytes(16);
     const expiresAt = new Date(this.deps.now() + ttl * 1000).toISOString();
@@ -130,10 +146,16 @@ export class PeerService {
         hash: hashCode(code, salt).toString("base64url"),
         expires_at: expiresAt,
         by,
+        ...(bound !== undefined ? { for: bound } : {}),
       },
     ]);
-    this.deps.journal({ type: "peer_invited", data: { by, expires_at: expiresAt } });
-    return { ok: true, result: { expires_at: expiresAt, ttl_s: ttl }, sealed: seal(key, { code }) };
+    const forField = bound !== undefined ? { for: bound } : {};
+    this.deps.journal({ type: "peer_invited", data: { by, expires_at: expiresAt, ...forField } });
+    return {
+      ok: true,
+      result: { expires_at: expiresAt, ttl_s: ttl, ...forField },
+      sealed: seal(key, { code }),
+    };
   }
 
   async join(p: Fields, by: string): Promise<PeerReply> {
@@ -157,26 +179,44 @@ export class PeerService {
     const key = replyKey(p.reply_key);
     if (typeof key === "string") return refuse(key);
     if (typeof p.code !== "string") return refuse("code is required");
-    if (Object.hasOwn(this.deps.hosts(), name)) {
-      return refuse(`a host named "${name}" is already configured; remove it first`);
+    const configured = Object.hasOwn(this.deps.hosts(), name);
+    const taken = refuse(
+      `a host named "${name}" is already configured; remove it first, or re-pair it with a code from \`volley peer invite --for ${name}\` and \`volley peer join --replace\``,
+    );
+    if (configured && p.replace !== true) return taken;
+    // Matched, not yet burned: a refusal below leaves the code usable.
+    const entry = this.match(p.code);
+    if (entry === null) return refuse("invalid or expired pairing code");
+    if (entry.for !== undefined && entry.for !== name) {
+      return refuse(`this pairing code re-pairs ${entry.for} only (join with --name ${entry.for})`);
     }
-    if (!this.burn(p.code)) return refuse("invalid or expired pairing code");
+    const replacing = entry.for === name && p.replace === true;
+    if (configured && !replacing) return taken;
+    let existing = false;
+    if (replacing) {
+      const accounts = await listAccounts(this.deps.exec);
+      if (typeof accounts === "string") return refuse(accounts);
+      const account = accounts.find((a) => a.name === name);
+      if (account !== undefined && account.role !== "peer") {
+        return refuse(`"${name}" is a ${account.role} account, not a peer: not replaced`);
+      }
+      existing = account !== undefined;
+    }
+    this.consume(entry);
 
-    const created = await volleyAuth(this.deps.exec, [
-      "add",
-      name,
-      "--role",
-      "peer",
-      "--kind",
-      "machine",
-      "--json",
-    ]);
+    // Re-pairing an existing account rotates its password; anything else is a new account.
+    const created = await volleyAuth(
+      this.deps.exec,
+      existing
+        ? ["rotate", name, "--json"]
+        : ["add", name, "--role", "peer", "--kind", "machine", "--json"],
+    );
     if (!created.ok) return refuse(`${created.error} (the code is used up: ask for a new one)`);
     const username = created.out?.username;
     const password = created.out?.password;
     if (typeof username !== "string" || typeof password !== "string") {
-      await volleyAuth(this.deps.exec, ["revoke", name]);
-      return refuse("volley auth add printed no credentials");
+      if (!existing) await volleyAuth(this.deps.exec, ["revoke", name]);
+      return refuse(`volley auth ${existing ? "rotate" : "add"} printed no credentials`);
     }
     const host: RemoteHostConfig = {
       target: p.target,
@@ -187,7 +227,8 @@ export class PeerService {
     };
     const applied = this.deps.setHost(name, host, by);
     if (!applied.applied) {
-      await volleyAuth(this.deps.exec, ["revoke", name]);
+      // Never revoke an account this join did not create (a re-pairing keeps the old machine's).
+      if (!existing) await volleyAuth(this.deps.exec, ["revoke", name]);
       const why = applied.rejected.map((r) => `${r.path}: ${r.reason}`).join("; ");
       return { ...refuse(`hosts.${name} rejected: ${why}`), rejected: applied.rejected };
     }
@@ -203,6 +244,7 @@ export class PeerService {
         target: p.target,
         ...(typeof p.os === "string" ? { os: p.os } : {}),
         ...(typeof p.cores === "number" ? { cores: p.cores } : {}),
+        ...(replacing ? { replaced: true } : {}),
       },
     });
     return {
@@ -289,29 +331,29 @@ export class PeerService {
     writeJson(this.deps.pairedFile, { peers });
   }
 
-  /** Burn the code if it is outstanding; a wrong one counts towards revoking them all. */
-  private burn(code: string): boolean {
-    const codes = this.live();
+  /** The outstanding code `code` is, or null; a wrong one counts towards revoking them all. */
+  private match(code: string): StoredCode | null {
     const n = normalizeCode(code);
-    const idx = isPairingCode(`${n.slice(0, 4)}-${n.slice(4)}`)
-      ? codes.findIndex((c) =>
+    const found = isPairingCode(`${n.slice(0, 4)}-${n.slice(4)}`)
+      ? this.live().find((c) =>
           timingSafeEqual(
             hashCode(n, Buffer.from(c.salt, "base64url")),
             Buffer.from(c.hash, "base64url"),
           ),
         )
-      : -1;
-    if (idx >= 0) {
-      codes.splice(idx, 1);
-      this.write(codes);
-      return true;
-    }
+      : undefined;
+    if (found !== undefined) return found;
     this.failures++;
     if (this.failures >= DAEMON_DEFAULTS.peer_join_max_failures) {
       this.failures = 0;
       this.write([]);
     }
-    return false;
+    return null;
+  }
+
+  /** Burn a matched code. */
+  private consume(entry: StoredCode): void {
+    this.write(this.live().filter((c) => c.hash !== entry.hash));
   }
 
   /** The unexpired codes on disk. */

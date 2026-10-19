@@ -1142,10 +1142,17 @@ On the new machine (bun, claude, gh, git, tmux and a volley checkout already the
 ssh to the daemon's machine):
 
 ```sh
+volley peer doctor --repo ~/src/example-repo     # optional: join runs it anyway
 volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 ```
 
-`join` checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
+`join` first runs `volley peer doctor` (the volley-cli README's "`volley peer doctor`": tools and
+their versions, `claude` and `bun` on the non-interactive ssh `PATH`, the volley checkout, the
+clone and its origin, GitHub push access, the Claude sign-in and folder trust, memory and disk).
+A failing `block` check (no bun, no tmux, `claude` off the ssh `PATH`, no clone or no `--repo`)
+stops the join *before* the code is used, so it stays valid while you fix things
+(`volley peer doctor --fix` applies the safe fixes); `warn` checks are printed and the join goes
+on. Then it checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
 daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
 there needs it; if not, the join stops before the code is used) and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
@@ -1186,7 +1193,12 @@ and join again with a new code.
 backoff) and publishes the machine's retained record on `volley/_system/machines/<name>` every
 30 s through it: os, cores, load averages, its tmux session count, `tunnel: up`. Its LWT is the
 record with `tunnel: down` (built when it connected: volleyd keeps the last heartbeat's
-`last_seen`, load and agents). volleyd only counts records for a configured host, and marks a
+`last_seen`, load and agents). Every record also carries the Fleet fields (SPEC §4.6.15):
+`kind: peer`, `memory`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat,
+and the last doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`,
+`claude_plan`), `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor
+every 600 s (`PEER_DEFAULTS.doctor_interval_s`); the version it compares the checkout against is
+the supervisor's readiness verdict's `requirements.volley`. volleyd only counts records for a configured host, and marks a
 machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
@@ -1198,6 +1210,22 @@ admin op) revokes the account, removes `hosts.<name>` and clears the record. It 
 paired machine or a `peer` account: a host you configured by hand is refused. The machine's service stops on its own
 the next time the broker refuses the revoked account (exit 0, so the service manager leaves it
 stopped).
+
+**Re-pairing.** A machine that is already paired (a new ssh target, a lost `peer.json`, a fresh
+install) re-pairs without being removed first. On the daemon's machine, as an admin:
+
+```sh
+volley peer invite --for box-a     # a code that re-pairs box-a only
+```
+
+and on the machine, `volley peer join <code> --to dev@supervisor --name box-a --replace --repo ...`.
+volleyd (`peer_invite { for }`, `peer_join { replace: true }`) keeps the binding in the code's
+hashed entry; with such a code it rotates the `peer` account's password (`volley auth rotate`)
+and rewrites `hosts.box-a` with the join's fields (a hand-set `max_agents` or `drain` stays)
+instead of refusing the configured name, and journals `peer_joined { ..., replaced: true }`. The
+machine rewrites `~/.volley/peer.json` and restarts its service. An ordinary code for a configured
+name is still refused, `replace` or not; a `--for` code joins under its own name only; neither
+refusal uses the code up. A name whose account is not a `peer` is never replaced.
 
 ---
 

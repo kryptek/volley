@@ -20,6 +20,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
 - [`volley lease`](#volley-lease)
+- [`volley peer`](#volley-peer)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -59,7 +60,7 @@ volley --help
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
 | `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
-| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
+| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
 
@@ -202,6 +203,61 @@ echo "$TOKEN" | volley auth redeem --label "Desk on mac" --json  # what volleyd 
 - **One-time tokens** (`token`, `signin-link`) are stored only as a sha256 hash in `tokens.json`. Each is also the password of a temporary login named by the token id, holding the `token` role: it may only write `volley-auth/redeem/<id>` and read `volley-auth/redeem/<id>/reply`, so the Desk can redeem it through volleyd (SPEC §4.6.10) while the broker keeps refusing anonymous clients. `redeem` reads the token from stdin, burns it and creates an account with the token's role (refusing, token unburned, if that `<role>-<id>` name is taken; `add` reserves that shape). The login outlives the redemption by about a minute so the redeeming client, still connected as it, gets its answer; the next account command after that, or after the token expires, deletes it (volleyd runs `volley auth list` every minute for this). `accounts.json` and `tokens.json` are replaced by rename, never rewritten in place.
 
 Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/volley`, e.g. `/opt/homebrew/etc/mosquitto/volley`, or `/var/snap/mosquitto/common/volley` on a snap-only machine; the broker never reads it). `--broker-url` (env `VOLLEY_BROKER_URL`) names the broker. The admin password reaches `mosquitto_ctrl dynsec init` on its command line once, so it is briefly visible in `ps` while that child runs.
+
+---
+
+## `volley peer`
+
+Pairs a second machine with `volleyd`'s, so waves can run agents there (SPEC §4.6.14; the volleyd
+README's "Paired machines" has the whole walk-through). On the supervisor's machine, as an admin
+account: `volley peer invite` (a one-time code), `volley peer invite --for <name>` (a code that
+re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name>`. On the
+machine to pair: `volley peer join <code> --to <user@supervisor> --repo <clone>` (add
+`--name <name> --replace` with a `--for` code), then the `volley peer run` service it installs.
+
+### `volley peer doctor`
+
+The one command that says whether this machine can run an agent, and what to do if not:
+
+```sh
+volley peer doctor                       # one line per check: ✓ ok, ! warning, ✗ blocks agents
+volley peer doctor --fix                 # print the plan, ask, apply the safe fixes, check again
+volley peer doctor --fix --yes --clone --origin https://github.com/example-org/example-repo
+volley peer doctor --json                # the machine record's doctor fields (SPEC §4.6.15)
+```
+
+| Check | Severity | What it looks at |
+|---|---|---|
+| `tool.<name>` | block (`gh`: warn) | `bun git gh tmux nc base64 cmp claude` installed (`command -v`), and their versions |
+| `bun_on_path`, `claude_on_path` | block | the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets (sshd's default `PATH` through your login shell's non-interactive startup) |
+| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin` and `bun install --frozen-lockfile --dry-run` is clean |
+| `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
+| `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
+| `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with `GIT_TERMINAL_PROMPT=0` |
+| `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
+| `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
+| `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
+| `machine.memory`, `machine.disk` | warn | available memory (macOS: `memory_pressure`), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
+
+**Fixes.** `--fix` runs only what writes inside the volley checkout (`bun install
+--frozen-lockfile`; with a known requirement, `git fetch origin --tags && git checkout --detach
+v<version> && bun install --frozen-lockfile`) and, with `--clone` and `--origin`, one `git clone`
+into an empty `--repo`. It prints its plan and asks first unless `--yes`, and a second run reports
+each of those as "already done". Everything else is printed for you to run: installing a tool,
+the `sudo ln -s ~/.local/bin/claude /usr/local/bin/claude` that puts Claude Code on the ssh
+`PATH` (macOS: a line in `~/.zshenv`), `gh auth login && gh auth setup-git`, the Claude sign-in,
+a wrong `origin` (explained, never changed). Exit status 1 while a `block` check fails.
+
+**No secrets.** The doctor keeps states and plain labels only: exit codes of `gh auth status`,
+the `loggedIn` and plan of `claude auth status`, an origin with any credentials stripped. Nothing
+it prints or publishes carries a token (it also scrubs anything token-shaped), and `--origin`
+refuses a URL with a password or token in it.
+
+**Where it runs.** `volley peer join` runs it first and stops on a `block` check before the
+pairing code is used, so the code stays valid while you fix things; `warn` checks are printed and
+the join goes on. `volley peer run` runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s) and
+puts its last result (`versions`, `auth`, `repo`, `checks` without fix text, `doctor_at`) in
+every heartbeat, with `kind: peer`, `memory`, `disk` and `uptime_s` read fresh each time.
 
 ---
 

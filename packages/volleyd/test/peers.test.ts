@@ -57,6 +57,14 @@ function fakeAuth(): FakeExec & { accounts: Map<string, string> } {
         if (!accounts.delete(name)) return { code: 1, stderr: `volley auth: no account "${name}"` };
         return {};
       }
+      case "rotate": {
+        const name = argv[3] as string;
+        if (!accounts.has(name)) return { code: 1, stderr: `volley auth: no account "${name}"` };
+        n++;
+        return {
+          stdout: JSON.stringify({ username: name, password: `pw-${n}`, role: accounts.get(name) }),
+        };
+      }
       default:
         return { code: 2, stderr: "unexpected" };
     }
@@ -271,6 +279,104 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
     const r = await peers.join(joinFields(code), "cli");
     expect(r).toMatchObject({ ok: false, error: expect.stringContaining("already") });
     expect(auth.accounts.has("box-a")).toBe(false);
+  });
+
+  describe("re-pairing: invite --for and join { replace }", () => {
+    const inviteFor = async (name: string) => {
+      const r = await peers.invite({ reply_key: REPLY_KEY, for: name }, "admin-1");
+      expect(r.ok, r.error).toBe(true);
+      return unseal(r.sealed).code as string;
+    };
+    const paired = async () => {
+      await peers.join(joinFields(await invite()), "cli");
+      events = [];
+    };
+
+    it("a --for code redeemed with replace: true replaces the account's password and hosts.<name>", async () => {
+      await paired();
+      const code = await inviteFor("box-a");
+      expect(events.at(-1)).toEqual({
+        type: "peer_invited",
+        data: { by: "admin-1", expires_at: expect.any(String), for: "box-a" },
+      });
+      const r = await peers.join(
+        joinFields(code, { target: "dev@box-a.new", repo: "/srv/other", replace: true }),
+        "cli",
+      );
+      expect(r.ok, r.error).toBe(true);
+      // A new password for the same account: rotated, never added twice.
+      expect(unseal(r.sealed)).toEqual({ username: "box-a", password: "pw-2" });
+      expect(auth.argvs(["volley", "auth", "rotate"])).toEqual([
+        ["volley", "auth", "rotate", "box-a", "--json"],
+      ]);
+      expect(auth.argvs(["volley", "auth", "add"])).toHaveLength(1);
+      expect(hosts["box-a"]).toMatchObject({ target: "dev@box-a.new", repo: "/srv/other" });
+      expect(events.at(-1)).toEqual({
+        type: "peer_joined",
+        data: {
+          by: "cli",
+          name: "box-a",
+          target: "dev@box-a.new",
+          os: "linux",
+          cores: 8,
+          replaced: true,
+        },
+      });
+      // Burned like any code.
+      const again = await peers.join(joinFields(code, { replace: true }), "cli");
+      expect(again).toMatchObject({ ok: false, error: "invalid or expired pairing code" });
+    });
+
+    it("an unbound code for a configured name is still refused, replace or not, before it is burned", async () => {
+      await paired();
+      const code = await invite();
+      for (const extra of [{}, { replace: true }]) {
+        const r = await peers.join(joinFields(code, extra), "cli");
+        expect(r).toMatchObject({ ok: false, error: expect.stringContaining("already") });
+      }
+      expect(auth.argvs(["volley", "auth", "rotate"])).toEqual([]);
+      // Not burned: it still pairs another name.
+      expect((await peers.join(joinFields(code, { name: "box-b" }), "cli")).ok).toBe(true);
+    });
+
+    it("a --for code cannot join under another name (and stays usable for its own)", async () => {
+      await paired();
+      const code = await inviteFor("box-a");
+      for (const name of ["box-b", "box-c"]) {
+        const r = await peers.join(joinFields(code, { name, replace: true }), "cli");
+        expect(r).toMatchObject({ ok: false, error: expect.stringContaining("box-a") });
+      }
+      expect(auth.accounts.has("box-b")).toBe(false);
+      expect((await peers.join(joinFields(code, { replace: true }), "cli")).ok).toBe(true);
+    });
+
+    it("a --for code without replace: true is refused for the configured name", async () => {
+      await paired();
+      const code = await inviteFor("box-a");
+      const r = await peers.join(joinFields(code), "cli");
+      expect(r).toMatchObject({ ok: false, error: expect.stringContaining("--replace") });
+    });
+
+    it("invite --for names a paired machine", async () => {
+      for (const name of ["box-a", "Bad Name"]) {
+        const r = await peers.invite({ reply_key: REPLY_KEY, for: name }, "admin-1");
+        expect(r).toMatchObject({ ok: false });
+      }
+      expect(codes).toHaveLength(2);
+    });
+
+    it("replace never touches an account that is not a peer", async () => {
+      hosts = { "admin-1": { target: "dev@x" } };
+      // Paired by hand into peers.json: the name exists as an admin account.
+      peers = make();
+      (peers as unknown as { writePaired: (p: unknown) => void }).writePaired({
+        "admin-1": { target: "dev@x", joined_at: "2026-10-19T09:00:00.000Z" },
+      });
+      const code = await inviteFor("admin-1");
+      const r = await peers.join(joinFields(code, { name: "admin-1", replace: true }), "cli");
+      expect(r).toMatchObject({ ok: false, error: expect.stringContaining("not a peer") });
+      expect(auth.argvs(["volley", "auth", "rotate"])).toEqual([]);
+    });
   });
 
   it("a config the host entry cannot go into revokes the account it just created", async () => {
