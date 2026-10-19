@@ -19,6 +19,7 @@ import {
   VOLLEY_ROLES,
   type VolleyRole,
   roleName,
+  tokenIdOf,
 } from "../auth/roles";
 import { accountVerb, readAccounts } from "../commands/auth-accounts";
 import { makeBufferIO } from "../io";
@@ -131,8 +132,26 @@ async function brokerState(link: AdminLink): Promise<BrokerState> {
   return { missingRoles, drifted, missingIds, partialIds };
 }
 
+/**
+ * What a new identity's password comes to. The terminal prints each one once; over the Desk
+ * (`remote`) volleyd and coordinator get theirs in their files only, and desk's is never shown:
+ * the Desk issues one when a device needs it (`newDeskPassword`).
+ */
+function passwordNote(missing: readonly FixedIdentity[], remote: boolean): string {
+  if (missing.length === 0) return "";
+  if (!remote) return ` (password${missing.length === 1 ? "" : "s"} shown once)`;
+  return missing.includes("desk")
+    ? " (desk's password is not shown here: Setup & Security › New desk password issues one, shown once)"
+    : "";
+}
+
 /** "Create Volley's 8 shared roles and the identities …" for what is missing. */
-function createSummary(s: BrokerState, adminFileMissing: boolean, adminFile: string): string {
+function createSummary(
+  s: BrokerState,
+  adminFileMissing: boolean,
+  adminFile: string,
+  remote: boolean,
+): string {
   const parts: string[] = [];
   if (s.missingRoles.length === VOLLEY_ROLES.length) {
     parts.push(`Volley's ${VOLLEY_ROLES.length} shared roles`);
@@ -150,9 +169,7 @@ function createSummary(s: BrokerState, adminFileMissing: boolean, adminFile: str
   }
   const what: string[] = [];
   if (parts.length > 0) {
-    what.push(
-      `Create ${parts.join(" and ")}${s.missingIds.length > 0 ? ` (password${s.missingIds.length === 1 ? "" : "s"} shown once)` : ""}`,
-    );
+    what.push(`Create ${parts.join(" and ")}${passwordNote(s.missingIds, remote)}`);
   }
   if (s.partialIds.length > 0) what.push(`Give ${list(s.partialIds)} their missing roles`);
   // init writes it along with the identities; alone, it is the whole change.
@@ -196,7 +213,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
     adminFileMissing
   ) {
     plan.changes.push({
-      summary: createSummary(state, adminFileMissing, adminFile),
+      summary: createSummary(state, adminFileMissing, adminFile, ctx.deliverToken !== undefined),
       detail: "volley auth init --no-config --coordinator-file --volleyd-file",
       apply: () => runInit(ctx),
     });
@@ -214,16 +231,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
     plan.changes.push({
       summary: `New password for ${r.user}, written to ${r.file} (disconnects its sessions)`,
       apply: async () => {
-        const password = deps.generatePassword();
-        const l = await openAdmin(ctx.auth);
-        try {
-          const [a] = await l.session.run([cmd.setClientPassword(r.user, password)]);
-          if (a === undefined || classify(a) !== "ok") {
-            throw new Error(`setClientPassword ${r.user}: ${a?.error ?? "no answer"}`);
-          }
-        } finally {
-          await l.close().catch(() => {});
-        }
+        const password = await newPassword(ctx, r.user);
         const owner = r.user === "volleyd" ? sudoUser(ctx) : null;
         ensureOwnedDir(deps, dirname(r.file), owner);
         writeSecret(r.file, `${JSON.stringify({ username: r.user, password })}\n`);
@@ -309,17 +317,65 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
   return plan;
 }
 
+/** Give a fixed identity a new password on the broker (its sessions are disconnected). */
+async function newPassword(ctx: SetupContext, user: FixedIdentity): Promise<string> {
+  const password = ctx.auth.deps.generatePassword();
+  const l = await openAdmin(ctx.auth);
+  try {
+    const [a] = await l.session.run([cmd.setClientPassword(user, password)]);
+    if (a !== undefined && classify(a) === "missing") {
+      throw new Error(`no ${user} login on the broker yet: apply the accounts step first`);
+    }
+    if (a === undefined || classify(a) !== "ok") {
+      throw new Error(`setClientPassword ${user}: ${a?.error ?? "no answer"}`);
+    }
+  } finally {
+    await l.close().catch(() => {});
+  }
+  return password;
+}
+
+/**
+ * A new password for the shared `desk` login (the one `volley dash` and a Desk without a token
+ * sign in as). No file keeps it, so this is how the Desk issues one when a device needs it: the
+ * caller shows it once. Signs out whatever uses the old one.
+ */
+export const newDeskPassword = (ctx: SetupContext): Promise<string> => newPassword(ctx, "desk");
+
 function adminTokenChange(ctx: SetupContext): Change {
   return {
     summary:
       "Issue a one-time admin token (10 minutes, single use) to sign in to the Desk as admin",
-    detail: "volley auth token: printed here only; tokens.json keeps its hash",
+    detail:
+      ctx.deliverToken === undefined
+        ? "volley auth token: printed here only; tokens.json keeps its hash"
+        : "volley auth token: shown once, to this browser only; tokens.json keeps its hash",
     apply: async () => {
-      const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
-        withAdmin(ctx.auth, fn),
+      const deliver = ctx.deliverToken;
+      if (deliver === undefined) {
+        const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
+          withAdmin(ctx.auth, fn),
+        );
+        if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
+        return [];
+      }
+      // The token comes back as JSON on a captured stdout and goes to `deliver` only.
+      const capture = makeBufferIO({ now: () => ctx.auth.io.now() });
+      const code = await accountVerb(
+        { ...ctx.auth, io: { ...capture, stderr: ctx.auth.io.stderr } },
+        "token",
+        undefined,
+        { json: true },
+        (fn) => withAdmin(ctx.auth, fn),
       );
       if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
-      return [];
+      const { token, expires_at } = JSON.parse(capture.readStdout()) as {
+        token: string;
+        expires_at: string;
+      };
+      const tokenId = tokenIdOf(token) ?? "";
+      deliver({ token, token_id: tokenId, expires_at });
+      return [`Issued a one-time admin token (${tokenId}, until ${expires_at}).`];
     },
   };
 }

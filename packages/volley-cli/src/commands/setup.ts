@@ -1,17 +1,18 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, ensureOwnedDir, realAuthDeps, volleydHome } from "../auth/context";
+import { type AuthContext, realAuthDeps, volleydHome } from "../auth/context";
 import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
+import { appendSetupLog, setupLogFile } from "../setup/journal";
 import { planServices } from "../setup/services";
 import {
   type Planner,
@@ -20,6 +21,7 @@ import {
   type StepName,
   type StepPlan,
   fencedExec,
+  listenerUrls,
   setupFence,
 } from "../setup/step";
 import { defaultAuthDir } from "./auth";
@@ -206,17 +208,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
 
   const url = resolveBrokerUrl(str("broker-url"), env);
-  let broker: URL;
-  try {
-    broker = new URL(url);
-  } catch {
-    io.stderr(`volley setup: not a broker URL: ${url}\n`);
-    return EXIT.USAGE;
-  }
-  if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
-    io.stderr(
-      `volley setup: ${broker.protocol === "mqtts:" || broker.protocol === "wss:" ? "TLS is not supported by `volley setup` yet" : "the broker URL must be mqtt://"} (got ${url})\n`,
-    );
+  const listeners = listenerUrls(url);
+  if ("error" in listeners) {
+    io.stderr(`volley setup: ${listeners.error}\n`);
     return EXIT.USAGE;
   }
   // Every command goes through the fence: the exact commands the steps run, nothing else.
@@ -237,8 +231,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     deps,
     config: str("config") ?? layout.config,
     stateFile: str("state-file") ?? layout.stateFile,
-    tcpUrl: url,
-    wsUrl: `ws://${broker.hostname.includes(":") ? `[${broker.hostname}]` : broker.hostname}:9001`,
+    ...listeners,
     home: sudoHome ?? env.HOME ?? homedir(),
     volleydHome: volleydHome(env, sudoHome),
     repair: values.repair === true,
@@ -248,22 +241,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     deskPort: Number(portText),
   };
 
-  const logFile = join(ctx.volleydHome, "setup.log");
-  const journal = (step: StepName, event: string, summary?: string) => {
-    try {
-      const owner = typeof invoker === "object" ? invoker : null;
-      ensureOwnedDir(deps.auth, ctx.volleydHome, owner);
-      appendFileSync(
-        logFile,
-        `${JSON.stringify({ at: io.now().toISOString(), step, event, ...(summary !== undefined ? { summary } : {}) })}\n`,
-        { mode: 0o600 },
-      );
-      // Under sudo the journal is the invoking user's, like the rest of $VOLLEYD_HOME.
-      if (owner !== null) deps.auth.chown(logFile, owner.uid, owner.gid);
-    } catch {
-      // The journal is a record, not a gate: an unwritable home never stops the setup.
-    }
-  };
+  const logFile = setupLogFile(ctx.volleydHome);
+  const journal = (step: StepName, event: string, summary?: string) =>
+    appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
     `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,

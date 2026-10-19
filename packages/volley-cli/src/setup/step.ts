@@ -24,6 +24,26 @@ export type SetupExec = (
   opts?: { cwd?: string; env?: Record<string, string | undefined>; input?: string },
 ) => Promise<ExecResult>;
 
+/**
+ * The broker's two listeners as setup probes them: the mqtt:// URL itself and the WebSocket
+ * listener on the same host's port 9001; or why setup cannot use the URL.
+ */
+export function listenerUrls(url: string): { tcpUrl: string; wsUrl: string } | { error: string } {
+  let broker: URL;
+  try {
+    broker = new URL(url);
+  } catch {
+    return { error: `not a broker URL: ${url}` };
+  }
+  if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
+    return {
+      error: `${broker.protocol === "mqtts:" || broker.protocol === "wss:" ? "TLS is not supported by `volley setup` yet" : "the broker URL must be mqtt://"} (got ${url})`,
+    };
+  }
+  // An IPv6 hostname keeps its brackets (WHATWG URL).
+  return { tcpUrl: url, wsUrl: `ws://${broker.hostname}:9001` };
+}
+
 /** What an anonymous MQTT CONNECT to a listener got. */
 export type AnonymousProbe = "refused" | "accepted" | "unreachable";
 
@@ -75,6 +95,18 @@ export interface SetupContext {
   lan?: boolean;
   deskHost: string;
   deskPort: number;
+  /**
+   * Where the accounts step's one-time admin token goes. Unset (the terminal): printed on
+   * stdout. volleyd sets it to seal the token to the Desk that asked (`setup_apply`).
+   */
+  deliverToken?: (t: IssuedToken) => void;
+}
+
+/** A one-time admin token as `volley auth token --json` prints it. */
+export interface IssuedToken {
+  token: string;
+  token_id: string;
+  expires_at: string;
 }
 
 export interface Change {

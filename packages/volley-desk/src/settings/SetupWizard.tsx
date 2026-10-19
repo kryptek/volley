@@ -125,16 +125,18 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   /** A new plan for another LAN answer is on its way. */
   const [replanning, setReplanning] = useState(false);
   const live = useRef(true);
-  useEffect(
-    () => () => {
+  // Set again on every mount: StrictMode mounts, unmounts and mounts again.
+  useEffect(() => {
+    live.current = true;
+    return () => {
       live.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const fetchPlan = useCallback(
     async (lanChoice: boolean | null): Promise<Fetched> => {
-      const r = await ops.request("setup_plan", {
+      // Never left spinning: a request that fails outright shows Try again.
+      const r = await requestOrFail(ops, "setup_plan", {
         ...(lanChoice !== null ? { lan: lanChoice } : {}),
         ...(repair ? { repair: true } : {}),
       });
@@ -194,6 +196,11 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   const steps = load.state === "ready" ? load.plan.steps : [];
   const at = STEPS[current - 1] as (typeof STEPS)[number];
   const stepPlan = steps.find((s) => s.step === at.step);
+  /** A step left behind with changes only a terminal can make is not done: it asks for attention. */
+  const needsTerminal = (n: number) =>
+    steps
+      .find((s) => s.step === STEPS[n - 1]?.step)
+      ?.changes.some((c) => c.terminal !== undefined) === true;
   const blockedBefore = steps.find(
     (s) => s.blocked !== undefined && STEPS.findIndex((x) => x.step === s.step) < current - 1,
   );
@@ -211,7 +218,8 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   const apply = async (s: SetupStepPlan) => {
     setApplying({ state: "busy" });
     const lanChoice = s.step === "security" && s.lan !== undefined ? (lan ?? s.lan.planned) : lan;
-    const r = await ops.request(
+    const r = await requestOrFail(
+      ops,
       "setup_apply",
       {
         step: s.step,
@@ -311,6 +319,21 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
         step={current}
         disableStepIndicators
         showFooter={false}
+        renderStepIndicator={({ step: n, currentStep }) => (
+          <StepBadge
+            n={n}
+            title={STEPS[n - 1]?.title ?? ""}
+            status={
+              n === currentStep
+                ? "active"
+                : n > currentStep
+                  ? "upcoming"
+                  : needsTerminal(n)
+                    ? "attention"
+                    : "complete"
+            }
+          />
+        )}
       >
         {STEPS.map((s) => (
           <Step key={s.step} title={s.title} description={s.description}>
@@ -370,6 +393,45 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
         </div>
       )}
     </Shell>
+  );
+}
+
+/** `ops.request`, with a request that fails outright answered as a refusal. */
+async function requestOrFail(
+  ops: AuthOps,
+  ...args: Parameters<AuthOps["request"]>
+): Promise<AuthAnswer> {
+  try {
+    return await ops.request(...args);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+type BadgeStatus = "complete" | "attention" | "active" | "upcoming";
+
+/** The Stepper's own badge, plus `attention`: a step passed with a terminal's work still to do. */
+function StepBadge({ n, title, status }: { n: number; title: string; status: BadgeStatus }) {
+  return (
+    <span
+      className="stepper__badge"
+      data-status={status}
+      role="img"
+      aria-label={`Step ${n}: ${title}${status === "attention" ? ", needs a terminal" : ""}`}
+      aria-current={status === "active" ? "step" : undefined}
+    >
+      {status === "complete" ? (
+        <span className="stepper__check">
+          <HugeiconsIcon icon={Tick02Icon} size={16} strokeWidth={2.4} />
+        </span>
+      ) : status === "attention" ? (
+        <span className="stepper__glyph">
+          <HugeiconsIcon icon={Alert02Icon} size={14} strokeWidth={2} />
+        </span>
+      ) : (
+        n
+      )}
+    </span>
   );
 }
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { encodeQr, matrixText, qrPath } from "../src/lib/qr";
 import { SetupWizard } from "../src/settings/SetupWizard";
@@ -396,6 +397,58 @@ describe("SetupWizard", () => {
     expect(await screen.findByText(/did not answer/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await planned()).toBeInTheDocument();
+  });
+
+  it("shows the plan under StrictMode (its effects run, are cleaned up and run again)", async () => {
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    render(
+      <StrictMode>
+        <SetupWizard ops={ops} deskUrl={DESK} onClose={() => {}} />
+      </StrictMode>,
+    );
+    expect(await planned()).toBeInTheDocument();
+  });
+
+  it("never spins on a plan request that fails outright: it offers Try again", async () => {
+    let n = 0;
+    const { ops } = fakeOps({
+      setup_plan: () => {
+        if (n++ === 0) throw new Error("the connection closed");
+        return { ok: true, result: PLAN };
+      },
+    });
+    wizard(ops);
+    expect(await screen.findByText(/the connection closed/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await planned()).toBeInTheDocument();
+  });
+
+  it("does not tick a step left with changes only a terminal can make", async () => {
+    const terminal = {
+      reason: "it needs sudo",
+      command: "sudo volley setup --step security --no-lan",
+    };
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("security", (s) => ({
+          changes: s.changes.map((c) => ({ ...c, terminal })),
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    const badge = (n: number, t: string) => screen.getByLabelText(new RegExp(`^Step ${n}: ${t}`));
+    // Broker is done; Security still waits on a terminal, so it asks for attention instead.
+    expect(badge(1, "Broker")).toHaveAttribute("data-status", "complete");
+    expect(badge(2, "Security")).toHaveAttribute("data-status", "attention");
+    expect(screen.getByLabelText(/^Step 2: Security/)).toHaveAccessibleName(
+      "Step 2: Security, needs a terminal",
+    );
+    expect(badge(3, "Accounts")).toHaveAttribute("data-status", "active");
+    expect(badge(4, "Services")).toHaveAttribute("data-status", "upcoming");
   });
 });
 

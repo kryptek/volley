@@ -148,6 +148,11 @@ export const DYNSEC_ADMIN_USER = "dynsec-admin";
 /** A token login's username: the token id, 8 hex digits (so `%u` names its topics). */
 export const TOKEN_ID_RE = /^[0-9a-f]{8}$/;
 
+/** A one-time token's id: the `<id>` of `vly_<kind>_<id>_<secret>`; null when it is not one. */
+export function tokenIdOf(token: string): string | null {
+  return /^vly_[a-z]+_([0-9a-f]{8})_/.exec(token)?.[1] ?? null;
+}
+
 /**
  * Ids `add-agent` refuses because the role's `volley/+/%u/…` grants would carry them into
  * reserved or foreign topics: with %u=`registry`, `volley/+/%u/status` matches

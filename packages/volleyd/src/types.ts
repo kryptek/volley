@@ -286,6 +286,11 @@ export const WAVE_EVENT_TYPES = [
   "account_revoked",
   "signin_link_issued",
   "token_redeemed",
+  // The setup ops (setup-ops.ts): a step applied for the Desk, a one-time admin token issued, the
+  // shared desk login's new password issued.
+  "setup_step_applied",
+  "admin_token_issued",
+  "desk_password_issued",
   // Claude account profiles (src/claude/): the registry and sign-ins in `_system`; a move in its wave.
   "claude_account_added",
   "claude_signin_started",

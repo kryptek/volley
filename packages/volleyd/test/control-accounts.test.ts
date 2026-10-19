@@ -84,6 +84,13 @@ function fakeAuth(): FakeExec & { accounts: Map<string, string>; tokens: Map<str
           expires_at: "2026-10-18T12:10:00.000Z",
         });
       }
+      case "token": {
+        n++;
+        const id = `0000c0d${n}`;
+        const token = `vly_admin_${id}_t${n}`;
+        tokens.set(token, { id, role: "admin", state: "fresh" });
+        return ok({ token, username: id, expires_at: "2026-10-18T12:10:00.000Z" });
+      }
       case "redeem": {
         const t = tokens.get((opts.input ?? "").trim());
         if (t === undefined) return fail("volley auth: invalid token");
@@ -235,6 +242,38 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     const ev = systemEvents().find((e) => e.type === "account_created");
     expect(ev?.data).toEqual({ by: "admin-1", name: "phone", role: "steer" });
     expect(typeof ev?.at).toBe("string");
+  });
+
+  it("admin_token from an admin runs `volley auth token --json`, seals the token, journals its id", async () => {
+    const r = await op("admin-1", { op: "admin_token" });
+    expect(r).toMatchObject({
+      ok: true,
+      op: "admin_token",
+      result: { token_id: "0000c0d1", expires_at: "2026-10-18T12:10:00.000Z" },
+    });
+    expect(JSON.stringify(r)).not.toContain("vly_admin_");
+    expect(unseal(r?.sealed)).toEqual({ token: "vly_admin_0000c0d1_t1" });
+    expect(auth.argvs(["volley", "auth", "token"])).toEqual([
+      ["volley", "auth", "token", "--json"],
+    ]);
+    const ev = systemEvents().find((e) => e.type === "admin_token_issued");
+    expect(ev?.data).toEqual({
+      by: "admin-1",
+      token_id: "0000c0d1",
+      expires_at: "2026-10-18T12:10:00.000Z",
+    });
+    expect(JSON.stringify(systemEvents())).not.toContain("vly_admin_");
+  });
+
+  it("admin_token is refused for a steer sender and without a usable reply_key, before it runs", async () => {
+    const steer = await op("steer-1", { op: "admin_token" });
+    expect(steer).toMatchObject({ ok: false, op: "admin_token" });
+    expect(steer?.error).toMatch(/steer-1.*steer.*admin/);
+    const keyless = await request("admin-1", authOpsTopic("admin-1"), { op: "admin_token" });
+    expect(keyless).toMatchObject({ ok: false, op: "admin_token" });
+    expect(keyless?.error).toContain("reply_key");
+    expect(auth.argvs(["volley", "auth", "token"])).toEqual([]);
+    expect(systemEvents().some((e) => e.type === "admin_token_issued")).toBe(false);
   });
 
   it("the same op from a steer sender is refused with a reason, and nothing runs", async () => {
