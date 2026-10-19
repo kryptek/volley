@@ -1,11 +1,12 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { claudeRoot } from "../../src/claude/profiles";
 import { ControlClient } from "../../src/control";
 import { NS } from "../helpers/daemon-env";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import { withEnv } from "../helpers/with-env";
 
 /** agent_move_account through a real daemon: cancel, stop, retire, respawn under the profile. */
 
@@ -97,13 +98,9 @@ describe("agent_move_account (daemon)", () => {
   it("moves to a profile in the DEFAULT root (~/.volley/claude/<acct>) through the real fence", async () => {
     // The owner's smoke: the respawn under a profile there was FENCE_DENIED (launch.sh).
     const base = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-move-")));
-    vi.stubEnv("HOME", base);
-    vi.stubEnv("VOLLEY_CLAUDE_DIR", undefined);
-    try {
+    await withEnv({ HOME: base, VOLLEY_CLAUDE_DIR: undefined }, async () => {
       expect(claudeRoot()).toBe(join(base, ".volley", "claude"));
       await moveToWork(undefined, base);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    });
   }, 20_000);
 });

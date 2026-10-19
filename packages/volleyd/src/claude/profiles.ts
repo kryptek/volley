@@ -45,10 +45,15 @@ export interface ClaudeRegistry {
   accounts: ClaudeAccount[];
 }
 
-/** `$VOLLEY_CLAUDE_DIR`, else `~/.volley/claude`. */
+/** `$VOLLEY_CLAUDE_DIR`, else `~/.volley/claude` (`$HOME` as `env` has it, else the OS's). */
 export function claudeRoot(env: Record<string, string | undefined> = process.env): string {
   const dir = env.VOLLEY_CLAUDE_DIR;
-  return dir !== undefined && dir !== "" ? dir : join(homedir(), ".volley", "claude");
+  if (dir !== undefined && dir !== "") return dir;
+  return join(
+    env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir(),
+    ".volley",
+    "claude",
+  );
 }
 
 export const registryPath = (root: string) => join(root, "accounts.json");

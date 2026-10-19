@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -15,6 +15,7 @@ import {
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { withEnvSync } from "./helpers/with-env";
 
 /** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
 const PLIST = join(
@@ -867,10 +868,8 @@ describe("single spawn point", () => {
 describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () => {
   const WT = "/wt/w1/T1-implementer";
   const seal = (claudeConfigDir: string, env: Record<string, string | undefined> = {}) => {
-    vi.stubEnv("HOME", env.HOME ?? "/home/u");
-    vi.stubEnv("VOLLEY_CLAUDE_DIR", env.VOLLEY_CLAUDE_DIR);
-    try {
-      return sealLaunchScript(
+    withEnvSync({ HOME: env.HOME ?? "/home/u", VOLLEY_CLAUDE_DIR: env.VOLLEY_CLAUDE_DIR }, () =>
+      sealLaunchScript(
         WT,
         renderLaunchScript({
           hooksDir: "/opt/volley/packages/volley-hooks",
@@ -879,10 +878,8 @@ describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () =>
           worktree: WT,
           claudeConfigDir,
         }),
-      );
-    } finally {
-      vi.unstubAllEnvs();
-    }
+      ),
+    );
   };
 
   it("allows a profile in the default root, ~/.volley/claude/<acct>", () => {
