@@ -215,6 +215,30 @@ describe.skipIf(!RUN)("Volley roles on mosquitto 2.1 Dynamic Security", () => {
     expect(await delivered(reply)).toBe(false);
   });
 
+  it("readiness: a peer cannot forge a verdict; the supervisors write it (SPEC §4.6.15)", async () => {
+    const record = probe("peer-own-record");
+    const ownVerdict = probe("peer-forges-own-readiness");
+    const otherVerdict = probe("peer-forges-other-readiness");
+    const adminVerdict = probe("admin-forges-readiness");
+    const sup = probe("supervisor-readiness");
+    const supOwn = probe("supervisor-own-readiness");
+    const daemon = probe("volleyd-readiness");
+    await attempt("peer-test", "volley/_system/machines/peer-test", record);
+    await attempt("peer-test", "volley/_system/machines/peer-test/readiness", ownVerdict);
+    await attempt("peer-test", "volley/_system/machines/other-box/readiness", otherVerdict);
+    await attempt("admin-test", "volley/_system/machines/admin-test/readiness", adminVerdict);
+    await attempt("supervisor-test", "volley/_system/machines/peer-test/readiness", sup);
+    await attempt("supervisor-test", "volley/_system/machines/supervisor-test/readiness", supOwn);
+    await attempt("volleyd", "volley/_system/machines/peer-test/readiness", daemon);
+    expect(await delivered(record)).toBe(true);
+    expect(await delivered(sup)).toBe(true);
+    expect(await delivered(supOwn)).toBe(true);
+    expect(await delivered(daemon)).toBe(true);
+    expect(await delivered(ownVerdict)).toBe(false);
+    expect(await delivered(otherVerdict)).toBe(false);
+    expect(await delivered(adminVerdict)).toBe(false);
+  });
+
   it("only an admin writes account ops, and only on its own topic", async () => {
     const own = probe("admin-own-ops");
     const other = probe("admin-other-ops");

@@ -110,7 +110,7 @@ live, so the file holds only live agents, the fixed identities and the accounts 
 | Role (broker name) | Held by | Writes |
 |---|---|---|
 | `agent` (`volley-agent`) | each dispatched agent (username = agent id) | its own `status`, `progress`, `result`, `capability`, `usage`, `control`, `_user/*` and registry entry (`%u`), lease requests, and the mailboxes of `volleyd` and `desk` (acks) |
-| `account` | the Desk, coordinators, every account | its own channels, registry entry and `volley/_system/machines/%u[/#]`, lease requests |
+| `account` | the Desk, coordinators, every account | its own channels, registry entry and machine record `volley/_system/machines/%u` (nothing under it, so no account writes a machine's readiness verdict), lease requests |
 | `desk` | the Desk, `steer` accounts | any agent's `mailbox` (steering; control requests to the daemon); reads `volley/_system/desk-probe/%c` (the Desk's resume probe, its own client id) |
 | `coordinator` | coordinator sessions | any agent's `mailbox`, standard channels and registry entry |
 | `admin` | `admin` accounts | what `coordinator` may, plus `volley/_system/auth/ops/%u` |
@@ -126,6 +126,11 @@ from this version's; `volley auth migrate --roles` shows the change and `--roles
 (its holders reconnect). On a broker initialised before v0.2.0's `usage` channel, rerun
 `volley auth init`; if it reports a drifted role, run `volley auth migrate --roles --yes`, or the
 old `volley-agent` role drops every agent's `usage` samples without an error (volleyd warns at start).
+On a broker initialised before the Fleet (v0.4.0), `volley-account` still grants
+`volley/_system/machines/%u/#`, which lets a paired machine write its own readiness verdict (SPEC
+§4.6.15): run `volley auth migrate --roles --yes`. That grant is narrowed rather than refused because
+a login's roles are checked in the order it holds them and the first matching ACL decides: a deny in
+`volley-account` would also bind a `supervisor` account, which holds `volley-account` first.
 
 Nobody but `volleyd` writes the supervisor topics SPEC §4.6 defines under `volley/_waves/*`. An
 agent login cannot write another agent's mailbox, status or registry entry; that guarantee does not

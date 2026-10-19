@@ -77,18 +77,18 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
     expect(seen).not.toContain(denied);
   });
 
-  it("peer publishes only under its own machine topic", async () => {
+  it("peer publishes only its own machine record, never its readiness verdict", async () => {
     const own = probe("peer-own");
-    const ownSub = probe("peer-own-sub");
+    const ownVerdict = probe("peer-own-readiness");
     const other = probe("peer-other");
     const mailbox = probe("peer-mailbox");
     await attempt("peer-test", "volley/_system/machines/peer-test", own);
-    await attempt("peer-test", "volley/_system/machines/peer-test/health", ownSub);
+    await attempt("peer-test", "volley/_system/machines/peer-test/readiness", ownVerdict);
     await attempt("peer-test", "volley/_system/machines/other-box", other);
     await attempt("peer-test", `volley/${NS}/some-agent/mailbox`, mailbox);
     expect(await delivered(own)).toBe(true);
-    expect(await delivered(ownSub)).toBe(true);
     expect(seen).not.toContain(other);
+    expect(seen).not.toContain(ownVerdict);
     expect(seen).not.toContain(mailbox);
   });
 
