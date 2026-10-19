@@ -321,6 +321,25 @@ describe("volley auth", () => {
     });
   });
 
+  describe("migrate --roles with a missing role", () => {
+    it("without --yes lists it and creates nothing; --yes creates it", async () => {
+      const deps = await initDeps();
+      const admin = await realAuthDeps.connectAdmin(fake.url, adminCreds());
+      await admin.session.run([{ command: "deleteRole", rolename: "volley-token" }]);
+      await admin.close();
+      const edits = fake.roleEdits();
+      const r = await run(["migrate", "--roles"], deps);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("volley-token: missing, to create");
+      expect(r.stderr).toContain("Nothing was changed");
+      expect(fake.roleEdits()).toBe(edits);
+      expect(fake.roles().has("volley-token")).toBe(false);
+
+      expect((await run(["migrate", "--roles", "--yes"], deps)).code).toBe(0);
+      expect(fake.roles().has("volley-token")).toBe(true);
+    });
+  });
+
   describe("agent logins", () => {
     it("add-agent creates a volley-agent login and prints only its password", async () => {
       const deps = await initDeps();

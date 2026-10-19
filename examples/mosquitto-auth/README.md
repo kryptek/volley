@@ -203,10 +203,14 @@ volley auth migrate --coordinator-file --volleyd-file   # then restart the broke
 
 `migrate` is `init` plus: new passwords for the fixed identities, written to the credential files
 their clients already read (`coordinator.json`, volleyd's `broker.json`; Desk users sign in again
-once); a login for every agent with a minted `.volley/agent.json` under the worktree roots (the file
-gets its new password); and a login for every account in `accounts.json` (new passwords, printed
-once). One-time tokens that were still pending cannot be migrated (only their hash is stored): issue
-new ones. Rerunning it changes nothing. Rollback: copy the config backup it names back and restart.
+once); a login for every agent with a minted `.volley/agent.json` under the worktree roots (`~/.volley/worktrees`,
+`$VOLLEYD_HOME/worktrees`, or the `--worktrees` you name; under sudo, the invoking user's home), created
+with the password the file already holds, so running agents keep working after the restart (a file
+without one gets a new password and its agent must be restarted); and a login for every account in
+`accounts.json` (new passwords, printed once). Any other user in `passwd` is named as not migrated:
+give it a login with `volley auth add` or `add-agent`. One-time tokens that were still pending cannot
+be migrated (only their hash is stored): issue new ones. Rerunning it changes nothing. Rollback: copy
+the config backup it names back and restart.
 
 [`acl.conf`](acl.conf) is the file-based ACL of earlier Volley versions, kept for reference while
 migrating; the broker no longer reads it.

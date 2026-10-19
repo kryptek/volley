@@ -26,7 +26,7 @@ import {
   cmd,
   ensureClients,
   ensureRoles,
-  roleDrift,
+  inspectRoles,
 } from "./dynsec";
 import {
   ACCOUNT_ROLE_MAP,
@@ -34,6 +34,7 @@ import {
   FIXED_CLIENTS,
   FIXED_IDENTITIES,
   VOLLEY_ROLES,
+  badAgentId,
   roleName,
 } from "./roles";
 import { BrokerVersionError, requireBrokerVersion } from "./version";
@@ -50,8 +51,9 @@ import { BrokerVersionError, requireBrokerVersion } from "./version";
  *   4. once the broker runs the plugin: the eight shared roles (created once, never edited
  *      here) and the fixed identities, with new passwords printed once and written to the
  *      credential files their clients read;
- *   5. migrate only: a login for every agent with a `.volley/agent.json` (the file gets the new
- *      password) and for every account in accounts.json.
+ *   5. migrate only: a login for every agent with a `.volley/agent.json`, keeping the password
+ *      the file already holds (the running agent keeps working), and for every account in
+ *      accounts.json; any other user in the old password file is named as not migrated.
  */
 
 export interface MigrateFlags {
@@ -246,8 +248,8 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
 
     const minted = await fixedIdentities(ctx, admin_, f, sudoUser, out);
     if (f.migrate) {
-      await migrateAgents(ctx, admin_, f, out);
-      await migrateAccounts(ctx, admin_, out, minted);
+      const agents = await migrateAgents(ctx, admin_, f, invoker, out);
+      await migrateAccounts(ctx, admin_, out, minted, agents);
     }
     if (minted.length > 0) {
       out.push(
@@ -360,18 +362,29 @@ interface AgentFile {
   [k: string]: unknown;
 }
 
-/** One login per agent with a minted `.volley/agent.json`; the file gets the new password. */
+type InvokingUser = ReturnType<AuthContext["deps"]["invokingUser"]>;
+
+/**
+ * One login per agent with a minted `.volley/agent.json`, created with the password the file
+ * already holds: the agent's MCP server and hooks read it at start, so a new one would lock every
+ * running agent out after the broker restart. A file without a password gets a new one, written
+ * to the file BEFORE the login exists (a crash in between leaves a file a rerun picks up, never a
+ * login whose password nobody knows). Returns every agent id found.
+ */
 async function migrateAgents(
   ctx: AuthContext,
   link: AdminLink,
   f: MigrateFlags,
+  invoker: InvokingUser,
   out: string[],
-): Promise<void> {
+): Promise<string[]> {
+  // Under sudo HOME is root's and env_reset drops VOLLEYD_HOME: the agents are the invoking user's.
+  const home = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const roots =
     f.worktrees.length > 0
       ? f.worktrees
       : [
-          join(ctx.env.HOME ?? homedir(), ".volley", "worktrees"),
+          join(home ?? ctx.env.HOME ?? homedir(), ".volley", "worktrees"),
           ...(ctx.env.VOLLEYD_HOME !== undefined ? [join(ctx.env.VOLLEYD_HOME, "worktrees")] : []),
         ];
   const found: { path: string; id: string; file: AgentFile }[] = [];
@@ -384,30 +397,59 @@ async function migrateAgents(
       continue;
     }
     if (typeof file.agent_id !== "string" || file.broker === undefined) continue;
+    const why = badAgentId(file.agent_id);
+    if (why !== null) {
+      out.push(`Skipped ${path}: ${why}.`);
+      continue;
+    }
     found.push({ path, id: file.agent_id, file });
   }
-  if (found.length === 0) return;
-  {
-    const exist = await link.session.run(found.map((a) => cmd.getClient(a.id)));
-    const todo = found.filter((_a, i) => classify(exist[i] as never) === "missing");
-    if (todo.length === 0) return;
-    const pws = todo.map(() => ctx.deps.generatePassword());
-    const made = await link.session.run(
-      todo.map((a, i) => cmd.createClient(a.id, pws[i] as string, ["agent"])),
+  if (found.length === 0) {
+    out.push(`No agent to migrate under ${roots.join(", ")} (--worktrees names other roots).`);
+    return [];
+  }
+  const exist = await link.session.run(found.map((a) => cmd.getClient(a.id)));
+  const todo = found.filter((_a, i) => classify(exist[i] as never) === "missing");
+  if (todo.length === 0) return found.map((a) => a.id);
+  const fresh: string[] = [];
+  const pws = todo.map((a) => {
+    const b = a.file.broker;
+    if (typeof b?.password === "string" && b.password !== "" && b.username === a.id) {
+      return b.password;
+    }
+    const pw = ctx.deps.generatePassword();
+    // Root writes the file: hand it back to whoever owned it, or the agent can no longer read it.
+    const owner = invoker !== null ? statSync(a.path) : null;
+    writeSecret(
+      a.path,
+      `${JSON.stringify({ ...a.file, broker: { username: a.id, password: pw } }, null, 2)}\n`,
     );
-    todo.forEach((a, i) => {
-      const r = made[i];
-      if (r === undefined || classify(r) !== "ok") {
-        out.push(`Could not create ${a.id}'s login: ${r?.error ?? "no answer"}.`);
-        return;
-      }
-      const next = { ...a.file, broker: { username: a.id, password: pws[i] } };
-      writeSecret(a.path, `${JSON.stringify(next, null, 2)}\n`);
-    });
+    if (owner !== null) ctx.deps.chown(a.path, owner.uid, owner.gid);
+    fresh.push(a.id);
+    return pw;
+  });
+  const made = await link.session.run(
+    todo.map((a, i) => cmd.createClient(a.id, pws[i] as string, ["agent"])),
+  );
+  const created: string[] = [];
+  todo.forEach((a, i) => {
+    const r = made[i];
+    if (r === undefined || classify(r) !== "ok") {
+      out.push(`Could not create ${a.id}'s login: ${r?.error ?? "no answer"}.`);
+    } else created.push(a.id);
+  });
+  if (created.length > 0) {
     out.push(
-      `Created ${todo.length} agent login(s) and updated their .volley/agent.json: ${todo.map((a) => a.id).join(", ")}.`,
+      `Created ${created.length} agent login(s) with the passwords their .volley/agent.json holds: ${created.join(", ")}.`,
     );
   }
+  const restart = fresh.filter((id) => created.includes(id));
+  if (restart.length > 0) {
+    out.push(
+      `Their .volley/agent.json had no password, so it now holds a new one; restart these agents: ${restart.join(", ")}.`,
+    );
+  }
+  return found.map((a) => a.id);
 }
 
 /** One login per accounts.json entry, holding its role's roles; new passwords printed once. */
@@ -416,6 +458,7 @@ async function migrateAccounts(
   link: AdminLink,
   out: string[],
   minted: [string, string][],
+  agents: readonly string[],
 ): Promise<void> {
   const accounts = readAccounts(ctx.dir);
   if (accounts.length > 0) {
@@ -449,7 +492,28 @@ async function migrateAccounts(
       );
     }
   }
-  if (existsSync(join(ctx.dir, "passwd")) || existsSync(join(ctx.dir, "acl.conf"))) {
+  const passwd = join(ctx.dir, "passwd");
+  if (existsSync(passwd)) {
+    // Everyone else in the old password file (someone added them by hand) gets no login: say so.
+    const known = new Set<string>([
+      ...FIXED_IDENTITIES,
+      DYNSEC_ADMIN_USER,
+      ...agents,
+      ...accounts.map((a) => a.name),
+    ]);
+    const others = readFileSync(passwd, "utf-8")
+      .split("\n")
+      .map((l) => l.split(":")[0]?.trim() ?? "")
+      .filter((u) => u !== "" && !u.startsWith("#") && !known.has(u))
+      // An O2 one-time token's login: its token is reported above.
+      .filter((u) => !/^redeem-[0-9a-f]{8}$/.test(u));
+    if (others.length > 0) {
+      out.push(
+        `Users in ${passwd} not migrated: ${others.join(", ")} (give each a login with \`volley auth add\` or \`volley auth add-agent\`).`,
+      );
+    }
+  }
+  if (existsSync(passwd) || existsSync(join(ctx.dir, "acl.conf"))) {
     out.push(
       `The broker no longer reads ${join(ctx.dir, "passwd")} / acl.conf; keep them until you no longer need the rollback.`,
     );
@@ -466,16 +530,19 @@ async function migrateRoles(ctx: AuthContext, yes: boolean): Promise<ExitCode> {
     return report(io, e);
   }
   try {
-    await ensureRoles(link.session, VOLLEY_ROLES);
-    const drift = await roleDrift(link.session, VOLLEY_ROLES);
-    if (drift.length === 0) {
+    // Read-only until --yes: without it nothing is created or edited.
+    const { missing, drifted: drift } = await inspectRoles(link.session, VOLLEY_ROLES);
+    if (drift.length === 0 && missing.length === 0) {
       io.stdout("The shared roles already match this Volley.\n");
       return EXIT.OK;
     }
-    const plan = drift.map(
-      (d) =>
-        `  ${roleName(d.role)}: ${d.missing.length} ACL(s) to add, ${d.extra.length} to remove`,
-    );
+    const plan = [
+      ...missing.map((r) => `  ${roleName(r)}: missing, to create`),
+      ...drift.map(
+        (d) =>
+          `  ${roleName(d.role)}: ${d.missing.length} ACL(s) to add, ${d.extra.length} to remove`,
+      ),
+    ];
     if (!yes) {
       io.stderr(
         [
@@ -487,6 +554,7 @@ async function migrateRoles(ctx: AuthContext, yes: boolean): Promise<ExitCode> {
       );
       return EXIT.ERROR;
     }
+    if (missing.length > 0) await ensureRoles(link.session, missing);
     await applyRoleDrift(link.session, drift);
     io.stdout(
       ["Updated the shared roles (their holders were disconnected):", ...plan, ""].join("\n"),

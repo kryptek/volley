@@ -134,10 +134,17 @@ export class DynsecSession {
     for (const w of waits) w.catch(() => {});
     try {
       await this.transport.publish(CONTROL_TOPIC, JSON.stringify({ commands: tagged }));
+      this.messagesSent++;
     } catch (e) {
-      this.failAll(`control message not sent: ${e instanceof Error ? e.message : String(e)}`);
+      // Only this message's commands: another run's may already be sent and still answerable.
+      const reason = `control message not sent: ${e instanceof Error ? e.message : String(e)}`;
+      for (const c of tagged) {
+        const p = this.pending.get(c.correlationData);
+        if (p === undefined) continue;
+        this.pending.delete(c.correlationData);
+        p.reject(new DynsecError(reason, true));
+      }
     }
-    this.messagesSent++;
     const settled = await Promise.allSettled(waits);
     const failed = settled.find((s) => s.status === "rejected");
     if (failed !== undefined) throw (failed as PromiseRejectedResult).reason;
@@ -339,16 +346,36 @@ export async function ensureRoles(
   return { created, existing, drifted: await roleDrift(s, existing) };
 }
 
-/** How each role's ACLs in the broker differ from this Volley's definitions. */
+/** How each role's ACLs in the broker differ from this Volley's definitions (each must exist). */
 export async function roleDrift(
   s: DynsecSession,
   roles: readonly VolleyRole[],
 ): Promise<RoleDrift[]> {
+  const r = await inspectRoles(s, roles);
+  if (r.missing.length > 0) {
+    throw new DynsecError(
+      `role ${roleName(r.missing[0] as VolleyRole)}: getRole failed: Role not found`,
+    );
+  }
+  return r.drifted;
+}
+
+/** Read-only: which roles do not exist, and how the existing ones drift. Changes nothing. */
+export async function inspectRoles(
+  s: DynsecSession,
+  roles: readonly VolleyRole[],
+): Promise<{ missing: VolleyRole[]; drifted: RoleDrift[] }> {
   const answers = await s.run(roles.map((r) => cmd.getRole(roleName(r))));
-  const drift: RoleDrift[] = [];
+  const missing: VolleyRole[] = [];
+  const drifted: RoleDrift[] = [];
   answers.forEach((r, i) => {
     const role = roles[i] as VolleyRole;
-    if (classify(r) !== "ok") throw fail(r, `role ${roleName(role)}`);
+    const o = classify(r);
+    if (o === "missing") {
+      missing.push(role);
+      return;
+    }
+    if (o !== "ok") throw fail(r, `role ${roleName(role)}`);
     const actual = ((r.data?.role as { acls?: RoleAcl[] } | undefined)?.acls ?? []).map((a) => ({
       acltype: a.acltype,
       topic: a.topic,
@@ -358,11 +385,13 @@ export async function roleDrift(
     const want = ROLE_ACLS[role].map((a) => ({ ...a, priority: a.priority ?? 0 }));
     const have = new Set(actual.map(aclKey));
     const wanted = new Set(want.map(aclKey));
-    const missing = want.filter((a) => !have.has(aclKey(a)));
+    const missingAcls = want.filter((a) => !have.has(aclKey(a)));
     const extra = actual.filter((a) => !wanted.has(aclKey(a)));
-    if (missing.length > 0 || extra.length > 0) drift.push({ role, missing, extra });
+    if (missingAcls.length > 0 || extra.length > 0) {
+      drifted.push({ role, missing: missingAcls, extra });
+    }
   });
-  return drift;
+  return { missing, drifted };
 }
 
 /** Bring drifted roles to this Volley's ACLs. Disconnects every client holding each role. */

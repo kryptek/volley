@@ -48,7 +48,7 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     // The file-based setup: three fixed identities, two minted agents, two accounts, a token.
     writeFileSync(
       join(authDir, "passwd"),
-      ["volleyd", "desk", "coordinator", ...AGENTS, "tablet", "ci"]
+      ["volleyd", "desk", "coordinator", ...AGENTS, "tablet", "ci", "redeem-0000beef", "backup-bot"]
         .map((u) => `${u}:$7$x`)
         .join("\n"),
     );
@@ -144,14 +144,19 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     expect(json(join(home, "broker.json")).password).toBe(clients.get("volleyd")?.password);
     expect(json(join(home, "broker.json")).password).not.toBe("old");
     expect(json(join(home, "dynsec-admin.json"))).toEqual(json(join(authDir, "admin.json")));
-    // One agent login per live agent; its .volley/agent.json gets the new password (still 0600).
+    // One agent login per live agent, with the password its .volley/agent.json already holds:
+    // the running agent's MCP server and hooks keep working after the broker restart.
     for (const id of AGENTS) {
       expect(clients.get(id)?.roles).toEqual(["volley-agent"]);
+      expect(clients.get(id)?.password).toBe("old");
       const file = json(agentJson(id));
-      expect(file.broker).toEqual({ username: id, password: clients.get(id)?.password });
+      expect(file.broker).toEqual({ username: id, password: "old" });
       expect(file.namespace).toBe("default");
       expect(statSync(agentJson(id)).mode & 0o777).toBe(0o600);
     }
+    // A passwd user that is none of Volley's identities is named, not silently dropped.
+    expect(r.stdout).toContain("not migrated: backup-bot");
+    expect(r.stdout).not.toContain("redeem-0000beef");
     // O2's accounts become logins of their role's roles; their new passwords are printed once.
     expect(clients.get("tablet")?.roles).toEqual(ACCOUNT_ROLE_MAP.watch.map(roleName));
     expect(clients.get("ci")?.roles).toEqual(ACCOUNT_ROLE_MAP.supervisor.map(roleName));
@@ -208,6 +213,57 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     ]) {
       expect(rerun).not.toContain(c);
     }
+  });
+
+  it("an agent.json without a password gets a new one, written before its login exists", async () => {
+    const id = AGENTS[0] as string;
+    writeFileSync(
+      agentJson(id),
+      JSON.stringify({ agent_id: id, namespace: "default", broker: { username: id } }),
+      { mode: 0o600 },
+    );
+    const r = await run(["migrate"], fakeDeps(fake, layout));
+    expect(r.code).toBe(0);
+    const pw = fake.clients().get(id)?.password;
+    expect(pw).toMatch(/^pw-/);
+    expect(json(agentJson(id)).broker).toEqual({ username: id, password: pw });
+    expect(r.stdout).toContain(`restart these agents: ${id}`);
+  });
+
+  it("skips an agent.json whose id add-agent would refuse", async () => {
+    const bad = join(worktrees, "w9", "x", ".volley", "agent.json");
+    mkdirSync(join(bad, ".."), { recursive: true });
+    writeFileSync(
+      bad,
+      JSON.stringify({ agent_id: "registry", broker: { username: "registry", password: "old" } }),
+    );
+    const r = await run(["migrate"], fakeDeps(fake, layout));
+    expect(r.code).toBe(0);
+    expect(fake.clients().has("registry")).toBe(false);
+    expect(r.stdout).toContain(`Skipped ${bad}: "registry" is reserved`);
+  });
+
+  it("under sudo: finds agents under the invoking user's home and keeps their files theirs", async () => {
+    const userHome = join(dir, "user-home");
+    const root = join(userHome, ".volley", "worktrees");
+    const id = "w2-t1-implementer-1";
+    const file = join(root, "w2", "t1-implementer", ".volley", "agent.json");
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, JSON.stringify({ agent_id: id, broker: { username: id } }), {
+      mode: 0o600,
+    });
+    const deps = fakeDeps(fake, layout);
+    deps.invokingUser = () => ({ uid: 1234, gid: 5678, home: userHome });
+    const io = makeBufferIO({ now: () => new Date(NOW) });
+    // HOME is root's under sudo, and env_reset strips VOLLEYD_HOME.
+    const code = await auth(
+      { argv: ["migrate"], env: { HOME: join(dir, "root"), VOLLEY_AUTH_DIR: authDir }, io },
+      deps,
+    );
+    expect(code).toBe(0);
+    expect(fake.clients().get(id)?.roles).toEqual(["volley-agent"]);
+    const st = statSync(file);
+    expect(deps.chowns).toContainEqual([file, st.uid, st.gid]);
   });
 
   it("refuses a broker older than 2.1 and changes nothing", async () => {

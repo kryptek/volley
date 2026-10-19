@@ -60,6 +60,26 @@ describe("DynsecSession", () => {
     await other.disconnect();
   });
 
+  it("a message that cannot be sent fails only its own commands, not another run's", async () => {
+    const base = brokerTransport(admin);
+    let refuse = false;
+    const flaky = await DynsecSession.open(
+      {
+        publish: (t, p) => (refuse ? Promise.reject(new Error("offline")) : base.publish(t, p)),
+        subscribe: base.subscribe,
+      },
+      2_000,
+    );
+    const release = fake.stall();
+    const first = flaky.run([cmd.getClient("x")]);
+    await new Promise((r) => setTimeout(r, 50));
+    refuse = true;
+    await expect(flaky.run([cmd.getClient("y")])).rejects.toThrow(/not sent: offline/);
+    release();
+    expect(await first).toHaveLength(1);
+    await flaky.close();
+  });
+
   it("an answer that never comes times out", async () => {
     const release = fake.stall();
     const quick = await DynsecSession.open(brokerTransport(admin), 100);

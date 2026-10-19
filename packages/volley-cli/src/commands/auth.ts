@@ -2,13 +2,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
-import { isValidAgentId } from "volley-mcp/topics";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
 import { type AuthContext, type AuthDeps, realAuthDeps, withAdmin } from "../auth/context";
 import { DynsecError, classify, cmd, deleteClients, listAllClients } from "../auth/dynsec";
 import { type MigrateFlags, initOrMigrate } from "../auth/migrate";
-import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES, TOKEN_ID_RE, isAgentClient } from "../auth/roles";
+import { FIXED_IDENTITIES, RESERVED_AGENT_IDS, badAgentId, isAgentClient } from "../auth/roles";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import {
@@ -26,35 +25,13 @@ export {
   VOLLEYD_BROKER_FILE,
   realAuthDeps,
 } from "../auth/context";
-export { FIXED_IDENTITIES };
+export { FIXED_IDENTITIES, RESERVED_AGENT_IDS };
 
 export interface AuthArgs {
   argv: string[];
   env: Record<string, string | undefined>;
   io: IO;
 }
-
-/**
- * Ids `add-agent` refuses because the role's `volley/+/%u/…` grants would carry them into
- * reserved or foreign topics: with %u=`registry`, `volley/+/%u/status` matches
- * `volley/_system/registry/status`, and an agent named after a channel has a registry entry
- * (`volley/_system/registry/mailbox`) that every steering client's `volley/+/+/mailbox` matches.
- */
-export const RESERVED_AGENT_IDS = [
-  "registry",
-  "leases",
-  "health",
-  "federation",
-  "machines",
-  "auth",
-  "status",
-  "progress",
-  "result",
-  "capability",
-  "control",
-  "mailbox",
-  "screen",
-] as const;
 
 /**
  * `<first existing mosquitto config dir>/volley` (where the coordinator's hooks look for
@@ -72,19 +49,6 @@ function resolveLayout(flag: string | undefined, deps: AuthDeps): Layout {
     throw new Error(`--layout must be one of ${Object.keys(LAYOUTS).join(", ")}`);
   }
   return LAYOUTS[flag as LayoutName];
-}
-
-/** Why `id` cannot be an agent login, or null. */
-function badAgentId(id: string): string | null {
-  if (!isValidAgentId(id)) return `"${id}" does not match [a-z0-9][a-z0-9_-]{0,62}`;
-  if ((FIXED_IDENTITIES as readonly string[]).includes(id) || id === DYNSEC_ADMIN_USER) {
-    return `"${id}" is a fixed identity`;
-  }
-  if ((RESERVED_AGENT_IDS as readonly string[]).includes(id)) {
-    return `"${id}" is reserved (a reserved topic segment or channel name: ${RESERVED_AGENT_IDS.join(", ")}); prefer the <wave>-<task>-<role>-<attempt> form`;
-  }
-  if (TOKEN_ID_RE.test(id)) return `"${id}": 8 hex digits are reserved for one-time token logins`;
-  return null;
 }
 
 export async function auth(
@@ -291,9 +255,11 @@ file, no ACL file, no reload. Every verb refuses a broker older than 2.1.
   volley auth migrate              From an acl_file / password_file setup: the same as init,
                                    plus new passwords for the fixed identities (written to
                                    the credential files their clients read), a login for each
-                                   agent with a .volley/agent.json (the file is updated), and
-                                   one for each account in accounts.json. Rerunning changes
-                                   nothing. Rollback: restore the config backup it names.
+                                   agent with a .volley/agent.json (keeping the password it
+                                   holds, so running agents keep working), and one for each
+                                   account in accounts.json; other passwd users are named.
+                                   Under sudo it looks in the invoking user's home. Rerunning
+                                   changes nothing. Rollback: restore the config backup it names.
   volley auth migrate --roles --yes
                                    Bring the shared roles to this Volley's ACLs. Every client
                                    holding a changed role is disconnected (it reconnects).

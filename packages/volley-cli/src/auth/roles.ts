@@ -21,6 +21,8 @@
  *   - a denied PUBLISH is dropped silently for MQTT 3.1.1 clients (they still get a PUBACK).
  */
 
+import { isValidAgentId } from "volley-mcp/topics";
+
 export const VOLLEY_ROLES = [
   "volleyd",
   "coordinator",
@@ -144,6 +146,41 @@ export const DYNSEC_ADMIN_USER = "dynsec-admin";
 
 /** A token login's username: the token id, 8 hex digits (so `%u` names its topics). */
 export const TOKEN_ID_RE = /^[0-9a-f]{8}$/;
+
+/**
+ * Ids `add-agent` refuses because the role's `volley/+/%u/…` grants would carry them into
+ * reserved or foreign topics: with %u=`registry`, `volley/+/%u/status` matches
+ * `volley/_system/registry/status`, and an agent named after a channel has a registry entry
+ * (`volley/_system/registry/mailbox`) that every steering client's `volley/+/+/mailbox` matches.
+ */
+export const RESERVED_AGENT_IDS = [
+  "registry",
+  "leases",
+  "health",
+  "federation",
+  "machines",
+  "auth",
+  "status",
+  "progress",
+  "result",
+  "capability",
+  "control",
+  "mailbox",
+  "screen",
+] as const;
+
+/** Why `id` cannot be an agent login (`add-agent` and `migrate` refuse it), or null. */
+export function badAgentId(id: string): string | null {
+  if (!isValidAgentId(id)) return `"${id}" does not match [a-z0-9][a-z0-9_-]{0,62}`;
+  if ((FIXED_IDENTITIES as readonly string[]).includes(id) || id === DYNSEC_ADMIN_USER) {
+    return `"${id}" is a fixed identity`;
+  }
+  if ((RESERVED_AGENT_IDS as readonly string[]).includes(id)) {
+    return `"${id}" is reserved (a reserved topic segment or channel name: ${RESERVED_AGENT_IDS.join(", ")}); prefer the <wave>-<task>-<role>-<attempt> form`;
+  }
+  if (TOKEN_ID_RE.test(id)) return `"${id}": 8 hex digits are reserved for one-time token logins`;
+  return null;
+}
 
 /** `[{ rolename }]` for a createClient. */
 export const clientRoles = (roles: readonly VolleyRole[]) =>
