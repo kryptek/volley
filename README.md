@@ -153,15 +153,13 @@ sudo snap install mosquitto         # Linux: the snap is 2.1; distribution packa
 # or a container: docker run eclipse-mosquitto:2.1-alpine (layout in examples/mosquitto-auth/)
 ```
 
-The broker **requires a username and password on both listeners**. From your clone of this repo (step 3; `bun install` first), let `volley auth init` write the broker config for your install, create the plugin's state file and its admin login, then the roles and identities:
+The broker **requires a username and password on both listeners**. From your clone of this repo (step 3; `bun install` first), let `volley setup` do the rest: it shows what it will change before every step, backs up each file it replaces, and is safe to rerun (`--repair` re-checks and fixes):
 
 ```sh
-bun packages/volley-cli/src/cli.ts auth init --coordinator-file --volleyd-file
-brew services restart mosquitto     # macOS; Linux: sudo snap restart mosquitto
-bun packages/volley-cli/src/cli.ts auth init   # rerun: creates the roles and identities
+bun packages/volley-cli/src/cli.ts setup        # interactive; --yes to apply every step without asking
 ```
 
-The first run writes the config (Apple Silicon Homebrew: `/opt/homebrew/etc/mosquitto/mosquitto.conf`, the same as [`examples/mosquitto-localhost.conf`](examples/mosquitto-localhost.conf); the old one is backed up) and asks for the restart; the rerun prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7). On **Linux** with the snap, run both as root (`sudo bun …`): the config and state file live under `/var/snap/mosquitto/common/`. `init` refuses a config with `per_listener_settings true` or the plugin loaded twice, and is safe to rerun. Details, the container layout and the migration from an older `password_file` / `acl_file` setup (`volley auth migrate`): [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md).
+It finds mosquitto (refusing a version older than 2.1), writes the Dynamic Security broker config for your install (Apple Silicon Homebrew: `/opt/homebrew/etc/mosquitto/mosquitto.conf`, the same as [`examples/mosquitto-localhost.conf`](examples/mosquitto-localhost.conf); the diff is shown and the old file backed up), restarts the broker and checks both listeners refuse anonymous clients; creates the roles and the `volleyd`, `desk` and `coordinator` identities, printing their passwords **once** (keep them: you need `coordinator` in step 4 and `desk` in step 7) and a one-time admin token for the Desk; installs volleyd, the Volley hooks for coordinator sessions and the Desk (`volley desk serve` on port 5199) as services; and ends with a QR code that signs your phone in to the Desk (10 minutes, single use). Every step is journaled to `~/.volley/volleyd/setup.log`. On **Linux** with the snap the broker config lives under `/var/snap/mosquitto/common/`, so run it as root (`sudo bun …`), then `volley setup --step services` as yourself for the user services. The manual path, step by step, is [`volley auth init`](packages/volley-cli/README.md#volley-auth); details, the container layout and the migration from an older `password_file` / `acl_file` setup (`volley auth migrate`): [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md).
 
 You now have a broker with two listeners on `127.0.0.1`:
 - **`1883`** (raw MQTT) — used by `volley-mcp`, `volley-cli`, and any native MQTT client
