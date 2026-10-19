@@ -34,6 +34,11 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   let sessionDelayMs = 20;
   /** While false, the launched session's MCP server never publishes its own status. */
   let mcpStatus = true;
+  /** The simulated sessions' pending start timers and in-flight publishes (see teardown). */
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const sessions = new Set<Promise<void>>();
+  let sessionErrors: unknown[] = [];
+  let closing = false;
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
@@ -74,6 +79,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     failing = o.failing ?? true;
     sessionDelayMs = o.sessionDelayMs ?? 20;
     mcpStatus = o.mcpStatus ?? true;
+    closing = false;
+    sessionErrors = [];
     env = await makeDaemonEnv();
     const repo = join(realpathSync(env.home), "repo");
     mkdirSync(repo);
@@ -122,26 +129,37 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       }
       return prepare(spec);
     };
-    // The launched session: the MCP server's spawning status, then the SessionStart hook.
+    // The launched session: the MCP server's spawning status, then the SessionStart hook. Its
+    // timer and publishes are tracked, so teardown never disconnects the client under them.
     host.onLaunch = () => {
-      setTimeout(async () => {
-        if (mcpStatus) await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
-        await pub(registryTopic(ID), "registered", "_system/registry", {
-          capabilities: [],
-          cwd: "/wt",
-          started_at: new Date().toISOString(),
-          model: "claude-opus-5-5",
-          model_source: "harness-hook",
+      if (closing) return;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        const s = session().catch((e: unknown) => {
+          sessionErrors.push(e);
         });
-        await pub(buildTopic(NS, ID, "status"), "working", "status", { source: "harness-hook" });
-        await pub(
-          buildTopic(NS, ID, "progress"),
-          "heartbeat",
-          "progress",
-          { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
-          false,
-        );
+        sessions.add(s);
+        void s.finally(() => sessions.delete(s));
       }, sessionDelayMs);
+      timers.add(timer);
+    };
+    const session = async () => {
+      if (mcpStatus) await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
+      await pub(registryTopic(ID), "registered", "_system/registry", {
+        capabilities: [],
+        cwd: "/wt",
+        started_at: new Date().toISOString(),
+        model: "claude-opus-5-5",
+        model_source: "harness-hook",
+      });
+      await pub(buildTopic(NS, ID, "status"), "working", "status", { source: "harness-hook" });
+      await pub(
+        buildTopic(NS, ID, "progress"),
+        "heartbeat",
+        "progress",
+        { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
+        false,
+      );
     };
     startOpts = {
       now: () => clock,
@@ -170,8 +188,13 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   }
 
   afterEach(async () => {
+    closing = true;
+    for (const t of timers) clearTimeout(t);
+    timers.clear();
+    await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
+    expect(sessionErrors).toEqual([]);
   });
 
   it("journals each failure with its retry, keeps one decision open, doubles the wait, recovers visibly", async () => {
