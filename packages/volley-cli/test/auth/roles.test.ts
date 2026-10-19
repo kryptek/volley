@@ -9,6 +9,7 @@ import {
   isAgentClient,
   roleName,
   rolesDocument,
+  tokenIdOf,
 } from "../../src/auth/roles";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 
@@ -148,5 +149,14 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canSubscribe("0000abcd", "volley-auth/redeem/0000abcd/reply")).toBe(true);
     expect(fake.canSubscribe("0000abcd", "volley-auth/redeem/+/reply")).toBe(false);
     expect(fake.canSubscribe("0000abcd", "volley/#")).toBe(false);
+  });
+});
+
+describe("tokenIdOf", () => {
+  it("is the <id> of vly_<kind>_<id>_<secret>, or null for anything else", () => {
+    expect(tokenIdOf(`vly_admin_4f2a9c1e_${"0".repeat(32)}`)).toBe("4f2a9c1e");
+    expect(tokenIdOf(`vly_signin_0badc0de_${"f".repeat(32)}`)).toBe("0badc0de");
+    expect(tokenIdOf("vly_admin_nothex00_x")).toBeNull();
+    expect(tokenIdOf("not a token")).toBeNull();
   });
 });

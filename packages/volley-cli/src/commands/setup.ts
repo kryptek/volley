@@ -21,6 +21,7 @@ import {
   type StepName,
   type StepPlan,
   fencedExec,
+  listenerUrls,
   setupFence,
 } from "../setup/step";
 import { defaultAuthDir } from "./auth";
@@ -207,17 +208,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
 
   const url = resolveBrokerUrl(str("broker-url"), env);
-  let broker: URL;
-  try {
-    broker = new URL(url);
-  } catch {
-    io.stderr(`volley setup: not a broker URL: ${url}\n`);
-    return EXIT.USAGE;
-  }
-  if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
-    io.stderr(
-      `volley setup: ${broker.protocol === "mqtts:" || broker.protocol === "wss:" ? "TLS is not supported by `volley setup` yet" : "the broker URL must be mqtt://"} (got ${url})\n`,
-    );
+  const listeners = listenerUrls(url);
+  if ("error" in listeners) {
+    io.stderr(`volley setup: ${listeners.error}\n`);
     return EXIT.USAGE;
   }
   // Every command goes through the fence: the exact commands the steps run, nothing else.
@@ -238,8 +231,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     deps,
     config: str("config") ?? layout.config,
     stateFile: str("state-file") ?? layout.stateFile,
-    tcpUrl: url,
-    wsUrl: `ws://${broker.hostname.includes(":") ? `[${broker.hostname}]` : broker.hostname}:9001`,
+    ...listeners,
     home: sudoHome ?? env.HOME ?? homedir(),
     volleydHome: volleydHome(env, sudoHome),
     repair: values.repair === true,

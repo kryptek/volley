@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fencedExec, setupFence } from "../../src/setup/step";
+import { fencedExec, listenerUrls, setupFence } from "../../src/setup/step";
 
 describe("setupFence", () => {
   const fence = setupFence({
@@ -70,5 +70,28 @@ describe("setupFence", () => {
     await expect(exec(["rm", "-rf", "/"])).rejects.toThrow(/volley setup does not run `rm -rf \/`/);
     await exec(["systemctl", "--user", "daemon-reload"]);
     expect(ran).toEqual([["systemctl", "--user", "daemon-reload"]]);
+  });
+});
+
+describe("listenerUrls", () => {
+  it("is the broker's two listeners: the URL itself and ws://<host>:9001", () => {
+    expect(listenerUrls("mqtt://127.0.0.1:1883")).toEqual({
+      tcpUrl: "mqtt://127.0.0.1:1883",
+      wsUrl: "ws://127.0.0.1:9001",
+    });
+    expect(listenerUrls("tcp://[::1]:1883")).toEqual({
+      tcpUrl: "tcp://[::1]:1883",
+      wsUrl: "ws://[::1]:9001",
+    });
+  });
+
+  it("says why a URL setup cannot probe is refused", () => {
+    expect(listenerUrls("nope")).toEqual({ error: "not a broker URL: nope" });
+    expect(listenerUrls("mqtts://h:8883")).toEqual({
+      error: "TLS is not supported by `volley setup` yet (got mqtts://h:8883)",
+    });
+    expect(listenerUrls("http://h")).toEqual({
+      error: "the broker URL must be mqtt:// (got http://h)",
+    });
   });
 });
