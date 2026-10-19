@@ -274,6 +274,26 @@ export interface ClaudeSignin {
   at: number;
 }
 
+/**
+ * machine.schema.json payload: a paired machine's retained health record on
+ * `volley/_system/machines/<name>` (SPEC §4.6.14), published by the machine
+ * every heartbeat and by volleyd when the heartbeat stops.
+ */
+export interface MachinePayload {
+  name: string;
+  os: string;
+  arch?: string;
+  cores: number;
+  tunnel: "up" | "down";
+  /** Why the tunnel is down; absent while it is up. */
+  reason?: "disconnect" | "heartbeat_timeout";
+  /** The 1, 5 and 15 minute load averages. */
+  load: number[];
+  agents: number;
+  remote_port?: number;
+  last_seen: string;
+}
+
 // ------------------------------------------------------------------- store
 
 export interface FeedEntry {
@@ -411,6 +431,8 @@ export interface DeskState {
   usage?: Record<string, UsagePayload>;
   /** Claude account sign-ins heard since the page loaded, by account id; live-only. */
   signins?: Record<string, ClaudeSignin>;
+  /** Paired machines' retained health records, by machine name. */
+  machines?: Record<string, MachinePayload>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

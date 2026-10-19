@@ -1,8 +1,7 @@
 /**
  * The Settings window's sections, ported from the prototype `settings.tsx`
  * (`SECTIONS`): the sidebar label, the coloured icon tile, the sidebar group
- * and the extra words the sidebar search matches. Machines is a placeholder
- * until Onboarding fills it, listed now so search and layout are final.
+ * and the extra words the sidebar search matches.
  */
 import {
   ComputerIcon,
@@ -85,7 +84,6 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     tint: "#34c759",
     group: 1,
     keywords: "peer pair add machine tunnel host",
-    placeholder: true,
   },
   {
     key: "setup",

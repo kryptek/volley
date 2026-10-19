@@ -426,14 +426,15 @@ describe("SettingsWindow", () => {
     expect(body.getByText("Warn me at")).toBeInTheDocument();
   });
 
-  it.each([["machines", "Machines"]] as [SectionKey, string][])(
-    "%s is a placeholder until Onboarding fills it",
-    (key, label) => {
-      render(<Harness initial={key} />);
-      expect(heading()).toHaveTextContent(label);
-      expect(within(dialog()).getByText(/Coming with Onboarding/)).toBeInTheDocument();
-    },
-  );
+  it("Machines shows this machine's card, read-only without the pairing ops", () => {
+    render(<Harness initial="machines" />);
+    expect(heading()).toHaveTextContent("Machines");
+    const body = within(dialog());
+    expect(body.queryByText(/Coming with Onboarding/)).toBeNull();
+    expect(body.getByRole("article", { name: "This machine" })).toBeInTheDocument();
+    expect(body.queryByRole("button", { name: "+ Add a machine" })).toBeNull();
+    expect(body.getByText(/Read-only/)).toBeInTheDocument();
+  });
 
   it("Broker accounts and Setup & Security are read-only without an admin", () => {
     render(<Harness initial="accounts" />);
