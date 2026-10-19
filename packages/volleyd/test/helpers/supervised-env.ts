@@ -127,10 +127,12 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     pub(buildTopic(ns, AGENT, "status"), type, "status", payload);
 
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
+  /** Simulated sessions still publishing (cleanup waits for them before disconnecting). */
+  const sessions = new Set<Promise<void>>();
   host.onLaunch = () => {
     o.onLaunch?.(daemon);
     // Started at once: the daemon subscribed to the agent before launching it.
-    void (async () => {
+    const session = (async () => {
       await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
@@ -148,6 +150,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
         false,
       );
     })();
+    sessions.add(session);
+    void session.finally(() => sessions.delete(session));
   };
   const daemonOptions: Partial<DaemonOptions> = {
     spawner: {
@@ -202,6 +206,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     },
     daemonOptions,
     cleanup: async () => {
+      await Promise.allSettled([...sessions]);
       await control?.close();
       await agent.disconnect();
       await env.cleanup();
