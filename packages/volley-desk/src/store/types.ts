@@ -155,6 +155,7 @@ export const DECISION_KINDS = [
   "plan_change",
   "pr_closed",
   "pr_head_moved",
+  "spawn_budget_exhausted",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

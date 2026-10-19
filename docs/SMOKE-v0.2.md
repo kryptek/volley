@@ -461,6 +461,8 @@ The wave's owner is `desk` since the claim:
   reviews it shows `review (spec + quality)` with both reviewers.
 - [ ] After the last merge the wave completes (`wave_complete`); the Desk shows it finished, and
   admission stops sampling CI for its repo.
+- [ ] Every retired agent's workspace is already closed (cmux locally, `tmux ls` on the box):
+  no stale workspaces are left; each `agent_retired` says `workspace_closed: true`.
 - [ ] `volleyd cleanup "$WAVE"` lists what it would remove; `volleyd cleanup "$WAVE" --yes`
   removes the retired worktrees and workspaces on both machines, keeps the branches, and every
   identity minted for the wave (implementers, reviewers, fixups, rebases) is revoked:

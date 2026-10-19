@@ -41,6 +41,8 @@ export interface RetireRequest {
   terminal?: unknown;
   /** The agent's retained `result` payload, if it published one. */
   result?: unknown;
+  /** The agent's workspace (cmux locally, its tmux session on an ssh host), closed on retire. */
+  workspace?: string;
 }
 
 export interface RetireDeps {
@@ -50,6 +52,8 @@ export interface RetireDeps {
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
   /** Remove the lock file at `path` (only called when it names this agent). */
   releaseLock: (path: string) => void;
+  /** Close the retired agent's own workspace (through the fence, with its retire consent). */
+  closeWorkspace?: (workspace: string) => Promise<void>;
 }
 
 /**
@@ -78,6 +82,16 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
     deps.releaseLock(req.lockPath);
     released = true;
   }
+  // Its session is over: close its workspace too (the worktree and branch stay for cleanup).
+  let closed: boolean | null = null;
+  if (req.workspace !== undefined && req.workspace !== "" && deps.closeWorkspace !== undefined) {
+    try {
+      await deps.closeWorkspace(req.workspace);
+      closed = true;
+    } catch {
+      closed = false;
+    }
+  }
   await deps.journal({
     type: "agent_retired",
     task: req.task,
@@ -87,6 +101,7 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
       status: req.status,
       credentials_revoked: revoked,
       lock_released: released,
+      ...(closed !== null ? { workspace: req.workspace, workspace_closed: closed } : {}),
       // The retained status/result are cleared above; the journal keeps what they said.
       ...(req.terminal !== undefined ? { terminal: req.terminal } : {}),
       ...(req.result !== undefined ? { result: req.result } : {}),

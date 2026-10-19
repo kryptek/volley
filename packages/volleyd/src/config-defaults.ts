@@ -138,6 +138,9 @@ export const DAEMON_DEFAULTS = {
   token_prune_ms: 60_000,
   /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
   reply_key_min_bits: 2048,
+  /** Retry headroom of the derived spawn budget: this share of the wave's pipeline roles, at least `spawn_budget_retry_min`. */
+  spawn_budget_retry_headroom: 0.5,
+  spawn_budget_retry_min: 2,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */

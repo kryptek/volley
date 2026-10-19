@@ -46,6 +46,8 @@ export interface WaveRecord {
    * cancelled or done.
    */
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
+  /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
+  budget_raised?: number;
 }
 
 /** A role's latest failed spawn: what failed, how often in a row, and when it is retried. */
@@ -102,6 +104,7 @@ export function emptyRecord(): WaveRecord {
     steers: {},
     pipeline: {},
     spawnFailures: {},
+    budget_raised: 0,
   };
 }
 
@@ -288,6 +291,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           at: (ev.data.at as string | undefined) ?? ev.at,
         };
         if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
+        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
         // Only a parking decision keeps the task parked (one opened with `park: false` never does).
         const stillOpen = state.open_decisions.some((o) => {
           const x = next.decisions[o];
@@ -446,6 +451,13 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+}
+
+/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
+export function raiseBy(answer: string): number | null {
+  const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
+  const n = m !== null ? Number(m[1]) : 0;
+  return n >= 1 ? n : null;
 }
 
 /** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */

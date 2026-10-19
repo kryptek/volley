@@ -1,3 +1,4 @@
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { WaveRecord } from "./reducer";
 import type { TaskId, TaskStage, Wave } from "./types";
 
@@ -104,9 +105,26 @@ export function admit(
   return { admit: readyTasks.slice(0, n), reasons };
 }
 
-/** The wave's spawn budget: its own `spawn_budget`, else ceil(multiplier × task count). */
-export function spawnBudget(wave: Wave, multiplier: number): number {
-  return wave.spawn_budget ?? Math.ceil(multiplier * wave.task_order.length);
+/** Agents one run of a task's pipeline spawns with no retry: one per stage (the gate spawns none). */
+export function pipelineRoles(wave: Wave, task: TaskId): number {
+  return (wave.tasks[task]?.stages ?? []).flat().filter((s) => s !== "merge_ready").length;
+}
+
+/**
+ * The wave's spawn budget: its own `spawn_budget` (the hard override), else enough for every
+ * role of every task's pipeline plus retry headroom (`spawn_budget_retry_headroom` of it, at
+ * least `spawn_budget_retry_min`), or ceil(multiplier × task count) when that is more — so the
+ * default always lets a wave finish with no retry at all, and the multiplier only raises it.
+ * `raised` is what `raise by N` answers added (reducer `budget_raised`).
+ */
+export function spawnBudget(wave: Wave, multiplier: number, raised = 0): number {
+  if (wave.spawn_budget !== undefined) return wave.spawn_budget + raised;
+  const roles = wave.task_order.reduce((n, id) => n + pipelineRoles(wave, id), 0);
+  const headroom = Math.max(
+    DAEMON_DEFAULTS.spawn_budget_retry_min,
+    Math.ceil(roles * DAEMON_DEFAULTS.spawn_budget_retry_headroom),
+  );
+  return Math.max(roles + headroom, Math.ceil(multiplier * wave.task_order.length)) + raised;
 }
 
 /** Spawns a wave has used or committed to: actual spawns plus admitted tasks not yet spawned. */

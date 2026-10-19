@@ -369,10 +369,14 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       ),
       { qos: 1, retain: true },
     );
-    await event("w1", "agent_retired");
+    // The retire closed its tmux session on the box.
+    expect((await event("w1", "agent_retired")).data).toMatchObject({
+      workspace: "workspace:1",
+      workspace_closed: true,
+    });
     await waits.settled();
 
-    // cleanup --yes reaches the box again: kill the tmux session, remove the remote worktree.
+    // cleanup --yes reaches the box again: remove the remote worktree (the session is gone).
     const fx = fakeExec();
     const io = makeBufferIO();
     expect(await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io)).toBe(
@@ -380,7 +384,6 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     );
     const wt = join(box.spec.worktree_root, "w1", "T1-implementer");
     expect(fx.calls.map((c) => [c.argv.at(-3), c.opts.remote?.steps.map((x) => x.argv)])).toEqual([
-      ["dev@box", [["tmux", "kill-session", "-t", "=workspace:1"]]],
       ["dev@box", [["git", "-C", wt, "rev-parse", "--is-inside-work-tree"]]],
       ["dev@box", [["git", "-C", repo, "worktree", "remove", wt]]],
     ]);

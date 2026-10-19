@@ -5,7 +5,7 @@
 # than by editing this file while the daemon runs. Bounds: spec/schemas/config.schema.json.
 
 # hard_ceiling: 12              # max live supervised agents across all waves (runaway fuse)
-# spawn_budget_multiplier: 3    # per-wave spawn budget = multiplier x task count
+# spawn_budget_multiplier: 3    # raises the derived spawn budget to multiplier x task count
 
 # Heavy-operation lease pools. A command matching a pool's `match` regex (checked by the
 # volley-hooks PreToolUse lease hook) runs inside `volley lease run --pool <pool> -- ...` and

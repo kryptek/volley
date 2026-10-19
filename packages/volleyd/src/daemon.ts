@@ -83,7 +83,7 @@ import {
   writeDecisionsFile,
 } from "./decisions";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintModelSwitchToken } from "./fence";
+import { mintConsentToken, mintModelSwitchToken } from "./fence";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -120,7 +120,14 @@ import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
 import { type SpawnFailure, type WaveRecord, latestSpawnFailure } from "./reducer";
-import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
+import {
+  type Admission,
+  activeTasks,
+  admit,
+  pipelineRoles,
+  spawnBudget,
+  spawnsUsed,
+} from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type {
   CoordinatorAttention,
@@ -1470,13 +1477,19 @@ export class Daemon {
         live,
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
-        spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier),
+        spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
       });
       live += verdict.admit.length;
       const before = JSON.stringify(this.heldBack.get(wave) ?? []);
       this.heldBack.set(wave, verdict.reasons);
       for (const task of verdict.admit)
         await this.append(wave, { type: "task_admitted", task, data: {} });
+      // Ready tasks the budget holds back: never silent.
+      if (
+        verdict.admit.length < candidates.length &&
+        verdict.reasons.some((r) => r.startsWith("spawn budget exhausted"))
+      )
+        await this.budgetExhausted(wave, null);
       if (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons)) {
         await this.publishState(wave);
       }
@@ -2472,6 +2485,7 @@ export class Daemon {
         ),
         ...(typeof d.lock === "string" ? { lockPath: d.lock } : {}),
         minted: d.credentials === "minted",
+        ...(typeof d.workspace === "string" ? { workspace: d.workspace } : {}),
       },
       {
         exec: host.exec,
@@ -2482,6 +2496,7 @@ export class Daemon {
             unlinkSync(path);
           } catch {}
         },
+        closeWorkspace: (ws) => host.close(ws, mintConsentToken(`retire ${agentId}`)),
       },
     );
   }
@@ -2521,8 +2536,10 @@ export class Daemon {
         minted: a.minted,
         ...(terminal !== undefined ? { terminal } : {}),
         ...(result !== undefined ? { result } : {}),
+        workspace: a.workspace,
       },
       {
+        closeWorkspace: (ws) => a.host.close(ws, mintConsentToken(`retire ${agentId}`)),
         exec: a.host.exec,
         clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
         journal: (ev) => this.append(a.wave, ev),
@@ -2631,6 +2648,49 @@ export class Daemon {
   }
 
   /**
+   * The wave's spawn budget holds a spawn (a task's next role, or a ready task's admission):
+   * open one `spawn_budget_exhausted` decision (`raise by <n>` | `cancel`) unless one is open.
+   * With a task it parks that task (its why_waiting names the decision); without, it is wave-level.
+   */
+  private async budgetExhausted(wave: WaveId, task: TaskId | null, role?: Role): Promise<void> {
+    const log = this.waves.get(wave);
+    const rec = log?.record;
+    if (rec?.wave == null || rec.state?.status !== "running") return;
+    if (openDecisions(rec).some((d) => d.kind === "spawn_budget_exhausted")) return;
+    const budget = spawnBudget(
+      rec.wave,
+      this.config.effective(wave).spawn_budget_multiplier,
+      rec.budget_raised ?? 0,
+    );
+    const used = spawnsUsed(rec);
+    const n = Math.max(
+      1,
+      task !== null
+        ? pipelineRoles(rec.wave, task) -
+            Object.keys(rec.state.tasks.find((t) => t.id === task)?.agents ?? {}).length
+        : 1,
+    );
+    const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
+    let id = "spawn_budget_exhausted";
+    for (let k = 2; rec.decisions[id] !== undefined; k++) id = `spawn_budget_exhausted-${k}`;
+    try {
+      await this.openDecisionNow(
+        wave,
+        {
+          kind: "spawn_budget_exhausted",
+          task,
+          id,
+          question: `Needs you: wave ${wave}'s spawn budget is exhausted (${used}/${budget} spawns), so ${what} cannot start. raise by <n>: allow n more spawns; or cancel ${task !== null ? "the task" : "(stop the wave)"}?`,
+          options: [`raise by ${n}`, "cancel"],
+        },
+        { used, budget, ...(role !== undefined ? { role } : {}) },
+      );
+    } catch (e) {
+      this.log(`spawn budget ${wave}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
    * A pipeline role spawn, through the same lock, launch and verification as the implementer's,
    * under T5's admission verdict, within the wave's spawn budget and only while the wave runs. A
    * hold is silent: the pipeline's next tick asks again.
@@ -2652,10 +2712,17 @@ export class Daemon {
       admission: admission.allow,
       reasons: admission.reasons,
       used: spawnsUsed(rec),
-      budget: spawnBudget(rec.wave, this.config.effective(wave).spawn_budget_multiplier),
+      budget: spawnBudget(
+        rec.wave,
+        this.config.effective(wave).spawn_budget_multiplier,
+        rec.budget_raised ?? 0,
+      ),
     });
     if (hold !== null) {
       this.log(`spawn ${key}: held, ${hold}`);
+      // The budget is the one hold that never lifts by itself: ask the owner.
+      if (hold.startsWith("spawn budget exhausted"))
+        void this.enqueue(() => this.budgetExhausted(wave, task, role));
       return;
     }
     void this.startSpawn(wave, task, role, req).catch((e: unknown) => {
@@ -3748,6 +3815,18 @@ export class Daemon {
           if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
         }
       }
+    }
+    if (d.kind === "spawn_budget_exhausted") {
+      if (r.answer.trim().toLowerCase() === "cancel") {
+        if (d.task !== null)
+          await this.append(wave, {
+            type: "task_cancelled",
+            task: d.task,
+            data: { by: r.by, why: `spawn budget exhausted (decision ${id})` },
+          });
+        else await this.stopWave(wave, r.by);
+      }
+      // `raise by N` is folded into the budget by the reducer; the next tick spawns.
     }
     if (d.kind === "spawn_failed" && d.task !== null && r.by !== DAEMON_AGENT_ID) {
       if (r.answer.trim().toLowerCase() === SPAWN_STOP_ANSWER) {

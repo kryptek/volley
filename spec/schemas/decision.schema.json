@@ -41,7 +41,8 @@
                 "wave_complete",
                 "plan_change",
                 "pr_closed",
-                "pr_head_moved"
+                "pr_head_moved",
+                "spawn_budget_exhausted"
               ]
             },
             "question": { "type": "string", "minLength": 1 },

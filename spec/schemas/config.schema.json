@@ -87,7 +87,7 @@
           "minimum": 1,
           "maximum": 10,
           "default": 3,
-          "description": "Per-wave spawn budget = multiplier x task count (counts retries and reviewers)."
+          "description": "Raises a wave's derived spawn budget (every task's pipeline roles plus retry headroom) to multiplier x task count when that is more. Counts retries and reviewers; spawn_budget in the wave file overrides both."
         },
         "lease_pools": {
           "type": "object",

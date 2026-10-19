@@ -86,7 +86,7 @@ tasks:
 # optional:
 # version: 1                 # bumped by a versioned re-submission
 # namespace: dispatch        # Volley namespace for the wave's agents
-# spawn_budget: 20           # default: spawn_budget_multiplier × task count
+# spawn_budget: 20           # default: every task's pipeline roles + 50% retry headroom (min 2), or spawn_budget_multiplier × task count if more
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
@@ -918,6 +918,18 @@ record and has the same trust boundary: anyone who can subscribe to `volley/<ns>
 read it, so restrict broker access (per-agent credentials and ACLs) as for the rest of the
 namespace.
 
+### Spawn budget
+
+A wave's spawn budget counts every agent it spawns (retries and reviewers included). Its default
+is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
+(implement, each review, fixup: 4 for the default pipeline) plus 50% of that for retries (at
+least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
+`spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
+`spawn_budget_exhausted` decision (`raise by <n>` | `cancel`; on a task it parks the task, so its
+`why_waiting` names the decision). `raise by <n>` adds n spawns to the wave's budget (journaled
+with the answer, so it survives a restart) and the next tick spawns; `cancel` cancels the task (a
+wave-level one stops the wave).
+
 ### Retire and cleanup
 
 When a supervised agent's `failed` status arrives, the daemon retires it; a `done` is first
@@ -928,10 +940,12 @@ LWT) is retired only after the reap grace passes with no fresh status or heartbe
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
 retained payloads on its `registry`, `status`, `progress`, `result`, `capability` and `screen` topics, the
-lock released, and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+lock released, the agent's workspace closed (its cmux workspace, or its tmux session on an ssh
+host: `agent_retired { workspace, workspace_closed }`), and `agent_retired { status, terminal,
+result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes the retired agents' workspaces and runs `git worktree remove` with the fence's
+--yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's
 consent token (`--force` for dirty worktrees); worktrees of agents not yet retired are skipped,
 and branches are never deleted.
 

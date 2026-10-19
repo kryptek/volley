@@ -142,7 +142,11 @@ export interface ConsentToken {
   readonly reason: string;
 }
 
-/** Mint a consent token. Callers: `volleyd cleanup --yes` only. */
+/**
+ * Mint a consent token. Callers: `volleyd cleanup --yes`, and a retire closing the retired
+ * agent's own workspace (daemon.ts: its session is over, its login already deleted; the worktree
+ * and branch stay for cleanup).
+ */
 export function mintConsentToken(reason: string): ConsentToken {
   const token = Object.freeze({ reason });
   minted.add(token);
