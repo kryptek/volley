@@ -19,7 +19,8 @@ import type {
   WaveStatePayload,
   WaveView,
 } from "../src/store/types";
-import { AgentWindow } from "../src/windows/agent/AgentWindow";
+import { AgentWindow, NO_SIGNAL_GREY } from "../src/windows/agent/AgentWindow";
+import { Terminal } from "../src/windows/agent/Terminal";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const S = 1000;
@@ -189,6 +190,46 @@ describe("no-signal state", () => {
     expect(agentAttention(impl, w, ctx()).tier).toBe("info");
   });
 
+  it("a coordinator-tier no-signal item escalates to you after escalate_after_min", () => {
+    const w = wave();
+    const coordinators = { "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const } };
+    // Silent since NOW - 121 s: the silence began at NOW - 1 s (120 s after the last status).
+    const impl = agentFrom(
+      "impl-1",
+      [registry("impl-1", NOW - 200 * S), status("impl-1", "working", NOW - 121 * S)],
+      w,
+    );
+    const at = (now: number) => agentAttention(impl, w, ctx({ now, coordinators }));
+    expect(at(NOW).tier).toBe("coordinator");
+    expect(at(NOW + 14 * 60 * S).tier).toBe("coordinator");
+    expect(at(NOW + 15 * 60 * S)).toEqual({
+      tier: "you",
+      reason: `${NO_SIGNAL_LABEL} · unresolved for 15 min`,
+    });
+    // Never any signal: the silence began at its registration.
+    const mute = agentFrom("impl-1", [registry("impl-1", NOW - 5 * S)], w);
+    expect(
+      agentAttention(mute, w, ctx({ now: NOW + 15 * 60 * S - 5 * S, coordinators })).tier,
+    ).toBe("you");
+  });
+
+  it("times a live status by its receipt, not the sender's (skewed) clock", () => {
+    // The sender's clock runs 5 min behind: wall_time says NOW - 300 s, it arrived at NOW - 5 s.
+    const skewed: DeskMessage = {
+      topic: "volley/default/loner/status",
+      envelope: env("loner", "status", "working", {}, NOW - 300 * S),
+      receivedAt: NOW - 5 * S,
+    };
+    const a = agentFrom("loner", [registry("loner", NOW - 400 * S), skewed]);
+    expect(noSignalFor(a, undefined, ctx())).toBeNull();
+    // A retained replay still uses its wall_time.
+    const replay = agentFrom("loner", [
+      registry("loner", NOW - 400 * S),
+      { ...skewed, retained: true },
+    ]);
+    expect(noSignalFor(replay, undefined, ctx())).not.toBeNull();
+  });
+
   it("passes the wave state's why_waiting through as the reason", () => {
     const why = "MCP server connected to another broker";
     const w = wave({
@@ -237,7 +278,15 @@ describe("AgentWindow no-signal glyph and label", () => {
       "title",
       expect.stringContaining("/work/repo"),
     );
-    expect(container.querySelector(".sm-nosignal")).not.toBeNull();
+    const mark = container.querySelector<HTMLElement>(".sm-nosignal");
+    expect(mark?.style.getPropertyValue("--sm-color")).toBe(NO_SIGNAL_GREY);
+  });
+
+  it("the Terminal's empty state says there is no signal", () => {
+    const { rerender } = render(<Terminal screen={null} stale={false} noSignal />);
+    expect(screen.getByText(/no screen yet/)).toHaveTextContent(/no signal/);
+    rerender(<Terminal screen={null} stale={false} />);
+    expect(screen.getByText(/no screen yet/)).not.toHaveTextContent(/no signal/);
   });
 
   it("no label without the state", () => {

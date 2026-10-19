@@ -99,6 +99,11 @@ describe("CoordinatorsWindow", () => {
     expect(screen.getByText("2 need you")).toHaveClass("chip--hot");
   });
 
+  it("says `1 needs you` for one", () => {
+    setup({ needsYou: 1 });
+    expect(screen.getByText("1 needs you")).toHaveClass("chip--hot");
+  });
+
   it("shows each wave's progress", () => {
     setup();
     const bar = row("ci-speed").querySelector(".coord-bar > span") as HTMLElement;

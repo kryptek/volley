@@ -13,7 +13,7 @@ import { Cancel01Icon, CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/
 import type { EffectiveCoordinator } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
-import { plural } from "../../lib/plural";
+import { noun, plural } from "../../lib/plural";
 import { supervisorHealth } from "../../store/reducer";
 import type { CoordinatorState, SupervisorView, WaveView } from "../../store/types";
 import { age } from "../agent/AgentWindow";
@@ -78,7 +78,7 @@ function SupervisorRow({ sup, now }: { sup: SupervisorView | undefined; now: num
       aria-label={`Supervisor ${id}`}
       className={`coord coord--sup st-${h.down ? "gone" : "working"}`}
     >
-      <span className="coord-dot" style={{ background: h.down ? "#ff7a59" : "#34d399" }} />
+      <span className="coord-dot" />
       <div className="coord-main">
         <div className="coord-name">Supervisor</div>
         <div className="coord-sub">
@@ -109,7 +109,11 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
   const title = (
     <>
       <span className="t-name">Wave coordinators</span>
-      {p.needsYou > 0 && <span className="chip chip--hot">{p.needsYou} need you</span>}
+      {p.needsYou > 0 && (
+        <span className="chip chip--hot">
+          {p.needsYou} {noun(p.needsYou, "needs", "need")} you
+        </span>
+      )}
     </>
   );
   return (

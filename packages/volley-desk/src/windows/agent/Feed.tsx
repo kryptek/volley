@@ -85,7 +85,12 @@ export function Feed({
   const { ref, onScroll } = useFollow<HTMLDivElement>(feed);
   // Stable sort: equal timestamps keep arrival order.
   const rows = feed
-    .filter((e) => !(feedChannel(e) === "mailbox" && isControlTraffic(e.envelope)))
+    .filter(
+      (e) =>
+        !(
+          feedChannel(e) === "mailbox" && isControlTraffic(e.envelope, e.topic.split("/")[2] ?? "")
+        ),
+    )
     .map((e, i) => ({ e, i, t: entryTime(e) }))
     .sort((a, b) => a.t - b.t || a.i - b.i);
 

@@ -233,7 +233,9 @@ export function AgentWindow({
       <Narration text={agent.narration} fx={narrationFx} />
       {noSignal && (
         <div className="a-nosignal" title={noSignal.title}>
-          <i /> {noSignal.label}
+          <span className="chip">
+            <i style={{ background: NO_SIGNAL_GREY }} /> {noSignal.label}
+          </span>
         </div>
       )}
       {attention}
@@ -259,7 +261,11 @@ export function AgentWindow({
         <Feed feed={agent.feed} noSignal={noSignal !== null} />
       ) : (
         // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
-        <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
+        <Terminal
+          screen={agent.screen}
+          stale={task?.screen_stale === true}
+          noSignal={noSignal !== null}
+        />
       )}
       {steer}
     </Frame>

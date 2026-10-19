@@ -302,7 +302,7 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
   if (ns) {
     const stage = s?.tasks.find((t) => t.id === task)?.stage;
     const theirs = live && a.role === "implementer" && stage === "implement";
-    return { tier: theirs ? "coordinator" : "info", reason: ns.reason };
+    return theirs ? handled(ns.reason, ns.since, w, ctx) : { tier: "info", reason: ns.reason };
   }
   const tasks = s?.tasks.filter((t) => t.id === task) ?? [];
   return infoFor(tasks, [a.id], ctx);
@@ -315,6 +315,8 @@ export interface NoSignal {
   reason: string;
   /** Tooltip: what is missing and where the session runs, when its registry says. */
   title: string;
+  /** ms the silence began: the last signal plus `no_signal_after_s`, else its registration. */
+  since: number;
 }
 
 /** The agent's no-signal state (see the module comment), or null while it has a signal. */
@@ -327,33 +329,32 @@ export function noSignalFor(
   if (type !== undefined && (ENDED_STATUS.has(type) || STUCK_STATUS.has(type))) return null;
   // Quiet on purpose: waiting for a human, or its turn ended (the hooks said so, on this broker).
   if (a.attention || a.lastProgress?.type === "idle") return null;
-  const signals = [a.status?.at, a.heartbeat, a.lastProgress?.at].filter(
+  // Local receipt for live messages: a sender's skewed clock must not read as silence.
+  const signals = [a.status?.seenAt ?? a.status?.at, a.heartbeat, a.lastProgress?.at].filter(
     (t): t is number => typeof t === "number" && Number.isFinite(t),
   );
+  const reg: Partial<RegistryPayload> = a.registry ?? {};
   let silent: number | null = null;
+  let since: number;
   if (signals.length === 0) {
     if (!a.registered) return null;
+    since = parseTime(reg.started_at) ?? a.lastSeen;
   } else {
     silent = connectedSilence(Math.max(...signals), ctx.now, ctx.offline);
-    if (silent <= tunables(w, ctx).noSignalMs) return null;
+    const limit = tunables(w, ctx).noSignalMs;
+    if (silent <= limit) return null;
+    since = ctx.now - (silent - limit);
   }
   const why = a.task ? w?.state?.tasks.find((t) => t.id === a.task)?.why_waiting : undefined;
-  const reg: Partial<RegistryPayload> = a.registry ?? {};
-  const broker = [reg.broker_url, reg.broker].find(
-    (v): v is string => typeof v === "string" && v !== "",
-  );
   const head =
     silent === null
       ? `${a.id} registered here but has published no status, progress or heartbeat.`
       : `Nothing from ${a.id} for ${Math.round(silent / 1000)} s.`;
-  const where = [
-    broker && `its registry names ${broker}`,
-    typeof reg.cwd === "string" && reg.cwd !== "" && `the session runs in ${reg.cwd}`,
-  ]
+  const where = [typeof reg.cwd === "string" && reg.cwd !== "" && `the session runs in ${reg.cwd}`]
     .filter(Boolean)
     .join("; ");
   const title = `${head} Its Volley MCP server may be connected to another broker${where ? ` (${where})` : ""}.`;
-  return { label: NO_SIGNAL_LABEL, reason: why || NO_SIGNAL_LABEL, title };
+  return { label: NO_SIGNAL_LABEL, reason: why || NO_SIGNAL_LABEL, title, since };
 }
 
 /** `Blocked: <reason>` from the status payload, without doubling a leading "Blocked". */

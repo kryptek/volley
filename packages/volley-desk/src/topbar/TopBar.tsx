@@ -38,26 +38,33 @@ export interface TopBarProps {
   setNotify: (next: NotifyOptions) => void;
   /** Phone width: the counts collapse, the pill stays. */
   compact?: boolean;
-  /** Clock override (tests); otherwise the supervisor's age ticks every 2 s. */
+  /** The supervisor's clock (the App shares it with the coordinators row); else its own 2 s tick. */
   now?: number;
 }
 
-function useNow(fixed: number | undefined): number {
+/** `fixed`, else a 2 s clock that runs only while `active`. */
+function useNow(fixed: number | undefined, active: boolean): number {
   const [now, setNow] = useState(() => fixed ?? Date.now());
   useEffect(() => {
-    if (fixed !== undefined) return;
+    if (fixed !== undefined || !active) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 2000);
     return () => clearInterval(t);
-  }, [fixed]);
+  }, [fixed, active]);
   return fixed ?? now;
 }
 
-/** One supervisor's health: `volleyd · working · 4s`; `volleyd · absent` when there is none. */
+/**
+ * One supervisor's health: `volleyd · working · 4s`; `volleyd · absent` when
+ * there is none. `compact` (phone width) shows the dot alone, the text in its
+ * label and tooltip, so the top bar stays on one line.
+ */
 export function SupervisorPill({
   id,
   sup,
   now,
-}: { id: string; sup: SupervisorView | undefined; now: number }) {
+  compact = false,
+}: { id: string; sup: SupervisorView | undefined; now: number; compact?: boolean }) {
   const h = supervisorHealth(sup);
   const text = [id, h.label, ...(h.since === null ? [] : [age(now - h.since)])].join(" · ");
   return (
@@ -65,10 +72,11 @@ export function SupervisorPill({
       // The age ticks: announce nothing on every tick.
       aria-live="off"
       aria-label={`Supervisor ${text}`}
-      className={`sup-pill${h.down ? " sup-pill--down" : ""}`}
+      className={`chip sup-pill${h.down ? " chip--hot sup-pill--down" : ""}`}
       title={h.down ? `Supervisor ${id} is not running` : `Supervisor ${id}: last seen ${text}`}
     >
-      <i /> {text}
+      <i />
+      {!compact && ` ${text}`}
     </output>
   );
 }
@@ -102,10 +110,10 @@ function Toggle(p: {
 
 export function TopBar(p: TopBarProps) {
   const [denied, setDenied] = useState(false);
-  const now = useNow(p.now);
   const waves = Object.values(p.state.waves).filter((w) => w.state !== null).length;
   const working = Object.values(p.state.agents).filter((a) => a.status?.type === "working").length;
   const supervisors = supervisorList(p.state);
+  const now = useNow(p.now, supervisors.length > 0);
 
   const toggleNotify = () => {
     if (p.notify.enabled) {
@@ -140,11 +148,11 @@ export function TopBar(p: TopBarProps) {
         </div>
       )}
       {supervisors.map((s) => (
-        <SupervisorPill key={s.id} id={s.id} sup={s} now={now} />
+        <SupervisorPill key={s.id} id={s.id} sup={s} now={now} compact={p.compact === true} />
       ))}
       {/* Waves need a supervisor; the demo has none to show. */}
       {supervisors.length === 0 && waves > 0 && !p.demo && (
-        <SupervisorPill id="volleyd" sup={undefined} now={now} />
+        <SupervisorPill id="volleyd" sup={undefined} now={now} compact={p.compact === true} />
       )}
       {p.needsYou > 0 && (
         <button type="button" className="ny-pill" onClick={p.onNeedsYou}>

@@ -7,6 +7,7 @@ import {
   CGAP,
   type Cluster,
   GAP,
+  type Screen,
   arrange,
   candidates,
   layoutCluster,
@@ -196,40 +197,84 @@ describe("arrange", () => {
       Math.max(...ids.map((k) => (place[k]?.x ?? 0) + (dims[k]?.w ?? 0)));
     const waveIds = (c: Cluster) => [c.main.id, ...c.kids.map((k) => k.id)];
 
-    for (const sc of [screen, { width: 1920, height: 1080 }, { width: 390, height: 844 }]) {
-      it(`every candidate puts them on the waves' first row, one CGAP apart (${sc.width}px)`, () => {
+    const screens = [screen, { width: 1920, height: 1080 }, { width: 390, height: 844 }];
+    for (const sc of screens) {
+      const portrait = sc.width < sc.height;
+      it(`every candidate keeps them together, one CGAP from the first wave row (${sc.width}px)`, () => {
+        let under = 0;
         for (const c of candidates(set, sc)) {
           const p = c.place;
           const u = p.unassigned;
           const co = p.coordinators;
-          if (!u || !co) throw new Error("side clusters not placed");
-          // same row as the first wave cluster
-          expect(u.y).toBe(p["wave-a"]?.y);
-          expect(co.y).toBe(p["wave-a"]?.y);
-          // the last wave cluster on that row, then unassigned, then coordinators
-          const row = [waveA, waveB].filter((w) => p[w.main.id]?.y === u.y);
-          const last = row.at(-1);
-          if (!last) throw new Error("no wave on the row");
-          expect(u.x - end(p, waveIds(last))).toBe(CGAP);
-          expect(co.x - end(p, waveIds(unassigned))).toBe(CGAP);
+          const a = p["wave-a"];
+          if (!u || !co || !a) throw new Error("not placed");
+          const row = [waveA, waveB].filter((w) => p[w.main.id]?.y === a.y);
+          if (u.y === a.y) {
+            // closing the first row, after its last wave cluster
+            const last = row.at(-1);
+            if (!last) throw new Error("no wave on the row");
+            expect(u.x - end(p, waveIds(last))).toBe(CGAP);
+          } else {
+            // portrait only: starting the second row, under the first wave
+            under++;
+            expect(portrait).toBe(true);
+            const rowH = Math.max(...row.map((w) => layoutCluster(w, c.cols).h));
+            expect(u).toEqual({ x: 0, y: a.y + rowH + CGAP });
+          }
+          // coordinators: right after the unassigned group, or stacked under it
+          const uH = layoutCluster(unassigned, 2).h;
+          if (co.y === u.y) expect(co.x - end(p, waveIds(unassigned))).toBe(CGAP);
+          else expect(co).toEqual({ x: u.x, y: u.y + uH + CGAP });
           // every window is placed, once
           expect(Object.keys(p).sort()).toEqual(Object.keys(dims).sort());
+        }
+        expect(under > 0).toBe(portrait);
+      });
+
+      it(`keeps the tethers to unassigned agents short in every candidate (${sc.width}px)`, () => {
+        // Chord from the group window's right edge to each agent's top-left corner. One
+        // column of three agents (the old layout) reaches hypot(36, 1012) ≈ 1013.
+        const bound = 460 + 470 + 2 * GAP;
+        for (const c of candidates(set, sc)) {
+          const m = c.place.unassigned;
+          if (!m) throw new Error("unassigned not placed");
+          for (const k of unassigned.kids) {
+            const a = c.place[k.id];
+            if (!a) throw new Error(`${k.id} not placed`);
+            expect(Math.hypot(a.x - (m.x + 620), a.y - m.y)).toBeLessThan(bound);
+          }
         }
       });
     }
 
-    it("keeps the tethers to unassigned agents short", () => {
-      const r = arrange(set, screen);
-      if (!r) throw new Error("no arrangement");
-      const m = r.place.unassigned;
-      if (!m) throw new Error("unassigned not placed");
-      // Chord from the group window's right edge to each agent's top-left corner.
-      const bound = 460 + 470 + 2 * GAP;
-      for (const k of unassigned.kids) {
-        const a = r.place[k.id];
-        if (!a) throw new Error(`${k.id} not placed`);
-        expect(Math.hypot(a.x - (m.x + 620), a.y - m.y)).toBeLessThan(bound);
+    it("packs unassigned agents in ⌈√n⌉ columns whatever the waves use", () => {
+      const nine: Cluster = {
+        main: box("unassigned", 620, 200),
+        kids: Array.from({ length: 9 }, (_, i) => box(`n${i}`, 460, 470)),
+        side: true,
+      };
+      for (const c of candidates([waveA, nine, coordsSide], screen)) {
+        const xs = new Set(nine.kids.map((k) => c.place[k.id]?.x));
+        expect(xs.size).toBe(3);
       }
+    });
+
+    it("keeps a readable zoom at phone width (390 x 844) and on a laptop (1440 x 900)", () => {
+      // The Desk's real sizes: wave 620 x 440, agent 460 x 470, coordinators 430 wide.
+      const wave = (id: string, n: number): Cluster => ({
+        main: box(id, 620, 440),
+        kids: Array.from({ length: n }, (_, i) => box(`${id}-${i}`, 460, 470)),
+      });
+      const un = (n: number): Cluster => ({ ...wave("unassigned", n), side: true });
+      const co: Cluster = { main: box("coordinators", 430, 348), kids: [], side: true };
+      const phone = { width: 390, height: 844 };
+      const laptop = { width: 1440, height: 900 };
+      const s = (cl: Cluster[], sc: Screen) => arrange(cl, sc)?.view.s ?? 0;
+      expect(s([wave("w1", 3), co], phone)).toBeGreaterThan(0.3);
+      expect(s([wave("w1", 3), un(2), co], phone)).toBeGreaterThan(0.2);
+      expect(s([wave("w1", 3), un(2), co], laptop)).toBeGreaterThan(0.48);
+      const four = ["w1", "w2", "w3", "w4"].map((id) => wave(id, 4));
+      expect(s([...four, un(6), co], phone)).toBeGreaterThan(0.12);
     });
 
     it("with no waves, the side clusters make one row", () => {

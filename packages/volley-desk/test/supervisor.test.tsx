@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { DeskStoreProvider } from "../src/store/context";
@@ -9,9 +9,11 @@ import {
   agentsByWave,
   initialState,
   isSupervisorId,
+  pruneUnconfirmed,
   reduceAll,
   resync,
   supervisorHealth,
+  supervisorNamespace,
 } from "../src/store/reducer";
 import type { DeskMessage, DeskState, Envelope, WaveView } from "../src/store/types";
 import { TopBar, type TopBarProps } from "../src/topbar/TopBar";
@@ -59,6 +61,13 @@ const controlQuery = (to: string, op: string, at = T0): DeskMessage => ({
   receivedAt: at,
 });
 
+/** The same delivery from volleyd running in namespace `ops`. */
+const ops = (m: DeskMessage): DeskMessage => ({
+  ...m,
+  topic: m.topic.replace("volley/default/", "volley/ops/"),
+  envelope: m.envelope && { ...m.envelope, namespace: "ops" },
+});
+
 describe("supervisors slice", () => {
   it("a registry entry with capability `supervisor` is a supervisor, not an agent", () => {
     const s = reduceAll(initialState(), [
@@ -66,7 +75,7 @@ describe("supervisors slice", () => {
       status("sup-main", "working", T0 + 1000, { waves: 2 }),
     ]);
     expect(s.agents["sup-main"]).toBeUndefined();
-    expect(s.supervisors?.["sup-main"]).toMatchObject({
+    expect(s.supervisors["sup-main"]).toMatchObject({
       id: "sup-main",
       status: "working",
       lastHeartbeat: T0 + 1000,
@@ -80,7 +89,7 @@ describe("supervisors slice", () => {
       expect(isSupervisorId(id)).toBe(true);
       const s = reduceAll(initialState(), [registry(id, []), status(id, "working")]);
       expect(s.agents[id]).toBeUndefined();
-      expect(s.supervisors?.[id]?.status).toBe("working");
+      expect(s.supervisors[id]?.status).toBe("working");
     }
     expect(isSupervisorId("volleydx")).toBe(false);
     expect(isSupervisorId("my-volleyd")).toBe(false);
@@ -92,7 +101,7 @@ describe("supervisors slice", () => {
       registry("sup-main", ["supervisor"], T0 + 500),
     ]);
     expect(s.agents["sup-main"]).toBeUndefined();
-    expect(s.supervisors?.["sup-main"]).toMatchObject({
+    expect(s.supervisors["sup-main"]).toMatchObject({
       status: "working",
       lastHeartbeat: T0 + 500,
     });
@@ -126,8 +135,38 @@ describe("supervisors slice", () => {
     const cleared = reduceAll(s, [
       { topic: "volley/_system/registry/volleyd", envelope: null, receivedAt: T0 },
     ]);
-    expect(cleared.supervisors?.volleyd).toBeUndefined();
-    expect(resync(s).supervisors).toEqual({});
+    expect(cleared.supervisors.volleyd).toBeUndefined();
+  });
+
+  it("volleyd's namespace comes from its registry: config_set and steering go there", () => {
+    const s = reduceAll(initialState(), [ops(registry("volleyd", ["supervisor"]))]);
+    expect(supervisorNamespace(s)).toBe("ops");
+    expect(supervisorNamespace(initialState())).toBe("default");
+  });
+
+  it("resync keeps a supervisor's namespace until the replay; one not replayed is pruned", () => {
+    const s = reduceAll(initialState(), [
+      ops(registry("volleyd", ["supervisor"])),
+      ops(registry("sup-old", ["supervisor"])),
+      ops(status("volleyd", "working")),
+    ]);
+    const r = resync(s);
+    expect(r.supervisors.volleyd).toMatchObject({
+      namespace: "ops",
+      status: null,
+      registry: null,
+      lastHeartbeat: T0,
+    });
+    expect(supervisorNamespace(r)).toBe("ops");
+    expect(r.unconfirmed).toEqual(expect.arrayContaining(["volleyd", "sup-old"]));
+    const replayed = reduceAll(r, [
+      { ...ops(registry("volleyd", ["supervisor"])), retained: true },
+      { ...ops(status("volleyd", "working")), retained: true },
+    ]);
+    const settled = pruneUnconfirmed(replayed);
+    expect(settled.supervisors.volleyd?.status).toBe("working");
+    expect(settled.supervisors["sup-old"]).toBeUndefined();
+    expect(settled.unconfirmed).toBeUndefined();
   });
 
   it("health: live statuses are up; reaped, done and no status are down", () => {
@@ -175,6 +214,17 @@ describe("top-bar supervisor pill", () => {
     const pill = screen.getByRole("status", { name: /supervisor/i });
     expect(pill).toHaveTextContent("volleyd · working · 4s");
     expect(pill).not.toHaveClass("sup-pill--down");
+  });
+
+  it("at phone width the pill is its dot alone; the text stays in its label", () => {
+    const s = reduceAll(initialState(), [
+      registry("volleyd", ["supervisor"]),
+      status("volleyd", "working"),
+    ]);
+    topBar(s, { compact: true });
+    const pill = screen.getByRole("status", { name: "Supervisor volleyd · working · 4s" });
+    expect(pill.textContent?.trim()).toBe("");
+    expect(pill).toHaveAttribute("title", expect.stringContaining("volleyd · working · 4s"));
   });
 
   it("a reaped supervisor renders red", () => {
@@ -252,7 +302,7 @@ describe("coordinators window supervisor row", () => {
       registry("volleyd", ["supervisor"]),
       status("volleyd", "working", T0, { waves: 1 }),
     ]);
-    render(<CoordinatorsWindow {...props({ supervisors: Object.values(s.supervisors ?? {}) })} />);
+    render(<CoordinatorsWindow {...props({ supervisors: Object.values(s.supervisors) })} />);
     const rows = screen.getAllByRole("listitem");
     expect(rows[0]).toHaveAccessibleName("Supervisor volleyd");
     expect(rows[0]).toHaveTextContent("Supervisor");
@@ -264,7 +314,7 @@ describe("coordinators window supervisor row", () => {
   it("a reaped supervisor's row is red; with none it says absent", () => {
     const s = reduceAll(initialState(), [registry("volleyd", []), status("volleyd", "reaped")]);
     const { unmount } = render(
-      <CoordinatorsWindow {...props({ supervisors: Object.values(s.supervisors ?? {}) })} />,
+      <CoordinatorsWindow {...props({ supervisors: Object.values(s.supervisors) })} />,
     );
     const row = screen.getByRole("listitem", { name: "Supervisor volleyd" });
     expect(row).toHaveClass("st-gone");
@@ -326,5 +376,57 @@ describe("App with a live supervisor", () => {
     );
     expect(screen.queryByRole("region", { name: "volleyd" })).toBeNull();
     expect(screen.queryByText("model unknown")).toBeNull();
+  });
+
+  it("the pill and the coordinators row tick on one clock: the same age", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const now = Date.now();
+      const factory = fakeClient([
+        { topic: "volley/_waves/w1/state", envelope: waveEnv, receivedAt: now },
+        registry("volleyd", ["supervisor"], now),
+        status("volleyd", "working", now),
+      ]);
+      render(
+        <DeskStoreProvider demo={false} brokerUrl="ws://test.invalid" clientFactory={factory}>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const row = await screen.findByRole("listitem", { name: "Supervisor volleyd" });
+      await act(async () => {
+        vi.advanceTimersByTime(6000);
+      });
+      const ageOf = (el: HTMLElement) => /working · (\d+[smh])/.exec(el.textContent ?? "")?.[1];
+      const pill = screen.getByRole("status", { name: /supervisor/i });
+      expect(ageOf(pill)).toMatch(/^\d+s$/);
+      expect(ageOf(pill)).not.toBe("0s");
+      expect(ageOf(row)).toBe(ageOf(pill));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("top-bar clock", () => {
+  it("runs no timer when there is no supervisor to age", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <TopBar
+          state={initialState()}
+          connection="connected"
+          demo={false}
+          needsYou={0}
+          onNeedsYou={() => {}}
+          coordsOpen
+          onToggleCoords={() => {}}
+          notify={{ enabled: false, sound: false, on: [] }}
+          setNotify={() => {}}
+        />,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

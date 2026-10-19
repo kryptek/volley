@@ -376,42 +376,19 @@ code {
   }
 }
 
-/* ------------------------------ supervisor health pill, no-signal agent label */
+/* supervisor health (top-bar pill, coordinators row), no-signal agent label */
 .sup-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: 12px var(--f-mono);
-  color: var(--mute);
-  border: 1px solid var(--line);
-  padding: 2px 9px;
-  border-radius: 999px;
+  font-family: var(--f-mono);
   white-space: nowrap;
 }
 .sup-pill i,
-.a-nosignal i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #34d399;
-  flex: none;
+.coord--sup .coord-dot {
+  background: var(--ok);
 }
-.sup-pill--down {
-  color: #ffb4a1;
-  border-color: rgba(255, 122, 89, 0.45);
-  background: rgba(255, 122, 89, 0.07);
-}
-.sup-pill--down i {
-  background: #ff7a59;
+.sup-pill.chip--hot i,
+.coord--sup.st-gone .coord-dot {
+  background: var(--hot);
 }
 .a-nosignal {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   margin: 6px 0;
-  font-size: 12px;
-  color: var(--dim);
-}
-.a-nosignal i {
-  background: #6b7280;
 }

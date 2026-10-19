@@ -240,7 +240,11 @@ export interface AgentView {
   registered: boolean;
   registry: RegistryPayload | null;
   model: string | null;
-  status: { type: string; payload: unknown; at: number } | null;
+  /**
+   * `at` is the envelope's `wall_time` (the sender's clock); `seenAt` is when
+   * it reached this Desk (`wall_time` for a retained replay), skew-free.
+   */
+  status: { type: string; payload: unknown; at: number; seenAt?: number } | null;
   progress: number | null;
   narration: string | null;
   /** ms of the last `progress/heartbeat`. */
@@ -305,7 +309,7 @@ export interface DeskState {
   agents: Record<string, AgentView>;
   coordinators: Record<string, CoordinatorView>;
   /** Supervisors by agent id; they are never in `agents`. */
-  supervisors?: Record<string, SupervisorView>;
+  supervisors: Record<string, SupervisorView>;
   config: ConfigPayload | null;
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */

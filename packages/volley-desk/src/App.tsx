@@ -79,6 +79,8 @@ const WAVE_H = 440;
 const AGENT_H = 470;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
+/** The supervisor's age (top-bar pill, coordinators row) ticks this often while one is shown. */
+const SUPERVISOR_TICK_MS = 2000;
 
 const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
 
@@ -142,9 +144,12 @@ function placeholderLayout(
 
 const frameAttn = (a: Attn): Attention | undefined => (a.tier === "none" ? undefined : a.tier);
 
-function useNow(ms: number): number {
+/** A clock ticking every `ms`; `null` stops it. */
+function useNow(ms: number | null): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (ms === null) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), ms);
     return () => clearInterval(t);
   }, [ms]);
@@ -269,7 +274,9 @@ export default function App() {
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
   // The coordinators window's supervisor row; the demo has no volleyd to report as absent.
   const supervisors = demo ? undefined : supervisorList(state);
-  const coordsRows = waveList.length + Math.max(1, supervisors?.length ?? 0);
+  // One clock for both, so the pill and the row show the same age.
+  const supNow = useNow(supervisors?.length ? SUPERVISOR_TICK_MS : null);
+  const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
   const rects: Rect[] = [
@@ -476,7 +483,7 @@ export default function App() {
               clusterOf={clusterOf}
               onClose={() => setCoordsOpen(false)}
               {...(supervisors ? { supervisors } : {})}
-              now={now}
+              now={supNow}
               finished={{
                 hidden: finishedHidden,
                 shown: look.showFinished,
@@ -602,6 +609,7 @@ export default function App() {
         notify={notify}
         setNotify={setNotify}
         compact={narrow}
+        now={supNow}
       />
 
       {lookOpen && (

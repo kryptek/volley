@@ -132,7 +132,13 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       if (isSupervisor(s, route.agentId, null)) {
         return reduceSupervisor(s, route.agentId, route.channel, route.namespace, m);
       }
-      if (route.channel === "mailbox" && m.envelope && isControlTraffic(m.envelope)) return s;
+      if (
+        route.channel === "mailbox" &&
+        m.envelope &&
+        isControlTraffic(m.envelope, route.agentId, (id) => isSupervisor(s, id, null))
+      ) {
+        return s;
+      }
       return ownsNoAgent(s, route, m) ? s : withCoordinators(reduceAgent(s, route, m));
     }
     case "wave":
@@ -159,10 +165,12 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 
 /**
  * Forget everything that retained topics hold, ahead of the replay that
- * follows a reconnect: waves (with their decisions), supervisors, config,
- * leases, admission, and each agent's registry, status and screen. Live-only parts —
- * feed, narration, progress, heartbeat, attention — are kept. Agents that were
- * registered become `unconfirmed` until their registry entry is replayed.
+ * follows a reconnect: waves (with their decisions), config, leases,
+ * admission, each agent's registry, status and screen, and each supervisor's
+ * registry and status. Live-only parts — feed, narration, progress,
+ * heartbeat, attention, a supervisor's namespace — are kept. Agents and
+ * supervisors that were registered become `unconfirmed` until their registry
+ * entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
   const agents: Record<string, AgentView> = {};
@@ -180,12 +188,18 @@ export function resync(state: DeskState): DeskState {
       screen: null,
     };
   }
+  // volleyd's namespace survives, so a config_set or steer sent during the replay still reaches it.
+  const supervisors: Record<string, SupervisorView> = {};
+  for (const sv of Object.values(state.supervisors)) {
+    if (sv.registry) unconfirmed.add(sv.id);
+    supervisors[sv.id] = { ...sv, registry: null, status: null };
+  }
   return {
     ...state,
     waves: {},
     agents,
     coordinators: {},
-    supervisors: {},
+    supervisors,
     config: null,
     leases: {},
     admission: null,
@@ -193,15 +207,17 @@ export function resync(state: DeskState): DeskState {
   };
 }
 
-/** Drop agents still `unconfirmed` once the post-reconnect replay has settled. */
+/** Drop agents and supervisors still `unconfirmed` once the post-reconnect replay has settled. */
 export function pruneUnconfirmed(state: DeskState): DeskState {
   if (state.unconfirmed === undefined) return state;
   const { unconfirmed, ...rest } = state;
   const agents = { ...state.agents };
+  const supervisors = { ...state.supervisors };
   for (const id of unconfirmed) {
     if (agents[id] && !agents[id].registered) delete agents[id];
+    if (supervisors[id] && !supervisors[id].registry) delete supervisors[id];
   }
-  return withCoordinators({ ...rest, agents });
+  return withCoordinators({ ...rest, agents, supervisors });
 }
 
 // ------------------------------------------------------------------ agents
@@ -352,7 +368,12 @@ function reduceAgent(
   if (narration !== undefined) next.narration = narration;
   if (typeof payload.progress === "number") next.progress = payload.progress;
   if (channel === "status") {
-    next.status = { type: env.type, payload: env.payload, at: envTime(env, m.receivedAt) };
+    next.status = {
+      type: env.type,
+      payload: env.payload,
+      at: envTime(env, m.receivedAt),
+      seenAt: at,
+    };
     return putAgent(state, next);
   }
   // progress: hook activity events (SPEC §4.3)
@@ -383,19 +404,26 @@ const LIVE_SUPERVISOR = new Set(["spawning", "registered", "working"]);
 
 /** A known supervisor, one by its id, or a registry entry declaring capability `supervisor`. */
 function isSupervisor(state: DeskState, id: string, registry: Envelope | null): boolean {
-  if (isSupervisorId(id) || state.supervisors?.[id]) return true;
+  if (isSupervisorId(id) || state.supervisors[id]) return true;
   const caps = record(registry?.payload).capabilities;
   return Array.isArray(caps) && caps.includes("supervisor");
 }
 
 /**
- * volleyd's control channel: a mailbox `query` carrying `payload.op`, or the
- * daemon's `ack` to one (it echoes `acked_type: "query"` and the op).
+ * volleyd's control channel, on the mailbox of agent `to`: a `query` carrying
+ * `payload.op` sent to a supervisor, or a supervisor's `ack` to one (it echoes
+ * `acked_type: "query"` and the op). `op` is not reserved (SPEC §4.4), so
+ * the same query between two agents is a conversation and stays.
  */
-export function isControlTraffic(env: Envelope): boolean {
+export function isControlTraffic(
+  env: Envelope,
+  to: string,
+  supervisor: (id: string) => boolean = isSupervisorId,
+): boolean {
   const p = record(env.payload);
   if (typeof p.op !== "string") return false;
-  return env.type === "query" || (env.type === "ack" && p.acked_type === "query");
+  if (env.type === "query") return supervisor(to);
+  return env.type === "ack" && p.acked_type === "query" && supervisor(env.agent_id);
 }
 
 /**
@@ -450,7 +478,9 @@ function reduceSupervisor(
     if (typeof payload.waves === "number") next.wavesOwned = payload.waves;
   }
   supervisors[id] = next;
-  return { ...state, supervisors, agents };
+  if (channel !== "registry") return { ...state, supervisors, agents };
+  const unconfirmed = state.unconfirmed?.filter((u) => u !== id);
+  return { ...state, supervisors, agents, ...optional("unconfirmed", unconfirmed) };
 }
 
 /** A supervisor's health for the top-bar pill and the coordinators row. */
@@ -474,14 +504,14 @@ export function supervisorHealth(s: SupervisorView | undefined): SupervisorHealt
 
 /** The supervisors, volleyd first. */
 export function supervisorList(state: DeskState): SupervisorView[] {
-  return Object.values(state.supervisors ?? {}).sort(
+  return Object.values(state.supervisors).sort(
     (a, b) => Number(b.id === "volleyd") - Number(a.id === "volleyd") || a.id.localeCompare(b.id),
   );
 }
 
 /** The namespace volleyd's control mailbox lives in: its registry's, else `default`. */
 export function supervisorNamespace(state: DeskState, id = "volleyd"): string {
-  return state.supervisors?.[id]?.namespace ?? "default";
+  return state.supervisors[id]?.namespace ?? "default";
 }
 
 // ---------------------------------------------------------------- receipts
