@@ -250,6 +250,7 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
     for (const bad of [
       { name: "Bad Name" },
       { name: "local" },
+      { name: "auto" },
       { name: "volleyd" },
       { target: undefined },
       { volley_dir: "relative/path" },
