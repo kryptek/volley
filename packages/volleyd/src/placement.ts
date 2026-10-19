@@ -70,6 +70,11 @@ export interface PlaceOptions {
   warn_at_pct: number;
   /** The supervisor's own machine name (`local` in a wave file). */
   localName: string;
+  /**
+   * Machines a re-placement moves the task off (SPEC §4.6.15: a `machine_down` or `respawn on`
+   * answer): never chosen, shown as ineligible.
+   */
+  exclude?: string[];
 }
 
 /** One `tasks[].placement.candidates[]` entry (wave-state.schema.json). */
@@ -105,6 +110,16 @@ const LINE_MAX = 200;
 export const needsPlacement = (t: Pick<WaveTask, "host">): boolean => t.host === AUTO_HOST;
 
 const line = (s: string) => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);
+/** Why an excluded machine is skipped (`PlaceOptions.exclude`). */
+const EXCLUDED = "excluded: the task is being moved off it";
+/** An overload line (load or memory): nothing running there is touched, nothing new starts. */
+const overloaded = (what: string) => `overloaded: ${what} · no new agents`;
+/**
+ * The load an overload is judged on: the higher of the 1- and 5-minute averages, so a dip in the
+ * 1-minute figure alone does not reopen a machine that is still busy.
+ */
+export const overloadLoad = (r: Pick<MachineRecord, "load">): number =>
+  Math.max(r.load[0], r.load[1]);
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const pct = (n: number) => `${Math.round(n)}%`;
 
@@ -173,15 +188,15 @@ export function machineIneligible(m: MachineView, snap: Snapshot, o: FilterOptio
   out.push(...m.held);
   const r = m.record;
   if (r !== undefined) {
-    const perCore = r.load[0] / r.cores;
-    if (perCore > o.placement.load_per_core_max) {
-      out.push(
-        `load ${r.load[0].toFixed(1)} on ${r.cores} cores (${perCore.toFixed(2)} per core > max ${o.placement.load_per_core_max})`,
-      );
+    const load = overloadLoad(r);
+    if (load / r.cores > o.placement.load_per_core_max) {
+      out.push(overloaded(`load ${load.toFixed(1)} on ${r.cores} cores`));
     }
     if (r.memory !== undefined && r.memory.available_pct < o.placement.mem_available_min_pct) {
       out.push(
-        `memory available ${pct(r.memory.available_pct)} (min ${o.placement.mem_available_min_pct}%)`,
+        overloaded(
+          `memory available ${pct(r.memory.available_pct)} (min ${o.placement.mem_available_min_pct}%)`,
+        ),
       );
     }
     if (r.disk !== undefined && r.disk.free_gb < o.placement.disk_free_min_gb) {
@@ -204,7 +219,10 @@ function ineligible(
   snap: Snapshot,
   o: PlaceOptions,
 ): string[] {
-  const out = machineIneligible(m, snap, o);
+  const out = [
+    ...(o.exclude?.includes(m.name) === true ? [EXCLUDED] : []),
+    ...machineIneligible(m, snap, o),
+  ];
   for (const [pool, held, per] of heavySlots(m, task, wave, snap)) {
     if (held >= per) out.push(`heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`);
   }

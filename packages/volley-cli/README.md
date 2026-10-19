@@ -215,6 +215,21 @@ re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <
 machine to pair: `volley peer join <code> --to <user@supervisor> --repo <clone>` (add
 `--name <name> --replace` with a `--for` code), then the `volley peer run` service it installs.
 
+### `volley peer remove`
+
+```sh
+volley peer remove box-a           # now: revoke its account, drop hosts.box-a, clear its record
+volley peer remove box-a --drain   # place nothing new there; remove it once its agents finish
+volley peer remove box-a --now     # stop its agents (each task gets a respawn question), then remove
+```
+
+With agents still running there, `--drain` and `--now` answer at once (`draining box-a: nothing
+new starts there; 2 agents left. …`) and `volleyd` finishes the removal itself: `--drain` waits
+for the agents to finish; `--now` asks each to stop, retires those still running after
+`stop_grace_s`, and opens each task's respawn decision, which offers `respawn on <best>` (another
+eligible machine). With no agent there, both remove at once like the plain form. The two flags
+exclude each other.
+
 ### `volley peer doctor`
 
 The one command that says whether this machine can run an agent, and what to do if not:

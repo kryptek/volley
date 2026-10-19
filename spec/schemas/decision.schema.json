@@ -109,7 +109,7 @@
             "down_since": {
               "type": "string",
               "format": "date-time",
-              "description": "machine_down: when the supervisor marked the host down (spec section 4.6.14)."
+              "description": "machine_down: when the supervisor marked the host down, or since when it is draining, being removed or removed (spec section 4.6.14)."
             },
             "tasks": {
               "type": "array",
@@ -117,6 +117,10 @@
               "uniqueItems": true,
               "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
               "description": "machine_down: the wave's unfinished tasks on the host, running and queued."
+            },
+            "machine": {
+              "enum": ["down", "draining", "removing", "removed"],
+              "description": "machine_down: what is wrong with the host (absent: down). draining, removing and removed: nothing new starts there (spec section 4.6.15)."
             },
             "resolved": {
               "type": "object",

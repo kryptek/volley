@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { foldHost, hostSamples } from "../src/admission";
 import { DEFAULT_SHARING, readSharing } from "../src/claude/sharing";
 import type { MachineRecord } from "../src/machines";
 import {
@@ -151,6 +152,42 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     const r = readiness(input({ host: { max_agents: 4, drain: true } }));
     expect(r).toMatchObject({ ready: true, drain: true, eligible: false });
     expect(r.ineligible_reason).toBe("draining");
+  });
+
+  it("an overloaded machine (load 24.1 on 16 cores) is ineligible with the exact overload line, still ready", () => {
+    const r = readiness(input({ record: record({ cores: 16, load: [24.1, 20, 18] }) }));
+    expect(r).toMatchObject({
+      ready: true,
+      eligible: false,
+      ineligible_reason: "overloaded: load 24.1 on 16 cores · no new agents",
+    });
+    const mem = readiness(
+      input({ record: record({ memory: { total_mb: 8192, available_pct: 4 } }) }),
+    );
+    expect(mem.ineligible_reason).toBe("overloaded: memory available 4% (min 10%) · no new agents");
+  });
+
+  it("after an overload, three clean heartbeats restore eligibility; two do not", () => {
+    const T = { mem_available_min_pct: 10, load_per_core_max: 1.5, hysteresis_samples: 3 };
+    const hot = record({ cores: 16, load: [24.1, 20, 18] });
+    const clean = record({ cores: 16, load: [2, 3, 3] });
+    /** The verdict after these heartbeats (the daemon folds the box's last ones the same way). */
+    const verdictAfter = (beats: MachineRecord[]) =>
+      readiness(
+        input({
+          record: beats.at(-1),
+          held: foldHost("box-a", beats.map(hostSamples), T).recovering,
+        }),
+      );
+    expect(verdictAfter([hot]).eligible).toBe(false);
+    expect(verdictAfter([hot, clean, clean])).toMatchObject({
+      eligible: false,
+      ineligible_reason: "recovering: load per core clear for 2/3 samples",
+    });
+    expect(verdictAfter([hot, clean, clean, clean]).eligible).toBe(true);
+    // A heartbeat whose 1-minute load dipped while the 5-minute one is still over is not clean.
+    const dip = record({ cores: 16, load: [2, 30, 20] });
+    expect(verdictAfter([hot, dip, clean, clean]).eligible).toBe(false);
   });
 
   it("placed at max_agents is ineligible: 4/4 agents (max_agents)", () => {

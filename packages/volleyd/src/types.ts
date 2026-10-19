@@ -118,7 +118,7 @@ export type NudgeOnMerge = "files" | "all" | "off";
 export interface PlacementConfig {
   nudge_on_merge: NudgeOnMerge;
   // --- Fleet: placement engine (placement.ts) ---
-  /** A machine whose 1-minute load per core is above this takes no new placement. */
+  /** A machine whose load per core (the higher of the 1- and 5-minute) is above this takes no new placement. */
   load_per_core_max: number;
   /** A machine with less available memory (percent) takes no new placement. */
   mem_available_min_pct: number;
@@ -126,6 +126,9 @@ export interface PlacementConfig {
   disk_free_min_gb: number;
   /** Relative weights of each headroom in a candidate's score (renormalised over the known ones). */
   weights: { cpu: number; slots: number; mem: number; usage: number };
+  // --- Fleet: a machine that stays down ---
+  /** Seconds a machine with unfinished tasks stays down before its `machine_down` decision opens. */
+  down_decision_after_s: number;
 }
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
@@ -378,6 +381,8 @@ export const WAVE_EVENT_TYPES = [
   "machine_readiness_changed",
   // Fleet (SPEC §4.6.14): an admin's `peer_doctor` ran on a paired machine, in `_system`.
   "peer_doctor_run",
+  // Fleet (SPEC §4.6.14): `peer_remove { drain | now }` started; `peer_removed` follows later.
+  "peer_drain_started",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

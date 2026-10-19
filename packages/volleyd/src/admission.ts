@@ -202,7 +202,9 @@ export function hostSamples(r: {
   memory?: { available_pct: number };
 }): HostSamples {
   const mem = r.memory?.available_pct;
-  const perCore = r.cores > 0 ? r.load[0] / r.cores : undefined;
+  // The higher of the 1- and 5-minute loads, as placement's overload filter reads it: a heartbeat
+  // whose 1-minute load dipped while the 5-minute one is still over is not a clean sample.
+  const perCore = r.cores > 0 ? Math.max(r.load[0], r.load[1]) / r.cores : undefined;
   return {
     memory_available:
       mem !== undefined

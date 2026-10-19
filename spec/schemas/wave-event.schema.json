@@ -69,7 +69,8 @@
             "task_placed",
             "machine_readiness_changed",
             "merge_nudge_sent",
-            "peer_doctor_run"
+            "peer_doctor_run",
+            "peer_drain_started"
           ]
         },
         "payload": {

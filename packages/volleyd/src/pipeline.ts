@@ -22,6 +22,7 @@ import type { DecisionInput, DecisionRecord } from "./decisions";
 import { type EvidenceInput, markEvidenceStale, writeEvidence } from "./evidence";
 import type { ExecFn, ExecOptions, ExecResult } from "./exec";
 import { type RunningImplementer, nudgeTargets, nudgeText, parsePrFiles } from "./overlap";
+import { isRespawnAnswer } from "./recovery";
 import type { WaveRecord } from "./reducer";
 import {
   type Disagreement,
@@ -453,7 +454,13 @@ export function reducePipeline(
           ...(typeof d.by === "string" ? { by: d.by } : {}),
         };
       // A respawn replaces the run; advance spawns the role again (and retries a held spawn).
-      if (m !== undefined && RESPAWNABLE.has(m.on) && isRole(m.role) && isAnswer(answer, "respawn"))
+      // `respawn on <machine>` (F6) too: the daemon re-placed the task there first.
+      if (
+        m !== undefined &&
+        RESPAWNABLE.has(m.on) &&
+        isRole(m.role) &&
+        isRespawnAnswer(answer, ctx.decision?.options ?? [])
+      )
         delete p.runs[m.role];
       if (m?.on === "pr_head_moved" && p.moved !== undefined && m.head === p.moved.to) {
         const fixup = isAnswer(answer, "fixup");
@@ -505,6 +512,8 @@ export type PipelineEvent =
       agent_id: string;
       status: "done" | "failed";
       result?: unknown;
+      /** Why a `failed` one ended, when the daemon stopped it (F6: its machine is being removed). */
+      why?: string;
     }
   /** Artifacts verified for `role`'s run `agent_id`; `waited_ms`: how long this head has had no CI run. */
   | {
@@ -1140,7 +1149,7 @@ function onDone(
         decision: {
           kind: "agent_blocked",
           task: v.task,
-          question: `${ev.agent_id} (${ev.role}) failed. Respawn the ${ev.role}, or cancel the task?`,
+          question: `${ev.agent_id} (${ev.role}) ${ev.why ?? "failed"}. Respawn the ${ev.role}, or cancel the task?`,
           options: ["respawn", "cancel"],
         },
       },
@@ -1475,7 +1484,7 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "review_result":
       if (role === undefined) return [];
       // respawn: the reducer dropped the run; advance spawns it (retrying a held spawn).
-      if (isAnswer(answer, "respawn")) return [];
+      if (isRespawnAnswer(answer, d.options)) return [];
       if (!isAnswer(answer, "skip")) return reask();
       return [
         {
@@ -1496,10 +1505,10 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         },
       ];
     case "fixup_result":
-      if (role === undefined || isAnswer(answer, "respawn")) return [];
+      if (role === undefined || isRespawnAnswer(answer, d.options)) return [];
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
-      return isAnswer(answer, "respawn") ? [] : reask();
+      return isRespawnAnswer(answer, d.options) ? [] : reask();
     case "pr_head_moved": {
       // The reducer moved the task's head to the new one and kept the directive.
       const live = REVIEWER_ROLES.flatMap((r) => {

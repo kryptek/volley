@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Role } from "../../src/brief";
-import { type DecisionRecord, openEvent, resolveEvent } from "../../src/decisions";
+import {
+  type DecisionInput,
+  type DecisionRecord,
+  openEvent,
+  resolveEvent,
+} from "../../src/decisions";
 import type { ExecFn, ExecOptions, ExecResult } from "../../src/exec";
 import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
@@ -97,6 +102,8 @@ export interface HarnessOptions {
   siblings?: Record<string, string[] | null>;
   /** The `placement.nudge_on_merge` the driver reads (default: the driver's own default). */
   nudgeOnMerge?: NudgeOnMerge;
+  /** What the daemon adds to a decision before opening it (F6: `respawn on <best>`). */
+  decideWith?: (input: DecisionInput, extra: Record<string, unknown>) => DecisionInput;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -352,7 +359,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       });
     },
     decide: async (input, extra) => {
-      const r = openEvent(rec, input, new Date());
+      const r = openEvent(rec, o.decideWith?.(input, extra) ?? input, new Date());
       if ("error" in r) throw new Error(r.error);
       await journal({ ...r.event, data: { ...extra, ...r.event.data } });
     },

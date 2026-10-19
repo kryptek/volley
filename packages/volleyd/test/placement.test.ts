@@ -156,9 +156,25 @@ describe("place: eligibility lines", () => {
       {
         host: "box-a",
         score: null,
-        line: "ineligible: load 32.0 on 16 cores (2.00 per core > max 1.5)",
+        line: "ineligible: overloaded: load 32.0 on 16 cores · no new agents",
       },
     ]);
+  });
+
+  it("overload reads the higher of the 1- and 5-minute load: a dip in load1 is not enough", () => {
+    const r = only(machine("box-a", { record: record("box-a", { load: [4, 30, 28] }) }));
+    expect(r.candidates[0]?.line).toBe(
+      "ineligible: overloaded: load 30.0 on 16 cores · no new agents",
+    );
+    // load5 back under the maximum too: eligible.
+    expect(
+      place(
+        task(),
+        AUTO,
+        snap(machine("box-a", { record: record("box-a", { load: [4, 20, 28] }) })),
+        OPTS,
+      ).host,
+    ).toBe("box-a");
   });
 
   it("memory under the minimum and disk under the minimum likewise", () => {
@@ -167,7 +183,9 @@ describe("place: eligibility lines", () => {
         record: record("box-a", { memory: { total_mb: 8192, available_pct: 9 } }),
       }),
     );
-    expect(mem.candidates[0]?.line).toBe("ineligible: memory available 9% (min 10%)");
+    expect(mem.candidates[0]?.line).toBe(
+      "ineligible: overloaded: memory available 9% (min 10%) · no new agents",
+    );
     const disk = only(
       machine("box-a", {
         record: record("box-a", { disk: { path: "/srv", free_gb: 3, free_pct: 2 } }),
@@ -245,6 +263,36 @@ describe("place: eligibility lines", () => {
     expect(r).toMatchObject({ host: null, why: "no eligible machine: box-b: draining" });
     if (r.host !== null) throw new Error("placed");
     expect(r.candidates.map((c) => c.host)).toEqual(["box-b", "box-a"]);
+  });
+
+  it("a drained host receives no placement, however much headroom it has", () => {
+    const drained = machine("box-a", { drain: true, record: record("box-a", { load: [0, 0, 0] }) });
+    const busy = machine("box-b", { record: record("box-b", { load: [12, 12, 12] }) });
+    const r = place(task(), AUTO, snap(drained, busy), OPTS);
+    expect(r.host).toBe("box-b");
+    expect(r.candidates.find((c) => c.host === "box-a")).toEqual({
+      host: "box-a",
+      score: null,
+      line: "ineligible: draining",
+    });
+  });
+
+  it("exclude: a re-placement never lands on the machine it moves the task off", () => {
+    const best = machine("box-a", { record: record("box-a", { load: [0, 0, 0] }) });
+    const other = machine("box-b");
+    expect(place(task(), AUTO, snap(best, other), OPTS).host).toBe("box-a");
+    const r = place(task(), AUTO, snap(best, other), { ...OPTS, exclude: ["box-a"] });
+    expect(r.host).toBe("box-b");
+    expect(r.candidates.find((c) => c.host === "box-a")).toEqual({
+      host: "box-a",
+      score: null,
+      line: "ineligible: excluded: the task is being moved off it",
+    });
+    // Nothing else left: unplaced, with that reason.
+    expect(place(task(), AUTO, snap(best), { ...OPTS, exclude: ["box-a"] })).toMatchObject({
+      host: null,
+      why: "no eligible machine: box-a: excluded: the task is being moved off it",
+    });
   });
 
   it("no candidate at all says so", () => {
@@ -370,12 +418,12 @@ describe("one machine filter: the readiness verdict agrees with placement", () =
     [
       "load",
       { record: { ...ok, load: [32, 30, 28] } },
-      "load 32.0 on 16 cores (2.00 per core > max 1.5)",
+      "overloaded: load 32.0 on 16 cores · no new agents",
     ],
     [
       "memory",
       { record: { ...ok, memory: { total_mb: 8192, available_pct: 9 } } },
-      "memory available 9% (min 10%)",
+      "overloaded: memory available 9% (min 10%) · no new agents",
     ],
     [
       "disk",
