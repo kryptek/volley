@@ -8,12 +8,14 @@ import { CONFIG_DEFAULTS } from "../src/config-defaults";
 import { ConfigStore } from "../src/config-store";
 import { ControlClient, leasePoolTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
+import { localMachineName } from "../src/fleet-name";
 import { Journal, readJournalFile } from "../src/journal";
 import {
   type LeaseBook,
   type LeaseInput,
   type LeaseStepContext,
   emptyBook,
+  heldOn,
   poolPayload,
   replayLeases,
   step,
@@ -410,17 +412,45 @@ describe("leases: per-machine cap", () => {
     ]);
   });
 
-  it("a renewal keeps the holder's host", () => {
+  it("a renewal keeps the holder's host, and its lease_granted carries it", () => {
     const h = harness(POOL);
     h.acquireOn("box-a", "backend-it", "l-1", "agent-a");
-    h.run({
+    // The renewal's own host is ignored: a held lease stays on the machine it was granted on.
+    const r = h.run({
       kind: "request",
       pool: "backend-it",
       req: { op: "renew", lease_id: "l-1", holder: "agent-a", ttl_s: 600 },
-      host: "box-a",
+      host: "box-b",
     });
+    expect(r.events.map((e) => [e.type, e.data.renewed, e.data.host])).toEqual([
+      ["lease_granted", true, "box-a"],
+    ]);
     expect(h.book["backend-it"]?.held[0]).toMatchObject({ host: "box-a", ttl_s: 600 });
     expect(replayLeases(h.journal)).toEqual(h.book);
+  });
+
+  it("FIFO across machines: when a slot frees, the earliest request both caps admit wins", () => {
+    const h = harness(POOL);
+    h.acquireOn("box-a", "backend-it", "l-1", "agent-a");
+    h.acquireOn("box-b", "backend-it", "l-2", "agent-b");
+    h.acquireOn("box-c", "backend-it", "l-3", "agent-c");
+    h.acquireOn("box-d", "backend-it", "l-4", "agent-d");
+    expect(h.queued("backend-it")).toEqual(["l-3", "l-4"]);
+    h.pools["backend-it"] = { capacity: 3, per_machine: 1 };
+    h.tick(at(1));
+    expect(h.held("backend-it")).toEqual(["l-1", "l-2", "l-3"]);
+    expect(h.queued("backend-it")).toEqual(["l-4"]);
+  });
+
+  it("heldOn counts a pool's holders on one machine (0 for an unknown pool or a null host)", () => {
+    const h = harness({ "backend-it": { capacity: 4 } });
+    h.acquireOn("box-a", "backend-it", "l-1", "agent-a");
+    h.acquireOn("box-a", "backend-it", "l-2", "agent-b");
+    h.acquireOn(null, "backend-it", "l-3", "hand-1");
+    expect(heldOn(h.book, "backend-it", "box-a")).toBe(2);
+    expect(heldOn(h.book, "backend-it", "box-b")).toBe(0);
+    expect(heldOn(h.book, "backend-it", null)).toBe(0);
+    expect(heldOn(h.book, "no-such-pool", "box-a")).toBe(0);
   });
 });
 
@@ -648,6 +678,61 @@ tasks:
       (e) => e.type === "lease_granted",
     );
     expect(granted.map((e) => e.data.host)).toEqual(["box-a", null]);
+  });
+
+  it("a holder spawned on the supervisor's own machine is held under its machine name, and counts toward its cap", async () => {
+    const client = await ControlClient.connect(t.broker.url, NS);
+    try {
+      const set = await client.request(
+        "config_set",
+        { patch: { lease_pools: { build: { capacity: 3, per_machine: 1 } } }, by: "tester" },
+        { text: "cap build per machine" },
+      );
+      expect(set.applied).toBe(true);
+      const wave = `wave: w-local
+repo: example-org/example-repo
+release_branch: release/w-local
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+config: { hard_ceiling: 1 }
+tasks:
+  A: { issue: 1 }
+  B: { issue: 2 }
+`;
+      expect((await client.request("run", { wave_yaml: wave, owner: "coord-a" })).error).toBe(
+        undefined,
+      );
+    } finally {
+      await client.close();
+    }
+    // A local spawn journals no host: the supervisor's own machine.
+    for (const [task, id] of [
+      ["A", "agent-a"],
+      ["B", "agent-b"],
+    ] as const) {
+      await daemon.recordEvent("w-local", {
+        type: "agent_spawned",
+        task,
+        data: { role: "implementer", agent_id: id },
+      });
+    }
+    const name = localMachineName();
+    const a = await connect("agent-a");
+    const b = await connect("agent-b");
+    await request(a, "agent-a", "build", { op: "acquire", lease_id: "l-a", holder: "agent-a" });
+    await until("build", (p) => ids(p.held).includes("l-a"));
+    await request(b, "agent-b", "build", { op: "acquire", lease_id: "l-b", holder: "agent-b" });
+    const p = (await until("build", (x) => ids(x.queue).includes("l-b"))) as unknown as {
+      held: { lease_id: string; host: string | null }[];
+      queue: { lease_id: string; host: string | null }[];
+      reasons: string[];
+    };
+    expect(p.held.map((x) => [x.lease_id, x.host])).toEqual([["l-a", name]]);
+    expect(p.queue.map((x) => [x.lease_id, x.host])).toEqual([["l-b", name]]);
+    expect(p.reasons).toEqual([`queued l-b: 1/1 build leases held on ${name} (per machine)`]);
+    expect(
+      schemaErrors("lease-pool.schema.json", envelope("_system/leases", "lease_pool", p)),
+    ).toEqual([]);
   });
 });
 

@@ -108,6 +108,7 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken } from "./fence";
+import { LOCAL_HOST, localMachineName } from "./fleet-name";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -1657,7 +1658,10 @@ export class Daemon {
     }
     // Machine-aware leases (F4): the holder's machine, from its `agent_spawned` (null: a
     // hand-run holder the daemon did not spawn), counted against the pool's `per_machine`.
-    const host = this.spawnedAgents.get(req.holder)?.host ?? null;
+    // The `local` token is the supervisor's own machine, held under its name (SPEC §4.6.15).
+    const spawned = this.spawnedAgents.get(req.holder)?.host;
+    const host =
+      spawned === undefined ? null : spawned === LOCAL_HOST ? localMachineName() : spawned;
     await this.runLeases({ kind: "request", pool, req, host });
   }
 

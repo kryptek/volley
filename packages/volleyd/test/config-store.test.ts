@@ -101,6 +101,23 @@ describe("ConfigStore layering", () => {
     ]);
   });
 
+  it("fails load on a per_machine above its pool's capacity, naming the path", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  build: { capacity: 2, per_machine: 3 }\n",
+    );
+    let err: unknown;
+    try {
+      open();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).errors).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
+    ]);
+  });
+
   it("fails load on an unknown key and on malformed YAML", () => {
     writeFileSync(join(home, "config.yaml"), "hard_ceilin: 5\n");
     expect(() => open()).toThrow(/hard_ceilin: unknown key/);

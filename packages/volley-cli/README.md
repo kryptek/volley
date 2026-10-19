@@ -223,8 +223,9 @@ volley lease status                                        # every pool: holders
 ```
 
 `status` groups each pool's holders and queued requests under the machine they run on, hosts by
-name and `(unknown host)` (a holder volleyd did not spawn) last; a pool with a `per_machine` cap
-shows it, and each machine's share of it:
+name and `(unknown host)` last (a holder volleyd did not spawn, or every holder of a supervisor
+that does not report hosts); a pool with a `per_machine` cap shows it, and each machine's share of
+it:
 
 ```text
 backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it leases held on box-a (per machine)

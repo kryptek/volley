@@ -17,10 +17,11 @@ import type { JournalEvent, LeasePoolConfig, NewEvent } from "./types";
  */
 
 /**
- * The machine a holder runs on, from its `agent_spawned` (`local`: the supervisor's own); null
- * for a holder the daemon did not spawn. Absent on leases from before machine-aware leases.
+ * The machine a holder runs on, by machine name (the supervisor's own under its
+ * `fleet.local_name`, never the `local` token: the daemon maps it before `step`); null for a
+ * holder the daemon did not spawn. Absent on leases from before machine-aware leases.
  */
-type LeaseHost = string | null;
+export type LeaseHost = string | null;
 
 export interface HeldLease {
   lease_id: string;
@@ -109,13 +110,18 @@ const plus = (iso: string, seconds: number) =>
 /** The host fields of a lease or its events: nothing when the host is unknown (absent). */
 const hostOf = (host: LeaseHost | undefined) => (host !== undefined ? { host } : {});
 
-/** Leases held by holders on `host` (null: none, a hand-run holder is on no machine's cap). */
-export const heldOn = (p: PoolLeases, host: LeaseHost | undefined): number =>
-  host === null || host === undefined ? 0 : p.held.filter((h) => h.host === host).length;
+/**
+ * Leases of `pool` held by holders on `host`: 0 for a pool with none, and for a null (or
+ * absent) host, since a hand-run holder is on no machine's cap.
+ */
+export function heldOn(book: LeaseBook, pool: string, host: LeaseHost | undefined): number {
+  if (host === null || host === undefined) return 0;
+  return book[pool]?.held.filter((h) => h.host === host).length ?? 0;
+}
 
 /** A queued request's machine is at the pool's `per_machine` cap (never, when it sets none). */
-const machineFull = (p: PoolLeases, cfg: LeasePoolConfig, q: QueuedLease) =>
-  cfg.per_machine !== undefined && q.host != null && heldOn(p, q.host) >= cfg.per_machine;
+const machineFull = (book: LeaseBook, pool: string, cfg: LeasePoolConfig, q: QueuedLease) =>
+  cfg.per_machine !== undefined && heldOn(book, pool, q.host) >= cfg.per_machine;
 
 const has = (p: PoolLeases | undefined, leaseId: string) =>
   p !== undefined &&
@@ -232,6 +238,7 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
     } else if (heldBy?.holder === req.holder) {
       emit("lease_granted", {
         ...ref,
+        ...hostOf(heldBy.host),
         ttl_s: req.ttl_s ?? heldBy.ttl_s,
         renewed: true,
       });
@@ -274,7 +281,7 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
     for (;;) {
       const p = cur[pool];
       if (p === undefined || p.held.length >= cfg.capacity) break;
-      const next = p.queue.find((q) => !machineFull(p, cfg, q));
+      const next = p.queue.find((q) => !machineFull(cur, pool, cfg, q));
       if (next === undefined) break;
       emit("lease_granted", {
         pool,
@@ -308,12 +315,12 @@ export function poolPayload(
   const reasons: string[] = [];
   if (cfg === undefined) reasons.push(`pool ${pool} removed from config: new requests rejected`);
   else {
-    const perMachine = p.queue.filter((q) => machineFull(p, cfg, q));
+    const perMachine = p.queue.filter((q) => machineFull(book, pool, cfg, q));
     if (perMachine.length < p.queue.length)
       reasons.push(`queued: ${p.held.length}/${capacity} ${pool} leases held`);
     for (const q of perMachine) {
       reasons.push(
-        `queued ${q.lease_id}: ${heldOn(p, q.host)}/${cfg.per_machine} ${pool} leases held on ${q.host} (per machine)`,
+        `queued ${q.lease_id}: ${heldOn(book, pool, q.host)}/${cfg.per_machine} ${pool} leases held on ${q.host} (per machine)`,
       );
     }
   }
