@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DESK_STAMP,
@@ -154,9 +154,19 @@ describe("setup: services", () => {
         join(repo, "packages", "volleyd", "src", "cli.ts"),
       );
       expect(out.join("\n")).toContain(`export PATH="${bin}:$PATH"`);
-      // `volleyd install` writes the PATH it runs with into the plist: the links come first.
-      const install = m.execCalls.findIndex((a) => a[2] === "install" && !a.includes("--dry-run"));
-      expect(m.execEnvs[install]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin`);
+      // `volleyd install` writes the PATH and auth dir it runs with into the plist: the dry run
+      // (what the plan compares) and the install get the same ones, the links first on PATH.
+      for (const dry of [true, false]) {
+        const i = m.execCalls.findIndex(
+          (a) => a[2] === "install" && a.includes("--dry-run") === dry,
+        );
+        expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin`);
+        expect(m.execEnvs[i]?.VOLLEY_AUTH_DIR).toBe(m.ctx.auth.dir);
+      }
+      // volleyd's own service change is in this plan: the link says sign-in waits for it.
+      expect(out.join("\n")).toContain(
+        "Sign-in links work once volleyd runs with it on its PATH: the change “Install volleyd as a launchd service (volleyd install)” in this step does that",
+      );
       const again = await planServices(m.ctx);
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain(`volley, volleyd: linked in ${bin}`);
@@ -173,6 +183,58 @@ describe("setup: services", () => {
       expect(readlinkSync(join(bin, "volley"))).toBe(
         join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts"),
       );
+    });
+
+    it("backs up a file or directory at a link's path instead of deleting it", async () => {
+      const bin = join(m.ctx.home, ".volley", "bin");
+      mkdirSync(join(bin, "volleyd"), { recursive: true });
+      writeFileSync(join(bin, "volley"), "#!/bin/sh\necho my own wrapper\n");
+      const p = await planServices(m.ctx);
+      expect(p.changes[0]?.detail).toContain(`${join(bin, "volley")} -> `);
+      expect(p.changes[0]?.detail).toContain("(now: a file; backed up first)");
+      expect(p.changes[0]?.detail).toContain("(now: a directory; backed up first)");
+      const out = (await p.changes[0]?.apply()) ?? [];
+      const backup = (name: string) => `${join(bin, name)}.volley-backup-20261018T120000Z`;
+      expect(readFileSync(backup("volley"), "utf-8")).toBe("#!/bin/sh\necho my own wrapper\n");
+      expect(existsSync(backup("volleyd"))).toBe(true);
+      expect(out.join("\n")).toContain(`Moved ${join(bin, "volley")} aside to ${backup("volley")}`);
+      expect(readlinkSync(join(bin, "volley"))).toBe(
+        join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts"),
+      );
+    });
+
+    it("counts a relative link to the right file as in place", async () => {
+      const bin = join(m.ctx.home, ".volley", "bin");
+      mkdirSync(bin, { recursive: true });
+      const repo = m.deps.repoRoot as string;
+      symlinkSync(
+        relative(bin, join(repo, "packages", "volley-cli", "src", "cli.ts")),
+        join(bin, "volley"),
+      );
+      symlinkSync(
+        relative(bin, join(repo, "packages", "volleyd", "src", "cli.ts")),
+        join(bin, "volleyd"),
+      );
+      const p = await planServices(m.ctx);
+      expect(p.changes.map((c) => c.summary)).not.toContain(LINK_SUMMARY(m));
+      expect(p.found.join("\n")).toContain(`volley, volleyd: linked in ${bin}`);
+    });
+
+    it("moves the links to the front of a PATH that has them further back", async () => {
+      const bin = join(m.ctx.home, ".volley", "bin");
+      m.ctx.auth.env.PATH = `/opt/old-volley/bin:${bin}:/usr/bin`;
+      await applyAll(await planServices(m.ctx));
+      const i = m.execCalls.findIndex((a) => a[2] === "install" && !a.includes("--dry-run"));
+      expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/opt/old-volley/bin:/usr/bin`);
+    });
+
+    it("with volleyd's service already in place, the link alone fixes sign-in", async () => {
+      await applyAll(await planServices(m.ctx));
+      rmSync(join(m.ctx.home, ".volley", "bin"), { recursive: true });
+      const p = await planServices(m.ctx);
+      expect(p.changes.map((c) => c.summary)).toEqual([LINK_SUMMARY(m)]);
+      const out = await applyAll(p);
+      expect(out.join("\n")).toContain("volleyd already runs with it on its PATH");
     });
 
     it("is skipped as root: the services belong to the user", async () => {

@@ -6,13 +6,14 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { writeConfig } from "../auth/config";
+import { dirname, join, relative, resolve } from "node:path";
+import { backupPath, writeConfig } from "../auth/config";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
@@ -208,11 +209,14 @@ async function systemdChange(
 /** Where setup links the `volley` and `volleyd` commands. */
 export const binDir = (ctx: SetupContext) => join(ctx.home, ".volley", "bin");
 
-/** The services' PATH: the linked commands first, then the PATH setup runs with. */
+/**
+ * The services' PATH: the linked commands first (moved there when the PATH setup runs with has
+ * them further back, behind another `volley`), then the rest of that PATH.
+ */
 function servicePath(ctx: SetupContext): string {
   const path = ctx.auth.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const bin = binDir(ctx);
-  return path.split(":").includes(bin) ? path : `${bin}:${path}`;
+  return [bin, ...path.split(":").filter((d) => d !== bin && d !== "")].join(":");
 }
 
 /**
@@ -230,10 +234,12 @@ function serviceEnv(ctx: SetupContext): Record<string, string> {
   };
 }
 
-/** What a symlink at `path` points to, or null when there is none. */
-function linkTarget(path: string): string | null {
+/** What is at a link's path: a symlink (its target, resolved), something else, or nothing. */
+function atPath(path: string): { link: string } | { other: "a file" | "a directory" } | null {
   try {
-    return lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null;
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return { link: resolve(dirname(path), readlinkSync(path)) };
+    return { other: st.isDirectory() ? "a directory" : "a file" };
   } catch {
     return null;
   }
@@ -244,13 +250,22 @@ function linkTarget(path: string): string | null {
  * by name (redeeming the Desk's sign-in links and admin tokens), so the services need it on their
  * PATH; a fresh machine has it nowhere else.
  */
-function linkChange(ctx: SetupContext, repo: string, found: string[]): Change | null {
+function linkChange(
+  ctx: SetupContext,
+  repo: string,
+  found: string[],
+  volleydChange: () => string | null,
+): Change | null {
   const bin = binDir(ctx);
   const links: [string, string][] = [
     ["volley", join(repo, "packages", "volley-cli", "src", "cli.ts")],
     ["volleyd", join(repo, "packages", "volleyd", "src", "cli.ts")],
   ];
-  const wrong = links.filter(([name, target]) => linkTarget(join(bin, name)) !== target);
+  const linked = (path: string, target: string) => {
+    const at = atPath(path);
+    return at !== null && "link" in at && at.link === target;
+  };
+  const wrong = links.filter(([name, target]) => !linked(join(bin, name), target));
   if (wrong.length === 0) {
     found.push(`volley, volleyd: linked in ${bin}`);
     return null;
@@ -260,19 +275,38 @@ function linkChange(ctx: SetupContext, repo: string, found: string[]): Change | 
     detail: wrong
       .map(([name, target]) => {
         const path = join(bin, name);
-        const now = linkTarget(path) ?? (existsSync(path) ? "a file" : "nothing");
+        const at = atPath(path);
+        const now =
+          at === null ? "nothing" : "link" in at ? at.link : `${at.other}; backed up first`;
         return `${path} -> ${target} (now: ${now})`;
       })
       .join("\n"),
     apply: async () => {
       mkdirSync(bin, { recursive: true });
+      const lines: string[] = [];
       for (const [name, target] of wrong) {
         const path = join(bin, name);
-        rmSync(path, { force: true });
+        const at = atPath(path);
+        if (at !== null && "other" in at) {
+          // Never delete what someone put here (a wrapper script, a directory): move it aside.
+          const backup = backupPath(path, ctx.auth.io.now());
+          renameSync(path, backup);
+          lines.push(`Moved ${path} aside to ${backup} (${at.other}).`);
+        } else if (at !== null) rmSync(path);
         symlinkSync(target, path);
       }
+      const pending = volleydChange();
+      const managed = ctx.deps.platform === "darwin" || ctx.deps.platform === "linux";
       return [
-        `Linked ${wrong.map(([name]) => name).join(" and ")} into ${bin}; the services run with it on their PATH.`,
+        ...lines,
+        `Linked ${wrong.map(([name]) => name).join(" and ")} into ${bin}.`,
+        ...(!managed
+          ? [`Run volleyd with ${bin} first on its PATH, or the Desk's sign-in links fail.`]
+          : pending === null
+            ? ["volleyd already runs with it on its PATH: sign-in links work now."]
+            : [
+                `Sign-in links work once volleyd runs with it on its PATH: the change “${pending}” in this step does that (from a terminal, when the Desk lists it there).`,
+              ]),
         `To run them from your shell, add it to your PATH (in ~/.zshrc or ~/.bashrc): export PATH="${bin}:$PATH"`,
       ];
     },
@@ -345,14 +379,17 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     if (c !== null) plan.changes.push(c);
   };
 
-  push(linkChange(ctx, repo, plan.found));
+  // Whether this plan also (re)installs volleyd's service, read when the link is applied.
+  let volleydSummary: string | null = null;
+  push(linkChange(ctx, repo, plan.found, () => volleydSummary));
+  const volleydAt = plan.changes.length;
 
   // volleyd.
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
   if (platform === "darwin") {
     const install = [bun, volleydCli, "install", "--broker-url", ctx.auth.url];
     // `volleyd install` writes the PATH it runs with into the plist.
-    const installEnv = { ...ctx.auth.env, PATH: env.PATH };
+    const installEnv = { ...ctx.auth.env, PATH: env.PATH, VOLLEY_AUTH_DIR: ctx.auth.dir };
     const dry = await ctx.deps.exec([...install, "--dry-run"], { env: installEnv });
     if (dry.code !== 0) {
       plan.blocked = `\`volleyd install --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;
@@ -398,6 +435,8 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
       `no launchd or systemd here (${platform}): run \`volleyd daemon\` and \`volley desk serve --host 0.0.0.0\` yourself`,
     );
   }
+
+  if (plan.changes.length > volleydAt) volleydSummary = plan.changes[volleydAt]?.summary ?? null;
 
   // The hooks, for coordinator sessions.
   const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
