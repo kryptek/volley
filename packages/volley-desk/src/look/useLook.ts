@@ -5,7 +5,7 @@
  * localStorage entry; D6's saved `autoArrange` lives in the same entry and
  * carries over. The same entry keeps whether finished agents are shown (the
  * coordinators window's toggle) and after how many minutes a finished agent
- * leaves the canvas (`finishedGraceMin`, the Appearance panel). Unlike the
+ * leaves the canvas (`finishedGraceMin`, Settings › General). Unlike the
  * prototype, a stored value of the wrong kind falls back to its default
  * instead of reaching the UI.
  */

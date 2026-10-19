@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { Appearance } from "../src/look/Appearance";
 import { Background } from "../src/look/Background";
 import {
   BACKGROUNDS,
@@ -13,6 +12,8 @@ import {
   isLazyBackground,
 } from "../src/look/backgrounds";
 import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
+import { Appearance } from "../src/settings/Appearance";
+import { General } from "../src/settings/General";
 import { DeskStoreProvider } from "../src/store/context";
 
 /** The "Backgrounds" section of https://reactbits.dev/llms.txt (the owner's amendment). */
@@ -33,7 +34,14 @@ function Harness({ onArrange = () => {} }: { onArrange?: () => void }) {
   return (
     <>
       <Background which={look.bg} dim={look.dim} backgrounds={stub} />
-      <Appearance look={look} setLook={setLook} onClose={() => {}} onArrange={onArrange} />
+      <Appearance look={look} setLook={setLook} />
+      <General
+        look={look}
+        setLook={setLook}
+        notify={{ enabled: false, sound: true, on: [] }}
+        setNotify={() => {}}
+        onArrange={onArrange}
+      />
     </>
   );
 }
@@ -80,10 +88,10 @@ describe("background registry", () => {
   });
 });
 
-describe("Appearance", () => {
+describe("Settings › Appearance and General", () => {
   it("counts the React Bits backgrounds", () => {
     render(<Harness />);
-    expect(screen.getByText("· 63 from React Bits")).toBeInTheDocument();
+    expect(screen.getByText(/^63 backgrounds from React Bits\./)).toBeInTheDocument();
   });
 
   // One test per background: each role query scans the whole grid, so 64 picks in one test
@@ -138,34 +146,35 @@ describe("Appearance", () => {
   it("window style, Needs-you and narration segments set the look", () => {
     render(<Harness />);
     const seg = (group: string, name: string) =>
-      within(screen.getByRole("group", { name: group })).getByRole("button", { name });
+      within(screen.getByRole("radiogroup", { name: group })).getByRole("radio", { name });
     const picks: [string, string, keyof Look, string][] = [
-      ["Window style", "Frosted glass", "chrome", "glass"],
+      // Each pick changes the value (picking the current option again is a no-op).
       ["Window style", "Liquid glass", "chrome", "liquid"],
       ["Window style", "Spotlight", "chrome", "spotlight"],
       ["Window style", "Border glow", "chrome", "glow"],
       ["Window style", "Solid", "chrome", "solid"],
+      ["Window style", "Frosted glass", "chrome", "glass"],
       ["Needs you effect", "Electric border", "attn", "electric"],
       ["Needs you effect", "Star border", "attn", "star"],
       ["Needs you effect", "Pulse", "attn", "pulse"],
-      ["Narration effect", "Decrypt", "narr", "decrypt"],
       ["Narration effect", "Shiny", "narr", "shiny"],
       ["Narration effect", "Plain", "narr", "plain"],
+      ["Narration effect", "Decrypt", "narr", "decrypt"],
     ];
     for (const [group, name, key, value] of picks) {
       fireEvent.click(seg(group, name));
       expect(latest[key]).toBe(value);
       expect(stored()[key]).toBe(value);
-      expect(seg(group, name)).toHaveAttribute("aria-pressed", "true");
+      expect(seg(group, name)).toHaveAttribute("aria-checked", "true");
     }
-    expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-pressed", "false");
+    expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-checked", "false");
   });
 
   it("toggles auto-arrange and arranges on demand", () => {
     const onArrange = vi.fn();
     render(<Harness onArrange={onArrange} />);
-    const box = screen.getByRole("checkbox", { name: /Auto-arrange and fit/ });
-    expect(box).toBeChecked();
+    const box = screen.getByRole("switch", { name: "Auto-arrange" });
+    expect(box).toHaveAttribute("aria-checked", "true");
     fireEvent.click(box);
     expect(latest.autoArrange).toBe(false);
     expect(stored().autoArrange).toBe(false);
@@ -243,22 +252,22 @@ describe("App look (demo mode)", () => {
     expect(paths()).toBe(before);
   });
 
-  it("opens Appearance from the dock; picks reach every window; tethers toggle", () => {
+  it("Settings › Appearance and General picks reach every window; tethers toggle", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
     const { container } = renderApp();
-    expect(screen.queryByRole("complementary", { name: "Appearance" })).toBeNull();
-    fireEvent.click(dock().getByRole("button", { name: "Appearance" }));
-    const panel = within(screen.getByRole("complementary", { name: "Appearance" }));
-    fireEvent.click(panel.getByRole("button", { name: "Solid" }));
+    fireEvent.click(dock().getByRole("button", { name: "Settings" }));
+    const settings = within(screen.getByRole("dialog", { name: "Settings" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Plain" }));
+    expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "plain");
+    fireEvent.click(settings.getByRole("button", { name: "Appearance" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Solid" }));
     const inners = [...container.querySelectorAll(".world .win-inner")];
     expect(inners.length).toBeGreaterThan(0);
     for (const el of inners) expect(el).toHaveClass("chrome-solid");
-    fireEvent.click(panel.getByRole("button", { name: "Star border" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Star border" }));
     expect(container.querySelector(".world .win--attn-you .star-border")).not.toBeNull();
     expect(container.querySelector(".world .win-attn-pulse")).toBeNull();
-    fireEvent.click(panel.getByRole("button", { name: "Plain" }));
-    expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "plain");
-    fireEvent.click(dock().getByRole("button", { name: "Hide tethers" }));
+    fireEvent.click(settings.getByRole("switch", { name: "Tethers" }));
     expect(container.querySelector(".world svg.tethers")).toBeNull();
     expect(stored()).toMatchObject({
       chrome: "solid",
@@ -266,16 +275,7 @@ describe("App look (demo mode)", () => {
       narr: "plain",
       tethers: false,
     });
-    fireEvent.click(panel.getByRole("button", { name: "Close appearance" }));
-    expect(screen.queryByRole("complementary", { name: "Appearance" })).toBeNull();
-  });
-
-  it("toggles auto-arrange from the dock with a toast", () => {
-    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
-    renderApp();
-    fireEvent.click(dock().getByRole("button", { name: "Auto-arrange: on" }));
-    expect(stored().autoArrange).toBe(false);
-    expect(dock().getByRole("button", { name: "Auto-arrange: off" })).toBeInTheDocument();
-    expect(screen.getByText("Windows stay where you put them.")).toBeInTheDocument();
+    fireEvent.click(settings.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 });

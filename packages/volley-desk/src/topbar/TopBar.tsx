@@ -16,8 +16,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
 import { noun } from "../lib/plural";
-import { requestNotificationPermission } from "../notify/notify-permission";
-import type { NotifyOptions } from "../notify/use-notify-settings";
+import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
+import { useNotifyToggle } from "../notify/use-notify-toggle";
 import type { Connection } from "../store/context";
 import { supervisorHealth, supervisorList } from "../store/reducer";
 import type { DeskState, SupervisorView } from "../store/types";
@@ -35,7 +35,7 @@ export interface TopBarProps {
   coordsOpen: boolean;
   onToggleCoords: () => void;
   notify: NotifyOptions;
-  setNotify: (next: NotifyOptions) => void;
+  setNotify: SetNotify;
   /** Phone width: the counts collapse, the pill stays. */
   compact?: boolean;
   /** The supervisor's clock (the App shares it with the coordinators row); else its own 2 s tick. */
@@ -109,23 +109,12 @@ function Toggle(p: {
 }
 
 export function TopBar(p: TopBarProps) {
-  const [denied, setDenied] = useState(false);
   const waves = Object.values(p.state.waves).filter((w) => w.state !== null).length;
   const working = Object.values(p.state.agents).filter((a) => a.status?.type === "working").length;
   const supervisors = supervisorList(p.state);
   const now = useNow(p.now, supervisors.length > 0);
 
-  const toggleNotify = () => {
-    if (p.notify.enabled) {
-      p.setNotify({ ...p.notify, enabled: false });
-      return;
-    }
-    void requestNotificationPermission().then((result) => {
-      // Only a refusal is "blocked"; dismissing the prompt leaves it askable.
-      setDenied(result === "denied");
-      p.setNotify({ ...p.notify, enabled: result === "granted" });
-    });
-  };
+  const { toggle: toggleNotify, blocked } = useNotifyToggle(p.setNotify);
 
   return (
     <header className="topbar">
@@ -170,14 +159,14 @@ export function TopBar(p: TopBarProps) {
           label="Browser notifications"
           on={p.notify.enabled}
           i={p.notify.enabled ? Notification01Icon : NotificationOff01Icon}
-          onClick={toggleNotify}
-          {...(denied ? { title: "Notifications are blocked: allow them in the browser" } : {})}
+          onClick={() => toggleNotify(!p.notify.enabled)}
+          {...(blocked ? { title: "Notifications are blocked: allow them in the browser" } : {})}
         />
         <Toggle
           label="Sound"
           on={p.notify.sound}
           i={p.notify.sound ? VolumeHighIcon : VolumeOffIcon}
-          onClick={() => p.setNotify({ ...p.notify, sound: !p.notify.sound })}
+          onClick={() => p.setNotify((prev) => ({ ...prev, sound: !prev.sound }))}
         />
       </div>
     </header>

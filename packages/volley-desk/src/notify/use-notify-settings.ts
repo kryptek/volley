@@ -5,13 +5,17 @@
  * fires on attention tier `you` and keeps `on` only so the shared entry
  * round-trips intact. A corrupt entry falls back to the defaults.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 export interface NotifyOptions {
   enabled: boolean;
   sound: boolean;
   on: string[];
 }
+
+/** The next settings, or how to get them from the latest ones (for answers that arrive late). */
+export type NotifyUpdate = NotifyOptions | ((prev: NotifyOptions) => NotifyOptions);
+export type SetNotify = (next: NotifyUpdate) => void;
 
 export const NOTIFY_STORAGE_KEY = "volley-dash:notify";
 
@@ -40,10 +44,14 @@ function readFromStorage(): NotifyOptions {
   }
 }
 
-export function useNotifySettings(): [NotifyOptions, (next: NotifyOptions) => void] {
+export function useNotifySettings(): [NotifyOptions, SetNotify] {
   const [settings, setSettings] = useState<NotifyOptions>(readFromStorage);
+  /** The settings as last set, so an updater never sees a stale render's value. */
+  const latest = useRef(settings);
 
-  const setAndPersist = useCallback((next: NotifyOptions): void => {
+  const setAndPersist = useCallback((update: NotifyUpdate): void => {
+    const next = typeof update === "function" ? update(latest.current) : update;
+    latest.current = next;
     setSettings(next);
     try {
       localStorage.setItem(NOTIFY_STORAGE_KEY, JSON.stringify(next));

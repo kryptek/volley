@@ -55,18 +55,32 @@ describe("axe (jsdom)", () => {
     expect(await violations()).toEqual([]);
   }, 30_000);
 
-  it("reports no violations with Appearance, a steering panel and the settings modal open", async () => {
+  it("reports no violations with a steering panel and the wave settings open", async () => {
     renderApp();
-    fireEvent.click(
-      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
-        name: "Appearance",
-      }),
-    );
     fireEvent.click(screen.getAllByRole("button", { name: /^Message / })[0] as HTMLElement);
     expect(await violations()).toEqual([]);
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
     expect(await violations()).toEqual([]);
   }, 30_000);
+
+  it.each(["General", "Appearance", "Supervisor", "Machines", "About Volley"])(
+    "reports no violations in the Settings window's %s section",
+    async (section) => {
+      renderApp();
+      fireEvent.click(
+        within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+          name: "Settings",
+        }),
+      );
+      fireEvent.click(
+        within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", {
+          name: section,
+        }),
+      );
+      expect(await violations()).toEqual([]);
+    },
+    30_000,
+  );
 });
 
 describe("landmarks and roles", () => {
