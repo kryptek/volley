@@ -62,6 +62,10 @@ export interface RemoteHostConfig {
   /** The volley checkout on the remote machine (its volley-hooks is `$VOLLEY_HOOKS_DIR`). */
   volley_dir?: string;
   tunnel?: { remote_port?: number; supervise?: boolean };
+  /** The most supervised agents the host runs at once (default 4, SPEC §4.6.15). */
+  max_agents?: number;
+  /** true: no new placements on the host; its running agents finish. */
+  drain?: boolean;
 }
 
 /** Every runtime tunable, fully populated (what `ConfigStore.effective()` returns). */
@@ -98,6 +102,13 @@ export interface Tunables {
   /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
   require_fresh_base: boolean;
   placement: PlacementConfig;
+  /** The supervisor's own machine (SPEC §4.6.15). */
+  fleet: FleetConfig;
+}
+
+/** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
+export interface FleetConfig {
+  local_name: string | null;
 }
 
 /** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
@@ -330,6 +341,10 @@ export const WAVE_EVENT_TYPES = [
   "peer_removed",
   // Fleet (SPEC §4.6.15): a running implementer told that a sibling PR merged (pipeline.ts).
   "merge_nudge_sent",
+  // Fleet (SPEC §4.6.15): a machine's readiness verdict changed, in the `_system` journal.
+  "machine_readiness_changed",
+  // Fleet (SPEC §4.6.14): an admin's `peer_doctor` ran on a paired machine, in `_system`.
+  "peer_doctor_run",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

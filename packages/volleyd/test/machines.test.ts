@@ -1,11 +1,14 @@
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { buildEnvelope } from "volley-mcp/envelope";
-import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { authOpsTopic } from "../src/accounts";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
-import type { Daemon } from "../src/daemon";
+import { type Daemon, type DaemonOptions, realLocalDoctor } from "../src/daemon";
+import { assertAllowed } from "../src/fence";
 import type { RemoteHost, RemoteHostSpec } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import {
@@ -21,9 +24,17 @@ import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
-import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
+import {
+  FIXTURES,
+  type FakeHost,
+  type FakeRemoteHost,
+  GREEN_DOCTOR,
+  fakeHost,
+  fakeRemoteHost,
+} from "./helpers/fake-host";
 import { type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
+import { schemaErrors } from "./helpers/schema";
 
 const record = (over: Partial<MachineRecord> = {}): MachineRecord => ({
   name: "box",
@@ -149,28 +160,58 @@ describe("MachineHealth", () => {
 });
 
 /** A paired machine on fakes: its own tunnel (supervise: false) always answers the port check. */
-function fakeBox(spec: RemoteHostSpec, local: FakeHost): FakeHost & RemoteHost {
-  const h = fakeHost(local.fake) as unknown as FakeHost & RemoteHost;
-  Object.assign(h, {
-    name: spec.name,
-    spec,
-    screenSource: "tmux",
-    hooksDir: `${spec.volley_dir}/packages/volley-hooks`,
-    mcpEntry: `${spec.volley_dir}/packages/volley-mcp/src/index.ts`,
-    brokerUrl: `mqtt://127.0.0.1:${spec.tunnel.remote_port}`,
-    launchEnv: (id: { agent_id: string; namespace: string }) => ({
-      VOLLEY_BROKER_URL: `mqtt://127.0.0.1:${spec.tunnel.remote_port}`,
-      VOLLEY_NAMESPACE: id.namespace,
-      VOLLEY_AGENT_ID: id.agent_id,
-    }),
-    repoExists: async () => true,
-    tunnelUp: async () => true,
-    readTrust: async () => ({ projects: { [spec.repo]: { hasTrustDialogAccepted: true } } }),
-    recordTrust: async () => {},
-    readFile: async () => null,
-  });
-  return h;
-}
+const fakeBox = (spec: RemoteHostSpec, local: FakeHost) => fakeRemoteHost(spec, local);
+
+const FLEET_VERSION = "0.4.0";
+const ORIGIN = "github.com/example-org/widgets";
+/**
+ * What the real `volley peer doctor --json` prints (exit 1) with no `--repo` and no `peer.json`,
+ * the supervisor's case: a failing `repo.clone` block check and no `repo`.
+ */
+const noRepoReport = () => ({
+  checks: [
+    { id: "tool.bun", ok: true, severity: "block", detail: "bun 1.3.1 at /usr/local/bin/bun" },
+    { id: "tool.claude", ok: true, severity: "block", detail: "claude at /usr/local/bin/claude" },
+    {
+      id: "volley.version",
+      ok: true,
+      severity: "block",
+      detail: `volley ${FLEET_VERSION} (the supervisor's requirement is not known here)`,
+    },
+    {
+      id: "repo.clone",
+      ok: false,
+      severity: "block",
+      detail: "no wave repo: pass --repo <path> (this machine's clone of the wave repository)",
+    },
+    {
+      id: "claude.trust",
+      ok: false,
+      severity: "warn",
+      detail: "no wave repo to check Claude Code's folder trust for",
+    },
+  ],
+  versions: { peer: FLEET_VERSION, volley: FLEET_VERSION, bun: "1.3.1", git: "2.43.0" },
+  auth: { gh: "ok", claude: "signed_in", trust: "unknown" },
+  memory: { total_mb: 16384, available_pct: 60 },
+  doctor_at: "2026-10-19T09:00:00.000Z",
+});
+/** The same doctor given `--repo <path>`: the clone checks pass and `repo` names its origin. */
+const repoReport = (path: string) => {
+  const r = noRepoReport();
+  return {
+    ...r,
+    checks: r.checks.map((c) =>
+      c.id === "repo.clone"
+        ? { ...c, ok: true, detail: `clone at ${path}` }
+        : c.id === "claude.trust"
+          ? { ...c, ok: true, detail: "trusted" }
+          : c,
+    ),
+    auth: { ...r.auth, trust: "ok" },
+    repo: { path, exists: true, origin: ORIGIN },
+  };
+};
 
 describe("machine health in the daemon: down parks the host's spawns, back resumes them", () => {
   let env: DaemonEnv;
@@ -183,7 +224,13 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
   let waits: JournalWait;
   let repo: string;
   let beats: number;
+  /** Every argv the supervisor's own doctor ran (each passed the fence first). */
+  let doctorArgv: string[][];
 
+  const verdict = async (name: string) =>
+    (await env.retained(`${machineTopic(name)}/readiness`)) as {
+      payload: Record<string, unknown> & { ready: boolean; reasons: string[] };
+    } | null;
   const task = async (wave: string, id: string) => {
     await waits.settled();
     const s = (await env.retained(`volley/_waves/${wave}/state`)) as {
@@ -242,7 +289,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     writeFileSync(claudeJson, `${JSON.stringify({ projects: {} })}\n`);
     writeFileSync(
       join(env.home, "config.yaml"),
-      `hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n`,
+      `fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n`,
     );
     // Paired with `volley peer join` (peers.ts): `peers` lists it.
     writeFileSync(
@@ -250,8 +297,27 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
       `${JSON.stringify({ peers: { box: { target: "dev@box", joined_at: "2026-10-19T09:00:00.000Z" } } })}\n`,
     );
     clock = fakeClock(1_000_000);
+    doctorArgv = [];
+    // The production doctor (realLocalDoctor) over an exec that answers like the real CLI.
+    const doctorExec = async (argv: readonly string[]) => {
+      assertAllowed(argv);
+      doctorArgv.push([...argv]);
+      const at = argv.indexOf("--repo");
+      const report = at === -1 ? noRepoReport() : repoReport(argv[at + 1] as string);
+      return {
+        code: at === -1 ? 1 : 0,
+        stdout: JSON.stringify(report),
+        stderr: "",
+        timedOut: false,
+      };
+    };
     daemon = await env.start({
       clock,
+      fleet: {
+        version: FLEET_VERSION,
+        localDoctor: realLocalDoctor(doctorExec),
+        localPath: () => ({ claude: true, bun: true }),
+      },
       spawner: {
         host: local,
         hooksDir: "/opt/local-hooks",
@@ -357,6 +423,429 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     await eventually(async () => {
       const a = await client.request("peers", {});
       return (a.result as { machines: MachineRecord[] }).machines.length === 0;
+    });
+  });
+
+  it("the own doctor runs through the fence without --repo while no wave runs (its repo checks do not count), then with the running wave's repo, whose origin a peer's is compared with", async () => {
+    await eventually(async () => {
+      await tick();
+      return (await verdict("control"))?.payload.ready === true;
+    });
+    expect(doctorArgv[0]).toEqual(["volley", "peer", "doctor", "--json"]);
+    expect((await verdict("control"))?.payload.reasons).toEqual([]);
+
+    // A wave runs: the doctor runs again at once, on that wave's repo.
+    await submit("w1");
+    await eventually(async () => {
+      await tick();
+      return doctorArgv.some((a) => a.includes("--repo"));
+    });
+    expect(doctorArgv.find((a) => a.includes("--repo"))).toEqual([
+      "volley",
+      "peer",
+      "doctor",
+      "--json",
+      "--repo",
+      repo,
+    ]);
+    await eventually(async () => {
+      const own = (await env.retained(machineTopic("control"))) as {
+        payload: MachineRecord;
+      } | null;
+      return own?.payload.repo?.origin === ORIGIN;
+    });
+    expect((await verdict("control"))?.payload.ready).toBe(true);
+
+    // A peer whose clone has another origin is not ready, and says so.
+    await heartbeat({
+      checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone" }],
+      versions: { peer: FLEET_VERSION, volley: FLEET_VERSION, bun: "1.3.1", git: "2.43.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      repo: { path: "/srv/repo", exists: true, origin: "github.com/example-org/fork" },
+      doctor_at: "2026-10-19T09:00:00.000Z",
+    });
+    await eventually(async () => {
+      await tick();
+      return (
+        (await verdict("box"))?.payload.reasons.some((r) => r.startsWith("repo origin")) === true
+      );
+    });
+    expect((await verdict("box"))?.payload.reasons).toEqual([
+      `repo origin differs from the host's (github.com/example-org/fork, host: ${ORIGIN})`,
+    ]);
+  });
+
+  it("the own machine's verdict counts every live supervised agent, on any machine, against hard_ceiling", async () => {
+    await heartbeat();
+    await submit("w1");
+    await tick();
+    expect(box?.launches).toHaveLength(1);
+    await eventually(async () => {
+      await tick();
+      const v = await verdict("control");
+      return v?.payload.ready === true && v.payload.placed === 1;
+    });
+    expect((await verdict("control"))?.payload).toMatchObject({
+      max_agents: CONFIG_DEFAULTS.hard_ceiling,
+      placed: 1,
+      eligible: true,
+    });
+    // Its own record counts only the agents on it.
+    const own = (await env.retained(machineTopic("control"))) as { payload: MachineRecord };
+    expect(own.payload.agents).toBe(0);
+
+    const r = await client.request("config_set", { patch: { hard_ceiling: 1 }, by: "tester" });
+    expect(r).toMatchObject({ ok: true });
+    await eventually(async () => {
+      await tick();
+      return (await verdict("control"))?.payload.max_agents === 1;
+    });
+    expect((await verdict("control"))?.payload).toMatchObject({
+      ready: true,
+      placed: 1,
+      eligible: false,
+      ineligible_reason: "1/1 agents",
+    });
+  });
+});
+
+describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", () => {
+  const VERSION = "0.4.0";
+  const LOCAL = "control";
+  let env: DaemonEnv;
+  let peer: VolleyBroker;
+  let daemon: Daemon;
+  let clock: FakeClock;
+  let box: FakeRemoteHost | undefined;
+  let accounts: Map<string, string>;
+  let claudeRoot: string;
+  let startOpts: Partial<DaemonOptions>;
+  let doctorRuns: number;
+
+  type Verdict = {
+    agent_id: string;
+    payload: Record<string, unknown> & {
+      ready: boolean;
+      reasons: string[];
+      path_ok: { claude: boolean | null };
+    };
+  };
+  const verdict = async (name: string) =>
+    (await env.retained(`${machineTopic(name)}/readiness`)) as Verdict | null;
+  const systemEvents = () =>
+    readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).filter(
+      (e) => e.type === "machine_readiness_changed",
+    );
+  /** A full peer record: everything an agent needs, at the supervisor's version. */
+  const boxRecord = (over: Partial<MachineRecord> = {}): MachineRecord =>
+    record({
+      checks: GREEN_DOCTOR.checks.map(({ id, ok, severity, detail }) => ({
+        id,
+        ok,
+        severity,
+        detail,
+      })),
+      versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      doctor_at: GREEN_DOCTOR.doctor_at,
+      ...over,
+    });
+  const tick = async () => {
+    await clock.advance(1000);
+    await daemon.tick();
+  };
+
+  beforeEach(async () => {
+    env = await makeDaemonEnv();
+    box = undefined;
+    writeFileSync(
+      join(env.home, "config.yaml"),
+      `fleet:\n  local_name: ${LOCAL}\nhosts:\n  box:\n    target: dev@box\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n`,
+    );
+    writeFileSync(
+      join(env.home, "peers.json"),
+      `${JSON.stringify({ peers: { box: { target: "dev@box", joined_at: "2026-10-19T09:00:00.000Z" } } })}\n`,
+    );
+    accounts = new Map([
+      ["admin-1", "admin"],
+      ["box", "peer"],
+    ]);
+    const auth = fakeExec().on(["volley", "auth"], (argv) => {
+      if (argv[2] === "list") {
+        return {
+          stdout: JSON.stringify({
+            accounts: [...accounts].map(([name, role]) => ({
+              name,
+              role,
+              kind: "machine",
+              created: "2026-10-19T09:00:00.000Z",
+            })),
+          }),
+        };
+      }
+      if (argv[2] === "revoke") {
+        accounts.delete(argv[3] as string);
+        return {};
+      }
+      return { code: 2, stderr: "unexpected" };
+    });
+    clock = fakeClock(1_000_000);
+    doctorRuns = 0;
+    claudeRoot = mkdtempSync(join(tmpdir(), "volleyd-claude-root-"));
+    writeFileSync(join(claudeRoot, "sharing.yaml"), "skills: own\nmcp: own\n");
+    startOpts = {
+      clock,
+      authExec: auth.exec,
+      claude: { root: claudeRoot },
+      spawner: {
+        host: fakeHost(),
+        remoteHost: (s) => {
+          box ??= fakeRemoteHost(s, fakeHost());
+          return box;
+        },
+        credentials: memoryCredentials(),
+      },
+      fleet: {
+        version: VERSION,
+        localDoctor: async () => {
+          doctorRuns++;
+          return {
+            ...GREEN_DOCTOR,
+            versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
+          };
+        },
+        localPath: () => ({ claude: true, bun: true }),
+      },
+    };
+    daemon = await env.start(startOpts);
+    peer = new VolleyBroker();
+    await peer.connect({ url: env.broker.url, agentId: "box" });
+  });
+  afterEach(async () => {
+    await peer.disconnect();
+    await env.cleanup();
+    rmSync(claudeRoot, { recursive: true, force: true });
+  });
+
+  it("publishes its own record as volleyd: kind supervisor, tunnel local, valid, filled by its doctor", async () => {
+    await eventually(async () => {
+      const r = (await env.retained(machineTopic(LOCAL))) as { payload: MachineRecord } | null;
+      return r?.payload.doctor_at !== undefined;
+    });
+    const own = (await env.retained(machineTopic(LOCAL))) as {
+      agent_id: string;
+      payload: MachineRecord;
+    };
+    expect(own.agent_id).toBe("volleyd");
+    expect(own.payload).toMatchObject({
+      name: LOCAL,
+      kind: "supervisor",
+      tunnel: "local",
+      agents: 0,
+      versions: { volley: VERSION },
+    });
+    expect(own.payload.memory?.total_mb).toBeGreaterThan(0);
+    expect(own.payload.checks?.some((c) => "fix" in c)).toBe(false);
+    expect(schemaErrors("machine.schema.json", own)).toEqual([]);
+    // Ready from its own doctor run and its own agents' PATH (no ssh hop), capped by hard_ceiling.
+    await eventually(async () => (await verdict(LOCAL))?.payload.ready === true);
+    const v = (await verdict(LOCAL)) as Verdict;
+    expect(v.agent_id).toBe("volleyd");
+    expect(v.payload).toMatchObject({ max_agents: 12, drain: false, eligible: true });
+    // requirements.sharing: the supervisor's own sharing.yaml modes, over the defaults.
+    expect(v.payload.requirements).toMatchObject({
+      volley: VERSION,
+      sharing: { skills: "own", mcp: "own", "CLAUDE.md": "linked", "settings.json": "copy" },
+    });
+    expect(schemaErrors("readiness.schema.json", v)).toEqual([]);
+  });
+
+  it("a peer's record change re-publishes its verdict; ready flipping journals once", async () => {
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    // The record folds in, the PATH probe runs over ssh, then the verdict is ready.
+    await eventually(async () => {
+      await tick();
+      return (await verdict("box"))?.payload.ready === true;
+    });
+    expect(box?.probes).toBe(1);
+    const ready = (await verdict("box")) as Verdict;
+    expect(ready.payload).toMatchObject({
+      name: "box",
+      max_agents: 4,
+      path_ok: { claude: true, bun: true },
+      requirements: { volley: VERSION },
+    });
+    expect(schemaErrors("readiness.schema.json", ready)).toEqual([]);
+    // Its first verdict with its inputs (record folded, probe done) is the baseline: no event,
+    // and no "not probed yet" verdict was journaled or published before it.
+    expect(systemEvents()).toEqual([]);
+
+    // The same record again (a heartbeat): no new event.
+    await peer.publish(
+      machineTopic("box"),
+      envelope(boxRecord({ last_seen: "2026-10-19T09:01:00.000Z" })),
+      {
+        qos: 1,
+        retain: true,
+      },
+    );
+    await tick();
+    expect(systemEvents()).toEqual([]);
+
+    // Signed out: re-published at once, with the reason.
+    await peer.publish(
+      machineTopic("box"),
+      envelope(boxRecord({ auth: { gh: "ok", claude: "not_signed_in", trust: "ok" } })),
+      { qos: 1, retain: true },
+    );
+    await eventually(async () => (await verdict("box"))?.payload.ready === false);
+    expect((await verdict("box"))?.payload.reasons).toEqual(["claude: not signed in"]);
+    expect(systemEvents().at(-1)?.data).toEqual({
+      name: "box",
+      ready: false,
+      reasons: ["claude: not signed in"],
+    });
+  });
+
+  it("a probe without claude says so; drain and max_agents apply hot", async () => {
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      return box !== undefined && (await verdict("box"))?.payload.ready === true;
+    });
+    const client = await ControlClient.connect(env.broker.url, NS);
+    try {
+      const r = await client.request("config_set", {
+        patch: { hosts: { box: { drain: true } } },
+        by: "tester",
+      });
+      expect(r).toMatchObject({ ok: true });
+    } finally {
+      await client.close();
+    }
+    await eventually(async () => (await verdict("box"))?.payload.drain === true);
+    expect((await verdict("box"))?.payload).toMatchObject({
+      ready: true,
+      eligible: false,
+      ineligible_reason: "draining",
+    });
+
+    // The next probe (at most every path_probe_interval_ms) finds no claude on the ssh PATH.
+    if (box !== undefined) box.answers.path = { claude: false, bun: true };
+    await clock.advance(DAEMON_DEFAULTS.path_probe_interval_ms);
+    // Its heartbeat keeps it up across the wait.
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      return (await verdict("box"))?.payload.path_ok.claude === false;
+    });
+    const v = (await verdict("box")) as Verdict;
+    expect(v.payload.path_ok).toEqual({ claude: false, bun: true });
+    expect(v.payload.reasons).toEqual([
+      expect.stringMatching(/^claude not on the non-interactive ssh PATH/),
+    ]);
+    expect(box?.probes).toBe(2);
+  });
+
+  it("peer_remove clears the verdict", async () => {
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      return (await verdict("box")) !== null;
+    });
+    const admin = new VolleyBroker();
+    await admin.connect({ url: env.broker.url, agentId: "admin-cli" });
+    try {
+      await admin.publish(
+        authOpsTopic("admin-1"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "admin-1",
+            parentId: null,
+            channel: "_system/auth",
+            type: "query",
+            correlationId: "c0ffee00-0000-4000-8000-000000000001",
+            payload: { op: "peer_remove", name: "box" },
+          }),
+        ),
+        { qos: 1, retain: false },
+      );
+      await eventually(async () => (await verdict("box")) === null);
+    } finally {
+      await admin.disconnect();
+    }
+    expect(await env.retained(machineTopic("box"))).toBeNull();
+  });
+
+  it("a restart journals no flip and publishes no transient 'not ready' for machines that did not change", async () => {
+    const ready = async () =>
+      (await verdict("box"))?.payload.ready === true &&
+      (await verdict(LOCAL))?.payload.ready === true;
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      return ready();
+    });
+    // One real change and back, so the journal holds a last verdict for box (LOCAL has none).
+    await peer.publish(
+      machineTopic("box"),
+      envelope(boxRecord({ auth: { gh: "ok", claude: "not_signed_in", trust: "ok" } })),
+      { qos: 1, retain: true },
+    );
+    await eventually(async () => (await verdict("box"))?.payload.ready === false);
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => (await verdict("box"))?.payload.ready === true);
+    await daemon.settled();
+    const before = systemEvents();
+    expect(before.map((e) => e.data.ready)).toEqual([false, true]);
+
+    // Everything any verdict says from here on.
+    const seen: { name: string; ready: boolean; reasons: string[] }[] = [];
+    const watcher = new VolleyBroker();
+    await watcher.connect({ url: env.broker.url, agentId: "readiness-watcher" });
+    await watcher.subscribeStream(`${machineTopic("+")}/readiness`, ({ payload: raw }) => {
+      const e = raw === "" ? null : parseEnvelope(raw);
+      if (e !== null) seen.push(e.payload as (typeof seen)[number]);
+    });
+    try {
+      await daemon.stop();
+      const probes = box?.probes ?? 0;
+      const runs = doctorRuns;
+      daemon = await env.start(startOpts);
+      // Its inputs gathered again: the box probed over ssh, its own doctor run.
+      await eventually(async () => {
+        await tick();
+        return (box?.probes ?? 0) > probes && doctorRuns > runs;
+      });
+      await tick();
+      await daemon.settled();
+      expect(await ready()).toBe(true);
+    } finally {
+      await watcher.disconnect();
+    }
+    expect(systemEvents()).toEqual(before);
+    expect(seen.filter((v) => !v.ready)).toEqual([]);
+  });
+
+  it("a PATH probe ssh cannot run says so in the verdict", async () => {
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      return box !== undefined;
+    });
+    if (box !== undefined)
+      box.answers.path = new Error("ssh to dev@box failed: Connection refused");
+    await clock.advance(DAEMON_DEFAULTS.path_probe_interval_ms);
+    await peer.publish(machineTopic("box"), envelope(boxRecord()), { qos: 1, retain: true });
+    await eventually(async () => {
+      await tick();
+      const v = await verdict("box");
+      return v?.payload.reasons.some((r) => r.startsWith("PATH probe")) === true;
+    });
+    expect((await verdict("box"))?.payload).toMatchObject({
+      ready: false,
+      path_ok: { claude: null, bun: null },
+      reasons: ["PATH probe over ssh failed: ssh to dev@box failed: Connection refused"],
     });
   });
 });

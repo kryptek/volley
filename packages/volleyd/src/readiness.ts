@@ -1,0 +1,214 @@
+import { basename } from "node:path";
+import type { Sharing } from "./claude/sharing";
+import { PATH_PROBE_TOOLS } from "./fence";
+import { type MachineRecord, machineTopic } from "./machines";
+
+/**
+ * Readiness (SPEC §4.6.15), as pure logic: the supervisor's verdict on one machine, its own
+ * included, from a snapshot of what it knows. The machine record is the machine's statement about
+ * itself; the verdict needs the supervisor's config and version, so it has its own retained topic,
+ * `volley/_system/machines/<name>/readiness`, which only the supervisor publishes.
+ *
+ * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
+ * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
+ * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
+ * push access or Claude signed out. `eligible` adds placement's static filter: not draining and
+ * under `max_agents`. Load, memory and usage headroom are placement's (F3), not checked here.
+ */
+
+export const READINESS_CHANNEL = "_system/machines/readiness";
+export const readinessTopic = (name: string) => `${machineTopic(name)}/readiness`;
+
+/**
+ * The tools the PATH probe looks for (`command -v claude bun`): what an agent session runs. The
+ * fence's list, so the probe never asks for a name the fence refuses.
+ */
+export const PATH_TOOLS = PATH_PROBE_TOOLS;
+export type PathTool = (typeof PATH_TOOLS)[number];
+export type PathProbe = Record<PathTool, boolean>;
+
+/** One reason or ineligible_reason line, at most (readiness.schema.json). */
+const LINE_MAX = 200;
+const REASONS_MAX = 32;
+
+export interface ReadinessInput {
+  name: string;
+  /** The machine's last record (MachineHealth's, or the supervisor's own); undefined: none yet. */
+  record: MachineRecord | undefined;
+  /** The supervisor's own machine: its PATH is its own agents' environment, not an ssh session. */
+  local: boolean;
+  /** `hosts.<name>.max_agents` / `.drain` (the supervisor's own machine: hard_ceiling, false). */
+  host: { max_agents: number; drain: boolean };
+  /** The supervisor's own volley version: a machine's must match it. */
+  hostVersion: string;
+  /** The supervisor's own clone's origin (its doctor's `repo.origin`), when known. */
+  hostOrigin?: string | null;
+  /**
+   * The supervisor's own machine whose doctor ran without a wave repo (no wave is running): its
+   * `repo.*` checks say only that no repo was given, so they do not count.
+   */
+  noRepo?: boolean;
+  /** The last PATH probe; null: not probed yet. */
+  probe: PathProbe | null;
+  /** Why the last PATH probe could not run (ssh failed, the host is not reachable). */
+  probeError?: string;
+  /** Live supervised agents on the machine, plus placements reserved for it. */
+  placed: number;
+  heavy: Record<string, { held: number; per_machine: number }>;
+  usage: { account: string | null; five_hour_pct: number | null };
+  /** The lowest bun the supervisor accepts (the wave repo's `packageManager` / `engines.bun`). */
+  bun?: string;
+  /** The supervisor's `sharing.yaml` modes (`readSharing`). */
+  sharing?: Sharing;
+  checkedAt: Date;
+}
+
+/** One `readiness.schema.json` payload. */
+export interface ReadinessPayload {
+  name: string;
+  ready: boolean;
+  reasons: string[];
+  drain: boolean;
+  max_agents: number;
+  placed: number;
+  path_ok: { claude: boolean | null; bun: boolean | null };
+  requirements: { volley: string; bun?: string; sharing?: Sharing };
+  heavy: Record<string, { held: number; per_machine: number }>;
+  usage: { account: string | null; five_hour_pct: number | null };
+  eligible: boolean;
+  ineligible_reason?: string;
+  checked_at: string;
+}
+
+const line = (s: string) => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);
+
+/** `github.com/owner/repo` → `owner/repo` (what `gh` calls it). */
+const slug = (origin: string | undefined) =>
+  origin === undefined ? "the wave repo" : origin.split("/").slice(1).join("/");
+
+/** Why the PATH an agent gets lacks `tool` (null: not probed yet), in the machine's terms. */
+function pathReasons(probe: PathProbe | null, local: boolean, error?: string): string[] {
+  if (probe === null && error !== undefined) return [`PATH probe over ssh failed: ${error}`];
+  if (probe === null) {
+    return [
+      local
+        ? "claude and bun not probed yet in the environment the supervisor gives its own agents"
+        : "claude and bun not probed yet on the non-interactive ssh PATH",
+    ];
+  }
+  return PATH_TOOLS.filter((t) => !probe[t]).map((t) =>
+    local
+      ? `${t} not on the PATH the supervisor gives its own agents`
+      : `${t} not on the non-interactive ssh PATH (the supervisor's ssh probe decides; the doctor's ${t}_on_path only estimates it)`,
+  );
+}
+
+/** What keeps a machine with a doctor report from running an agent, beside the PATH. */
+function doctorReasons(r: MachineRecord, i: ReadinessInput): string[] {
+  const out: string[] = [];
+  // volley.version is the doctor's view of our requirement; the comparison below decides.
+  for (const c of r.checks ?? []) {
+    if (i.noRepo === true && c.id.startsWith("repo.")) continue;
+    if (!c.ok && c.severity === "block" && c.id !== "volley.version") {
+      out.push(`${c.id}: ${c.detail}`);
+    }
+  }
+  const volley = r.versions?.volley ?? null;
+  if (volley !== i.hostVersion) {
+    out.push(`volley ${volley ?? "missing"} on ${i.name}, host runs ${i.hostVersion}`);
+  }
+  return out;
+}
+
+function authReasons(r: MachineRecord, i: ReadinessInput): string[] {
+  const out: string[] = [];
+  const gh = r.auth?.gh;
+  if (gh === "no_write") out.push(`gh: no write permission on ${slug(r.repo?.origin)}`);
+  else if (gh === "unauthenticated") out.push("gh: not signed in");
+  else if (gh === "missing") out.push("gh: not installed");
+  else if (gh === undefined) out.push("gh: no sign-in state in the doctor report");
+  const claude = r.auth?.claude;
+  if (claude === "not_signed_in") out.push("claude: not signed in");
+  else if (claude === "missing") out.push("claude: not installed");
+  else if (claude === "unknown") out.push("claude: sign-in state unknown");
+  else if (claude === undefined) out.push("claude: no sign-in state in the doctor report");
+  const origin = r.repo?.origin;
+  const hostOrigin = i.hostOrigin ?? undefined;
+  if (origin !== undefined && hostOrigin !== undefined && origin !== hostOrigin) {
+    out.push(`repo origin differs from the host's (${origin}, host: ${hostOrigin})`);
+  }
+  return out;
+}
+
+/** The blockers, in the order a person fixes them. */
+function blockers(i: ReadinessInput): string[] {
+  const r = i.record;
+  if (r === undefined) {
+    return [`no machine record from ${i.name} yet: is its \`volley peer run\` service running?`];
+  }
+  const out: string[] = [];
+  if (r.tunnel === "down") {
+    out.push(
+      `tunnel down to ${i.name}: ${r.reason === "heartbeat_timeout" ? "no heartbeat" : "disconnected"}`,
+    );
+  }
+  const doctored = r.doctor_at !== undefined && r.checks !== undefined;
+  if (!doctored) out.push("no doctor report: run volley peer doctor");
+  else out.push(...doctorReasons(r, i));
+  out.push(...pathReasons(i.probe, i.local, i.probeError));
+  if (doctored) out.push(...authReasons(r, i));
+  return out;
+}
+
+/** The verdict on one machine (pure). */
+export function readiness(i: ReadinessInput): ReadinessPayload {
+  const reasons = blockers(i).slice(0, REASONS_MAX).map(line);
+  const ready = reasons.length === 0;
+  const ineligible = !ready
+    ? reasons[0]
+    : i.host.drain
+      ? "draining"
+      : i.placed >= i.host.max_agents
+        ? `${i.placed}/${i.host.max_agents} agents`
+        : undefined;
+  return {
+    name: i.name,
+    ready,
+    reasons,
+    drain: i.host.drain,
+    max_agents: i.host.max_agents,
+    placed: i.placed,
+    path_ok: { claude: i.probe?.claude ?? null, bun: i.probe?.bun ?? null },
+    requirements: {
+      volley: i.hostVersion,
+      ...(i.bun !== undefined ? { bun: i.bun } : {}),
+      ...(i.sharing !== undefined ? { sharing: { ...i.sharing } } : {}),
+    },
+    heavy: i.heavy,
+    usage: i.usage,
+    eligible: ineligible === undefined,
+    ...(ineligible !== undefined ? { ineligible_reason: ineligible } : {}),
+    checked_at: i.checkedAt.toISOString(),
+  };
+}
+
+/**
+ * The PATH probe's answer: `command -v claude bun` prints one line per name it resolves (a path,
+ * a function's bare name, or `alias <name>=…`) and nothing for a missing one.
+ */
+export function parsePathProbe(stdout: string): PathProbe {
+  const found = new Set(
+    stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "")
+      .map((l) => (l.startsWith("alias ") ? (l.slice(6).split("=")[0] ?? "") : basename(l))),
+  );
+  return { claude: found.has("claude"), bun: found.has("bun") };
+}
+
+/** A verdict without `checked_at`: what decides whether a re-publish carries news. */
+export function readinessKey(p: ReadinessPayload): string {
+  const { checked_at: _at, ...rest } = p;
+  return JSON.stringify(rest);
+}

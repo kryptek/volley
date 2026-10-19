@@ -10,6 +10,8 @@ import {
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
+import { type DoctorReport, parseDoctorReport } from "../machines";
+import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
@@ -85,6 +87,16 @@ export interface RemoteHost extends Host {
   recordTrust(root: string): Promise<void>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
+  /**
+   * Readiness's PATH probe: whether `claude` and `bun` resolve on the non-interactive ssh PATH
+   * (the same `bash -s` that runs launch.sh). Throws when ssh fails.
+   */
+  probePath(): Promise<PathProbe>;
+  /**
+   * `volley peer doctor --json [--fix --yes] [--clone]` on the box, in its volley checkout: the
+   * parsed report. Throws when ssh fails or the doctor printed no report.
+   */
+  runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport>;
 }
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -403,6 +415,39 @@ export class SshTmuxHost implements RemoteHost {
     const r = await this.run([{ argv: ["cat", path] }]).catch(() => null);
     if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
     return r.code === 0 ? r.stdout : null;
+  }
+
+  async probePath(): Promise<PathProbe> {
+    const r = await this.run([{ argv: ["command", "-v", ...PATH_TOOLS] }], {
+      timeoutMs: DAEMON_DEFAULTS.path_probe_timeout_ms,
+    }).catch(() => null);
+    if (r === null || transportFailed(r)) throw this.sshFailed("PATH probe", r);
+    // `command -v` exits 1 when a name is missing: what it printed is the answer either way.
+    return parsePathProbe(r.stdout);
+  }
+
+  async runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport> {
+    const argv = [
+      "volley",
+      "peer",
+      "doctor",
+      "--json",
+      ...(opts.fix ? ["--fix", "--yes"] : []),
+      ...(opts.fix && opts.clone ? ["--clone"] : []),
+    ];
+    // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
+    const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {
+      timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
+    }).catch(() => null);
+    if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
+    // A failing block check exits 1 with the report on stdout.
+    const report = parseDoctorReport(r.stdout);
+    if (report === null) {
+      throw new Error(
+        `volley peer doctor on ${this.spec.target} printed no report: ${firstLine(r.stderr, `exit ${r.code}`)}`,
+      );
+    }
+    return report;
   }
 
   /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */

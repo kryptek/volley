@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
   closeSync,
   existsSync,
+  constants as fsConstants,
   mkdirSync,
   openSync,
   readFileSync,
@@ -10,13 +12,23 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import {
+  availableParallelism,
+  freemem,
+  homedir,
+  loadavg,
+  arch as osArch,
+  platform,
+  totalmem,
+  uptime,
+} from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
+import pkg from "../package.json";
 import {
   AUTH_CHANNEL,
   AUTH_OPS_FILTER,
@@ -46,6 +58,7 @@ import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
+import { type Sharing, readSharing } from "./claude/sharing";
 import {
   type LimitSeen,
   USAGE_FILTER,
@@ -65,7 +78,7 @@ import {
   waveAccount,
   waveAccountMoves,
 } from "./claude/usage";
-import { DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
@@ -108,7 +121,7 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken } from "./fence";
-import { LOCAL_HOST, localMachineName } from "./fleet-name";
+import { LOCAL_HOST } from "./fleet-name";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -132,22 +145,26 @@ import {
   type LeaseBook,
   type LeaseInput,
   type LeaseRequest,
+  heldOn,
   step as leaseStep,
   poolPayload,
   replayLeases,
 } from "./leases";
 import {
+  type DoctorReport,
   MACHINES_FILTER,
   MACHINE_CHANNEL,
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  doctorFields,
   machineTopic,
+  parseDoctorReport,
   parseMachine,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
-import { PeerService } from "./peers";
+import { type DoctorRun, type PeerReply, PeerService } from "./peers";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -155,6 +172,15 @@ import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
+import {
+  PATH_TOOLS,
+  type PathProbe,
+  READINESS_CHANNEL,
+  type ReadinessInput,
+  readiness,
+  readinessKey,
+  readinessTopic,
+} from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import {
   type Admission,
@@ -359,6 +385,17 @@ export interface DaemonOptions {
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
   /**
+   * The Fleet (SPEC §4.6.15): the supervisor's own machine's doctor, given the running wave's
+   * repo or null (default: none, so its machine is not ready; `volleyd daemon` passes
+   * `realLocalDoctor`), the PATH probe of its own agents' environment (default: `PATH` resolved
+   * here), and the version a machine must run (default: this package's).
+   */
+  fleet?: {
+    localDoctor?: (repo: string | null) => Promise<DoctorReport | null>;
+    localPath?: () => PathProbe;
+    version?: string;
+  };
+  /**
    * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
    * primary profile's directory (default `~/.claude`), the exec sign-ins run through (default
    * the fenced exec) and the sign-in poll / timeout (tests).
@@ -452,8 +489,16 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+/**
+ * An account op answered after a long run outside the daemon's queue (`peer_doctor`): `later`
+ * resolves to the answer and the `_system` record to journal with it.
+ */
+interface DeferredAuth {
+  later: () => Promise<AuthOutcome & { journal?: NewEvent }>;
+}
+
 /** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
-const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove"]);
+const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove", "peer_doctor"]);
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
@@ -516,6 +561,42 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
       ci: Object.fromEntries(repos.map((r, i) => [r, ci[i] as Sample])),
     };
   };
+}
+
+/**
+ * The supervisor's own doctor (SPEC §4.6.15): `volley peer doctor --json [--repo <repo>]` through
+ * the fence. The supervisor is no peer (it has no `peer.json`), so the running wave's repo is the
+ * clone it checks; with none, the report's `repo.*` checks only say that no repo was given.
+ */
+export function realLocalDoctor(
+  exec: ExecFn = realExec,
+): (repo: string | null) => Promise<DoctorReport | null> {
+  return async (repo) => {
+    const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
+    const r = await exec(argv, {
+      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+    }).catch(() => null);
+    // A failing block check exits 1 with the report on stdout.
+    return r === null ? null : parseDoctorReport(r.stdout);
+  };
+}
+
+/**
+ * Whether `claude` and `bun` resolve on `path` (the daemon's own `PATH`, which its agent sessions
+ * inherit): what `command -v` answers on a box, without a shell.
+ */
+export function pathProbe(path: string | undefined = process.env.PATH): PathProbe {
+  const dirs = (path ?? "").split(delimiter).filter((d) => d !== "");
+  const on = (tool: string) =>
+    dirs.some((d) => {
+      try {
+        accessSync(join(d, tool), fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  return Object.fromEntries(PATH_TOOLS.map((t) => [t, on(t)])) as PathProbe;
 }
 
 /** A wave file's `repo` as a directory (`~/x` → `$HOME/x`). */
@@ -766,6 +847,42 @@ export class Daemon {
   private usage: UsageBook;
   /** Every spawned agent's wave and host (from `agent_spawned`): where its usage belongs. */
   private readonly spawnedAgents = new Map<string, { wave: WaveId; host: string }>();
+  // --- Fleet (F2): the supervisor's own record, readiness verdicts, PATH probes ---
+  /** The version a machine must run (its readiness `requirements.volley`). */
+  private readonly version: string;
+  /** The supervisor's own machine record, as last published (and when). */
+  private ownRecord: MachineRecord | undefined;
+  private ownRecordAt: number | null = null;
+  /**
+   * The supervisor's own doctor: its last report, the repo that run checked (null: none; undefined:
+   * no run finished yet), when it last started, whether it runs now.
+   */
+  private localReport: DoctorReport | null = null;
+  private localDoctorRepo: string | null | undefined = undefined;
+  /** The repo the last run started with (a failed run is not retried before the next beat). */
+  private localDoctorTried: string | null = null;
+  private localDoctorAt: number | null = null;
+  private localDoctorRunning = false;
+  /**
+   * Machines whose verdict has its inputs in this process (SPEC §4.6.15): until then a verdict is
+   * neither published nor journaled, so a restart neither replaces the last retained verdict nor
+   * journals a flip from inputs not gathered yet. `fleetSince`: when this process began, the
+   * bound on the wait (`machine_down_after_ms`).
+   */
+  private readonly readinessSettled = new Set<string>();
+  private fleetSince: number | null = null;
+  /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
+  private readonly doctoring = new Set<string>();
+  private readonly authRunning = new Set<string>();
+  /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
+  private readonly probes = new Map<
+    string,
+    { path: PathProbe | null; error?: string; at: number; running: boolean }
+  >();
+  /** Each machine's verdict as last published (`key`: readinessKey) and when. */
+  private readonly published = new Map<string, { key: string; at: number }>();
+  /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
+  private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
   /** The account records last published, by account (an unchanged one is not re-published). */
   private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
@@ -810,6 +927,16 @@ export class Daemon {
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
+    this.version = opts.fleet?.version ?? pkg.version;
+    for (const e of this.system.readAll()) {
+      if (e.type !== "machine_readiness_changed") continue;
+      const { name, ready, reasons } = e.data as {
+        name: string;
+        ready: boolean;
+        reasons: string[];
+      };
+      this.journaledReadiness.set(name, { ready, reasons });
+    }
     if (opts.spawner?.credentials !== undefined) {
       this.credentials = opts.spawner.credentials;
     } else if (opts.dynsecAdmin !== undefined) {
@@ -884,7 +1011,10 @@ export class Daemon {
       clearMachine: async (name) => {
         this.machines.forget(name);
         await this.clearRetained(machineTopic(name));
+        await this.clearReadiness(name);
       },
+      localName: () => this.config.localName(),
+      remote: (name) => this.remoteFor(name),
       machines: () => this.machines.all(),
       journal: (ev) => this.appendSystem(ev),
     });
@@ -1080,7 +1210,12 @@ export class Daemon {
         // Every account may publish its own record: only a configured host's is a machine.
         if (record === null) return;
         void this.enqueue(async () => {
-          if (Object.hasOwn(this.config.effective().hosts, name)) this.machines.observe(record);
+          // A configured host is a peer whatever its record says (SPEC §4.6.15): never local.
+          if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
+            return;
+          }
+          this.machines.observe(record);
+          await this.publishReadiness(name);
         });
       }),
     );
@@ -1663,7 +1798,7 @@ export class Daemon {
     // The `local` token is the supervisor's own machine, held under its name (SPEC §4.6.15).
     const spawned = this.spawnedAgents.get(req.holder)?.host;
     const host =
-      spawned === undefined ? null : spawned === LOCAL_HOST ? localMachineName() : spawned;
+      spawned === undefined ? null : spawned === LOCAL_HOST ? this.config.localName() : spawned;
     await this.runLeases({ kind: "request", pool, req, host });
   }
 
@@ -1758,6 +1893,7 @@ export class Daemon {
    */
   private async tickNow(): Promise<void> {
     await this.sweepMachines();
+    await this.fleetTick();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
@@ -2387,7 +2523,21 @@ export class Daemon {
 
   /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
   private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
-    const spec = resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts);
+    return this.remoteBySpec(
+      resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts),
+    );
+  }
+
+  /** The configured host `name` (no task's inline `host:`), or why it cannot be reached. */
+  private remoteFor(name: string): RemoteHost | string {
+    try {
+      return this.remoteBySpec(resolveRemoteHost(name, undefined, this.config.effective().hosts));
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  private remoteBySpec(spec: RemoteHostSpec): RemoteHost {
     const key = JSON.stringify(spec);
     let h = this.remotes.get(key);
     if (h === undefined) {
@@ -2563,6 +2713,390 @@ export class Daemon {
         true,
       );
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F2, SPEC §4.6.15): the supervisor's own machine record, readiness, PATH probes
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Every tick: start the own doctor when one is due (outside the queue: it runs for seconds),
+   * re-publish the own record every `machine_heartbeat_ms`, then re-compute every verdict.
+   */
+  private async fleetTick(): Promise<void> {
+    const beat = DAEMON_DEFAULTS.machine_heartbeat_ms;
+    const now = this.now();
+    this.fleetSince ??= now;
+    if (
+      this.opts.fleet?.localDoctor !== undefined &&
+      !this.localDoctorRunning &&
+      (this.localDoctorAt === null ||
+        now - this.localDoctorAt >= beat ||
+        this.localDoctorTried !== this.waveRepo())
+    ) {
+      void this.runLocalDoctor();
+    }
+    if (
+      this.ownRecordAt === null ||
+      now - this.ownRecordAt >= beat ||
+      this.ownRecord?.name !== this.config.localName()
+    ) {
+      await this.publishOwnRecord();
+    }
+    await this.publishReadiness();
+  }
+
+  /**
+   * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
+   * report fills the own record. Runs again at once when the running wave's repo changes.
+   */
+  private async runLocalDoctor(): Promise<void> {
+    const doctor = this.opts.fleet?.localDoctor;
+    if (doctor === undefined) return;
+    this.localDoctorRunning = true;
+    this.localDoctorAt = this.now();
+    const repo = this.waveRepo();
+    this.localDoctorTried = repo;
+    try {
+      const report = await doctor(repo).catch((e: unknown) => {
+        this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (!this.running) return;
+      // A failed run settles the verdict too (on the last report, or none).
+      await this.enqueue(async () => {
+        if (report !== null) {
+          this.localReport = report;
+          this.localDoctorRepo = repo;
+        } else if (this.localDoctorRepo === undefined) {
+          this.localDoctorRepo = null;
+        }
+        await this.publishOwnRecord();
+        await this.publishReadiness(this.config.localName());
+      });
+    } finally {
+      this.localDoctorRunning = false;
+    }
+  }
+
+  /**
+   * The own machine's record, as volleyd (`kind: supervisor`, `tunnel: local`): live load,
+   * memory and agents from `os`, the rest from the own doctor's last report. A renamed machine
+   * (`fleet.local_name`) clears the old name's record and verdict.
+   */
+  private async publishOwnRecord(): Promise<void> {
+    const name = this.config.localName();
+    const prior = this.ownRecord;
+    if (prior !== undefined && prior.name !== name) {
+      this.machines.forget(prior.name);
+      await this.clearRetained(machineTopic(prior.name));
+      await this.clearReadiness(prior.name);
+    }
+    const total = totalmem();
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const memory = {
+      total_mb: Math.max(1, Math.round(total / (1024 * 1024))),
+      available_pct: round((freemem() / total) * 100),
+    };
+    const base: MachineRecord = {
+      name,
+      kind: "supervisor",
+      os: platform(),
+      arch: osArch(),
+      cores: Math.max(1, availableParallelism()),
+      tunnel: "local",
+      load: loadavg().map(round) as [number, number, number],
+      agents: this.placedOn(name),
+      memory,
+      uptime_s: Math.floor(uptime()),
+      last_seen: dateOf(this.time).toISOString(),
+    };
+    const report = this.localReport;
+    let record: MachineRecord =
+      report === null
+        ? base
+        : {
+            ...base,
+            ...doctorFields(report),
+            memory,
+            ...(report.versions !== undefined
+              ? { versions: { ...report.versions, volley: this.version } }
+              : {}),
+          };
+    if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
+      this.log("own doctor report does not fit machine.schema.json: published without it");
+      record = base;
+    }
+    this.ownRecord = record;
+    this.ownRecordAt = this.now();
+    this.machines.observe(record);
+    await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+  }
+
+  /** Live supervised agents on machine `name` (the `local` token is the own machine). */
+  private placedOn(name: string): number {
+    const local = this.config.localName();
+    let n = 0;
+    for (const id of this.supervised.keys()) {
+      const host = this.spawnedAgents.get(id)?.host ?? LOCAL_HOST;
+      if ((host === LOCAL_HOST ? local : host) === name) n++;
+    }
+    return n;
+  }
+
+  /**
+   * Re-compute the verdict of every machine (or only `name`): the own machine and every
+   * configured host. Published retained when it changed or is a heartbeat old; journaled as
+   * `machine_readiness_changed` when `ready` or `reasons` change. A host no longer configured has
+   * its verdict cleared.
+   */
+  private async publishReadiness(only?: string): Promise<void> {
+    if (!this.running) return;
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const names = [local, ...Object.keys(cfg.hosts).filter((n) => n !== local)];
+    for (const n of [...this.published.keys()])
+      if (!names.includes(n)) await this.clearReadiness(n);
+    const shared = this.requirementsExtra();
+    for (const name of only === undefined ? names : names.filter((n) => n === only)) {
+      const isLocal = name === local;
+      if (!isLocal) this.maybeProbe(name);
+      // Inputs not gathered yet in this process: the last retained verdict stands.
+      if (!this.isSettled(name, isLocal)) continue;
+      const v = readiness(this.readinessInput(name, isLocal, cfg, shared));
+      const key = readinessKey(v);
+      const now = this.now();
+      const prior = this.published.get(name);
+      if (
+        prior === undefined ||
+        prior.key !== key ||
+        now - prior.at >= DAEMON_DEFAULTS.machine_heartbeat_ms
+      ) {
+        this.published.set(name, { key, at: now });
+        await this.publish(
+          readinessTopic(name),
+          this.envelope(READINESS_CHANNEL, "readiness", v),
+          true,
+        );
+      }
+      // A machine's first settled verdict is its baseline (nothing changed yet); a restart
+      // compares with the last journaled one.
+      const was = this.journaledReadiness.get(name);
+      if (was === undefined)
+        this.journaledReadiness.set(name, { ready: v.ready, reasons: v.reasons });
+      else if (was.ready !== v.ready || JSON.stringify(was.reasons) !== JSON.stringify(v.reasons)) {
+        this.journaledReadiness.set(name, { ready: v.ready, reasons: v.reasons });
+        await this.appendSystem({
+          type: "machine_readiness_changed",
+          data: { name, ready: v.ready, reasons: v.reasons },
+        });
+      }
+    }
+  }
+
+  /**
+   * Whether machine `name`'s verdict has its inputs: a peer's record has folded in and its first
+   * PATH probe finished (none runs while its tunnel is not up); the own machine's first doctor run
+   * finished. Either way at most `machine_down_after_ms` after this process began. Once settled,
+   * a machine stays settled.
+   */
+  private isSettled(name: string, isLocal: boolean): boolean {
+    if (this.readinessSettled.has(name)) return true;
+    let warm: boolean;
+    if (isLocal) {
+      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorRepo !== undefined;
+    } else {
+      const r = this.machines.record(name);
+      const probe = this.probes.get(name);
+      warm = r !== undefined && (r.tunnel !== "up" || (probe !== undefined && !probe.running));
+    }
+    this.fleetSince ??= this.now();
+    if (!warm && this.now() - this.fleetSince < DAEMON_DEFAULTS.machine_down_after_ms) {
+      return false;
+    }
+    this.readinessSettled.add(name);
+    return true;
+  }
+
+  /** A removed (or renamed) machine: its verdict cleared, its probe forgotten. */
+  private async clearReadiness(name: string): Promise<void> {
+    this.published.delete(name);
+    this.probes.delete(name);
+    this.readinessSettled.delete(name);
+    await this.clearRetained(readinessTopic(name));
+  }
+
+  private readinessInput(
+    name: string,
+    isLocal: boolean,
+    cfg: Tunables,
+    extra: Pick<ReadinessInput, "bun" | "sharing">,
+  ): ReadinessInput {
+    const h = Object.hasOwn(cfg.hosts, name) ? cfg.hosts[name] : undefined;
+    const probe = this.probes.get(name);
+    const records = accountRecords(this.usage);
+    const account = isLocal
+      ? cfg.claude.default_account
+      : (Object.keys(records)
+          .filter((a) => a.endsWith(`@${name}`))
+          .sort()[0] ?? null);
+    return {
+      name,
+      record: isLocal ? this.ownRecord : this.machines.record(name),
+      local: isLocal,
+      // The own machine is capped by hard_ceiling, which caps every supervised agent: its
+      // headroom is the ceiling less all of them, wherever they run.
+      host: isLocal
+        ? { max_agents: cfg.hard_ceiling, drain: false }
+        : {
+            max_agents: h?.max_agents ?? REMOTE_HOST_DEFAULTS.max_agents,
+            drain: h?.drain ?? REMOTE_HOST_DEFAULTS.drain,
+          },
+      hostVersion: this.version,
+      hostOrigin:
+        typeof this.localDoctorRepo === "string" ? (this.localReport?.repo?.origin ?? null) : null,
+      ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
+      probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
+      ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
+      placed: isLocal ? this.supervised.size : this.placedOn(name),
+      heavy: Object.fromEntries(
+        Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
+          c.per_machine === undefined
+            ? []
+            : [[pool, { held: heldOn(this.leases, pool, name), per_machine: c.per_machine }]],
+        ),
+      ),
+      usage: {
+        account,
+        five_hour_pct: account !== null ? (records[account]?.five_hour?.pct ?? null) : null,
+      },
+      ...extra,
+      checkedAt: dateOf(this.time),
+    };
+  }
+
+  /**
+   * The wave repo the supervisor's own clone is checked against: the running wave's (the first by
+   * wave id when several run), as an absolute path; null when no wave runs.
+   */
+  private waveRepo(): string | null {
+    const repos = this.runningWaves()
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, l]) => l.record.wave?.repo ?? "")
+      .filter((r) => r !== "");
+    return repos[0] !== undefined ? resolve(repoDir(repos[0])) : null;
+  }
+
+  /**
+   * What every verdict's `requirements` adds to the version: the bun the running wave's repo
+   * (`waveRepo`) asks for (`engines.bun`, else `packageManager`), and the own `sharing.yaml`
+   * modes.
+   */
+  private requirementsExtra(): Pick<ReadinessInput, "bun" | "sharing"> {
+    let sharing: Sharing | undefined;
+    try {
+      sharing = readSharing(this.opts.claude?.root ?? claudeRoot());
+    } catch {
+      sharing = undefined;
+    }
+    let bun: string | undefined;
+    const dir = this.waveRepo();
+    if (dir !== null) {
+      try {
+        const p = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")) as {
+          engines?: { bun?: unknown };
+          packageManager?: unknown;
+        };
+        const engines =
+          typeof p.engines?.bun === "string" ? p.engines.bun.replace(/^[\s^~>=<]+/, "") : "";
+        const pm =
+          typeof p.packageManager === "string" && p.packageManager.startsWith("bun@")
+            ? (p.packageManager.slice("bun@".length).split("+")[0] ?? "")
+            : "";
+        const v = engines !== "" ? engines : pm;
+        if (/^[0-9][0-9A-Za-z.-]{0,63}$/.test(v)) bun = v;
+      } catch {}
+    }
+    return {
+      ...(bun !== undefined ? { bun } : {}),
+      ...(sharing !== undefined ? { sharing } : {}),
+    };
+  }
+
+  /**
+   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms`: run
+   * beside the queue (it is an ssh round-trip), then re-compute that machine's verdict.
+   */
+  private maybeProbe(name: string): void {
+    if (this.machines.record(name)?.tunnel !== "up") return;
+    const prior = this.probes.get(name);
+    const at = this.now();
+    if (
+      prior !== undefined &&
+      (prior.running || at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms)
+    ) {
+      return;
+    }
+    const host = this.remoteFor(name);
+    if (typeof host === "string") {
+      this.probes.set(name, { path: null, error: host, at, running: false });
+      return;
+    }
+    this.probes.set(name, { path: prior?.path ?? null, at, running: true });
+    void Promise.resolve()
+      .then(() => host.probePath())
+      .then(
+        (path) => ({ path }),
+        (e: unknown) => ({ path: null, error: e instanceof Error ? e.message : String(e) }),
+      )
+      .then(async (r) => {
+        if (!this.running) return;
+        await this.enqueue(async () => {
+          // A removed host (or a newer probe) is not overwritten by this one.
+          if (this.probes.get(name)?.at !== at) return;
+          this.probes.set(name, { ...r, at, running: false });
+          await this.publishReadiness(name);
+        });
+      });
+  }
+
+  /**
+   * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
+   * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
+   * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
+   * PATH is probed again, and `peer_doctor_run` is journaled.
+   */
+  private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const req = this.peers.doctorRequest(p);
+    if (!("host" in req)) return { reply: authReply("peer_doctor", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_doctor", {
+          ok: false,
+          error: `a doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
+    const run: DoctorRun = req;
+    return {
+      later: async () => {
+        let r: PeerReply;
+        try {
+          r = await this.peers.runDoctor(run);
+        } finally {
+          this.doctoring.delete(run.name);
+        }
+        if (r.ok) this.probes.delete(run.name);
+        return {
+          reply: authReply("peer_doctor", r),
+          journal: {
+            type: "peer_doctor_run",
+            data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
+          },
+        };
+      },
+    };
   }
 
   /**
@@ -4523,9 +5057,30 @@ export class Daemon {
     const key = `${topic}/${cid}`;
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
+    // A redelivery of a request still running (peer_doctor): its answer comes when the run ends.
+    if (this.authRunning.has(key)) return;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     const exec = this.opts.authExec ?? realExec;
-    let out: AuthOutcome;
+    const failed = (e: unknown): AuthOutcome => ({
+      reply: {
+        text: "ACKED",
+        acked_type: "query",
+        op: typeof payload.op === "string" ? payload.op : "",
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    });
+    const finish = async (o: AuthOutcome & { journal?: NewEvent }) => {
+      if (o.event !== undefined) this.system.append(o.event, dateOf(this.time));
+      if (o.journal !== undefined) await this.appendSystem(o.journal);
+      if (!o.reply.ok) this.log(`refused ${o.reply.op || "auth request"}: ${o.reply.error}`);
+      this.authAnswered.set(key, o.reply);
+      if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+        this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+      }
+      await send(o.reply);
+    };
+    let out: AuthOutcome | DeferredAuth;
     try {
       if (tokenId !== null) {
         out = await redeemToken(exec, tokenId, payload);
@@ -4544,35 +5099,39 @@ export class Daemon {
           : await accountOp(exec, sender, payload, lastSeen);
       }
     } catch (e) {
-      const op = typeof payload.op === "string" ? payload.op : "";
-      out = {
-        reply: {
-          text: "ACKED",
-          acked_type: "query",
-          op,
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        },
-      };
+      out = failed(e);
     }
-    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
-    if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
-    this.authAnswered.set(key, out.reply);
-    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
-      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    if ("later" in out) {
+      // Outside the queue: only the answer (and its journal record) goes back through it.
+      const { later } = out;
+      this.authRunning.add(key);
+      void later()
+        .catch(failed)
+        .then((o) =>
+          this.enqueue(async () => {
+            this.authRunning.delete(key);
+            if (this.running) await finish(o);
+          }),
+        );
+      return;
     }
-    await send(out.reply);
+    await finish(out);
   }
 
   /**
    * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
    * names: the account ops' admin check, then peers.ts (which journals them itself).
    */
-  private async peerAdminOp(exec: ExecFn, sender: string, p: Record<string, unknown>) {
+  private async peerAdminOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
     const accounts = await listAccounts(exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    if (op === "peer_doctor") return this.peerDoctor(p, sender);
     const r =
       op === "peer_invite"
         ? await this.peers.invite(p, sender)
@@ -4701,6 +5260,7 @@ export class Daemon {
       case "token_redeem":
       case "peer_invite":
       case "peer_remove":
+      case "peer_doctor":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,

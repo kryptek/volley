@@ -1,0 +1,255 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_SHARING, readSharing } from "../src/claude/sharing";
+import type { MachineRecord } from "../src/machines";
+import {
+  READINESS_CHANNEL,
+  type ReadinessInput,
+  parsePathProbe,
+  readiness,
+  readinessTopic,
+} from "../src/readiness";
+import { envelope, schemaErrors } from "./helpers/schema";
+
+const CHECKED = new Date("2026-10-19T09:00:00.000Z");
+
+const VERSIONS = { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" };
+
+/** A peer whose doctor found everything an agent needs. */
+const record = (over: Partial<MachineRecord> = {}): MachineRecord => ({
+  name: "box-a",
+  kind: "peer",
+  os: "linux",
+  cores: 8,
+  tunnel: "up",
+  load: [0.5, 0.4, 0.3],
+  agents: 0,
+  last_seen: "2026-10-19T08:59:30.000Z",
+  versions: VERSIONS,
+  auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+  repo: { path: "/srv/repo", exists: true, origin: "github.com/example-org/example-repo" },
+  checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/repo" }],
+  doctor_at: "2026-10-19T08:59:00.000Z",
+  ...over,
+});
+
+const input = (over: Partial<ReadinessInput> = {}): ReadinessInput => ({
+  name: "box-a",
+  record: record(),
+  local: false,
+  host: { max_agents: 4, drain: false },
+  hostVersion: "0.4.0",
+  hostOrigin: "github.com/example-org/example-repo",
+  probe: { claude: true, bun: true },
+  placed: 0,
+  heavy: {},
+  usage: { account: null, five_hour_pct: null },
+  checkedAt: CHECKED,
+  ...over,
+});
+
+const PATH_REASON = /^claude not on the non-interactive ssh PATH/;
+
+describe("readiness (the supervisor's verdict on one machine)", () => {
+  it("a machine whose doctor found everything, probed and under its cap, is ready and eligible", () => {
+    const r = readiness(input());
+    expect(r).toMatchObject({
+      name: "box-a",
+      ready: true,
+      reasons: [],
+      eligible: true,
+      drain: false,
+      max_agents: 4,
+      placed: 0,
+      path_ok: { claude: true, bun: true },
+      requirements: { volley: "0.4.0" },
+      checked_at: CHECKED.toISOString(),
+    });
+    expect(r.ineligible_reason).toBeUndefined();
+  });
+
+  it("a volley version other than the host's is not ready, with the exact reason", () => {
+    const r = readiness(input({ record: record({ versions: { ...VERSIONS, volley: "0.3.0" } }) }));
+    expect(r.ready).toBe(false);
+    expect(r.reasons).toEqual(["volley 0.3.0 on box-a, host runs 0.4.0"]);
+    expect(r).toMatchObject({ eligible: false, ineligible_reason: r.reasons[0] });
+  });
+
+  it("a probe without claude: path_ok.claude false and the PATH reason, saying the probe decides", () => {
+    const r = readiness(input({ probe: { claude: false, bun: true } }));
+    expect(r.path_ok).toEqual({ claude: false, bun: true });
+    expect(r.ready).toBe(false);
+    expect(r.reasons).toHaveLength(1);
+    expect(r.reasons[0]).toMatch(PATH_REASON);
+    // The doctor's own claude_on_path only estimates that PATH: the reason says which one counts.
+    expect(r.reasons[0]).toContain("claude_on_path");
+  });
+
+  it("no probe yet: path_ok nulls and not ready", () => {
+    const r = readiness(input({ probe: null }));
+    expect(r.path_ok).toEqual({ claude: null, bun: null });
+    expect(r.ready).toBe(false);
+    expect(r.reasons).toEqual([expect.stringMatching(/not probed yet/)]);
+  });
+
+  it("the supervisor's own machine names its own agent environment, not ssh", () => {
+    const r = readiness(
+      input({
+        local: true,
+        record: record({ kind: "supervisor", tunnel: "local" }),
+        probe: { claude: true, bun: false },
+      }),
+    );
+    expect(r.reasons).toEqual([expect.stringMatching(/^bun not on the PATH .*own agents/)]);
+  });
+
+  it("an ssh failure of the PATH probe: path_ok nulls and the transport reason", () => {
+    const r = readiness(
+      input({ probe: null, probeError: "ssh to dev@box-a failed: Connection refused" }),
+    );
+    expect(r).toMatchObject({
+      ready: false,
+      path_ok: { claude: null, bun: null },
+      reasons: ["PATH probe over ssh failed: ssh to dev@box-a failed: Connection refused"],
+    });
+  });
+
+  it("the supervisor's own doctor run without a wave repo: its repo.* checks do not count", () => {
+    const own = record({
+      name: "control",
+      kind: "supervisor",
+      tunnel: "local",
+      checks: [
+        { id: "tool.bun", ok: true, severity: "block", detail: "bun" },
+        { id: "repo.clone", ok: false, severity: "block", detail: "no wave repo: pass --repo" },
+      ],
+    });
+    const { repo: _none, ...noRepo } = own;
+    const base = { name: "control", local: true, hostOrigin: null };
+    expect(readiness(input({ ...base, record: noRepo, noRepo: true })).reasons).toEqual([]);
+    // Given a repo, a failing clone check blocks as on any machine.
+    expect(readiness(input({ ...base, record: noRepo })).reasons).toEqual([
+      "repo.clone: no wave repo: pass --repo",
+    ]);
+  });
+
+  it("drain: true is ineligible with ineligible_reason draining (and still ready)", () => {
+    const r = readiness(input({ host: { max_agents: 4, drain: true } }));
+    expect(r).toMatchObject({ ready: true, drain: true, eligible: false });
+    expect(r.ineligible_reason).toBe("draining");
+  });
+
+  it("placed at max_agents is ineligible: 4/4 agents", () => {
+    const r = readiness(input({ placed: 4 }));
+    expect(r).toMatchObject({ ready: true, eligible: false, ineligible_reason: "4/4 agents" });
+    expect(readiness(input({ placed: 3 })).eligible).toBe(true);
+  });
+
+  it("no record, a down tunnel, or no doctor report: not ready, each said plainly", () => {
+    expect(readiness(input({ record: undefined })).reasons).toEqual([
+      expect.stringMatching(/^no machine record/),
+    ]);
+    expect(
+      readiness(input({ record: record({ tunnel: "down", reason: "heartbeat_timeout" }) })).reasons,
+    ).toEqual([expect.stringMatching(/^tunnel down to box-a/)]);
+    const { checks: _c, doctor_at: _d, versions: _v, auth: _a, ...bare } = record();
+    expect(readiness(input({ record: bare })).reasons).toEqual([
+      "no doctor report: run volley peer doctor",
+    ]);
+  });
+
+  it("a failing block check blocks, a failing warn check does not", () => {
+    const checks = [
+      { id: "tools.git", ok: false, severity: "block" as const, detail: "git not found" },
+      { id: "claude_on_path", ok: false, severity: "warn" as const, detail: "estimate" },
+    ];
+    expect(readiness(input({ record: record({ checks }) })).reasons).toEqual([
+      "tools.git: git not found",
+    ]);
+  });
+
+  it("GitHub push, Claude sign-in and the repo origin are blockers in plain words", () => {
+    const r = readiness(
+      input({
+        record: record({
+          auth: { gh: "no_write", claude: "not_signed_in", trust: "ok" },
+          repo: { path: "/srv/repo", exists: true, origin: "github.com/someone/fork" },
+        }),
+      }),
+    );
+    expect(r.reasons).toEqual([
+      "gh: no write permission on someone/fork",
+      "claude: not signed in",
+      "repo origin differs from the host's (github.com/someone/fork, host: github.com/example-org/example-repo)",
+    ]);
+  });
+
+  it("carries requirements (bun, sharing), heavy and usage through", () => {
+    const r = readiness(
+      input({
+        bun: "1.3.0",
+        sharing: DEFAULT_SHARING,
+        heavy: { build: { held: 1, per_machine: 2 } },
+        usage: { account: "main@box-a", five_hour_pct: 42 },
+      }),
+    );
+    expect(r.requirements).toEqual({ volley: "0.4.0", bun: "1.3.0", sharing: DEFAULT_SHARING });
+    expect(r.heavy).toEqual({ build: { held: 1, per_machine: 2 } });
+    expect(r.usage).toEqual({ account: "main@box-a", five_hour_pct: 42 });
+  });
+
+  it("every verdict validates against readiness.schema.json (reasons cut to 200 characters)", () => {
+    const long = "x".repeat(300);
+    for (const v of [
+      readiness(input()),
+      readiness(input({ record: undefined, host: { max_agents: 4, drain: true } })),
+      readiness(input({ placed: 9, sharing: DEFAULT_SHARING, bun: "1.3.0" })),
+      readiness(
+        input({
+          record: record({ checks: [{ id: "x", ok: false, severity: "block", detail: long }] }),
+        }),
+      ),
+    ]) {
+      expect(
+        schemaErrors("readiness.schema.json", envelope(READINESS_CHANNEL, "readiness", v)),
+      ).toEqual([]);
+    }
+    expect(readinessTopic("box-a")).toBe("volley/_system/machines/box-a/readiness");
+  });
+});
+
+describe("requirements.sharing is the supervisor's sharing.yaml", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "volleyd-readiness-"));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("equals readSharing's modes", () => {
+    writeFileSync(join(root, "sharing.yaml"), "skills: own\nmcp: own\n");
+    const sharing = readSharing(root);
+    expect(readiness(input({ sharing })).requirements.sharing).toEqual({
+      ...DEFAULT_SHARING,
+      skills: "own",
+      mcp: "own",
+    });
+  });
+});
+
+describe("parsePathProbe (`command -v claude bun` on the box)", () => {
+  it("maps each resolved path to its tool, a missing one to false", () => {
+    expect(parsePathProbe("/home/dev/.bun/bin/bun\n")).toEqual({ claude: false, bun: true });
+    expect(parsePathProbe("/usr/local/bin/claude\n/usr/bin/bun\n")).toEqual({
+      claude: true,
+      bun: true,
+    });
+    expect(parsePathProbe("")).toEqual({ claude: false, bun: false });
+    // A function or an alias from the box's bashrc resolves too.
+    expect(parsePathProbe("claude\nalias bun='/opt/bun/bin/bun'\n")).toEqual({
+      claude: true,
+      bun: true,
+    });
+  });
+});

@@ -1,19 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { buildEnvelope } from "volley-mcp/envelope";
+import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
+import { readJournalFile } from "../src/journal";
+import type { DoctorReport } from "../src/machines";
 import { SYSTEM_WAVE } from "../src/types";
-import { startTestBroker } from "./helpers/aedes-broker";
+import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
-import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type DaemonEnv, NO_PRESSURE, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
+import { fakeExec } from "./helpers/fake-exec";
+import {
+  type FakeRemoteAnswers,
+  type FakeRemoteHost,
+  GREEN_DOCTOR,
+  fakeHost,
+  fakeRemoteHost,
+} from "./helpers/fake-host";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
@@ -393,3 +404,218 @@ async function rawRequest(
     await sender.disconnect();
   }
 }
+
+describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
+  const USERS = ["volleyd", "admin-1", "steer-1"];
+  const pw = (u: string) => `${u}-pw`;
+  /** The shipped roles' ACL, reduced to the auth topics (peers.test.ts). */
+  const canPublish = (user: string | undefined, topic: string) =>
+    user === "volleyd" ||
+    (topic.startsWith("volley/_system/auth/ops/")
+      ? topic === authOpsTopic(user ?? "")
+      : !topic.startsWith("volley/_system/auth/"));
+  const REPORT: DoctorReport = {
+    ...GREEN_DOCTOR,
+    checks: [
+      { id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/repo" },
+      {
+        id: "volley.version",
+        ok: false,
+        severity: "block",
+        detail: "volley 0.1.3 in /opt/volley; the supervisor runs 0.2.0",
+        fix: "git -C /opt/volley fetch origin --tags && git -C /opt/volley checkout --detach v0.2.0",
+      },
+      { id: "gh.auth", ok: false, severity: "warn", detail: "gh signed out", fix: "gh auth login" },
+    ],
+  };
+  let broker: TestBroker;
+  let home: string;
+  let box: FakeRemoteHost | undefined;
+  let answers: FakeRemoteAnswers;
+  let daemon: Daemon;
+  const clients: VolleyBroker[] = [];
+
+  beforeEach(async () => {
+    broker = await startTestBroker({
+      users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
+      canPublish,
+    });
+    home = mkdtempSync(join(tmpdir(), "volleyd-peer-doctor-"));
+    writeFileSync(
+      join(home, "config.yaml"),
+      "hosts:\n  box-a:\n    target: dev@box-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    answers = { doctor: REPORT };
+    box = undefined;
+    const auth = fakeExec().on(["volley", "auth", "list"], {
+      stdout: JSON.stringify({
+        accounts: [
+          { name: "admin-1", role: "admin", kind: "human", created: "2026-10-19T09:00:00.000Z" },
+          { name: "steer-1", role: "steer", kind: "human", created: "2026-10-19T09:00:00.000Z" },
+        ],
+      }),
+    });
+    daemon = await Daemon.start({
+      brokerUrl: broker.url,
+      namespace: NS,
+      home,
+      tickMs: 0,
+      protocolVersion: 4,
+      pressure: NO_PRESSURE,
+      auth: { username: "volleyd", password: pw("volleyd") },
+      authExec: auth.exec,
+      spawner: {
+        remoteHost: (s) => {
+          box ??= fakeRemoteHost(s, fakeHost(), answers);
+          return box;
+        },
+      },
+    });
+  });
+  afterEach(async () => {
+    for (const c of clients.splice(0)) {
+      // broker round-trip: a client the ACL refused may never complete its DISCONNECT.
+      await Promise.race([c.disconnect().catch(() => {}), new Promise((r) => setTimeout(r, 300))]);
+      c.simulateCrash();
+    }
+    await daemon.stop();
+    await broker.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** One account op as `user`, answered on the account-op reply topic. */
+  async function op(user: string, payload: Record<string, unknown>) {
+    const c = new VolleyBroker();
+    await c.connect({
+      url: broker.url,
+      agentId: `cli-${randomUUID().slice(0, 6)}`,
+      username: user,
+      password: pw(user),
+    });
+    clients.push(c);
+    const cid = randomUUID();
+    let resolve!: (p: Record<string, unknown>) => void;
+    const reply = new Promise<Record<string, unknown>>((r) => {
+      resolve = r;
+    });
+    await c.subscribeStream(authReplyTopic(cid), ({ payload: raw }) => {
+      const env = parseEnvelope(raw);
+      if (env?.type === "ack" && env.correlation_id === cid) {
+        resolve(env.payload as Record<string, unknown>);
+      }
+    });
+    const env = buildEnvelope({
+      agentId: user,
+      parentId: null,
+      channel: "_system/auth",
+      type: "query",
+      correlationId: cid,
+      payload,
+    });
+    await c.publish(authOpsTopic(user), JSON.stringify(env), { qos: 1, retain: false });
+    return reply;
+  }
+
+  it("from an admin: runs the doctor on the box and answers its checks and the plan", async () => {
+    const r = await op("admin-1", { op: "peer_doctor", name: "box-a", fix: false });
+    expect(r).toMatchObject({ ok: true, op: "peer_doctor" });
+    const result = r.result as { name: string; checks: unknown[]; plan: unknown[] };
+    expect(result.name).toBe("box-a");
+    expect(result.checks).toEqual(REPORT.checks);
+    // The plan: each failing check with its fix, so the sheet shows what Repair would do.
+    expect(result.plan).toEqual([
+      {
+        id: "volley.version",
+        severity: "block",
+        detail: "volley 0.1.3 in /opt/volley; the supervisor runs 0.2.0",
+        fix: "git -C /opt/volley fetch origin --tags && git -C /opt/volley checkout --detach v0.2.0",
+      },
+      { id: "gh.auth", severity: "warn", detail: "gh signed out", fix: "gh auth login" },
+    ]);
+    expect(box?.doctorRuns).toEqual([{ fix: false, clone: false }]);
+
+    const fixed = await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true });
+    expect(fixed).toMatchObject({ ok: true, result: { name: "box-a", fix: true } });
+    expect(box?.doctorRuns.at(-1)).toEqual({ fix: true, clone: true });
+  });
+
+  it("from a non-admin, or on the mailbox: refused, and nothing runs on the box", async () => {
+    const r = await op("steer-1", { op: "peer_doctor", name: "box-a", fix: false });
+    expect(r).toMatchObject({ ok: false, op: "peer_doctor" });
+    expect(r.error).toMatch(/steer-1.*steer.*admin/);
+    const client = await ControlClient.connect(broker.url, NS, {
+      username: "steer-1",
+      password: pw("steer-1"),
+    });
+    try {
+      const m = await client.request("peer_doctor", { name: "box-a" });
+      expect(m).toMatchObject({ ok: false, error: expect.stringContaining("auth/ops") });
+    } finally {
+      await client.close();
+    }
+    expect(box?.doctorRuns ?? []).toEqual([]);
+  });
+
+  it("an ssh failure answers ok: false with the transport reason", async () => {
+    answers.doctor = new Error("ssh to dev@box-a failed (volley peer doctor): Connection refused");
+    const r = await op("admin-1", { op: "peer_doctor", name: "box-a" });
+    expect(r).toMatchObject({ ok: false, op: "peer_doctor" });
+    expect(r.error).toContain("Connection refused");
+  });
+
+  it("a run holds no queue: config_set and ticks go on meanwhile; a second run on the box is refused until it ends; each run is journaled", async () => {
+    let release!: (r: DoctorReport) => void;
+    answers.doctor = () =>
+      new Promise<DoctorReport>((r) => {
+        release = r;
+      });
+    const pending = op("admin-1", { op: "peer_doctor", name: "box-a", fix: true });
+    await eventually(async () => (box?.doctorRuns.length ?? 0) === 1);
+
+    // The doctor is still running on the box: the daemon's queue is not.
+    const client = await ControlClient.connect(broker.url, NS, {
+      username: "admin-1",
+      password: pw("admin-1"),
+    });
+    try {
+      const r = await client.request("config_set", {
+        patch: { hosts: { "box-a": { max_agents: 2 } } },
+        by: "tester",
+      });
+      expect(r).toMatchObject({ ok: true });
+    } finally {
+      await client.close();
+    }
+    await daemon.tick();
+    expect(
+      await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true }),
+    ).toMatchObject({ ok: false, error: 'a doctor run on "box-a" is already in progress' });
+    expect(box?.doctorRuns).toHaveLength(1);
+
+    release(REPORT);
+    expect(await pending).toMatchObject({ ok: true, result: { name: "box-a", fix: true } });
+    const runs = () =>
+      readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).filter(
+        (e) => e.type === "peer_doctor_run",
+      );
+    expect(runs().map((e) => e.data)).toEqual([
+      { by: "admin-1", name: "box-a", fix: true, clone: false, ok: true },
+    ]);
+
+    // Ended: the box takes the next run.
+    answers.doctor = REPORT;
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a" })).toMatchObject({ ok: true });
+    expect(runs().map((e) => e.data.ok)).toEqual([true, true]);
+  });
+
+  it("refuses an unknown host and --clone without --fix before ssh", async () => {
+    expect(await op("admin-1", { op: "peer_doctor", name: "nobody" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("nobody"),
+    });
+    expect(
+      await op("admin-1", { op: "peer_doctor", name: "box-a", fix: false, clone: true }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("clone") });
+    expect(box?.doctorRuns ?? []).toEqual([]);
+  });
+});

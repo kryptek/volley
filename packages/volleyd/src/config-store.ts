@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { dateOf, systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
+import { localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type { ConfigPayload, Tunables, TunablesPatch, WaveId } from "./types";
@@ -82,7 +83,30 @@ const TUNABLES = "config.schema.json#/$defs/tunables";
  * plainly at the field's path: the schema can only express that bound as `if`/`then` pairs,
  * whose errors (`must match "then" schema`) name neither the field nor the bound.
  */
-function tunablesErrors(value: unknown): PathError[] {
+function tunablesErrors(value: unknown, host: string): PathError[] {
+  return [...fleetNameErrors(value, host), ...poolErrors(value)];
+}
+
+/**
+ * The supervisor's own machine name (`fleet.local_name`, else derived from `host`) is never a
+ * configured host's (SPEC §4.6.15): two machines would write one record topic.
+ */
+function fleetNameErrors(value: unknown, host: string): PathError[] {
+  if (!isPlain(value) || !isPlain(value.hosts)) return [];
+  const set = isPlain(value.fleet) ? value.fleet.local_name : undefined;
+  const name = localMachineName(typeof set === "string" ? set : null, host);
+  if (!Object.hasOwn(value.hosts, name)) return [];
+  return typeof set === "string" && set === name
+    ? [{ path: "fleet.local_name", reason: `"${name}" is a configured host (hosts.${name})` }]
+    : [
+        {
+          path: `hosts.${name}`,
+          reason: `"${name}" is the supervisor's own machine name (derived from its host name; set fleet.local_name to name it otherwise)`,
+        },
+      ];
+}
+
+function poolErrors(value: unknown): PathError[] {
   const pools = isPlain(value) && isPlain(value.lease_pools) ? value.lease_pools : {};
   const over = Object.entries(pools).flatMap(([name, p]) =>
     isPlain(p) &&
@@ -134,12 +158,15 @@ export class ConfigStore {
   private updatedAt: string;
   private updatedBy: string;
   private readonly listeners: ((c: ConfigChange) => void)[] = [];
+  /** The machine's host name, from which `fleet.local_name: null` derives the machine name. */
+  private readonly hostname: string;
 
   private constructor(
-    opts: { home: string; system: Journal; now: () => Date; defaults: Tunables },
+    opts: { home: string; system: Journal; now: () => Date; defaults: Tunables; hostname: string },
     layer: TunablesPatch,
   ) {
     this.file = join(opts.home, "config.yaml");
+    this.hostname = opts.hostname;
     this.system = opts.system;
     this.now = opts.now;
     this.defaults = opts.defaults;
@@ -158,8 +185,11 @@ export class ConfigStore {
     system: Journal;
     now?: () => Date;
     defaults?: Tunables;
+    /** Tests: the host name `fleet.local_name: null` derives from (default: the machine's). */
+    hostname?: string;
   }): ConfigStore {
     const defaults = opts.defaults ?? CONFIG_DEFAULTS;
+    const host = opts.hostname ?? hostname();
     const file = join(opts.home, "config.yaml");
     let layer: TunablesPatch = {};
     if (existsSync(file)) {
@@ -173,12 +203,12 @@ export class ConfigStore {
       }
       layer = (parsed ?? {}) as TunablesPatch;
       // The file is a patch over the defaults: what must be valid is the merged result.
-      const errors = tunablesErrors(isPlain(layer) ? merge(defaults, layer) : layer);
+      const errors = tunablesErrors(isPlain(layer) ? merge(defaults, layer) : layer, host);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
     return new ConfigStore(
       // real clock: the default when the daemon injects no clock
-      { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults },
+      { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults, hostname: host },
       layer,
     );
   }
@@ -214,14 +244,24 @@ export class ConfigStore {
     return v;
   }
 
-  /** The retained `volley/_waves/_config` payload (config.schema.json). */
+  /**
+   * The retained `volley/_waves/_config` payload (config.schema.json). `fleet.local_name` is the
+   * resolved name, never null: clients recognise the supervisor's machine by it.
+   */
   retainedPayload(): ConfigPayload {
+    const eff = this.effective();
     return {
       version: this.version,
       updated_at: this.updatedAt,
       updated_by: this.updatedBy,
-      ...this.effective(),
+      ...eff,
+      fleet: { ...eff.fleet, local_name: this.localName() },
     };
+  }
+
+  /** The supervisor's own machine name: `fleet.local_name`, else derived from the host name. */
+  localName(): string {
+    return localMachineName(this.global.fleet?.local_name ?? null, this.hostname);
   }
 
   onChange(listener: (c: ConfigChange) => void): void {
@@ -243,7 +283,7 @@ export class ConfigStore {
     else rejected.push(...emptyObjects(patch));
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(this.defaults, nextLayer);
-    if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal));
+    if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal, this.hostname));
     if (rejected.length > 0) return { applied: false, rejected };
     return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
   }

@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "desk-4c2e",
+  "wall_time": "2026-10-19T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "3c9d1e52-7a4b-4c6f-8d29-1e5f7a3b9c42",
+  "payload": {
+    "op": "peer_doctor",
+    "name": "box-a",
+    "fix": true,
+    "clone": true
+  }
+}

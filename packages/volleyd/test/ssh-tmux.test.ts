@@ -509,3 +509,46 @@ describe("resolveRemoteHost", () => {
     );
   });
 });
+
+describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
+  const REPORT = {
+    checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone" }],
+    doctor_at: "2026-10-19T09:00:00.000Z",
+  };
+
+  it("probePath runs `command -v claude bun` on the box and reads what resolved", async () => {
+    // `command -v` exits 1 when one name is missing; what it printed is still the answer.
+    const r = remote(() => ({ code: 1, stdout: "/home/dev/.bun/bin/bun\n" }));
+    expect(await r.host.probePath()).toEqual({ claude: false, bun: true });
+    expect(r.steps()).toEqual([{ argv: ["command", "-v", "claude", "bun"] }]);
+  });
+
+  it("probePath throws when ssh itself fails (no answer is not a missing tool)", async () => {
+    const r = remote(() => ({ code: 255, stderr: "ssh: connect to host box: Connection refused" }));
+    await expect(r.host.probePath()).rejects.toThrow(/Connection refused/);
+  });
+
+  it("runDoctor runs volley peer doctor --json in the box's volley checkout and parses it", async () => {
+    const r = remote(() => ({ code: 1, stdout: JSON.stringify(REPORT) }));
+    expect(await r.host.runDoctor({ fix: false, clone: false })).toEqual(REPORT);
+    expect(await r.host.runDoctor({ fix: true, clone: true })).toEqual(REPORT);
+    expect(r.steps()).toEqual([
+      { argv: ["volley", "peer", "doctor", "--json"], cwd: SPEC.volley_dir },
+      {
+        argv: ["volley", "peer", "doctor", "--json", "--fix", "--yes", "--clone"],
+        cwd: SPEC.volley_dir,
+      },
+    ]);
+  });
+
+  it("runDoctor throws with ssh's reason, or when the doctor printed no report", async () => {
+    const down = remote(() => ({ code: 255, stderr: "Permission denied (publickey)" }));
+    await expect(down.host.runDoctor({ fix: false, clone: false })).rejects.toThrow(
+      /ssh to dev@box failed.*Permission denied/,
+    );
+    const none = remote(() => ({ code: 127, stderr: "bash: volley: command not found" }));
+    await expect(none.host.runDoctor({ fix: false, clone: false })).rejects.toThrow(
+      /printed no report: bash: volley: command not found/,
+    );
+  });
+});

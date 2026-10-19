@@ -12,6 +12,9 @@ import { dirname, join } from "node:path";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import type { ConsentToken } from "../../src/fence";
 import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "../../src/hosts/host";
+import type { RemoteHost, RemoteHostSpec } from "../../src/hosts/ssh-tmux";
+import type { DoctorReport } from "../../src/machines";
+import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
 import type { NewEvent, Wave } from "../../src/types";
 import type { AgentWatch, SignalState } from "../../src/verify";
@@ -252,4 +255,75 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     worktree: join(dir, "wt", "w1", "T1-implementer"),
     cleanup: async () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// A paired machine on fakes (RemoteHost): its own tunnel always answers the port check.
+// ---------------------------------------------------------------------------------------------
+
+export interface FakeRemoteAnswers {
+  /** probePath's answer (an Error: ssh failed). Default: both tools resolve. */
+  path?: PathProbe | Error;
+  /**
+   * runDoctor's answer (an Error: ssh failed; a function: a run that ends when its promise does).
+   * Default: an all-green report.
+   */
+  doctor?: DoctorReport | Error | (() => Promise<DoctorReport>);
+}
+
+export type FakeRemoteHost = FakeHost &
+  RemoteHost & {
+    answers: FakeRemoteAnswers;
+    probes: number;
+    doctorRuns: { fix: boolean; clone: boolean }[];
+  };
+
+/** A doctor report with every check passing. */
+export const GREEN_DOCTOR: DoctorReport = {
+  checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/repo" }],
+  versions: { peer: "0.2.0", volley: "0.2.0", bun: "1.3.1", git: "2.43.0" },
+  auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+  doctor_at: "2026-10-19T09:00:00.000Z",
+};
+
+export function fakeRemoteHost(
+  spec: RemoteHostSpec,
+  local: FakeHost,
+  answers: FakeRemoteAnswers = {},
+): FakeRemoteHost {
+  const h = fakeHost(local.fake) as unknown as FakeRemoteHost;
+  Object.assign(h, {
+    name: spec.name,
+    spec,
+    screenSource: "tmux",
+    hooksDir: `${spec.volley_dir}/packages/volley-hooks`,
+    mcpEntry: `${spec.volley_dir}/packages/volley-mcp/src/index.ts`,
+    brokerUrl: `mqtt://127.0.0.1:${spec.tunnel.remote_port}`,
+    launchEnv: (id: { agent_id: string; namespace: string }) => ({
+      VOLLEY_BROKER_URL: `mqtt://127.0.0.1:${spec.tunnel.remote_port}`,
+      VOLLEY_NAMESPACE: id.namespace,
+      VOLLEY_AGENT_ID: id.agent_id,
+    }),
+    repoExists: async () => true,
+    tunnelUp: async () => true,
+    readTrust: async () => ({ projects: { [spec.repo]: { hasTrustDialogAccepted: true } } }),
+    recordTrust: async () => {},
+    readFile: async () => null,
+    answers,
+    probes: 0,
+    doctorRuns: [],
+    probePath: async () => {
+      h.probes++;
+      const a = h.answers.path ?? { claude: true, bun: true };
+      if (a instanceof Error) throw a;
+      return a;
+    },
+    runDoctor: async (opts: { fix: boolean; clone: boolean }) => {
+      h.doctorRuns.push(opts);
+      const a = h.answers.doctor ?? GREEN_DOCTOR;
+      if (a instanceof Error) throw a;
+      return typeof a === "function" ? a() : a;
+    },
+  });
+  return h;
 }

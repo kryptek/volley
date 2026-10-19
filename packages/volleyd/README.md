@@ -39,6 +39,7 @@ coordinator session.
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+- [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
 - [Recovery](#recovery)
 - [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The pipeline and the merge-ready gate](#the-pipeline-and-the-merge-ready-gate)
@@ -1269,6 +1270,102 @@ machine rewrites `~/.volley/peer.json` and restarts its service. An ordinary cod
 name is still refused, `replace` or not; a `--for` code joins under its own name only; neither
 refusal uses the code up. A name whose account is not a `peer` is never replaced.
 
+## Fleet: readiness, the supervisor's card, Repair
+
+The Fleet (SPEC §4.6.15) lets volleyd judge where an agent can run. This section covers what it
+computes and publishes today; placement itself uses these verdicts.
+
+**The supervisor's own machine record.** volleyd publishes a record for its own machine, as
+`volleyd`, on `volley/_system/machines/<local_name>` with `kind: supervisor` and
+`tunnel: local`, every `machine_heartbeat_ms` (30 s). `<local_name>` is `fleet.local_name`, or,
+when that is `null`, the host name's first label lowercased (`MacBook-Pro.local` is
+`macbook-pro`; a reserved result becomes `supervisor`). The retained config carries the resolved
+name, never `null`. `load`, `cores`, `memory` and `uptime_s` are read live from the OS, `agents`
+is its live supervised agents, and the rest (`checks`, `versions`, `auth`, `repo`, `disk`,
+`doctor_at`) comes from its own doctor: `volleyd daemon` runs `volley peer doctor --json --repo
+<repo>` locally (fenced: that argv only, never `--fix`) at start, every heartbeat, and at once when
+the running wave's repo changes. volleyd is no peer (it has no `peer.json`), so `<repo>` is the
+running wave's repo (the first by wave id when several run); with no wave running it runs without
+`--repo`, and the report's `repo.*` checks, which then only say that no repo was given, do not
+count against its own machine (nor is any origin compared). `versions.volley` is
+volleyd's own version. The name is never a configured host's: `config_set` (or `config.yaml`)
+that would make `fleet.local_name` equal a `hosts.<name>` key, or a host key equal the derived
+name, is refused, and so is `peer_join` under that name.
+
+**Readiness.** For its own machine and every configured host, volleyd publishes a verdict,
+retained, on `volley/_system/machines/<name>/readiness` (`readiness.schema.json`; only volleyd
+publishes there):
+
+```jsonc
+{ "name": "box-a", "ready": false,
+  "reasons": ["volley 0.3.0 on box-a, host runs 0.4.0"],
+  "drain": false, "max_agents": 4, "placed": 1,
+  "path_ok": { "claude": true, "bun": true },
+  "requirements": { "volley": "0.4.0", "bun": "1.3.0", "sharing": { "skills": "linked", "...": "..." } },
+  "heavy": { "build": { "held": 1, "per_machine": 2 } },
+  "usage": { "account": "main@box-a", "five_hour_pct": 42 },
+  "eligible": false, "ineligible_reason": "volley 0.3.0 on box-a, host runs 0.4.0",
+  "checked_at": "2026-10-19T09:00:00.000Z" }
+```
+
+`ready` is false while anything blocks an agent there, each said in one plain line: no record
+yet, the tunnel down, no doctor report (`no doctor report: run volley peer doctor`), a failing
+`block` check, a volley version other than volleyd's, `claude` or `bun` missing from the PATH an
+agent gets, GitHub without push access (`gh: no write permission on <owner/repo>`), Claude signed
+out (`claude: not signed in`), or a clone whose origin differs from the supervisor's. The PATH
+is volleyd's own probe: for a peer, `command -v claude bun` as a fenced step of the same
+`ssh -T <target> bash -s` that runs `launch.sh`, at most every `path_probe_interval_ms` (5 min)
+while its record is up; the doctor's own `claude_on_path` / `bun_on_path` only estimate that PATH
+(they are `warn` checks), and the reason says the probe decides. For volleyd's own machine the
+probe is its own agents' environment, with no ssh hop: volleyd's own `PATH`, which is an
+approximation (local sessions start through cmux, whose shell may set its own `PATH`; under
+launchd volleyd's `PATH` is the one its plist recorded). `eligible` adds placement's
+static filter: ready, not draining (`ineligible_reason: "draining"`), and `placed` under
+`max_agents` (`"4/4 agents"`). `requirements` is what a machine's doctor checks against:
+volleyd's version, the bun the running wave's repo asks for (the same repo as the own doctor's;
+`engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
+
+The verdict is re-computed on every tick, on each folded record, on a config change and after a
+probe; it is re-published when anything but `checked_at` changed, and otherwise every
+heartbeat. A change of `ready` or `reasons` is journaled in `_system` as
+`machine_readiness_changed { name, ready, reasons }`.
+
+A verdict waits for its inputs. Until a peer's record has folded in and its first PATH probe has
+finished (no probe runs while its tunnel is not up), or until volleyd's own first doctor run has
+finished, volleyd neither publishes nor journals that machine's verdict, at most for
+`machine_down_after_ms` after it starts. So a restart leaves the last retained verdict in place
+and journals nothing for a machine that did not change: the first verdict with its inputs is
+compared with the last journaled one, or, when there is none, is the baseline.
+`peer_remove`, or a host leaving the config, clears the verdict.
+
+**Caps and drain.** `hosts.<name>.max_agents` (1 to 100, default 4) and `hosts.<name>.drain`
+(default `false`) are validated by `config_set`, applied hot and journaled as `config_changed`:
+
+```sh
+volleyd config set hosts.box-a.max_agents 2
+volleyd config set hosts.box-a.drain true     # no new placements; running agents finish
+```
+
+The supervisor's own machine is capped by `hard_ceiling`, which still caps the total: its verdict
+reads `max_agents: hard_ceiling` and `placed` every live supervised agent, wherever it runs, so
+with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
+
+**Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
+refused on the mailbox) asks volleyd to run the doctor on a configured host:
+`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
+`--fix --yes` with `fix: true` and `--clone` with `clone: true` (which needs `fix`), in the box's
+`volley_dir` as one fenced remote step; the fence allows exactly those argv on a box and no other
+`volley` command. The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
+`fix` it also carries `plan`, each failing check with its fix, so the sheet shows what a fix would
+do before anyone runs it. An ssh failure answers `ok: false` with ssh's reason. The run (up to
+`peer_doctor_timeout_ms`, 15 min, for a `--fix`) happens outside volleyd's serial queue, so ticks
+and control ops go on meanwhile; a second `peer_doctor` for the same host while one runs is
+refused (`a doctor run on "<name>" is already in progress`). Each run is journaled in `_system`
+as `peer_doctor_run { by, name, fix, clone, ok }`. After a Repair the box's PATH is probed again
+on the next re-compute. Repair runs the bare `volley` of the box's non-interactive ssh PATH: on a
+box whose PATH probe finds no `bun` (and so no `volley`), fix the PATH first, or Repair answers
+only `volley: command not found`.
+
 ---
 
 ## Recovery
@@ -1657,6 +1754,9 @@ ALLOW (program by bare name only — never a path):
   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
     LABEL 1..64 printable characters, not starting with `-`
+  volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
+    §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
+    an absolute path with no `.`/`..` segment and no control character
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
@@ -1703,6 +1803,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
+  command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+  volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
+    the `peer_doctor` op); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json
