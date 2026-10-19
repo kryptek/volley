@@ -53,13 +53,15 @@ export type AccountOp =
   | "account_create"
   | "account_rotate"
   | "account_revoke"
-  | "signin_link";
+  | "signin_link"
+  | "admin_token";
 const ACCOUNT_OPS: readonly string[] = [
   "account_list",
   "account_create",
   "account_rotate",
   "account_revoke",
   "signin_link",
+  "admin_token",
 ];
 
 /** One accounts.json entry, as `volley auth list --json` prints it. */
@@ -91,7 +93,9 @@ export interface AuthEvent {
     | "account_rotated"
     | "account_revoked"
     | "signin_link_issued"
-    | "token_redeemed";
+    | "token_redeemed"
+    | "admin_token_issued"
+    | "setup_step_applied";
   data: Record<string, unknown>;
 }
 
@@ -221,6 +225,7 @@ export async function accountOp(
   }
 
   if (op === "signin_link") return signinLink(exec, sender, p);
+  if (op === "admin_token") return adminToken(exec, sender, p);
 
   const name = p.name;
   if (typeof name !== "string" || !isValidAgentId(name)) {
@@ -350,6 +355,37 @@ async function signinLink(exec: ExecFn, sender: string, p: Fields): Promise<Auth
     event: {
       type: "signin_link_issued",
       data: { by: sender, role: p.role, label: p.label, token_id: tokenId, expires_at: expiresAt },
+    },
+  };
+}
+
+/**
+ * `admin_token {reply_key}` → a one-time admin token (`volley auth token --json`), sealed to the
+ * admin who asked: an admin may already create an admin account, so this adds no privilege, and
+ * volleyd running as a service has no terminal to print it to. The journal names the token's id,
+ * never the token.
+ */
+async function adminToken(exec: ExecFn, sender: string, p: Fields): Promise<AuthOutcome> {
+  const op = "admin_token";
+  const key = replyKey(p.reply_key);
+  if (typeof key === "string") return refuse(op, key);
+  const r = await volleyAuth(exec, ["token", "--json"]);
+  if (!r.ok) return refuse(op, r.error);
+  const token = r.out?.token;
+  const expiresAt = r.out?.expires_at;
+  if (typeof token !== "string" || typeof expiresAt !== "string") {
+    return refuse(op, "volley auth token printed no token");
+  }
+  const tokenId = token.split("_")[2] ?? "";
+  return {
+    reply: reply(op, {
+      ok: true,
+      result: { token_id: tokenId, expires_at: expiresAt },
+      sealed: seal(key, { token }),
+    }),
+    event: {
+      type: "admin_token_issued",
+      data: { by: sender, token_id: tokenId, expires_at: expiresAt },
     },
   };
 }

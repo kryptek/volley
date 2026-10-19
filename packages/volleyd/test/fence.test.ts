@@ -11,6 +11,7 @@ import {
   mintConsentToken,
   mintModelSwitchToken,
   mintScriptToken,
+  mintSetupToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
@@ -471,6 +472,129 @@ describe("assertAllowed", () => {
     expect(() =>
       assertAllowed(["git", "worktree", "remove", "/tmp/wt"], { consent: forged }),
     ).toThrow(FenceError);
+  });
+});
+
+describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup token)", () => {
+  const repo = "/src/volley";
+  const home = "/home/owner";
+  const inputs = {
+    restart: "brew services restart mosquitto",
+    ctrl: { bin: "mosquitto_ctrl", stateFile: "/opt/homebrew/var/mosquitto/dynamic-security.json" },
+    repoRoot: repo,
+    bun: "/usr/local/bin/bun",
+    home,
+    uid: 501,
+  };
+  const setup = mintSetupToken(inputs);
+  const desk = `${repo}/packages/volley-desk`;
+  const hooks = `${repo}/packages/volley-hooks/scripts/install.sh`;
+  const volleydCli = `${repo}/packages/volleyd/src/cli.ts`;
+  const deskPlist = `${home}/Library/LaunchAgents/systems.volley.desk.plist`;
+
+  // O3's own commands for a brew layout, minus what only a terminal may run.
+  const SETUP_ALLOWED: [string[], string?][] = [
+    [["brew", "services", "restart", "mosquitto"]],
+    [["mosquitto_ctrl", "dynsec", "init", inputs.ctrl.stateFile, "dynsec-admin", "pw-1"]],
+    [["mosquitto", "-h"]],
+    [["launchctl", "print", "gui/501/systems.volley.volleyd"]],
+    [["launchctl", "print", "gui/501/systems.volley.desk"]],
+    [["launchctl", "bootout", "gui/501/systems.volley.desk"]],
+    [["launchctl", "bootstrap", "gui/501", deskPlist]],
+    [["systemctl", "--user", "daemon-reload"]],
+    [["systemctl", "--user", "is-active", "volleyd.service"]],
+    [["systemctl", "--user", "is-active", "volley-desk.service"]],
+    [["systemctl", "--user", "enable", "volley-desk.service"]],
+    [["systemctl", "--user", "restart", "volley-desk.service"]],
+    [["bash", hooks]],
+    [["bash", hooks, "--dry-run"]],
+    [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883", "--dry-run"]],
+    [[inputs.bun, "run", "build"], desk],
+    [["volley", "auth", "token", "--json"]],
+  ];
+  const SETUP_DENIED: [string[], string?][] = [
+    // volleyd's own service: installing or reloading it would stop the volleyd answering.
+    [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883"]],
+    [["volleyd", "install"]],
+    [["launchctl", "bootout", "gui/501/systems.volley.volleyd"]],
+    [["launchctl", "kickstart", "-k", "gui/501/systems.volley.volleyd"]],
+    [
+      [
+        "launchctl",
+        "bootstrap",
+        "gui/501",
+        `${home}/Library/LaunchAgents/systems.volley.volleyd.plist`,
+      ],
+    ],
+    [["systemctl", "--user", "restart", "volleyd.service"]],
+    [["systemctl", "--user", "enable", "volleyd.service"]],
+    // Anything that needs sudo.
+    [["sudo", "systemctl", "restart", "mosquitto"]],
+    [["sudo", "snap", "restart", "mosquitto"]],
+    [["sudo", "volley", "setup"]],
+    // The keychain is a terminal's (the logged-in session's).
+    [["security", "find-generic-password", "-s", "volley-broker", "-a", "coordinator", "-w"]],
+    [["security", "-i"]],
+    // Not O3's exact shapes.
+    [["brew", "services", "stop", "mosquitto"]],
+    [["mosquitto_ctrl", "dynsec", "init", "/tmp/other.json", "dynsec-admin", "pw-1"]],
+    [["mosquitto_ctrl", "dynsec", "createClient", "x"]],
+    [["bun", "run", "build"], desk],
+    [[inputs.bun, "run", "build"], repo],
+    [[inputs.bun, "run", "build"]],
+    [["bash", "/tmp/install.sh"]],
+    [["bash", hooks, "--force"]],
+    [["launchctl", "bootstrap", "gui/501", "/tmp/evil.plist"]],
+    [["launchctl", "print", "gui/501/com.example.other"]],
+    [["volley", "auth", "list", "--json"]],
+    [["git", "status"]],
+    [["rm", "-rf", "/tmp/x"]],
+  ];
+
+  it.each(SETUP_ALLOWED.map(([a, cwd]) => [a.join(" "), a, cwd]))("allows %s", (_l, argv, cwd) => {
+    const opts = { setup, ...(cwd !== undefined ? { cwd: cwd as string } : {}) };
+    expect(() => assertAllowed(argv as string[], opts)).not.toThrow();
+  });
+
+  it.each(SETUP_DENIED.map(([a, cwd]) => [a.join(" "), a, cwd]))("denies %s", (_l, argv, cwd) => {
+    const opts = { setup, ...(cwd !== undefined ? { cwd: cwd as string } : {}) };
+    expect(() => assertAllowed(argv as string[], opts)).toThrow(FenceError);
+  });
+
+  it("needs the token: without it the setup commands are not volleyd's", () => {
+    expect(() => assertAllowed(["brew", "services", "restart", "mosquitto"])).toThrow(FenceError);
+    expect(() => assertAllowed(["bash", hooks])).toThrow(FenceError);
+    const forged = { inputs } as unknown as ReturnType<typeof mintSetupToken>;
+    expect(() =>
+      assertAllowed(["brew", "services", "restart", "mosquitto"], { setup: forged }),
+    ).toThrow(FenceError);
+  });
+
+  it("a layout only a terminal restarts (sudo, a container) gets no restart at all", () => {
+    const etc = mintSetupToken({ ...inputs, restart: null, ctrl: null });
+    expect(() =>
+      assertAllowed(["brew", "services", "restart", "mosquitto"], { setup: etc }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(
+        ["mosquitto_ctrl", "dynsec", "init", inputs.ctrl.stateFile, "dynsec-admin", "x"],
+        {
+          setup: etc,
+        },
+      ),
+    ).toThrow(FenceError);
+    // A sudo restart is never a setup command, whatever the inputs say.
+    const sudo = mintSetupToken({ ...inputs, restart: "sudo systemctl restart mosquitto" });
+    expect(() =>
+      assertAllowed(["sudo", "systemctl", "restart", "mosquitto"], { setup: sudo }),
+    ).toThrow(FenceError);
+  });
+
+  it("`volley auth token --json` is an account verb volleyd may run for admin_token", () => {
+    expect(() => assertAllowed(["volley", "auth", "token", "--json"])).not.toThrow();
+    expect(() => assertAllowed(["volley", "auth", "token", "--ttl", "60", "--json"])).toThrow(
+      FenceError,
+    );
   });
 });
 

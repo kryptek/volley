@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
+import { countLiveAgents } from "volley-cli/setup/broker";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -164,6 +165,7 @@ import {
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
+import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./setup-ops";
 import type {
   CoordinatorAttention,
   JournalEvent,
@@ -348,6 +350,11 @@ export interface DaemonOptions {
   credentialSweepMs?: number;
   /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
   authExec?: ExecFn;
+  /**
+   * The setup ops' planner context (setup-ops.ts; tests): the planners' deps, the auth dir, the
+   * env and the broker they log in to. Default: the real machine, volleyd's own broker URL.
+   */
+  setup?: Partial<Omit<SetupOpsOptions, "exec">>;
   /**
    * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
    * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
@@ -755,6 +762,10 @@ export class Daemon {
   private readonly claude: ClaudeService;
   /** Paired machines (peers.ts) and their heartbeats (machines.ts). */
   private readonly peers: PeerService;
+  /** `setup_plan` / `setup_apply` (setup-ops.ts), answered beside the serial queue. */
+  private readonly setupOps: SetupOps;
+  /** Setup requests being answered (topic/correlation id): a re-delivery waits for the answer. */
+  private readonly setupInFlight = new Set<string>();
   private readonly machines: MachineHealth;
   /**
    * Usage metering (claude/usage.ts): every agent's latest sample, folded per account. The
@@ -867,6 +878,17 @@ export class Daemon {
       onChange: (name, status, record) => {
         if (this.running) void this.enqueue(() => this.onMachine(name, status, record));
       },
+    });
+    this.setupOps = new SetupOps({
+      exec: opts.authExec ?? realExec,
+      volleydHome: opts.home,
+      brokerUrl: opts.brokerUrl,
+      env: process.env,
+      now: () => dateOf(this.time),
+      sleep: (ms) => new Promise((r) => this.time.setTimeout(r, ms)),
+      liveAgents: () => this.liveAgentCount(),
+      brokerVersion: () => this.dynsec?.version ?? null,
+      ...opts.setup,
     });
     this.peers = new PeerService({
       exec: opts.authExec ?? realExec,
@@ -4513,6 +4535,15 @@ export class Daemon {
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
     const payload = (req.payload ?? {}) as Record<string, unknown>;
+    if (tokenId === null && SETUP_OPS.has(payload.op as string)) {
+      // A step can take minutes (the Desk build): answered beside the queue, never blocking it.
+      if (this.setupInFlight.has(key)) return;
+      this.setupInFlight.add(key);
+      void this.answerSetup(topic.split("/")[4] ?? "", payload, key, send)
+        .catch((e: unknown) => this.log(`setup op: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => this.setupInFlight.delete(key));
+      return;
+    }
     const exec = this.opts.authExec ?? realExec;
     let out: AuthOutcome;
     try {
@@ -4551,6 +4582,59 @@ export class Daemon {
       this.authAnswered.delete(this.authAnswered.keys().next().value as string);
     }
     await send(out.reply);
+  }
+
+  /**
+   * `setup_plan` / `setup_apply` from `sender`: answered, journaled, remembered for a
+   * re-delivery like every account op; then what runs after the answer (a broker restart).
+   */
+  private async answerSetup(
+    sender: string,
+    payload: Record<string, unknown>,
+    key: string,
+    send: (r: AuthReply) => Promise<void>,
+  ): Promise<void> {
+    this.authSeen.set(sender, dateOf(this.time).toISOString());
+    let out: SetupOutcome;
+    try {
+      out = await this.setupOps.handle(sender, payload);
+    } catch (e) {
+      out = {
+        reply: authReply(String(payload.op), {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      };
+    }
+    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
+    if (!out.reply.ok) this.log(`refused ${out.reply.op}: ${out.reply.error}`);
+    this.authAnswered.set(key, out.reply);
+    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    }
+    try {
+      await send(out.reply);
+    } finally {
+      // The restart drops every connection, ours included: only once the answer is out.
+      if (out.after !== undefined) {
+        this.log("setup: restarting the broker after the answer");
+        await out.after();
+      }
+    }
+  }
+
+  /** Agents with a live (non-terminal) retained status: the setup detect step's count. */
+  private async liveAgentCount(): Promise<number | null> {
+    try {
+      const msgs = await this.broker.subscribeCollect(
+        "volley/+/+/status",
+        Number.POSITIVE_INFINITY,
+        DAEMON_DEFAULTS.registry_scan_ms,
+      );
+      return countLiveAgents(msgs);
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -131,6 +131,11 @@ export const DAEMON_DEFAULTS = {
   registry_scan_ms: 250,
   /** Kill a `volley auth` account command (accounts.ts) after this long. */
   auth_exec_timeout_ms: 15_000,
+  /**
+   * Kill one command a `setup_apply` step runs (the Desk build, the hooks installer, the broker
+   * restart) after this long: inside the Desk's own 120 s wait for the answer.
+   */
+  setup_apply_timeout_ms: 110_000,
   /** Lifetime of a `signin_link` whose request names no `ttl_s`. */
   signin_link_ttl_s: 600,
   /** The longest a sign-in link may live (`volley auth` enforces the same bound). */
