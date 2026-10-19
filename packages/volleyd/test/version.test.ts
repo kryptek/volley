@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DynsecSession, brokerTransport, ensureClients, ensureRoles } from "volley-cli/auth/dynsec";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
+import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { DynsecControl, brokerControl } from "../src/dynsec";
 import { NO_PRESSURE } from "./helpers/daemon-env";
@@ -103,6 +104,35 @@ describe("Daemon.start with a dynsec admin login", () => {
     fake = await startFakeDynsec({ version: "mosquitto version 2.0.22" });
     await bootstrap();
     await expect(Daemon.start(opts())).rejects.toMatchObject({ code: "BROKER_TOO_OLD" });
+  });
+
+  it("status answers from the cached login count while the control connection is stalled", async () => {
+    fake = await startFakeDynsec();
+    await bootstrap();
+    const b = new VolleyBroker();
+    await b.connect({ url: fake.url, agentId: "bootstrap2", ...fake.admin });
+    const s = await DynsecSession.open(brokerTransport(b));
+    await ensureClients(s, [{ username: "w0-t1-implementer-1", password: "x", roles: ["agent"] }]);
+    await s.close();
+    await b.disconnect();
+    const d = await Daemon.start({ ...opts(), clock: fakeClock(Date.now()) });
+    const client = await ControlClient.connect(fake.url, "vt", {
+      username: "volleyd",
+      password: "vd",
+    });
+    try {
+      await d.sweepCredentials(); // counts the login (too young to sweep)
+      const release = fake.stall(); // the plugin stops answering on the live connection
+      try {
+        const r = await client.request("status", {}, { timeoutMs: 3_000 });
+        expect(r).toMatchObject({ ok: true, result: { agent_logins: { live: 1, swept: 0 } } });
+      } finally {
+        release();
+      }
+    } finally {
+      await client.close();
+      await d.stop();
+    }
   });
 
   it("starts against 2.1.2", async () => {

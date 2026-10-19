@@ -53,6 +53,28 @@ export function planSweep(i: SweepInput): SweepPlan {
   return { sweep: sweep.sort(), kept: kept.sort() };
 }
 
+/** `store` with a re-count after every mint and revoke, so the cached `status` count follows them. */
+export function recounted(store: CredentialStore, recount: () => void): CredentialStore {
+  return {
+    mint: async (agentId) => {
+      try {
+        return await store.mint(agentId);
+      } finally {
+        recount();
+      }
+    },
+    revoke: async (agentId) => {
+      const ok = await store.revoke(agentId);
+      recount();
+      return ok;
+    },
+    agentLogins: () => store.agentLogins(),
+    get mintedAt() {
+      return store.mintedAt;
+    },
+  };
+}
+
 export interface SweeperDeps {
   credentials: CredentialStore;
   /** The live agents, judged from candidates (the logins not obviously live). */
@@ -67,7 +89,7 @@ export interface SweeperDeps {
 }
 
 export interface SweepCounts {
-  /** Agent logins on the broker: counted by the last sweep, or by `refresh()` since. */
+  /** Agent logins on the broker: counted by the last sweep, or by a `refreshSoon()` since. */
   live: number;
   /** Logins swept, in total (from the `_system` journal across restarts). */
   swept: number;
@@ -82,15 +104,34 @@ export class CredentialSweeper {
     readonly counts: SweepCounts = { live: 0, swept: 0 },
   ) {}
 
+  private refreshing: Promise<void> | null = null;
+  private again = false;
+
   /**
-   * The counts with `live` read from the broker now (one paged listClients), so mints and
-   * retires since the last sweep show; the last known count when the broker cannot answer.
+   * Re-count the agent logins in the background (one paged listClients; overlapping calls share
+   * it, and one made during it runs it once more). Never awaited where an answer is due:
+   * `volleyd status` reads `counts`, which keeps the last count while the broker is slow.
    */
-  async refresh(): Promise<SweepCounts> {
-    try {
-      this.counts.live = (await this.d.credentials.agentLogins()).length;
-    } catch {}
-    return { ...this.counts };
+  refreshSoon(): void {
+    if (this.refreshing !== null) {
+      this.again = true;
+      return;
+    }
+    this.refreshing = (async () => {
+      do {
+        this.again = false;
+        try {
+          this.counts.live = (await this.d.credentials.agentLogins()).length;
+        } catch {}
+      } while (this.again);
+    })().finally(() => {
+      this.refreshing = null;
+    });
+  }
+
+  /** Resolves once a background re-count in flight (if any) is done. */
+  async refreshed(): Promise<void> {
+    await this.refreshing;
   }
 
   /** One sweep (concurrent calls share it). Returns the swept agent ids. */

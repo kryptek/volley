@@ -510,8 +510,9 @@ async function launchAttempt(
     }
     return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
-    // Exempt from the delete path: the spawn failed before or at its launch, so no session has
-    // logged in with this login and published records yet; there is nothing to reap or clear.
+    // A bare revoke, not the delete path: this is almost always a failure before or at the
+    // launch, when no session holds the login. (A journal failure right after a launch is the rare
+    // exception, and its retained records are not cleared here.)
     if (creds !== undefined) await revokeCredentials(deps.credentials, agentId);
     throw e;
   }

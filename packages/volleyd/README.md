@@ -936,8 +936,9 @@ worktree lock naming it, no non-terminal retained status (`spawning`, `registere
 `blocked`…, in any namespace), and not minted (or first seen) within `spawn_timeout_s`. One sweep's
 deletes go as one control message; it journals `credentials_swept { agent_ids }` in `_system`. The
 fixed identities, accounts, token logins and the admin are never candidates. `volleyd status` starts
-with `agent logins: N live, M swept` (the agent logins on the broker right now, listed when the
-status is asked for, and the total swept per the `_system` journal); `--json` has
+with `agent logins: N live, M swept` (the agent logins on the broker, a count volleyd re-reads after
+each of its mints and deletes, each sweep and every 30 s, so `status` never waits on the broker,
+and the total swept per the `_system` journal); `--json` has
 `agent_logins: { live, swept }`.
 ### Remote hosts (ssh + tmux)
 

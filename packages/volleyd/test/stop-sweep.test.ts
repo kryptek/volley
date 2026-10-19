@@ -31,6 +31,9 @@ describe("volleyd stop retires the wave's agents; a sweep then leaves no agent l
     // No LWT comes for a deleted login: volleyd said it, then cleared the records.
     expect(await s.env.retained(buildTopic(NS, AGENT, "status"))).toBeNull();
     expect(await s.env.retained(registryTopic(AGENT))).toBeNull();
+    // The daemon's own delete re-counted the logins: status shows only the leftover.
+    const status = await runCli(["status"], s.env.env);
+    expect(status.stdout.split("\n")[0]).toBe("agent logins: 1 live, 0 swept");
 
     await s.daemon.sweepCredentials();
     expect(waveLogins()).toEqual([]);

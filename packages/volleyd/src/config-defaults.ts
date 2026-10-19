@@ -77,6 +77,8 @@ export const DAEMON_DEFAULTS = {
   tick_ms: 10_000,
   /** How long the CLI waits for the daemon's retained status before saying "not running". */
   probe_ms: 1_000,
+  /** How often the cached agent-login count (`volleyd status`) is re-read from the broker. */
+  login_count_refresh_ms: 30_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
   /** How often the daemon checks its broker connection; a lost connection makes it exit. */

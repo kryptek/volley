@@ -14,8 +14,9 @@ decisions and a "needs you" count on the waves the caller owns (--by, else VOLLE
 else the session registered for this directory).
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state; without a wave, { waves: [those payloads], agent_logins }.
-Without a wave, a first line counts the broker's agent logins: those on the broker now, and
-how many the credential sweeps deleted in total (--json: agent_logins).
+Without a wave, a first line counts the broker's agent logins (as last re-read: after each
+mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
+(--json: agent_logins).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {

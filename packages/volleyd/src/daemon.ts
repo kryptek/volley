@@ -69,7 +69,7 @@ import {
   runningAgents,
   steerTarget,
 } from "./controls";
-import { CredentialSweeper } from "./credential-sweep";
+import { CredentialSweeper, recounted } from "./credential-sweep";
 import {
   type DecisionInput,
   type DecisionPayload,
@@ -602,6 +602,8 @@ export class Daemon {
   private readonly credentials: CredentialStore | undefined;
   private readonly sweeper: CredentialSweeper | undefined;
   private sweepTimer: TimerHandle | undefined;
+  /** Re-counts the agent logins for `status` (CredentialSweeper.refreshSoon). */
+  private countTimer: TimerHandle | undefined;
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
@@ -774,6 +776,8 @@ export class Daemon {
             .reduce((n, e) => n + ((e.data.agent_ids as unknown[] | undefined)?.length ?? 0), 0),
         },
       );
+      const sweeper = this.sweeper;
+      this.credentials = recounted(store, () => sweeper.refreshSoon());
     }
     this.claude = new ClaudeService({
       root: opts.claude?.root ?? claudeRoot(),
@@ -1038,7 +1042,14 @@ export class Daemon {
       );
     }
     // The sweep is mandatory (no login ever expires): at start, then every interval.
-    if (this.sweeper !== undefined) this.scheduleSweep(0);
+    if (this.sweeper !== undefined) {
+      this.scheduleSweep(0);
+      const sweeper = this.sweeper;
+      this.countTimer = this.time.setInterval(
+        () => sweeper.refreshSoon(),
+        DAEMON_DEFAULTS.login_count_refresh_ms,
+      );
+    }
     this.log(`volleyd up: ${this.waves.size} wave(s), broker ${this.opts.brokerUrl}`);
   }
 
@@ -1282,6 +1293,7 @@ export class Daemon {
     this.time.clearInterval(this.screenTimer);
     this.time.clearInterval(this.pruneTimer);
     this.time.clearTimeout(this.sweepTimer);
+    this.time.clearInterval(this.countTimer);
     if (closeControl) void this.dynsec?.close();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
@@ -1305,10 +1317,13 @@ export class Daemon {
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
     this.halt(false);
-    await this.claude.stop();
-    await this.tunnelsStopped;
-    await this.enqueue(async () => {});
-    await this.dynsec?.close();
+    try {
+      await this.claude.stop();
+      await this.tunnelsStopped;
+      await this.enqueue(async () => {});
+    } finally {
+      await this.dynsec?.close();
+    }
     this.acks.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
@@ -4050,7 +4065,8 @@ export class Daemon {
           result: {
             waves: [...this.waves.keys()].map((w) => this.snapshot(w)),
             ...(this.killSwitch ? { kill_switch: true } : {}),
-            ...(this.sweeper !== undefined ? { agent_logins: await this.sweeper.refresh() } : {}),
+            // The cached count: status never waits on the broker's control connection.
+            ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
           },
         };
       }

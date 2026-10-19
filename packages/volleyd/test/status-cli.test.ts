@@ -16,11 +16,13 @@ import {
   uninstallService,
 } from "../src/commands/install";
 import { formatLogins, formatWave } from "../src/commands/status";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
 import type { NewEvent } from "../src/types";
 import { makeDaemonEnv } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { memoryCredentials } from "./helpers/fake-dynsec";
 import { runCli } from "./helpers/run-cli";
 
@@ -306,16 +308,25 @@ describe("volleyd status: agent logins", () => {
     }
   });
 
-  it("the live count follows mints and retires between sweeps", async () => {
+  it("the live count is cached, re-read on the clock: it follows logins made outside the daemon", async () => {
     const env = await makeDaemonEnv();
     try {
       const creds = memoryCredentials();
-      const d = await env.start({ spawner: { credentials: creds }, credentialSweepMs: 3_600_000 });
+      const clock = fakeClock(Date.now());
+      const d = await env.start({
+        spawner: { credentials: creds },
+        credentialSweepMs: 3_600_000,
+        clock,
+      });
       await d.sweepCredentials();
-      await creds.mint("w1-t1-implementer-1");
       const line = async () => (await runCli(["status"], env.env)).stdout.split("\n")[0];
+      // Another tool mints a login: status answers from the cache until the next re-count.
+      await creds.mint("w1-t1-implementer-1");
+      expect(await line()).toBe("agent logins: 0 live, 0 swept");
+      await clock.advance(DAEMON_DEFAULTS.login_count_refresh_ms);
       expect(await line()).toBe("agent logins: 1 live, 0 swept");
       await creds.revoke("w1-t1-implementer-1");
+      await clock.advance(DAEMON_DEFAULTS.login_count_refresh_ms);
       expect(await line()).toBe("agent logins: 0 live, 0 swept");
     } finally {
       await env.cleanup();
