@@ -24,6 +24,8 @@
  *   - `configset-*.json` -> config-set-request.schema.json
  *   - `screen-*.json` -> screen.schema.json
  *   - `admission-*.json` -> admission.schema.json
+ *   - `account-*.json` -> account.schema.json (a file, not an envelope)
+ *   - `authreq-*.json` -> auth-request.schema.json
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -55,6 +57,8 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   configset: "config-set-request.schema.json",
   screen: "screen.schema.json",
   admission: "admission.schema.json",
+  account: "account.schema.json",
+  authreq: "auth-request.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

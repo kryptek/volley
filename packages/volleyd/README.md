@@ -30,6 +30,7 @@ coordinator session.
 - [Leases](#leases)
 - [Spawn admission](#spawn-admission)
 - [Topics and the control channel](#topics-and-the-control-channel)
+- [Accounts and one-time tokens](#accounts-and-one-time-tokens)
 - [Decisions](#decisions)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
@@ -258,6 +259,10 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
+| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)). |
+| `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
+| `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
+| `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -293,6 +298,59 @@ wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers 
 arrives or `wait_ack_ms` (default 30 s, at most 300 s) passes, and `run` answers once each task
 issue's body has been fetched — neither wait blocks other control requests. A request redelivered
 while its answer is still pending is not run twice; it gets the one answer.
+
+---
+
+## Accounts and one-time tokens
+
+The Desk manages broker accounts through the daemon, never by writing the password file itself
+(SPEC §4.6.9). The daemon in turn only runs `volley auth` through the [fence](#the-authority-fence):
+`volley auth` owns `passwd`, `acl.conf`, `accounts.json` and `tokens.json` in `$VOLLEY_AUTH_DIR`.
+
+**Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
+mailbox cannot say who sent a request (the daemon refuses them there with a pointer). An admin
+publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "query"`, a fresh
+`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker ACL grants that topic only
+to admin accounts and only for their own username, so the topic names the sender; the daemon
+then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
+`account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
+process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
+under its name. Requests are never retained: the daemon clears a request topic's retained message
+after each request, so a restart cannot replay one. `account_rotate` of the sender's own account is
+refused: the reload that applies the new password disconnects the client holding the old one
+before the answer arrives (rotate yourself with `volley auth rotate` or through another admin).
+
+| `op` | Fields | `result` | `sealed` (decrypts to) | Journal (`_system`) |
+|---|---|---|---|---|
+| `account_list` | — | `{ accounts: [{ name, role, kind, created, label?, last_seen? }] }` | — | — |
+| `account_create` | `name`, `role` (`admin` \| `steer` \| `watch` \| `supervisor` \| `peer`), `kind?` | `{ name, role }` | `{ username, password }` | `account_created { by, name, role, kind? }` |
+| `account_rotate` | `name` | `{ name, role }` | `{ username, password }` | `account_rotated { by, name }` |
+| `account_revoke` | `name` | `{ name }` | — | `account_revoked { by, name }` |
+| `signin_link` | `role` (`steer` \| `watch`), `label`, `ttl_s?` (default 600), `desk_url?` | `{ role, label, expires_at, link_base? }` | `{ token }`; the link is `<link_base>#signin=<token>` (sealing the link too could exceed what RSA-OAEP fits) | `signin_link_issued { by, role, label, token_id, expires_at }` |
+
+**Token redemption.** `volley auth token` prints a one-time admin token in the operator's
+terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
+broker login `redeem-<id>`, so the broker keeps `allow_anonymous false` (an anonymous client would
+inherit the ACL's read of the whole tree). That login may only write `volley-auth/redeem/<id>` and
+read `volley-auth/redeem/<id>/reply`: its ACL block denies `volley/#` (where every shared grant
+lives), so it sees nothing of the tree and nothing of other tokens. The client connects as that
+login, subscribes to the reply topic and publishes `{ op: "token_redeem", token, label, reply_key }`
+on the request topic; the daemon refuses a token whose id is not the topic's, then pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
+which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
+journaled as `token_redeemed { by, name, role, label }`. A used, expired or unknown token is
+refused. The token's login is not removed during redemption (mosquitto would disconnect the client
+on the reload before it hears the answer): `volley auth` drops it about a minute after redemption
+or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
+(when it uses broker auth) so that happens without anyone running a command.
+
+**Answers** go to `volley/_system/auth/replies/<correlation_id>` (a `token_redeem`'s to `volley-auth/redeem/<id>/reply`) as an `ack` from `volleyd` with
+`{ text: "ACKED", acked_type: "query", op, ok, error?, result?, sealed? }`. Every authenticated
+client may read that topic, so passwords and sign-in tokens appear only in `sealed`: base64url
+RSA-OAEP (SHA-256) ciphertext for the request's `reply_key`, an RSA public JWK of at least 2048
+bits (WebCrypto: `generateKey({ name: "RSA-OAEP", hash: "SHA-256", modulusLength: 2048 })`, export
+the public key as JWK, decrypt with the private one). An op that would return a secret without a
+usable `reply_key` is refused before anything is created. A redelivered request (same topic and
+`correlation_id`) gets the first answer again.
 
 ---
 
@@ -1080,6 +1138,12 @@ ALLOW (program by bare name only — never a path):
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]
+  volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
+  volley auth add <agent_id> --role ROLE [--kind KIND] --json
+  volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
+  volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+    ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
+    LABEL 1..64 printable characters, not starting with `-`
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service

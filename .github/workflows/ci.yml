@@ -161,6 +161,27 @@ jobs:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
         run: bunx vitest run test/integration/daemon-auth.test.ts
+      - name: Run account roles + token login ACL integration test
+        working-directory: packages/volleyd
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-roles.test.ts
+      - name: Install mosquitto_passwd
+        # The token-redeem test runs the real `volley auth` (it calls mosquitto_passwd) against
+        # its own eclipse-mosquitto container; the distro broker this package also starts is
+        # stopped so nothing but the test containers listens.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mosquitto
+          sudo systemctl stop mosquitto || true
+          mosquitto_passwd -h | head -1 || true
+      - name: Run token redeem end-to-end test (real volley auth + mosquitto reload)
+        working-directory: packages/volley-cli
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_REDEEM_IT_REQUIRED: "1"
+        run: bunx vitest run test/commands/auth-redeem.integration.test.ts
       - name: Broker log
         if: failure()
         run: docker logs mosquitto-auth

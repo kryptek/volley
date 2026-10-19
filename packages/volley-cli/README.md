@@ -55,7 +55,7 @@ volley --help
 | `volley list`   | Enumerate agents in a namespace (or all namespaces). Human table by default; `--json` for tooling. |
 | `volley dash`   | Launch the browser dashboard (Vite dev server). See [`volley dash`](#volley-dash) below. |
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
-| `volley auth`   | Manage the broker's password file: `init` the fixed identities, mint/revoke per-agent credentials. See [`volley auth`](#volley-auth) below. |
+| `volley auth`   | Manage the broker's password file: `init` the fixed identities, mint/revoke per-agent credentials, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 
 Each has its own `--help`:
@@ -140,7 +140,19 @@ volley auth add-agent w1-t1-implementer-1 # mint a password (username = agent id
 volley auth add-agent w1-t1-implementer-1 --json   # {"username","password"} for .volley/agent.json "broker"
 volley auth add-agent w1-t1-implementer-1 --ack-to coordinator-ab12   # + let it ack its parent
 volley auth rm-agent w1-t1-implementer-1  # revoke on retire (succeeds if already revoked)
+
+volley auth add phone --role steer        # an account with a role; prints its password ONCE
+volley auth add build-box --role peer --json   # {"username","password","role"}
+volley auth rotate phone                  # new password, printed once
+volley auth revoke phone                  # password, account entry and ACL block removed
+volley auth list [--json]                 # the accounts (never their passwords)
+volley auth token                         # one-time admin token for the Desk (10 min, single use)
+volley auth signin-link --role steer --label "Owner's phone"   # one-time sign-in token
+echo "$TOKEN" | volley auth redeem --label "Desk on mac" --json  # what volleyd runs on redemption
 ```
+
+- **Roles** select an ACL template appended to `acl.conf` as a managed `# >>> volley account <name>` block: `admin` (a coordinator's writes plus account ops on `volley/_system/auth/ops/<name>`), `steer` (write mailboxes), `watch` (read only), `supervisor` (read/write everything like `volleyd`, except the account-op and answer topics under `volley/_system/auth/`), `peer` (a paired machine: `volley/_system/machines/<name>[/#]`). Every account also keeps the ACL's shared patterns (read `volley/#`, its own `%u` channels, lease requests). The registry is `accounts.json` (name, role, kind, created, label); `--kind` is `human` \| `device` \| `machine` \| `service` (default from the role).
+- **One-time tokens** (`token`, `signin-link`) are stored only as a sha256 hash in `tokens.json`. Each is also the password of a temporary broker login `redeem-<id>` that may only write `volley-auth/redeem/<id>` and read `volley-auth/redeem/<id>/reply` (its block denies `volley/#`, so it sees nothing else), so the Desk can redeem it through volleyd (SPEC §4.6.9) while the broker keeps refusing anonymous clients. `redeem` reads the token from stdin, burns it and creates an account with the token's role (refusing, token unburned, if that `<role>-<id>` name is taken; `add` reserves that shape). The login outlives the redemption by about a minute so the redeeming client, still connected as it, gets its answer; the next account command after that, or after the token expires, removes it (volleyd runs `volley auth list` every minute for this). `accounts.json` and `tokens.json` are replaced by rename, never rewritten in place.
 
 - `--ack-to <sender_id>` (repeatable) appends a managed `user` block to `acl.conf` that lets the agent write exactly those senders' mailboxes, so its acks (SPEC §4.4) and query replies reach them. Without it a minted agent can write no mailbox at all, and the broker silently drops its acks. Pass the parent's agent id (and `volleyd` when the daemon steers it).
 - `add-agent` refuses the fixed identity names and ids the ACL's namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, and the channel names).

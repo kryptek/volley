@@ -1,0 +1,25 @@
+{
+  "accounts": [
+    {
+      "name": "admin-3fa9c210",
+      "role": "admin",
+      "kind": "device",
+      "created": "2026-10-18T12:01:00.000Z",
+      "label": "Desk on laptop"
+    },
+    {
+      "name": "steer-7b01e4d2",
+      "role": "steer",
+      "kind": "device",
+      "created": "2026-10-18T12:06:00.000Z",
+      "label": "Owner's phone",
+      "last_seen": "2026-10-18T12:30:00.000Z"
+    },
+    {
+      "name": "build-box",
+      "role": "peer",
+      "kind": "machine",
+      "created": "2026-10-18T12:10:00.000Z"
+    }
+  ]
+}

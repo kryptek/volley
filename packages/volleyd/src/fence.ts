@@ -46,6 +46,12 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
  *   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
  *   volley auth rm-agent <agent_id> [--no-reload]
+ *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
+ *   volley auth add <agent_id> --role ROLE [--kind KIND] --json
+ *   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
+ *   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+ *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
+ *     LABEL 1..64 printable characters, not starting with `-`
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -867,6 +873,42 @@ const absPath = (p: string) => /^\/[^\n\r\0]*$/.test(p) && cleanPath(p);
 
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
+const ROLE = /^(admin|steer|watch|supervisor|peer)$/;
+const KIND = /^(human|device|machine|service)$/;
+const LABEL = (l: string | undefined) =>
+  l !== undefined &&
+  l.length >= 1 &&
+  l.length <= 64 &&
+  !l.startsWith("-") &&
+  [...l].every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f);
+const TTL = /^[1-9][0-9]{0,5}$/;
+
+/**
+ * The account verbs the daemon's account ops run (accounts.ts), each one exact shape. Tokens
+ * never appear: `redeem` reads its token from stdin.
+ */
+const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
+  list: (a) => a.length === 1 && a[0] === "--json",
+  rotate: (a) => a.length === 2 && AGENT_ID.test(a[0] ?? "") && a[1] === "--json",
+  revoke: (a) => a.length === 1 && AGENT_ID.test(a[0] ?? ""),
+  add: (a) =>
+    AGENT_ID.test(a[0] ?? "") &&
+    a[1] === "--role" &&
+    ROLE.test(a[2] ?? "") &&
+    ((a.length === 4 && a[3] === "--json") ||
+      (a.length === 6 && a[3] === "--kind" && KIND.test(a[4] ?? "") && a[5] === "--json")),
+  "signin-link": (a) =>
+    a.length === 7 &&
+    a[0] === "--role" &&
+    (a[1] === "steer" || a[1] === "watch") &&
+    a[2] === "--label" &&
+    LABEL(a[3]) &&
+    a[4] === "--ttl" &&
+    TTL.test(a[5] ?? "") &&
+    a[6] === "--json",
+  redeem: (a) => a.length === 3 && a[0] === "--label" && LABEL(a[1]) && a[2] === "--json",
+};
+
 /**
  * `volley auth add-agent|grant|rm-agent <id>`: mint, extend the ack grant of (ACL only), and
  * revoke one agent's broker credentials.
@@ -874,6 +916,9 @@ const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 function volley(args: string[]): Verdict {
   const [group, verb, id, ...rest] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
+  if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
+    return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
+  }
   if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent" && verb !== "grant"))
     return deny(name);
   if (id === undefined || !AGENT_ID.test(id)) return deny(`${name} (agent id)`);
