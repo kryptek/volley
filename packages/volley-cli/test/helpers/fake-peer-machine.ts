@@ -1,6 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExecResult, PeerExec } from "../../src/commands/peer";
 import { type DoctorDeps, LOCK_MARKER, type ToolName, lockHash } from "../../src/peer/doctor";
 
@@ -8,8 +19,22 @@ import { type DoctorDeps, LOCK_MARKER, type ToolName, lockHash } from "../../src
  * A fake machine for `volley peer doctor`: real temp directories (home, the volley checkout, the
  * wave repo's parent) and a scripted exec that answers `command -v`, `--version`, `gh`, `claude`,
  * `git` and `bun` like a box would, and changes state when a fix runs (`bun install` creates
- * `node_modules/.bin`, `git clone` creates the clone).
+ * `node_modules/.bin`, `git clone` creates the clone). Its Claude profile (`~/.claude`) is what
+ * the profile installers act on: the skill installers link `~/.claude/skills/<skill>`, the hooks
+ * installer writes `settings.json` (or prints it under `--dry-run`), `claude mcp` edits
+ * `~/.claude.json`'s `mcpServers`.
  */
+
+/** The Claude profile volley provisions (default: everything in place, with no broker URL). */
+export interface FakeProfile {
+  /** `~/.claude/skills/{volley,volley-issues}`: links to the checkout, absent, a real folder, a link elsewhere, a dangling link. */
+  skills?: "linked" | "absent" | "stray" | "elsewhere" | "broken";
+  hooks?: "installed" | "absent";
+  /** The broker URL the installed hooks and MCP entry carry (none by default). */
+  url?: string;
+  /** `mcpServers.volley` in `~/.claude.json`: this checkout's, none, or the given entry. */
+  mcp?: "registered" | "absent" | Record<string, unknown>;
+}
 
 export interface FakeTool {
   /** Where `command -v` finds it in the doctor's own shell (null: not installed there). */
@@ -48,12 +73,21 @@ export interface FakeMachineOptions {
   /** A token-shaped string appended to every output the box prints. */
   plant?: string;
   memPressurePct?: number;
+  profile?: FakeProfile;
 }
 
 export interface Call {
   argv: string[];
   input?: string;
 }
+
+const lstatOrNull = (p: string) => {
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
+};
 
 const TOOL_VERSIONS: Record<ToolName, string> = {
   bun: "1.3.2",
@@ -65,6 +99,41 @@ const TOOL_VERSIONS: Record<ToolName, string> = {
   cmp: "cmp (GNU diffutils) 3.10",
   claude: "2.0.14 (Claude Code)",
 };
+
+/** The two skills the profile links, and their packages in the checkout. */
+export const FAKE_SKILLS = [
+  ["volley", "volley-skill"],
+  ["volley-issues", "volley-issues"],
+] as const;
+
+/** What the fake hooks installer merges: one hook, its prefix carrying the broker URL and namespace if any. */
+export const fakeHooksSettings = (volleyDir: string, url?: string, namespace?: string) =>
+  `${JSON.stringify(
+    {
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: `VOLLEY_HOOKS_COORDINATOR=1 ${url !== undefined ? `VOLLEY_BROKER_URL=${url} ` : ""}${namespace !== undefined ? `VOLLEY_NAMESPACE=${namespace} ` : ""}bun run "${volleyDir}/packages/volley-hooks/src/hooks/stop.ts"`,
+              },
+            ],
+          },
+        ],
+      },
+    },
+    null,
+    2,
+  )}\n`;
+
+/** This checkout's MCP registration, as `claude mcp add-json` stores it. */
+export const fakeMcpEntry = (volleyDir: string, url?: string) => ({
+  type: "stdio",
+  command: "/usr/bin/bun",
+  args: ["run", join(volleyDir, "packages", "volley-mcp", "src", "index.ts")],
+  env: { VOLLEY_AGENT_ID: "coordinator", ...(url !== undefined ? { VOLLEY_BROKER_URL: url } : {}) },
+});
 
 export function fakePeerMachine(opts: FakeMachineOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), "volley-fake-box-"));
@@ -99,8 +168,60 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     (opts.trusted === true
       ? { projects: { [repoPath]: { hasTrustDialogAccepted: true } } }
       : undefined);
-  if (claudeJson !== undefined)
-    writeFileSync(join(home, ".claude.json"), JSON.stringify(claudeJson));
+  // The Claude profile: the checkout's packages, and what is installed from them.
+  const profile = opts.profile ?? {};
+  const claudeDir = join(home, ".claude");
+  const skillsDir = join(claudeDir, "skills");
+  const settingsFile = join(claudeDir, "settings.json");
+  const claudeJsonFile = join(home, ".claude.json");
+  for (const [, pkg] of FAKE_SKILLS) {
+    mkdirSync(join(volleyDir, "packages", pkg, "scripts"), { recursive: true });
+    writeFileSync(join(volleyDir, "packages", pkg, "SKILL.md"), `# ${pkg}\n`);
+    writeFileSync(join(volleyDir, "packages", pkg, "scripts", "install.sh"), "#!/bin/sh\n");
+  }
+  mkdirSync(join(volleyDir, "packages", "volley-hooks", "scripts"), { recursive: true });
+  writeFileSync(
+    join(volleyDir, "packages", "volley-hooks", "scripts", "install.sh"),
+    "#!/bin/sh\n",
+  );
+  mkdirSync(join(volleyDir, "packages", "volley-mcp", "src"), { recursive: true });
+  writeFileSync(join(volleyDir, "packages", "volley-mcp", "src", "index.ts"), "");
+  mkdirSync(skillsDir, { recursive: true });
+  const skillsState = profile.skills ?? "linked";
+  for (const [skill, pkg] of FAKE_SKILLS) {
+    const at = join(skillsDir, skill);
+    if (skillsState === "linked") symlinkSync(join(volleyDir, "packages", pkg), at);
+    if (skillsState === "stray") mkdirSync(at);
+    if (skillsState === "elsewhere") {
+      mkdirSync(join(root, "elsewhere", pkg), { recursive: true });
+      symlinkSync(join(root, "elsewhere", pkg), at);
+    }
+    if (skillsState === "broken") symlinkSync(join(root, "deleted", pkg), at);
+  }
+  if ((profile.hooks ?? "installed") === "installed") {
+    writeFileSync(settingsFile, fakeHooksSettings(volleyDir, profile.url));
+  }
+  const mcp = profile.mcp ?? "registered";
+  const servers =
+    mcp === "absent"
+      ? undefined
+      : { volley: mcp === "registered" ? fakeMcpEntry(volleyDir, profile.url) : mcp };
+  const claudeJsonOut =
+    servers === undefined
+      ? claudeJson
+      : typeof claudeJson === "object" && claudeJson !== null
+        ? { ...claudeJson, mcpServers: servers }
+        : claudeJson === undefined
+          ? { mcpServers: servers }
+          : claudeJson;
+  if (claudeJsonOut !== undefined) writeFileSync(claudeJsonFile, JSON.stringify(claudeJsonOut));
+  const readClaudeJson = (): Record<string, unknown> => {
+    try {
+      return JSON.parse(readFileSync(claudeJsonFile, "utf-8")) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
 
   const tools = {} as Record<ToolName, FakeTool>;
   for (const t of Object.keys(TOOL_VERSIONS) as ToolName[]) {
@@ -156,12 +277,58 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       state.installed = true;
       return {};
     }
-    // `env VAR=value ... git ...`: the git probes and the clone run with a quiet environment.
+    // `env [-u VAR] VAR=value ... git ...`: the git probes and the clone run with a quiet
+    // environment; the profile installers with the profile's paths and the broker URL.
     let envArgs: string[] | null = null;
+    const envVars: Record<string, string> = {};
     if (cmd === "env" && a[0] !== "-i") {
       let i = 0;
-      while (i < a.length && /^[A-Z_]+=/.test(a[i] as string)) i++;
+      while (i < a.length && (a[i] === "-u" || /^[A-Z_]+=/.test(a[i] as string))) {
+        if (a[i] === "-u") i++;
+        else {
+          const kv = a[i] as string;
+          envVars[kv.slice(0, kv.indexOf("="))] = kv.slice(kv.indexOf("=") + 1);
+        }
+        i++;
+      }
       envArgs = a.slice(i);
+    }
+    // The copy-mode skill fixes act on the real temp folders.
+    if (cmd === "rm" && a.length === 1) {
+      rmSync(a[0] as string);
+      return {};
+    }
+    if (cmd === "cp" && a[0] === "-R") {
+      cpSync(a[1] as string, a[2] as string, { recursive: true });
+      return {};
+    }
+    if (envArgs?.[0] === "bash") {
+      const script = envArgs[1] ?? "";
+      const skill = FAKE_SKILLS.find(([, pkg]) => script.endsWith(`/${pkg}/scripts/install.sh`));
+      if (skill !== undefined) {
+        const at = join(envVars.HOME ?? home, ".claude", "skills", skill[0]);
+        const pkgDir = join(volleyDir, "packages", skill[1]);
+        mkdirSync(dirname(at), { recursive: true });
+        if (existsSync(at) || lstatOrNull(at) !== null) {
+          if (lstatOrNull(at)?.isSymbolicLink() === true) rmSync(at);
+          else renameSync(at, `${at}.backup.20261019-090000`);
+        }
+        symlinkSync(pkgDir, at);
+        return { stdout: `/${skill[0]} skill installed\n` };
+      }
+      if (script.endsWith("/volley-hooks/scripts/install.sh")) {
+        // The installer never reads VOLLEY_BROKER_URL from its env: only its flags.
+        const flag = (f: string) => {
+          const i = envArgs.indexOf(f);
+          return i > 1 ? envArgs[i + 1] : undefined;
+        };
+        const out = fakeHooksSettings(volleyDir, flag("--broker-url"), flag("--namespace"));
+        if (envArgs.includes("--dry-run")) return { stdout: out };
+        const file = envVars.CLAUDE_SETTINGS ?? settingsFile;
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, out);
+        return { stdout: `installed volley-hooks into ${file}\n` };
+      }
     }
     const git =
       cmd === "git"
@@ -208,6 +375,24 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
         code: opts.claudeCode ?? 0,
         stdout: typeof s === "string" ? s : JSON.stringify(s),
       };
+    }
+    if (cmd === "claude" && a[0] === "mcp") {
+      const j = readClaudeJson();
+      const servers = { ...((j.mcpServers ?? {}) as Record<string, unknown>) };
+      if (a[1] === "add-json") {
+        const [, , , scope, name, json] = a;
+        if (scope !== "user") return { code: 1, stderr: "only -s user here\n" };
+        if (Object.hasOwn(servers, name as string)) {
+          return { code: 1, stderr: `MCP server ${name} already exists in user config\n` };
+        }
+        servers[name as string] = { type: "stdio", ...JSON.parse(json as string) };
+      } else if (a[1] === "remove") {
+        const name = a.at(-1) as string;
+        if (!Object.hasOwn(servers, name)) return { code: 1, stderr: `No MCP server ${name}\n` };
+        delete servers[name];
+      }
+      writeFileSync(claudeJsonFile, JSON.stringify({ ...j, mcpServers: servers }));
+      return {};
     }
     if (cmd === "memory_pressure") {
       return {
@@ -258,6 +443,11 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     root,
     home,
     volleyDir,
+    claudeDir,
+    skillsDir,
+    settingsFile,
+    claudeJsonFile,
+    readClaudeJson,
     repoPath,
     tools,
     state,

@@ -1248,6 +1248,19 @@ machine whose record stopped for 90 s down (republishing the record with
 (running ones too) carries `host_down` in the wave state, and each wave on it journals
 `MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage.
 
+**What the machine's Claude profile gets.** The doctor (by hand, at join, in every heartbeat
+and on a Desk's Repair) also checks the machine's own Claude profile, `~/.claude` of the user
+the service runs as, and its `--fix` prepares it: the `/volley` and `/volley-issues` skills
+linked to its volley checkout, the hooks installed with `--broker-url` at the tunnel
+(`mqtt://127.0.0.1:<remote_port>`) and `--namespace` outside `default`, and the volley MCP
+server registered there (`claude mcp add-json -s user volley`, again after a port change), each
+under the per-item sharing modes this daemon publishes in the machine's readiness verdict
+(`requirements.sharing`, from its own `sharing.yaml`: `own` leaves an item as is). One `warn`
+row each (`skills`, `hooks`, `mcp`, `sharing`): agents volleyd spawns there do not need them.
+No credential is involved: the MCP registration carries no broker login, the hooks keep their
+coordinator file out of `settings.json`, and the owner's own sessions on that machine sign in
+to the broker as they would anywhere (the hooks README).
+
 `volley peer list` shows the paired machines; `volley peer remove <name>` (`peer_remove`, an
 admin op) revokes the account, removes `hosts.<name>` and clears the record. It only removes a
 paired machine or a `peer` account: a host you configured by hand is refused. The machine's service stops on its own

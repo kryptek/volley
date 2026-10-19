@@ -56,6 +56,7 @@ every command in the template resolves to a file (`bun run check:template`).
 packages/volley-hooks/scripts/install.sh              # merge into ~/.claude/settings.json
 packages/volley-hooks/scripts/install.sh --dry-run    # print the result instead
 packages/volley-hooks/scripts/install.sh --uninstall  # remove only the volley-hooks entries
+packages/volley-hooks/scripts/install.sh --broker-url mqtt://127.0.0.1:21883 --namespace team-a
 ```
 
 `install.sh` substitutes the absolute package path, prefixes each command with
@@ -63,6 +64,18 @@ packages/volley-hooks/scripts/install.sh --uninstall  # remove only the volley-h
 It also installs the [usage statusLine](#usage-statusline); a `statusLine` you already had is
 saved to `<state root>/statusline-chain.json` and keeps drawing your status line, and
 `--uninstall` puts it back. `CLAUDE_SETTINGS` points it at a different file.
+
+`--broker-url <url>` and `--namespace <ns>` add `VOLLEY_BROKER_URL=<url>` and
+`VOLLEY_NAMESPACE=<ns>` to every command's prefix (after `VOLLEY_HOOKS_COORDINATOR=1`), so the
+hooks use that broker and namespace from every session on the machine: a prefix assignment
+overrides the session's own environment. `volley peer doctor --fix` passes them for a paired
+machine (its tunnel's URL; the namespace when it is not `default`). Without the flags nothing is
+added and the hooks read both from each session's environment at run time, as before: the
+installer never takes them from its own environment, so an exported `VOLLEY_BROKER_URL` is not
+baked in (`volley setup` runs it that way). The URL must be a plain `mqtt://`, `mqtts://`,
+`tcp://`, `ws://` or `wss://` URL with no login: a login goes in `VOLLEY_AUTH_USERNAME` /
+`VOLLEY_AUTH_PASSWORD` or `coordinator.json` ([Broker credentials](#broker-credentials)), and the
+installer refuses a URL that carries one.
 
 ## Identity
 
@@ -308,7 +321,7 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
 | `VOLLEY_LEASE_CLI` | this repo's `volley-cli`, else `volley` | Shell fragment the lease hook uses to invoke the CLI. |
-| `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` | as volley-mcp | Used when `agent.json` does not set them. |
+| `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` | as volley-mcp | Used when `agent.json` does not set them. `install.sh --broker-url` / `--namespace` put them in every command's prefix, which overrides the session's own value. |
 | `VOLLEY_AUTH_USERNAME`, `VOLLEY_AUTH_PASSWORD` | — | Broker credentials ([Broker credentials](#broker-credentials)). |
 | `VOLLEY_AUTH_DIR` | `<mosquitto etc dir>/volley` | Coordinator: where `coordinator.json` lives. |
 
