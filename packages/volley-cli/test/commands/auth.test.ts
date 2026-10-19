@@ -46,7 +46,10 @@ describe("volley auth", () => {
   const run = async (
     argv: string[],
     deps: TestDeps = fakeDeps(fake, layout),
-    env: Record<string, string | undefined> = { VOLLEYD_HOME: join(dir, "volleyd-home") },
+    env: Record<string, string | undefined> = {
+      VOLLEYD_HOME: join(dir, "volleyd-home"),
+      VOLLEY_AUTH_DIR: authDir,
+    },
   ) => {
     const io = makeBufferIO({ now: () => new Date(NOW) });
     const code = await auth({ argv, env, io }, deps);
@@ -252,7 +255,10 @@ describe("volley auth", () => {
 
       it("writes the files in the invoking user's home, owned by them", async () => {
         const deps = sudoDeps();
-        const r = await run(["init", "--volleyd-file"], deps, sudoEnv());
+        const r = await run(["init", "--volleyd-file"], deps, {
+          ...sudoEnv(),
+          VOLLEY_AUTH_DIR: authDir,
+        });
         expect(r.code).toBe(0);
         const vh = join(dir, "userhome", ".volley", "volleyd");
         expect(existsSync(join(dir, "roothome"))).toBe(false);
@@ -268,7 +274,10 @@ describe("volley auth", () => {
       it("as root with no sudo user, refuses --volleyd-file without VOLLEYD_HOME (nothing done)", async () => {
         const deps = fakeDeps(fake, layout);
         deps.invokingUser = () => "root";
-        const r = await run(["init", "--volleyd-file"], deps, { HOME: join(dir, "roothome") });
+        const r = await run(["init", "--volleyd-file"], deps, {
+          HOME: join(dir, "roothome"),
+          VOLLEY_AUTH_DIR: authDir,
+        });
         expect(r.code).toBe(2);
         expect(r.stderr).toContain("VOLLEYD_HOME");
         expect(deps.ctrlCalls).toEqual([]);
@@ -561,7 +570,7 @@ describe("volley auth", () => {
         deps.stdin = `${TOKEN}\n`;
         await run(["redeem", "--label", "Desk"], deps);
         const io = makeBufferIO({ now: () => new Date(NOW + 61_000) });
-        await auth({ argv: ["list"], env: {}, io }, deps);
+        await auth({ argv: ["list"], env: { VOLLEY_AUTH_DIR: authDir }, io }, deps);
         expect(fake.clients().has("00000001")).toBe(false);
       });
 
@@ -569,13 +578,16 @@ describe("volley auth", () => {
         const deps = await initDeps();
         await run(["token", "--ttl", "1"], deps);
         const io = makeBufferIO({ now: () => new Date(NOW + 5_000) });
-        await auth({ argv: ["list", "--json"], env: {}, io }, deps);
+        await auth({ argv: ["list", "--json"], env: { VOLLEY_AUTH_DIR: authDir }, io }, deps);
         expect(fake.clients().has("00000001")).toBe(false);
         deps.stdin = `${TOKEN}\n`;
         const late = makeBufferIO({ now: () => new Date(NOW + 5_000) });
-        expect(await auth({ argv: ["redeem", "--label", "Desk"], env: {}, io: late }, deps)).toBe(
-          1,
-        );
+        expect(
+          await auth(
+            { argv: ["redeem", "--label", "Desk"], env: { VOLLEY_AUTH_DIR: authDir }, io: late },
+            deps,
+          ),
+        ).toBe(1);
         expect(late.readStderr()).toContain("expired");
       });
 

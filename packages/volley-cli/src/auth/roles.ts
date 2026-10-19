@@ -89,8 +89,10 @@ export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   // (`coordinator-ab12`), so `%u` cannot pin it: it is operator-level (README, "Identities").
   coordinator: operator,
   // Browser clients (volley dash, the Desk) and `steer` accounts: steer any agent and send control
-  // requests (config_set included) to the daemon's mailbox.
-  desk: [send("volley/+/+/mailbox")],
+  // requests (config_set included) to the daemon's mailbox. The Desk's resume probe subscribes to
+  // a topic named by its own client id (nothing publishes there), granted here with `%c` so it
+  // does not hang on the broad read of the account role.
+  desk: [send("volley/+/+/mailbox"), read("volley/_system/desk-probe/%c")],
   // Another volleyd: the whole tree except the account-op and answer topics, so it can neither
   // impersonate an admin nor forge volleyd's answers (SPEC §4.6.10).
   supervisor: [
@@ -159,4 +161,27 @@ export function heldRoles(roles: readonly { rolename: string }[] | undefined): s
  */
 export function isAgentClient(client: { roles: readonly string[] }): boolean {
   return client.roles.length === 1 && client.roles[0] === roleName("agent");
+}
+
+/**
+ * The roles as examples/mosquitto-auth/roles.json documents them (a test keeps the file equal):
+ * the broker role names, their ACLs with priorities, and who holds which.
+ */
+export function rolesDocument(): Record<string, unknown> {
+  return {
+    $comment:
+      "Generated from packages/volley-cli/src/auth/roles.ts (volley auth init creates these roles once). Dynamic Security ACL types; %u is the client's username (mosquitto >= 2.1).",
+    roles: VOLLEY_ROLES.map((r) => ({
+      rolename: roleName(r),
+      acls: ROLE_ACLS[r].map((a) => ({ priority: 0, ...a })),
+    })),
+    fixed_clients: Object.fromEntries(
+      Object.entries(FIXED_CLIENTS).map(([u, rs]) => [u, rs.map((x) => roleName(x))]),
+    ),
+    account_roles: Object.fromEntries(
+      Object.entries(ACCOUNT_ROLE_MAP).map(([u, rs]) => [u, rs.map((x) => roleName(x))]),
+    ),
+    agent_login: AGENT_ROLES.map(roleName),
+    token_login: TOKEN_ROLES.map(roleName),
+  };
 }

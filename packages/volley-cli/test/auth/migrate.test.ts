@@ -117,7 +117,11 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
   const run = async (argv: string[], deps: TestDeps) => {
     const io = makeBufferIO({ now: () => new Date(NOW) });
     const code = await auth(
-      { argv: [...argv, "--worktrees", worktrees], env: { VOLLEYD_HOME: home, HOME: dir }, io },
+      {
+        argv: [...argv, "--worktrees", worktrees],
+        env: { VOLLEYD_HOME: home, HOME: dir, VOLLEY_AUTH_DIR: authDir },
+        io,
+      },
       deps,
     );
     return { code, stdout: io.readStdout(), stderr: io.readStderr() };

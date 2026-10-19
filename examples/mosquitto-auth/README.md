@@ -1,185 +1,220 @@
-# Broker authentication + ACLs
+# Broker authentication: mosquitto 2.1 Dynamic Security
 
-Volley's reference broker config (`examples/mosquitto-localhost.conf`) refuses anonymous
-clients on both listeners and enforces the ACL in [`acl.conf`](acl.conf).
+Volley's reference broker refuses anonymous clients on both listeners and authorises every
+client through mosquitto's **Dynamic Security** plugin, with eight shared roles
+([`roles.json`](roles.json)). Logins are created and deleted at runtime over the broker's control
+topic (`$CONTROL/dynamic-security/v1`): there is no password file, no ACL file and no reload
+signal. `volley auth` and volleyd do it; you never edit the plugin's state file.
+
+**mosquitto 2.1 or newer is required.** The roles scope per-identity grants with `%u` (the
+client's username), and mosquitto substitutes `%u` in Dynamic Security ACLs only from 2.1 on; on
+2.0.x the same role would silently deny every agent. `volley auth` and volleyd read the running
+broker's version (`$SYS/broker/version`, else `mosquitto -h`) and refuse an older one
+(`BROKER_TOO_OLD`).
 
 ## Why localhost needs auth
 
-Dispatched agents run with permission prompts skipped and act on their mailbox. A
-localhost-only broker still has two ways in:
+Dispatched agents run with permission prompts skipped and act on their mailbox. A localhost-only
+broker still has two ways in:
 
-- **Any web page.** Browsers let a page open a WebSocket to `ws://127.0.0.1:9001`. Without
-  auth, a page you visit could publish steering into an agent's mailbox or rewrite the
-  retained supervisor config (`volley/_waves/_config`).
+- **Any web page.** Browsers let a page open a WebSocket to `ws://127.0.0.1:9001`. Without auth, a
+  page you visit could publish steering into an agent's mailbox or rewrite the retained supervisor
+  config (`volley/_waves/_config`).
 - **Any local process.** Anything running as any user on the machine can reach `127.0.0.1:1883`.
 
-Authentication closes both. The ACL also stops one agent from steering another and keeps
-agents out of supervisor state.
+Authentication closes both, and the roles stop one agent from steering another and keep agents out
+of supervisor state. This is still **localhost-only**: a broker exposed on a network additionally
+needs TLS (`mqtts://`, `wss://`), since passwords over plain MQTT are readable on the wire.
 
-This setup is still **localhost-only**. Exposing the broker on a network additionally needs
-TLS (`mqtts://`, `wss://`): passwords over plain MQTT are readable on the wire. That is out
-of scope here.
+## Install mosquitto 2.1
+
+| Platform | Install | Config | Plugin | State file |
+|---|---|---|---|---|
+| macOS (Homebrew) | `brew install mosquitto` | `/opt/homebrew/etc/mosquitto/mosquitto.conf` (Intel: `/usr/local/…`) | `/opt/homebrew/opt/mosquitto/lib/mosquitto_dynamic_security.so` | `/opt/homebrew/var/mosquitto/dynamic-security.json` |
+| Linux (snap) | `sudo snap install mosquitto` | `/var/snap/mosquitto/common/mosquitto.conf` | `/snap/mosquitto/current/usr/lib/<arch>/mosquitto_dynamic_security.so` | `/var/snap/mosquitto/common/dynamic-security.json` |
+| Container | `docker run eclipse-mosquitto:2.1-alpine` | `/mosquitto/config/mosquitto.conf` ([`mosquitto-dynsec.conf`](mosquitto-dynsec.conf)) | `/usr/lib/mosquitto_dynamic_security.so` | `/mosquitto/data/dynamic-security.json` |
+
+- **Distribution packages** (`apt install mosquitto` and similar) may still ship 2.0.x: use the
+  snap, which is 2.1. With both installed, make sure the running broker is the snap's
+  (`/snap/bin/mosquitto -h`), and that the distro service is stopped.
+- **Snap confinement:** the snap's broker may write only under `/var/snap/mosquitto/common/`, so
+  its state file must live there (`volley auth init` puts it there).
+- **Container:** map the listeners to the host's loopback only, e.g.
+  `-p 127.0.0.1:1883:1883 -p 127.0.0.1:9001:9001`.
+- **A self-built 2.1 under a distro AppArmor profile** (Ubuntu's profile for
+  `/usr/sbin/mosquitto` lets the broker write only `/var/lib/mosquitto/mosquitto.db`): the plugin
+  cannot write its state file until a local rule allows it, e.g. in
+  `/etc/apparmor.d/local/mosquitto`:
+
+  ```
+  /var/lib/mosquitto/dynamic-security.json rw,
+  /var/lib/mosquitto/dynamic-security.json.new rw,
+  ```
+
+  then `sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.mosquitto`. Volley does not manage
+  AppArmor.
 
 ## Setup
 
 ```sh
-volley auth init      # or: bun packages/volley-cli/src/cli.ts auth init
+volley auth init --coordinator-file --volleyd-file   # or: bun packages/volley-cli/src/cli.ts auth init …
+# restart the broker as it says (brew services restart mosquitto / sudo snap restart mosquitto)
+volley auth init                                     # rerun: creates the roles and identities
 ```
 
-This writes `passwd` (via `mosquitto_passwd`, mode 0600) and a copy of `acl.conf` (unless one
-already exists: your edits and agents' ack grants are kept) into `<mosquitto config dir>/volley/`
-(`--dir` or `VOLLEY_AUTH_DIR` to choose), prints each fixed identity's password **once**, prints
-the three `mosquitto.conf` lines, and reloads the broker. `init --force` rotates the three fixed
-passwords in place; minted agents keep theirs.
+`init` is idempotent and does what is still missing, in this order:
 
-**Linux.** `/etc/mosquitto` is root-owned, so run `sudo bun packages/volley-cli/src/cli.ts auth
-init --dir /etc/mosquitto/volley`. The distro broker starts as root and drops to the `mosquitto`
-user *before* it opens `password_file`, so run as root `init` hands the directory and both files
-to that user (a broker that cannot read them exits with `Unable to open pwfile`). If you created
-the files some other way: `sudo chown -R mosquitto: /etc/mosquitto/volley`.
-`examples/mosquitto-localhost.conf` already contains those lines for Apple Silicon Homebrew (the
-root README's install commands rewrite them, and `persistence_location`, for Intel and Linux):
+1. Refuses a broker older than 2.1 before changing anything.
+2. Writes the broker config for your install ([`mosquitto-localhost.conf`](../mosquitto-localhost.conf)
+   is its output for Apple Silicon Homebrew), atomically and with a backup of the old one
+   (`<config>.volley-backup-<time>`). It refuses a config with one of the **traps** below.
+   `--no-config` leaves your config alone; `--layout` and `--config` pick another install.
+3. Creates the plugin's state file with its first admin login (`mosquitto_ctrl dynsec init`) and
+   stores that login in `<auth dir>/admin.json` (mode 0600). Only `volley auth` and volleyd use it.
+4. Once the broker runs the plugin (restart it, or pass `--restart`), creates the eight shared
+   roles and the fixed identities `volleyd`, `desk` and `coordinator`, printing their new passwords
+   **once**. `--coordinator-file` writes the coordinator's to `<auth dir>/coordinator.json`;
+   `--volleyd-file` writes volleyd's to `$VOLLEYD_HOME/broker.json` and a copy of the admin login to
+   `$VOLLEYD_HOME/dynsec-admin.json` (both 0600), which volleyd mints agents with.
 
-```
-allow_anonymous false
-password_file /opt/homebrew/etc/mosquitto/volley/passwd
-acl_file /opt/homebrew/etc/mosquitto/volley/acl.conf
-```
+A rerun keeps every existing password; `init --force` rotates the fixed identities (their
+sessions are disconnected and sign in again).
 
-mosquitto refuses to start when `password_file` is missing, so run `volley auth init` before
-installing the config. With the default `per_listener_settings false`, these settings cover
-both the TCP and the WebSocket listener.
+### The config, and its traps
 
-## Identities
+The generated config puts the plugin and its state file **before any listener**, sets
+`per_listener_settings false`, `allow_anonymous false`, `set_tcp_nodelay true` and
+`max_queued_messages 10000`, and opens the TCP (1883) and WebSocket (9001) listeners on
+127.0.0.1. `init` refuses an existing config that has:
 
-| Username | Who | Reads | Writes |
-|---|---|---|---|
-| `volleyd` | the supervisor daemon | `volley/#` | `volley/#`, including `volley/_waves/*` and `_waves/_config` |
-| `desk` | browser clients (`volley dash`, the Desk) | `volley/#` | any agent's `mailbox` (steering; `config_set` goes to the daemon's mailbox), lease requests |
-| `coordinator` | coordinator Claude sessions | `volley/#` | any agent's `mailbox`; the standard channels (`status`, `progress`, `result`, `capability`, `control`, `_user/*`) and registry entry of **any** agent id; lease requests |
-| `<agent_id>` | one dispatched agent, minted by `volley auth add-agent` | `volley/#` | its own standard channels and registry entry, lease requests, and the mailboxes of the senders given with `--ack-to` |
+- **`per_listener_settings true`**: the plugin options then sit before the first listener, which
+  makes mosquitto add an implicit default listener on port 1883; and repeating the plugin under each
+  listener instead is refused by 2.1.
+- **the plugin loaded twice** (also through an `include_dir` file): 2.1 refuses to start
+  ("Dynamic security plugin can currently only be loaded once").
 
-Nobody but `volleyd` writes the supervisor topics SPEC §4.6 defines under `volley/_waves/*`.
-A **per-agent** identity cannot write another agent's mailbox, status or registry entry. That
-guarantee does not cover the `coordinator` identity (below), nor agents that log in as
-`coordinator` because they were dispatched without a minted identity.
+`set_tcp_nodelay true` matters: with mosquitto's default, every control request/response round trip
+took about 41 ms. `max_queued_messages` is raised from mosquitto's default of 1000 because the
+Desk's subscriber to the whole tree overflowed it while agents were being created and deleted.
+
+### Why the sweep matters
+
+The plugin rewrites its **whole** state file after every change (once per control message on 2.1),
+so the file size, about 300 bytes per login, drives the cost of every mint. No login ever expires.
+volleyd therefore batches simultaneous changes into one message (`dynsec_batch_ms`) and **sweeps**:
+at start and every `credential_sweep_interval_s` it deletes the logins of agents that are no longer
+live, so the file holds only live agents, the fixed identities and the accounts (SPEC §4.6.12).
+
+## Roles and identities
+
+| Role (broker name) | Held by | Writes |
+|---|---|---|
+| `agent` (`volley-agent`) | each dispatched agent (username = agent id) | its own `status`, `progress`, `result`, `capability`, `control`, `_user/*` and registry entry (`%u`), lease requests, and the mailboxes of `volleyd` and `desk` (acks) |
+| `account` | the Desk, coordinators, every account | its own channels, registry entry and `volley/_system/machines/%u[/#]`, lease requests |
+| `desk` | the Desk, `steer` accounts | any agent's `mailbox` (steering; control requests to the daemon); reads `volley/_system/desk-probe/%c` (the Desk's resume probe, its own client id) |
+| `coordinator` | coordinator sessions | any agent's `mailbox`, standard channels and registry entry |
+| `admin` | `admin` accounts | what `coordinator` may, plus `volley/_system/auth/ops/%u` |
+| `supervisor` | `supervisor` accounts (another volleyd) | the whole tree except the account-op and answer topics |
+| `volleyd` | the supervisor daemon | the whole tree (`_waves/*`, `_waves/_config`, screens) and `volley-auth/#` |
+| `token` | a one-time token's login (username = token id) | `volley-auth/redeem/%u`; it may read only `volley-auth/redeem/%u/reply` |
+
+Every role except `token` reads the whole `volley/` tree. The roles carry a `volley-` prefix in
+the broker because `mosquitto_ctrl dynsec init` already creates a role named `admin` that may
+administer the plugin. **Roles are never edited while clients hold them**: an ACL change on a role
+disconnects every client holding it. After upgrading Volley, `init` reports a role that differs
+from this version's; `volley auth migrate --roles` shows the change and `--roles --yes` applies it
+(its holders reconnect).
+
+Nobody but `volleyd` writes the supervisor topics SPEC §4.6 defines under `volley/_waves/*`. An
+agent login cannot write another agent's mailbox, status or registry entry; that guarantee does not
+cover the operator-level `coordinator` identity.
+
+**Acks.** SPEC §4.4 has a recipient ack by publishing to the sender's mailbox. The agent role lets
+an agent ack `volleyd` and the Desk, with nothing granted per agent. A coordinator session's agent id
+is random-suffixed (`coordinator-ab12`), which no static role can name, so an agent's ack to a
+coordinator is dropped by the broker (`vol_send_mailbox` with `wait_ack_ms` reports
+`acked: false`; the steer itself is delivered). Steering that must be confirmed goes through volleyd
+(`volleyd steer`) or the Desk.
 
 **Limits of the `+` wildcard.** mosquitto's `+` also matches the reserved `_waves`, `_system` and
-`_meta` levels, and an ACL cannot exclude them. `volley/+/%u/status` therefore matches
-`volley/_waves/<agent id>/status`, and the steering clients' `volley/+/+/mailbox` matches
-`volley/_system/registry/mailbox`. No topic SPEC defines there ends in a channel name, so this is
-safe as long as wave ids, lease-pool names and agent ids are not channel names: SPEC §4.6 forbids
-it for waves and pools, and `volley auth add-agent` refuses such agent ids (plus `registry`,
-`leases`, `health`, `federation`). For a hard guarantee, generate the ACL per namespace
-(`volley/<ns>/%u/status`) instead of using `+`.
+`_meta` levels, and a role cannot exclude them: `volley/+/%u/status` also matches
+`volley/_waves/<agent id>/status`. No topic SPEC defines there ends in a channel name, so this is safe
+as long as wave ids, lease-pool names and agent ids are not channel names: SPEC §4.6 forbids it for
+waves and pools, and `volley auth add-agent` refuses such agent ids (and `registry`, `leases`,
+`health`, `federation`, `machines`, `auth`).
 
-**Acks.** SPEC §4.4 has a recipient ack by publishing to the **sender's** mailbox. A per-agent
-identity can write no mailbox by default, so mint it with the senders it must ack:
-`volley auth add-agent <id> --ack-to <parent id> [--ack-to volleyd]`. That appends a managed
-`user <id>` block to `acl.conf` (removed again by `rm-agent`). Acks to any other sender are
-dropped by the broker while the sender still gets its PUBACK, so `vol_send_mailbox` with
-`wait_ack_ms` reports `acked: false`. `coordinator` and `desk` can write every mailbox, so their
-acks always arrive.
+**A denied publish is dropped silently** for MQTT 3.1.1 clients (they still get a PUBACK); check a
+change with a subscriber. A denied subscription is refused outright.
 
-**Why `coordinator` is broad.** A coordinator session runs its own MCP server, whose agent id
-carries a random suffix (`coordinator-ab12`), so the ACL cannot pin it with `%u`. It can
-therefore forge any agent's status, result or registry entry. Agents dispatched without a minted
-identity (the legacy `/volley-issues` path) inherit the MCP server's env and therefore also log
-in as `coordinator`. Treat the coordinator password as operator-level.
+## Accounts and one-time tokens
 
-## Accounts and roles
+`volley auth add <name> --role <admin|steer|watch|supervisor|peer>` creates an account: a login that
+holds `account` plus its role's (`admin` → `admin`, `steer` → `desk`, `supervisor` → `supervisor`;
+`watch` and `peer` only `account`). The registry is `accounts.json` in the auth directory (never a
+password). `rotate` sets a new password (the account's sessions are disconnected), `revoke` deletes
+the login and the entry, `list` shows the registry.
 
-Beyond the fixed identities and per-agent identities, `volley auth add <name> --role <role>`
-creates an **account** (registry: `accounts.json` next to `passwd`; never a password). Each role
-is a template `volley auth` appends to `acl.conf` as a managed `# >>> volley account <name>` block:
-
-| Role | Writes (beyond the shared patterns) |
-|---|---|
-| `admin` | everything `coordinator` may, plus `volley/_system/auth/ops/<name>` (account ops through volleyd) |
-| `steer` | any agent's `mailbox` (steering, control requests to volleyd) |
-| `watch` | nothing |
-| `supervisor` | `volley/#` (a volleyd), except the account-op and answer topics: its block denies `volley/_system/auth/ops/#` and `volley/_system/auth/replies/#`, so it cannot impersonate an admin or forge volleyd's answers |
-| `peer` | `volley/_system/machines/<name>` and below (a paired machine) |
-
-The shared `pattern` lines still apply to every account: read `volley/#`, write the account's own
-`%u` channels and registry entry, and lease requests. So `watch` is read-only in practice, but can
-publish as its own agent id. `rotate` mints a new password, `revoke` removes the password, entry
-and block, `list` shows the registry.
-
-**One-time tokens.** `volley auth token` prints a single-use admin token (`vly_admin_…`, 10
-minutes; only its hash is stored in `tokens.json`); volleyd's `signin_link` op makes a `steer` or
-`watch` one for a phone. A token is also the password of a temporary login `redeem-<id>` with a
-managed `# >>> volley token <id>` block:
-
-```
-user redeem-<id>
-topic deny volley/#
-topic write volley-auth/redeem/<id>
-topic read volley-auth/redeem/<id>/reply
-```
-
-That is how a browser with nothing but the token reaches volleyd without the broker accepting
-anonymous clients (mosquitto applies `pattern` lines, including `pattern read volley/#`, to
-anonymous clients too, so an anonymous redeem topic would expose the whole tree to every web page).
-A `deny` overrides every grant, the login's own and the shared patterns, so the token topics live
-under a separate `volley-auth/` root that no pattern reaches: the login can write its own request
-topic and read its own answer, and nothing else, not the `volley/` tree and not another token's
-topics. `volley auth token` also grants `volleyd` `topic readwrite volley-auth/#` (the shipped
-`acl.conf` has it; an older one gets a managed `# >>> volley token topics` block). Redeeming burns the token but keeps its login for
-about a minute, because mosquitto disconnects a client whose user leaves the password file when it
-reloads, and the redeeming client is still connected as that login, waiting for its answer. The
-next `volley auth` account command after that (or after the token expires) removes the login;
-volleyd runs `volley auth list` every minute (`token_prune_ms`), so an unused token stops being a
-login soon after it expires.
+`volley auth token` prints a single-use admin token (`vly_admin_<id>_…`, 10 minutes; only its hash is
+stored in `tokens.json`); volleyd's `signin_link` op makes a `steer` or `watch` one for a device. The
+token is also the password of a login named `<id>` holding the `token` role, which reaches only its
+own request and answer topics under `volley-auth/redeem/<id>`. Redeeming burns the token but keeps
+the login for about a minute (the redeeming client is still connected as it, waiting for its
+answer); the next account command after that, or after the token expires, deletes it, and volleyd
+runs `volley auth list` every minute (`token_prune_ms`) for this.
 
 ## Giving clients their credentials
 
 | Client | Where credentials come from |
 |---|---|
 | `volley-mcp` (coordinator session) | `VOLLEY_AUTH_USERNAME=coordinator`, `VOLLEY_AUTH_PASSWORD=…` in the MCP registration's `env` block |
-| the coordinator's **shell** (`volley wait` / `volley sub` in `/volley-issues` and `/wait`, `mosquitto_pub` cleanup) | the same two variables exported in your shell profile: the MCP `env` block reaches only the MCP server, not the session's Bash tool. Use `mosquitto_pub -u "$VOLLEY_AUTH_USERNAME" -P "$VOLLEY_AUTH_PASSWORD" …` |
+| the coordinator's **shell** (`volley wait` / `volley sub`, `mosquitto_pub`) | the same two variables exported in your shell profile |
 | GitHub Actions bridge (`examples/bridges/github-actions/`) | `VOLLEY_AUTH_*` from repo secrets |
-| volley-hooks in a coordinator session | `VOLLEY_AUTH_*`, else `$VOLLEY_AUTH_DIR/coordinator.json` written by `volley auth init --coordinator-file`, so `settings.json` holds no password |
-| `volley-mcp` / hooks in a dispatched agent | the `broker` block of `.volley/agent.json` in the agent's cwd (beats `VOLLEY_AUTH_*`), so the agent needs no env |
+| volley-hooks in a coordinator session | `VOLLEY_AUTH_*`, else `$VOLLEY_AUTH_DIR/coordinator.json` (`init --coordinator-file`) |
+| `volley-mcp` / hooks in a dispatched agent | the `broker` block of `.volley/agent.json` in the agent's cwd, written by volleyd at spawn |
 | `volley` CLI | `--username/--password`, then `.volley/agent.json` `broker`, then `VOLLEY_AUTH_*` |
-| `volley dash` | sign-in form on first load (stored in the browser's localStorage) |
-| `volleyd` | its own config file |
+| `volley dash` / the Desk | sign-in form on first load (stored in the browser) |
+| `volleyd` | `$VOLLEYD_HOME/broker.json` (its login) and `$VOLLEYD_HOME/dynsec-admin.json` (agent logins) |
 
-Code that connects with an agent's identity should resolve credentials with
-`resolveBrokerAuth(env, cwd)` from `volley-mcp/config` (identity file, then env, then
-anonymous) and pass `username`/`password` to `VolleyBroker.connect`. A refused CONNECT surfaces
-as `AUTH_FAILED` (SPEC §9).
+A refused CONNECT surfaces as `AUTH_FAILED` (SPEC §9).
 
-## Supervisor hook points (mint on spawn, revoke on retire)
+## Agent logins (a supervisor's hook points)
 
-A supervisor that writes `.volley/agent.json` for an agent (SPEC §6.5) mints its credentials
-first and revokes them when the agent retires:
+volleyd mints and deletes agent logins itself over one long-lived admin control connection. A
+supervisor of your own can use the CLI:
 
 ```sh
-creds=$(volley auth add-agent "$AGENT_ID" --ack-to "$PARENT_ID" --json)   # {"username":"<id>","password":"…"}
+creds=$(volley auth add-agent "$AGENT_ID" --json)   # {"username":"<id>","password":"…"}
 # write it as the "broker" key of <worktree>/.volley/agent.json, file mode 0600
 ...
 volley auth rm-agent "$AGENT_ID"                    # on retire (safe to retry)
+volley auth list-agents                             # what is left
 ```
 
-`add-agent` prints nothing but the credentials on stdout (warnings go to stderr), and exits
-non-zero without printing a password if `mosquitto_passwd` fails. Each generated password is
-passed to `mosquitto_passwd` on its command line, so it is briefly visible in `ps` while that
-child runs.
+`rm-agent` deletes only agent logins. Deleting a login disconnects the agent **without its will**,
+so publish its retained `reaped` status yourself before deleting it (volleyd does, SPEC §4.6.12).
+volleyd's sweep deletes any agent login with no live agent behind it, including ones another tool
+minted, once it has seen it for `spawn_timeout_s`.
 
-## Reloading
+## Migrating from `password_file` + `acl_file`
 
-`mosquitto_passwd` only edits the file; the broker re-reads `password_file` and `acl_file` on
-`SIGHUP`. `volley auth` sends it to every `mosquitto` process you own (`pkill -HUP -x
-mosquitto`; this covers `brew services`). A root-owned systemd broker needs `sudo systemctl
-reload mosquitto`; `volley auth` warns when it cannot signal. Pass `--no-reload` to skip it.
+```sh
+volley auth migrate --coordinator-file --volleyd-file   # then restart the broker and rerun it
+```
 
-## Editing the ACL
+`migrate` is `init` plus: new passwords for the fixed identities, written to the credential files
+their clients already read (`coordinator.json`, volleyd's `broker.json`; Desk users sign in again
+once); a login for every agent with a minted `.volley/agent.json` under the worktree roots (the file
+gets its new password); and a login for every account in `accounts.json` (new passwords, printed
+once). One-time tokens that were still pending cannot be migrated (only their hash is stored): issue
+new ones. Rerunning it changes nothing. Rollback: copy the config backup it names back and restart.
 
-Read the header of [`acl.conf`](acl.conf) first. Keep your own lines above the managed
-`# >>> volley agent …` blocks at the end: a `topic` line below a `user` line belongs to that user. In particular, mosquitto's `deny` also blocks
-reads, so do not use it to fence off `_waves/*`; the per-agent rules enumerate channels instead.
-A denied publish is dropped silently under MQTT 3.1.1, so check a change with a subscriber. The
-CI job `test-integration-auth` runs `packages/volley-mcp/test/integration/mosquitto-auth.test.ts`
-against this exact file, and `packages/volleyd/test/integration/mosquitto-roles.test.ts` against it
-plus the role and token blocks `volley auth` generates.
+[`acl.conf`](acl.conf) is the file-based ACL of earlier Volley versions, kept for reference while
+migrating; the broker no longer reads it.
+
+## Tests
+
+`packages/volley-cli/test/integration/mosquitto-dynsec.test.ts` proves the roles against a real
+2.1 broker (the `%u` scoping, the Desk, supervisor and token rules, anonymous refused on TCP and
+WebSocket, no LWT on delete); the CI job `test-integration-dynsec` runs it, and the volley-mcp,
+volley-hooks and volleyd auth suites, against the `eclipse-mosquitto:2.1-alpine` container bootstrapped by
+`test/integration/dynsec-fixture.ts`.

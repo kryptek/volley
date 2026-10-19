@@ -24,7 +24,7 @@ describe("volleyd refuses a broker older than 2.1 (control-connection open)", ()
     expect((err as BrokerVersionError).code).toBe("BROKER_TOO_OLD");
     expect((err as Error).message).toContain("brew install mosquitto");
     expect((err as Error).message).toContain("sudo snap install mosquitto");
-    expect((err as Error).message).toContain("eclipse-mosquitto:2.1");
+    expect((err as Error).message).toContain("eclipse-mosquitto:2.1-alpine");
     expect(fake.controlMessages).toEqual([]);
     await c.close();
   });

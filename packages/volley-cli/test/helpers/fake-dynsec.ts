@@ -7,7 +7,7 @@ import type { RoleAcl } from "../../src/auth/roles";
  * the plugin's clients, every PUBLISH and SUBSCRIBE is checked against the client's roles with
  * `%u` / `%c` substituted (the 2.1 semantics), and the admin's control messages on
  * `$CONTROL/dynamic-security/v1` are answered on `.../response` with one `responses` array per
- * message, in order, with the plugin's error strings (the error table bench/dynsec measured):
+ * message, in order, with the plugin's error strings (as measured on 2.0.22 and 2.1.2):
  *
  *   createRole on an existing role       "Role already exists"
  *   addRoleACL of an existing ACL        "ACL with this topic already exists"

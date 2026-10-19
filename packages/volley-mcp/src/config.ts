@@ -138,14 +138,16 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
 }
 
 /**
- * Where Homebrew / distro packages keep mosquitto.conf. `volley auth` keeps its files in
- * `volley/` under the first that exists when neither `--dir` nor `VOLLEY_AUTH_DIR` is given;
- * the coordinator's hooks look for `coordinator.json` in the same place.
+ * Where Homebrew, distro packages and the snap keep mosquitto.conf. `volley auth` keeps its files
+ * in `volley/` under the first that exists when neither `--dir` nor `VOLLEY_AUTH_DIR` is given;
+ * the coordinator's hooks look for `coordinator.json` in the same place. The snap's comes last,
+ * so a machine that already has an auth directory keeps it.
  */
 export const MOSQUITTO_ETC_DIRS: readonly string[] = [
   "/opt/homebrew/etc/mosquitto",
   "/usr/local/etc/mosquitto",
   "/etc/mosquitto",
+  "/var/snap/mosquitto/common",
 ];
 
 /**

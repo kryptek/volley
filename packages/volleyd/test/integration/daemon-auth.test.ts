@@ -10,10 +10,10 @@ import { BROKER_FILE } from "../../src/broker-auth";
 import { ControlClient } from "../../src/control";
 
 /**
- * `volleyd daemon` against real mosquitto with `allow_anonymous false` and the shipped
- * examples/mosquitto-auth/acl.conf. Opt-in: needs VOLLEY_INTEGRATION=1 and VOLLEY_AUTH_BROKER_URL
- * pointing at a PRIVATE mosquitto started as volley-mcp's test/integration/mosquitto-auth.conf
- * describes (auth-fixture.sh identities: each password is "<username>-test-pw").
+ * `volleyd daemon` against real mosquitto 2.1 with `allow_anonymous false` and Volley's shared
+ * Dynamic Security roles. Opt-in: needs VOLLEY_INTEGRATION=1 and VOLLEY_AUTH_BROKER_URL pointing
+ * at a PRIVATE broker bootstrapped by volley-cli's test/integration/dynsec-fixture.ts (each
+ * password is "<username>-test-pw").
  */
 const AUTH_URL = process.env.VOLLEY_AUTH_BROKER_URL;
 const RUN = process.env.VOLLEY_INTEGRATION === "1" && AUTH_URL !== undefined;
@@ -57,7 +57,7 @@ function startDaemon(home: string, extraEnv: Record<string, string> = {}): Run {
   return { child, out: () => out, exited };
 }
 
-describe.skipIf(!RUN)("volleyd daemon against mosquitto auth + the shipped ACL", () => {
+describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", () => {
   let observer: VolleyBroker;
   const homes: string[] = [];
   const newHome = () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DynsecSession, brokerTransport, ensureClients, ensureRoles } from "volley-cli/auth/dynsec";
 import { ACCOUNT_ROLE_MAP, FIXED_CLIENTS } from "volley-cli/auth/roles";
 import { VolleyBroker } from "volley-mcp/broker";
+import { buildTopic } from "volley-mcp/topics";
 import { CredentialSweeper, planSweep } from "../src/credential-sweep";
 import { DynsecControl, DynsecCredentials, brokerControl } from "../src/dynsec";
 import { reapAndRevoke } from "../src/retire";
@@ -215,6 +216,25 @@ describe("the daemon sweeps at start and on the interval", () => {
       expect(s.journal("_system").find((e) => e.type === "credentials_swept")?.data).toEqual({
         agent_ids: ["w0-t1-implementer-1"],
       });
+    } finally {
+      await s.cleanup();
+    }
+  });
+
+  it("a login with a non-terminal retained status is spared (another supervisor's blocked agent)", async () => {
+    const s = await makeSupervisedEnv({ daemon: { credentialSweepMs: 3_600_000 } });
+    try {
+      for (const id of ["x1-t1-implementer-1", "x1-t2-implementer-1"]) {
+        s.creds.logins.add(id);
+        s.creds.mintedAt.set(id, 0);
+      }
+      await s.pub(buildTopic("other-ns", "x1-t1-implementer-1", "status"), "blocked", "status", {});
+      await s.pub(buildTopic("other-ns", "x1-t2-implementer-1", "status"), "done", "status", {});
+      expect(await s.daemon.sweepCredentials()).toEqual(["x1-t2-implementer-1"]);
+      // Its records were cleared in the namespace its status was found in.
+      expect(
+        await s.env.retained(buildTopic("other-ns", "x1-t2-implementer-1", "status")),
+      ).toBeNull();
     } finally {
       await s.cleanup();
     }

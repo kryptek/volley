@@ -29,7 +29,7 @@ describe("checkBrokerVersion", () => {
     expect(r.message).toContain("brew install mosquitto");
     expect(r.message).toContain("sudo snap install mosquitto");
     expect(r.message).toContain("/var/snap/mosquitto/common/");
-    expect(r.message).toContain("eclipse-mosquitto:2.1");
+    expect(r.message).toContain("eclipse-mosquitto:2.1-alpine");
   });
 
   it("2.1.2 and 3.0.0 proceed", () => {

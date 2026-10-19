@@ -1193,8 +1193,9 @@ export class Daemon {
 
   /**
    * Which of `candidates` (agent logins) belong to a live agent: supervised; non-terminal in a
-   * wave that is neither stopped nor complete; holding its worktree lock; or with a retained
-   * `spawning` / `registered` / `working` status. Records where each one's channels live.
+   * wave that is neither stopped nor complete; holding its worktree lock; or with any retained
+   * status but a terminal one (spawning, registered, working, blocked…: also another supervisor's
+   * agent on this broker). Records where each one's channels live.
    */
   private async liveAgents(candidates: readonly string[]): Promise<Set<string>> {
     const live = new Set<string>(this.supervised.keys());
@@ -1221,7 +1222,7 @@ export class Daemon {
         const ns = m.topic.split("/")[1];
         if (ns !== undefined && !this.sweepNamespaces.has(id)) this.sweepNamespaces.set(id, ns);
         const type = parseEnvelope(m.payload)?.type;
-        if (type === "spawning" || type === "registered" || type === "working") live.add(id);
+        if (type !== undefined && !TERMINAL_STATUS.has(type)) live.add(id);
       }),
     );
     return live;

@@ -21,7 +21,7 @@ export const INSTALL_INSTRUCTIONS = [
   "             /snap/mosquitto/current/usr/lib/<arch>/mosquitto_dynamic_security.so; the",
   "             dynamic-security.json state file must live under /var/snap/mosquitto/common/",
   "             (snap confinement). Distribution packages may still ship 2.0.x.",
-  "  Container: docker run eclipse-mosquitto:2.1",
+  "  Container: docker run eclipse-mosquitto:2.1-alpine",
 ].join("\n");
 
 /** `[major, minor, patch]` from `mosquitto version 2.1.2`, `2.0.22`, `mosquitto -h` output… */

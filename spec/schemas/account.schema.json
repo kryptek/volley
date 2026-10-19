@@ -23,7 +23,7 @@
         "name": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-          "description": "The broker username (agent-id grammar; never a fixed identity, a reserved id or redeem-*)."
+          "description": "The broker username (agent-id grammar; never a fixed identity, the dynsec admin, a reserved id or a token id: 8 hex digits)."
         },
         "role": {
           "enum": ["admin", "steer", "watch", "supervisor", "peer"]

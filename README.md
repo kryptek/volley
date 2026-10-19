@@ -145,34 +145,23 @@ That's it. Everything else in the spec is a refinement.
 
 ### 2. Install the MQTT broker
 
-```sh
-brew install mosquitto
-```
-
-Mosquitto's stock install ships with a config that doesn't accept connections out of the box. Replace it with the localhost config bundled in this repo. That config **requires a username and password on both listeners**, so first create the broker identities (run from your clone of this repo, step 3; `bun install` first):
+Volley needs **mosquitto 2.1 or newer**: broker auth runs on its Dynamic Security plugin with shared roles that use `%u`, which 2.0 does not substitute (Volley refuses an older broker with `BROKER_TOO_OLD`).
 
 ```sh
-bun packages/volley-cli/src/cli.ts auth init
+brew install mosquitto              # macOS (2.1.x)
+sudo snap install mosquitto         # Linux: the snap is 2.1; distribution packages may still be 2.0
+# or a container: docker run eclipse-mosquitto:2.1-alpine (layout in examples/mosquitto-auth/)
 ```
 
-It writes `passwd` + `acl.conf` into `<mosquitto config dir>/volley/`, prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7) and the `password_file` / `acl_file` lines, which the bundled config already contains for Apple Silicon Homebrew. The config has three machine-specific paths (`password_file`, `acl_file`, `persistence_location`); the Intel and Linux install commands below rewrite all three for you. On **Linux** run it as root so it can write `/etc/mosquitto` and hand the files to the `mosquitto` user the broker runs as: `sudo bun packages/volley-cli/src/cli.ts auth init --dir /etc/mosquitto/volley` (if you made the files another way, `sudo chown -R mosquitto: /etc/mosquitto/volley`, or the broker will not start). Then install the config and start the service:
+The broker **requires a username and password on both listeners**. From your clone of this repo (step 3; `bun install` first), let `volley auth init` write the broker config for your install, create the plugin's state file and its admin login, then the roles and identities:
 
 ```sh
-# macOS (Apple Silicon):
-cp examples/mosquitto-localhost.conf /opt/homebrew/etc/mosquitto/mosquitto.conf
-
-# macOS (Intel): same layout under /usr/local
-sed 's|/opt/homebrew/|/usr/local/|' examples/mosquitto-localhost.conf \
-  > /usr/local/etc/mosquitto/mosquitto.conf
-
-# Linux (apt / yum / dnf): config in /etc/mosquitto, persistence in /var/lib/mosquitto
-sed -e 's|/opt/homebrew/etc/mosquitto/|/etc/mosquitto/|' \
-    -e 's|/opt/homebrew/var/mosquitto/|/var/lib/mosquitto/|' examples/mosquitto-localhost.conf \
-  | sudo tee /etc/mosquitto/mosquitto.conf > /dev/null
-
-brew services start mosquitto      # macOS
-sudo systemctl start mosquitto      # Linux
+bun packages/volley-cli/src/cli.ts auth init --coordinator-file --volleyd-file
+brew services restart mosquitto     # macOS; Linux: sudo snap restart mosquitto
+bun packages/volley-cli/src/cli.ts auth init   # rerun: creates the roles and identities
 ```
+
+The first run writes the config (Apple Silicon Homebrew: `/opt/homebrew/etc/mosquitto/mosquitto.conf`, the same as [`examples/mosquitto-localhost.conf`](examples/mosquitto-localhost.conf); the old one is backed up) and asks for the restart; the rerun prints three passwords **once** (`volleyd`, `desk`, `coordinator`; keep them, you need `coordinator` in step 4 and `desk` in step 7). On **Linux** with the snap, run both as root (`sudo bun …`): the config and state file live under `/var/snap/mosquitto/common/`. `init` refuses a config with `per_listener_settings true` or the plugin loaded twice, and is safe to rerun. Details, the container layout and the migration from an older `password_file` / `acl_file` setup (`volley auth migrate`): [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md).
 
 You now have a broker with two listeners on `127.0.0.1`:
 - **`1883`** (raw MQTT) — used by `volley-mcp`, `volley-cli`, and any native MQTT client
@@ -182,7 +171,7 @@ You now have a broker with two listeners on `127.0.0.1`:
 
 > 💾 **Queued mailbox messages and persistence.** Mailbox messages for an agent that is offline wait on the broker in that agent's persistent session ([SPEC §4.4](spec/SPEC.md#44-mailbox-message-types)). mosquitto only flushes its persistence DB every `autosave_interval` seconds (1800 by default), so the bundled config sets `autosave_interval 30` and `autosave_on_changes false`. If you run your own config, add both lines. volleyd's journal remains the source of truth; this only narrows how far the broker's copy can lag behind. Persistent sessions expire after 7 days by default. The hooks drain client (`packages/volley-hooks`) reads the expiry from the runtime tunable `mailbox.session_expiry_s` in volleyd's retained config, with `VOLLEY_SESSION_EXPIRY_S` as the env fallback; volleyd's own mailbox session uses the same tunable. A changed value applies to **new connections only**: an existing session keeps the expiry it was created with until its client reconnects.
 
-> 🔐 **Why a password on localhost?** Agents run with permission prompts skipped and obey their mailbox. A localhost broker is reachable by every local process, and by **any web page you visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent from steering another. Details, identities and ACL rules: [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md). Upgrading from the anonymous config? Run `volley auth init`, re-copy the config, restart mosquitto, then give each client its credentials (steps 4 and 7).
+> 🔐 **Why a password on localhost?** Agents run with permission prompts skipped and obey their mailbox. A localhost broker is reachable by every local process, and by **any web page you visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent from steering another. Details, identities and ACL rules: [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md). Upgrading from the anonymous config? Run `volley auth init` as above, then give each client its credentials (steps 4 and 7). From an earlier `password_file` / `acl_file` setup: `volley auth migrate --coordinator-file --volleyd-file`, restart mosquitto, rerun it.
 
 > ⚠️ **Security note.** The bundled config is **localhost-only**. **If you plan to expose your broker on a network**, you additionally need TLS (`mqtts://` / `wss://`); passwords over plain MQTT are readable on the wire. Start at the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/) and the [`mosquitto.conf(5)` reference](https://mosquitto.org/man/mosquitto-conf-5.html). Don't copy a "works on my laptop" config to a public host.
 

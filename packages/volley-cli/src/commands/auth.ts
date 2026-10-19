@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { isValidAgentId } from "volley-mcp/topics";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
@@ -52,6 +55,16 @@ export const RESERVED_AGENT_IDS = [
   "mailbox",
   "screen",
 ] as const;
+
+/**
+ * `<first existing mosquitto config dir>/volley` (where the coordinator's hooks look for
+ * coordinator.json, volley-mcp's MOSQUITTO_ETC_DIRS), else the layout's. The broker never reads
+ * this directory, so it need not follow the layout.
+ */
+function defaultAuthDir(layout: Layout): string {
+  const etc = MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
+  return etc !== undefined ? join(etc, "volley") : layout.authDir;
+}
 
 function resolveLayout(flag: string | undefined, deps: AuthDeps): Layout {
   if (flag === undefined) return deps.layout();
@@ -161,7 +174,7 @@ export async function auth(
     return EXIT.USAGE;
   }
   const ctx: AuthContext = {
-    dir: str("dir") ?? env.VOLLEY_AUTH_DIR ?? layout.authDir,
+    dir: str("dir") ?? env.VOLLEY_AUTH_DIR ?? defaultAuthDir(layout),
     layout,
     url: resolveBrokerUrl(str("broker-url"), env),
     io,
@@ -308,7 +321,7 @@ Accounts (registry: <dir>/accounts.json; each account is a login with its role's
 
 Options:
   --dir <dir>     Where admin.json, accounts.json and tokens.json live (env: VOLLEY_AUTH_DIR;
-                  default: the layout's, e.g. /opt/homebrew/etc/mosquitto/volley)
+                  default: <mosquitto config dir>/volley, e.g. /opt/homebrew/etc/mosquitto/volley)
   --broker-url    The broker (env: VOLLEY_BROKER_URL; default mqtt://localhost:1883)
   --layout <name> init, migrate: brew-arm64 | brew-intel | snap | etc | container
                   (default: detected; the snap first on Linux)

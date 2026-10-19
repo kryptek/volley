@@ -2,7 +2,7 @@ import type { CredentialStore } from "./identity";
 import type { NewEvent } from "./types";
 
 /**
- * The credential sweep: Dynamic Security has no expiry of any kind (bench/dynsec row g), and the
+ * The credential sweep: Dynamic Security has no expiry of any kind (a client is a username, a password hash and roles), and the
  * plugin rewrites its whole state file on every change, so a login nobody deletes costs every
  * later mint. volleyd lists the agent logins at start and every `credential_sweep_interval_s`,
  * and deletes each one with no live agent behind it (through the delete path: `reaped`, record

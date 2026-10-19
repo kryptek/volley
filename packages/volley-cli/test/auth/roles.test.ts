@@ -8,6 +8,7 @@ import {
   VOLLEY_ROLES,
   isAgentClient,
   roleName,
+  rolesDocument,
 } from "../../src/auth/roles";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 
@@ -26,6 +27,20 @@ describe("role definitions", () => {
       "volley-auth/redeem/%u",
       "volley-auth/redeem/%u/reply",
     ]);
+  });
+
+  it("the desk role itself grants the Desk's resume probe on its own client id (%c)", () => {
+    expect(ROLE_ACLS.desk).toContainEqual({
+      acltype: "subscribePattern",
+      topic: "volley/_system/desk-probe/%c",
+      allow: true,
+    });
+  });
+
+  it("examples/mosquitto-auth/roles.json is these definitions", async () => {
+    const { readFileSync } = await import("node:fs");
+    const file = new URL("../../../../examples/mosquitto-auth/roles.json", import.meta.url);
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual(rolesDocument());
   });
 
   it("isAgentClient: exactly volley-agent and nothing else", () => {
@@ -108,6 +123,16 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("steer-test", "volley/_system/auth/ops/steer-test")).toBe(false);
     expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test/state")).toBe(true);
     expect(fake.canPublish("peer-test", "volley/_system/machines/other/state")).toBe(false);
+  });
+
+  it("the Desk's resume probe: it subscribes to volley/_system/desk-probe/<its client id>", () => {
+    expect(fake.canSubscribe("desk", "volley/_system/desk-probe/desk-ab12", "desk-ab12")).toBe(
+      true,
+    );
+    expect(fake.canSubscribe("steer-test", "volley/_system/desk-probe/p1", "p1")).toBe(true);
+    expect(fake.canSubscribe("0000abcd", "volley/_system/desk-probe/x", "x")).toBe(false);
+    // Nothing publishes there.
+    expect(fake.canPublish("desk", "volley/_system/desk-probe/desk-ab12", "desk-ab12")).toBe(false);
   });
 
   it("supervisor writes the tree but not the account-op or answer topics", () => {

@@ -29,7 +29,7 @@ import { checkBrokerVersion } from "../../src/auth/version";
  *   VOLLEY_DYNSEC_WS_URL=ws://127.0.0.1:<port>          the WebSocket listener (optional)
  *   VOLLEY_DYNSEC_ADMIN_PASSWORD=<password>
  *
- * CI's test-integration-dynsec job runs it against the eclipse-mosquitto:2.1 container. The
+ * CI's test-integration-dynsec job runs it against the eclipse-mosquitto:2.1-alpine container. The
  * suite bootstraps the roles itself (what `volley auth init` does) and the identities below, each
  * with the password "<username>-test-pw".
  */
@@ -176,6 +176,22 @@ describe.skipIf(!RUN)("Volley roles on mosquitto 2.1 Dynamic Security", () => {
     expect(await delivered(d)).toBe(true);
     expect(await delivered(w)).toBe(false);
     expect(await delivered(st)).toBe(true);
+  });
+
+  it("the Desk's resume probe subscribes to volley/_system/desk-probe/<its client id>", async () => {
+    const clientId = `desk-${randomBytes(3).toString("hex")}`;
+    const desk = new VolleyBroker();
+    await desk.connect({
+      url: URL_TCP as string,
+      agentId: "desk",
+      clientId,
+      username: "desk",
+      password: "desk-test-pw",
+    });
+    clients.push(desk);
+    const stop = await desk.subscribeStream(`volley/_system/desk-probe/${clientId}`, () => {});
+    await stop();
+    expect(desk.connected).toBe(true);
   });
 
   it("supervisor writes the tree but not the account-op or reply topics", async () => {
