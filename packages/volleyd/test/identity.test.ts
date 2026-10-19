@@ -1,11 +1,11 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentIdFor, grantAckTo, mintCredentials } from "../src/identity";
+import { agentIdFor, mintCredentials } from "../src/identity";
 import { retireAgent } from "../src/retire";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
-import { fakeExec } from "./helpers/fake-exec";
+import { memoryCredentials } from "./helpers/fake-dynsec";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
 import { schemaErrors } from "./helpers/schema";
 
@@ -28,47 +28,32 @@ describe("agentIdFor", () => {
 });
 
 describe("mintCredentials", () => {
-  it("runs the fenced volley auth add-agent <id> --ack-to … --json and parses the broker block", async () => {
-    const fake = fakeExec().on(["volley", "auth", "add-agent"], {
-      stdout: '{"username":"w1-t1-implementer-1","password":"s3cret"}\n',
+  it("mints through the credential store; its failure is CREDENTIALS_FAILED", async () => {
+    const creds = memoryCredentials();
+    expect(await mintCredentials(creds, "w1-t1-implementer-1")).toEqual({
+      username: "w1-t1-implementer-1",
+      password: "pw-w1-t1-implementer-1",
     });
-    const c = await mintCredentials(fake.exec, "w1-t1-implementer-1", ["volleyd", "volleyd"]);
-    expect(c).toEqual({ username: "w1-t1-implementer-1", password: "s3cret" });
-    expect(fake.calls[0]?.argv).toEqual([
-      "volley",
-      "auth",
-      "add-agent",
-      "w1-t1-implementer-1",
-      "--ack-to",
-      "volleyd",
-      "--json",
-    ]);
-  });
-});
-
-describe("grantAckTo", () => {
-  it("runs the fenced volley auth grant <id> --ack-to … (the password is kept)", async () => {
-    const fake = fakeExec();
-    await grantAckTo(fake.exec, "w1-t1-implementer-1", ["coordinator-cd34"]);
-    expect(fake.calls[0]?.argv).toEqual([
-      "volley",
-      "auth",
-      "grant",
-      "w1-t1-implementer-1",
-      "--ack-to",
-      "coordinator-cd34",
-    ]);
+    creds.failNextMint();
+    const err = await mintCredentials(creds, "w1-t2-implementer-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SpawnError);
+    expect((err as SpawnError).code).toBe("CREDENTIALS_FAILED");
   });
 
-  it("a failing grant throws with its stderr", async () => {
-    const fake = fakeExec().on(["volley", "auth", "grant"], { code: 1, stderr: "not in passwd" });
-    await expect(grantAckTo(fake.exec, "w1", ["desk"])).rejects.toThrow("not in passwd");
+  it("without a credential store (no admin login) refuses, naming where the login comes from", async () => {
+    const err = await mintCredentials(undefined, "w1-t1-implementer-1").catch((e: unknown) => e);
+    expect((err as SpawnError).code).toBe("CREDENTIALS_FAILED");
+    expect((err as SpawnError).message).toContain("dynsec-admin.json");
   });
 });
 
 describe("spawn identity", () => {
-  let env: SpawnEnv;
-  afterEach(() => env.cleanup());
+  let env: SpawnEnv | undefined;
+  afterEach(async () => {
+    // Not every case builds an env ("retire calls …" does not): shuffled order runs it first.
+    await env?.cleanup();
+    env = undefined;
+  });
 
   it("agent.json has id/namespace/parent/role/broker_url and the minted broker block, mode 0600", async () => {
     env = await makeSpawnEnv();
@@ -83,50 +68,27 @@ describe("spawn identity", () => {
       task: "T1",
       role: "implementer",
       broker_url: "mqtt://127.0.0.1:1",
+      claude_account: "primary",
       broker: { username: "w1-t1-implementer-1", password: "pw-w1-t1-implementer-1" },
     });
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(schemaErrors("agent-identity.schema.json", id)).toEqual([]);
-    expect(env.host.fake.argvs(["volley", "auth", "add-agent"])).toEqual([
-      [
-        "volley",
-        "auth",
-        "add-agent",
-        "w1-t1-implementer-1",
-        "--ack-to",
-        "volleyd",
-        "--ack-to",
-        "desk",
-        "--json",
-      ],
-    ]);
+    expect(env.creds.minted).toEqual(["w1-t1-implementer-1"]);
+    // No per-agent grant: acks to volleyd and the Desk are in the shared agent role.
+    expect(env.host.fake.argvs(["volley"])).toEqual([]);
   });
 
-  it("the wave owner is the parent and may receive acks", async () => {
+  it("the wave owner is the parent", async () => {
     env = await makeSpawnEnv();
     env.deps.owner = "coordinator-ab12";
     await spawnAgent(env.request(), env.deps);
     const id = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
     expect(id.parent_id).toBe("coordinator-ab12");
-    expect(env.host.fake.argvs(["volley", "auth", "add-agent"])[0]).toEqual([
-      "volley",
-      "auth",
-      "add-agent",
-      "w1-t1-implementer-1",
-      "--ack-to",
-      "coordinator-ab12",
-      "--ack-to",
-      "volleyd",
-      // The Desk steers too: its acks (hooks' "Delivered by hook") go to the desk's mailbox.
-      "--ack-to",
-      "desk",
-      "--json",
-    ]);
   });
 
-  it("add-agent failing → spawn refused before any launch", async () => {
+  it("a failed mint → spawn refused before any launch", async () => {
     env = await makeSpawnEnv();
-    env.host.fake.on(["volley", "auth", "add-agent"], { code: 1, stderr: "mosquitto_passwd: no" });
+    env.creds.failNextMint();
     const err = await spawnAgent(env.request(), env.deps).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpawnError);
     expect((err as SpawnError).code).toBe("CREDENTIALS_FAILED");
@@ -137,16 +99,16 @@ describe("spawn identity", () => {
     expect(env.events.some((e) => e.type === "agent_spawned")).toBe(false);
   });
 
-  it("an open broker (minting off) writes no broker block and runs no volley auth", async () => {
+  it("an open broker (minting off) writes no broker block and mints nothing", async () => {
     env = await makeSpawnEnv({ mint: false });
     await spawnAgent(env.request(), env.deps);
     const id = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
     expect(id.broker).toBeUndefined();
-    expect(env.host.fake.argvs(["volley"])).toEqual([]);
+    expect(env.creds.minted).toEqual([]);
   });
 
-  it("retire calls volley auth rm-agent", async () => {
-    const fake = fakeExec();
+  it("retire deletes the agent's login", async () => {
+    const creds = memoryCredentials();
     await retireAgent(
       {
         wave: "w1",
@@ -158,8 +120,14 @@ describe("spawn identity", () => {
         waveAgents: new Set(["w1-t1-implementer-1"]),
         minted: true,
       },
-      { exec: fake.exec, clearRetained: async () => {}, journal: () => {}, releaseLock: () => {} },
+      {
+        credentials: creds,
+        publishRetained: async () => {},
+        clearRetained: async () => {},
+        journal: () => {},
+        releaseLock: () => {},
+      },
     );
-    expect(fake.argvs(["volley"])).toEqual([["volley", "auth", "rm-agent", "w1-t1-implementer-1"]]);
+    expect(creds.revoked).toEqual(["w1-t1-implementer-1"]);
   });
 });

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/account.schema.json",
+  "title": "Volley Account Registry",
+  "description": "The account registry file ($VOLLEY_AUTH_DIR/accounts.json) that `volley auth add|rotate|revoke|redeem` maintain and `account_list` returns (with last_seen added). Not an envelope; it never holds a password. See spec section 4.6.10.",
+  "type": "object",
+  "required": ["accounts"],
+  "additionalProperties": false,
+  "properties": {
+    "accounts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/account"
+      }
+    }
+  },
+  "$defs": {
+    "account": {
+      "type": "object",
+      "required": ["name", "role", "kind", "created"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "description": "The broker username (agent-id grammar; never a fixed identity, the dynsec admin, a reserved id or a token id: 8 hex digits)."
+        },
+        "role": {
+          "enum": ["admin", "steer", "watch", "supervisor", "peer"]
+        },
+        "kind": {
+          "enum": ["human", "device", "machine", "service"]
+        },
+        "created": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]*$",
+          "description": "The device a redeemed token's account is bound to."
+        },
+        "last_seen": {
+          "type": "string",
+          "format": "date-time",
+          "description": "account_list only: the newest wall_time of the account's retained registry entry, its retained status (where its LWT lands), and its last auth request to the running supervisor."
+        }
+      }
+    }
+  }
+}

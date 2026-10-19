@@ -257,9 +257,20 @@ const DENIED: string[][] = [
   ["sudo", "git", "status"],
   ["env", "git", "push"],
   ["curl", "https://example.com"],
-  // volley: only auth add-agent / rm-agent, exact options
+  // volley: only the account verbs, exact options. Agent logins go over volleyd's own
+  // Dynamic Security connection (dynsec.ts): add-agent / rm-agent / grant are never run.
   ["volley", "auth", "init"],
+  ["volley", "auth", "migrate"],
+  ["volley", "auth", "list-agents", "--json"],
   ["volley", "pub", "volley/x/y/status", "{}"],
+  ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--json"],
+  ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
+  ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b"],
+  ["volley", "auth", "reload"],
+  // mosquitto: only -h (its version)
+  ["mosquitto", "-c", "/tmp/x.conf"],
+  ["mosquitto", "-h", "-v"],
+  ["pkill", "-HUP", "-x", "mosquitto"],
   ["volley", "auth", "add-agent", "--json"],
   ["volley", "auth", "add-agent", "Bad_Id"],
   ["volley", "auth", "add-agent", "a1", "--dir", "/tmp/x"],
@@ -269,16 +280,48 @@ const DENIED: string[][] = [
   ["volley", "auth", "grant", "a1"], // grant needs at least one --ack-to
   ["volley", "auth", "grant", "a1", "--json"],
   ["volley", "auth", "grant", "a1", "--ack-to", "Bad Id"],
+  // account verbs: exact shapes, never a token on argv, never an operator role by sign-in link
+  ["volley", "auth", "list"],
+  ["volley", "auth", "list", "--json", "--dir", "/tmp/x"],
+  ["volley", "auth", "add", "phone", "--role", "steer"],
+  ["volley", "auth", "add", "phone", "--role", "agent", "--json"],
+  ["volley", "auth", "add", "phone", "--role", "steer", "--kind", "robot", "--json"],
+  ["volley", "auth", "add", "Bad Id", "--role", "steer", "--json"],
+  ["volley", "auth", "rotate", "phone"],
+  ["volley", "auth", "revoke", "phone", "--force"],
+  ["volley", "auth", "token"],
+  ["volley", "auth", "init", "--force"],
+  ["volley", "auth", "signin-link", "--role", "admin", "--label", "x", "--ttl", "60", "--json"],
+  ["volley", "auth", "signin-link", "--role", "steer", "--label", "-x", "--ttl", "60", "--json"],
+  ["volley", "auth", "signin-link", "--role", "steer", "--label", "a\nb", "--ttl", "60", "--json"],
+  ["volley", "auth", "signin-link", "--role", "steer", "--label", "x", "--ttl", "0", "--json"],
+  ["volley", "auth", "redeem", "vly_admin_0000abcd_secret", "--label", "x", "--json"],
+  ["volley", "auth", "redeem", "--label", "x", "--json", "--dir", "/tmp/x"],
   // a script path without a minted token
   ["/home/u/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
   [],
 ];
 
 const ALLOWED: string[][] = [
-  ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--ack-to", "volleyd", "--json"],
-  ["volley", "auth", "add-agent", "a1", "--ack-to", "p1", "--ack-to", "volleyd", "--no-reload"],
-  ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
-  ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b", "--no-reload"],
+  ["mosquitto", "-h"],
+  ["volley", "auth", "list", "--json"],
+  ["volley", "auth", "add", "phone", "--role", "steer", "--json"],
+  ["volley", "auth", "add", "laptop", "--role", "peer", "--kind", "machine", "--json"],
+  ["volley", "auth", "rotate", "phone", "--json"],
+  ["volley", "auth", "revoke", "phone"],
+  [
+    "volley",
+    "auth",
+    "signin-link",
+    "--role",
+    "watch",
+    "--label",
+    "Owner's phone",
+    "--ttl",
+    "300",
+    "--json",
+  ],
+  ["volley", "auth", "redeem", "--label", "Desk on mac", "--json"],
   ["cmux", "read-screen", "--workspace", "workspace:3", "--lines", "40"],
   ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
   ["git", "worktree", "add", "-b", "issue-5", "/tmp/wt", "release/w1"],
@@ -651,6 +694,7 @@ describe("exec", () => {
       killGraceMs: 200,
     });
     expect(r.timedOut).toBe(true);
+    // real process: exec's kill of a real child, on the real clock.
     expect(Date.now() - started).toBeLessThan(3000);
   });
 });

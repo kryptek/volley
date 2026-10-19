@@ -202,6 +202,15 @@ describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
     expect(() => loadConfig({}, cwd)).toThrow(/parent_id/);
   });
 
+  it("carries the file's claude_account; rejects one out of grammar", () => {
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", claude_account: "work" }));
+    expect(loadConfig({}, cwd).claudeAccount).toBe("work");
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1" }));
+    expect(loadConfig({}, cwd).claudeAccount).toBeUndefined();
+    writeIdentity(JSON.stringify({ agent_id: "w1-t1-implementer-1", claude_account: "Work Max" }));
+    expect(() => loadConfig({}, cwd)).toThrow(/claude_account/);
+  });
+
   it("a cwd without .volley/agent.json keeps the env-prefix behavior", () => {
     rmSync(join(cwd, ".volley"), { recursive: true });
     expect(loadConfig({ VOLLEY_AGENT_ID: "coordinator" }, cwd).agentId).toMatch(

@@ -5,6 +5,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
+import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
@@ -46,7 +47,13 @@ export type ControlOp =
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
   | "admission"
   // Spawn one task's agent now (spawn.ts).
-  | "spawn";
+  | "spawn"
+  // Claude account profiles (claude/service.ts, claude/move.ts).
+  | "claude_accounts"
+  | "claude_account_add"
+  | "claude_signin"
+  | "claude_sync"
+  | "agent_move_account";
 
 export interface ControlResponse {
   text: string;
@@ -149,7 +156,7 @@ export class ControlClient {
         }
       },
     );
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: TimerHandle | undefined;
     try {
       const request = buildEnvelope({
         agentId: this.agentId,
@@ -167,11 +174,16 @@ export class ControlClient {
       return await Promise.race([
         reply,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new ControlTimeoutError(op, timeoutMs)), timeoutMs);
+          // real clock: the CLI's own request timeout, in the CLI process
+          timer = systemClock.setTimeout(
+            () => reject(new ControlTimeoutError(op, timeoutMs)),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
-      clearTimeout(timer);
+      // real clock: the CLI's own request timeout, in the CLI process
+      systemClock.clearTimeout(timer);
       await unsubscribe();
     }
   }

@@ -83,6 +83,12 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** Window collecting broker login changes into one Dynamic Security control message. */
+  dynsec_batch_ms: number;
+  /** Seconds between credential sweeps (credential-sweep.ts). */
+  credential_sweep_interval_s: number;
+  /** Claude account profiles (src/claude/): which account an agent runs under by default. */
+  claude: { default_account: string | null };
   hosts: Record<string, RemoteHostConfig>;
 }
 
@@ -119,6 +125,8 @@ export interface WaveTask {
   /** An inline remote `host:` (layered over config `hosts.<host>`). */
   host_spec?: RemoteHostConfig & { type: "ssh"; name?: string };
   files: string[];
+  /** `account:` as written on the task (a Claude account id); absent: the wave's. */
+  account?: string;
 }
 
 export interface Wave {
@@ -138,6 +146,8 @@ export interface Wave {
   config: TunablesPatch;
   /** `brief_preface:` as written (relative to `repo`, or absolute); absent: the default file. */
   brief_preface?: string;
+  /** `account:` as written (a Claude account id); absent: `claude.default_account`. */
+  account?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +264,23 @@ export const WAVE_EVENT_TYPES = [
   "reap_suppressed",
   "reconciled",
   "config_changed",
+  // Account management over the control channel (accounts.ts), in the `_system` journal.
+  "account_created",
+  "account_rotated",
+  "account_revoked",
+  "signin_link_issued",
+  "token_redeemed",
+  // Claude account profiles (src/claude/): the registry and sign-ins in `_system`; a move in its wave.
+  "claude_account_added",
+  "claude_signin_started",
+  "claude_signin_done",
+  "claude_signin_failed",
+  "claude_profile_synced",
+  "agent_account_moved",
+  // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
+  "agent_reaped_by_supervisor",
+  "credentials_revoked",
+  "credentials_swept",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

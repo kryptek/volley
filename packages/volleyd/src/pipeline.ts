@@ -7,6 +7,7 @@ import {
   verifyArtifacts,
 } from "./artifacts";
 import type { Role } from "./brief";
+import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput, DecisionRecord } from "./decisions";
 import { type EvidenceInput, writeEvidence } from "./evidence";
@@ -1256,7 +1257,8 @@ export class PipelineDriver {
   ) {}
 
   private now(): number {
-    return this.deps.now?.() ?? Date.now();
+    // real clock: the default when the daemon injects no clock
+    return (this.deps.now ?? systemClock.now)();
   }
 
   /** The task's fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */

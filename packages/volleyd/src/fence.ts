@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { SIGNIN_COMMAND, renderSigninScript } from "./claude/signin-script";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
 import { AGENT_BRANCH } from "./worktree";
 
@@ -40,12 +41,26 @@ import { AGENT_BRANCH } from "./worktree";
  *     send --workspace <ref> <text>   text: TYPED_TEXT only
  *     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
  *     list-workspaces · ping
- *   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
- *     which the launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS),
- *     including `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>`
- *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
- *   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
- *   volley auth rm-agent <agent_id> [--no-reload]
+ *   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
+ *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
+ *     `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+ *     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
+ *     a profile's login state and plan, never a credential)
+ *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
+ *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
+ *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
+ *     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
+ *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+ *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
+ *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+ *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
+ *     retains no $SYS/broker/version)
+ *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
+ *   volley auth add <agent_id> --role ROLE [--kind KIND] --json
+ *   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
+ *   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+ *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
+ *     LABEL 1..64 printable characters, not starting with `-`
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -197,6 +212,34 @@ export function sealLaunchScript(worktree: string, content: string): LaunchToken
   return token;
 }
 
+const signins = new WeakSet<object>();
+
+/** Proof that `<cwd>/signin.sh` is one volleyd rendered (`sealSigninScript`). */
+export interface SigninToken {
+  readonly cwd: string;
+}
+
+/** A sign-in tmux session's name: `volley-signin-<acct>`, the account id grammar. */
+const SIGNIN_SESSION = /^volley-signin-[a-z0-9][a-z0-9_-]{0,62}$/;
+const SIGNIN_EXPORT = (name: string) => new RegExp(`^export ${name}=(${SHQ})$`);
+
+/**
+ * Seal the sign-in script volleyd is about to write to `<dir>/signin.sh`: throws `FenceError`
+ * unless `dir` is a clean absolute path and `content` is exactly `renderSigninScript` of a clean
+ * absolute profile dir and that `dir` (so `$BROWSER` is `<dir>/browser.sh`). Callers: signin.ts.
+ */
+export function sealSigninScript(dir: string, content: string): SigninToken {
+  if (!absPath(dir))
+    throw new FenceError("signin.sh", "the sign-in dir is not a clean absolute path");
+  const m = SIGNIN_EXPORT("CLAUDE_CONFIG_DIR").exec(content.split("\n")[3] ?? "");
+  const configDir = m !== null ? unshq(m[1] as string) : "";
+  if (!absPath(configDir) || renderSigninScript({ configDir, signinDir: dir }) !== content)
+    throw new FenceError("signin.sh", "only a script renderSigninScript renders for this dir");
+  const token = Object.freeze({ cwd: dir });
+  signins.add(token);
+  return token;
+}
+
 const sealedFor = (opts: FenceOptions, cwd?: string) =>
   opts.launch !== undefined &&
   launches.has(opts.launch) &&
@@ -229,6 +272,8 @@ export interface FenceOptions {
   launch?: LaunchToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
+  /** For starting a sign-in tmux session: the sealed sign-in script. */
+  signin?: SigninToken;
 }
 
 type Verdict =
@@ -653,10 +698,17 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
     case "cmux":
       return cmux(args, opts);
     case "claude":
-      // Never with any arguments: claude starts only from `.volley/launch.sh` (see the header).
-      return deny("claude (only from .volley/launch.sh)");
+      // claude starts only from `.volley/launch.sh` or a sealed sign-in script (see the header);
+      // the one direct call reads a profile's login state.
+      return args.length === 2 && args[0] === "auth" && args[1] === "status"
+        ? ALLOW
+        : deny("claude (only from .volley/launch.sh)");
+    case "tmux":
+      return localTmux(args, opts);
     case "volley":
       return volley(args);
+    case "mosquitto":
+      return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
     case "sysctl":
@@ -867,30 +919,50 @@ const absPath = (p: string) => /^\/[^\n\r\0]*$/.test(p) && cleanPath(p);
 
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
+const ROLE = /^(admin|steer|watch|supervisor|peer)$/;
+const KIND = /^(human|device|machine|service)$/;
+const LABEL = (l: string | undefined) =>
+  l !== undefined &&
+  l.length >= 1 &&
+  l.length <= 64 &&
+  !l.startsWith("-") &&
+  [...l].every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f);
+const TTL = /^[1-9][0-9]{0,5}$/;
+
 /**
- * `volley auth add-agent|grant|rm-agent <id>`: mint, extend the ack grant of (ACL only), and
- * revoke one agent's broker credentials.
+ * The account verbs the daemon's account ops run (accounts.ts), each one exact shape. Tokens
+ * never appear: `redeem` reads its token from stdin.
  */
+const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
+  list: (a) => a.length === 1 && a[0] === "--json",
+  rotate: (a) => a.length === 2 && AGENT_ID.test(a[0] ?? "") && a[1] === "--json",
+  revoke: (a) => a.length === 1 && AGENT_ID.test(a[0] ?? ""),
+  add: (a) =>
+    AGENT_ID.test(a[0] ?? "") &&
+    a[1] === "--role" &&
+    ROLE.test(a[2] ?? "") &&
+    ((a.length === 4 && a[3] === "--json") ||
+      (a.length === 6 && a[3] === "--kind" && KIND.test(a[4] ?? "") && a[5] === "--json")),
+  "signin-link": (a) =>
+    a.length === 7 &&
+    a[0] === "--role" &&
+    (a[1] === "steer" || a[1] === "watch") &&
+    a[2] === "--label" &&
+    LABEL(a[3]) &&
+    a[4] === "--ttl" &&
+    TTL.test(a[5] ?? "") &&
+    a[6] === "--json",
+  redeem: (a) => a.length === 3 && a[0] === "--label" && LABEL(a[1]) && a[2] === "--json",
+};
+
+/** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
-  const [group, verb, id, ...rest] = args;
+  const [group, verb] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
-  if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent" && verb !== "grant"))
-    return deny(name);
-  if (id === undefined || !AGENT_ID.test(id)) return deny(`${name} (agent id)`);
-  let acks = 0;
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--no-reload") continue;
-    if (verb === "add-agent" && a === "--json") continue;
-    if (verb !== "rm-agent" && a === "--ack-to" && AGENT_ID.test(rest[i + 1] ?? "")) {
-      acks++;
-      i++;
-      continue;
-    }
-    return deny(`${name} ${a}`);
+  if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
+    return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
-  if (verb === "grant" && acks === 0) return deny(`${name} (no --ack-to)`);
-  return ALLOW;
+  return deny(name);
 }
 
 /** The service plist `volleyd install` writes under `home` (`$HOME/Library/LaunchAgents`). */
@@ -1038,6 +1110,7 @@ const SHQ = "'(?:[^']|'\\\\'')*'";
 const unshq = (q: string) => q.slice(1, -1).replace(/'\\''/g, "'");
 const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
 const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
+const LAUNCH_PROFILE = new RegExp(`^export CLAUDE_CONFIG_DIR=(${SHQ})$`);
 const LAUNCH_EXEC = new RegExp(
   `^exec claude .* --model (${SHQ}) --settings ${SHQ} --strict-mcp-config --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
@@ -1069,9 +1142,11 @@ const outsideVolley = (p: string) =>
  * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
- * bash and point every hook at other code) and `worktree` — so `--mcp-config=` names exactly
- * `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and `--` before the prompt). Parsed
- * back into its values and re-rendered, so not one byte can differ from a script volleyd writes.
+ * bash and point every hook at other code), optional Claude account profile (`CLAUDE_CONFIG_DIR`,
+ * absolute and outside any `.volley/`, with its credential env unset) and `worktree` — so
+ * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and
+ * `--` before the prompt). Parsed back into its values and re-rendered, so not one byte can
+ * differ from a script volleyd writes.
  */
 function isLaunchScript(content: string, worktree: string): boolean {
   const lines = content.split("\n");
@@ -1079,8 +1154,11 @@ function isLaunchScript(content: string, worktree: string): boolean {
   const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
   if (hooks === null || run === null) return false;
   if (!absPath(worktree) || unshq(run[2] as string) !== mcpConfigPath(worktree)) return false;
+  // A Claude account profile: its CLAUDE_CONFIG_DIR export (re-rendered below with its unset).
+  const profile = LAUNCH_PROFILE.exec(lines[5] ?? "");
+  const claudeConfigDir = profile !== null ? unshq(profile[1] as string) : undefined;
   const env: Record<string, string> = {};
-  for (const line of lines.slice(5, -2)) {
+  for (const line of lines.slice(profile !== null ? 7 : 5, -2)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);
@@ -1091,8 +1169,10 @@ function isLaunchScript(content: string, worktree: string): boolean {
     agentId: unshq(run[3] as string),
     worktree,
     env,
+    ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
   };
   return (
+    (claudeConfigDir === undefined || outsideVolley(claudeConfigDir)) &&
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
@@ -1236,6 +1316,48 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
   if (spec === undefined) return deny(`tmux ${sub}`);
   const v = checkArgs(`tmux ${sub}`, rest, spec);
   return v.kind === "allow" && sub === "new-session" ? newSessionSealed(rest, opts) : v;
+}
+
+/**
+ * Local tmux: Claude account sign-in sessions only (`volley-signin-<acct>`). Agents run in cmux
+ * locally; a remote host's tmux is the REMOTE policy (`tmux` above).
+ */
+function localTmux(args: string[], opts: FenceOptions): Verdict {
+  const [sub, ...rest] = args;
+  const target = (flag: string, a: readonly string[]) => {
+    const i = a.indexOf(flag);
+    return i >= 0 ? a[i + 1] : undefined;
+  };
+  const session = (flag: string) => SIGNIN_SESSION.test(target(flag, rest) ?? "");
+  const verb = `tmux ${sub ?? ""}`.trim();
+  switch (sub) {
+    case "new-session": {
+      const cwd = target("-c", rest);
+      return sameArgv(rest, [
+        "-d",
+        "-s",
+        target("-s", rest) ?? "",
+        "-c",
+        cwd ?? "",
+        SIGNIN_COMMAND,
+      ]) &&
+        session("-s") &&
+        opts.signin !== undefined &&
+        signins.has(opts.signin) &&
+        opts.signin.cwd === cwd
+        ? ALLOW
+        : deny("tmux new-session (only a sealed sign-in script, in a volley-signin-* session)");
+    }
+    case "capture-pane":
+      return sameArgv(rest, ["-p", "-J", "-t", target("-t", rest) ?? ""]) && session("-t")
+        ? ALLOW
+        : deny(verb);
+    case "has-session":
+    case "kill-session":
+      return sameArgv(rest, ["-t", target("-t", rest) ?? ""]) && session("-t") ? ALLOW : deny(verb);
+    default:
+      return deny(verb);
+  }
 }
 
 /**

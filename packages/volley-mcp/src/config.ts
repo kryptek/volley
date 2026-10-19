@@ -11,6 +11,8 @@ export interface VolleyConfig {
   parentId: string | null;
   /** Broker credentials; absent means connect anonymously. */
   auth?: BrokerAuth;
+  /** The Claude account profile a supervisor launched the agent under (agent.json `claude_account`). */
+  claudeAccount?: string;
 }
 
 /** MQTT username/password for brokers that require authentication (SPEC §11.5). */
@@ -48,6 +50,7 @@ interface AssignedIdentity {
   parentId?: string | null;
   brokerUrl?: string;
   auth?: BrokerAuth;
+  claudeAccount?: string;
 }
 
 /**
@@ -107,6 +110,14 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
     }
     identity.brokerUrl = file.broker_url;
   }
+  if (file.claude_account !== undefined) {
+    if (typeof file.claude_account !== "string" || !isValidAgentId(file.claude_account)) {
+      throw new Error(
+        `${path}: claude_account ${JSON.stringify(file.claude_account)} does not match [a-z0-9][a-z0-9_-]{0,62}`,
+      );
+    }
+    identity.claudeAccount = file.claude_account;
+  }
   if (file.broker !== undefined) {
     const broker = file.broker as Record<string, unknown> | null;
     if (
@@ -127,14 +138,16 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
 }
 
 /**
- * Where Homebrew / distro packages keep mosquitto.conf. `volley auth` keeps its files in
- * `volley/` under the first that exists when neither `--dir` nor `VOLLEY_AUTH_DIR` is given;
- * the coordinator's hooks look for `coordinator.json` in the same place.
+ * Where Homebrew, distro packages and the snap keep mosquitto.conf. `volley auth` keeps its files
+ * in `volley/` under the first that exists when neither `--dir` nor `VOLLEY_AUTH_DIR` is given;
+ * the coordinator's hooks look for `coordinator.json` in the same place. The snap's comes last,
+ * so a machine that already has an auth directory keeps it.
  */
 export const MOSQUITTO_ETC_DIRS: readonly string[] = [
   "/opt/homebrew/etc/mosquitto",
   "/usr/local/etc/mosquitto",
   "/etc/mosquitto",
+  "/var/snap/mosquitto/common",
 ];
 
 /**
@@ -247,5 +260,12 @@ export function loadConfig(
 
   const auth = identity?.auth ?? authFromEnv(env);
 
-  return { brokerUrl, namespace, agentId, parentId, ...(auth !== null ? { auth } : {}) };
+  return {
+    brokerUrl,
+    namespace,
+    agentId,
+    parentId,
+    ...(auth !== null ? { auth } : {}),
+    ...(identity?.claudeAccount !== undefined ? { claudeAccount: identity.claudeAccount } : {}),
+  };
 }

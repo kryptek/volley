@@ -40,7 +40,21 @@
             "wake_detected",
             "reap_suppressed",
             "reconciled",
-            "config_changed"
+            "config_changed",
+            "account_created",
+            "account_rotated",
+            "account_revoked",
+            "signin_link_issued",
+            "token_redeemed",
+            "claude_account_added",
+            "claude_signin_started",
+            "claude_signin_done",
+            "claude_signin_failed",
+            "claude_profile_synced",
+            "agent_account_moved",
+            "agent_reaped_by_supervisor",
+            "credentials_revoked",
+            "credentials_swept"
           ]
         },
         "payload": {

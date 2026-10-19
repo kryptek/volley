@@ -8,6 +8,7 @@ import { Daemon } from "../src/daemon";
 import { findOverlaps, parseFilesSection } from "../src/overlap";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
+import { flushMicrotasks } from "./helpers/fake-clock";
 
 const body = (name: string) =>
   readFileSync(
@@ -181,6 +182,10 @@ tasks:
     const gate = new Promise<void>((r) => {
       release = r;
     });
+    let fetched!: () => void;
+    const reached = new Promise<void>((r) => {
+      fetched = r;
+    });
     daemon = await Daemon.start({
       brokerUrl: broker.url,
       namespace: NS,
@@ -189,12 +194,13 @@ tasks:
       protocolVersion: 4,
       pressure: NO_PRESSURE,
       issueBody: async (_repo, issue) => {
+        fetched();
         await gate;
         return BODIES[issue] ?? null;
       },
     });
     const run = client.request("run", { wave_yaml: wave("w2", 2) }, { timeoutMs: 5000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await reached;
     // The fetch is still parked, yet a status query is answered.
     const status = await client.request("status", {}, { timeoutMs: 1000 });
     expect(status.ok).toBe(true);
@@ -231,7 +237,9 @@ tasks:
     await reached;
     await late.stop();
     release();
-    await new Promise((r) => setTimeout(r, 100));
+    // The fetch resolves into a stopped daemon: what it would set off is done once that is idle.
+    await late.settled();
+    await flushMicrotasks();
     expect(existsSync(join(home, "waves", "w4"))).toBe(false);
     daemon = await Daemon.start({
       brokerUrl: broker.url,

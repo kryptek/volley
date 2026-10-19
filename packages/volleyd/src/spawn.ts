@@ -14,10 +14,12 @@ import {
   runBriefGate,
   withPreface,
 } from "./brief";
+import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
+  type AgentCredentials,
   type BrokerCredentials,
   agentIdFor,
   mintCredentials,
@@ -33,7 +35,7 @@ import {
   renderMcpConfig,
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
-import { retainedTopics } from "./retire";
+import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
@@ -76,6 +78,18 @@ export interface SpawnRequest {
   start?: { ref: string; detach: boolean };
   /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
   files?: Record<string, string>;
+  /**
+   * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
+   * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
+   */
+  account?: { id: string; dir: string | null };
+  /** Appended to the brief: an account move's resume note (claude/move.ts). */
+  resumeNote?: string;
+  /**
+   * The earlier attempt whose per-attempt worktree (`start` set) this spawn continues in, not a
+   * fresh one: an account move of a pipeline role (claude/move.ts moveRespawn).
+   */
+  worktreeAttempt?: number;
 }
 
 export interface SpawnDeps {
@@ -98,8 +112,10 @@ export interface SpawnDeps {
   hooksDir: string;
   /** `packages/volley-mcp/src/index.ts` on the agent's host: its `.volley/mcp.json` server. */
   mcpEntry: string;
-  /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
+  /** Mint per-agent broker logins; false for an open broker. */
   mintCredentials: boolean;
+  /** Where the logins come from: volleyd's Dynamic Security control connection (dynsec.ts). */
+  credentials?: AgentCredentials;
   tunables: Pick<
     Tunables,
     "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
@@ -117,6 +133,8 @@ export interface SpawnDeps {
   briefsDir?: string;
   /** Publish an empty retained payload (clears a superseded attempt's records). Default: none. */
   clearRetained?: (topic: string) => Promise<void>;
+  /** Publish a retained message (a superseded attempt's `reaped` status). Default: none. */
+  publishRetained?: (topic: string, payload: string) => Promise<void>;
   /**
    * Open a decision through the daemon's decision store (published retained, notify bridge).
    * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
@@ -126,7 +144,22 @@ export interface SpawnDeps {
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
   relaunchSettleMs?: number;
+  /**
+   * Bring a Claude account profile in line before its agent launches (sharing.yaml, the MCP
+   * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
+   */
+  prepareAccount?: (account: { id: string; dir: string }) => Promise<void>;
+  /**
+   * The daemon's clock (epoch ms): lock staleness, lock and decision stamps, so they compare
+   * against the agent heartbeats the daemon records on it. Default: the system clock.
+   */
+  now?: () => number;
 }
+
+/** The spawn's "now" on the daemon's clock (SpawnDeps.now). */
+// real clock: the default when no daemon clock is injected
+const nowOf = (deps: Pick<SpawnDeps, "now">): (() => number) => deps.now ?? systemClock.now;
+const stampOf = (deps: Pick<SpawnDeps, "now">): string => new Date(nowOf(deps)()).toISOString();
 
 export type DecisionKind =
   | "repo_untrusted"
@@ -198,8 +231,6 @@ const secondsMs = (s: number) => s * 1000;
 
 /** The volleyd agent id, the parent of agents in a wave without an owner. */
 const SUPERVISOR = "volleyd";
-/** The Desk's fixed identity: it steers agents, so they ack to its mailbox. */
-const DESK = "desk";
 
 interface Ctx {
   req: SpawnRequest;
@@ -228,7 +259,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
       deps.tunables.worktree_root,
       req.wave.wave,
       req.task,
-      req.start !== undefined ? `${req.role}-${req.attempt}` : req.role,
+      req.start !== undefined ? `${req.role}-${req.worktreeAttempt ?? req.attempt}` : req.role,
     ),
   };
   try {
@@ -238,14 +269,14 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const cfg =
       deps.remoteTrust !== undefined
         ? await deps.remoteTrust.read()
-        : readClaudeJson(deps.claudeJsonPath);
+        : readClaudeJson(claudeJsonOf(ctx));
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
       if (open !== undefined) {
         return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
       const decisionId = await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-        question: trustQuestion(ctx.root, deps.remoteTrust?.target),
+        question: trustAsk(ctx),
         options: ["trust", "cancel"],
         data: trustData(ctx),
       });
@@ -264,10 +295,10 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
         attempt: req.attempt,
         agent_id: agentId,
         pid: process.pid,
-        at: new Date().toISOString(),
+        at: stampOf(deps),
       },
       deps.probe,
-      { staleAfterMs: secondsMs(deps.tunables.heartbeat_alarm_s) },
+      { staleAfterMs: secondsMs(deps.tunables.heartbeat_alarm_s), now: nowOf(deps) },
     );
 
     // 2–5. Worktree, issue, brief, identity, launch.
@@ -297,6 +328,18 @@ interface Launched {
   /** Epoch ms just before the launch (an older hooks-error.json is stale). */
   launchedAt: number;
 }
+
+/** The Claude account the spawn runs under, `primary` when none is selected. */
+const accountId = (req: SpawnRequest) => req.account?.id ?? "primary";
+
+/** A Claude account profile's directory, or undefined for the primary. */
+const profileDirOf = (req: SpawnRequest) => req.account?.dir ?? undefined;
+
+/** Folder trust is per profile: its own `.claude.json` (the primary's is `claudeJsonPath`). */
+const claudeJsonOf = (ctx: Ctx) => {
+  const dir = profileDirOf(ctx.req);
+  return dir !== undefined ? join(dir, ".claude.json") : ctx.deps.claudeJsonPath;
+};
 
 /**
  * The wave's brief preface, read at each spawn on the supervisor's host (the wave state shows
@@ -360,16 +403,32 @@ async function launchAttempt(
         ? briefExtraFrom(await host.readFile(briefExtraPath(ctx.root)))
         : briefExtra(ctx.root),
   });
-  await host.writeFile(briefPath, withPreface(preface, rendered));
+  const brief = withPreface(preface, rendered);
+  await host.writeFile(
+    briefPath,
+    req.resumeNote !== undefined ? `${brief.trimEnd()}\n\n---\n\n${req.resumeNote}\n` : brief,
+  );
   if (deps.briefGate !== null)
     await runBriefGate(host.exec, deps.briefGate, briefPath, ctx.worktree);
+
+  const profile = profileDirOf(req);
+  if (profile !== undefined && deps.prepareAccount !== undefined) {
+    try {
+      await deps.prepareAccount({ id: accountId(req), dir: profile });
+    } catch (e) {
+      throw new SpawnError(
+        "CLAUDE_ACCOUNT_PREPARE_FAILED",
+        `Claude account '${accountId(req)}': ${e instanceof Error ? e.message : String(e)}`,
+        { claude_account: accountId(req) },
+      );
+    }
+  }
 
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
-    // Everyone who may steer it: the owner (or volleyd), volleyd, and the Desk. A later owner
-    // (`claim`) is granted then (daemon.ts extendAckGrants).
-    creds = await mintCredentials(host.exec, agentId, [parent, SUPERVISOR, DESK]);
+    // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
+    creds = await mintCredentials(deps.credentials, agentId);
   }
   try {
     await writeAgentJson(host, ctx.worktree, {
@@ -380,6 +439,7 @@ async function launchAttempt(
       task: req.task,
       role: req.role,
       broker_url: deps.brokerUrl,
+      claude_account: accountId(req),
       ...(creds !== undefined ? { broker: creds } : {}),
     });
     // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker.
@@ -389,6 +449,7 @@ async function launchAttempt(
       model: task.model,
       agentId,
       worktree: ctx.worktree,
+      ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -399,7 +460,8 @@ async function launchAttempt(
 
     // Subscribe before launching, so no hook signal can be missed.
     const watch = await deps.watch(ctx.namespace, agentId);
-    const launchedAt = Date.now();
+    // real clock: the hooks process stamps its error file with its own.
+    const launchedAt = systemClock.now();
     let workspace: string;
     try {
       if (recovered !== undefined) {
@@ -433,8 +495,10 @@ async function launchAttempt(
         branch: wt.branch,
         worktree_reused: wt.reused,
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
+        ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
+        claude_account: accountId(req),
         ...(ctx.lock !== undefined ? { lock: ctx.lock.path } : {}),
         ...(recovered !== undefined
           ? { recovered_from: recovered.from, recovery: recovered.reason }
@@ -446,7 +510,10 @@ async function launchAttempt(
     }
     return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
-    if (creds !== undefined) await revokeCredentials(host.exec, agentId);
+    // A bare revoke, not the delete path: this is almost always a failure before or at the
+    // launch, when no session holds the login. (A journal failure right after a launch is the rare
+    // exception, and its retained records are not cleared here.)
+    if (creds !== undefined) await revokeCredentials(deps.credentials, agentId);
     throw e;
   }
 }
@@ -515,7 +582,7 @@ async function verifyAndRecover(
       const decisionId =
         openDecisionFor(deps.openDecisions, trustId(ctx)) ??
         (await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-          question: trustQuestion(ctx.root, deps.remoteTrust?.target),
+          question: trustAsk(ctx),
           options: ["trust", "cancel"],
           screen,
           data: { ...trustData(ctx), agent_id: cur.agentId },
@@ -570,10 +637,27 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
-  const revoked = prev.minted ? await revokeCredentials(deps.host.exec, prev.agentId) : null;
-  if (deps.clearRetained !== undefined) {
-    for (const topic of retainedTopics(ctx.namespace, prev.agentId))
-      await deps.clearRetained(topic);
+  // A stalled attempt may still be connected: delete its login through the delete path (`reaped`
+  // first, records cleared before and after the delete), as every other delete does.
+  let revoked: boolean | null = null;
+  if (prev.minted && deps.publishRetained !== undefined && deps.clearRetained !== undefined) {
+    revoked = await reapAndRevoke(
+      prev.agentId,
+      ctx.namespace,
+      {
+        credentials: deps.credentials,
+        publishRetained: deps.publishRetained,
+        clearRetained: deps.clearRetained,
+        journal: deps.journal,
+      },
+      req.task,
+    );
+  } else {
+    if (prev.minted) revoked = await revokeCredentials(deps.credentials, prev.agentId);
+    if (deps.clearRetained !== undefined) {
+      for (const topic of retainedTopics(ctx.namespace, prev.agentId))
+        await deps.clearRetained(topic);
+    }
   }
   const attempt = prev.attempt + 1;
   const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);
@@ -695,7 +779,7 @@ async function openDecision(
       question: d.question,
       options: d.options,
       pointers,
-      opened_at: new Date().toISOString(),
+      opened_at: stampOf(ctx.deps),
       ...d.data,
     },
   });
@@ -707,17 +791,39 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   await ctx.deps.journal({
     type: "decision_resolved",
     task: ctx.req.task,
-    data: { decision_id: id, answer, by, at: new Date().toISOString() },
+    data: { decision_id: id, answer, by, at: stampOf(ctx.deps) },
   });
 }
 
-/** The repo_untrusted decision id for the spawn's repo root, on the machine it runs on. */
-const trustId = (ctx: Ctx) => trustDecisionId(ctx.root, ctx.deps.remoteTrust?.target);
+/**
+ * The repo_untrusted decision id for the spawn's repo root, on the machine it runs on, in the
+ * Claude account profile it runs under (each profile has its own folder trust).
+ */
+const trustId = (ctx: Ctx) =>
+  trustDecisionId(
+    ctx.root,
+    ctx.deps.remoteTrust?.target ??
+      (profileDirOf(ctx.req) !== undefined ? `claude-account:${accountId(ctx.req)}` : undefined),
+  );
+
+/** The repo_untrusted question, naming the host and the Claude account where it is answered. */
+const trustAsk = (ctx: Ctx) =>
+  trustQuestion(
+    ctx.root,
+    ctx.deps.remoteTrust?.target,
+    profileDirOf(ctx.req) !== undefined ? accountId(ctx.req) : undefined,
+  );
 
 /** A repo_untrusted decision's facts: the root, and for a remote host where it is trusted. */
 const trustData = (ctx: Ctx): Record<string, unknown> => {
   const r = ctx.deps.remoteTrust;
-  return { repo: ctx.root, ...(r !== undefined ? { host: r.host, target: r.target } : {}) };
+  const profile = profileDirOf(ctx.req);
+  return {
+    repo: ctx.root,
+    ...(r !== undefined ? { host: r.host, target: r.target } : {}),
+    // Answered in that profile's own .claude.json (daemon.ts trustAnswer).
+    ...(profile !== undefined ? { claude_config_dir: profile } : {}),
+  };
 };
 
 /** Keep the screen that triggered a decision under `$VOLLEYD_HOME/waves/<wave>/screens/`. */
@@ -725,7 +831,7 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   if (screen === null) return undefined;
   const dir = join(ctx.deps.home, "waves", ctx.req.wave.wave, "screens");
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${agentId}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`);
+  const path = join(dir, `${agentId}-${stampOf(ctx.deps).replace(/[:.]/g, "-")}.txt`);
   writeFileSync(path, screen);
   return path;
 }

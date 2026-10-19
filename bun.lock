@@ -154,6 +154,7 @@
       "dependencies": {
         "ajv": "^8.17.0",
         "ajv-formats": "^3.0.1",
+        "volley-cli": "workspace:*",
         "volley-mcp": "workspace:*",
         "yaml": "^2.6.0",
       },

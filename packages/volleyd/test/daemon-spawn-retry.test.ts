@@ -12,8 +12,11 @@ import { SpawnError } from "../src/spawn-error";
 import type { JournalEvent, TaskState } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
+import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 
 const ID = "w1-t1-implementer-1";
@@ -23,19 +26,21 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   let env: DaemonEnv;
   let agent: VolleyBroker;
   let host: FakeHost;
+  let creds: MemoryCredentials;
   let daemon: Daemon;
   let startOpts: Parameters<DaemonEnv["start"]>[0];
   /** The git argvs run in the wave's repo so far. */
   let gitCalls: () => string[][] = () => [];
-  let clock = T0;
+  /** The daemon's clock: every backoff, verification window and reap grace runs on it. */
+  let clock: FakeClock;
+  let waits: JournalWait;
   /** While true, every worktree add fails as in the owner's smoke. */
   let failing = true;
-  /** How long the launched session takes to come up (its MCP status, then the hooks). */
-  let sessionDelayMs = 20;
+  /** A launched session comes up (its MCP status, then the hooks) once this resolves. */
+  let sessionGate: Promise<void> = Promise.resolve();
   /** While false, the launched session's MCP server never publishes its own status. */
   let mcpStatus = true;
-  /** The simulated sessions' pending start timers and in-flight publishes (see teardown). */
-  const timers = new Set<ReturnType<typeof setTimeout>>();
+  /** The simulated sessions' in-flight publishes (see teardown). */
   const sessions = new Set<Promise<void>>();
   let sessionErrors: unknown[] = [];
   let closing = false;
@@ -43,14 +48,10 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
   const of = (type: string) => journal().filter((e) => e.type === type);
-  const until = async (pred: () => boolean, ms = 5000) => {
-    const end = Date.now() + ms;
-    while (!pred()) {
-      if (Date.now() > end) throw new Error("timed out waiting");
-      await new Promise((r) => setTimeout(r, 25));
-    }
-  };
-  const settle = () => new Promise((r) => setTimeout(r, 100));
+  /** The n-th journal event matching `match`, awaited as the daemon appends it. */
+  const event = (match: EventMatch, n = 1) => waits.event("w1", match, n);
+  /** The daemon is idle: whatever a tick or an answer started has run. */
+  const settle = () => waits.settled();
   const task = (): TaskState => daemon.snapshot("w1")?.tasks[0] as TaskState;
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
     agent.publish(
@@ -66,8 +67,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     config: string,
     o: {
       failing?: boolean;
-      sessionDelayMs?: number;
-      spawnTimeoutS?: number;
+      /** Hold launched sessions until this resolves (default: they come up at once). */
+      sessionGate?: Promise<void>;
       mcpStatus?: boolean;
       /** The repo's release branch: local (default), nowhere, or on origin once fetched. */
       release?: "local" | "missing" | "after-fetch";
@@ -75,9 +76,9 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       taskHost?: string;
     } = {},
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    clock = T0;
+    clock = fakeClock(T0);
     failing = o.failing ?? true;
-    sessionDelayMs = o.sessionDelayMs ?? 20;
+    sessionGate = o.sessionGate ?? Promise.resolve();
     mcpStatus = o.mcpStatus ?? true;
     closing = false;
     sessionErrors = [];
@@ -98,10 +99,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     if (o.release === "missing" || o.release === "after-fetch") {
       const fetched = () => fake.argvs(["git", "-C", repo, "fetch"]).length > 0;
       fake
@@ -117,6 +115,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
         );
     }
     gitCalls = () => fake.argvs(["git", "-C", repo]);
+    creds = memoryCredentials();
     host = fakeHost(fake);
     const prepare = host.prepareWorktree.bind(host);
     host.prepareWorktree = async (spec) => {
@@ -130,18 +129,16 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       return prepare(spec);
     };
     // The launched session: the MCP server's spawning status, then the SessionStart hook. Its
-    // timer and publishes are tracked, so teardown never disconnects the client under them.
+    // publishes are tracked, so teardown never disconnects the client under them.
     host.onLaunch = () => {
       if (closing) return;
-      const timer = setTimeout(() => {
-        timers.delete(timer);
-        const s = session().catch((e: unknown) => {
+      const s = sessionGate
+        .then(() => (closing ? undefined : session()))
+        .catch((e: unknown) => {
           sessionErrors.push(e);
         });
-        sessions.add(s);
-        void s.finally(() => sessions.delete(s));
-      }, sessionDelayMs);
-      timers.add(timer);
+      sessions.add(s);
+      void s.finally(() => sessions.delete(s));
     };
     const session = async () => {
       if (mcpStatus) await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
@@ -162,19 +159,17 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       );
     };
     startOpts = {
-      now: () => clock,
-      // below the wave file's minimum (10 s), so a verification can time out within a test
-      ...(o.spawnTimeoutS !== undefined
-        ? { configDefaults: { ...CONFIG_DEFAULTS, spawn_timeout_s: o.spawnTimeoutS } }
-        : {}),
+      clock,
       spawner: {
         host,
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
+        credentials: creds,
       },
     };
     daemon = await env.start(startOpts);
+    waits = journalWait(env.home, () => daemon);
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
       wave,
@@ -189,8 +184,6 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   afterEach(async () => {
     closing = true;
-    for (const t of timers) clearTimeout(t);
-    timers.clear();
     await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
@@ -199,7 +192,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   it("journals each failure with its retry, keeps one decision open, doubles the wait, recovers visibly", async () => {
     await setup("spawn_retry_max_s: 100, spawn_retry_max: 5");
-    await until(() => of("spawn_failed").length === 1);
+    await event("spawn_failed");
     expect(of("spawn_failed")[0]).toMatchObject({
       task: "T1",
       data: {
@@ -210,8 +203,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
         next_retry_at: new Date(T0 + 30_000).toISOString(),
       },
     });
-    await until(() => of("decision_opened").length === 1);
-    const opened = of("decision_opened")[0];
+    const opened = await event("decision_opened");
     expect(opened?.data).toMatchObject({
       kind: "spawn_failed",
       options: ["retry now", "stop task"],
@@ -240,46 +232,44 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     });
 
     // Not before its time.
-    clock = T0 + 29_000;
+    await clock.advanceTo(T0 + 29_000);
     await daemon.tick();
     await settle();
     expect(of("spawn_failed")).toHaveLength(1);
     expect(task().why_waiting).toBe("spawn failed: WORKTREE_FAILED — retry in 1s (attempt 1)");
 
     // Then 30 s → 60 s → capped at spawn_retry_max_s (100), one decision throughout.
-    clock = T0 + 30_000;
+    await clock.advanceTo(T0 + 30_000);
     await daemon.tick();
-    await until(() => of("spawn_failed").length === 2);
-    expect(of("spawn_failed")[1]?.data).toMatchObject({
+    expect((await event("spawn_failed", 2)).data).toMatchObject({
       attempt: 2,
-      next_retry_at: new Date(clock + 60_000).toISOString(),
+      next_retry_at: new Date(clock.now() + 60_000).toISOString(),
     });
-    clock += 60_000;
+    await clock.advance(60_000);
     await daemon.tick();
-    await until(() => of("spawn_failed").length === 3);
-    expect(of("spawn_failed")[2]?.data).toMatchObject({
+    expect((await event("spawn_failed", 3)).data).toMatchObject({
       attempt: 3,
-      next_retry_at: new Date(clock + 100_000).toISOString(),
+      next_retry_at: new Date(clock.now() + 100_000).toISOString(),
     });
+    await settle();
     expect(of("decision_opened")).toHaveLength(1);
     expect(task().why_waiting).toBe("spawn failed: WORKTREE_FAILED — retry in 100s (attempt 3)");
 
     // The cause is fixed (the tracking branch exists): the next retry spawns, visibly.
     failing = false;
-    clock += 100_000;
+    await clock.advance(100_000);
     await daemon.tick();
-    await until(() => of("spawn_recovered").length === 1);
-    expect(of("spawn_recovered")[0]).toMatchObject({
+    expect(await event("spawn_recovered")).toMatchObject({
       task: "T1",
       data: { role: "implementer", after_failures: 3, attempt: 4 },
     });
-    await until(() => of("decision_resolved").length === 1);
-    expect(of("decision_resolved")[0]?.data).toMatchObject({
+    expect((await event("decision_resolved")).data).toMatchObject({
       decision_id: opened?.data.decision_id,
       answer: "recovered",
       by: "volleyd",
     });
-    await until(() => of("agent_registered").length === 1);
+    await event("agent_registered");
+    await settle();
     const t = task();
     expect(t.why_waiting ?? "").not.toContain("spawn failed");
     expect(t.last_error).toBeUndefined();
@@ -289,15 +279,17 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   it("spawn_retry_max reached: retries stop, the decision says so; 'retry now' tries again", async () => {
     await setup("spawn_retry_max: 2");
-    await until(() => of("spawn_failed").length === 1);
-    clock += 30_000;
+    await event("spawn_failed");
+    await clock.advance(30_000);
     await daemon.tick();
-    await until(() => of("spawn_failed").length === 2);
-    expect(of("spawn_failed")[1]?.data).toMatchObject({ attempt: 2, next_retry_at: null });
-    await until(() =>
-      of("decision_opened").some((e) => String(e.data.question).includes("retries stopped")),
+    expect((await event("spawn_failed", 2)).data).toMatchObject({
+      attempt: 2,
+      next_retry_at: null,
+    });
+    const stopped = await event(
+      (e) => e.type === "decision_opened" && String(e.data.question).includes("retries stopped"),
     );
-    const stopped = of("decision_opened").at(-1);
+    await settle();
     expect(stopped?.data).toMatchObject({
       kind: "spawn_failed",
       options: ["retry now", "stop task"],
@@ -310,7 +302,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect(task().next_retry_at).toBeNull();
 
     // No automatic retry, however long it waits — nor after a restart.
-    clock += 24 * 3_600_000;
+    await clock.advance(24 * 3_600_000);
     await daemon.tick();
     await settle();
     expect(of("spawn_failed")).toHaveLength(2);
@@ -328,20 +320,19 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     );
     expect(r.stderr).toBe("");
     await daemon.tick();
-    await until(() => of("spawn_recovered").length === 1);
-    expect(of("spawn_recovered")[0]?.data).toMatchObject({ after_failures: 2, attempt: 3 });
+    expect((await event("spawn_recovered")).data).toMatchObject({ after_failures: 2, attempt: 3 });
   });
 
   it("'stop task' cancels the task", async () => {
     await setup("spawn_retry_max: 5");
-    await until(() => of("decision_opened").length === 1);
-    const id = of("decision_opened")[0]?.data.decision_id as string;
+    const id = (await event("decision_opened")).data.decision_id as string;
     const r = await runCli(["resolve", id, "stop task", "--by", "tester"], env.env);
     expect(r.stderr).toBe("");
-    await until(() => of("task_cancelled").length === 1);
+    await event("task_cancelled");
+    await settle();
     expect(task().stage).toBe("cancelled");
     expect(task().last_error).toBeUndefined();
-    clock += 3_600_000;
+    await clock.advance(3_600_000);
     await daemon.tick();
     await settle();
     expect(of("spawn_failed")).toHaveLength(1);
@@ -349,7 +340,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   it("two roles of one step failing: each counts its own attempts, backs off and reaches the stop", async () => {
     await setup("spawn_retry_max: 3");
-    await until(() => of("spawn_failed").length === 1);
+    await event("spawn_failed");
+    await settle();
     // A step that spawns two roles at once ([spec_review, quality_review]), both refused.
     const d = daemon as unknown as {
       spawnFailed(wave: string, task: string, role: string, e: unknown): Promise<void>;
@@ -372,24 +364,24 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     }
     expect(byRole("implementer")).toEqual([[1, new Date(T0 + 30_000).toISOString()]]);
     // One decision on the task, superseded once by the one that says the retries stopped.
-    await until(() =>
-      of("decision_opened").some((e) => String(e.data.question).includes("retries stopped")),
+    await event(
+      (e) => e.type === "decision_opened" && String(e.data.question).includes("retries stopped"),
     );
+    await settle();
     expect(daemon.snapshot("w1")?.open_decisions).toHaveLength(1);
     expect(of("decision_opened")).toHaveLength(2);
 
     // The implementer's retry succeeds: its own failure is recovered, but the reviewers' are
     // not, so the decision stays open and the task still shows the latest failure.
     failing = false;
-    clock = T0 + 30_000;
+    await clock.advanceTo(T0 + 30_000);
     await daemon.tick();
-    await until(() => of("spawn_recovered").length === 1);
-    expect(of("spawn_recovered")[0]?.data).toMatchObject({
+    expect((await event("spawn_recovered")).data).toMatchObject({
       role: "implementer",
       after_failures: 1,
       attempt: 2,
     });
-    await until(() => of("agent_registered").length === 1);
+    await event("agent_registered");
     await settle();
     expect(of("decision_resolved").filter((e) => e.data.answer === "recovered")).toHaveLength(0);
     expect(daemon.snapshot("w1")?.open_decisions).toHaveLength(1);
@@ -401,11 +393,18 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   });
 
   it("a `volleyd spawn` refused SPAWN_LOCKED while the launched agent is verifying records nothing against the task", async () => {
-    await setup("spawn_retry_max: 5", { failing: false, sessionDelayMs: 1500 });
-    await until(() => of("agent_spawned").length === 1);
+    // The session stays down until the extra spawn was refused: it is refused mid-verification.
+    let comeUp: () => void = () => {};
+    const sessionGate = new Promise<void>((r) => {
+      comeUp = r;
+    });
+    await setup("spawn_retry_max: 5", { failing: false, sessionGate });
+    await event("agent_spawned");
     const r = await runCli(["spawn", "w1", "T1"], env.env);
     expect(r.stderr).toContain("SPAWN_LOCKED");
-    await until(() => of("agent_registered").length === 1, 8000);
+    expect(of("agent_registered")).toHaveLength(0);
+    comeUp();
+    await event("agent_registered");
     await settle();
     expect(of("spawn_failed")).toHaveLength(0);
     expect(of("decision_opened")).toHaveLength(0);
@@ -414,9 +413,18 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   });
 
   it("an agent whose MCP server never reaches volleyd's broker parks the task on mcp_not_registered", async () => {
-    await setup("spawn_retry_max: 5", { failing: false, spawnTimeoutS: 1, mcpStatus: false });
-    await until(() => of("verify_failed").length === 1, 8000);
-    await until(() => of("decision_opened").some((e) => e.data.kind === "mcp_not_registered"));
+    await setup("spawn_retry_max: 5", { failing: false, mcpStatus: false });
+    await event("agent_spawned");
+    // The session's hook signals are on the broker; a control round-trip through the daemon's
+    // connection (behind them on it) proves the daemon has read them. Then the window closes.
+    await Promise.all([...sessions]);
+    expect((await runCli(["status"], env.env)).exitCode).toBe(0);
+    const windowMs = CONFIG_DEFAULTS.spawn_timeout_s * 1000;
+    await clock.armed(windowMs);
+    await clock.advance(windowMs);
+    await event("verify_failed");
+    await event((e) => e.type === "decision_opened" && e.data.kind === "mcp_not_registered");
+    await settle();
     expect(task().why_waiting).toContain("mcp_not_registered");
   });
 
@@ -437,7 +445,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     const calls = gitCalls().map((a) => a.slice(3, 5).join(" "));
     expect(calls.indexOf("fetch --quiet")).toBeGreaterThanOrEqual(0);
     expect(calls.indexOf("fetch --quiet")).toBeLessThan(calls.indexOf("rev-parse --verify"));
-    await until(() => of("task_admitted").length === 1);
+    await event("task_admitted");
   });
 
   it("run does not check the local repo for a wave whose every task runs on a remote host", async () => {
@@ -445,7 +453,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
     expect(gitCalls().filter((a) => a[3] === "rev-parse" && a[4] === "--verify")).toEqual([]);
-    await until(() => of("task_admitted").length === 1);
+    await event("task_admitted");
   });
 });
 

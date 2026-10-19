@@ -15,17 +15,15 @@ import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent } from "../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock, flushMicrotasks } from "./helpers/fake-clock";
+import { memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
+import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 
-const until = async (pred: () => boolean | Promise<boolean>, ms = 5000) => {
-  const end = Date.now() + ms;
-  while (!(await pred())) {
-    if (Date.now() > end) throw new Error("timed out waiting");
-    await new Promise((r) => setTimeout(r, 20));
-  }
-};
+/** How many virtual-time steps `tickUntil` takes before it gives up (deterministic, not a deadline). */
+const MAX_TICKS = 40;
 
 interface FakeRemote extends Omit<FakeHost, "readFile">, RemoteHost {
   tunnel: boolean;
@@ -96,13 +94,21 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
   let localClaudeJson: string;
   /** How the supervised tunnel's ssh behaves: stays up, or exits at once (forward failed). */
   let tunnelMode: "up" | "fail";
-  let clock: number;
+  /** The daemon's clock: tunnel settle times, restart backoffs, check intervals, reap graces. */
+  let clock: FakeClock;
+  let waits: JournalWait;
   let repo: string;
   let tunnelCalls: string[][];
+  /** The simulated sessions' publishes (teardown waits for them). */
+  const sessions = new Set<Promise<void>>();
 
   const journal = (wave: string): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
+  /** The n-th journal event of `wave` matching `match`, awaited as the daemon appends it. */
+  const event = (wave: string, match: EventMatch, n = 1) => waits.event(wave, match, n);
+  /** The task as last published (read once the daemon is idle, so the publish is on the broker). */
   const task = async (wave: string, id: string) => {
+    await waits.settled();
     const s = (await env.retained(`volley/_waves/${wave}/state`)) as {
       payload: { tasks: { id: string; stage: string; why_waiting?: string; host?: string }[] };
     };
@@ -117,21 +123,38 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     const r = await runCli(["run", file], env.env);
     expect(r.exitCode).toBe(0);
   };
-  /** Advance past the check interval and run a tick; wait for the check to land. */
+  /** Advance past the check interval and run a tick; the check lands before the daemon is idle. */
   const recheck = async (b: FakeRemote = box) => {
     const before = b.tunnelChecks;
-    clock += 60_000;
+    await clock.advance(60_000);
     await daemon.tick();
-    await until(() => b.tunnelChecks > before);
+    await waits.settled();
+    expect(b.tunnelChecks).toBeGreaterThan(before);
     await daemon.tick();
+    await waits.settled();
   };
-  /** Tick until `pred` holds, the clock moving on (past a fresh tunnel's settle time) each time. */
-  const tickUntil = (pred: () => boolean | Promise<boolean>, ms = 5000) =>
-    until(async () => {
-      clock += 20_000;
+  /**
+   * Tick until `pred` holds, the clock moving on 20 s (past a fresh tunnel's settle time) each
+   * step and the daemon settling in between: a bounded number of virtual-time steps.
+   */
+  const tickUntil = async (pred: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < MAX_TICKS; i++) {
+      await clock.advance(20_000);
       await daemon.tick();
-      return pred();
-    }, ms);
+      await waits.settled();
+      if (await pred()) return;
+    }
+    throw new Error(`not reached after ${MAX_TICKS} ticks`);
+  };
+  /**
+   * Tick until `n` agents of `wave` are launched, then await their registration. The clock stands
+   * still meanwhile: the sessions' signals cross the broker, and the verification window is virtual.
+   */
+  const registered = async (wave: string, n = 1) => {
+    await tickUntil(() => journal(wave).filter((e) => e.type === "agent_spawned").length >= n);
+    await event(wave, "agent_registered", n);
+    await waits.settled();
+  };
   const publishStatus = (id: string, type: string, payload: unknown = {}) =>
     agent.publish(
       buildTopic(NS, id, "status"),
@@ -179,10 +202,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     local = fakeHost(fake);
     const spec: RemoteHostSpec = {
       name: "box",
@@ -200,7 +220,9 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         b = fakeRemote(s, local, () => tunnelCalls.some((c) => c[3]?.startsWith(port)));
         b.onLaunch = (l) => {
           const [wave, task] = l.name.split(" ");
-          setTimeout(() => void signal(`${wave}-${task?.toLowerCase()}-implementer-1`), 20);
+          const session = signal(`${wave}-${task?.toLowerCase()}-implementer-1`);
+          sessions.add(session);
+          void session.finally(() => sessions.delete(session));
         };
         boxes.set(s.tunnel.remote_port, b);
       }
@@ -229,13 +251,13 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     };
     localClaudeJson = join(dir, "local-claude.json");
     writeFileSync(localClaudeJson, `${JSON.stringify({ projects: {} })}\n`);
-    clock = 1_000_000;
+    clock = fakeClock(1_000_000);
     writeFileSync(
       join(env.home, "config.yaml"),
       `hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${spec.worktree_root}\n    tunnel: { remote_port: 21883 }\n`,
     );
     daemon = await env.start({
-      now: () => clock,
+      clock,
       spawner: {
         host: local,
         hooksDir: "/opt/local-hooks",
@@ -243,11 +265,14 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         reapGraceMs: 150,
         remoteHost: (s) => boxFor(s),
         remoteExec: tunnelExec,
+        credentials: memoryCredentials(),
       },
     });
+    waits = journalWait(env.home, () => daemon);
   });
 
   afterEach(async () => {
+    await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
   });
@@ -257,12 +282,12 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     await submit("w1", "  T1: { issue: 42, host: box }\n");
     // The tunnel was only just started: not known either way until its ssh has stayed up.
     await daemon.tick();
-    await until(async () => (await task("w1", "T1"))?.why_waiting === "checking tunnel to dev@box");
+    expect((await task("w1", "T1"))?.why_waiting).toBe("checking tunnel to dev@box");
     expect(box.tunnelChecks).toBe(1); // only the port check before the forward was started
     expect(journal("w1").some((e) => e.data.code === "TUNNEL_DOWN")).toBe(false);
     // Past the settle time the check runs, and fails.
     await recheck();
-    await until(async () => (await task("w1", "T1"))?.why_waiting === "tunnel down to dev@box");
+    expect((await task("w1", "T1"))?.why_waiting).toBe("tunnel down to dev@box");
     expect(await task("w1", "T1")).toMatchObject({ stage: "queued", host: "box" });
     expect(box.launches).toHaveLength(0);
     expect(local.launches).toHaveLength(0);
@@ -274,7 +299,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
 
     box.tunnel = true;
     await recheck();
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     expect(box.launches).toHaveLength(1);
     expect(local.launches).toHaveLength(0);
     const t1 = await task("w1", "T1");
@@ -287,7 +312,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(identity).toMatchObject({
       agent_id: "w1-t1-implementer-1",
       broker_url: "mqtt://127.0.0.1:21883",
-      broker: { username: "w1-t1-implementer-1", password: "pw" },
+      broker: { username: "w1-t1-implementer-1", password: "pw-w1-t1-implementer-1" },
     });
     const launch = readFileSync(join(wt, ".volley", "launch.sh"), "utf-8");
     expect(launch).toContain("export VOLLEY_HOOKS_DIR='/opt/volley/packages/volley-hooks'");
@@ -314,13 +339,14 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
   it("a running agent is never touched when the tunnel goes down", async () => {
     box.tunnel = true;
     await submit("w1", "  T1: { issue: 42, host: box }\n");
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     const keysBefore = box.keys.length;
 
     box.tunnel = false;
     await recheck();
     await submit("w2", "  T1: { issue: 42, host: box }\n");
-    await until(async () => (await task("w2", "T1"))?.why_waiting === "tunnel down to dev@box");
+    await daemon.tick();
+    expect((await task("w2", "T1"))?.why_waiting).toBe("tunnel down to dev@box");
     // w1's agent: still supervised, not retired, no keys, no close, its stage unchanged.
     expect(journal("w1").some((e) => e.type === "agent_retired")).toBe(false);
     expect(box.keys.length).toBe(keysBefore);
@@ -342,7 +368,8 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       ),
       { qos: 1, retain: true },
     );
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_retired"));
+    await event("w1", "agent_retired");
+    await waits.settled();
 
     // cleanup --yes reaches the box again: kill the tmux session, remove the remote worktree.
     const fx = fakeExec();
@@ -401,9 +428,10 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(trustDecisionId(repo, "dev@box")).not.toBe(trustDecisionId(repo));
     // The local file (which trusts nothing) neither resolves nor re-opens it.
     for (let i = 0; i < 3; i++) {
-      clock += 60_000;
+      await clock.advance(60_000);
       await daemon.tick();
     }
+    await waits.settled();
     expect(opens()).toHaveLength(1);
     expect(journal("w1").some((e) => e.type === "decision_resolved")).toBe(false);
     expect(box.launches).toHaveLength(0);
@@ -416,7 +444,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(r.exitCode).toBe(0);
     expect(box.trustRecorded).toEqual([repo]);
     expect(readFileSync(localClaudeJson, "utf-8")).toBe(localBefore);
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     expect(box.launches).toHaveLength(1);
     expect(opens()).toHaveLength(1);
     expect(readFileSync(localClaudeJson, "utf-8")).toBe(localBefore);
@@ -428,10 +456,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     await submit("w1", "  T1: { issue: 42, host: box }\n");
     await tickUntil(() => journal("w1").some((e) => e.type === "decision_opened"));
     box.trusted = true; // the owner ran claude on the box and accepted the dialog
-    await tickUntil(() => {
-      clock += 60_000;
-      return journal("w1").some((e) => e.type === "agent_registered");
-    });
+    await registered("w1");
     expect(journal("w1").find((e) => e.type === "decision_resolved")?.data).toMatchObject({
       answer: "trusted",
       by: "claude-trust-dialog",
@@ -445,13 +470,14 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       "w1",
       "  T1: { issue: 42, host: box }\n  T2: { issue: 42, host: { type: ssh, name: box, tunnel: { remote_port: 2883 } } }\n",
     );
-    await until(() => boxes.size === 2);
+    await waits.settled();
+    expect(boxes.size).toBe(2);
     const box2 = boxes.get(2883) as FakeRemote;
     box.tunnel = true;
     box2.tunnel = false;
     await recheck(box2);
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
-    await until(async () => (await task("w1", "T2"))?.why_waiting === "tunnel down to dev@box");
+    await registered("w1");
+    expect((await task("w1", "T2"))?.why_waiting).toBe("tunnel down to dev@box");
     expect(tunnelCalls).toEqual([
       tunnelArgv("dev@box", 21883, env.broker.url),
       tunnelArgv("dev@box", 2883, env.broker.url),
@@ -465,7 +491,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
 
     box2.tunnel = true;
     await recheck(box2);
-    await tickUntil(() => journal("w1").filter((e) => e.type === "agent_registered").length === 2);
+    await registered("w1", 2);
     expect(box2.launches).toHaveLength(1);
     expect(box.launches).toHaveLength(1);
   });
@@ -473,14 +499,15 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
   it("a remote agent whose tunnel is down is not reaped until the tunnel is back", async () => {
     box.tunnel = true;
     await submit("w1", "  T1: { issue: 42, host: box }\n");
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     const id = "w1-t1-implementer-1";
     // The tunnel drops: the agent's connection dies and the broker fires its LWT.
     box.tunnel = false;
     await recheck();
     await publishStatus(id, "reaped", { reason: "lwt" });
     await tickUntil(() => journal("w1").some((e) => e.data.code === "REAP_DEFERRED"));
-    await new Promise((r) => setTimeout(r, 600)); // several reap graces
+    await clock.advance(600); // several reap graces
+    await waits.settled();
     expect(journal("w1").some((e) => e.type === "agent_retired")).toBe(false);
     expect(journal("w1").filter((e) => e.data.code === "REAP_DEFERRED")).toHaveLength(1);
     expect(journal("w1").find((e) => e.data.code === "REAP_DEFERRED")?.data).toMatchObject({
@@ -501,7 +528,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
   it("tunnel checks keep running while the wave is paused (a stale `up` must not let a reap through)", async () => {
     box.tunnel = true;
     await submit("w1", "  T1: { issue: 42, host: box }\n");
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     await daemon.recordEvent("w1", { type: "wave_paused", data: { by: "test" } });
     box.tunnel = false;
     await recheck(); // waits for the box's tunnel to be checked again
@@ -514,7 +541,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     tunnelMode = "fail";
     box.tunnel = true; // e.g. the box's own mosquitto holds the port
     await submit("w1", "  T1: { issue: 42, host: box }\n");
-    await tickUntil(() => journal("w1").some((e) => e.data.code === "TUNNEL_FORWARD_FAILED"), 8000);
+    await tickUntil(() => journal("w1").some((e) => e.data.code === "TUNNEL_FORWARD_FAILED"));
     const alarm = journal("w1").find((e) => e.data.code === "TUNNEL_FORWARD_FAILED")?.data;
     expect(alarm).toMatchObject({
       target: "dev@box",
@@ -528,7 +555,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     });
     await tickUntil(async () => (await task("w1", "T1"))?.why_waiting === "tunnel down to dev@box");
     expect(box.launches).toHaveLength(0);
-  }, 15_000);
+  });
 
   it("a box port something else already listens on is down: no tunnel, no spawn, until it is free", async () => {
     box.tunnel = true;
@@ -542,7 +569,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     ).toMatchObject({ reason: "port 21883 on dev@box is already in use", remote_port: 21883 });
 
     box.squatter = false;
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     expect(tunnelCalls).toEqual([tunnelArgv("dev@box", 21883, env.broker.url)]);
     expect(box.launches).toHaveLength(1);
   });
@@ -553,7 +580,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     writeFileSync(join(repo, ".volley", "brief-extra.md"), "LOCAL NOTES\n");
     box.files[join(repo, ".volley", "brief-extra.md")] = "Notes from the box clone.\n";
     await submit("w1", "  T1: { issue: 42, host: box }\n");
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await registered("w1");
     const wt = join(box.spec.worktree_root, "w1", "T1-implementer");
     const brief = readFileSync(join(wt, ".volley", "brief.md"), "utf-8");
     expect(brief).toContain("Notes from the box clone.");
@@ -567,8 +594,11 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     };
     await submit("w1", "  T1: { issue: 42, host: box }\n");
     await tickUntil(() => journal("w1").some((e) => e.data.code === "LAUNCH_FAILED"));
-    // Visible as a failed spawn with its retry (spawn_failed), never as a missing clone.
-    await tickUntil(() => journal("w1").some((e) => e.type === "spawn_failed"));
+    // Visible as a failed spawn with its retry (spawn_failed) and its decision, never as a missing
+    // clone. (The decision is opened after spawn_failed is journaled: await it, not the failure.)
+    await event("w1", "spawn_failed");
+    await event("w1", (e) => e.type === "decision_opened" && e.data.kind === "spawn_failed");
+    await waits.settled();
     const kinds = journal("w1")
       .filter((e) => e.type === "decision_opened")
       .map((e) => e.data.kind);
@@ -627,8 +657,9 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     await daemon.resolveDecision("w1", id, { answer: "retry", by: "coord-a" });
     // Without advancing the clock: the refusal's 30 s backoff must not hold the retry back.
     await daemon.tick();
-    await until(() => box.launches.length > 0, 3000);
-    await tickUntil(() => journal("w1").some((e) => e.type === "agent_registered"));
+    await waits.settled();
+    expect(box.launches).toHaveLength(1);
+    await event("w1", "agent_registered");
     expect(journal("w1").some((e) => e.type === "task_cancelled")).toBe(false);
   });
 });
@@ -659,7 +690,8 @@ describe("TunnelSupervisor", () => {
     });
     sup.ensure("dev@box", 21883, "mqtt://127.0.0.1:1883");
     sup.ensure("dev@box", 21883, "mqtt://127.0.0.1:1883");
-    await until(() => calls.length === 3);
+    await flushMicrotasks(); // the loop runs on promises only: fakes exit and sleep at once
+    expect(calls).toHaveLength(3);
     expect(calls[0]).toEqual([
       "ssh",
       "-N",
@@ -696,7 +728,8 @@ describe("TunnelSupervisor", () => {
     sup.ensure("dev@box", 21883, "mqtt://127.0.0.1:1883");
     sup.ensure("dev@box", 2883, "mqtt://127.0.0.1:1883");
     sup.ensure("dev@box", 2883, "mqtt://127.0.0.1:1883");
-    await until(() => calls.length === 2);
+    await flushMicrotasks();
+    expect(calls).toHaveLength(2);
     expect(sup.targets()).toEqual(["dev@box:21883", "dev@box:2883"]);
     expect(calls.map((c) => c[3])).toEqual(["21883:127.0.0.1:1883", "2883:127.0.0.1:1883"]);
     await sup.stop();
@@ -738,12 +771,14 @@ describe("TunnelSupervisor", () => {
     });
     expect(sup.health("dev@box", 21883)).toBe("ok"); // not supervised: the check decides
     sup.ensure("dev@box", 21883, "mqtt://127.0.0.1:1883");
-    await until(() => exits.length === 2);
+    await flushMicrotasks();
+    expect(exits).toHaveLength(2);
     expect(exits.map((x) => x.streak)).toEqual([1, 2]);
     expect(exits[1]).toMatchObject({ target: "dev@box", remotePort: 21883, code: 255 });
     expect(sup.health("dev@box", 21883)).toBe("failing");
     release();
-    await until(() => runs === 3);
+    await flushMicrotasks();
+    expect(runs).toBe(3);
     expect(sup.health("dev@box", 21883)).toBe("failing"); // up, but not for long yet
     clock += 1000;
     expect(sup.health("dev@box", 21883)).toBe("ok");

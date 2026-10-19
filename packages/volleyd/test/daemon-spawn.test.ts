@@ -11,9 +11,13 @@ import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent } from "../src/types";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
+import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 
 const ID = "w1-t1-implementer-1";
@@ -22,19 +26,20 @@ describe("daemon spawn loop", () => {
   let env: DaemonEnv;
   let agent: VolleyBroker;
   let host: FakeHost;
+  let creds: MemoryCredentials;
   let repo: string;
   let claudeJson: string;
   let daemon: Daemon;
+  /** The daemon's clock: reap graces and verification windows move only when the test says. */
+  let clock: FakeClock;
+  let waits: JournalWait;
+  /** The simulated session's publishes (teardown waits for them). */
+  const sessions = new Set<Promise<void>>();
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
-  const until = async (pred: () => boolean, ms = 5000) => {
-    const end = Date.now() + ms;
-    while (!pred()) {
-      if (Date.now() > end) throw new Error("timed out waiting");
-      await new Promise((r) => setTimeout(r, 25));
-    }
-  };
+  /** The n-th journal event matching `match`, awaited as the daemon appends it. */
+  const event = (match: EventMatch, n = 1) => waits.event("w1", match, n);
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
     agent.publish(
       topic,
@@ -67,10 +72,7 @@ describe("daemon spawn loop", () => {
       })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     // The implementer's claimed artifacts (T6 verifies them before retiring it): pushed, one PR
     // for its branch against the release branch, CI green on the head, release branch current.
     const wt = join(env.home, "wt", "w1", "T1-implementer");
@@ -102,10 +104,11 @@ describe("daemon spawn loop", () => {
         ]),
       })
       .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
+    creds = memoryCredentials();
     host = fakeHost(fake);
     // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
     host.onLaunch = () => {
-      setTimeout(async () => {
+      const session = (async () => {
         await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
         await pub(registryTopic(ID), "registered", "_system/registry", {
           capabilities: [],
@@ -122,16 +125,22 @@ describe("daemon spawn loop", () => {
           { source: "harness-hook", seq: 1, hook_event: "SessionStart" },
           false,
         );
-      }, 20);
+      })();
+      sessions.add(session);
+      void session.finally(() => sessions.delete(session));
     };
+    clock = fakeClock(Date.now());
     daemon = await env.start({
+      clock,
       spawner: {
         host,
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
+        credentials: creds,
       },
     });
+    waits = journalWait(env.home, () => daemon);
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
       wave,
@@ -142,13 +151,15 @@ describe("daemon spawn loop", () => {
   }
 
   afterEach(async () => {
+    await Promise.all([...sessions]);
     await agent.disconnect();
     await env.cleanup();
   });
 
   it("spawns the admitted implementer, verifies it through the hooks, refuses a second spawn, retires on done", async () => {
     await setup();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
+    await waits.settled();
     const types = journal().map((e) => e.type);
     expect(types).toEqual(
       expect.arrayContaining([
@@ -187,7 +198,7 @@ describe("daemon spawn loop", () => {
     // done → retire: credentials revoked, retained records cleared, lock released.
     await pub(buildTopic(NS, ID, "result"), "result", "result", { summary: "ok" });
     await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
-    await until(() => journal().some((e) => e.type === "agent_retired"));
+    await event("agent_retired");
     // The cleared status/result payloads are kept in the journal.
     expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: ID,
@@ -198,15 +209,15 @@ describe("daemon spawn loop", () => {
     // Retired only after its artifacts were verified; `[implement]` then ends at the gate.
     const order = journal().map((e) => e.type);
     expect(order.indexOf("artifact_verified")).toBeLessThan(order.indexOf("agent_retired"));
-    await until(() => journal().some((e) => e.data.stage === "merge_ready"));
+    await event((e) => e.data.stage === "merge_ready");
+    // The state that stage change published is on the broker once the daemon is idle.
+    await waits.settled();
     const gated = (await env.retained("volley/_waves/w1/state")) as {
       payload: { gates: string[]; tasks: { evidence_path?: string }[] };
     };
     expect(gated.payload.gates).toEqual(["T1"]);
     expect(existsSync(gated.payload.tasks[0]?.evidence_path as string)).toBe(true);
-    expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([
-      ["volley", "auth", "rm-agent", ID],
-    ]);
+    expect(creds.revoked).toEqual([ID]);
     expect(await env.retained(registryTopic(ID))).toBeNull();
     expect(await env.retained(buildTopic(NS, ID, "status"))).toBeNull();
     expect(await env.retained(buildTopic(NS, ID, "result"))).toBeNull();
@@ -230,7 +241,8 @@ describe("daemon spawn loop", () => {
 
   it("cleanup skips worktrees whose agent is not retired", async () => {
     await setup();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
+    await waits.settled();
     const io = makeBufferIO();
     const fx = fakeExec();
     await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io);
@@ -240,19 +252,26 @@ describe("daemon spawn loop", () => {
 
   it("reaped is not retired while the session comes back; reaped and quiet past the grace is", async () => {
     await setup();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
+    await waits.settled();
     const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
-    // An LWT from a network blip, then the MCP server reconnects with a fresh spawning.
+    // An LWT from a network blip: the reap is held for its grace (300 ms on the daemon's clock).
     await pub(buildTopic(NS, ID, "status"), "reaped", "status", { reason: "lwt" });
-    await new Promise((r) => setTimeout(r, 50));
+    await clock.armed(300);
+    const held = clock.pending();
+    // Then the MCP server reconnects with a fresh spawning: the held reap is dropped.
     await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
-    await new Promise((r) => setTimeout(r, 600));
+    await eventually(() => clock.pending() < held);
+    await clock.advance(600); // two graces
+    await waits.settled();
     expect(journal().some((e) => e.type === "agent_retired")).toBe(false);
-    expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([]);
+    expect(creds.revoked).toEqual([]);
     expect(existsSync(lock)).toBe(true);
     // Reaped for good: retired after the grace.
     await pub(buildTopic(NS, ID, "status"), "reaped", "status", { reason: "lwt" });
-    await until(() => journal().some((e) => e.type === "agent_retired"));
+    await clock.armed(300);
+    await clock.advance(300);
+    await event("agent_retired");
     expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: ID,
       status: "reaped",
@@ -262,8 +281,8 @@ describe("daemon spawn loop", () => {
 
   it("an untrusted repo opens a published repo_untrusted decision; answering trust records it and spawns", async () => {
     await setup({ trusted: false });
-    await until(() => journal().some((e) => e.type === "decision_opened"));
-    const opened = journal().find((e) => e.type === "decision_opened");
+    const opened = await event("decision_opened");
+    await waits.settled();
     const id = opened?.data.decision_id as string;
     expect(opened?.data).toMatchObject({ kind: "repo_untrusted", repo });
     expect(host.launches).toHaveLength(0);
@@ -277,13 +296,14 @@ describe("daemon spawn loop", () => {
       hasTrustDialogAccepted: true,
     });
     await daemon.tick();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
     expect(host.launches).toHaveLength(1);
   });
 
   it("a repo_untrusted decision raised from a pane resolves on the next tick once the repo is trusted", async () => {
     await setup();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
+    await waits.settled();
     // As verify does on a trust-dialog screen: the task is past `queued`, so no spawn re-checks.
     const d = await daemon.openDecision("w1", {
       kind: "repo_untrusted",
@@ -304,7 +324,8 @@ describe("daemon spawn loop", () => {
 
   it("stop interrupts the agent in its workspace; the kill switch refuses spawns", async () => {
     await setup();
-    await until(() => journal().some((e) => e.type === "agent_registered"));
+    await event("agent_registered");
+    await waits.settled();
     expect((await runCli(["stop", "w1", "--by", "tester"], env.env)).exitCode).toBe(0);
     expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
     expect((await runCli(["stop", "--all", "--by", "tester"], env.env)).exitCode).toBe(0);

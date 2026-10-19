@@ -46,6 +46,15 @@
 # brief_preface_max_bytes: 16384  # largest brief preface; a larger one refuses run / the spawn
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+# dynsec_batch_ms: 50           # window collecting simultaneous mints / deletes into ONE broker
+#                               # control message (one Dynamic Security state-file rewrite)
+# credential_sweep_interval_s: 600  # seconds between sweeps deleting logins of agents no longer live
+
+# Claude account profiles (README "Claude accounts"): the account an agent runs under when its
+# task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or
+# most_headroom (the primary until usage metering exists). null: primary.
+# claude:
+#   default_account: null
 
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and

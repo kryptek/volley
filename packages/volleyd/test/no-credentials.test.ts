@@ -1,0 +1,73 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
+import { describe, expect, it } from "vitest";
+import { CREDENTIAL_ENV } from "../src/claude/signin-script";
+
+/**
+ * Grep-guard: volleyd never reads, stores or forwards a Claude credential (the accounts spike,
+ * sections (a) and (b)). No source line outside a comment names where Claude Code keeps one — the
+ * profile's `.credentials.json` (its fallback when the Keychain is locked), the Keychain item
+ * `Claude Code-credentials[-<hash>]` or the `security` calls that read it — or the
+ * `setup-token` flow, which prints a bearer token. The credential env variables appear only in
+ * CREDENTIAL_ENV, which launch.sh and signin.sh `unset`.
+ */
+
+const SRC = new URL("../src/", import.meta.url).pathname;
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    d.isDirectory()
+      ? sourceFiles(join(dir, d.name))
+      : d.name.endsWith(".ts")
+        ? [join(dir, d.name)]
+        : [],
+  );
+}
+
+const TOKEN_LOCATIONS = [
+  /\.credentials\.json/,
+  /Claude Code-credentials/,
+  /find-generic-password|find-internet-password|dump-keychain/,
+  /\bsecurity\b["'`,\s]+(?:find|dump|export)/,
+  /setup-token/,
+  /CLAUDE_SECURESTORAGE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY/,
+];
+
+/** Code lines (comments stripped) that name a token location, as `file:line: text`. */
+function offenders(file: string): string[] {
+  const rel = relative(SRC, file);
+  return readFileSync(file, "utf-8")
+    .split("\n")
+    .flatMap((line, i) => {
+      if (/^\s*(\/\*|\*|\/\/)/.test(line)) return [];
+      const code = line.replace(/\/\/.*$/, "");
+      return TOKEN_LOCATIONS.some((re) => re.test(code)) ? [`${rel}:${i + 1}: ${line.trim()}`] : [];
+    });
+}
+
+describe("no Claude credential handling in volleyd", () => {
+  it("the detector catches what it guards against", () => {
+    const hits = (line: string) => TOKEN_LOCATIONS.some((re) => re.test(line));
+    expect(hits('readFileSync(join(dir, ".credentials.json"))')).toBe(true);
+    expect(hits('exec(["security", "find-generic-password", "-s", svc])')).toBe(true);
+    expect(hits("`Claude Code-credentials-${hash}`")).toBe(true);
+    expect(hits('exec(["claude", "setup-token"])')).toBe(true);
+    expect(hits("env.CLAUDE_CODE_OAUTH_TOKEN = token")).toBe(true);
+    expect(hits('exec(["claude", "auth", "status"])')).toBe(false);
+  });
+
+  it("src/ names no token location; the credential env lives only in CREDENTIAL_ENV", () => {
+    // CREDENTIAL_ENV's own entries (the list launch.sh and signin.sh unset) are the one exception.
+    const listed = new Set(CREDENTIAL_ENV.map((k) => `claude/signin-script.ts: "${k}",`));
+    const rest = sourceFiles(SRC)
+      .flatMap(offenders)
+      .filter((o) => !listed.has(o.replace(/:\d+:/, ":")));
+    expect(rest).toEqual([]);
+    expect(CREDENTIAL_ENV).toEqual([
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ]);
+  });
+});

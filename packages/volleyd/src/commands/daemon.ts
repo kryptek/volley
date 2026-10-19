@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
-import { daemonAuth } from "../broker-auth";
+import { daemonAdminAuth, daemonAuth } from "../broker-auth";
+import { dateOf, systemClock } from "../clock";
 import { defaultsFor } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
@@ -13,10 +14,12 @@ Run the supervisor in the foreground until SIGINT/SIGTERM. Exits 1 if the broker
 lost (launchd then restarts it). State lives in $VOLLEYD_HOME (default ~/.volley/volleyd);
 only one daemon may use a home at a time. \`volleyd install\` runs this under launchd instead.
 Broker credentials: $VOLLEYD_HOME/broker.json (mode 0600; \`volley auth init --volleyd-file\`),
-else VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD, else anonymous.
+else VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD, else anonymous. Agent logins are minted and
+deleted with the broker's Dynamic Security admin login, $VOLLEYD_HOME/dynsec-admin.json (also
+written by --volleyd-file), else $VOLLEY_AUTH_DIR/admin.json; the broker must be mosquitto >= 2.1.
 
   --no-spawn   Admit tasks but spawn nothing (the pre-spawn behaviour)
-  --no-mint    Do not mint per-agent broker credentials (an open, anonymous broker)
+  --no-mint    Do not mint per-agent broker logins (an open, anonymous broker)
 `;
 
 export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -55,7 +58,8 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       ...daemonStartOptions(target, env, spawner),
       // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
       // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
-      log: (line) => io.stdout(`${new Date().toISOString()} ${line}\n`),
+      // real clock: the log line's timestamp, for the human reading the log
+      log: (line) => io.stdout(`${dateOf(systemClock).toISOString()} ${line}\n`),
     });
   } catch (e) {
     io.stderr(`volleyd daemon: ${e instanceof Error ? e.message : String(e)}\n`);
@@ -91,10 +95,13 @@ export function daemonStartOptions(
 ): DaemonOptions {
   const home = volleydHome(env);
   const auth = daemonAuth(home, env);
+  // Minting needs the dynsec admin login; `--no-mint` (an open broker) needs none.
+  const admin = spawner?.mintCredentials === false ? null : daemonAdminAuth(home, env);
   return {
     ...target,
     home,
     ...(auth !== null ? { auth } : {}),
+    ...(admin !== null ? { dynsecAdmin: admin } : {}),
     ...(spawner !== undefined ? { spawner } : {}),
     // worktree_root defaults to $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set.
     configDefaults: defaultsFor(env),

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CREDENTIAL_ENV } from "./claude/signin-script";
 
 /** `packages/volley-hooks` in this checkout: `$VOLLEY_HOOKS_DIR` for every launched agent. */
 export const HOOKS_DIR = fileURLToPath(new URL("../../volley-hooks", import.meta.url));
@@ -44,6 +45,11 @@ export interface LaunchScriptVars {
   worktree: string;
   /** Extra exports (a remote host's VOLLEY_BROKER_URL / _NAMESPACE / _AGENT_ID, for tooling). */
   env?: Record<string, string>;
+  /**
+   * The Claude account profile the agent runs under (`CLAUDE_CONFIG_DIR`); absent: the primary
+   * (Claude Code's default profile).
+   */
+  claudeConfigDir?: string;
 }
 
 /**
@@ -55,7 +61,9 @@ export interface LaunchScriptVars {
  * value and `--` ends option parsing, so the prompt (last) is never swallowed as a config. The
  * brief is read from `.volley/brief.md` at launch, so it never appears in any argv volleyd
  * builds. Identity comes from `.volley/agent.json`; `env` exports (remote hosts) are for tooling
- * that reads env only — the identity file wins.
+ * that reads env only — the identity file wins. Under a Claude account profile it exports
+ * `CLAUDE_CONFIG_DIR` and unsets every credential variable, so the profile's own login is the one
+ * claude uses.
  */
 export function renderLaunchScript(v: LaunchScriptVars): string {
   return [
@@ -64,6 +72,9 @@ export function renderLaunchScript(v: LaunchScriptVars): string {
     "set -euo pipefail",
     'cd "$(dirname "${BASH_SOURCE[0]}")/.."',
     `export VOLLEY_HOOKS_DIR=${shq(v.hooksDir)}`,
+    ...(v.claudeConfigDir !== undefined
+      ? [`export CLAUDE_CONFIG_DIR=${shq(v.claudeConfigDir)}`, `unset ${CREDENTIAL_ENV.join(" ")}`]
+      : []),
     ...Object.entries(v.env ?? {}).map(([k, val]) => `export ${k}=${shq(val)}`),
     `exec claude --dangerously-skip-permissions --model ${shq(v.model)} --settings ${shq(hooksSettingsPath(v.hooksDir))} --strict-mcp-config --mcp-config=${shq(mcpConfigPath(v.worktree))} --name ${shq(v.agentId)} -- "$(cat .volley/brief.md)"`,
     "",

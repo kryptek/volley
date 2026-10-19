@@ -3,10 +3,10 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { Appearance } from "../src/look/Appearance";
 import { BG_NO_WEBGL_NOTE, degradeLook, hasWebGL, needsWebGL } from "../src/look/Background";
 import { BACKGROUNDS, NO_BACKGROUND } from "../src/look/backgrounds";
 import { LOOK0, LOOK_STORAGE_KEY } from "../src/look/useLook";
+import { Appearance } from "../src/settings/Appearance";
 import { DeskStoreProvider } from "../src/store/context";
 
 /** The two React Bits backgrounds that draw with a 2D canvas or the DOM, not WebGL. */
@@ -77,10 +77,11 @@ describe("App without WebGL", () => {
 
     fireEvent.click(
       within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
-        name: "Appearance",
+        name: "Settings",
       }),
     );
-    const panel = within(screen.getByRole("complementary", { name: "Appearance" }));
+    const panel = within(screen.getByRole("dialog", { name: "Settings" }));
+    fireEvent.click(panel.getByRole("button", { name: "Appearance" }));
     const grid = within(panel.getByRole("group", { name: "Backgrounds" }));
     expect(grid.getAllByRole("button").map((b) => b.textContent)).toEqual([
       "Grid Motion",
@@ -92,10 +93,10 @@ describe("App without WebGL", () => {
       "true",
     );
     expect(panel.getByText(BG_NO_WEBGL_NOTE)).toBeInTheDocument();
-    const style = within(panel.getByRole("group", { name: "Window style" }));
-    expect(style.queryByRole("button", { name: "Liquid glass" })).toBeNull();
-    expect(style.getByRole("button", { name: "Frosted glass" })).toHaveAttribute(
-      "aria-pressed",
+    const style = within(panel.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.queryByRole("radio", { name: "Liquid glass" })).toBeNull();
+    expect(style.getByRole("radio", { name: "Frosted glass" })).toHaveAttribute(
+      "aria-checked",
       "true",
     );
     // The saved look is untouched: a browser with WebGL still gets Aurora and liquid glass.
@@ -125,13 +126,11 @@ describe("App without WebGL", () => {
     expect(container.querySelector(".world .win-glass")).not.toBeNull();
   });
 
-  it("the Appearance panel lists everything when WebGL is there", () => {
-    render(
-      <Appearance look={LOOK0} setLook={() => {}} onClose={() => {}} onArrange={() => {}} webgl />,
-    );
+  it("Settings › Appearance lists everything when WebGL is there", () => {
+    render(<Appearance look={LOOK0} setLook={() => {}} webgl />);
     const grid = within(screen.getByRole("group", { name: "Backgrounds" }));
     expect(grid.getAllByRole("button")).toHaveLength(BACKGROUNDS.length);
     expect(screen.queryByText(BG_NO_WEBGL_NOTE)).toBeNull();
-    expect(screen.getByRole("button", { name: "Liquid glass" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Liquid glass" })).toBeInTheDocument();
   });
 });

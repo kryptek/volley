@@ -12,10 +12,24 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
+import {
+  AUTH_CHANNEL,
+  AUTH_OPS_FILTER,
+  type AuthOutcome,
+  type AuthReply,
+  TOKEN_REDEEM_FILTER,
+  accountOp,
+  authReplyTopic,
+  isValidCorrelationId,
+  listAccounts,
+  redeemToken,
+  tokenReplyTopic,
+} from "./accounts";
 import {
   type AdmissionState,
   type AdmissionSummary,
@@ -27,6 +41,9 @@ import {
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
+import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
+import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
+import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
@@ -52,6 +69,7 @@ import {
   runningAgents,
   steerTarget,
 } from "./controls";
+import { CredentialSweeper, recounted } from "./credential-sweep";
 import {
   type DecisionInput,
   type DecisionPayload,
@@ -66,6 +84,7 @@ import {
   resolveEvent,
   writeDecisionsFile,
 } from "./decisions";
+import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintModelSwitchToken } from "./fence";
 import type { Host } from "./hosts/host";
@@ -83,7 +102,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import { grantAckTo, revokeCredentials } from "./identity";
+import type { AgentCredentials, CredentialStore } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -135,15 +154,20 @@ import {
   readBriefPreface,
 } from "./brief";
 import {
-  type ClockSample,
+  type Clock,
   type ClockState,
   type PendingReap,
+  type TimerHandle,
+  dateOf,
   heartbeatSuppresses,
   holdReap,
   inWakeGrace,
   initialClock,
   reapVerdict,
   sampleClock,
+  sampleOf,
+  systemClock,
+  withNow,
 } from "./clock";
 import { HOOKS_DIR, MCP_ENTRY } from "./launch";
 import {
@@ -163,7 +187,7 @@ import {
   trackAgent,
   whyWaiting,
 } from "./liveness";
-import { type AgentProbe, FINAL_STATUS, lockPath, readLock } from "./locks";
+import { type AgentProbe, FINAL_STATUS, TERMINAL_STATUS, lockPath, readLock } from "./locks";
 import {
   type ReconcileProbes,
   type ReconcileTarget,
@@ -185,7 +209,7 @@ import {
   switchModel,
   switchesSent,
 } from "./recovery";
-import { retireAgent } from "./retire";
+import { type ReapDeps, reapAndRevoke, retireAgent, withJointRevokes } from "./retire";
 import { ScreenPublisher } from "./screen-publisher";
 import {
   type SpawnDecision,
@@ -255,18 +279,48 @@ export interface DaemonOptions {
    * worktree; otherwise (or before any spawn) `<home>/waves/<wave>/tasks/<task>`.
    */
   taskDir?: (wave: WaveId, task: TaskId) => string;
-  /** Clock for the screen publisher's capture schedule (tests drive it with `tickScreens()`). */
+  /**
+   * Every daemon timer and wall-clock read (clock.ts). Default: real timers. Tests pass a fake
+   * one (test/helpers/fake-clock.ts) and move time by hand.
+   */
+  clock?: Clock;
+  /** Wall clock override on top of `clock` (tests that only fix the time). */
   now?: () => number;
   /** The config's bottom layer (default CONFIG_DEFAULTS; `volleyd daemon`: `defaultsFor` env). */
   configDefaults?: Tunables;
   /** Overrides of the screen publisher's slow/hard read bounds (tests; ms). */
   screenTimeouts?: { slowMs?: number; readTimeoutMs?: number };
-  /** Monotonic + wall clock sampled every tick for sleep/wake detection (tests inject a jump). */
-  clock?: () => ClockSample;
   /** Override of the model-switch verification window (tests; ms). */
   recoveryTimeouts?: { modelSwitchVerifyMs?: number };
+  /**
+   * The broker's Dynamic Security admin login (`$VOLLEYD_HOME/dynsec-admin.json`): volleyd keeps
+   * one control connection with it to mint, delete and sweep agent logins. Absent: no logins are
+   * minted (a spawn that needs one fails with CREDENTIALS_FAILED) and nothing is swept.
+   */
+  dynsecAdmin?: BrokerAuth;
+  /** The credential sweep's interval in ms (tests; default `credential_sweep_interval_s`). */
+  credentialSweepMs?: number;
+  /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
+  authExec?: ExecFn;
+  /**
+   * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
+   * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
+   */
+  tokenPruneMs?: number;
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
+  /**
+   * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
+   * primary profile's directory (default `~/.claude`), the exec sign-ins run through (default
+   * the fenced exec) and the sign-in poll / timeout (tests).
+   */
+  claude?: {
+    root?: string;
+    primaryDir?: string;
+    exec?: ExecFn;
+    signinPollMs?: number;
+    signinTimeoutMs?: number;
+  };
 }
 
 /** How the daemon spawns agents. Every field has a production default. */
@@ -279,8 +333,13 @@ export interface SpawnerOptions {
   hooksDir?: string;
   /** volley-mcp's entry point for `.volley/mcp.json` (default: the one in this checkout). */
   mcpEntry?: string;
-  /** Mint per-agent broker credentials with `volley auth add-agent` (default true). */
+  /** Mint per-agent broker logins (default true). */
   mintCredentials?: boolean;
+  /**
+   * Where agent logins come from (tests). Default: volleyd's Dynamic Security control
+   * connection, when `DaemonOptions.dynsecAdmin` is set.
+   */
+  credentials?: CredentialStore;
   briefsDir?: string;
   /**
    * How long an agent whose status is `reaped` (its LWT) stays supervised before it is retired,
@@ -291,6 +350,16 @@ export interface SpawnerOptions {
   remoteHost?: (spec: RemoteHostSpec) => RemoteHost;
   /** The exec remote hosts and their tunnels run with (default: the fenced exec). */
   remoteExec?: ExecFn;
+}
+
+/** How the pipeline (or an account move) starts a spawn (startSpawn). */
+interface SpawnPipelineOptions {
+  start?: SpawnStart;
+  files?: Record<string, string>;
+  /** An account move's resume note, appended to the brief. */
+  resumeNote?: string;
+  /** An account move of a pipeline role: the attempt whose worktree it continues in. */
+  worktreeAttempt?: number;
 }
 
 /** A spawned agent the daemon watches until it is retired. */
@@ -309,7 +378,7 @@ interface Supervised {
   minted: boolean;
   workspace: string;
   /** Armed while the status is `reaped`: retires the agent unless it comes back first. */
-  reapTimer?: ReturnType<typeof setTimeout> | undefined;
+  reapTimer?: TimerHandle | undefined;
   /** The `reaped` status being re-verified (clock.ts). */
   pendingReap?: PendingReap | undefined;
   /** `wall_time` of a `reaped` status a heartbeat suppressed: never accepted, even re-delivered. */
@@ -332,8 +401,6 @@ const SLOT_OF: Record<string, DecisionSlot> = {
   hooks_silent: "silent",
   screen_static: "silent",
 };
-
-const defaultClock = (): ClockSample => ({ mono: performance.now(), wall: Date.now() });
 
 const secondsMs = (s: number) => s * 1000;
 
@@ -369,10 +436,7 @@ export type PressureSource = (ctx: {
  * A repo's CI queue is re-sampled at most every `ci_queue_sample_ms` (it spends GitHub API
  * quota); ticks in between reuse its last sample.
  */
-export function systemPressure(
-  exec: ExecFn = realExec,
-  now: () => number = Date.now,
-): PressureSource {
+export function systemPressure(exec: ExecFn, now: () => number): PressureSource {
   const ciCache = new Map<string, { at: number; sample: Promise<Sample> }>();
   const ciQueue = (repo: string, timeout: number) => {
     const t = now();
@@ -532,6 +596,16 @@ async function assertNotRunning(opts: DaemonOptions): Promise<void> {
  */
 export class Daemon {
   private readonly broker = new VolleyBroker();
+  /** The control connection to the broker's Dynamic Security plugin (dynsec.ts), if any. */
+  private readonly dynsec: DynsecControl | undefined;
+  /** Agent logins: minted on spawn, deleted on retire / stop / sweep. */
+  private readonly credentials: CredentialStore | undefined;
+  private readonly sweeper: CredentialSweeper | undefined;
+  private sweepTimer: TimerHandle | undefined;
+  /** Re-counts the agent logins for `status` (CredentialSweeper.refreshSoon). */
+  private countTimer: TimerHandle | undefined;
+  /** The namespace each swept candidate's records live in (found while judging liveness). */
+  private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
@@ -542,7 +616,7 @@ export class Daemon {
   private readonly system: Journal;
   /** `stop --all` engaged: every wave admits nothing and `run` is refused until `resume --all`. */
   private killSwitch: boolean;
-  private readonly acks = new AckTracker();
+  private readonly acks: AckTracker;
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
@@ -551,7 +625,7 @@ export class Daemon {
    * When this process started. `lastSeen` is in memory only, so for `claim` every owner counts
    * as seen at least at daemon start: a restart never makes a live owner instantly claimable.
    */
-  private readonly startedAt = Date.now();
+  private readonly startedAt: number;
   /** Subscriptions released on `stop` (never the mailbox: it lives in the persistent session). */
   private readonly unsubscribers: (() => Promise<void>)[] = [];
   private leases: LeaseBook;
@@ -584,10 +658,12 @@ export class Daemon {
   private sampling = false;
   private readonly log: (line: string) => void;
   private queue: Promise<unknown> = Promise.resolve();
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private watchdog: ReturnType<typeof setInterval> | undefined;
-  private screenTimer: ReturnType<typeof setInterval> | undefined;
+  private timer: TimerHandle | undefined;
+  private watchdog: TimerHandle | undefined;
+  private screenTimer: TimerHandle | undefined;
   private running = false;
+  /** Spawn launch halves and journal appends (with their publishes) in flight: `settled`. */
+  private readonly inflight = new Set<Promise<unknown>>();
   /** Spawns between start and launch, by `<wave>/<task>/<role>`. */
   private readonly spawning = new Set<string>();
   /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
@@ -600,6 +676,13 @@ export class Daemon {
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
   private readonly deferred = new Set<string>();
+  /** Answered auth requests by `<topic>/<correlation_id>`, for QoS 1 redelivery. */
+  private readonly authAnswered = new Map<string, AuthReply>();
+  /** When each account last sent an auth request (account_list's `last_seen`). */
+  private readonly authSeen = new Map<string, string>();
+  private pruneTimer: TimerHandle | undefined;
+  /** The last token-prune failure logged, so a broker without `volley auth` logs it once. */
+  private pruneError: string | null = null;
   /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
   private readonly screens: ScreenPublisher;
   /** Remote hosts (T15) by resolved spec, their reverse tunnels and tunnel checks. */
@@ -614,10 +697,20 @@ export class Daemon {
   private tunnelsStopped: Promise<void> = Promise.resolve();
   /** Remote trust re-reads for open repo_untrusted decisions: when each last started. */
   private readonly trustChecks = new Map<string, { at: number; inFlight: boolean }>();
+  /** Claude account profiles: registry, sign-ins, sharing (src/claude/service.ts). */
+  private readonly claude: ClaudeService;
+  /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
+  private readonly moving = new Set<string>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
   private clock: ClockState = initialClock();
-  /** Liveness clock (epoch ms). */
+  /** `onJournal` listeners. */
+  private readonly journalListeners = new Set<(wave: WaveId, event: JournalEvent) => void>();
+  /** Every timer and wall-clock read (DaemonOptions.clock). */
+  private readonly time: Clock;
+  /** Liveness clock (epoch ms): `time.now`. */
   private readonly now: () => number;
+  /** The admission samplers (one CI-queue cache across ticks), on the daemon's clock. */
+  private readonly samplePressure: PressureSource;
   private resolveClosed!: (e: Error) => void;
   /**
    * Resolves (never rejects) with the reason when the daemon dies on its own — today, a lost
@@ -633,18 +726,79 @@ export class Daemon {
     private readonly releaseLock: () => void,
   ) {
     this.log = opts.log ?? (() => {});
-    this.now = opts.now ?? Date.now;
+    // real clock: the default of DaemonOptions.clock
+    this.time = withNow(opts.clock ?? systemClock, opts.now);
+    this.now = this.time.now;
+    this.samplePressure = opts.pressure ?? systemPressure(realExec, this.now);
+    this.startedAt = this.now();
+    this.acks = new AckTracker(this.time);
     this.system = Journal.open(join(opts.home, "waves", SYSTEM_WAVE));
+    this.observeJournal(SYSTEM_WAVE, this.system);
     this.config = ConfigStore.load({
       home: opts.home,
       system: this.system,
+      now: () => dateOf(this.time),
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
+    if (opts.spawner?.credentials !== undefined) {
+      this.credentials = opts.spawner.credentials;
+    } else if (opts.dynsecAdmin !== undefined) {
+      this.dynsec = new DynsecControl({
+        connect: brokerControl(opts.brokerUrl, opts.dynsecAdmin),
+        batchMs: () => this.config.get("dynsec_batch_ms") as number,
+        binaryVersion: async () => {
+          const r = await realExec(["mosquitto", "-h"]).catch(() => null);
+          return r === null ? null : `${r.stdout}\n${r.stderr}`;
+        },
+        log: this.log,
+        clock: this.time,
+      });
+      this.credentials = new DynsecCredentials(this.dynsec, this.time);
+    }
+    if (this.credentials !== undefined && opts.spawner?.mintCredentials !== false) {
+      const store = this.credentials;
+      this.sweeper = new CredentialSweeper(
+        {
+          credentials: store,
+          live: (candidates) => this.liveAgents(candidates),
+          reap: (id) =>
+            reapAndRevoke(id, this.sweepNamespaces.get(id) ?? this.opts.namespace, this.reapDeps()),
+          journal: (ev) => this.appendSystem(ev),
+          graceMs: () => secondsMs(this.config.get("spawn_timeout_s") as number),
+          now: () => this.time.now(),
+        },
+        {
+          live: 0,
+          swept: this.system
+            .readAll()
+            .filter((e) => e.type === "credentials_swept")
+            .reduce((n, e) => n + ((e.data.agent_ids as unknown[] | undefined)?.length ?? 0), 0),
+        },
+      );
+      const sweeper = this.sweeper;
+      this.credentials = recounted(store, () => sweeper.refreshSoon());
+    }
+    this.claude = new ClaudeService({
+      root: opts.claude?.root ?? claudeRoot(),
+      ...(opts.claude?.primaryDir !== undefined ? { primaryDir: opts.claude.primaryDir } : {}),
+      primaryJson: this.claudeJsonPath,
+      exec: opts.claude?.exec ?? realExec,
+      clock: this.time,
+      publish: (topic, e) => this.publish(topic, this.envelope(SIGNIN_CHANNEL, e.type, e), false),
+      journal: (ev) => this.appendSystem(ev),
+      log: this.log,
+      ...(opts.claude?.signinPollMs !== undefined
+        ? { signinPollMs: opts.claude.signinPollMs }
+        : {}),
+      ...(opts.claude?.signinTimeoutMs !== undefined
+        ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
+        : {}),
+    });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
       publish: (topic, payload) => this.broker.publish(topic, payload, { qos: 0, retain: true }),
-      ...(opts.now !== undefined ? { now: opts.now } : {}),
+      clock: this.time,
       ...opts.screenTimeouts,
       onStale: (agentId) => {
         const a = this.supervised.get(agentId);
@@ -655,11 +809,11 @@ export class Daemon {
     this.tunnels = new TunnelSupervisor({
       exec: opts.spawner?.remoteExec ?? realExec,
       log: this.log,
-      now: opts.now ?? Date.now,
+      clock: this.time,
       onExit: (x) => this.onTunnelExit(x),
     });
     this.tunnelChecks = new TunnelChecks({
-      now: opts.now ?? Date.now,
+      now: this.now,
       log: this.log,
       onChange: (key, status) => {
         // A check that lands after shutdown changes nothing.
@@ -677,6 +831,7 @@ export class Daemon {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
       this.waves.set(wave, log);
+      this.observeJournal(wave, log.journal);
       this.config.setWaveOverrides(wave, log.record.overrides);
       this.issueFiles.set(wave, journaledIssueFiles(log.journal.readAll()));
       // The backoff carries over a restart: a retry is due when the journal said it was, and
@@ -759,6 +914,19 @@ export class Daemon {
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
       ...authFields(this.opts.auth),
     });
+    if (this.dynsec !== undefined) {
+      // Refuse a broker older than 2.1 at start (BrokerVersionError ends `start`). Any other
+      // failure only delays minting: the control connection reconnects on next use.
+      try {
+        await this.dynsec.open();
+        this.log(`dynsec: control connection up (mosquitto ${this.dynsec.version})`);
+      } catch (e) {
+        if (e instanceof BrokerVersionError) throw e;
+        this.log(
+          `dynsec: control connection failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
     this.running = true;
 
     await this.publish(this.statusTopic, this.envelope("status", "spawning", {}), true);
@@ -768,7 +936,7 @@ export class Daemon {
         ...this.envelope("_system/registry", "registered", {
           capabilities: ["supervisor"],
           cwd: this.opts.home,
-          started_at: new Date().toISOString(),
+          started_at: dateOf(this.time).toISOString(),
         }),
         namespace,
       },
@@ -841,6 +1009,8 @@ export class Daemon {
     const legacyProgress = buildTopic(this.opts.namespace, "+", "progress");
     await (await this.broker.subscribeStream(legacyProgress, () => {}))();
     void this.leaseRequestLoop();
+    void this.drainLoop(AUTH_OPS_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
+    void this.drainLoop(TOKEN_REDEEM_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
     this.reconciling = this.reconcileAll().catch((e: unknown) =>
       this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`),
@@ -854,12 +1024,32 @@ export class Daemon {
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) {
-      this.timer = setInterval(() => void this.tick(), tickMs);
-      this.screenTimer = setInterval(() => void this.tickScreens(), DAEMON_DEFAULTS.screen_tick_ms);
+      this.timer = this.time.setInterval(() => void this.tick(), tickMs);
+      this.screenTimer = this.time.setInterval(
+        () => void this.tickScreens(),
+        DAEMON_DEFAULTS.screen_tick_ms,
+      );
     }
-    this.watchdog = setInterval(() => {
+    this.watchdog = this.time.setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
+    const pruneMs =
+      this.opts.tokenPruneMs ?? (this.opts.auth !== undefined ? DAEMON_DEFAULTS.token_prune_ms : 0);
+    if (pruneMs > 0) {
+      this.pruneTimer = this.time.setInterval(
+        () => void this.enqueue(() => this.pruneTokens()),
+        pruneMs,
+      );
+    }
+    // The sweep is mandatory (no login ever expires): at start, then every interval.
+    if (this.sweeper !== undefined) {
+      this.scheduleSweep(0);
+      const sweeper = this.sweeper;
+      this.countTimer = this.time.setInterval(
+        () => sweeper.refreshSoon(),
+        DAEMON_DEFAULTS.login_count_refresh_ms,
+      );
+    }
     this.log(`volleyd up: ${this.waves.size} wave(s), broker ${this.opts.brokerUrl}`);
   }
 
@@ -878,11 +1068,12 @@ export class Daemon {
     }
     if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
-    if (env !== null && isApiSignal(env)) this.apiSignals.push(Date.now());
+    if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     if (env !== null) this.noteAttention(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
-    this.lastSeen.set(agent, Number.isNaN(sent) ? Date.now() : Math.min(Date.now(), sent));
+    const now = this.now();
+    this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
@@ -1015,16 +1206,99 @@ export class Daemon {
     }
   }
 
-  /** Stop timers and the mailbox loop; nothing is published. */
-  private halt(): void {
+  /** Run a credential sweep after `ms`, then again every `credential_sweep_interval_s`. */
+  private scheduleSweep(ms: number): void {
+    this.time.clearTimeout(this.sweepTimer);
+    this.sweepTimer = this.time.setTimeout(async () => {
+      await this.sweepCredentials().catch((e: unknown) =>
+        this.log(`credential sweep: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      if (this.running) {
+        this.scheduleSweep(
+          this.opts.credentialSweepMs ??
+            secondsMs(this.config.get("credential_sweep_interval_s") as number),
+        );
+      }
+    }, ms);
+  }
+
+  /** One credential sweep now (also the interval's body; tests call it). The swept agent ids. */
+  async sweepCredentials(): Promise<string[]> {
+    if (this.sweeper === undefined) return [];
+    const swept = await this.sweeper.sweep();
+    if (swept.length > 0) this.log(`credential sweep: deleted ${swept.join(", ")}`);
+    return swept;
+  }
+
+  /** What the delete path (retire.ts reapAndRevoke) needs from the daemon. */
+  private reapDeps(
+    journal?: ReapDeps["journal"],
+    credentials: AgentCredentials | undefined = this.credentials,
+  ): ReapDeps {
+    return {
+      credentials,
+      publishRetained: (topic, payload) =>
+        this.broker.publish(topic, payload, { qos: 1, retain: true }),
+      clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      journal: journal ?? ((ev) => this.appendSystem(ev)),
+    };
+  }
+
+  /**
+   * Which of `candidates` (agent logins) belong to a live agent: supervised; non-terminal in a
+   * wave that is neither stopped nor complete; holding its worktree lock; or with any retained
+   * status but a terminal one (spawning, registered, working, blocked…: also another supervisor's
+   * agent on this broker). Records where each one's channels live.
+   */
+  private async liveAgents(candidates: readonly string[]): Promise<Set<string>> {
+    const live = new Set<string>(this.supervised.keys());
+    for (const [wave, log] of this.waves) {
+      for (const e of log.journal.readAll()) {
+        if (e.type !== "agent_spawned") continue;
+        const id = e.data.agent_id as string;
+        this.sweepNamespaces.set(id, this.agentNamespace(wave, id));
+        const lock = e.data.lock;
+        if (typeof lock === "string" && readLock(lock)?.agent_id === id) live.add(id);
+      }
+      const status = log.record.state?.status;
+      if (status === "stopped" || status === "complete") continue;
+      for (const a of runningAgents(log.record, retiredAgents(log))) live.add(a.agent_id);
+    }
+    const unknown = candidates.filter((id) => !live.has(id));
+    await Promise.all(
+      unknown.map(async (id) => {
+        const got = await this.broker
+          .subscribeCollect(`volley/+/${id}/status`, 1, DAEMON_DEFAULTS.probe_ms)
+          .catch(() => []);
+        const m = got.find((x) => x.payload !== "");
+        if (m === undefined) return;
+        const ns = m.topic.split("/")[1];
+        if (ns !== undefined && !this.sweepNamespaces.has(id)) this.sweepNamespaces.set(id, ns);
+        const type = parseEnvelope(m.payload)?.type;
+        if (type !== undefined && !TERMINAL_STATUS.has(type)) live.add(id);
+      }),
+    );
+    return live;
+  }
+
+  /**
+   * Stop timers and the mailbox loop; nothing is published. A clean `stop()` passes false and
+   * closes the control connection itself once its queue has drained (a queued retire still
+   * deletes its login).
+   */
+  private halt(closeControl = true): void {
     this.running = false;
-    clearInterval(this.timer);
-    clearInterval(this.watchdog);
-    clearInterval(this.screenTimer);
+    this.time.clearInterval(this.timer);
+    this.time.clearInterval(this.watchdog);
+    this.time.clearInterval(this.screenTimer);
+    this.time.clearInterval(this.pruneTimer);
+    this.time.clearTimeout(this.sweepTimer);
+    this.time.clearInterval(this.countTimer);
+    if (closeControl) void this.dynsec?.close();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
-      clearTimeout(a.reapTimer);
+      this.time.clearTimeout(a.reapTimer);
       void a.watch.close();
     }
     this.supervised.clear();
@@ -1042,9 +1316,14 @@ export class Daemon {
 
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
-    this.halt();
-    await this.tunnelsStopped;
-    await this.enqueue(async () => {});
+    this.halt(false);
+    try {
+      await this.claude.stop();
+      await this.tunnelsStopped;
+      await this.enqueue(async () => {});
+    } finally {
+      await this.dynsec?.close();
+    }
     this.acks.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
@@ -1113,7 +1392,7 @@ export class Daemon {
       ].filter((r) => r !== "");
       let reading: PressureReading;
       try {
-        reading = await (this.opts.pressure ?? systemPressure())({
+        reading = await this.samplePressure({
           repos,
           config: this.config.effective(),
         });
@@ -1123,7 +1402,7 @@ export class Daemon {
       }
       await this.enqueue(async () => {
         this.lastReading = reading;
-        this.sampledAt = new Date();
+        this.sampledAt = dateOf(this.time);
         // The state the new verdicts start from; kept so a config change can re-decide this
         // same sample with new thresholds without counting it twice for hysteresis.
         this.prevAdmission = new Map(
@@ -1141,7 +1420,7 @@ export class Daemon {
   private evaluate(): void {
     const reading = this.lastReading;
     if (reading === null) return;
-    const now = (this.sampledAt ?? new Date()).getTime();
+    const now = (this.sampledAt ?? dateOf(this.time)).getTime();
     const windows: number[] = [];
     const samplesFor = (cfg: Tunables, ci: Sample | undefined): Samples => {
       windows.push(cfg.admission.api_overload_window_s);
@@ -1178,7 +1457,7 @@ export class Daemon {
     for (const [key, v] of this.verdicts) {
       if (key !== GLOBAL) waves[key] = { allow: allowJson(v.allow), reasons: v.reasons };
     }
-    this.summary = summaryPayload(global, this.sampledAt ?? new Date(), waves);
+    this.summary = summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves);
     await this.publish(
       ADMISSION_TOPIC,
       this.envelope("_system/admission", "admission", this.summary),
@@ -1252,12 +1531,12 @@ export class Daemon {
     const pools = this.config.effective().lease_pools;
     const r = leaseStep(this.leases, input, {
       pools,
-      now: new Date(),
+      now: dateOf(this.time),
       defaultTtlS: DAEMON_DEFAULTS.lease_default_ttl_s,
     });
     const touched = new Set<string>(input.kind === "request" ? [input.pool] : []);
     for (const ev of r.events) {
-      const e = this.system.append(ev);
+      const e = this.system.append(ev, dateOf(this.time));
       touched.add(String(e.data.pool));
       await this.publish(
         waveEventsTopic(SYSTEM_WAVE),
@@ -1440,11 +1719,41 @@ export class Daemon {
    * straight to the wave log (each is a synchronous fsync'd write), so a spawn never waits on the
    * serial queue and the queue never waits on a spawn's verification window.
    */
-  private async startSpawn(
+  private startSpawn(
     wave: WaveId,
     task: string,
     role: Role,
-    pipeline: { start?: SpawnStart; files?: Record<string, string> } = {},
+    pipeline: SpawnPipelineOptions = {},
+  ): Promise<SpawnResult> {
+    return this.track(this.launchSpawn(wave, task, role, pipeline));
+  }
+
+  private track<T>(p: Promise<T>): Promise<T> {
+    this.inflight.add(p);
+    const done = () => this.inflight.delete(p);
+    void p.then(done, done);
+    return p;
+  }
+
+  /**
+   * Resolves once the serial queue is drained, no spawn's launch half is running and every journal
+   * append (a wave's, or `_system`'s through appendSystem) has been published (a spawn's
+   * verification waits on the agent, so it is not counted).
+   * Tests await it before reading the published state or asserting that nothing happened.
+   */
+  async settled(): Promise<void> {
+    for (let q = this.queue; ; q = this.queue) {
+      await q;
+      await Promise.allSettled([...this.inflight]);
+      if (q === this.queue && this.inflight.size === 0) return;
+    }
+  }
+
+  private async launchSpawn(
+    wave: WaveId,
+    task: string,
+    role: Role,
+    pipeline: SpawnPipelineOptions,
   ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
@@ -1470,13 +1779,36 @@ export class Daemon {
         throw err;
       }
     }
+    let account: SelectedAccount;
+    try {
+      account = this.accountFor(wave, w, t, role);
+    } catch (e) {
+      if (!(e instanceof ClaudeAccountError)) throw e;
+      const err = new SpawnError("CLAUDE_ACCOUNT_UNAVAILABLE", e.message);
+      await this.append(wave, {
+        type: "alarm_raised",
+        task,
+        data: { code: err.code, message: err.message, role },
+      });
+      await this.spawnFailed(wave, task, role, err);
+      throw err;
+    }
     this.spawning.add(key);
     try {
       const attempt = this.agentAttempt(wave, task, role);
       // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
-      let req = { wave: w, task, role, attempt, ...pipeline };
+      const { resumeNote, ...rest } = pipeline;
+      let req = {
+        wave: w,
+        task,
+        role,
+        attempt,
+        ...rest,
+        account: { id: account.id, dir: account.dir },
+        ...(resumeNote !== undefined ? { resumeNote } : {}),
+      };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
         req = { ...req, wave: r.wave };
@@ -1489,16 +1821,7 @@ export class Daemon {
       if (res.kind === "launched") {
         this.refused.delete(key);
         void res.verified.then(
-          (outcome) => {
-            this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
-            // Minted for the owner `deps` captured: a claim since then missed this agent (it was
-            // not supervised yet), so grant the current owner here.
-            const owner = this.waves.get(wave)?.record.state?.owner ?? null;
-            const a = this.supervised.get(outcome.agentId);
-            if (a?.minted === true && owner !== null && owner !== deps.owner) {
-              void this.grantAck(wave, outcome.agentId, a, owner);
-            }
-          },
+          (outcome) => this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel),
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
         // Best effort, after supervision is attached: the agent is launched whatever it says.
@@ -1643,6 +1966,35 @@ export class Daemon {
     );
   }
 
+  /**
+   * The Claude account a task role runs under: its last `agent_account_moved`, else the task's
+   * `account:`, the wave's, `claude.default_account`, the primary. A remote host's agents run
+   * under its own default profile: an account named for one is refused, and the config default
+   * does not apply there.
+   */
+  private accountFor(wave: WaveId, w: Wave, t: WaveTask, role: Role): SelectedAccount {
+    const journal = this.waves.get(wave)?.journal;
+    const moved =
+      journal !== undefined ? accountMoves(journal.readAll())[`${t.id}/${role}`] : undefined;
+    const task = moved ?? t.account;
+    if (t.host === "local") {
+      return this.claude.select({
+        ...(task !== undefined ? { task } : {}),
+        ...(w.account !== undefined ? { wave: w.account } : {}),
+        configDefault: this.config.effective(wave).claude.default_account,
+      });
+    }
+    const sel = this.claude.select({
+      ...(task !== undefined ? { task } : {}),
+      ...(w.account !== undefined ? { wave: w.account } : {}),
+    });
+    if (sel.dir !== null)
+      throw new ClaudeAccountError(
+        `Claude account '${sel.id}' is a profile on the supervisor's machine; task ${t.id} runs on host ${t.host}`,
+      );
+    return sel;
+  }
+
   /** The `local` host agents run on. */
   private get host(): Host {
     this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
@@ -1716,8 +2068,15 @@ export class Daemon {
           this.checkRemoteTrust(wave, d, repo);
           continue;
         }
-        cfg ??= readClaudeJson(this.claudeJsonPath);
-        if (!isRepoTrusted(cfg, expandHome(repo))) continue;
+        // A Claude account profile's own folder trust, else the primary's.
+        const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
+        let here: Record<string, unknown> | null;
+        if (typeof profile === "string") here = readClaudeJson(join(profile, ".claude.json"));
+        else {
+          cfg ??= readClaudeJson(this.claudeJsonPath);
+          here = cfg;
+        }
+        if (!isRepoTrusted(here, expandHome(repo))) continue;
         await this.resolveNow(wave, d.decision_id, {
           answer: "trusted",
           by: "claude-trust-dialog",
@@ -1732,7 +2091,7 @@ export class Daemon {
    * beside the serial queue and only the resolution is queued.
    */
   private checkRemoteTrust(wave: WaveId, d: DecisionRecord, repo: string): void {
-    const now = (this.opts.now ?? Date.now)();
+    const now = this.now();
     const c = this.trustChecks.get(d.decision_id);
     if (
       c?.inFlight === true ||
@@ -1829,18 +2188,25 @@ export class Daemon {
       hooksDir: spawner.hooksDir ?? HOOKS_DIR,
       mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
+      ...(this.credentials !== undefined ? { credentials: this.credentials } : {}),
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
+      now: this.now,
       get openDecisions() {
         return log.record.state?.open_decisions ?? [];
       },
       probe,
-      watch: (ns, id) => watchAgent(this.broker, ns, id, Date.now, this.progressFeed),
+      watch: (ns, id) => watchAgent(this.broker, ns, id, this.time, this.progressFeed),
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      publishRetained: (topic, payload) =>
+        this.broker.publish(topic, payload, { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
+      prepareAccount: async (a) => {
+        this.claude.prepare(a);
+      },
       resolveDecision: async (id, answer, by) => {
         await this.resolveNow(wave, id, { answer, by });
       },
@@ -1892,10 +2258,10 @@ export class Daemon {
       const port = tunnel.remote_port;
       const key = forwardOf(h);
       if (tunnel.supervise && !this.tunnels.has(target, port)) {
-        this.tunnelChecks.poke(key, () => this.startTunnel(h));
+        void this.track(this.tunnelChecks.poke(key, () => this.startTunnel(h)));
         continue;
       }
-      this.tunnelChecks.poke(key, async (): Promise<TunnelStatus> => {
+      const checked = this.tunnelChecks.poke(key, async (): Promise<TunnelStatus> => {
         // Only the supervised ssh having stayed up says the port is the tunnel: a forward whose
         // ssh keeps failing is down whatever answers there (the box's own broker, a stale
         // forward), and one still coming up is not known either way yet.
@@ -1909,6 +2275,7 @@ export class Daemon {
         this.tunnelDownWhy.delete(key);
         return "down";
       });
+      void this.track(checked);
     }
   }
 
@@ -2189,7 +2556,7 @@ export class Daemon {
         if (a.pendingReap === undefined) holdReaped();
         return;
       }
-      clearTimeout(a.reapTimer);
+      this.time.clearTimeout(a.reapTimer);
       a.reapTimer = undefined;
       a.reapDeferred = false;
       a.pendingReap = undefined;
@@ -2207,12 +2574,16 @@ export class Daemon {
     if (watch.state.status !== null) check(watch.state.status.type);
   }
 
-  private async retire(agentId: string, status: string): Promise<void> {
+  private async retire(
+    agentId: string,
+    status: string,
+    credentials: AgentCredentials | undefined = this.credentials,
+  ): Promise<void> {
     const a = this.supervised.get(agentId);
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
     // Stop capturing first, so no in-flight capture re-publishes the screen after retire clears it.
@@ -2244,9 +2615,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
       },
       {
-        exec: a.host.exec,
-        clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
-        journal: (ev) => this.append(a.wave, ev),
+        ...this.reapDeps((ev) => this.append(a.wave, ev), credentials),
         releaseLock: (path) => {
           try {
             unlinkSync(path);
@@ -2302,6 +2671,7 @@ export class Daemon {
         if (this.running) await this.enqueue(fn);
       },
       log: (line) => this.log(line),
+      now: this.now,
     });
     this.pipelines.set(wave, d);
     return d;
@@ -2314,7 +2684,7 @@ export class Daemon {
    */
   private async onFinal(agentId: string, type: string): Promise<void> {
     const a = this.supervised.get(agentId);
-    if (a === undefined) return;
+    if (a === undefined || this.moving.has(agentId)) return;
     if (type !== "done") await this.retire(agentId, type);
     const raw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
@@ -2394,15 +2764,15 @@ export class Daemon {
   }
 
   private wallNow(): number {
-    return (this.opts.clock ?? defaultClock)().wall;
+    return this.now();
   }
 
   /** (Re-)arm the timer that accepts a pending reap unless a heartbeat moved it. */
   private scheduleReap(agentId: string, a: Supervised): void {
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     const p = a.pendingReap;
     if (p === undefined) return;
-    a.reapTimer = setTimeout(
+    a.reapTimer = this.time.setTimeout(
       () => {
         a.reapTimer = undefined;
         if (!this.acceptReap(agentId, a)) this.scheduleReap(agentId, a);
@@ -2438,7 +2808,7 @@ export class Daemon {
       a.pendingReap = { ...pending, until: this.now() + this.reapGrace(a.wave).ms };
       return false;
     }
-    clearTimeout(a.reapTimer);
+    this.time.clearTimeout(a.reapTimer);
     a.reapTimer = undefined;
     a.pendingReap = undefined;
     // Through the pipeline, like `failed`: a reaped role opens its respawn / cancel decision.
@@ -2458,7 +2828,7 @@ export class Daemon {
     const p = a.pendingReap;
     if (p !== undefined && (sig !== null || env.type === "heartbeat")) {
       if (heartbeatSuppresses(p, now)) {
-        clearTimeout(a.reapTimer);
+        this.time.clearTimeout(a.reapTimer);
         a.reapTimer = undefined;
         a.pendingReap = undefined;
         a.suppressedReap = a.watch.state.status?.wall_time;
@@ -2486,7 +2856,7 @@ export class Daemon {
 
   /** The monitor half of a tick: sleep/wake, then every supervised agent's liveness. */
   private async monitor(): Promise<void> {
-    const r = sampleClock(this.clock, (this.opts.clock ?? defaultClock)());
+    const r = sampleClock(this.clock, sampleOf(this.time));
     this.clock = r.state;
     const now = this.now();
     if (r.wake !== null) {
@@ -2658,14 +3028,17 @@ export class Daemon {
 
   private readScreenBounded(workspace: string, host: Host = this.host): Promise<string | null> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), DAEMON_DEFAULTS.screen_read_timeout_ms);
+      const timer = this.time.setTimeout(
+        () => resolve(null),
+        DAEMON_DEFAULTS.screen_read_timeout_ms,
+      );
       host.readScreen(workspace, DAEMON_DEFAULTS.screen_lines).then(
         (s) => {
-          clearTimeout(timer);
+          this.time.clearTimeout(timer);
           resolve(s);
         },
         () => {
-          clearTimeout(timer);
+          this.time.clearTimeout(timer);
           resolve(null);
         },
       );
@@ -2831,7 +3204,15 @@ export class Daemon {
       (e) => e.type === "agent_retired" && e.data.agent_id === agentId,
     );
     if (done) return;
-    const revoked = d.minted === true ? await revokeCredentials(this.host.exec, agentId) : null;
+    const revoked =
+      d.minted === true
+        ? await reapAndRevoke(
+            agentId,
+            this.agentNamespace(wave, agentId),
+            this.reapDeps((ev) => this.append(wave, ev)),
+            task,
+          )
+        : null;
     await this.append(wave, {
       type: "agent_retired",
       task,
@@ -2972,7 +3353,7 @@ export class Daemon {
   ): Promise<void> {
     const id = t.agent_id;
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
-    const watch = await watchAgent(this.broker, ns, id, this.now, this.progressFeed);
+    const watch = await watchAgent(this.broker, ns, id, this.time, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
     const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
     const role =
@@ -3142,6 +3523,71 @@ export class Daemon {
     }
   }
 
+  /**
+   * `agent_move_account { agent, acct }` (claude/move.ts): journal, cancel, wait for the stop,
+   * retire (`moved`), respawn the role under the other profile with a resume note.
+   */
+  private async moveAccount(p: Record<string, unknown>, by: string): Promise<Reply> {
+    if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
+    const agentId = typeof p.agent === "string" ? p.agent : "";
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const a = this.supervised.get(agentId);
+    if (a === undefined) return { ok: false, error: `no supervised agent '${agentId}'` };
+    if (this.moving.has(agentId)) return { ok: false, error: `${agentId} is already moving` };
+    let to: SelectedAccount;
+    try {
+      to = this.claude.select({ task: acct });
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (to.dir !== null && a.host.name !== "local")
+      return {
+        ok: false,
+        error: `${agentId} runs on host ${a.host.name}: profiles are local only`,
+      };
+    const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, a.wave);
+    const from = typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
+    const stopped = new Set([...TERMINAL_STATUS, "blocked"]);
+    this.moving.add(agentId);
+    try {
+      return await moveAgentAccount(
+        { wave: a.wave, task: a.task, role: a.role, agentId, from, to, by },
+        {
+          journal: (ev) => this.serial(() => this.append(a.wave, ev)),
+          cancel: (text) =>
+            this.serial(() =>
+              this.cancelAgent(a.wave, { task: a.task, role: a.role, agent_id: agentId }, by, {
+                text,
+                from_agent_id: DAEMON_AGENT_ID,
+                wave: a.wave,
+                task: a.task,
+              }),
+            ),
+          waitStopped: () =>
+            a.watch.waitFor(
+              (s) => stopped.has(s.status?.type ?? ""),
+              DAEMON_DEFAULTS.account_move_stop_ms,
+            ),
+          retire: () => this.serial(() => this.retire(agentId, "moved")),
+          respawn: async (r) => {
+            const res = await this.serial(() =>
+              this.startSpawn(a.wave, a.task, a.role, {
+                ...moveRespawn(spawned),
+                resumeNote: r.resumeNote,
+              }),
+            );
+            return res.kind === "launched"
+              ? { agentId: res.agentId }
+              : { agentId: null, decision: res.decisionId };
+          },
+        },
+      );
+    } finally {
+      this.moving.delete(agentId);
+    }
+  }
+
   /** The worktree lock a spawn of `task`/`role` takes (per target for a remote host). */
   private lockFor(wave: WaveId, task: string, role: Role, worktreeRoot: string): string {
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
@@ -3157,11 +3603,30 @@ export class Daemon {
     return lockPath(this.opts.home, worktreePath(worktreeRoot, wave, task, role));
   }
 
+  /**
+   * Observe every journal append (any wave, `_system` included) as it is made durable; returns
+   * the unsubscribe. Tests await the event they expect through it instead of polling.
+   */
+  onJournal(fn: (wave: WaveId, event: JournalEvent) => void): () => void {
+    this.journalListeners.add(fn);
+    return () => this.journalListeners.delete(fn);
+  }
+
+  private observeJournal(wave: WaveId, journal: Journal): void {
+    journal.onAppend((event) => {
+      for (const fn of this.journalListeners) fn(wave, event);
+    });
+  }
+
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
   private async append(wave: WaveId, ev: NewEvent): Promise<JournalEvent> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const event = log.append(ev);
+    return this.track(this.publishAppended(wave, log.append(ev, dateOf(this.time))));
+  }
+
+  /** An appended event's `/events` mirror, then the wave state it changed. */
+  private async publishAppended(wave: WaveId, event: JournalEvent): Promise<JournalEvent> {
     await this.publish(
       waveEventsTopic(wave),
       this.envelope("_waves/events", event.type, {
@@ -3279,7 +3744,7 @@ export class Daemon {
   ): Promise<DecisionRecord> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const r = openEvent(log.record, input, new Date());
+    const r = openEvent(log.record, input, dateOf(this.time));
     if ("error" in r) throw new Error(r.error);
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     const d = log.record.decisions[r.id] as DecisionRecord;
@@ -3310,7 +3775,7 @@ export class Daemon {
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const ev = resolveEvent(log.record, id, r, new Date());
+    const ev = resolveEvent(log.record, id, r, dateOf(this.time));
     if ("error" in ev) throw new Error(ev.error);
     if ("already" in ev) return { decision: ev.already, already_resolved: true };
     await this.append(wave, ev.event);
@@ -3455,6 +3920,108 @@ export class Daemon {
       .catch((e: unknown) => this.log(`error: ${String(e)}`));
   }
 
+  /**
+   * The newest `wall_time` of every agent id's retained registry entry and retained status (where
+   * its LWT lands), by agent id: account_list's `last_seen`.
+   */
+  private async registrySeen(): Promise<Map<string, string>> {
+    const scan = (filter: string) =>
+      this.broker.subscribeCollect(
+        filter,
+        Number.POSITIVE_INFINITY,
+        DAEMON_DEFAULTS.registry_scan_ms,
+      );
+    const msgs = (
+      await Promise.all([scan("volley/_system/registry/+"), scan("volley/+/+/status")])
+    ).flat();
+    const seen = new Map<string, string>();
+    for (const m of msgs) {
+      const env = m.payload === "" ? null : parseEnvelope(m.payload);
+      if (env === null) continue;
+      const prior = seen.get(env.agent_id);
+      if (prior === undefined || env.wall_time > prior) seen.set(env.agent_id, env.wall_time);
+    }
+    return seen;
+  }
+
+  /**
+   * Drop expired one-time token logins: `volley auth list` prunes them before it lists. Runs on a
+   * timer because a token nobody redeems would otherwise stay a broker login (that can read the
+   * whole tree) until the next `volley auth` command.
+   */
+  private async pruneTokens(): Promise<void> {
+    const r = await listAccounts(this.opts.authExec ?? realExec);
+    const error = typeof r === "string" ? r : null;
+    if (error !== null && error !== this.pruneError) this.log(`token prune: ${error}`);
+    this.pruneError = error;
+  }
+
+  /**
+   * An account op (`volley/_system/auth/ops/<username>`, answered on
+   * `volley/_system/auth/replies/<correlation_id>`) or a token redemption
+   * (`volley-auth/redeem/<id>`, answered on `volley-auth/redeem/<id>/reply`, the one topic that
+   * token's login may read). The broker ACL lets only an admin account write its own ops topic,
+   * so the topic names the sender; accounts.ts checks that account's role again.
+   */
+  private async onAuthRequest(topic: string, raw: string): Promise<void> {
+    if (raw === "") return; // our own clear (below), or anyone's
+    // Requests are never retained: clear the topic after each one (auth ops are rare), or a
+    // request published retained would be replayed at every daemon start (an `account_rotate`
+    // would rotate that password again each time). Anything live on it was delivered already.
+    await this.broker.publish(topic, "", { qos: 1, retain: true });
+    const req = parseEnvelope(raw);
+    if (req === null || req.type !== "query") return;
+    const cid = req.correlation_id;
+    if (cid === null || !isValidCorrelationId(cid)) {
+      this.log(`dropped auth request on ${topic}: no usable correlation_id`);
+      return;
+    }
+    const tokenId = topic.startsWith("volley-auth/") ? (topic.split("/")[2] ?? "") : null;
+    const replyTo = tokenId !== null ? tokenReplyTopic(tokenId) : authReplyTopic(cid);
+    const send = (r: AuthReply) =>
+      this.publish(replyTo, this.envelope(AUTH_CHANNEL, "ack", r, cid), false);
+    const key = `${topic}/${cid}`;
+    const prior = this.authAnswered.get(key);
+    if (prior !== undefined) return send(prior);
+    const payload = (req.payload ?? {}) as Record<string, unknown>;
+    const exec = this.opts.authExec ?? realExec;
+    let out: AuthOutcome;
+    try {
+      if (tokenId !== null) {
+        out = await redeemToken(exec, tokenId, payload);
+      } else {
+        const sender = topic.split("/")[4] ?? "";
+        this.authSeen.set(sender, dateOf(this.time).toISOString());
+        const registry = payload.op === "account_list" ? await this.registrySeen() : new Map();
+        // The later of the account's last auth request and its registry entry (an agent id).
+        const lastSeen = (name: string) =>
+          [this.authSeen.get(name), registry.get(name)]
+            .filter((t): t is string => t !== undefined)
+            .sort()
+            .pop();
+        out = await accountOp(exec, sender, payload, lastSeen);
+      }
+    } catch (e) {
+      const op = typeof payload.op === "string" ? payload.op : "";
+      out = {
+        reply: {
+          text: "ACKED",
+          acked_type: "query",
+          op,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
+    if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
+    this.authAnswered.set(key, out.reply);
+    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    }
+    await send(out.reply);
+  }
+
   private async handle(
     op: string,
     p: Record<string, unknown>,
@@ -3498,6 +4065,8 @@ export class Daemon {
           result: {
             waves: [...this.waves.keys()].map((w) => this.snapshot(w)),
             ...(this.killSwitch ? { kill_switch: true } : {}),
+            // The cached count: status never waits on the broker's control connection.
+            ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
           },
         };
       }
@@ -3511,6 +4080,17 @@ export class Daemon {
         return { ok: true, result: this.summary };
       case "spawn":
         return this.manualSpawn(p);
+      // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
+      case "claude_accounts":
+        return this.claude.list();
+      case "claude_account_add":
+        return { ok: true, defer: this.claude.add(p, by) };
+      case "claude_signin":
+        return { ok: true, defer: this.claude.signin(p, by) };
+      case "claude_sync":
+        return this.claude.sync(p, by);
+      case "agent_move_account":
+        return { ok: true, defer: this.moveAccount(p, by) };
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -3546,6 +4126,17 @@ export class Daemon {
           result: { version: r.version },
         };
       }
+      case "account_list":
+      case "account_create":
+      case "account_rotate":
+      case "account_revoke":
+      case "signin_link":
+      case "token_redeem":
+        // The mailbox does not name its sender (anyone who steers can write it).
+        return {
+          ok: false,
+          error: `${op} is answered only on volley/_system/auth/ops/<your username> (token_redeem: volley-auth/redeem/<token id>)`,
+        };
       default:
         return { ok: false, error: `unknown op '${op}'` };
     }
@@ -3685,7 +4276,9 @@ export class Daemon {
     preface: { info: BriefPrefaceInfo | null; path: string },
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
-    this.waves.set(wave.wave, WaveLog.open(join(this.opts.home, "waves", wave.wave)));
+    const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
+    this.waves.set(wave.wave, log);
+    this.observeJournal(wave.wave, log.journal);
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
     this.storeVersion(this.versionFile(wave.wave, 1), text);
@@ -3867,12 +4460,17 @@ export class Daemon {
     const root = (d as { repo?: unknown }).repo;
     if (typeof root !== "string") return `decision '${id}' names no repo to trust`;
     const target = (d as { target?: unknown }).target;
+    const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
     try {
       if (typeof target === "string") {
         const remote = this.remoteForDecision(wave, d);
         if (remote === undefined) return `no configured host reaches ${target} to trust ${root}`;
         await remote.recordTrust(root);
-      } else recordRepoTrust(this.claudeJsonPath, root);
+      } else
+        recordRepoTrust(
+          typeof profile === "string" ? join(profile, ".claude.json") : this.claudeJsonPath,
+          root,
+        );
       return null;
     } catch (e) {
       const where = typeof target === "string" ? ` on ${target}` : "";
@@ -3892,8 +4490,8 @@ export class Daemon {
       status: info?.status ?? null,
       registryAt: info?.registryAt ?? null,
       heartbeatAt: owner !== null ? (this.lastSeen.get(owner) ?? this.startedAt) : null,
-      ownedSince: ownedSince(this.journalEvents(w.wave)),
-      now: Date.now(),
+      ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
+      now: this.now(),
       claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
@@ -3903,48 +4501,8 @@ export class Daemon {
         data: { owner: by, previous: owner, why: verdict.why },
       });
       this.log(`wave ${w.wave} claimed by ${by} from ${owner ?? "-"}: ${verdict.why}`);
-      // Its live agents may now ack the new owner's steers; the grant runs beside the queue.
-      void this.extendAckGrants(w.wave, by);
     }
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
-  }
-
-  /**
-   * A wave changed owner: let each of its live agents with minted credentials ack the new owner
-   * too (`volley auth grant`, password kept). A failure is journaled as an alarm.
-   */
-  private async extendAckGrants(wave: WaveId, owner: string): Promise<void> {
-    for (const [agentId, a] of [...this.supervised]) {
-      if (a.wave !== wave || !a.minted) continue;
-      if (!(await this.grantAck(wave, agentId, a, owner))) return;
-    }
-  }
-
-  /** Let one minted agent ack `owner`; false once the daemon is stopping. */
-  private async grantAck(
-    wave: WaveId,
-    agentId: string,
-    a: Supervised,
-    owner: string,
-  ): Promise<boolean> {
-    try {
-      await grantAckTo(a.host.exec, agentId, [owner]);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      this.log(`ack grant ${agentId} → ${owner}: ${message}`);
-      if (!this.running) return false;
-      await this.recordEvent(wave, {
-        type: "alarm_raised",
-        task: a.task,
-        data: {
-          code: "ACK_GRANT_FAILED",
-          message: `${agentId} cannot ack the new owner ${owner}: ${message}`,
-          agent_id: agentId,
-          owner,
-        },
-      }).catch(() => {});
-    }
-    return true;
   }
 
   /** The owner's retained status and registry timestamps. */
@@ -4031,12 +4589,54 @@ export class Daemon {
     if (status === "stopped" || status === "complete") return null;
     await this.append(wave, { type: "wave_stopped", data: { by } });
     const cancelled: string[] = [];
-    for (const a of runningAgents(log.record, retiredAgents(log))) {
+    const running = runningAgents(log.record, retiredAgents(log));
+    for (const a of running) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
+    // No login outlives a stop: every agent of the wave is retired through the delete path now,
+    // its session having been told to stop and interrupted above; their deletes go out together.
+    await withJointRevokes(
+      this.credentials,
+      running.map((a) => (credentials) => this.retireStopped(wave, a, credentials)),
+    );
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
     return cancelled;
+  }
+
+  /** Retire one agent of a stopped wave: supervised through `retire`, else directly. */
+  private async retireStopped(
+    wave: WaveId,
+    a: { task: TaskId; role: string; agent_id: string },
+    credentials: AgentCredentials | undefined,
+  ): Promise<void> {
+    if (this.supervised.has(a.agent_id)) {
+      await this.retire(a.agent_id, "stopped", credentials);
+      return;
+    }
+    const spawned = this.journalEvents(wave)
+      .filter((e) => e.type === "agent_spawned" && e.data.agent_id === a.agent_id)
+      .at(-1);
+    const minted = spawned?.data.credentials === "minted";
+    const revoked = minted
+      ? await reapAndRevoke(
+          a.agent_id,
+          this.agentNamespace(wave, a.agent_id),
+          this.reapDeps((ev) => this.append(wave, ev), credentials),
+          a.task,
+        )
+      : null;
+    await this.append(wave, {
+      type: "agent_retired",
+      task: a.task,
+      data: {
+        agent_id: a.agent_id,
+        role: a.role,
+        status: "stopped",
+        credentials_revoked: revoked,
+        lock_released: false,
+      },
+    });
   }
 
   /** Send one running agent a mailbox `cancel` (journaled) and interrupt its session. */
@@ -4098,8 +4698,11 @@ export class Daemon {
   }
 
   /** Journal a global event in `_system` and mirror it on `volley/_waves/_system/events`. */
-  private async appendSystem(ev: NewEvent): Promise<void> {
-    const event = this.system.append(ev);
+  private appendSystem(ev: NewEvent): Promise<void> {
+    return this.track(this.publishSystem(this.system.append(ev, dateOf(this.time))));
+  }
+
+  private async publishSystem(event: JournalEvent): Promise<void> {
     await this.publish(
       waveEventsTopic(SYSTEM_WAVE),
       this.envelope("_waves/events", event.type, {
@@ -4265,7 +4868,7 @@ export class Daemon {
       };
     }
     const file = this.versionFile(wave.wave, state.version + 1);
-    const now = new Date().toISOString();
+    const now = dateOf(this.time).toISOString();
     let res: ReturnType<typeof applyPlan>;
     try {
       const spawning = [...this.spawning]
@@ -4376,12 +4979,12 @@ function clipText(text: string): string {
 }
 
 /** When the current owner got the wave: the latest `owner_claimed`, else `wave_submitted`. */
-function ownedSince(events: readonly JournalEvent[]): string {
+function ownedSince(events: readonly JournalEvent[], now: number): string {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i] as JournalEvent;
     if (e.type === "owner_claimed" || e.type === "wave_submitted") return e.at;
   }
-  return new Date().toISOString();
+  return new Date(now).toISOString();
 }
 
 /** Open every wave journal under `<home>/waves/`, oldest submission first. */

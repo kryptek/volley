@@ -199,6 +199,35 @@
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
         },
+        "dynsec_batch_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 50,
+          "description": "Milliseconds the supervisor collects broker login changes (mints, deletes) before sending them as one Dynamic Security control message, so the broker rewrites its state file once per batch (spec section 4.6.12). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "credential_sweep_interval_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400,
+          "default": 600,
+          "description": "Seconds between credential sweeps, which delete the broker logins of agents that are no longer live (spec section 4.6.12). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "claude": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Claude account profiles (spec section 4.6.11). Optional in the retained payload: a supervisor that predates them omits it.",
+          "properties": {
+            "default_account": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+              ],
+              "default": null,
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (resolved by usage metering when available, else primary). null: primary."
+            }
+          }
+        },
         "hosts": {
           "type": "object",
           "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",

@@ -1,9 +1,9 @@
 /*
  * Phone width (D8): below 700 px (the JS `NARROW_PX`) the top bar keeps the
  * brand, the needs-you pill and its tools (`TopBar compact` drops the counts),
- * windows are clamped in JS (`clampWindowWidth`), the Appearance panel becomes
- * a bottom sheet above the dock, and the steering bar, settings modal and
- * Needs-you actions fit the viewport. Loaded after desk.css (main.tsx).
+ * windows are clamped in JS (`clampWindowWidth`), and the steering bar, a
+ * wave's settings and the Needs-you actions fit the viewport (the Settings
+ * window's own phone layout is in settings.css). Loaded after desk.css (main.tsx).
  */
 @media (max-width: 699.98px) {
   .topbar {
@@ -15,24 +15,6 @@
   }
   .ny-pill {
     padding: 6px 10px;
-  }
-
-  /* Appearance: a bottom sheet that leaves the dock reachable below it. */
-  .look {
-    top: auto;
-    left: 8px;
-    right: 8px;
-    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-    width: auto;
-    max-height: 55vh;
-    border-radius: 14px 14px 10px 10px;
-  }
-  /* The sheet scrolls as a whole; its sections keep their height. */
-  .look > * {
-    flex-shrink: 0;
-  }
-  .look .bg-grid {
-    max-height: 180px;
   }
 
   .steer,

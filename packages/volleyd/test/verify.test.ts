@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -11,6 +12,7 @@ import { type SpawnOutcome, spawnAgent } from "../src/spawn";
 import { trustDecisionId } from "../src/trust";
 import { sameModel, watchAgent } from "../src/verify";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { FIXTURES, type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
 
 const NS = "volleyd-test";
@@ -28,8 +30,63 @@ describe("verify through hook signals (Aedes)", () => {
   let daemonSide: VolleyBroker;
   let agentSide: VolleyBroker;
   let env: SpawnEnv;
+  /** The verification window and the relaunch settle time run on it. */
+  let clock: FakeClock;
+  /** The simulated sessions' publishes, in flight or done. */
+  let sessions: Promise<void>[];
+  const run = (session: Promise<void>) => {
+    sessions.push(session);
+  };
+  const watch = (ns: string, id: string) => watchAgent(daemonSide, ns, id, clock);
+
+  /**
+   * Every agent-side publish so far has reached the daemon side: a sentinel the agent side sends
+   * now arrives behind them on the daemon side's connection.
+   */
+  async function delivered(): Promise<void> {
+    const topic = `volley/${NS}/test-barrier/progress`;
+    const token = randomUUID();
+    let back!: () => void;
+    const got = new Promise<void>((r) => {
+      back = r;
+    });
+    const unsub = await daemonSide.subscribeStream(topic, ({ payload }) => {
+      if (payload === token) back();
+    });
+    await agentSide.publish(topic, token, { qos: 1, retain: false });
+    await got;
+    await unsub();
+  }
+
+  /**
+   * Settle a spawn's verification on the fake clock: whatever the simulated session publishes is
+   * read first, and only then does the window (or the next timer: the relaunch settle) run out.
+   */
+  async function drive<T>(verified: Promise<T>): Promise<T> {
+    let done = false;
+    const out = verified.finally(() => {
+      done = true;
+    });
+    const quiet = out.then(
+      () => {},
+      () => {},
+    );
+    while (!done) {
+      const started = sessions.length;
+      await Promise.all(sessions);
+      await delivered();
+      await Promise.race([quiet, clock.armed()]);
+      if (done) break;
+      // A session started meanwhile (a relaunch) publishes before any window runs out.
+      if (sessions.length !== started) continue;
+      await clock.advanceToNext();
+    }
+    return out;
+  }
 
   beforeEach(async () => {
+    clock = fakeClock();
+    sessions = [];
     broker = await startTestBroker();
     daemonSide = new VolleyBroker();
     await daemonSide.connect({ url: broker.url, agentId: "volleyd" });
@@ -88,20 +145,14 @@ describe("verify through hook signals (Aedes)", () => {
     onLaunch: (attempt: number) => Promise<void>,
     screens: (string | null)[] = [],
   ): Promise<SpawnOutcome> {
-    env = await makeSpawnEnv({
-      spawnTimeoutS: 0.5,
-      watch: (ns, id) => watchAgent(daemonSide, ns, id),
-    });
+    env = await makeSpawnEnv({ spawnTimeoutS: 0.5, watch });
     env.host.screens = screens;
     let n = 0;
-    env.host.onLaunch = () => {
-      const attempt = ++n;
-      // Like a real pane: the session starts a moment after the workspace opens.
-      setTimeout(() => void onLaunch(attempt), 20);
-    };
+    // Like a real pane: the session starts once the workspace is open.
+    env.host.onLaunch = () => run(onLaunch(++n));
     const out = await spawnAgent(env.request(), env.deps);
     if (out.kind !== "launched") throw new Error(`expected a launch, got ${out.kind}`);
-    const verified = await out.verified;
+    const verified = await drive(out.verified);
     await verified.watch.close();
     return verified;
   }
@@ -146,7 +197,6 @@ describe("verify through hook signals (Aedes)", () => {
   it("the MCP status arriving after the hooks (same window) still verifies", async () => {
     const out = await spawnWith(async () => {
       await sessionStart("w1-t1-implementer-1", { mcp: false });
-      await new Promise((r) => setTimeout(r, 100));
       await agentSide.publish(
         buildTopic(NS, "w1-t1-implementer-1", "status"),
         hookFixture("status-spawning.json", "w1-t1-implementer-1", {}),
@@ -247,20 +297,17 @@ describe("verify through hook signals (Aedes)", () => {
   });
 
   it("no SessionStart heartbeat + update prompt → Enter, then one relaunch typed into the same workspace (attempt+1, same lock)", async () => {
-    env = await makeSpawnEnv({
-      spawnTimeoutS: 0.5,
-      watch: (ns, id) => watchAgent(daemonSide, ns, id),
-    });
+    env = await makeSpawnEnv({ spawnTimeoutS: 0.5, watch });
     env.host.screens = [screen("update-prompt.txt"), screen("shell-prompt.txt")];
     // The retyped launch command starts the second attempt's session in the same pane.
     const typeText = env.host.sendText;
     env.host.sendText = async (ws, text) => {
       await typeText(ws, text);
-      setTimeout(() => void sessionStart("w1-t1-implementer-2"), 20);
+      run(sessionStart("w1-t1-implementer-2"));
     };
     const launched = await spawnAgent(env.request(), env.deps);
     if (launched.kind !== "launched") throw new Error("expected a launch");
-    const out = await launched.verified;
+    const out = await drive(launched.verified);
     await out.watch.close();
     expect(out).toMatchObject({ kind: "registered", agentId: "w1-t1-implementer-2" });
     // Never a second workspace in the same worktree: the launch command is typed into it.
@@ -283,18 +330,26 @@ describe("verify through hook signals (Aedes)", () => {
       lock: spawned[0]?.data.lock,
     });
     // the first identity is revoked before the second is minted, and journaled as retired
-    expect(env.host.fake.argvs(["volley", "auth"]).map((a) => `${a[2]} ${a[3]}`)).toEqual([
-      "add-agent w1-t1-implementer-1",
-      "rm-agent w1-t1-implementer-1",
-      "add-agent w1-t1-implementer-2",
-    ]);
+    expect(env.creds.minted).toEqual(["w1-t1-implementer-1", "w1-t1-implementer-2"]);
+    expect(env.creds.revoked).toEqual(["w1-t1-implementer-1"]);
     expect(env.events.find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: "w1-t1-implementer-1",
       status: "superseded",
       credentials_revoked: true,
       lock_released: false,
     });
-    expect(env.cleared).toEqual(retainedTopics(NS, "w1-t1-implementer-1"));
+    // Through the delete path: `reaped { credentials_deleted }` first, the records cleared
+    // before the delete and again after it.
+    expect(env.published.map((p) => [p.topic, JSON.parse(p.payload).type])).toEqual([
+      [buildTopic(NS, "w1-t1-implementer-1", "status"), "reaped"],
+    ]);
+    expect(env.cleared).toEqual([
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+    ]);
+    expect(env.events.map((e) => e.type)).toEqual(
+      expect.arrayContaining(["agent_reaped_by_supervisor", "credentials_revoked"]),
+    );
     // cleanup sees only the second attempt as live, and nothing once it is retired too.
     const j = Journal.open(join(env.home, "waves", "w1"));
     j.append({ type: "wave_submitted", data: { wave: env.wave } });
@@ -313,19 +368,16 @@ describe("verify through hook signals (Aedes)", () => {
   });
 
   it("after Enter the original launch may continue: its hook signals verify it, no relaunch", async () => {
-    env = await makeSpawnEnv({
-      spawnTimeoutS: 0.3,
-      watch: (ns, id) => watchAgent(daemonSide, ns, id),
-    });
+    env = await makeSpawnEnv({ spawnTimeoutS: 0.3, watch });
     env.host.screens = [screen("update-prompt.txt")];
     const orig = env.host.sendKeys;
     env.host.sendKeys = async (ws, key) => {
       await orig(ws, key);
-      setTimeout(() => void sessionStart("w1-t1-implementer-1"), 10);
+      run(sessionStart("w1-t1-implementer-1"));
     };
     const out = await spawnAgent(env.request(), env.deps);
     if (out.kind !== "launched") throw new Error("expected a launch");
-    const verified = await out.verified;
+    const verified = await drive(out.verified);
     await verified.watch.close();
     expect(verified).toMatchObject({ kind: "registered", agentId: "w1-t1-implementer-1" });
     expect(env.host.launches).toHaveLength(1);
@@ -346,7 +398,7 @@ describe("verify through hook signals (Aedes)", () => {
     env = await makeSpawnEnv({
       spawnTimeoutS: 0.2,
       watch: async (ns, id) => {
-        const w = await watchAgent(daemonSide, ns, id);
+        const w = await watch(ns, id);
         const close = w.close;
         return {
           ...w,
@@ -364,7 +416,7 @@ describe("verify through hook signals (Aedes)", () => {
     };
     const out = await spawnAgent(env.request(), env.deps);
     if (out.kind !== "launched") throw new Error("expected a launch");
-    await expect(out.verified).rejects.toThrow("socket timeout");
+    await expect(drive(out.verified)).rejects.toThrow("socket timeout");
     expect(existsSync(out.lock.path)).toBe(false);
     expect(closed).toBeGreaterThan(0);
     expect(env.events.at(-1)).toMatchObject({ type: "alarm_raised" });

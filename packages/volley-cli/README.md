@@ -55,7 +55,7 @@ volley --help
 | `volley list`   | Enumerate agents in a namespace (or all namespaces). Human table by default; `--json` for tooling. |
 | `volley dash`   | Launch the browser dashboard (Vite dev server). See [`volley dash`](#volley-dash) below. |
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
-| `volley auth`   | Manage the broker's password file: `init` the fixed identities, mint/revoke per-agent credentials. See [`volley auth`](#volley-auth) below. |
+| `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 
 Each has its own `--help`:
@@ -131,25 +131,37 @@ Exit codes: `0` clean SIGINT/SIGTERM, `1` broker error, `2` invalid usage.
 
 ## `volley auth`
 
-The reference broker config ([`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md)) refuses anonymous clients. `volley auth` manages its password file with `mosquitto_passwd` and reloads the broker (`SIGHUP`) after every change:
+The reference broker ([`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md)) is **mosquitto 2.1 or newer** with the Dynamic Security plugin: it refuses anonymous clients and authorises every login through eight shared roles. `volley auth` creates and deletes logins over the broker's control topic with the admin login in `<dir>/admin.json`; there is no password file, no ACL file and no reload. Every verb refuses a broker older than 2.1 (`BROKER_TOO_OLD`, with the brew / snap / container install instructions).
 
 ```sh
-volley auth init                          # passwd + acl.conf with volleyd / desk / coordinator;
-                                          # prints their passwords ONCE and the mosquitto.conf lines
-volley auth add-agent w1-t1-implementer-1 # mint a password (username = agent id); prints only the password
+volley auth init                          # broker config (backed up) + state file + admin login, then,
+                                          # once the broker runs it: the shared roles and the fixed
+                                          # identities, printing their passwords ONCE. Rerunnable.
+volley auth migrate                       # from password_file + acl_file: init, plus logins for the
+                                          # agents' .volley/agent.json and the accounts. Rerunnable.
+volley auth migrate --roles [--yes]       # show / apply role changes (disconnects their holders)
+volley auth add-agent w1-t1-implementer-1 # an agent login (username = agent id); prints only the password
 volley auth add-agent w1-t1-implementer-1 --json   # {"username","password"} for .volley/agent.json "broker"
-volley auth add-agent w1-t1-implementer-1 --ack-to coordinator-ab12   # + let it ack its parent
-volley auth rm-agent w1-t1-implementer-1  # revoke on retire (succeeds if already revoked)
+volley auth rm-agent w1-t1-implementer-1  # delete it on retire (succeeds if already gone)
+volley auth list-agents [--json]          # the agent logins
+
+volley auth add phone --role steer        # an account with a role; prints its password ONCE
+volley auth add build-box --role peer --json   # {"username","password","role"}
+volley auth rotate phone                  # new password, printed once (its sessions disconnect)
+volley auth revoke phone                  # the login and the account entry removed
+volley auth list [--json]                 # the accounts (never their passwords)
+volley auth token                         # one-time admin token for the Desk (10 min, single use)
+volley auth signin-link --role steer --label "Owner's phone"   # one-time sign-in token
+echo "$TOKEN" | volley auth redeem --label "Desk on mac" --json  # what volleyd runs on redemption
 ```
 
-- `--ack-to <sender_id>` (repeatable) appends a managed `user` block to `acl.conf` that lets the agent write exactly those senders' mailboxes, so its acks (SPEC §4.4) and query replies reach them. Without it a minted agent can write no mailbox at all, and the broker silently drops its acks. Pass the parent's agent id (and `volleyd` when the daemon steers it).
-- `add-agent` refuses the fixed identity names and ids the ACL's namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, and the channel names).
-- `init --force` rotates the three fixed passwords in place: minted agents and an existing (possibly edited) `acl.conf` are kept.
-- `init --coordinator-file` also writes `coordinator.json` (`{ "username": "coordinator", "password" }`, mode 0600) next to `passwd`: the credentials the coordinator session's hooks read when `VOLLEY_AUTH_*` is unset (see volley-hooks' README). Once the file exists, every `init --force` rewrites it with the rotated password. On an existing install, adopting it means `init --force --coordinator-file`, which rotates all three fixed identities (`volleyd`, `desk`, `coordinator`). Run as root, the file stays root-owned inside a directory handed to the broker's user, so `init` warns that your session cannot read it: copy it and point `VOLLEY_AUTH_DIR` at the copy, or use `VOLLEY_AUTH_*`.
-- Run as root (e.g. `sudo volley auth init --dir /etc/mosquitto/volley` on Linux), `init` hands the directory and files to the `mosquitto` user, because the distro broker drops to that user before it opens `password_file`.
-- `mosquitto_passwd` receives each generated password on its command line, so it is briefly visible in `ps` while that child runs.
+- **`init`** detects the install (`--layout brew-arm64|brew-intel|snap|etc|container`; the snap first on Linux) and writes its config: the plugin before any listener, `per_listener_settings false`, `allow_anonymous false`, `set_tcp_nodelay true`, `max_queued_messages 10000`, TCP 1883 and WebSocket 9001 on 127.0.0.1. It refuses an existing config with `per_listener_settings true` or the plugin loaded twice, naming the trap. `--no-config` leaves the config to you, `--config` / `--state-file` choose other paths, `--restart` runs the layout's restart command and carries on instead of asking you to restart and rerun.
+- **Fixed identities** `volleyd`, `desk` and `coordinator` are created once; a rerun keeps their passwords, `--force` rotates them. `--coordinator-file` writes `<dir>/coordinator.json` (mode 0600; the coordinator's hooks read it when `VOLLEY_AUTH_*` is unset); `--volleyd-file` writes `$VOLLEYD_HOME/broker.json` and `$VOLLEYD_HOME/dynsec-admin.json` (0600), volleyd's login and the admin login it mints agents with; under sudo they go to the invoking user's home, owned by that user.
+- **Agent logins** hold the `agent` role alone: their own channels and registry entry (`%u`), lease requests, and acks to `volleyd` and the Desk. Nothing is granted per agent, so there is no `--ack-to` and no `grant`: an agent's ack to a random-suffixed coordinator is dropped by the broker. `add-agent` refuses the fixed identities, the admin, 8-hex-digit ids (token logins) and ids the roles' namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, `machines`, `auth`, and the channel names). `rm-agent` deletes only agent logins. Deleting a login disconnects the agent without its will: volleyd publishes its `reaped` status itself.
+- **Roles** of accounts: `admin` (a coordinator's writes plus account ops on `volley/_system/auth/ops/<name>`), `steer` (write mailboxes), `watch` (no writes beyond the `account` role's own-identity ones), `supervisor` (read/write everything like `volleyd`, except the account-op and answer topics under `volley/_system/auth/`), `peer` (a paired machine: `volley/_system/machines/<name>[/#]`, which the `account` role already grants). Every account holds the shared `account` role (read `volley/#`; write its own `%u` channels, registry entry, lease requests and machine record) plus its role's. The registry is `accounts.json` (name, role, kind, created, label); `--kind` is `human` \| `device` \| `machine` \| `service` (default from the role).
+- **One-time tokens** (`token`, `signin-link`) are stored only as a sha256 hash in `tokens.json`. Each is also the password of a temporary login named by the token id, holding the `token` role: it may only write `volley-auth/redeem/<id>` and read `volley-auth/redeem/<id>/reply`, so the Desk can redeem it through volleyd (SPEC §4.6.10) while the broker keeps refusing anonymous clients. `redeem` reads the token from stdin, burns it and creates an account with the token's role (refusing, token unburned, if that `<role>-<id>` name is taken; `add` reserves that shape). The login outlives the redemption by about a minute so the redeeming client, still connected as it, gets its answer; the next account command after that, or after the token expires, deletes it (volleyd runs `volley auth list` every minute for this). `accounts.json` and `tokens.json` are replaced by rename, never rewritten in place.
 
-Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/volley`, e.g. `/opt/homebrew/etc/mosquitto/volley`). `init` refuses to overwrite an existing `passwd` without `--force` (which rotates every fixed identity). `--no-reload` skips the signal; the reload goes to every `mosquitto` process you own, so a root-owned systemd broker needs `sudo systemctl reload mosquitto` (the command warns when it cannot signal).
+Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/volley`, e.g. `/opt/homebrew/etc/mosquitto/volley`, or `/var/snap/mosquitto/common/volley` on a snap-only machine; the broker never reads it). `--broker-url` (env `VOLLEY_BROKER_URL`) names the broker. The admin password reaches `mosquitto_ctrl dynsec init` on its command line once, so it is briefly visible in `ps` while that child runs.
 
 ---
 

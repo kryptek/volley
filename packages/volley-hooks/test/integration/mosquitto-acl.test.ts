@@ -8,11 +8,10 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { contextOf, fixture, makeWorkdir, publishEnvelope, runHook, tick } from "../helpers/hooks";
 
 /**
- * The hooks as a minted agent against real mosquitto with the shipped
- * examples/mosquitto-auth/acl.conf. Opt-in: needs VOLLEY_INTEGRATION=1 and
- * VOLLEY_AUTH_BROKER_URL pointing at a PRIVATE mosquitto started as volley-mcp's
- * test/integration/mosquitto-auth.conf describes (auth-fixture.sh identities: each
- * password is "<username>-test-pw"; the agent is minted with --ack-to coordinator-ab12).
+ * The hooks as an agent login against real mosquitto 2.1 with Volley's shared Dynamic Security
+ * roles. Opt-in: needs VOLLEY_INTEGRATION=1 and VOLLEY_AUTH_BROKER_URL pointing at a PRIVATE
+ * broker bootstrapped by volley-cli's test/integration/dynsec-fixture.ts (each password is
+ * "<username>-test-pw"; the agent holds the static `agent` role).
  */
 const URL = process.env.VOLLEY_AUTH_BROKER_URL;
 const RUN = process.env.VOLLEY_INTEGRATION === "1" && URL !== undefined;
@@ -21,8 +20,10 @@ const BROKER_URL = URL as string;
 
 const AGENT = "w1-t1-implementer-1";
 const OTHER = "w1-t2-implementer-1";
-/** The sender auth-fixture.sh lets AGENT ack (`--ack-to coordinator-ab12`). */
-const PARENT = "coordinator-ab12";
+/** A steering sender the shared agent role lets AGENT ack: a fixed identity's mailbox. */
+const PARENT = "desk";
+/** A coordinator session's random-suffixed id: no static role rule can name its mailbox. */
+const COORDINATOR = "coordinator-ab12";
 const NS = `hooksacl-${randomBytes(3).toString("hex")}`;
 const pw = (user: string) => `${user}-test-pw`;
 
@@ -37,7 +38,7 @@ async function connectAs(username: string): Promise<VolleyBroker> {
   return b;
 }
 
-describe.skipIf(!RUN)("volley-hooks against mosquitto auth + the shipped ACL", () => {
+describe.skipIf(!RUN)("volley-hooks against mosquitto 2.1 Dynamic Security roles", () => {
   let observer: VolleyBroker;
   let coordinator: VolleyBroker;
   let stop: () => Promise<void>;
@@ -156,26 +157,28 @@ describe.skipIf(!RUN)("volley-hooks against mosquitto auth + the shipped ACL", (
     ).toBe(true);
   });
 
-  it("the agent's hooks cannot write another agent's mailbox: an ack to a sender outside --ack-to is dropped", async () => {
-    // Current behaviour, per the open T14 decision on ack routing: the ACL lets a minted
-    // agent write only the mailboxes it was granted with `volley auth add-agent --ack-to`,
-    // so the hooks' ack to any other sender is dropped by the broker (the steer is still
-    // delivered and injected).
-    const dir = agentDir(pw(AGENT));
-    expect((await postToolUse(dir)).exitCode).toBe(0);
-    const id = await steer(OTHER);
-    await tick(200);
-    const post = await postToolUse(dir);
-    expect(post.exitCode).toBe(0);
-    expect(contextOf(post.stdout)).toContain(`steer from ${OTHER}`);
-    expect(
-      await until(
-        () =>
-          envelopes(buildTopic(NS, OTHER, "mailbox")).some(
-            (e) => e.type === "ack" && e.correlation_id === id,
-          ),
-        1000,
-      ),
-    ).toBe(false);
-  });
+  it.each([OTHER, COORDINATOR])(
+    "an ack to %s is dropped: the agent role writes only the fixed identities' mailboxes",
+    async (sender) => {
+      // The static role lets an agent write volleyd's and the Desk's mailboxes and no other, so
+      // the hooks' ack to another agent or to a random-suffixed coordinator is dropped by the
+      // broker (the steer is still delivered and injected).
+      const dir = agentDir(pw(AGENT));
+      expect((await postToolUse(dir)).exitCode).toBe(0);
+      const id = await steer(sender);
+      await tick(200);
+      const post = await postToolUse(dir);
+      expect(post.exitCode).toBe(0);
+      expect(contextOf(post.stdout)).toContain(`steer from ${sender}`);
+      expect(
+        await until(
+          () =>
+            envelopes(buildTopic(NS, sender, "mailbox")).some(
+              (e) => e.type === "ack" && e.correlation_id === id,
+            ),
+          1000,
+        ),
+      ).toBe(false);
+    },
+  );
 });

@@ -14,29 +14,48 @@ export interface TestBroker {
 /**
  * Start an in-process Aedes MQTT broker on an OS-assigned free port. With `users`, every client
  * must CONNECT with one of those username/password pairs (anything else is refused with return
- * code 4, like `allow_anonymous false` in mosquitto).
+ * code 4, like `allow_anonymous false` in mosquitto). With `canPublish`, a PUBLISH the predicate
+ * refuses for the client's username never reaches a subscriber, like a mosquitto ACL denial
+ * (Aedes also closes the publisher's connection; mosquitto drops the message silently).
  */
 export async function startTestBroker(
-  opts: { users?: Record<string, string> } = {},
+  opts: {
+    users?: Record<string, string>;
+    canPublish?: (username: string | undefined, topic: string) => boolean;
+  } = {},
 ): Promise<TestBroker> {
-  const users = opts.users;
-  const aedes = new Aedes(
-    users === undefined
+  const { users, canPublish } = opts;
+  const usernames = new Map<string, string>();
+  const aedes = new Aedes({
+    ...(canPublish === undefined
       ? {}
       : {
-          authenticate: (_client, username, password, done) => {
+          authorizePublish: (client, packet, done) => {
+            if (client === null || canPublish(usernames.get(client.id), packet.topic)) {
+              return done(null);
+            }
+            done(new Error(`ACL: ${packet.topic}`));
+          },
+        }),
+    ...(users === undefined
+      ? {}
+      : {
+          authenticate: (client, username, password, done) => {
             const ok =
               username !== undefined &&
               Object.hasOwn(users, username) &&
               password?.toString() === users[username];
-            if (ok) return done(null, true);
+            if (ok) {
+              usernames.set(client.id, username);
+              return done(null, true);
+            }
             const err = Object.assign(new Error("bad username or password"), {
               returnCode: 4 as const,
             });
             done(err, null);
           },
-        },
-  );
+        }),
+  });
   const subs = new Map<string, Set<string>>();
   aedes.on("subscribe", (subscriptions, client) => {
     const set = subs.get(client.id) ?? new Set<string>();

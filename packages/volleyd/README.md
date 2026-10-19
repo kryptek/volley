@@ -30,6 +30,8 @@ coordinator session.
 - [Leases](#leases)
 - [Spawn admission](#spawn-admission)
 - [Topics and the control channel](#topics-and-the-control-channel)
+- [Accounts and one-time tokens](#accounts-and-one-time-tokens)
+- [Claude accounts](#claude-accounts)
 - [Decisions](#decisions)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
@@ -43,6 +45,7 @@ coordinator session.
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
+- [Testing: the clock contract](#testing-the-clock-contract)
 
 ---
 
@@ -87,11 +90,12 @@ tasks:
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
+# account: work              # the Claude account its agents run under (see Claude accounts)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run;
-default `local`), and `files` (a scheduling hint: paths the task will touch; tasks overlapping
-active ones start later).
+default `local`), `account` (overrides the wave's; see [Claude accounts](#claude-accounts)), and
+`files` (a scheduling hint: paths the task will touch; tasks overlapping active ones start later).
 
 The schema is [`spec/schemas/wave-file.schema.json`](../../spec/schemas/wave-file.schema.json).
 The parser adds the rules a schema cannot express and reports everything with a path:
@@ -259,6 +263,11 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
+| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)). |
+| `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
+| `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
+| `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
+| `volley/_system/claude/<acct>/signin` | no | A Claude account sign-in: its URL, then done / failed (see [Claude accounts](#claude-accounts)). |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -288,12 +297,161 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], sharing }` |
+| `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
+| `claude_signin` | `acct`, `by` | the same, for an existing profile |
+| `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
+| `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
 arrives or `wait_ack_ms` (default 30 s, at most 300 s) passes, and `run` answers once each task
 issue's body has been fetched — neither wait blocks other control requests. A request redelivered
 while its answer is still pending is not run twice; it gets the one answer.
+
+---
+
+## Accounts and one-time tokens
+
+The Desk manages broker accounts through the daemon, never by creating logins itself
+(SPEC §4.6.10). The daemon in turn only runs `volley auth` through the [fence](#the-authority-fence):
+`volley auth` owns the accounts' and tokens' broker logins and `accounts.json` / `tokens.json` in
+`$VOLLEY_AUTH_DIR`.
+
+**Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
+mailbox cannot say who sent a request (the daemon refuses them there with a pointer). An admin
+publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "query"`, a fresh
+`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin role grants that
+topic only to admin accounts and only for their own username (`%u`), so the topic names the sender; the daemon
+then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
+`account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
+process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
+under its name. Requests are never retained: the daemon clears a request topic's retained message
+after each request, so a restart cannot replay one. `account_rotate` of the sender's own account is
+refused: setting the new password disconnects the client holding the old one
+before the answer arrives (rotate yourself with `volley auth rotate` or through another admin).
+
+| `op` | Fields | `result` | `sealed` (decrypts to) | Journal (`_system`) |
+|---|---|---|---|---|
+| `account_list` | — | `{ accounts: [{ name, role, kind, created, label?, last_seen? }] }` | — | — |
+| `account_create` | `name`, `role` (`admin` \| `steer` \| `watch` \| `supervisor` \| `peer`), `kind?` | `{ name, role }` | `{ username, password }` | `account_created { by, name, role, kind? }` |
+| `account_rotate` | `name` | `{ name, role }` | `{ username, password }` | `account_rotated { by, name }` |
+| `account_revoke` | `name` | `{ name }` | — | `account_revoked { by, name }` |
+| `signin_link` | `role` (`steer` \| `watch`), `label`, `ttl_s?` (default 600), `desk_url?` | `{ role, label, expires_at, link_base? }` | `{ token }`; the link is `<link_base>#signin=<token>` (sealing the link too could exceed what RSA-OAEP fits) | `signin_link_issued { by, role, label, token_id, expires_at }` |
+
+**Token redemption.** `volley auth token` prints a one-time admin token in the operator's
+terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
+broker login named by the token id `<id>`, so the broker keeps `allow_anonymous false`. That login
+holds only the `volley-token` role: it may write `volley-auth/redeem/<id>` and read
+`volley-auth/redeem/<id>/reply` (`%u`), and subscribe to nothing else, so it sees nothing of the
+tree and nothing of other tokens. The client connects as that
+login, subscribes to the reply topic and publishes `{ op: "token_redeem", token, label, reply_key }`
+on the request topic; the daemon refuses a token whose id is not the topic's, then pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
+which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
+journaled as `token_redeemed { by, name, role, label }` (`by` is the token id: the redeeming login). A used, expired or unknown token is
+refused. The token's login is not removed during redemption (deleting it would disconnect the
+client before it hears the answer): `volley auth` drops it about a minute after redemption
+or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
+(when it uses broker auth) so that happens without anyone running a command.
+
+**Answers** go to `volley/_system/auth/replies/<correlation_id>` (a `token_redeem`'s to `volley-auth/redeem/<id>/reply`) as an `ack` from `volleyd` with
+`{ text: "ACKED", acked_type: "query", op, ok, error?, result?, sealed? }`. Every authenticated
+client may read that topic, so passwords and sign-in tokens appear only in `sealed`: base64url
+RSA-OAEP (SHA-256) ciphertext for the request's `reply_key`, an RSA public JWK of at least 2048
+bits (WebCrypto: `generateKey({ name: "RSA-OAEP", hash: "SHA-256", modulusLength: 2048 })`, export
+the public key as JWK, decrypt with the private one). An op that would return a secret without a
+usable `reply_key` is refused before anything is created. A redelivered request (same topic and
+`correlation_id`) gets the first answer again.
+
+---
+
+## Claude accounts
+
+volleyd can run agents under several Claude accounts. Each account is its own Claude Code
+profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` moves the root) that
+the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
+`CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
+`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
+SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
+evidence behind each choice below.
+
+> **Terms note.** Volley never collects, stores or intermediates Claude credentials. Sign-in
+> completes through Anthropic's own flow (`claude auth login`, in your browser); volleyd sees the
+> authorize URL and the plan label, never a code, a token or a Keychain item. Usage limits assume
+> individual use: several profiles are for an individual's own accounts, not for pooling or
+> sharing one subscription among people.
+
+```sh
+volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
+volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude signin work           # sign an existing profile in again
+volley claude list                  # profiles, sign-in state, plan, sharing modes
+volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude move <agent-id> work  # stop an agent and respawn it under another account
+```
+
+**Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
+`claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
+(`volley-signin-<acct>`, from a script the [fence](#the-authority-fence) seals) with `$BROWSER`
+set to a helper that only writes down the URL Claude Code asks it to open. That URL redirects to
+Claude Code's own listener on this machine, so open it in a browser **here**; the browser hands
+the code straight back to the `claude` process. volleyd answers the op with the URL and publishes
+`claude_signin_url { acct, url, flow, attach }` on `volley/_system/claude/<acct>/signin` (not
+retained: whoever opens it first picks the account; not retained is not private — under the
+example broker ACL every client, agents included, may read `volley/#` and so the URL while the
+sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
+`loggedIn` → `claude_signin_done { acct, plan }`, or `claude_signin_failed { acct, reason }`
+(the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
+run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
+the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
+sign-in terminal (`tmux attach -t volley-signin-<acct>`), never into the Desk. `claude setup-token`
+is never used: it prints a bearer token Volley would have to carry. The `_system` journal records
+`claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
+URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
+
+**Selection.** An agent runs under its task's `account:`, else the wave's, else
+`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` falls
+back to the primary until usage metering can rank accounts. A spawn under an unknown account, one
+not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
+usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses;
+`.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
+Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
+`repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
+Remote-host tasks run under the box's default profile: an account named for one is refused, and
+the config default does not apply there.
+
+**Sharing** (`~/.volley/claude/sharing.yaml`, `item: mode`): what each profile shares with the
+primary. Applied before every spawn under a profile and by `volley claude sync`.
+
+| Item | Default | Why |
+| --- | --- | --- |
+| `CLAUDE.md`, `agents`, `commands` | `linked` | read-only in practice |
+| `skills`, `plugins` | `linked` | account-synced content lands in per-account buckets; installs from any profile affect all |
+| `settings.json` | `copy` | `/model` and other settings writes go through a link into every profile |
+| `mcp` | `copy` | the `mcpServers` section of `.claude.json`, re-synced from `~/.claude.json` |
+
+`linked` is a symlink to `~/.claude/<item>` (Claude Code reads **and writes** through it);
+`copy` is copied once, when the profile has none, and is the profile's own from then on; `own` is
+never touched (a link volleyd made is removed). A real file or directory of the profile's own is
+never replaced. `.claude.json` holds the profile's own account and is never linked or copied
+whole: only `mcpServers` is rewritten, and `hasCompletedOnboarding: true` seeded once so a fresh
+profile's first agent does not stop at onboarding (read → set that key → temp file `0600` →
+rename, under Claude Code's own `.claude.json.lock/`; a lock older than
+`claude_json_lock_stale_ms` was left by a crashed process and is taken over). MCP entries can carry third-party secrets (`env`,
+`headers`), so volleyd never publishes or journals them (`claude_profile_synced` carries counts).
+`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched;
+`test/no-credentials.test.ts` keeps every credential location out of `src/`.
+
+**Moving an agent.** `agent_move_account { agent, acct }` journals `agent_account_moved
+{ agent_id, role, from, to, by }` first, cancels the agent (mailbox `cancel` + Escape) and waits
+up to `account_move_stop_ms` for its terminal status. Then it retires it (`moved`) and respawns
+the role under the other account: a new attempt in the same worktree, with a resume note at the
+end of its brief. A reviewer, fixup or rebase keeps its start point and its own attempt's worktree,
+with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
+the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
+alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
 
 ---
 
@@ -356,8 +514,9 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
 - `stop <wave>`: journals `wave_stopped` (no new admissions), then sends a mailbox `cancel`
   to every running agent of the wave (journaled as `steering_sent { type: "cancel" }`). The
   daemon also interrupts each agent: with spawning on, Escape into its cmux workspace (from its
-  `agent_spawned`); with `--no-spawn`, only the mailbox cancel is sent. A stopped
-  wave can be resumed explicitly. Known gap until the pipeline stages can respawn: `stop` journals
+  `agent_spawned`); with `--no-spawn`, only the mailbox cancel is sent. Then every agent it
+  cancelled is retired at once through the delete path (`agent_retired { status: "stopped" }`):
+  no broker login outlives a stop. A stopped wave can be resumed explicitly. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
   in their stage, counting against `hard_ceiling`) with no agent working them.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
@@ -437,7 +596,10 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
+| `dynsec_batch_ms` | the next batch of broker login changes | — |
+| `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
+| `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -464,7 +626,7 @@ lists every key with its default and example pools, commented out.
 | 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
-| 5 | **Identity** `volley auth add-agent <id> --ack-to <parent> --ack-to volleyd --json` → `.volley/agent.json` (mode 0600) | `identity.ts` | `CREDENTIALS_FAILED` |
+| 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
 | 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
@@ -531,6 +693,21 @@ shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `p
 wave owner, else `volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker`
 block; the MCP server and the hooks both read it, so no flag or env carries identity.
 `volleyd daemon --no-mint` skips minting for an anonymous broker (no `broker` block).
+
+**Broker logins** (mosquitto ≥ 2.1, Dynamic Security; [`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md),
+SPEC §4.6.12). The daemon keeps **one** admin control connection to the plugin
+(`$VOLLEYD_HOME/dynsec-admin.json`, from `volley auth init --volleyd-file`; else
+`$VOLLEY_AUTH_DIR/admin.json`), opened at start, version-checked on every open (a broker older than
+2.1 makes `volleyd daemon` exit with `BROKER_TOO_OLD`), and reconnected with backoff after a drop. A
+mint is one `createClient` (username = agent id, a random password, role `volley-agent` inline);
+the mints (and deletes) of the same `dynsec_batch_ms` window go as **one** control message, so the
+broker rewrites its state file once per batch, and each answer is matched to its own agent (a failed
+element fails only that spawn, `CREDENTIALS_FAILED`). A connection drop fails the commands in
+flight once (`CREDENTIALS_FAILED`: the spawn's own retry runs later over the reconnected link). A mint
+that finds its agent login already there (a retry) sets it a new password; it never takes over a
+login that is not an agent login. No ACL is changed per agent and no `volley auth` command or signal
+is involved: the agent role already lets an agent ack volleyd and the Desk (an ack to a
+random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
@@ -727,9 +904,13 @@ handed to the pipeline, which verifies the claim and retires the agent once it i
 LWT) is retired only after the reap grace passes with no fresh status or heartbeat (see
 [Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
-reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
-retained payloads on its `registry`, `status`, `result`, `capability` and `screen` topics, the
-lock released, and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+reconnect with a fresh `spawning` (SPEC §6.5). Retiring deletes the agent's login through the
+**delete path** (SPEC §4.6.12; a deleted login is disconnected without its will, so no LWT reports
+it): volleyd publishes the agent's retained `status: reaped { reason: "credentials_deleted" }`,
+then empty retained payloads on its `registry`, `status`, `progress`, `result`, `capability` and
+`screen` topics, then the batched `deleteClient` (journaled `agent_reaped_by_supervisor` and
+`credentials_revoked`); then the lock is released and `agent_retired { status, terminal, result }`
+journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
 --yes` closes the retired agents' workspaces and runs `git worktree remove` with the fence's
@@ -743,6 +924,22 @@ Accepting the dialog by hand in any worktree of the repo works too: every tick r
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
 
+
+### Credential sweep
+
+Dynamic Security logins never expire, and every change rewrites the plugin's whole state file, so
+the file size (about 300 bytes per login) drives the cost of every mint. With a dynsec admin login
+the daemon therefore **sweeps**: at start and every `credential_sweep_interval_s` (default 600) it
+lists the logins holding `volley-agent` alone and deletes, through the delete path, each one with no
+live agent behind it: not supervised, not running in a wave that is neither stopped nor complete, no
+worktree lock naming it, no non-terminal retained status (`spawning`, `registered`, `working`,
+`blocked`…, in any namespace), and not minted (or first seen) within `spawn_timeout_s`. One sweep's
+deletes go as one control message; it journals `credentials_swept { agent_ids }` in `_system`. The
+fixed identities, accounts, token logins and the admin are never candidates. `volleyd status` starts
+with `agent logins: N live, M swept` (the agent logins on the broker, a count volleyd re-reads after
+each of its mints and deletes, each sweep and every 30 s, so `status` never waits on the broker,
+and the total swept per the `_system` journal); `--json` has
+`agent_logins: { live, swept }`.
 ### Remote hosts (ssh + tmux)
 
 A task can run its agents on a second machine: no cmux there, agents in tmux sessions, reached
@@ -1132,12 +1329,26 @@ ALLOW (program by bare name only — never a path):
     send --workspace <ref> <text>   text: TYPED_TEXT only
     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
     list-workspaces · ping
-  claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
-    which the launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS),
-    including `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>`
-  volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
-  volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
-  volley auth rm-agent <agent_id> [--no-reload]
+  claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
+    launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
+    `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+    sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
+    a profile's login state and plan, never a credential)
+  tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
+    `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
+    SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
+    `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
+    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+  (agent logins are minted and deleted over volleyd's own Dynamic Security control
+  connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+  mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
+    retains no $SYS/broker/version)
+  volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
+  volley auth add <agent_id> --role ROLE [--kind KIND] --json
+  volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
+  volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+    ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
+    LABEL 1..64 printable characters, not starting with `-`
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
@@ -1231,3 +1442,55 @@ resolve) at install time. Re-run `volleyd install` after changing any of them.
 
 Same table as `volley`: `0` success · `1` error (validation failure, daemon not running, broker
 down, request rejected) · `2` usage error · `124` the daemon did not answer in time.
+
+---
+
+## Testing: the clock contract
+
+Every timer volleyd arms and every wall-clock read it makes goes through one `Clock`
+(`src/clock.ts`: `now`, `mono`, `setTimeout` / `clearTimeout`, `setInterval` / `clearInterval`).
+The daemon takes it as `DaemonOptions.clock` (default: `systemClock`, real timers) and hands it to
+everything it runs: the admission tick, the spawn-refusal backoff, verification windows, reap
+graces, steer ack waits, tunnel restarts and checks, screen captures and their read bounds, the
+token-prune interval, sign-in polls, and the sleep/wake sampler. The times it stamps and compares
+come from the same clock: journal events (wave and `_system`), decisions, config changes, worktree
+locks and their staleness check, so a daemon on a fake clock journals fake time. `systemClock`
+holds the only real timers in `src/`; `test/no-wall-clock.test.ts` fails on any `setTimeout`,
+`setInterval`, `Date.now()`, `performance.now()` or `new Date()` elsewhere, and on any use of
+`systemClock` (or a `globalThis` timer) not on a line commented `// real clock: <why>`. Those are
+the defaults of an injectable clock and code that runs on the real one: a real child process
+(`exec.ts`), the CLI's own timeouts, file mtimes, a hooks process's own stamps. In `daemon.ts`
+`systemClock` appears only as the default of `DaemonOptions.clock`.
+
+A test that depends on daemon timing never waits for real time to pass:
+
+- **Drive the clock.** Pass `fakeClock()` (`test/helpers/fake-clock.ts`) as the daemon's `clock`.
+  Its timers fire only on `advance(ms)` / `advanceTo(wall)` / `advanceToNext()`, in due order,
+  with pending promise continuations flushed after each. Nothing global is faked: the MQTT client
+  and the Aedes broker keep running on real I/O. `armed(ms)` resolves once the daemon has
+  scheduled a timer of that length — the sync point between "it consumed the message" and "move
+  past what it scheduled". It matches any armed timer of that length, intervals included and
+  ones armed before the call, so on a daemon clock (whose watchdog interval is always armed) use
+  a length only the awaited step schedules. `sleepHost(ms)` moves the wall clock only (a host sleep, for wake
+  detection).
+- **Await the event, never poll for it.** `journalWait(home, () => daemon)`
+  (`test/helpers/journal-wait.ts`) resolves `event(wave, type | predicate, n)` from the append
+  itself (`Daemon.onJournal`); events already in the journal count. `settled()` waits until the
+  daemon is idle — its queue drained, no spawn launching, every append published — before a test
+  reads the published state or asserts that nothing happened.
+- **Broker round-trips only** may be re-checked: `eventually(pred)` (`test/helpers/broker-wait.ts`)
+  has no deadline of its own (vitest's test timeout bounds it). To prove the daemon has read what
+  was published before, prefer a control round-trip behind it on the daemon's connection
+  (`SupervisedEnv.consumed()`). Any remaining real timer (a sleep, a race, a delayed start),
+  deadline or elapsed-time bound in `test/` carries a `broker round-trip:` or `real process:`
+  comment saying why, or the grep-guard fails.
+
+```ts
+const clock = fakeClock(T0);
+const daemon = await env.start({ clock });
+const waits = journalWait(env.home, () => daemon);
+// … a spawn is refused: spawn_failed, retry in 30 s
+await clock.advance(30_000);
+await daemon.tick();
+expect((await waits.event("w1", "spawn_failed", 2)).data).toMatchObject({ attempt: 2 });
+```

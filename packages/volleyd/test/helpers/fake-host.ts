@@ -16,6 +16,7 @@ import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
 import type { NewEvent, Wave } from "../../src/types";
 import type { AgentWatch, SignalState } from "../../src/verify";
 import { parseWaveFile } from "../../src/wave-file";
+import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
 
 export interface FakeHost extends Host {
@@ -113,11 +114,8 @@ export function fakeWatch(
     agentId,
     namespace,
     state,
-    waitFor: async (pred, ms) => {
-      if (pred(state)) return true;
-      await new Promise((r) => setTimeout(r, Math.min(ms, 50)));
-      return pred(state);
-    },
+    // The signals are fixed: waiting changes nothing, so the window is over at once.
+    waitFor: async (pred) => pred(state),
     onStatus: () => {},
     onProgress: () => {},
     close: async () => {},
@@ -146,7 +144,11 @@ export interface SpawnEnv {
   openDecisions: string[];
   /** Topics the spawn cleared with an empty retained payload (a superseded attempt's). */
   cleared: string[];
+  /** Retained messages the spawn published (a superseded attempt's `reaped` status). */
+  published: { topic: string; payload: string }[];
   deps: SpawnDeps;
+  /** The logins the spawn minted and revoked. */
+  creds: MemoryCredentials;
   request: (over?: Partial<SpawnRequest>) => SpawnRequest;
   /** The worktree a T1 implementer spawn uses. */
   worktree: string;
@@ -189,14 +191,13 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, o.issueFixture ?? "gh-issue-42.json"), "utf-8"),
-    })
-    .on(["volley", "auth", "add-agent"], (argv) => ({
-      stdout: JSON.stringify({ username: argv[3], password: `pw-${argv[3]}` }),
-    }));
+    });
   const host = fakeHost(fake);
+  const creds = memoryCredentials();
   const events: NewEvent[] = [];
   const openDecisions: string[] = [];
   const cleared: string[] = [];
+  const published: { topic: string; payload: string }[] = [];
   const deps: SpawnDeps = {
     host,
     home,
@@ -206,6 +207,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     hooksDir: "/opt/volley/packages/volley-hooks",
     mcpEntry: "/opt/volley/packages/volley-mcp/src/index.ts",
     mintCredentials: o.mint ?? true,
+    credentials: creds,
     tunables: {
       worktree_root: join(dir, "wt"),
       spawn_timeout_s: o.spawnTimeoutS ?? 1,
@@ -220,6 +222,9 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     probe: { status: async () => null, registered: async () => false, lastHeartbeat: () => null },
     watch: o.watch ?? (async (ns, id) => fakeWatch(ns, id)),
     briefGate: null,
+    publishRetained: async (topic, payload) => {
+      published.push({ topic, payload });
+    },
     clearRetained: async (topic) => {
       cleared.push(topic);
     },
@@ -235,7 +240,9 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     events,
     openDecisions,
     cleared,
+    published,
     deps,
+    creds,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),
     worktree: join(dir, "wt", "w1", "T1-implementer"),
     cleanup: async () => rmSync(dir, { recursive: true, force: true }),

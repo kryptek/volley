@@ -32,6 +32,9 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  dynsec_batch_ms: 50,
+  credential_sweep_interval_s: 600,
+  claude: { default_account: null },
   hosts: {},
 };
 
@@ -74,6 +77,8 @@ export const DAEMON_DEFAULTS = {
   tick_ms: 10_000,
   /** How long the CLI waits for the daemon's retained status before saying "not running". */
   probe_ms: 1_000,
+  /** How often the cached agent-login count (`volleyd status`) is re-read from the broker. */
+  login_count_refresh_ms: 30_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
   /** How often the daemon checks its broker connection; a lost connection makes it exit. */
@@ -123,6 +128,24 @@ export const DAEMON_DEFAULTS = {
   issue_fetch_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
+  /** Kill a `volley auth` account command (accounts.ts) after this long. */
+  auth_exec_timeout_ms: 15_000,
+  /** Lifetime of a `signin_link` whose request names no `ttl_s`. */
+  signin_link_ttl_s: 600,
+  /** The longest a sign-in link may live (`volley auth` enforces the same bound). */
+  token_max_ttl_s: 86_400,
+  /**
+   * How often volleyd runs `volley auth list --json`, which drops the broker logins of expired
+   * (and redeemed) one-time tokens, when the daemon uses broker auth.
+   */
+  token_prune_ms: 60_000,
+  /** How long a Dynamic Security control message may wait for its answer (and the connect). */
+  dynsec_timeout_ms: 10_000,
+  /** Reconnect backoff of volleyd's control connection after a failed open: doubles up to max. */
+  dynsec_reconnect_base_ms: 1_000,
+  dynsec_reconnect_max_ms: 30_000,
+  /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
+  reply_key_min_bits: 2048,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */
@@ -184,4 +207,17 @@ export const DAEMON_DEFAULTS = {
   decision_text_max: 300,
   /** Bound on each git / gh call of restart reconciliation. */
   reconcile_probe_ms: 15_000,
+  /** How often a Claude account sign-in checks for its URL and `claude auth status`. */
+  claude_signin_poll_ms: 2_000,
+  /** How long a background Claude sign-in may wait for the browser before it is failed. */
+  claude_signin_timeout_ms: 900_000,
+  /** Bound on one `claude auth status`. */
+  claude_auth_status_timeout_ms: 15_000,
+  /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
+  claude_json_lock_attempts: 50,
+  claude_json_lock_wait_ms: 20,
+  /** A `.claude.json.lock` older than this was left by a process that died holding it. */
+  claude_json_lock_stale_ms: 10_000,
+  /** How long an account move waits for the agent to stop before it respawns it. */
+  account_move_stop_ms: 60_000,
 } as const;

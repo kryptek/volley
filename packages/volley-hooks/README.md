@@ -295,20 +295,24 @@ explicitly and never falls back to a default broker. Subprocess hooks get an emp
 `VOLLEY_AUTH_DIR` by default, so no test reads the host's real `coordinator.json`.
 
 `test/integration/mosquitto-acl.test.ts` (also opt-in) starts no broker: it needs
-`VOLLEY_INTEGRATION=1` and `VOLLEY_AUTH_BROKER_URL` pointing at a PRIVATE mosquitto (never the
-live 1883/9001) set up as volley-mcp's `test/integration/mosquitto-auth.conf` and
-`auth-fixture.sh` describe (a generated password file plus the shipped
-`examples/mosquitto-auth/acl.conf`), and runs the hooks as a minted agent against it. CI's
-`test-integration-auth` job runs it against a docker mosquitto; locally:
+`VOLLEY_INTEGRATION=1` and `VOLLEY_AUTH_BROKER_URL` pointing at a PRIVATE mosquitto 2.1 (never the
+live 1883/9001) bootstrapped with Volley's shared Dynamic Security roles by volley-cli's
+`test/integration/dynsec-fixture.ts`, and runs the hooks as an agent login against it. CI's
+`test-integration-dynsec` job runs it against the `eclipse-mosquitto:2.1-alpine` container; locally:
 
 ```sh
-# from packages/volley-hooks
-d=$(mktemp -d); P=$((20000 + RANDOM % 20000))
-sh ../volley-mcp/test/integration/auth-fixture.sh "$d" ../../examples/mosquitto-auth/acl.conf
-sed -e "s#/tmp/volley-auth#$d#" -e "s#^listener 1884#listener $P 127.0.0.1#" \
-  ../volley-mcp/test/integration/mosquitto-auth.conf > "$d/mosquitto.conf"
-mosquitto -c "$d/mosquitto.conf" -d
-VOLLEY_INTEGRATION=1 VOLLEY_AUTH_BROKER_URL=mqtt://127.0.0.1:$P bun x vitest run test/integration/mosquitto-acl.test.ts
+# from the repo root
+P=$((20000 + RANDOM % 20000)); d=$(mktemp -d); chmod 777 "$d"
+docker run -d --name vly-dynsec -p 127.0.0.1:$P:1883 \
+  -v "$PWD/examples/mosquitto-auth/mosquitto-dynsec.conf:/mosquitto/config/mosquitto.conf:ro" \
+  -v "$d:/mosquitto/data" eclipse-mosquitto:2.1-alpine sh -c \
+  'mosquitto_ctrl dynsec init /mosquitto/data/dynamic-security.json dynsec-admin it-pw >/dev/null &&
+   chown -R mosquitto: /mosquitto/data && exec mosquitto -c /mosquitto/config/mosquitto.conf'
+VOLLEY_DYNSEC_BROKER_URL=mqtt://127.0.0.1:$P VOLLEY_DYNSEC_ADMIN_PASSWORD=it-pw \
+  bun packages/volley-cli/test/integration/dynsec-fixture.ts
+cd packages/volley-hooks && VOLLEY_INTEGRATION=1 VOLLEY_AUTH_BROKER_URL=mqtt://127.0.0.1:$P \
+  bun x vitest run test/integration/mosquitto-acl.test.ts
+docker rm -f vly-dynsec
 ```
 
 ## Harness findings
