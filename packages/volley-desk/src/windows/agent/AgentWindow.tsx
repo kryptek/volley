@@ -6,11 +6,14 @@
  * narration effect, D7); attention-line (D3) and steering-panel (D4) slots; the Volley
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
- * from the store's `AgentView` and the agent's `WaveView`.
+ * from the store's `AgentView` and the agent's `WaveView`. An agent with no
+ * signal (`attention.ts` `noSignalFor`) gets a grey status mark and a one-line
+ * label above the tabs.
  */
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
+import type { NoSignal } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
@@ -27,6 +30,8 @@ export const AGENT_WIDTH = 460;
 export const NEUTRAL_ACCENT = "#a3abc0";
 /** A heartbeat older than this is stale. */
 export const HEARTBEAT_STALE_MS = 60_000;
+/** The status mark of an agent with no signal. */
+export const NO_SIGNAL_GREY = "#6b7280";
 
 export const ROLE_LABEL: Record<Role, string> = {
   implementer: "implementer",
@@ -60,6 +65,8 @@ export interface AgentWindowProps {
   steerOpen?: boolean;
   /** Steering panel, rendered at the bottom of the body (D4). */
   steer?: ReactNode;
+  /** Set while the agent has no signal: greys the status mark and shows the label. */
+  noSignal?: NoSignal | null;
 }
 
 /** The mark for an outcome status: `blocked` (SPEC §5.2, terminal) needs the operator, like `failed`. */
@@ -127,6 +134,7 @@ export function AgentWindow({
   onChat,
   steerOpen = false,
   steer,
+  noSignal = null,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -144,12 +152,16 @@ export function AgentWindow({
 
   const title = (
     <>
-      <StatusMark
-        status={status}
-        {...(progress === null ? {} : { progress: progress / 100 })}
-        color={accent}
-        size={18}
-      />
+      {noSignal ? (
+        <StatusMark status="pending" color={NO_SIGNAL_GREY} size={18} className="sm-nosignal" />
+      ) : (
+        <StatusMark
+          status={status}
+          {...(progress === null ? {} : { progress: progress / 100 })}
+          color={accent}
+          size={18}
+        />
+      )}
       <span className="t-name ell min0">
         {agent.task ?? agent.id}
         {issue !== undefined && <span className="dim"> #{issue}</span>}
@@ -226,6 +238,13 @@ export function AgentWindow({
       {spec?.title && <div className="a-title">{spec.title}</div>}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
       <Narration text={agent.narration} fx={narrationFx} />
+      {noSignal && (
+        <div className="a-nosignal" title={noSignal.title}>
+          <span className="chip">
+            <i style={{ background: NO_SIGNAL_GREY }} /> {noSignal.label}
+          </span>
+        </div>
+      )}
       {attention}
       <GooeyTabs
         id={tabsId}
@@ -237,10 +256,14 @@ export function AgentWindow({
       />
       <div className="tab-panel" {...tabPanelProps(tabsId, tab)}>
         {tab === "feed" ? (
-          <Feed feed={agent.feed} />
+          <Feed feed={agent.feed} noSignal={noSignal !== null} />
         ) : (
           // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
-          <Terminal screen={agent.screen} stale={task?.screen_stale === true} />
+          <Terminal
+            screen={agent.screen}
+            stale={task?.screen_stale === true}
+            noSignal={noSignal !== null}
+          />
         )}
       </div>
       {steer}

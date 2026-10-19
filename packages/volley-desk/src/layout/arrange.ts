@@ -8,6 +8,15 @@
  * columns and every row count, clusters are laid out in rows and the
  * placement with the largest fitting scale wins, so one big cluster spreads
  * to the viewport's aspect instead of a tall strip.
+ *
+ * Side clusters (the unassigned group, the coordinators window) are not
+ * spread over rows with the waves: they form one block, side by side or
+ * stacked (unassigned above coordinators), that closes the first row right
+ * after its waves and before any overflow row, so it sits next to the waves
+ * instead of trailing far behind them. On a portrait screen the block may
+ * instead start the second row, under the first wave; the scale decides. A
+ * side cluster packs its agents in a near-square block (⌈√n⌉ columns)
+ * whatever the waves use, which bounds its tethers.
  */
 import { FIT_MIN_SCALE, type View } from "../canvas/useViewport";
 
@@ -34,6 +43,8 @@ export interface Box {
 export interface Cluster {
   main: Box;
   kids: Box[];
+  /** Laid out at the end of the first row, after its waves (see the module comment). */
+  side?: boolean;
 }
 
 /** The browser viewport (`window.innerWidth` / `innerHeight`). */
@@ -81,30 +92,67 @@ function fitArea(screen: Screen) {
   return { vw: screen.width - 48, vh: screen.height - 64 - 110 };
 }
 
+type Laid = ReturnType<typeof layoutCluster>;
+
+/** Laid-out clusters side by side (`across`) or stacked, CGAP apart, as one block. */
+function block(lays: readonly Laid[], across: boolean): Laid {
+  const at: Record<string, Pos> = {};
+  let off = 0;
+  for (const l of lays) {
+    for (const [id, p] of Object.entries(l.at)) {
+      at[id] = across ? { x: off + p.x, y: p.y } : { x: p.x, y: off + p.y };
+    }
+    off += (across ? l.w : l.h) + CGAP;
+  }
+  const w = across ? off - CGAP : Math.max(...lays.map((l) => l.w));
+  const h = across ? Math.max(...lays.map((l) => l.h)) : off - CGAP;
+  return { at, w, h };
+}
+
 /** Every placement arrange considers, in the order it considers them. */
 export function candidates(clusters: readonly Cluster[], screen: Screen): Candidate[] {
   const { vw, vh } = fitArea(screen);
   const out: Candidate[] = [];
-  const maxCols = Math.max(MIN_MAX_COLS, ...clusters.map((cl) => cl.kids.length));
+  const waves = clusters.filter((cl) => !cl.side);
+  const sides = clusters
+    .filter((cl) => cl.side)
+    .map((cl) => layoutCluster(cl, Math.ceil(Math.sqrt(cl.kids.length))));
+  if (waves.length === 0 && sides.length === 0) return out;
+  // The side block, side by side and (for two or more) stacked.
+  const blocks = sides.length === 0 ? [] : [block(sides, true)];
+  if (sides.length > 1) blocks.push(block(sides, false));
+  // Where it goes: closing the first row, or (portrait, with waves) as the second row.
+  const below = waves.length > 0 && vw < vh ? [false, true] : [false];
+  const maxCols = Math.max(MIN_MAX_COLS, ...waves.map((cl) => cl.kids.length));
   for (let c = 1; c <= maxCols; c++) {
-    const lays = clusters.map((cl) => layoutCluster(cl, c));
-    for (let rows = 1; rows <= lays.length; rows++) {
+    const lays = waves.map((cl) => layoutCluster(cl, c));
+    for (let rows = 1; rows <= Math.max(1, lays.length); rows++) {
       const per = Math.ceil(lays.length / rows);
-      const place: Record<string, Pos> = {};
-      let y = 0;
-      let W = 0;
-      for (let r = 0; r * per < lays.length; r++) {
-        const row = lays.slice(r * per, r * per + per);
-        let x = 0;
-        for (const l of row) {
-          for (const [id, p] of Object.entries(l.at)) place[id] = { x: x + p.x, y: y + p.y };
-          x += l.w + CGAP;
-        }
-        W = Math.max(W, x - CGAP);
-        y += Math.max(...row.map((l) => l.h)) + CGAP;
+      const waveRows: Laid[][] = [];
+      for (let r = 0; r === 0 || r * per < lays.length; r++) {
+        waveRows.push(lays.slice(r * per, r * per + per));
       }
-      const H = y - CGAP;
-      out.push({ cols: c, rows, s: Math.min(ARRANGE_MAX_SCALE, vw / W, vh / H), place, W, H });
+      for (const side of blocks.length ? blocks : [null]) {
+        for (const under of below) {
+          const grid = waveRows.map((row) => [...row]);
+          if (side && under) grid.splice(1, 0, [side]);
+          else if (side) grid[0]?.push(side);
+          const place: Record<string, Pos> = {};
+          let y = 0;
+          let W = 0;
+          for (const row of grid) {
+            let x = 0;
+            for (const l of row) {
+              for (const [id, p] of Object.entries(l.at)) place[id] = { x: x + p.x, y: y + p.y };
+              x += l.w + CGAP;
+            }
+            W = Math.max(W, x - CGAP);
+            y += Math.max(...row.map((l) => l.h)) + CGAP;
+          }
+          const H = y - CGAP;
+          out.push({ cols: c, rows, s: Math.min(ARRANGE_MAX_SCALE, vw / W, vh / H), place, W, H });
+        }
+      }
     }
   }
   return out;
