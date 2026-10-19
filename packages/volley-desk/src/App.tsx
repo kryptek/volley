@@ -7,7 +7,9 @@
  * the windows into per-wave clusters and re-runs on structural changes while
  * auto-arrange is on. The chat glyphs open the steering panel (D4). The look (D7,
  * `look/`): the picked React Bits background under its dim, the window chrome,
- * Needs-you and narration effects, tethers, the Appearance panel, the dock and toasts.
+ * Needs-you and narration effects, tethers and the dock. The Settings window (O1,
+ * `settings/SettingsWindow.tsx`) holds General, Appearance, Supervisor (the global
+ * volleyd config) and About; a wave's ⚙ opens that wave's effective config.
  * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage.
@@ -38,16 +40,17 @@ import {
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
 import { plural } from "./lib/plural";
-import { Appearance } from "./look/Appearance";
 import { Background, degradeLook, useWebGL } from "./look/Background";
-import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
+import { DeskDock } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
 import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { SettingsModal } from "./settings/SettingsModal";
+import { SettingsWindow } from "./settings/SettingsWindow";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
+import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
@@ -219,8 +222,8 @@ export default function App() {
   const webgl = useWebGL();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl);
-  const [lookOpen, setLookOpen] = useState(false);
-  const [toast, say, closeToast] = useToast();
+  /** The Settings window's section while it is open. */
+  const [deskSettings, setDeskSettings] = useState<SectionKey | null>(null);
 
   const allGroups = agentsByWave(state);
   // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
@@ -439,23 +442,13 @@ export default function App() {
     arrange,
     closeTop: () => {
       if (settings !== null) setSettings(null);
+      else if (deskSettings !== null) setDeskSettings(null);
       else if (steerOpen !== null) setSteerOpen(null);
-      else if (lookOpen) setLookOpen(false);
       else return false;
       return true;
     },
   });
 
-  const toggleAutoArrange = () => {
-    const on = !look.autoArrange;
-    setLook({ autoArrange: on });
-    say(
-      on ? "Auto-arrange on" : "Auto-arrange off",
-      on
-        ? "New, hidden or shown windows re-arrange and re-fit automatically."
-        : "Windows stay where you put them.",
-    );
-  };
   return (
     <div className="app">
       <Background which={look.bg} dim={look.dim} />
@@ -619,39 +612,44 @@ export default function App() {
         now={supNow}
       />
 
-      {lookOpen && (
-        <Appearance
-          look={look}
-          setLook={setLook}
-          onClose={() => setLookOpen(false)}
-          onArrange={arrange}
-          webgl={webgl}
-        />
-      )}
-
       <DeskDock
         coordsOpen={coordsOpen}
         onToggleCoords={() => setCoordsOpen((o) => !o)}
         needsYou={targets.length}
-        lookOpen={lookOpen}
-        onToggleLook={() => setLookOpen((o) => !o)}
         tethers={look.tethers}
         onToggleTethers={() => setLook({ tethers: !look.tethers })}
         onArrange={arrange}
-        autoArrange={look.autoArrange}
-        onToggleAutoArrange={toggleAutoArrange}
         onZoom={(f) => zoomAt(f)}
+        settingsOpen={deskSettings !== null}
+        onToggleSettings={() => setDeskSettings((s) => (s === null ? "general" : null))}
       />
 
-      <DeskToast toast={toast} onClose={closeToast} />
-
-      {settings !== null && state.waves[settings] && (
-        // Read-only until the Desk has signed in (and in demo mode, which has no volleyd).
-        <SettingsModal
-          wave={state.waves[settings]}
+      {deskSettings !== null && (
+        // Supervisor rows are read-only until the Desk has signed in (and in demo mode).
+        <SettingsWindow
+          initial={deskSettings}
+          look={look}
+          setLook={setLook}
+          notify={notify}
+          setNotify={setNotify}
+          webgl={webgl}
+          identity={identity}
+          demo={demo}
           config={state.config}
           transport={configTransport}
+          onArrange={arrange}
+          onClose={() => setDeskSettings(null)}
+        />
+      )}
+
+      {settings !== null && state.waves[settings] && (
+        <SettingsModal
+          wave={state.waves[settings]}
           onClose={() => setSettings(null)}
+          onOpenGlobal={() => {
+            setSettings(null);
+            setDeskSettings("supervisor");
+          }}
         />
       )}
     </div>

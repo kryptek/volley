@@ -70,8 +70,9 @@ describe("keyboard: canvas", () => {
   it("f arranges & fits, except while typing", () => {
     vi.useFakeTimers();
     const { container } = renderApp();
-    fireEvent.click(dock().getByRole("button", { name: "Appearance" }));
-    const search = screen.getByRole("searchbox", { name: "Search backgrounds" });
+    fireEvent.click(screen.getAllByRole("button", { name: /^Message / })[0] as HTMLElement);
+    const search = (document.querySelector(".steer textarea, .steer input") ?? null) as HTMLElement;
+    expect(search).not.toBeNull();
     search.focus();
     fireEvent.keyDown(search, { key: "f" });
     expect(container.querySelector(".world--anim")).toBeNull();
@@ -88,9 +89,8 @@ describe("keyboard: canvas", () => {
 });
 
 describe("keyboard: dialogs", () => {
-  it("Escape closes the top dialog first: settings, then the steering panel, then Appearance", () => {
+  it("Escape closes the top dialog first: wave settings, then the steering panel", () => {
     renderApp();
-    fireEvent.click(dock().getByRole("button", { name: "Appearance" }));
     const chat = screen.getAllByRole("button", { name: /^Message / })[0] as HTMLElement;
     fireEvent.click(chat);
     expect(document.querySelector(".steer")).not.toBeNull();
@@ -115,23 +115,37 @@ describe("keyboard: dialogs", () => {
     expect(notCancelled).toBe(false);
     expect(screen.queryByRole("dialog", { name: "Wave settings" })).toBeNull();
     expect(document.querySelector(".steer")).not.toBeNull();
-    expect(screen.getByRole("complementary", { name: "Appearance" })).toBeInTheDocument();
 
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(document.querySelector(".steer")).toBeNull();
-    expect(screen.getByRole("complementary", { name: "Appearance" })).toBeInTheDocument();
-
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
-    expect(screen.queryByRole("complementary", { name: "Appearance" })).toBeNull();
   });
 
-  it("f, + and - leave the canvas alone while the settings modal is open", () => {
+  it("Escape closes the Settings window before the steering panel, wherever focus is", () => {
+    renderApp();
+    fireEvent.click(screen.getAllByRole("button", { name: /^Message / })[0] as HTMLElement);
+    fireEvent.click(dock().getByRole("button", { name: "Settings" }));
+    const settings = screen.getByRole("dialog", { name: "Settings" });
+    expect(settings.contains(document.activeElement)).toBe(true);
+    const notCancelled = fireEvent.keyDown(document.activeElement as HTMLElement, {
+      key: "Escape",
+    });
+    expect(notCancelled).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(document.querySelector(".steer")).not.toBeNull();
+    // Focus outside the window (on the page) still closes it first.
+    fireEvent.click(dock().getByRole("button", { name: "Settings" }));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(document.querySelector(".steer")).not.toBeNull();
+  });
+
+  it("f, + and - leave the canvas alone while a wave's settings are open", () => {
     vi.useFakeTimers();
     const { container } = renderApp();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
     const dialog = screen.getByRole("dialog", { name: "Wave settings" });
     const v0 = view(container);
-    const btn = within(dialog).getAllByRole("radio")[0] as HTMLElement;
+    const btn = within(dialog).getByRole("button", { name: "Global settings…" });
     btn.focus();
     for (const key of ["f", "+", "=", "-"]) {
       fireEvent.keyDown(btn, { key });
@@ -141,7 +155,7 @@ describe("keyboard: dialogs", () => {
     expect(container.querySelector(".world--anim")).toBeNull();
   });
 
-  it("traps focus in the settings modal", () => {
+  it("traps focus in a wave's settings", () => {
     renderApp();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
     const dialog = screen.getByRole("dialog", { name: "Wave settings" });

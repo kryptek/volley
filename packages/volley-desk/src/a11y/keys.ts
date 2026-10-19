@@ -1,8 +1,8 @@
 /**
  * The Desk's keyboard (D8). With the stage focused the arrow keys pan; from
  * anywhere but a text field `+` / `-` zoom around the centre and `f` runs
- * arrange & fit; Escape closes the top dialog (settings, then the steering
- * panel, then Appearance). Modified keys are left to the browser (⌘F is find)
+ * arrange & fit; Escape closes the top dialog (a wave's settings or the
+ * Settings window, then the steering panel). Modified keys are left to the browser (⌘F is find)
  * and a key a control already handled (`preventDefault`, or stopped like the
  * settings field's Escape) does nothing here. Inside a modal dialog only
  * Escape reaches the Desk: the canvas behind the scrim keeps still.

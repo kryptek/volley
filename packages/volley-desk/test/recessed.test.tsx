@@ -7,9 +7,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { Appearance } from "../src/look/Appearance";
 import { LOOK0 } from "../src/look/useLook";
-import { SettingsModal } from "../src/settings/SettingsModal";
+import type { NotifyOptions } from "../src/notify/use-notify-settings";
+import { Appearance } from "../src/settings/Appearance";
+import { General } from "../src/settings/General";
+import { SettingsWindow } from "../src/settings/SettingsWindow";
+import { Supervisor } from "../src/settings/Supervisor";
 import { SteerPanel } from "../src/steer/SteerPanel";
 import { demoMessages } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
@@ -20,6 +23,7 @@ import { WaveYaml } from "../src/windows/wave/WaveYaml";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 const noop = () => {};
+const NOTIFY: NotifyOptions = { enabled: false, sound: true, on: [] };
 const css = readFileSync(join(__dirname, "../src/styles/desk.css"), "utf8").replace(/\s+/g, " ");
 
 function entry(): FeedEntry {
@@ -85,10 +89,8 @@ describe("recessed text boxes", () => {
   });
 
   it("settings text fields are recessed, and a focused one takes the focus ring", () => {
-    const wave = demoWave();
     const config = demo().config as ConfigPayload;
-    render(<SettingsModal wave={wave} config={config} transport={null} onClose={noop} />);
-    fireEvent.click(screen.getByRole("radio", { name: "Global" }));
+    render(<Supervisor config={config} transport={null} />);
     const field = screen.getByRole("textbox", { name: "Fallback model" });
     expect(field).toHaveClass("recessed");
     expect(field).toBeEnabled();
@@ -111,10 +113,33 @@ describe("recessed text boxes", () => {
     expect(ringed()).toContain("input.recessed:focus");
   });
 
-  it("the background search and the Appearance number field are recessed", () => {
-    render(<Appearance look={LOOK0} setLook={noop} onClose={noop} onArrange={noop} />);
+  it("the background search and the finished-agent grace field are recessed", () => {
+    render(<Appearance look={LOOK0} setLook={noop} />);
     expect(screen.getByRole("searchbox")).toHaveClass("recessed");
+    render(
+      <General look={LOOK0} setLook={noop} notify={NOTIFY} setNotify={noop} onArrange={noop} />,
+    );
     expect(screen.getByRole("spinbutton")).toHaveClass("recessed");
+  });
+
+  it("the Settings window's sidebar search is recessed", () => {
+    render(
+      <SettingsWindow
+        look={LOOK0}
+        setLook={noop}
+        notify={NOTIFY}
+        setNotify={noop}
+        webgl
+        identity="desk"
+        demo
+        config={null}
+        transport={null}
+        onArrange={noop}
+        onClose={noop}
+      />,
+    );
+    const search = screen.getByRole("searchbox", { name: "Search settings" });
+    expect(search.closest(".ms-search")).toHaveClass("recessed");
   });
 
   it("the recipe: inset shadow, dark gradient fill, lit bottom edge, keyboard focus ring", () => {

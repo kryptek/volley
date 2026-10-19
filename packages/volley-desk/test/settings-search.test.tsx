@@ -1,0 +1,60 @@
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { LOOK0 } from "../src/look/useLook";
+import { SettingsWindow } from "../src/settings/SettingsWindow";
+import { matchSections } from "../src/settings/sections";
+
+const keys = (q: string) => matchSections(q).map((s) => s.key);
+
+describe("matchSections", () => {
+  it("matches labels and keywords, ignoring case and spaces around the query", () => {
+    expect(keys("tunnel")).toEqual(["machines"]);
+    expect(keys("ceiling")).toEqual(["supervisor"]);
+    expect(keys("  Background ")).toEqual(["appearance"]);
+    expect(keys("ABOUT")).toEqual(["about"]);
+    expect(keys("")).toHaveLength(8);
+    expect(keys("zzz")).toEqual([]);
+  });
+});
+
+describe("the sidebar search", () => {
+  const renderWindow = () =>
+    render(
+      <SettingsWindow
+        look={LOOK0}
+        setLook={() => {}}
+        notify={{ enabled: false, sound: true, on: [] }}
+        setNotify={() => {}}
+        webgl
+        identity="desk"
+        demo={false}
+        config={null}
+        transport={null}
+        onArrange={() => {}}
+        onClose={() => {}}
+      />,
+    );
+  const search = () => screen.getByRole("searchbox", { name: "Search settings" });
+  const listed = () =>
+    within(screen.getByRole("navigation", { name: "Settings sections" }))
+      .queryAllByRole("button")
+      .map((b) => b.textContent);
+
+  it("typing 'tunnel' shows only Machines; 'ceiling' shows only Supervisor", () => {
+    renderWindow();
+    fireEvent.change(search(), { target: { value: "tunnel" } });
+    expect(listed()).toEqual(["Machines"]);
+    fireEvent.change(search(), { target: { value: "ceiling" } });
+    expect(listed()).toEqual(["Supervisor"]);
+    fireEvent.change(search(), { target: { value: "" } });
+    expect(listed()).toHaveLength(8);
+  });
+
+  it("says so when nothing matches, and keeps the open section on screen", () => {
+    renderWindow();
+    fireEvent.change(search(), { target: { value: "zzz" } });
+    expect(listed()).toEqual([]);
+    expect(screen.getByText(/No settings match/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("General");
+  });
+});

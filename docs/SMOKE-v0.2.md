@@ -374,12 +374,14 @@ owned by the coordinator, so it comes before the claim). After each, note in Res
 
 ### Config change mid-wave
 
-- [ ] In the Desk settings modal, change a global tunable (e.g. `heartbeat_alarm_s` to 900) and a
-  wave-scoped one. Both apply without a restart, the Desk shows the new values, and the reply came
-  from `volleyd` (the modal reports it applied):
+- [ ] In the Desk's **Settings › Supervisor** (dock → Settings, or a wave's ⚙ → *Global
+  settings…*), change a global tunable (e.g. `heartbeat_alarm_s` to 900). It applies without a
+  restart, the Desk shows the new value, and the reply came from `volleyd` (the row reports
+  `applied · v<version>`). Wave-scoped values come from the wave file's `config:` block; a wave's
+  ⚙ shows them read-only:
   ```sh
   volleyd config get heartbeat_alarm_s                              # 900
-  volleyd config get --wave "$WAVE"                                 # the wave-scoped value
+  volleyd config get --wave "$WAVE"                                 # the wave's effective config
   volleyd events _system --cursor smoke | grep config_changed       # one line per change
   ```
 - [ ] An invalid value (e.g. `-1`) is rejected with the field named; nothing changes.

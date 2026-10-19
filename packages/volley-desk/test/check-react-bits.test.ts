@@ -74,9 +74,8 @@ describe("check-react-bits", () => {
         used.add(m[1] as string);
       }
     }
-    // The D10 adoptions.
-    for (const name of ["GooeyNav", "RubberSegment", "SpecularButton"])
-      expect(used).toContain(name);
+    // The D10 adoptions in use (RubberSegment's one use, the wave modal's scope, moved to Settings).
+    for (const name of ["GooeyNav", "SpecularButton"]) expect(used).toContain(name);
     for (const name of used) {
       expect(REACT_BITS_ALLOW_LIST, name).toContain(name);
       expect(statSync(path.join(src, "rb", name)).isDirectory(), name).toBe(true);

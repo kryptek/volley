@@ -9,7 +9,7 @@
  *
  * WebGL (D8) is detected up front (`hasWebGL`): without it `degradeLook`
  * renders `none` for a WebGL background and `glass` for the `liquid` chrome,
- * and the Appearance panel hides both; the saved look is left alone. The
+ * and Settings › Appearance hides both; the saved look is left alone. The
  * error boundary stays as the last line (a context lost later, a driver bug).
  */
 import { Component, type ReactNode, Suspense, useMemo, useState } from "react";
