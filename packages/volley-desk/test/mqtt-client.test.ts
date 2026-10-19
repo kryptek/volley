@@ -140,6 +140,23 @@ describe("createMqttClient (desk)", () => {
     expect(received.map((r) => r.retained)).toEqual([true, false]);
   });
 
+  it("runs the connect handlers before the retained replay's first message (C11)", async () => {
+    const pub = await mqtt.connectAsync(broker.url, { reconnectPeriod: 0 });
+    for (const id of ["r1", "r2", "r3"]) {
+      await pub.publishAsync(`volley/demo/${id}/status`, envelope(id), { retain: true, qos: 1 });
+    }
+    await pub.endAsync();
+
+    client = createMqttClient({ url: broker.url, reconnectPeriod: 0 });
+    const events: string[] = [];
+    client.onConnect(() => events.push("connect"));
+    client.onMessage((m) => events.push(m.topic));
+    await client.connect();
+    await waitFor(() => events.length >= 4, 2000);
+
+    expect(events[0]).toBe("connect");
+  });
+
   it("after a reconnect, drops state cleared during the outage and does not duplicate the feed", async () => {
     const decision = "volley/_waves/w1/decisions/d1";
     const pub = await mqtt.connectAsync(broker.url, { reconnectPeriod: 0 });
@@ -379,7 +396,7 @@ describe("attachClient settling", () => {
     const detach = attachClient(
       f.client,
       (a) => actions.push(a.type),
-      { flushMs: 0, settleMs: 30 },
+      { flushMs: 0, settleMs: 30, quietMs: 2 },
       undefined,
       (s) => settling.push(s),
     );
@@ -392,7 +409,9 @@ describe("attachClient settling", () => {
     f.down();
     expect(settling).toEqual([false, true]);
     f.up();
-    expect(actions).toEqual(["resync"]);
+    expect(actions).toEqual([]); // the resync waits for the replay (C11)
+    await wait(5);
+    expect(actions).toEqual(["resync"]); // nothing replayed: released after the quiet window
     f.down(); // dropped again before settling: no settle while offline
     await wait(60);
     expect(settling).toEqual([false, true, true]);
@@ -400,6 +419,132 @@ describe("attachClient settling", () => {
     await wait(60);
     expect(settling).toEqual([false, true, true, false]);
     expect(actions).toEqual(["resync", "resync", "prune"]);
+    detach();
+  });
+});
+
+describe("attachClient replay hold (C11: the first load must not flash every retained agent)", () => {
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const msg = (topic: string, retained: boolean): DeskMessage => ({
+    topic,
+    envelope: {
+      schema_version: "0.1",
+      agent_id: "a",
+      channel: "status",
+      type: "working",
+      payload: {},
+    },
+    receivedAt: Date.now(),
+    retained,
+  });
+  function fake() {
+    const message = new Set<(m: DeskMessage) => void>();
+    const connect = new Set<() => void>();
+    const disconnect = new Set<() => void>();
+    const on =
+      <H>(set: Set<H>) =>
+      (h: H) => {
+        set.add(h);
+        return () => {
+          set.delete(h);
+        };
+      };
+    const client: DeskMqttClient = {
+      connect: async () => {},
+      disconnect: async () => {},
+      publish: async () => {},
+      onMessage: on(message),
+      onConnect: on(connect),
+      onDisconnect: on(disconnect),
+      onError: () => () => {},
+    };
+    return {
+      client,
+      emit: (m: DeskMessage) => {
+        for (const h of message) h(m);
+      },
+      up: () => {
+        for (const h of connect) h();
+      },
+      down: () => {
+        for (const h of disconnect) h();
+      },
+    };
+  }
+  type Logged = { type: string; topics?: string[] };
+  function attach(f: ReturnType<typeof fake>, opts: Parameters<typeof attachClient>[2]) {
+    const log: Logged[] = [];
+    const detach = attachClient(
+      f.client,
+      (a) =>
+        log.push(a.type === "apply" ? { type: a.type, topics: a.msgs.map((m) => m.topic) } : a),
+      opts,
+    );
+    return { log, detach };
+  }
+
+  it("holds the first connect's retained replay until it goes quiet, then applies it in one batch", async () => {
+    const f = fake();
+    const { log, detach } = attach(f, { flushMs: 0, settleMs: 1000, quietMs: 40 });
+    f.up();
+    f.emit(msg("volley/_system/registry/a", true)); // registry entries replay first…
+    await wait(20); // …longer than a flush, shorter than the quiet window
+    f.emit(msg("volley/default/a/status", true)); // …then the statuses
+    await wait(20);
+    expect(log).toEqual([]);
+    await wait(60);
+    expect(log).toEqual([
+      { type: "apply", topics: ["volley/_system/registry/a", "volley/default/a/status"] },
+    ]);
+    // Once released, deliveries flow as before.
+    f.emit(msg("volley/default/a/progress", false));
+    await wait(10);
+    expect(log.at(-1)).toEqual({ type: "apply", topics: ["volley/default/a/progress"] });
+    detach();
+  });
+
+  it("live (non-retained) deliveries during the hold do not keep it open", async () => {
+    const f = fake();
+    const { log, detach } = attach(f, { flushMs: 0, settleMs: 1000, quietMs: 40 });
+    f.up();
+    f.emit(msg("volley/default/a/status", true));
+    for (let i = 0; i < 6; i++) {
+      await wait(15);
+      f.emit(msg("volley/default/b/progress", false));
+    }
+    // 90 ms of live traffic, but the replay went quiet after its one retained message.
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0]?.topics?.[0]).toBe("volley/default/a/status");
+    detach();
+  });
+
+  it("releases a replay that never goes quiet once the hold's bound passes", async () => {
+    const f = fake();
+    const { log, detach } = attach(f, { flushMs: 0, settleMs: 1000, quietMs: 40, holdMaxMs: 80 });
+    f.up();
+    const stream = setInterval(() => f.emit(msg("volley/default/a/status", true)), 10);
+    await wait(150);
+    clearInterval(stream);
+    expect(log.length).toBeGreaterThan(0);
+    detach();
+  });
+
+  it("on a reconnect, dispatches the resync together with the replay, never before it", async () => {
+    const f = fake();
+    const { log, detach } = attach(f, { flushMs: 0, settleMs: 1000, quietMs: 40 });
+    f.up();
+    await wait(60);
+    f.down();
+    f.up();
+    f.emit(msg("volley/_system/registry/a", true));
+    await wait(20);
+    expect(log).toEqual([]); // the store still shows the pre-reconnect state
+    f.emit(msg("volley/default/a/status", true));
+    await wait(80);
+    expect(log).toEqual([
+      { type: "resync" },
+      { type: "apply", topics: ["volley/_system/registry/a", "volley/default/a/status"] },
+    ]);
     detach();
   });
 });

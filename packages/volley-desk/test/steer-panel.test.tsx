@@ -258,6 +258,20 @@ describe("Desk steering end to end (live store)", () => {
       payload: { capabilities: [], started_at: "2026-10-18T14:00:00.000Z" },
     },
   };
+  // A registered agent always has a status too (SPEC: vol_register publishes one); without
+  // it the Desk keeps the agent off the canvas while the replay settles (C11).
+  const status: DeskMessage = {
+    topic: `volley/default/${AGENT}/status`,
+    receivedAt: 1,
+    envelope: {
+      schema_version: "0.1",
+      agent_id: AGENT,
+      namespace: "default",
+      channel: "status",
+      type: "working",
+      payload: {},
+    },
+  };
 
   function fakeBroker({
     connects = true,
@@ -279,6 +293,7 @@ describe("Desk steering end to end (live store)", () => {
             if (connects) connected();
             deliver({ topic: "volley/_waves/w1/state", envelope: state, receivedAt: 1 });
             deliver(registry);
+            deliver(status);
           }, 0);
         },
         disconnect: async () => {},

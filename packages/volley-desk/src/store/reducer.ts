@@ -871,6 +871,19 @@ export function finishedAgents(state: DeskState, now: number, graceMs: number): 
 }
 
 /**
+ * Agents with no status yet (a registry entry, or a resync, ahead of the status):
+ * not classified as live or finished, so the Desk keeps them off the canvas while
+ * a connect's replay settles (C11).
+ */
+export function unclassifiedAgents(state: DeskState): Set<string> {
+  return new Set(
+    Object.values(state.agents)
+      .filter((a) => !a.status)
+      .map((a) => a.id),
+  );
+}
+
+/**
  * Agents grouped by wave id (every known wave, plus `UNASSIGNED`), ordered by
  * task then role. Wave coordinators are not listed: they have their own window.
  */

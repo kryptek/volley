@@ -142,11 +142,14 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
 
   let client: MqttClient | null = null;
 
-  const subscribe = (instance: MqttClient): Promise<void> =>
+  // `onGranted` runs in the SUBACK callback itself, before the broker's retained replay
+  // (sent after the SUBACK) is handled: a promise continuation could run after it.
+  const subscribe = (instance: MqttClient, onGranted: () => void): Promise<void> =>
     new Promise((resolve, reject) => {
       instance.subscribe([...DESK_SUBSCRIPTIONS], { qos: 1 }, (err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) return reject(err);
+        onGranted();
+        resolve();
       });
     });
 
@@ -193,19 +196,18 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         // mqtt.js re-subscribes on reconnect (`resubscribe` defaults on) the
         // filters that were granted, so we subscribe explicitly until one
         // SUBSCRIBE succeeds. Connect handlers run on every (re)connect after
-        // that; each reconnect is followed by a replay of every retained topic.
+        // that, before its replay of every retained topic (the store holds it, C11).
         let subscribed = false;
         instance.on("connect", () => {
           if (subscribed) {
             for (const h of connectHandlers) h();
             return;
           }
-          subscribe(instance)
-            .then(() => {
-              subscribed = true;
-              for (const h of connectHandlers) h();
-              resolve();
-            })
+          subscribe(instance, () => {
+            subscribed = true;
+            for (const h of connectHandlers) h();
+          })
+            .then(() => resolve())
             .catch((err: Error) => {
               for (const h of errorHandlers) h(err);
               reject(err);

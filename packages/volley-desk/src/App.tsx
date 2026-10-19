@@ -79,6 +79,7 @@ import {
   supervisorHealth,
   supervisorList,
   supervisorNamespace,
+  unclassifiedAgents,
 } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
@@ -294,11 +295,17 @@ export default function App() {
     0,
   );
   const finishedHidden = look.showFinished ? 0 : finishedCount;
+  // While a connect's replay settles, an agent with no status yet is not known to be live: it
+  // stays off the canvas (never laid out) until its status says which it is (C11).
+  const unclassified =
+    settling && connection === "connected" ? unclassifiedAgents(state) : new Set<string>();
+  const offCanvas = (a: AgentView) =>
+    unclassified.has(a.id) || (finishedHidden > 0 && finished.has(a.id));
   const groups =
-    finishedHidden === 0
+    finishedHidden === 0 && unclassified.size === 0
       ? allGroups
       : Object.fromEntries(
-          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !finished.has(a.id))]),
+          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !offCanvas(a))]),
         );
   const firstStart = useRef<Record<string, number>>({});
   const startedAt = (id: string): number | null => {
