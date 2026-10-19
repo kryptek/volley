@@ -153,6 +153,7 @@ export const DECISION_KINDS = [
   "ci_failed",
   "wave_complete",
   "plan_change",
+  "account_limit",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

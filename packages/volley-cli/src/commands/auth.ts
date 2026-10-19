@@ -85,6 +85,9 @@ export const RESERVED_AGENT_IDS = [
   "control",
   "mailbox",
   "screen",
+  "usage",
+  // `volley/+/%u/<channel>` would match `volley/_system/claude-accounts/<channel>` (SPEC §4.6.12).
+  "claude-accounts",
 ] as const;
 
 /** The shipped ACL; the CLI runs from source (no build step), so it is a repo-relative path. */

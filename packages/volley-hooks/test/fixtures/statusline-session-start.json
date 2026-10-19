@@ -1,0 +1,15 @@
+{
+  "context_window": {
+    "context_window_size": 1000000,
+    "current_usage": null,
+    "remaining_percentage": null,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "used_percentage": null
+  },
+  "cwd": "/path/to/work",
+  "model": { "display_name": "Opus 5.5", "id": "claude-opus-5-5" },
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "version": "2.1.303",
+  "workspace": { "added_dirs": [], "current_dir": "/path/to/work", "project_dir": "/path/to/work" }
+}

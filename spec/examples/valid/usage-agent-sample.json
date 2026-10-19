@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "wall_time": "2026-10-18T14:06:00.000Z",
+  "channel": "usage",
+  "type": "usage",
+  "payload": {
+    "account": "work",
+    "model": "claude-opus-5-5",
+    "context_window": { "used_percentage": 4, "used": 38427, "size": 1000000 },
+    "rate_limits": {
+      "five_hour": { "pct": 11, "resets_at": "2026-10-18T18:10:00.000Z" },
+      "weekly": { "pct": 43, "resets_at": "2026-10-21T09:00:00.000Z" }
+    },
+    "captured_at": "2026-10-18T14:06:00.000Z"
+  }
+}

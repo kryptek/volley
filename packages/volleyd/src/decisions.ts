@@ -27,6 +27,7 @@ export const DECISION_KINDS = [
   "ci_failed",
   "wave_complete",
   "plan_change",
+  "account_limit",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -55,6 +56,11 @@ export interface DecisionPayload {
   repo?: string;
   /** plan_change: what the new wave version changed about the task. */
   change?: string;
+  /** account_limit (claude/usage.ts): the account, its 5-hour window and the suggested target. */
+  acct?: string;
+  pct?: number;
+  resets_at?: string | null;
+  suggested?: string | null;
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -88,7 +94,7 @@ export const parksTask = (d: { parks?: boolean }): boolean => d.parks !== false;
 /** Task stages a task-level decision may not park: their dependents already moved on. */
 const SETTLED = new Set<TaskStage>(["done", "merge_ready", "cancelled"]);
 
-const ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 export const decisionTopic = (wave: WaveId, id: string) => `volley/_waves/${wave}/decisions/${id}`;
 
@@ -185,9 +191,18 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     target?: unknown;
     repo?: unknown;
     change?: unknown;
+    acct?: unknown;
   };
-  const str = (k: "host" | "target" | "repo" | "change") =>
+  const str = (k: "host" | "target" | "repo" | "change" | "acct") =>
     typeof x[k] === "string" && x[k] !== "" ? { [k]: x[k] as string } : {};
+  const limit =
+    d.kind === "account_limit"
+      ? {
+          ...(typeof d.pct === "number" ? { pct: d.pct } : {}),
+          ...(d.resets_at !== undefined ? { resets_at: d.resets_at } : {}),
+          ...(d.suggested !== undefined ? { suggested: d.suggested } : {}),
+        }
+      : {};
   return {
     decision_id: d.decision_id,
     wave: d.wave,
@@ -202,6 +217,8 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     ...str("target"),
     ...str("repo"),
     ...str("change"),
+    ...str("acct"),
+    ...limit,
   };
 }
 

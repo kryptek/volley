@@ -5,11 +5,13 @@ import { TERMINAL_STATUS, readLock } from "./locks";
 import { SpawnError } from "./spawn-error";
 import type { NewEvent, TaskId } from "./types";
 
-/** The retained per-agent records a retire clears (registry + four retained channels). */
+/** The retained per-agent records a retire clears (registry + five retained channels). */
 export function retainedTopics(namespace: string, agentId: string): string[] {
   return [
     registryTopic(agentId),
-    ...["status", "result", "capability", "screen"].map((c) => buildTopic(namespace, agentId, c)),
+    ...["status", "result", "capability", "screen", "usage"].map((c) =>
+      buildTopic(namespace, agentId, c),
+    ),
   ];
 }
 

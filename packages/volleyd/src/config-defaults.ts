@@ -32,7 +32,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
-  claude: { default_account: null },
+  claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
 };
 

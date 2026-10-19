@@ -1,0 +1,38 @@
+{
+  "context_window": {
+    "context_window_size": 1000000,
+    "current_usage": {
+      "cache_creation_input_tokens": 38425,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 2,
+      "output_tokens": 152
+    },
+    "remaining_percentage": 96,
+    "total_input_tokens": 38427,
+    "total_output_tokens": 152,
+    "used_percentage": 4
+  },
+  "cost": {
+    "total_api_duration_ms": 3428,
+    "total_cost_usd": 0.0078887,
+    "total_duration_ms": 117048,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "cwd": "/path/to/work",
+  "effort": { "level": "medium" },
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "model": { "display_name": "Haiku 5.5", "id": "claude-haiku-5-5" },
+  "output_style": { "name": "default" },
+  "rate_limits": {
+    "five_hour": { "resets_at": 1792375800, "used_percentage": 11 },
+    "seven_day": { "resets_at": 1792371600, "used_percentage": 43 }
+  },
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "session_name": "Directory listing with ls",
+  "thinking": { "enabled": true },
+  "transcript_path": "/path/to/profile/projects/work/session.jsonl",
+  "version": "2.1.303",
+  "workspace": { "added_dirs": [], "current_dir": "/path/to/work", "project_dir": "/path/to/work" }
+}

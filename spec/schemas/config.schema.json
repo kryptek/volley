@@ -210,7 +210,14 @@
                 { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
               ],
               "default": null,
-              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (resolved by usage metering when available, else primary). null: primary."
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (the signed-in account with the lowest 5-hour usage, spec section 4.6.12; primary when none has usage data). null: primary."
+            },
+            "warn_at_pct": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 90,
+              "description": "When an account's 5-hour window reaches this used percentage, the supervisor opens an account_limit decision for each wave with agents on it (spec section 4.6.12). It never moves a wave on its own."
             }
           }
         },
