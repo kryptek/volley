@@ -16,7 +16,8 @@ under 0.2.0, which was never tagged on its own. Owner smoke: [`SMOKE.md`](SMOKE.
   listeners checked against anonymous clients, and a choice about LAN access to the WebSocket
   listener), accounts (roles, fixed identities, the macOS keychain, a one-time admin token),
   services (volleyd, the hooks, the Desk served by `volley desk serve` on port 5199, and
-  `volley` / `volleyd` linked into `~/.volley/bin`) and a phone sign-in QR code. Every step says
+  `volley` / `volleyd` installed in `~/.volley/bin`, runnable on any `PATH`), the admin token
+  printed as a link to the Desk, and a phone sign-in QR code. Every step says
   what it will change before changing it, and a rerun changes nothing.
 - **The Desk's onboarding**: the first-run setup wizard (the same five steps through volleyd's
   `setup_plan` / `setup_apply`), one-time sign-in links and admin tokens (`#signin=<token>`),
@@ -30,8 +31,16 @@ under 0.2.0, which was never tagged on its own. Owner smoke: [`SMOKE.md`](SMOKE.
   from the statusLine, and an `account_limit` decision at `claude.warn_at_pct` (volleyd never
   switches accounts by itself).
 
+- **SPEC** §4.6.9 Brief preface, §4.6.10 Accounts and one-time tokens, §4.6.11 Claude account
+  profiles, §4.6.12 Usage metering, §4.6.13 Broker logins and §4.6.14 Machines and pairing, with
+  their JSON Schemas.
+- The Desk's **Settings window** (General, Appearance, Supervisor, About, sidebar search) and the
+  slimmed dock; the agent window's **context meter and Claude account picker**.
+- volleyd's **per-repo brief preface** (`.volley/brief-preface.md` in the wave's repo).
+
 ### Changed
 
+- **Bun 1.3 and 1.4** are supported (`engines.bun` is `>=1.3 <1.5`); CI runs both.
 - Broker auth needs **mosquitto 2.1 or newer** with the Dynamic Security plugin (no password or
   ACL files); an older broker is refused with `BROKER_TOO_OLD`.
 

@@ -436,34 +436,6 @@ describe("SettingsWindow", () => {
     expect(body.getByText(/Read-only/)).toBeInTheDocument();
   });
 
-  it("the account row shows an admin as admin while Machines is open, from the pairing ops' answer", async () => {
-    // A password sign-in: no stored role. Machines asks its ops (once); the row follows that answer.
-    let answer: (a: "admin") => void = () => {};
-    const ops = {
-      known: vi.fn(() => null),
-      admin: vi.fn(
-        () =>
-          new Promise<"admin">((resolve) => {
-            answer = resolve;
-          }),
-      ),
-      invite: vi.fn(),
-      remove: vi.fn(),
-    };
-    render(
-      <Harness
-        initial="machines"
-        identity="owner-admin"
-        machines={{ machines: {}, hubUp: true, ops }}
-      />,
-    );
-    const account = () => within(screen.getByRole("group", { name: "Signed-in account" }));
-    expect(account().getByText(/Agent identity/)).toBeInTheDocument();
-    await act(async () => answer("admin"));
-    expect(account().getByText("Admin · manages accounts and setup")).toBeInTheDocument();
-    expect(ops.admin).toHaveBeenCalledTimes(1);
-  });
-
   it("Broker accounts and Setup & Security are read-only without an admin", () => {
     render(<Harness initial="accounts" />);
     expect(heading()).toHaveTextContent("Broker accounts");

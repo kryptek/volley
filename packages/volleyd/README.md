@@ -57,7 +57,7 @@ coordinator session.
 
 On a machine set up with `volley setup` (root README, quickstart step 2), volleyd is already
 running as a service, logged in to the broker with `$VOLLEYD_HOME/broker.json`, and `volleyd` is
-linked into `~/.volley/bin`. To run it by hand instead, from the repo root, after `bun install`:
+installed in `~/.volley/bin`. To run it by hand instead, from the repo root, after `bun install`:
 
 ```sh
 # Validate a wave file (no daemon needed)
@@ -1703,11 +1703,13 @@ volleyd uninstall             # unload + remove the plist
 
 The plist (`launchd/systems.volley.volleyd.plist.tmpl`) runs `bun src/cli.ts daemon` with
 `RunAtLoad` and `KeepAlive`, logs to `$VOLLEYD_HOME/volleyd.log`, and captures `VOLLEYD_HOME`,
-`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` and your `PATH` (so `git`, `gh`, `cmux` and `claude`
-resolve) at install time. Re-run `volleyd install` after changing any of them. `volley setup`
-runs it for you on macOS, with `~/.volley/bin` first on that `PATH` (volleyd runs `volley auth` by
-name to redeem the Desk's sign-in links); on Linux it writes the systemd user unit
-`volleyd.service` instead (`systemctl --user status volleyd.service`).
+`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, your `PATH` (so `git`, `gh`, `cmux` and `claude`
+resolve) and, when set, `VOLLEY_AUTH_DIR` (the auth dir volleyd's `volley auth` calls use) at
+install time. Re-run `volleyd install` after changing any of them. `volley setup` runs it for you
+on macOS, with `~/.volley/bin` first on that `PATH` and `VOLLEY_AUTH_DIR` set to the auth dir it
+used (volleyd runs `volley auth` by name to redeem the Desk's sign-in links); on Linux it writes
+the systemd user unit `volleyd.service` instead, with the same two
+(`systemctl --user status volleyd.service`).
 
 ---
 

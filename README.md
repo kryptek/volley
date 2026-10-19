@@ -163,8 +163,8 @@ It finds mosquitto (refusing a version older than 2.1), writes the Dynamic Secur
 
 When it finishes:
 
-- **Put `volley` on your `PATH`.** Setup links `volley` and `volleyd` into `~/.volley/bin`: `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc`, then open a new terminal. The rest of this guide types `volley`.
-- **Open the Desk as admin.** Setup serves the Desk at `http://localhost:5199`. Open `http://localhost:5199/#signin=<the admin token setup printed>`. The token is single use and lasts 10 minutes; `volley auth token` issues another. The Desk opens Settings › Setup & Security, where you can rerun any step, issue sign-in links and manage broker accounts.
+- **Put `volley` on your `PATH`.** Setup installs `volley` and `volleyd` in `~/.volley/bin`: `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc`, then open a new terminal. The rest of this guide types `volley`.
+- **Open the Desk as admin.** Setup serves the Desk at `http://localhost:5199`. Under *One-time admin token* it prints `Open the Desk with it on this machine: http://localhost:5199/#signin=…`: open that link (in a new tab; the Desk reads a link only when a page loads). The token is single use and lasts 10 minutes; `volley auth token` prints another link. The Desk opens Settings › Setup & Security, where you can rerun any step, issue sign-in links and manage broker accounts.
 - **Your phone.** Scan the QR code (same Wi-Fi). It signs the phone in once, as a `steer` account; a used or expired code says so and what to do next.
 - **More machines and Claude accounts.** `volley peer invite` / `volley peer join` pair a second machine with one code (the Desk: Settings › Machines), and `volley claude add <label>` (Settings › Claude accounts & usage) runs agents under a second Claude account. See the [volleyd README](packages/volleyd/README.md#claude-accounts).
 
@@ -316,7 +316,7 @@ backup-script-1c8f      ops            🔄 working    14s ago
 
 Crash detection comes for free — if any of those processes dies hard, MQTT's Last-Will-and-Testament fires within 60–90 seconds and the registry flips that agent to `reaped`.
 
-For volleyd's waves, a second machine is one pairing code away: `volley peer invite` on the supervisor's machine, `volley peer join <code> --to <that machine>` on the new one. It gets its own broker account, an ssh tunnel to the broker and a health heartbeat; a wave task with `host: <name>` then runs there, and `volley peer remove <name>` revokes it.
+For volleyd's waves, a second machine is one pairing code away: `volley peer invite` on the supervisor's machine (as an admin account: `volley auth add <name> --role admin`), `volley peer join <code> --to <that machine>` on the new one. It gets its own broker account, an ssh tunnel to the broker and a health heartbeat; a wave task with `host: <name>` then runs there, and `volley peer remove <name>` revokes it.
 
 ### 3. Cross-vendor coordination
 

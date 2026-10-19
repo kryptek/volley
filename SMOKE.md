@@ -12,28 +12,36 @@ This file collects feature-level smoke recipes that span multiple packages — t
 and two Claude accounts, without anyone reading source. The target is **10 minutes** from
 `git clone` to the phone signed in.
 
+**Run it on a release head that has #133** (`volley setup` installs `volley` / `volleyd` in
+`~/.volley/bin`, as scripts that run bun by its full path, and puts it on the services' PATH)
+**and #138** (the admin token printed as a link, setup's install recorded for the Desk). Without #133 every Desk sign-in by link fails on a
+fresh machine (part A, first run).
+
 The smoke has two parts:
 
 - **A. Automated.** Run on a throwaway Linux "fresh machine" (a container: mosquitto 2.1 and bun,
   nothing else) and a second container as the paired machine, on a private Docker network. It
   publishes no host ports, so the everyday broker on `1883` / `9001` is never touched. The
-  recorded run is under [A. Results](#a-results); [A. How to rerun it](#a-how-to-rerun-it)
-  rebuilds it.
+  recorded runs are under [A. Results](#a-results); [A. How to rerun it](#a-how-to-rerun-it)
+  rebuilds them.
 - **B. Owner.** The part that needs real hardware and real accounts: a Mac (launchd, the macOS
   keychain), a phone on the LAN, a real second machine and a second Claude account. About 30
-  minutes. Every step says what to type or click and what a pass looks like.
+  minutes. Every step says what to type or click and what a pass looks like. Its commands were
+  dry-run in part A wherever a container can run them.
 
 ### A. What the automated run covers
 
 | | Check | Pass |
 |---|---|---|
-| (a) | `volley setup` on a clean anonymous broker | config diff shown, old config backed up, both listeners refuse anonymous clients, services up, rerun changes nothing |
-| (a) | the one-time admin token, redeemed in a fresh desktop browser (Playwright) | signed in as `admin`, Setup & Security opens |
-| (a) | the phone QR link, redeemed in phone emulation (390×844, touch) | signed in as `steer`; the same link again is refused ("already used") |
+| (a) | `volley setup` on a clean anonymous broker, timed from `git clone` | config diff shown, old config backed up, both listeners refuse anonymous clients, services up, rerun changes nothing |
+| (a) | the one-time admin token's link, in a fresh desktop browser (Playwright) | signed in as `admin`, Setup & Security opens with nothing pending; reuse refused |
+| (a) | the phone QR link, in phone emulation (390×844, touch) | signed in as `steer`; reuse refused; a link opened after its lifetime refused |
+| (a) | an admin token on the phone: typed into the open tab, opened in a new tab, pasted in Setup & Security | open tab: nothing happens (by design, see step 6); new tab and paste box: signed in as `admin` |
 | (b) | Settings: each of the 8 sections found from the sidebar search by one of its keywords | listed, opens |
 | (b) | Supervisor › Hard ceiling changed with the keyboard | `applied · v2`; volleyd's `config.yaml` and `volleyd config get` agree |
 | (c) | pair a second machine with a code, then remove it | `tunnel up` + heartbeat; after `remove`: account gone, broker refuses it, its service stops itself |
-| (e) | credential audit | no Volley process opens or stats a Claude credential file (strace, with decoys planted) |
+| (e) | credential audit | no Volley process opens or stats a Claude credential file (strace, decoys planted, positive control) |
+| B | the owner steps' commands | the step 8–9 wave files pass `volleyd validate`; `volley claude list` needs the coordinator's login first |
 
 Not automated, so in part B: the macOS keychain and launchd paths, a real phone over Wi-Fi, a
 wave task on the paired machine (it needs `claude` signed in there, and a container must never
@@ -42,7 +50,7 @@ hold Claude credentials), and all of (d), which needs a second real Claude accou
 ### A. Results
 
 ```
-RESULTS (2026-10-19, release/2026-10-18-onboarding @ 02d4d70 + the fix in #133):
+RESULTS 1 (2026-10-19, release/2026-10-18-onboarding @ 02d4d70, then with #133 applied):
   Environment: eclipse-mosquitto:2.1.2-alpine + bun 1.3.14 (musl), user `owner` (not root),
   layout `container`, a systemctl stand-in that runs the unit files setup writes. Second
   machine: the same image. Docker network only, no published ports.
@@ -61,17 +69,13 @@ RESULTS (2026-10-19, release/2026-10-18-onboarding @ 02d4d70 + the fix in #133):
       anonymous mosquitto_pub -> "Connection Refused: not authorised".                    PASS
       RED, fixed in #133: the admin token and the phone link were both refused
               ("Executable not found in $PATH: \"volley\""). volleyd redeems tokens with
-              `volley auth`, and nothing put `volley` on the services' PATH. With that fixed,
-              the next failure was the auth dir (`--layout` / `--dir` did not reach volleyd's
-              `volley auth`). #133 links volley/volleyd into ~/.volley/bin, puts it on the
-              services' PATH and sets VOLLEY_AUTH_DIR. Every result below is with #133.
+              `volley auth`, and nothing put `volley` on the services' PATH. Then the auth dir
+              (`--layout` / `--dir` did not reach volleyd's `volley auth`). Every result below is
+              with #133.
       admin token, fresh desktop browser (1440x900)     signed in as admin in 5.1 s         PASS
       the same token again                              refused: "token … was already used" PASS
       phone link, phone emulation (390x844, touch)      signed in as steer in 6.1 s         PASS
       the same link again                               refused: "token … was already used" PASS
-      Time, machine side, `bun install` to the phone signed in: under 30 s plus the broker
-      restart (bun install 2.8 s, setup 7 s, sign-in 6 s). The 10-minute target is the owner's
-      clock in part B.
 
   (b) Settings search (admin session): every section listed and opened from one keyword:
       narration→General, background→Appearance, ceiling→Supervisor,
@@ -85,9 +89,8 @@ RESULTS (2026-10-19, release/2026-10-18-onboarding @ 02d4d70 + the fix in #133):
       peer invite (admin account)                       code printed                        PASS
       peer join <code> --to owner@<host> --repo …       paired in 2 s, peer.json 0600,
                                                         trust line printed                  PASS
-      first try without --remote-volley: "bash: line 6: volley: command not found". `volley`
-      is not on the supervisor's non-interactive ssh PATH. Needs --remote-volley
-      ~/.volley/bin/volley (polish, see below).
+      first try without --remote-volley: "bash: line 6: volley: command not found" (`volley` is
+      not on the supervisor's non-interactive ssh PATH; #138 now says to pass --remote-volley).
       peer list on the host                             "tunnel up, linux 32 cores, load …,
                                                         last seen …" (after the
                                                         container's sshd allowed forwarding) PASS
@@ -98,7 +101,7 @@ RESULTS (2026-10-19, release/2026-10-18-onboarding @ 02d4d70 + the fix in #133):
                                                         broker refused machine-b: this
                                                         machine was unpaired"               PASS
       a wave task on the paired machine                 NOT RUN here (needs claude signed in
-                                                        on the peer): part B, step 9
+                                                        on the peer): part B, step 10
 
   (e) credential audit: decoys planted at ~/.claude/.credentials.json and a profile's
       .credentials.json. strace (open/openat/stat*/access*/readlink/execve, -f) over:
@@ -111,20 +114,68 @@ RESULTS (2026-10-19, release/2026-10-18-onboarding @ 02d4d70 + the fix in #133):
       volleyd reads `~/.claude.json` (folder trust, the `mcpServers` section) and never
       `.credentials.json` (claude/sharing.ts); usage comes from the statusLine's stdin.
 
-  Polish found (not fixed here; for the coordinator):
-    - `volley peer join`: when `volley` is not on the host's ssh PATH, the error does not
-      suggest --remote-volley (and with #133 the obvious value is ~/.volley/bin/volley).
-    - The Desk's Setup & Security reads "Security: 2 pending" right after a clean
-      `volley setup --layout container`: volleyd plans with the layout it detects, not the
-      one setup was given. Brew and snap detect the same layout both ways.
-    - `volley auth token` says "paste it into the Desk's sign-in", but the sign-in form has
-      only username and password. What works is `<desk>#signin=<token>`, or Setup & Security's
-      paste box once signed in. Setup could print the link.
-    - `volley peer invite` prints `--to unknown@<host>` when $USER is unset (seen in a
-      container; a login shell sets it).
-    - The broker config's header says "generated by `volley auth init`" when setup wrote it.
-  Fixed in this PR: the Settings sidebar showed a password-signed-in admin as
-    "Agent identity" while Machines was open. It now follows Machines' admin check.
+RESULTS 2 (2026-10-19, release @ c58d168 + #133 + #138 + this PR, the three merged together
+cleanly; on that tree volley-cli 386, volleyd 1433 and volley-desk 914 tests pass). bun lives in
+/opt/bun: on the interactive PATH, not on sshd's default PATH (as on a Mac).
+  (a) timed, fresh container, anonymous broker running:
+        git clone (an archive of the tree)  0.5 s
+        bun install                         2.9 s
+        volley setup --yes, run 1           0.1 s   (stops: restart the container's broker)
+        broker restart (by hand)            1.6 s
+        volley setup --yes, run 2           7.8 s   (prints the admin token's links and the QR)
+        phone link redeemed (Playwright)    2.1 s
+        TOTAL, clone to phone signed in    15.0 s   machine time; the 10-minute target is the
+                                                     owner's clock in part B (reading, typing)
+      Accounts prints "Open the Desk with it on this machine: http://localhost:5199/#signin=…"
+      and "From another device: http://<LAN address>:5199/#signin=…". Services prints
+      "Installed volley and volleyd in ~/.volley/bin (scripts that run this checkout with
+      /opt/bun/bun)"; `env -i PATH=/usr/bin:/bin ~/.volley/bin/volley --version` → 0.3.0. The
+      volleyd unit has ~/.volley/bin first on PATH and VOLLEY_AUTH_DIR; the config header names
+      `volley setup`; $VOLLEYD_HOME/setup.json records the container layout.             PASS
+      admin token's link (desktop)       signed in as admin; Setup & Security lists no pending
+                                         Security change (it said "2 pending" before #138)  PASS
+      the same link again                refused, "already used"                          PASS
+      phone QR link                      signed in as steer                               PASS
+      an admin link typed into that open phone tab
+                                         nothing happens: still steer (the Desk reads a link
+                                         only when a page loads)                          AS DESIGNED
+      the same admin link in a new tab   signed in as admin                               PASS
+      a steer phone pasting an admin token in Settings › Setup & Security › Admin token,
+      "Sign in with token"               signed in as admin                               PASS
+      `volley auth signin-link --ttl 5`, opened a minute later
+                                         refused: "it was used already or it has expired",
+                                         with what to do next                             PASS
+  (c) pairing on that tree (the host's ssh PATH has no bun):
+      peer invite                        "volley peer join <code> --to owner@machine-a"   PASS
+      join without --remote-volley       "`volley` is not on owner@<host>'s PATH for a
+                                         non-interactive ssh command. Pass … --remote-volley
+                                         '~/.volley/bin/volley' … the code is still valid"  PASS
+      join --remote-volley '~/.volley/bin/volley' (plus VOLLEY_AUTH_DIR=… in front only
+      because this broker is the container layout, see Open)
+                                         paired, tunnel service up, "Registered … (tunnel up)" PASS
+      peer list / peer remove            tunnel up / account revoked; the service stopped   PASS
+  Owner-step dry runs:
+      step 9–10 wave files (`smoke.yaml`, with `account: second`, with `host: <machine>`):
+      `volleyd validate` → ok. The template without top-level `model` and `pipeline` that an
+      earlier draft used → "must have required property 'model' / 'pipeline'".           PASS
+      `volley claude list` without a login → "refused anonymous access"; with the coordinator's
+      login exported → lists the profiles. Step 9 exports it first.                     PASS
+
+  Open (for the coordinator, not fixed in this PR):
+    - account_limit names no account to move to when the other account has never run an
+      agent (no usage record yet), or when its usage is above `warn_at_pct` (step 9 lowers that
+      to 1). The banner then says no other account has headroom and offers only "Not now".
+      Step 9 accepts that; a signed-in account with no sample could count as 0 %.
+    - `volley auth init` / `migrate` on a broker `volley setup --lan` opened rewrites the
+      config to the local-only listener (LAN access closed again).
+    - `volley peer redeem` over ssh finds coordinator.json only through VOLLEY_AUTH_DIR or the
+      default auth dir, not setup.json (a `--dir` / container setup needs it on the
+      --remote-volley command, as above).
+  Fixed since run 1: in #133 the services' PATH and auth dir, and ~/.volley/bin scripts that
+  run bun by its full path; in #138 the --remote-volley hint, the container layout's "2
+  pending", the admin token's links, `unknown@<host>` in `peer invite`, the config header
+  naming its writer, SMOKE-v0.2's skill version; in #139 Settings' account row for a
+  password-signed-in admin on Machines.
 ```
 
 ### A. How to rerun it
@@ -139,34 +190,40 @@ Docker, about 5 minutes. Everything runs inside the containers, on a Docker netw
    unit's `ExecStart` with its `Environment=`, `WorkingDirectory=` and
    `StandardOutput=append:`, exactly as `volley setup` wrote them.
 2. `docker network create vsmoke`, then
-   `docker run -d --name vsmoke-a --hostname machine-a --network vsmoke <image> sleep infinity`.
-   Copy this checkout in (`git archive HEAD`), `bun install`. Start mosquitto with an anonymous
-   config (`listener 1883`, `listener 9001` + `protocol websockets`, `allow_anonymous true`).
+   `docker run -d --name vsmoke-a --hostname machine-a --network vsmoke -e USER=owner <image> sleep infinity`.
+   Start mosquitto with an anonymous config (`listener 1883`, `listener 9001` +
+   `protocol websockets`, `allow_anonymous true`). Then, timed: copy this checkout in
+   (`git archive HEAD`), `bun install`.
 3. As `owner`: `bun packages/volley-cli/src/cli.ts setup --yes --layout container`. Restart
    mosquitto when it says so, then run it again.
 4. From the host, Playwright (Chromium) opens `http://<container IP>:5199/#signin=<token>`. The
    container IP is reachable from the host on the bridge, and the page then uses
    `ws://<container IP>:9001`, the container's broker. Use one fresh browser context per sign-in.
+   More tokens: `VOLLEY_AUTH_DIR=/mosquitto/config/volley volley auth token --json` and
+   `… auth signin-link --role steer --label <x> [--ttl 5] --json`.
 5. A second container `vsmoke-b`, with sshd on both (`AllowTcpForwarding yes` on the
    supervisor's; Alpine's default is `no`) and each one's key in the other's
    `authorized_keys`. Then `volley auth add <admin> --role admin`, `volley peer invite`,
    `volley peer join …`, `volley peer list`, `volley peer remove`.
 6. Audit: plant decoy `.credentials.json` files, run each Volley process under
    `strace -f -e trace=openat,open,stat,statx,lstat,newfstatat,access,faccessat,faccessat2,readlink,execve`,
-   then `grep credentials.json` the traces.
+   then `grep credentials.json` the traces, and `cat` a decoy under the same strace as the
+   positive control.
 7. `docker rm -f vsmoke-a vsmoke-b && docker network rm vsmoke`.
 
 ### B. Owner checklist (Mac + phone, about 30 minutes)
 
-You need: a Mac with Homebrew, bun 1.3 or 1.4 and `claude` signed in. An iPhone or Android phone
-on the same Wi-Fi. A second machine (Linux or macOS) with `claude` signed in, bun, git, tmux, a
-clone of a throwaway test repo, a Volley checkout of this release (`bun install` run), and
-key-based ssh both ways with the Mac. A second Claude account you can sign in with. Start a
-stopwatch at step 1 and stop it at step 5.
+You need: a Mac with Homebrew, bun 1.3 or 1.4, `gh` and `claude` signed in. An iPhone or Android
+phone on the same Wi-Fi. A second machine (Linux or macOS) with `claude` signed in, bun, git, tmux,
+a clone of a throwaway test repo, a Volley checkout of this release (`bun install` run), and
+key-based ssh both ways with the Mac. A second Claude account you can sign in with. The test repo
+on GitHub with one small open issue and a pushed release branch
+`release/<yyyy-mm-dd>-onboarding-smoke`, cloned on the Mac.
 
-1. **Fresh setup.** On the Mac:
+0. **Before the clock: the broker.** `brew install mosquitto && brew services start mosquitto`;
+   `mosquitto -h | head -1` says `mosquitto version 2.1.x`.
+1. **Fresh setup. Start the stopwatch now.**
    ```sh
-   brew install mosquitto && brew services start mosquitto     # mosquitto -h | head -1 → 2.1.x
    git clone https://github.com/kryptek/volley.git && cd volley && bun install
    bun packages/volley-cli/src/cli.ts setup
    ```
@@ -174,87 +231,131 @@ stopwatch at step 1 and stop it at step 5.
    **Pass:** each step lists what it found and what it will change *before* asking. Security
    names the `mosquitto.conf.volley-backup-<timestamp>` it made and ends with `Listener 1883:
    refuses anonymous clients` and the same for 9001 and the LAN address. Accounts prints three
-   passwords once and an admin token. Services links `volley`/`volleyd` into `~/.volley/bin` and
-   loads volleyd and the Desk. Phone prints a QR code. Last line: `Setup complete.` Anything
-   that asks you to read source or guess is a fail: note the step.
-2. **Rerun.** `bun packages/volley-cli/src/cli.ts setup --repair` → every step `✓ already done`.
-   Then `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc && exec zsh` and
-   `volley --version` → `0.3.0`.
-3. **Keychain** (never tested on a real Mac before). `security find-generic-password -s
-   volley-broker -a coordinator -w` prints the same password as `coordinator.json` in the auth
-   dir that setup named. **Pass:** identical, and no keychain dialog other than one "allow"
-   for `security` itself.
-4. **Admin sign-in, laptop.** In a private browser window, open
-   `http://localhost:5199/#signin=<the admin token from step 1>`.
-   **Pass:** the Desk opens signed in, the sidebar says *Admin · manages accounts and setup*,
-   and Setup & Security shows both listeners refusing anonymous clients. Paste the same URL
-   into another private window: *already used*.
-5. **Phone sign-in.** Scan the QR from step 1 with the phone camera.
-   **Pass:** within about 10 s the Desk loads signed in (Settings › account row: the `steer`
+   passwords once and, under *One-time admin token*, the lines `Open the Desk with it on this
+   machine: http://localhost:5199/#signin=vly_admin_…` and `From another device:
+   http://<LAN address>:5199/#signin=vly_admin_…` (keep the terminal open: you use them in step
+   5). Services says `Installed volley and volleyd in ~/.volley/bin (scripts that run this
+   checkout with <your bun>)` and loads volleyd and the Desk. Phone prints a QR code. Last line: `Setup complete.` Anything that asks you to read
+   source or guess is a fail: note the step.
+2. **Phone sign-in, then stop the stopwatch.** Right away (the QR lasts 10 minutes), scan the QR
+   with the phone camera and open the link.
+   **Pass:** within about 10 s the Desk loads signed in (Settings › account row: a `steer`
    account, *Desk on iPhone* or similar). **Stop the stopwatch and write the time down
    (target ≤ 10 min).** Scan the same QR again: the card says the link was already used and
-   what to do next. (If the QR expired before you scanned it: `volley setup` again issues a new
-   one.)
-6. **The Desk wizard from the phone.** On the laptop Desk: Settings › Setup & Security ›
-   **Issue new token**. On the phone, open `http://<the Mac's LAN IP>:5199/#signin=<that token>`.
-   Then Settings › Setup & Security › **Run setup again**.
-   **Pass:** the five steps fit the phone screen, each says *already done* (or shows exactly
-   what it would change and why), Apply never dead-ends, and errors say what to do next.
-7. **Settings.** On the phone: type `ceiling`, `pair`, `qr` and `weekly` in the Settings search,
+   what to do next. (If the QR expired before you scanned it, that is a fail of the 10-minute
+   target; `volley setup` again issues a new one.)
+3. **Rerun and PATH.**
+   `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc && exec zsh`, then
+   `volley --version` → `0.3.0`, and `volley setup --repair` → every step `✓ already done`.
+4. **Expiry.** `volley auth signin-link --role steer --label expiry-check --ttl 5` prints a
+   token. Wait 10 s, then on the phone open `http://<the Mac's LAN IP>:5199/#signin=<token>` in a
+   **new tab** (`ipconfig getifaddr en0` gives the IP).
+   **Pass:** the card says the link was used already or has expired, and what to do next.
+5. **Admin sign-in, laptop.** Open the `Open the Desk with it on this machine:` link from step 1
+   in a private browser window. If 10 minutes have passed since setup, run `volley auth token`
+   first: it prints a new link.
+   **Pass:** the Desk opens signed in, the sidebar says *Admin · manages accounts and setup*, and
+   Setup & Security shows both listeners refusing anonymous clients and no pending Security
+   change. Paste the same link into another private window: *already used*.
+6. **Keychain** (never tested on a real Mac before). `security find-generic-password -s
+   volley-broker -a coordinator -w` prints the same password as `coordinator.json` in the auth
+   dir that setup named (`/opt/homebrew/etc/mosquitto/volley/` on Apple Silicon).
+   **Pass:** identical, and no keychain dialog other than one "allow" for `security` itself.
+7. **The Desk wizard from the phone.** On the laptop Desk: Settings › Setup & Security ›
+   **Issue new token**. Get the token to the phone (AirDrop it, or copy on the Mac and paste on
+   the iPhone with Universal Clipboard; typing the `vly_admin_…` token works too). On the phone:
+   Settings › Setup & Security › **Admin token**, paste, **Sign in with token**. Do not type
+   `…#signin=<token>` into the tab that is already open: the Desk reads a link only when a page
+   loads, so that does nothing. A link in a **new** tab works.
+   **Pass:** the phone's account row says *Admin*. Then **Run setup again**: the five steps fit
+   the phone screen, each says *already done* (or shows exactly what it would change and why),
+   Apply never dead-ends, and errors say what to do next.
+8. **Settings.** On the phone: type `ceiling`, `pair`, `qr` and `weekly` in the Settings search,
    one at a time: each shows its section. Supervisor › Hard ceiling +1 → `applied`. Put it
    back.
-8. **Second Claude account (d).** Laptop Desk: Settings › Claude accounts & usage › **+ Add
-   Claude account**, label `second`, **Sign in on this machine**, then **Open Anthropic sign-in
-   ↗** and sign in with the *second* account.
-   **Pass:** the card shows `second` signed in; `volley claude list` lists both accounts.
-   Write a one-task wave file `smoke.yaml` (an open issue of the test repo, and a release branch
-   pushed there):
+9. **Second Claude account (d).** In a Mac terminal, sign in to the broker as the coordinator
+   first (`volley claude` and `volleyd` need a login):
+   ```sh
+   export VOLLEY_AUTH_USERNAME=coordinator
+   export VOLLEY_AUTH_PASSWORD="$(sed -n 's/.*"password": *"\([^"]*\)".*/\1/p' /opt/homebrew/etc/mosquitto/volley/coordinator.json)"
+   ```
+   Laptop Desk: Settings › Claude accounts & usage › **+ Add Claude account**, label `second`,
+   **Sign in on this machine**, then **Open Anthropic sign-in ↗** and sign in with the *second*
+   account.
+   **Pass:** the card shows `second` signed in; `volley claude list` lists both profiles.
+   Write `smoke.yaml` (the issue and branch from "You need"):
    ```yaml
    wave: <yyyy-mm-dd>-onboarding-smoke
    repo: <abs path of the test repo on the Mac>
    release_branch: release/<yyyy-mm-dd>-onboarding-smoke
+   model: claude-opus-5-5
+   pipeline: [implement, merge_ready]
    tasks:
-     T1: { issue: <n>, pipeline: [implement, merge_ready] }
+     T1: { issue: <n> }
    ```
-   From a shell with the coordinator's login (README step 4:
-   `VOLLEY_AUTH_USERNAME=coordinator`, `VOLLEY_AUTH_PASSWORD`):
-   `volleyd config set claude.warn_at_pct 1`, then `volleyd run smoke.yaml`, and let the agent
-   work for a minute under the primary account.
-   **Pass:** a Needs-you banner (*account_limit*) suggests `second`, and **nothing moves by
-   itself**: the agent stays on the primary until you answer. Answer **Not now**. Then pick
-   `second` in the agent window's title and confirm.
-   **Pass:** the agent restarts under `second`, in the same worktree, and
-   `<worktree>/.volley/brief.md` ends with a resume note. Afterwards:
-   `volleyd stop <wave>` and `volleyd config set claude.warn_at_pct 90`.
-9. **Pair the second machine (c).** Follow
-   [`docs/SMOKE-v0.2.md` → Paired machine](docs/SMOKE-v0.2.md#paired-machine-volley-peer)
-   (invite / join / up / down / remove). Add `--remote-volley ~/.volley/bin/volley` to `join`
-   when `volley` is not on the Mac's non-interactive ssh PATH: without it the join says
-   `volley: command not found`. Before **Remove**, submit `smoke.yaml` again under a new
-   `wave:` id, with `host: <the machine's name>` added to `T1`.
-   **Pass:** the task's agent starts on that machine, registers, and shows in the Desk under
-   the wave. After **Remove**: `volley auth list` no longer has the machine, and its service has
-   stopped itself.
-10. **Credential audit (e), macOS.** In one terminal:
-    `sudo fs_usage -w -f pathname | grep -E 'credentials\.json|Keychains/.*Claude'`. In another,
-    repeat steps 4 and 7 and let a wave agent run for a minute.
-    **Pass:** no line from a `bun` process. (Claude Code itself reads its own credentials; that
-    is `claude`, not Volley.)
-11. **Record** the results below, then **clean up**: `volley peer remove` anything left over,
+   `volleyd validate smoke.yaml` → `ok: wave … 1 task(s)`.
+   - **A wave on `second`.** Copy it to `second.yaml` with a new `wave:` id and the line
+     `account: second` (above `tasks:`), then `volleyd run second.yaml`.
+     **Pass:** its agent starts, and Settings › Claude accounts & usage shows it (and the wave)
+     on the `second` card, not the primary's. `volleyd stop <that wave>`.
+   - **The threshold prompt.** `volleyd config set claude.warn_at_pct 1`, then
+     `volleyd run smoke.yaml` (the primary account) and let the agent work for a minute.
+     **Pass:** Settings › Claude accounts & usage shows an *account_limit* banner for the
+     primary account. It may say no other account has headroom (an account with no usage
+     sample yet, or one above 1 %, is not offered): that is a pass. **Nothing moves by itself:**
+     the agent stays on the primary. Answer **Not now**.
+   - **Moving an agent.** In the agent's window, pick `second` in the account picker in its
+     title and confirm.
+     **Pass:** the agent restarts under `second`, in the same worktree, and
+     `<worktree>/.volley/brief.md` ends with a resume note.
+   Afterwards: `volleyd stop <wave>` and `volleyd config set claude.warn_at_pct 90`.
+10. **Pair the second machine (c).** Follow
+    [`docs/SMOKE-v0.2.md` → Paired machine](docs/SMOKE-v0.2.md#paired-machine-volley-peer)
+    (invite as an admin account / join / up / down / remove). On `join`, add
+    `--remote-volley '~/.volley/bin/volley'` (quoted, so the Mac's shell expands `~`) when
+    `volley` is not on the Mac's non-interactive ssh PATH: without it the join says exactly that,
+    and that the code is still valid. The script runs bun by its full path, so bun need not be on
+    that PATH either. Before **Remove**, copy
+    `smoke.yaml` to `peer.yaml` with a new `wave:` id and `T1: { issue: <n>, host: <the
+    machine's name> }`, then `volleyd validate peer.yaml && volleyd run peer.yaml`.
+    **Pass:** the task's agent starts on that machine, registers, and shows in the Desk under
+    the wave. After **Remove**: `volley auth list` no longer has the machine, and its service has
+    stopped itself.
+11. **Credential audit (e), macOS.** Claude Code keeps its login in the keychain (item *Claude
+    Code-credentials*) and sometimes in `.credentials.json` files; Volley must touch neither.
+    - **Decoys** (only where no file exists, so a real one is never overwritten):
+      ```sh
+      for f in ~/.claude/.credentials.json ~/.volley/claude/second/.credentials.json; do
+        [ -e "$f" ] || { echo '{"decoy":true}' > "$f"; echo "planted $f"; }; done
+      ```
+    - **Watch** in two terminals: `sudo fs_usage -w -f pathname | grep -F .credentials.json`, and
+      `sudo eslogger exec | grep -o '"path":"[^"]*security"[^}]*' ` (every `security` run, with
+      its arguments).
+    - **Positive control:** `cat ~/.claude/.credentials.json >/dev/null` must show in the first
+      terminal, and `security find-generic-password -s volley-broker -a coordinator >/dev/null`
+      in the second. If either stays silent, fix the watch before going on.
+    - **Run Volley:** `volley setup --repair`, `volley auth token` and open its link in a
+      private window (step 5), Settings search on the laptop (step 8), and let a wave agent run
+      for a minute (`volleyd run smoke.yaml`; `volleyd stop` after).
+    - **Pass:** no `.credentials.json` line from a `bun` process, and no `security` run with
+      `Claude Code-credentials` (or any service but `volley-broker`). Claude Code reading its own
+      login is the `claude` process, not Volley. Remove the decoys you planted.
+12. **Record** the results below, then **clean up**: `volley peer remove` anything left over,
     revoke the smoke accounts (`volley auth list`, `volley auth revoke <name>`).
 
 ```
 OWNER RESULTS (<date>, release head <sha>):
-  1. setup (each step explained before changing?):
-  2. rerun / PATH / --version:
-  3. keychain:
-  4. admin token (fresh window / reuse refused):
-  5. phone QR (time from clone: __ min; reuse refused):
-  6. Desk wizard on the phone:
-  7. Settings search / tunable from the phone:
-  8. second account / account_limit prompt, nothing switched / move + resume note:
-  9. paired machine: invite / join / up / wave task on it / remove + revoked:
-  10. credential audit:
+  1. setup (each step explained before changing? admin link printed?):
+  2. phone QR (time from clone: __ min; reuse refused):
+  3. PATH / --version / --repair:
+  4. expired link refused:
+  5. admin link (fresh window / reuse refused / nothing pending):
+  6. keychain:
+  7. Desk wizard on the phone (paste box):
+  8. Settings search / tunable from the phone:
+  9. second account / wave on second / account_limit prompt, nothing switched / move + resume note:
+  10. paired machine: invite / join / up / wave task on it / remove + revoked:
+  11. credential audit (positive control seen? any hit?):
   Issues found:
 ```
 

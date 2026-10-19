@@ -43,9 +43,9 @@ ln -s "$PWD/packages/volley-cli/src/cli.ts" /usr/local/bin/volley
 volley --help
 ```
 
-`volley setup` links `volley` and `volleyd` into `~/.volley/bin` for you (its services run with that directory on their `PATH`); add it to your shell's `PATH` to type `volley` yourself: `export PATH="$HOME/.volley/bin:$PATH"`.
+`volley setup` installs `volley` and `volleyd` in `~/.volley/bin` for you: small scripts that run this checkout with the full path of your `bun`, so they also work where `bun` is not on the `PATH` (a non-interactive ssh session). Its services run with that directory first on their `PATH`; add it to your shell's to type `volley` yourself: `export PATH="$HOME/.volley/bin:$PATH"`.
 
-> Bun runs `.ts` natively — no build step. The shebang on `cli.ts` is `#!/usr/bin/env bun`, so the symlinked version invokes Bun automatically.
+> Bun runs `.ts` natively — no build step. The shebang on `cli.ts` is `#!/usr/bin/env bun`, so the symlinked version invokes Bun automatically (when `bun` is on the `PATH`).
 
 ---
 
