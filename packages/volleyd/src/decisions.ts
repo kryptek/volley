@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomSuffix } from "volley-mcp/util";
@@ -102,6 +103,18 @@ export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 export const decisionTopic = (wave: WaveId, id: string) => `volley/_waves/${wave}/decisions/${id}`;
 
 export const newDecisionId = () => `d-${randomSuffix(8)}`;
+
+/**
+ * A deterministic decision id: `<kind>-<12 hex>`, hashed over its wave and `key` — the same on
+ * every restart (so an open one is found again), and never shared by two waves (`resolve` without
+ * `--wave` answers the first wave that has the id). Every fixed or derived id goes through here.
+ */
+export function waveDecisionId(kind: DecisionKind, wave: WaveId, ...key: string[]): string {
+  const h = createHash("sha256")
+    .update(JSON.stringify([wave, ...key]))
+    .digest("hex");
+  return `${kind}-${h.slice(0, 12)}`;
+}
 
 /** Decisions still open in a record, in opening order. */
 export function openDecisions(rec: WaveRecord): DecisionRecord[] {

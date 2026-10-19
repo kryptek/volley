@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -16,6 +15,7 @@ import {
 } from "./brief";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { waveDecisionId } from "./decisions";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
@@ -39,7 +39,7 @@ import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
-import type { NewEvent, TaskId, Tunables, Wave, WaveTask } from "./types";
+import type { NewEvent, TaskId, Tunables, Wave, WaveId, WaveTask } from "./types";
 import {
   type AgentWatch,
   type VerifyResult,
@@ -553,7 +553,7 @@ async function verifyAndRecover(
       const decisionId = await openDecision(
         ctx,
         "mcp_not_registered",
-        decisionIdFor("mcp_not_registered", cur.agentId),
+        decisionIdFor("mcp_not_registered", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
           options: ["relaunch", "cancel"],
@@ -567,7 +567,7 @@ async function verifyAndRecover(
       const decisionId = await openDecision(
         ctx,
         "hooks_auth_failed",
-        decisionIdFor("hooks_auth_failed", cur.agentId),
+        decisionIdFor("hooks_auth_failed", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}); volleyd paused it. relaunch: retire it (its login deleted), mint a fresh login and start the ${ctx.req.role} again as attempt ${cur.attempt + 1}; or cancel (the task is blocked)?`,
           options: ["relaunch", "cancel"],
@@ -607,7 +607,7 @@ async function verifyAndRecover(
     const decisionId = await openDecision(
       ctx,
       "unknown_screen",
-      decisionIdFor("unknown_screen", cur.agentId),
+      decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
         question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
         options: ["relaunch", "cancel"],
@@ -728,7 +728,7 @@ async function registered(
     const decisionId = await openDecision(
       ctx,
       "model_switch",
-      decisionIdFor("model_switch", cur.agentId),
+      decisionIdFor("model_switch", ctx.req.wave.wave, cur.agentId),
       {
         question: `Needs you: ${cur.agentId} runs ${r.model ?? "an unknown model"}, the wave asks for ${task.model}. Keep it running?`,
         options: ["keep", "cancel"],
@@ -766,8 +766,8 @@ function decision(
   };
 }
 
-export function decisionIdFor(kind: DecisionKind, agentId: string): string {
-  return `${kind}-${createHash("sha256").update(agentId).digest("hex").slice(0, 12)}`;
+export function decisionIdFor(kind: DecisionKind, wave: WaveId, agentId: string): string {
+  return waveDecisionId(kind, wave, agentId);
 }
 
 /** Open a decision (the daemon's store when wired, else the journal); resolves with its id. */
@@ -820,11 +820,12 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
 }
 
 /**
- * The repo_untrusted decision id for the spawn's repo root, on the machine it runs on, in the
- * Claude account profile it runs under (each profile has its own folder trust).
+ * The repo_untrusted decision id for the spawn's wave and repo root, on the machine it runs on, in
+ * the Claude account profile it runs under (each profile has its own folder trust).
  */
 const trustId = (ctx: Ctx) =>
   trustDecisionId(
+    ctx.req.wave.wave,
     ctx.root,
     ctx.deps.remoteTrust?.target ??
       (profileDirOf(ctx.req) !== undefined ? `claude-account:${accountId(ctx.req)}` : undefined),

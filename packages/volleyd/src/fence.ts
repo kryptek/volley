@@ -1,8 +1,10 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, normalize } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
-import { claudeRoot, isValidAccountId } from "./claude/profiles";
+import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
 import { SIGNIN_COMMAND, renderSigninScript } from "./claude/signin-script";
+import { volleydHome } from "./config-store";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
 import { AGENT_BRANCH } from "./worktree";
 
@@ -1273,18 +1275,41 @@ const outsideVolley = (p: string) =>
 /** `p` is `dir` or anything below it (both clean absolute paths). */
 const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
 
+/** `p` with its symlinks resolved, or `p` itself when it does not exist. */
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+
 /**
- * A launch script's `CLAUDE_CONFIG_DIR`: an absolute, clean path never inside the agent's own
- * worktree (which the agent writes, its `.volley/` included), and either outside any `.volley/`
- * or exactly `<root>/<account id>` — a profile in the configured profiles root (`claudeRoot()`:
- * `$VOLLEY_CLAUDE_DIR`, default `~/.volley/claude`), the one place volleyd keeps profiles.
+ * A launch script's `CLAUDE_CONFIG_DIR`: exactly `profileDir(claudeRoot(), <id>)` (the configured
+ * profiles root, `$VOLLEY_CLAUDE_DIR`, default `~/.volley/claude`) for an account in that root's
+ * registry, and nothing else: a real directory (not a symlink, not out of the root once resolved),
+ * never inside the agent's worktree (which the agent writes, its `.volley/` included) nor holding
+ * it. A root that is, holds or sits in `$VOLLEYD_HOME` admits nothing (its entries — `volleyd`
+ * among them — would pass as profiles), and a relative one admits nothing.
  */
 function profileDirAllowed(dir: string, worktree: string): boolean {
-  if (!absPath(dir) || within(dir, worktree)) return false;
-  if (outsideVolley(dir)) return true;
-  const root = normalize(claudeRoot()).replace(/\/+$/, "");
-  const slash = dir.lastIndexOf("/");
-  return absPath(root) && dir.slice(0, slash) === root && isValidAccountId(dir.slice(slash + 1));
+  try {
+    const root = canonicalRoot(claudeRoot());
+    const id = basename(dir);
+    if (dir !== profileDir(root, id)) return false;
+    if (within(dir, worktree) || within(worktree, dir)) return false;
+    const home = resolve(volleydHome(process.env));
+    if (within(root, home) || within(home, root)) return false;
+    if (!readRegistry(root).accounts.some((a) => a.id === id)) return false;
+    if (!lstatSync(dir).isDirectory()) return false;
+    const resolved = realpathSync(dir);
+    const wt = real(worktree);
+    return (
+      resolved === join(realpathSync(root), id) && !within(resolved, wt) && !within(wt, resolved)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

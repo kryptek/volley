@@ -91,16 +91,21 @@ async function moveToWork(customRoot: string | undefined, base: string): Promise
 
 describe("agent_move_account (daemon)", () => {
   it("retires the agent as moved and respawns it with the target profile's CLAUDE_CONFIG_DIR", async () => {
+    // A custom root (the daemon's `claude.root`) is the one $VOLLEY_CLAUDE_DIR names: the fence's.
     const base = mkdtempSync(join(tmpdir(), "volleyd-move-"));
-    await moveToWork(join(base, "claude"), base);
+    const root = join(base, "claude");
+    await withEnv({ VOLLEY_CLAUDE_DIR: root }, () => moveToWork(root, base));
   }, 20_000);
 
   it("moves to a profile in the DEFAULT root (~/.volley/claude/<acct>) through the real fence", async () => {
     // The owner's smoke: the respawn under a profile there was FENCE_DENIED (launch.sh).
     const base = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-move-")));
-    await withEnv({ HOME: base, VOLLEY_CLAUDE_DIR: undefined }, async () => {
-      expect(claudeRoot()).toBe(join(base, ".volley", "claude"));
-      await moveToWork(undefined, base);
-    });
+    await withEnv(
+      { HOME: base, VOLLEY_CLAUDE_DIR: undefined, VOLLEYD_HOME: undefined },
+      async () => {
+        expect(claudeRoot()).toBe(join(base, ".volley", "claude"));
+        await moveToWork(undefined, base);
+      },
+    );
   }, 20_000);
 });

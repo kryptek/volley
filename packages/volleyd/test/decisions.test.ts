@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { decisionPayload, decisionTopic, renderDecisionsMd } from "../src/decisions";
+import {
+  decisionPayload,
+  decisionTopic,
+  renderDecisionsMd,
+  waveDecisionId,
+} from "../src/decisions";
 import { ready } from "../src/scheduler";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
@@ -271,6 +276,24 @@ describe("decision lifecycle", () => {
     const list = await client.request("decisions", { wave: "2026-10-20-example", all: true });
     expect(list.error).toBeUndefined();
     expect((list.result as { decisions: unknown[] }).decisions).toEqual([]);
+  });
+});
+
+describe("waveDecisionId", () => {
+  it("is deterministic, and unique per wave and per key", () => {
+    // Deterministic: a restart finds the same id. Per wave: `volleyd resolve <id>` without --wave
+    // answers the first wave that has the id, so no two waves may share one.
+    const a = waveDecisionId("wave_complete", "w1");
+    expect(a).toMatch(/^wave_complete-[0-9a-f]{12}$/);
+    expect(waveDecisionId("wave_complete", "w1")).toBe(a);
+    expect(waveDecisionId("wave_complete", "w2")).not.toBe(a);
+    const k = waveDecisionId("remote_repo_missing", "w1", "dev@box:/repo");
+    expect(waveDecisionId("remote_repo_missing", "w2", "dev@box:/repo")).not.toBe(k);
+    expect(waveDecisionId("remote_repo_missing", "w1", "dev@box:/other")).not.toBe(k);
+    // the parts are joined unambiguously: (w1, "a/b") is not (w1/a, "b")
+    expect(waveDecisionId("spawn_failed", "w1", "a/b")).not.toBe(
+      waveDecisionId("spawn_failed", "w1/a", "b"),
+    );
   });
 });
 

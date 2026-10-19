@@ -11,6 +11,7 @@ import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import { stubEnv } from "../helpers/with-env";
 
 /**
  * Usage metering through a real daemon: fold, publish, threshold decision, wave move. The daemon
@@ -19,7 +20,10 @@ import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervi
  */
 
 let s: SupervisedEnv;
+let restoreEnv: (() => void) | undefined;
 afterEach(async () => {
+  restoreEnv?.();
+  restoreEnv = undefined;
   await s?.cleanup();
 });
 
@@ -73,8 +77,10 @@ async function recordWhen(
 }
 
 /** A registry with one signed-in local profile, `spare`; returns its profile dir. */
+/** Profile `spare` in `<base>/claude`, the profiles root the launch fence reads ($VOLLEY_CLAUDE_DIR). */
 function spareProfile(base: string): { root: string; primary: string; spare: string } {
   const root = join(base, "claude");
+  restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
   const primary = join(base, ".claude");
   mkdirSync(join(root, "spare"), { recursive: true });
   mkdirSync(primary, { recursive: true });

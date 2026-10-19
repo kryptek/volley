@@ -1,8 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { addAccount, profileDir } from "../src/claude/profiles";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -866,9 +875,21 @@ describe("single spawn point", () => {
 });
 
 describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () => {
-  const WT = "/wt/w1/T1-implementer";
-  const seal = (claudeConfigDir: string, env: Record<string, string | undefined> = {}) => {
-    withEnvSync({ HOME: env.HOME ?? "/home/u", VOLLEY_CLAUDE_DIR: env.VOLLEY_CLAUDE_DIR }, () =>
+  // Real directories: the rule reads the registry and refuses a symlinked profile.
+  let base: string;
+  let WT: string;
+  let root: string;
+  const env = (vars: Record<string, string | undefined> = {}) => ({
+    HOME: base,
+    VOLLEY_CLAUDE_DIR: undefined,
+    VOLLEYD_HOME: undefined,
+    ...vars,
+  });
+  const seal = (
+    claudeConfigDir: string | undefined,
+    vars: Record<string, string | undefined> = {},
+  ) =>
+    withEnvSync(env(vars), () =>
       sealLaunchScript(
         WT,
         renderLaunchScript({
@@ -876,53 +897,119 @@ describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () =>
           model: "claude-opus-5-5",
           agentId: "w1-t1-implementer-1",
           worktree: WT,
-          claudeConfigDir,
+          ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
         }),
       ),
     );
-  };
+  const account = (r: string, label: string) =>
+    profileDir(r, addAccount(r, { label }, "2026-10-19T00:00:00.000Z").id);
 
-  it("allows a profile in the default root, ~/.volley/claude/<acct>", () => {
-    expect(() => seal("/home/u/.volley/claude/work")).not.toThrow();
+  beforeAll(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "fence-profiles-")));
+    WT = join(base, "wt", "w1-T1-implementer");
+    mkdirSync(WT, { recursive: true });
+    root = join(base, ".volley", "claude");
+    account(root, "work");
+  });
+  afterAll(() => rmSync(base, { recursive: true, force: true }));
+
+  it("the primary (no CLAUDE_CONFIG_DIR) is unchanged", () => {
+    expect(() => seal(undefined)).not.toThrow();
   });
 
-  it("allows a profile in a configured root ($VOLLEY_CLAUDE_DIR), even inside a .volley/", () => {
-    expect(() => seal("/srv/claude/work", { VOLLEY_CLAUDE_DIR: "/srv/claude" })).not.toThrow();
-    expect(() =>
-      seal("/data/.volley/profiles/work", { VOLLEY_CLAUDE_DIR: "/data/.volley/profiles" }),
-    ).not.toThrow();
+  it("allows a registered profile in the default root, ~/.volley/claude/<acct>", () => {
+    expect(() => seal(join(root, "work"))).not.toThrow();
   });
 
-  it("allows a profile outside any .volley/, wherever its root is", () => {
-    expect(() => seal("/srv/claude/work")).not.toThrow();
+  it("allows a registered profile in a configured root, normalised like profileDir", () => {
+    const r = join(base, "data", ".volley", "p");
+    account(r, "work");
+    const dir = join(r, "work");
+    for (const VOLLEY_CLAUDE_DIR of [r, `${r}/`, `${r}//`, `${base}/data/.volley/x/../p`])
+      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR }), VOLLEY_CLAUDE_DIR).not.toThrow();
   });
 
-  it("refuses a profile inside the agent's worktree, its .volley/ included", () => {
+  it("the worktree boundary is a path segment: <worktree>-2 is not the agent's worktree", () => {
+    const r = `${WT}-2`;
+    account(r, "work");
+    expect(() => seal(join(r, "work"), { VOLLEY_CLAUDE_DIR: r })).not.toThrow();
+  });
+
+  it("refuses anything that is not exactly <root>/<registered account id>", () => {
     for (const dir of [
-      WT,
-      `${WT}/profile`,
-      `${WT}/.volley/claude/work`,
-      `${WT}/.volley/launch.sh`,
+      `${root}/work/`,
+      `${root}//work`,
+      `${root}/./work`,
+      `${root}/x/../work`,
+      root,
+      `${root}/`,
+      `${root}/work/nested`,
+      `${root}/Work`,
+      `${root}/accounts.json`,
+      `${root}/.signin`,
+      `${root}/other`, // a valid id, not in the registry
+      join(base, ".volley", "volleyd", "work"),
+      join(base, ".claude"),
+      join(base, ".ssh"),
+      "/tmp/x",
+      join(base, "wt", "w2-T2-implementer"), // another agent's worktree
+      "work",
     ]) {
       expect(() => seal(dir), dir).toThrow(FenceError);
-      // … even when the profiles root is configured to be there
-      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR: `${WT}/.volley/claude` }), dir).toThrow(
-        FenceError,
-      );
     }
   });
 
-  it("refuses any other .volley/ path: not a direct child of the root, or not an account id", () => {
-    for (const dir of [
-      "/home/u/.volley/claude",
-      "/home/u/.volley/claude/work/nested",
-      "/home/u/.volley/claude/Work",
-      "/home/u/.volley/volleyd/work",
-      "/home/u/.volley/claude/../volleyd",
-      "/srv/x/.volley/claude/work",
-      "/srv/x/.VOLLEY/work",
-    ]) {
-      expect(() => seal(dir), dir).toThrow(FenceError);
+  it("refuses a registered id whose profile dir is missing or a symlink", () => {
+    const outside = join(base, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    account(root, "linked");
+    rmSync(join(root, "linked"), { recursive: true });
+    expect(() => seal(join(root, "linked")), "missing").toThrow(FenceError);
+    symlinkSync(outside, join(root, "linked"));
+    expect(() => seal(join(root, "linked")), "symlink").toThrow(FenceError);
+  });
+
+  it("refuses a profile inside the agent's worktree, even with the root configured there", () => {
+    const r = join(WT, ".volley", "claude");
+    account(r, "work");
+    expect(() => seal(join(r, "work"), { VOLLEY_CLAUDE_DIR: r })).toThrow(FenceError);
+    // … or a root symlinked into it
+    const link = join(base, "link-root");
+    symlinkSync(r, link);
+    expect(() => seal(join(link, "work"), { VOLLEY_CLAUDE_DIR: link })).toThrow(FenceError);
+  });
+
+  it("refuses a profile dir the agent's worktree is inside", () => {
+    const r = join(base, "nest");
+    const dir = account(r, "work");
+    const saved = WT;
+    WT = join(dir, "wt");
+    try {
+      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR: r })).toThrow(FenceError);
+    } finally {
+      WT = saved;
     }
+  });
+
+  it("a root that is, holds or sits in $VOLLEYD_HOME admits nothing", () => {
+    // ~/.volley as the root would admit ~/.volley/volleyd (VOLLEYD_HOME) as a "profile".
+    const dotVolley = join(base, ".volley");
+    account(dotVolley, "volleyd");
+    expect(() => seal(join(dotVolley, "volleyd"), { VOLLEY_CLAUDE_DIR: dotVolley })).toThrow(
+      FenceError,
+    );
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: root })).toThrow(FenceError);
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(root, "work", "state") })).toThrow(
+      FenceError,
+    );
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(base, ".volley") })).toThrow(
+      FenceError,
+    );
+    // a VOLLEYD_HOME beside the root is fine
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(base, "vd") })).not.toThrow();
+  });
+
+  it("a relative root admits nothing", () => {
+    expect(() => seal(join(root, "work"), { VOLLEY_CLAUDE_DIR: "rel/claude" })).toThrow(FenceError);
   });
 });

@@ -11,6 +11,14 @@ function swap(vars: Vars): Vars {
   return saved;
 }
 
+/** Set `vars` in `process.env` until the returned function puts each back as it was. */
+export function stubEnv(vars: Vars): () => void {
+  const saved = swap(vars);
+  return () => {
+    swap(saved);
+  };
+}
+
 /**
  * Run `fn` with `vars` set in `process.env`, then put each back as it was. A plain save/restore
  * (no `vi.stubEnv`), so it works under both vitest and bun's test runner.

@@ -449,7 +449,10 @@ at 80% wins over a primary that simply has not reported (it may be at 0%). A spa
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses;
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses (the fence
+seals a `CLAUDE_CONFIG_DIR` only when it is exactly `<root>/<acct>` for an account in that root's
+registry: a real directory, not a symlink, never in or above the agent's worktree; a root that is,
+holds or sits in `$VOLLEYD_HOME` admits none);
 `.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
 Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
 `repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
