@@ -174,6 +174,19 @@ describe("notification", () => {
       expect(first(envs).payload).not.toHaveProperty("background_wait");
     });
 
+    it("after a Stop that ended in a question the idle_prompt is that question, without background_wait", async () => {
+      await runHook(
+        "stop",
+        fixture("stop-background-tasks.json", coordDir, {
+          last_assistant_message: "Both reviewers passed.\n\nShould I merge PR 12?",
+        }),
+        { cwd: coordDir, env },
+      );
+      const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
+      expect(first(envs).payload).toMatchObject({ question: "Should I merge PR 12?" });
+      expect(first(envs).payload).not.toHaveProperty("background_wait");
+    });
+
     it("once the session works again the wait is gone", async () => {
       await runHook("post-tool-use", fixture("post-tool-use.json", coordDir), {
         cwd: coordDir,

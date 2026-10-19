@@ -6,7 +6,7 @@
   "permission_mode": "bypassPermissions",
   "hook_event_name": "Stop",
   "stop_hook_active": false,
-  "last_assistant_message": "Both reviewers are running; I armed a wait for their results.\n\nI'll pick up when they report back?",
+  "last_assistant_message": "Both reviewers are running; I armed a wait for their results.\n\nI'll pick up when they report back.",
   "background_tasks": [
     {
       "id": "bash_1",

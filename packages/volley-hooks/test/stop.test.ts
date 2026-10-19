@@ -82,6 +82,12 @@ describe("stop (agent mode)", () => {
     const dir = makeWorkdir({ agent_id: AGENT, namespace: NS, broker_url: broker.url });
     const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
     const done = [{ id: "bash_1", command: "sleep 1", status: "completed" }];
+    // Only the documented list of task objects counts: no count, map or bare value.
+    for (const background_tasks of [2, { bash_1: { status: "running" } }, ["bash_1"]]) {
+      await runHook("stop", fixture("stop-background-tasks.json", dir, { background_tasks }), {
+        cwd: dir,
+      });
+    }
     await runHook("stop", fixture("stop-background-tasks.json", dir, { background_tasks: done }), {
       cwd: dir,
     });
@@ -163,16 +169,17 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     await progress.stop();
   });
 
-  it("a Stop ending in a question with a background wait armed: awaiting_input carries background_wait", async () => {
+  it("a Stop ending in a question is a real question even with a background wait armed", async () => {
     const progress = await collect(client, buildTopic("default", COORD, "progress"));
-    await runHook("stop", fixture("stop-background-tasks.json", dir), { cwd: dir, env });
+    const asked = { last_assistant_message: "Both reviewers passed.\n\nShould I merge PR 12?" };
+    await runHook("stop", fixture("stop-background-tasks.json", dir, asked), { cwd: dir, env });
     await tick(150);
     expect(types(progress.envelopes)).toEqual(["idle", "awaiting_input", "heartbeat"]);
     expect(progress.envelopes[1]?.payload).toMatchObject({
       hook_event: "Stop",
-      background_wait: true,
-      question: "I'll pick up when they report back?",
+      question: "Should I merge PR 12?",
     });
+    expect(progress.envelopes[1]?.payload).not.toHaveProperty("background_wait");
     await progress.stop();
   });
 

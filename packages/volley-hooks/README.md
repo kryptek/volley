@@ -124,7 +124,7 @@ All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq
 | `SessionStart` | registry entry (retained) with `model` from the input and `model_source: "harness-hook"`; without `model`, the last known model with `model_source: "unknown"`. Remembers the model in `model.json`. Flips a retained `spawning`/`registered` status to `working`. Bootstraps the persistent drain session and drains. | on `source` `compact` / `resume`: the live, already-delivered `steering` directives (newest 20), for context only; plus anything drained or never delivered |
 | `PostModelSwitch` | registry entry with `to_model` (also remembered in `model.json`) | — |
 | `UserPromptSubmit`, `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model | drained mail |
-| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running, both carry `background_wait: true` and `activity.json` records it | — |
+| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
 | `Notification` | `agent_needs_input` / `idle_prompt` / `permission_prompt` → `awaiting_input` (`notification_type`, `text`); `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`; `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only | — |
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
 | `PreToolUse` (`Bash`) | — (rewrites the command: see [Heavy-operation leases](#heavy-operation-leases)) | `command queued for a <pool> lease` when it wraps |
@@ -204,9 +204,13 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
   else the notification message.
 - **Background waits.** A coordinator that ends its turn with a background task still running
   (a `volley wait` armed in the background: Stop's `background_tasks` input) is idle, waiting on
-  the wave's events, not on the owner. The `Stop` envelopes and the `idle_prompt` that follows
-  carry `background_wait: true`, and the Desk shows `idle — waiting on wave events` instead of
-  "needs you". A `permission_prompt` or `agent_needs_input` never carries it.
+  the wave's events, not on the owner. Its `Stop` `idle` and the `idle_prompt` that follows
+  carry `background_wait: true` (SPEC §4.3), and the Desk shows `idle — waiting on wave events`
+  instead of "needs you". A turn that ends in a question is a question, background task or
+  not: neither its `awaiting_input` nor the idle prompt that repeats it carries the flag. A
+  `permission_prompt` or `agent_needs_input` never carries it. Only the documented
+  `background_tasks` shape counts: a list of task objects, one whose `status` is over
+  (`completed`, `failed`, `killed`, …) not counting.
 - the next `UserPromptSubmit` / `PostToolUse` → `resumed` (and clears the background wait).
 - `SessionStart` adds `session_url` / `workspace` to the registry entry.
 

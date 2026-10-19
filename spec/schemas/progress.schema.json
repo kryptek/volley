@@ -66,6 +66,10 @@
               "type": "string",
               "description": "awaiting_input: why the harness is waiting when it is not a question, e.g. credit (a provider usage limit; the harness resumes on its own when it resets)."
             },
+            "background_wait": {
+              "type": "boolean",
+              "description": "idle / awaiting_input: true when the session ended its turn without a question while a background task it started is still running; it waits on that task's events, not on a human (spec section 4.3). Never set on a permission_prompt."
+            },
             "completed": {
               "type": "boolean",
               "description": "idle: true when the harness reported the agent's task completed (notification agent_completed)."
