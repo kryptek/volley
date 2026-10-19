@@ -36,7 +36,7 @@ import {
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { reapAndRevoke, retainedTopics } from "./retire";
-import { classifyScreen } from "./screens";
+import { classifyScreen, lastOutput, lastOutputNote } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
 import type { NewEvent, TaskId, Tunables, Wave, WaveId, WaveTask } from "./types";
@@ -609,12 +609,13 @@ async function verifyAndRecover(
       "unknown_screen",
       decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
-        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
+        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(result.screen, deps.host.name !== "local")} Look at its terminal?`,
         options: ["relaunch", "cancel"],
         screen,
         data: {
           agent_id: cur.agentId,
           screen_class: result.screen_class,
+          ...(lastOutput(result.screen) !== null ? { last_output: lastOutput(result.screen) } : {}),
           pipeline: relaunchMarker(ctx, cur),
         },
       },

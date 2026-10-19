@@ -118,6 +118,7 @@ describe("SshTmuxHost", () => {
     expect(ws).toEqual({ workspace: "w1-T1-implementer" });
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "has-session", "-t", "=w1-T1-implementer"],
+      ["printenv", "PATH"],
       [
         "tmux",
         "new-session",
@@ -129,6 +130,30 @@ describe("SshTmuxHost", () => {
         "bash .volley/launch.sh",
       ],
     ]);
+  });
+
+  it("launch gives a running tmux server the ssh session's PATH first (a server keeps its old one)", async () => {
+    const PATH = "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin";
+    const r = remote((s) =>
+      argvIs("tmux", "has-session")(s)
+        ? { code: 1 }
+        : argvIs("printenv", "PATH")(s)
+          ? { stdout: `${PATH}\n` }
+          : argvIs("tmux", "set-environment")(s)
+            ? // No server running yet: the new one starts with this PATH anyway.
+              { code: 1, stderr: "no server running on /tmp/tmux-501/default" }
+            : undefined,
+    );
+    await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+    });
+    const argvs = r.steps().map((s) => s.argv);
+    const set = argvs.findIndex((a) => a[1] === "set-environment");
+    expect(argvs[set]).toEqual(["tmux", "set-environment", "-g", "PATH", PATH]);
+    expect(set).toBeLessThan(argvs.findIndex((a) => a[1] === "new-session"));
   });
 
   it("launch picks a free session name when one is taken (the relaunch after an update prompt)", async () => {

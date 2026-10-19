@@ -37,6 +37,14 @@ export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * launch.sh's line before it execs claude: a session whose PATH has no `claude` (a remote box's
+ * non-interactive ssh shell without it on PATH) says so, with the fix, and stays open so the
+ * screen volleyd reads (and the decision it opens) shows why, instead of dying empty.
+ */
+export const LAUNCH_CLAUDE_CHECK =
+  "command -v claude >/dev/null 2>&1 || { printf 'volleyd: cannot start the agent: claude is not on this session'\\''s PATH (%s). Put its directory on the PATH a non-interactive shell gets (zsh: ~/.zshenv; bash: the top of ~/.bashrc), then relaunch.\\n' \"$PATH\" >&2; exec tail -f /dev/null; }";
+
 export interface LaunchScriptVars {
   hooksDir: string;
   model: string;
@@ -76,6 +84,7 @@ export function renderLaunchScript(v: LaunchScriptVars): string {
       ? [`export CLAUDE_CONFIG_DIR=${shq(v.claudeConfigDir)}`, `unset ${CREDENTIAL_ENV.join(" ")}`]
       : []),
     ...Object.entries(v.env ?? {}).map(([k, val]) => `export ${k}=${shq(val)}`),
+    LAUNCH_CLAUDE_CHECK,
     `exec claude --dangerously-skip-permissions --model ${shq(v.model)} --settings ${shq(hooksSettingsPath(v.hooksDir))} --strict-mcp-config --mcp-config=${shq(mcpConfigPath(v.worktree))} --name ${shq(v.agentId)} -- "$(cat .volley/brief.md)"`,
     "",
   ].join("\n");

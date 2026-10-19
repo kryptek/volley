@@ -95,6 +95,7 @@ export async function installService(
   p: ServicePaths,
   io: IO,
   run: ExecFn = realExec,
+  // real clock: `volleyd install` is a one-shot command waiting on launchd, not the daemon
   clock: Clock = systemClock,
 ): Promise<ExitCode> {
   mkdirSync(p.home, { recursive: true });

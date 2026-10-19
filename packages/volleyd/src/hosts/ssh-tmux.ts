@@ -302,6 +302,7 @@ export class SshTmuxHost implements RemoteHost {
     const session = await this.freeSession(sessionName(spec.name)).catch((e: unknown) => {
       throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`);
     });
+    await this.syncTmuxPath();
     const r = await this.run(
       [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
       spec.launch !== undefined ? { launch: spec.launch } : {},
@@ -314,6 +315,19 @@ export class SshTmuxHost implements RemoteHost {
       });
     }
     return { workspace: session };
+  }
+
+  /**
+   * Give the box's tmux server the PATH an ssh session gets there now (its login shell's, e.g.
+   * from ~/.zshenv): a server started earlier keeps the PATH it started with, and its new
+   * sessions inherit that, so a fixed PATH would not reach the agent. Best effort: with no
+   * server running `set-environment` fails, and the server `new-session` starts gets this PATH.
+   */
+  private async syncTmuxPath(): Promise<void> {
+    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(() => null);
+    const path = r?.code === 0 ? r.stdout.trim() : "";
+    if (path === "" || path.includes("\n")) return;
+    await this.run([{ argv: ["tmux", "set-environment", "-g", "PATH", path] }]).catch(() => null);
   }
 
   /** `base`, or `base-2`, `base-3`, … — the first name no tmux session has. */

@@ -166,6 +166,7 @@ import {
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
+import { lastOutputNote } from "./screens";
 import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./setup-ops";
 import type {
   CoordinatorAttention,
@@ -3387,8 +3388,8 @@ export class Daemon {
             task,
             question:
               x.kind === "hooks_silent"
-                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update. Look at its terminal?`
-                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing. Look at its terminal?`,
+                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update.${lastOutputNote(x.screen, false)} Look at its terminal?`
+                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing.${lastOutputNote(x.screen, false)} Look at its terminal?`,
             options: ["keep running", STOP_ANSWER],
             pointers: { screen },
           },

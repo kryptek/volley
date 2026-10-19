@@ -139,6 +139,28 @@ describe("remote allow-list (ssh … bash -s)", () => {
     expect(() => assertAllowed(SSH, remote({ argv }))).not.toThrow();
   });
 
+  it("the box's PATH for its tmux server: printenv PATH and set-environment -g PATH only", () => {
+    const ok = (...argv: string[]) => {
+      try {
+        assertAllowed(SSH, remote(step(...argv)));
+        return "allow";
+      } catch (e) {
+        if (e instanceof FenceError) return "deny";
+        throw e;
+      }
+    };
+    expect(ok("printenv", "PATH")).toBe("allow");
+    expect(ok("printenv")).toBe("deny");
+    expect(ok("printenv", "HOME")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/home/dev/.local/bin:/usr/bin")).toBe(
+      "allow",
+    );
+    expect(ok("tmux", "set-environment", "-g", "LD_PRELOAD", "/tmp/x.so")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "relative/bin:/usr/bin")).toBe("deny");
+    expect(ok("tmux", "set-environment", "PATH", "/usr/bin")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin", "x")).toBe("deny");
+  });
+
   it("names the refused remote verb", () => {
     try {
       assertAllowed(SSH, remote(step("git", "push")));

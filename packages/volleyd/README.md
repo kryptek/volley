@@ -1665,10 +1665,11 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   gh issue view
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
     the LaunchToken sealed for <dir>) | capture-pane | has-session |
-    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
-    kill-session = CONSENT; no tmux global options
+    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+    set-environment -g PATH <absolute dirs> (the box's own PATH, from printenv) —
+    kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port>
+    nc -z 127.0.0.1 <port> · printenv PATH
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
