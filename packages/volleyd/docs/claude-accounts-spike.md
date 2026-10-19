@@ -7,23 +7,27 @@ marked **could not verify**, with what was tried.
 
 - **Tested:** Claude Code `2.1.303` (native install, `~/.local/share/claude/versions/2.1.303`),
   macOS 26 (Darwin 25.6.0, arm64), Claude Max subscription, 2026-10-18.
+- **Follow-up probes** (after review, same day): the same `2.1.303` build on Linux
+  (x86_64), in throwaway, **signed-out** `CLAUDE_CONFIG_DIR`s under tmux. They test only
+  what works without a login: `--settings` effects, statusLine precedence and two
+  triggers, and the `setup-token` `$BROWSER` URL. Each result says which run produced it.
 - **Docs read:**
   - <https://code.claude.com/docs/en/authentication> (multiple accounts, credential management, `setup-token`)
   - <https://code.claude.com/docs/en/env-vars> (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`)
   - <https://code.claude.com/docs/en/statusline> (triggers, JSON fields, absent/null fields)
   - <https://code.claude.com/docs/en/legal-and-compliance> (authentication and credential use)
-- **Redactions:** e-mail addresses, org/account UUIDs, OAuth `state` and `code_challenge`
-  values. No token, authorization code or Keychain secret was printed, read or stored at
+- **Redactions:** e-mail addresses, org/account UUIDs, the local username, OAuth `state`
+  and `code_challenge` values. No token, authorization code or Keychain secret was printed, read or stored at
   any point. Keychain inspection used metadata-only commands (no `-w` / `-g`).
 
 ## Summary: go / no-go
 
 | Item | Verdict | One line |
 | --- | --- | --- |
-| (a) Profiles | **GO** (one step still to confirm by the owner) | Each `CLAUDE_CONFIG_DIR` gets its own `.claude.json` and its own Keychain item `Claude Code-credentials-<sha256(dir)[:8]>`. `--model`, `/model` and `--settings` work normally. Two real sign-ins were not run. |
+| (a) Profiles | **PROVISIONAL GO**, pending the owner sign-in check (see "Could not verify") | Each `CLAUDE_CONFIG_DIR` gets its own `.claude.json` (observed). Its own Keychain item `Claude Code-credentials-<sha256(dir)[:8]>` comes from the bundle and the docs, not from an observed sign-in. `--model` and `/model` work normally. `--settings` takes effect in an interactive session (`model` and `statusLine` observed); in a headless `-p` run it was only seen to be accepted. Not observed: two real sign-ins, and a spawned run using *its profile's* account. |
 | (b) Headless sign-in | **GO** via `claude auth login` + `$BROWSER` hook; **NO-GO** for `setup-token` | `auth login` hands the localhost-callback URL to `$BROWSER` and prints a manual-code URL. The callback path keeps Volley out of the credential flow entirely. `setup-token` prints a 1-year token that Volley would then have to carry. |
-| (c) `.claude.json` split | **GO**, with caveats | Login metadata (`oauthAccount`, `userID`) sits next to `mcpServers` and `projects` in one file. Outside edits made with an atomic rename survived a running session. Every listed path can be a symlink, and Claude Code **writes through** it (settings.json gains `model` from `/model`). |
-| (d) statusLine | **GO** | `rate_limits.five_hour` / `seven_day` (`used_percentage`, `resets_at`), `context_window.used_percentage` / `context_window_size`, `model`, `cost`. Fires at session start, after each assistant message (300 ms debounce), and on model / permission-mode change. |
+| (c) `.claude.json` split | **GO**, with caveats | Login metadata (`oauthAccount`, `userID`) sits next to `mcpServers` and `projects` in one file. It holds no Claude credentials, but MCP entries (`env`, `headers`) can hold third-party secrets. Outside edits made with an atomic rename survived a running session. Every listed path can be a symlink, and Claude Code **writes through** it (settings.json gains `model` from `/model`). |
+| (d) statusLine | **GO** | `rate_limits.five_hour` / `seven_day` (`used_percentage`, `resets_at`), `context_window.used_percentage` / `context_window_size`, `model`, `cost`. Fires at session start and on permission-mode change (observed), and per the docs after each assistant message (300 ms debounce). A `statusLine` passed with `--settings` fires and wins over the profile's own (observed). A dump was also seen around `/model`, but that trigger is undocumented, so don't rely on it. |
 
 **Credential rule check.** The legal page says developers "may not collect, store, or
 intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must
@@ -79,7 +83,7 @@ Keychain items today (default profile only), using a metadata-only dump:
 
 ```sh
 $ security dump-keychain | grep -E '"svce"|"acct"' | grep -i -B1 -A1 claude
-    "acct"<blob>="kryptek"
+    "acct"<blob>="<user>"
     "svce"<blob>="Claude Code-credentials"
 ```
 
@@ -119,8 +123,10 @@ $ CLAUDE_CONFIG_DIR="$S/profS" CLAUDE_SECURESTORAGE_CONFIG_DIR= claude auth stat
 `claude auth status` (JSON by default, exit 1 when logged out) is the safe probe for the
 Desk to show "signed in as …". It prints e-mail and org, never a token.
 
-A spawned headless run under a profile honours `--model` and `--settings`, and loads the
-profile's `CLAUDE.md`, skills, agents and commands (here all symlinked, see (c)):
+A spawned headless run under a profile honours `--model`, accepts `--settings`, and loads
+the profile's `CLAUDE.md`, skills, agents and commands (here all symlinked, see (c)). This
+run used the default Keychain item through `CLAUDE_SECURESTORAGE_CONFIG_DIR=`, so it says
+nothing about which account a profile's own login would use:
 
 ```sh
 $ cd "$S/work" && env -u CLAUDECODE CLAUDE_CONFIG_DIR="$S/profS" CLAUDE_SECURESTORAGE_CONFIG_DIR= \
@@ -130,8 +136,19 @@ $ cd "$S/work" && env -u CLAUDECODE CLAUDE_CONFIG_DIR="$S/profS" CLAUDE_SECUREST
 → modelUsage keys: ["claude-haiku-5-5"]
 ```
 
-(`--settings` was accepted. The `env` check inside the prompt was blocked by the Bash
-permission classifier, not by settings handling.) In the interactive session,
+`--settings` was accepted, but this run didn't show it taking effect: the `env` check
+inside the prompt was blocked by the Bash permission classifier. The follow-up probes show
+the effect in an interactive session (signed-out profile, Linux):
+
+```sh
+$ CLAUDE_CONFIG_DIR="$S/profP" claude --settings '{"model":"claude-haiku-5-5","statusLine":{…dump script…}}'
+→ banner: "Haiku 5.5 · …"; statusLine dump: "model": {"id": "claude-haiku-5-5", …}
+```
+
+With a `--settings` that had no `model` key, the same profile started on the default
+(`claude-opus-5-5`). The
+`statusLine` in the same `--settings` ran too (see (d)). Whether `--settings` takes effect
+in a headless `-p` run is still unverified. In the interactive session,
 `/model claude-sonnet-5-5` switched the model after a confirm dialog and **persisted
 `"model": "claude-sonnet-5-5"` into the profile's `settings.json`**. That matters for (c).
 
@@ -142,16 +159,29 @@ bare mode cannot use a profile's subscription login.
 
 - **Two real sign-ins producing two Keychain items.** That needs the owner to finish two
   browser sign-ins, which an agent must not do on their behalf. The naming above comes
-  from the shipped bundle and matches the docs. To confirm (metadata only, prints no
-  secret):
+  from the shipped bundle and matches the docs.
+- **A spawned `claude -p` uses its profile's account.** The only spawned run (above) used
+  the shared default Keychain item, so it can't show this.
+- **`--settings` taking effect in a headless `-p` run.** Observed only for interactive
+  sessions.
+
+  To confirm the first two, for two profiles (metadata only, prints no secret):
 
   ```sh
-  D="$HOME/.volley/claude/work"; mkdir -p "$D"
-  CLAUDE_CONFIG_DIR="$D" claude auth login            # owner signs in in the browser
-  H=$(printf %s "$D" | shasum -a 256 | cut -c1-8)
-  security find-generic-password -s "Claude Code-credentials-$H" -a "$USER" >/dev/null && echo found
-  CLAUDE_CONFIG_DIR="$D" claude auth status --text    # expect the work account's e-mail
+  for A in work personal; do
+    D="$HOME/.volley/claude/$A"; mkdir -p "$D"
+    CLAUDE_CONFIG_DIR="$D" claude auth login            # owner signs in in the browser
+    H=$(printf %s "$D" | shasum -a 256 | cut -c1-8)
+    security find-generic-password -s "Claude Code-credentials-$H" -a "$USER" >/dev/null && echo "$A: item found"
+    CLAUDE_CONFIG_DIR="$D" claude auth status --text    # expect this profile's e-mail
+    (cd "$(mktemp -d)" && env -u CLAUDECODE CLAUDE_CONFIG_DIR="$D" ~/.local/bin/claude \
+       -p 'say hi' --output-format json </dev/null | jq '{is_error, modelUsage: (.modelUsage | keys)}')
+    jq -r .oauthAccount.emailAddress "$D/.claude.json"  # expect this profile's e-mail again
+  done
   ```
+
+  Two different item names, two different e-mails, and `is_error: false` for both spawned
+  runs together confirm (a).
 
 - **When the Keychain is locked** (an SSH session), Claude Code falls back to
   `<config dir>/.credentials.json`, mode 0600, per the authentication docs. Not exercised
@@ -193,6 +223,9 @@ $ lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN
 2.1.303 <pid> … TCP 127.0.0.1:50957 (LISTEN)
 ```
 
+The port is random per invocation, so the `$BROWSER` URL below (a separate run) shows a
+different one.
+
 It **honours `$BROWSER`**. With `BROWSER=<script that writes "$@" to a file>`, the URL it
 tries to open is the **localhost-callback** variant, not the one it prints:
 
@@ -227,6 +260,16 @@ Paste code here if prompted >
 ```
 
 It also honours `$BROWSER`, again with a localhost callback, scope `user:inference` only.
+Captured in the follow-up run (signed-out profile, Linux; `BROWSER` was a script that
+appends `"$@"` to a file):
+
+```sh
+$ CLAUDE_CONFIG_DIR="$S/profT" BROWSER="$S/bin/browser" claude setup-token   # in tmux, killed after
+https://claude.com/cai/oauth/authorize?code=true&client_id=<claude-code-client-id>&response_type=code
+  &redirect_uri=http%3A%2F%2Flocalhost%3A42527%2Fcallback&scope=user%3Ainference
+  &code_challenge=<redacted>&code_challenge_method=S256&state=<redacted>
+```
+
 On success (from the bundle; docs agree) it **prints the token to the terminal**: "✓
 Long-lived authentication token created successfully! Your OAuth token (valid for …):
 <token> … Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>". The docs say
@@ -239,7 +282,10 @@ claude.ai connectors.
 - **Use:** spawn `claude auth login` under
   `CLAUDE_CONFIG_DIR=~/.volley/claude/<acct>` with `BROWSER` set to a tiny Volley helper.
   The helper publishes the URL it receives so the Desk can show it, or simply runs `open`
-  on it. The user signs in in a browser on **the same machine**. The redirect lands on
+  on it. The URL isn't a credential, but whoever opens it first on that machine chooses
+  which account gets bound to the profile. So publish it on a **non-retained** topic that
+  only the requesting admin / Desk reads, and drop it once `auth status` reports
+  `loggedIn` or the `claude auth login` process exits. The user signs in in a browser on **the same machine**. The redirect lands on
   Claude Code's own `127.0.0.1` listener, and Claude Code writes its own Keychain item.
   Volley handles an authorize URL, which is not a credential (PKCE: the verifier never
   leaves the `claude` process). Then poll `claude auth status` for `loggedIn: true`.
@@ -267,8 +313,13 @@ claude.ai connectors.
 | Per-project state | `projects["<abs path>"]`: `hasTrustDialogAccepted`, `allowedTools`, `mcpServers` (local scope), `enabledMcpjsonServers` / `disabledMcpjsonServers`, `hasClaudeMdExternalIncludesApproved`, `lastSessionId`, `last*` usage stats |
 | Install / onboarding / UI | `hasCompletedOnboarding`, `numStartups`, `installMethod`, `autoUpdates`, `firstStartTime`, `machineID`, `tips*`, `*SeenCount`, `cachedGrowthBookFeatures`, `skillUsage`, `pluginUsage`, … |
 
-No secret is in `.claude.json`: the OAuth tokens are in the Keychain. The file still
-identifies the account, so it must stay per profile. A fresh profile's file after the
+No Claude credential is in `.claude.json`: the OAuth tokens are in the Keychain. But the
+MCP entries can hold **third-party secrets**. `claude mcp add` takes `-e/--env KEY=value`
+and `-H/--header "Authorization: Bearer …"`, and both are stored in `mcpServers.<name>`
+(and in `projects[...].mcpServers` for local scope). Volley's own MCP server reads
+`VOLLEY_AUTH_PASSWORD` from its env, so once broker auth is on, the volley entry in every
+profile's `.claude.json` holds a broker password. Copying MCP entries between profiles
+spreads those secrets. The file also identifies the account, so it must stay per profile. A fresh profile's file after the
 first authenticated run had `oauthAccount`, `userID` and the account caches, but no
 `hasCompletedOnboarding`. An interactive start showed onboarding until I pre-seeded
 `hasCompletedOnboarding: true` and `projects["<dir>"].hasTrustDialogAccepted: true`.
@@ -279,20 +330,40 @@ The test: an interactive session ran in the profile (tmux). While it was running
 `mcpServers.spikeExternal` with jq to a temp file and `mv`'d it over `.claude.json`
 (atomic rename). I then sent a prompt, ran `/model`, and `/exit`ed. The session rewrote
 the file (new `projects["<dir>"].lastSessionId`), **and `spikeExternal` was still
-there**. Claude Code re-reads and merges under its `.claude.json.lock/` directory rather
-than writing back a stale in-memory copy. `claude mcp add -s user …` /
+there**. That is consistent with Claude Code re-reading and merging under its
+`.claude.json.lock/` directory rather than writing back a stale in-memory copy, but one
+run doesn't establish the mechanism. `claude mcp add -s user …` /
 `claude mcp remove -s user …` under the same `CLAUDE_CONFIG_DIR` edited the same file
 ("File modified: <dir>/.claude.json").
 
 Recommendation: edit MCP config through `CLAUDE_CONFIG_DIR=… claude mcp add|remove -s user`,
 which takes Claude Code's own lock. If Volley must write the file directly, do a
-read → modify only `mcpServers` → write temp → `rename` cycle, and accept a small race
-window. One run doesn't prove there is no race.
+read → modify only `mcpServers` → write temp → `rename` cycle. A `<file>.lock/`
+*directory* looks like the usual mkdir-based lock, so a direct writer could take the same
+lock (`mkdir .claude.json.lock` → write → `rmdir`) instead of accepting a race window.
+That is **untested**. One run doesn't prove there is no race either way.
+
+Either way, the MCP sync handles secret-bearing data (see above). It must not log or
+publish MCP entries, and the profile's `backups/` (copies of `.claude.json`) count as
+secret-bearing too.
 
 ### Symlinks
 
 In the profile I symlinked `settings.json`, `CLAUDE.md`, `skills/`, `agents/`,
 `commands/` and `plugins/` to a shared directory, plus `.claude.json` in a second profile.
+The setup, reconstructed for reproduction (the exact original shell lines weren't kept):
+
+```sh
+mkdir -p "$S/shared"/{skills,agents,commands,plugins}   # plus CLAUDE.md, settings.json, a skill, agent, command
+for f in settings.json CLAUDE.md skills agents commands plugins; do
+  ln -s "$S/shared/$f" "$S/profS/$f"
+done
+ln -s "$S/shared-claude.json" "$S/profL/.claude.json"
+tmux new-session -d -s spike "cd $S/work && env -u CLAUDECODE CLAUDE_CONFIG_DIR=$S/profS \
+  CLAUDE_SECURESTORAGE_CONFIG_DIR= ~/.local/bin/claude"
+tmux send-keys -t spike '<prompt asking for the codeword, skills, agents>' Enter   # then /model, /exit
+ls -l "$S/profS"; find "$S/shared" -newer "$S/shared/CLAUDE.md"                 # links intact? what was written?
+```
 
 | Path | Read through the link | Written through the link | Link survives |
 | --- | --- | --- | --- |
@@ -331,17 +402,54 @@ an interactive session in tmux, sent one prompt that made two `ls` tool calls, t
 | Time | Event | Dumps |
 | --- | --- | --- |
 | 18:47:32 | session start | 1 (no `rate_limits`, `current_usage: null`, `used_percentage: null`) |
-| 18:49:28 / 18:49:30 | one 4 s turn with 2 tool calls | 2 (one per assistant message, not one per tool call) |
+| 18:49:28 / 18:49:30 | one 4 s turn with 2 tool calls | 2. Consistent with the documented per-assistant-message trigger, but this run didn't separate it from one per tool call (the number of assistant messages in the turn wasn't counted). |
 | 18:50:30 | `/model` switch | 1 |
 | idle | none | 0 |
 
-That matches the documented triggers: session start/resume, new assistant message,
+The follow-up probes (signed-out profile, Linux, statusLine passed with `--settings`):
+
+| Event | Dumps |
+| --- | --- |
+| session start | 1 |
+| permission-mode change (Shift+Tab: auto → manual) | 1 |
+| `/model claude-haiku-5-5`, which **failed** ("Unable to validate model", not signed in) | 1, with `model.id` unchanged |
+
+So the dump around `/model` doesn't need a model change: it may come from the command's
+output message or its dialog. Model change isn't in the documented list, so a consumer
+shouldn't rely on it as a trigger.
+
+The observations fit the documented triggers: session start/resume, new assistant message,
 `/compact`, permission-mode change, vim toggle, `command` change, the optional
 `refreshInterval` timer, a `rate_limits.*.resets_at` passing, and a warm prompt cache's
 `expires_at` passing. Updates are debounced by 300 ms, and an in-flight script is cancelled
 when a new update fires. **The docs warn that triggers go quiet while the session is
 idle.** A Desk usage meter fed from statusLine needs `refreshInterval` or must accept
 staleness between turns.
+
+### statusLine from `--settings` vs the profile's `settings.json`
+
+Volley's spawn already passes a settings file with `--settings` (the hooks template, see
+`packages/volleyd/src/launch.ts`), which is where a usage publisher would go. The
+follow-up probe started three interactive sessions, each with a dump script that also
+prints its own name as the status text:
+
+```sh
+$ CLAUDE_CONFIG_DIR="$S/profP" claude --settings '{"statusLine":{"type":"command","command":"…/dump-flag","padding":0}}'
+$ CLAUDE_CONFIG_DIR="$S/profQ" claude --settings '<same>'   # profQ/settings.json has statusLine → …/dump-profile
+$ CLAUDE_CONFIG_DIR="$S/profQ" claude                       # no flag
+```
+
+| Run | Profile `settings.json` statusLine | `--settings` statusLine | Which ran |
+| --- | --- | --- | --- |
+| P | none | dump-flag | dump-flag (shown as status text, one dump) |
+| Q | dump-profile | dump-flag | **dump-flag only** (no dump-profile file written) |
+| R | dump-profile | none | dump-profile |
+
+So a `statusLine` passed with `--settings` fires, and it **replaces** one in the profile's
+`settings.json`. That follows the documented settings precedence (command-line arguments
+over user settings). For Volley: a user's own statusLine in a shared `settings.json` (see
+(c)) is silently replaced in Volley-spawned sessions, so the publisher may want to chain
+to the user's command.
 
 ### Sample (after the first turn, paths shortened)
 
@@ -410,8 +518,11 @@ Fields the docs mark as conditional (no field is labelled "unstable"):
 - `rate_limits.spend_limit.*` is gateway-only (v2.1.251+). `used_usd`, `limit_usd` and
   `period` are optional even when present.
 
-Implication for O9: statusLine is the only first-party source of the 5-hour / weekly
-percentages, but it runs inside the user's interactive session. Headless `-p` runs never
-fire it. A Volley usage view built on it would capture these JSON payloads from sessions
-Volley spawns (statusLine set per profile) and show the last value seen per account, with
-its age.
+Implication for O8 (#76), and the O9 meters (#77): statusLine is the only first-party
+source of the 5-hour / weekly percentages, but it runs inside an interactive session.
+Whether headless `-p` runs ever fire it was **not probed**, so treat them as producing no
+statusLine data. That doesn't block O8: volleyd spawns interactive sessions in
+tmux/cmux (`packages/volleyd/src/launch.ts`). A Volley usage view built on it would pass
+the publisher's `statusLine` in the spawn `--settings` (shown above to fire and to win over
+a profile's own), capture these JSON payloads from the sessions Volley spawns, and show the
+last value seen per account, with its age.
