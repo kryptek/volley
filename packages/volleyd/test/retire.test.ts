@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { acquireLock, lockPath } from "../src/locks";
-import { type RetireRequest, retainedTopics, retireAgent } from "../src/retire";
+import {
+  type RetireRequest,
+  closableAfterRestart,
+  retainedTopics,
+  retireAgent,
+} from "../src/retire";
 import { SpawnError } from "../src/spawn-error";
 import type { NewEvent } from "../src/types";
 import { fakeExec } from "./helpers/fake-exec";
@@ -45,7 +50,7 @@ describe("retireAgent", () => {
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-  it("after a terminal status: revokes, clears the six retained records, releases the lock, journals", async () => {
+  it("after a terminal status: revokes, clears the retained records, releases the lock, journals", async () => {
     const path = lockPath(home, "/wt/w1/T1-implementer");
     await acquireLock(
       path,
@@ -58,6 +63,7 @@ describe("retireAgent", () => {
     expect(cleared).toEqual([
       `volley/_system/registry/${ID}`,
       `volley/ns/${ID}/status`,
+      `volley/ns/${ID}/progress`,
       `volley/ns/${ID}/result`,
       `volley/ns/${ID}/capability`,
       `volley/ns/${ID}/screen`,
@@ -80,10 +86,13 @@ describe("retireAgent", () => {
     ]);
   });
 
-  it.each(["failed", "reaped", "moved"])("retires a %s agent too", async (status) => {
-    await retireAgent(req({ status }), deps());
-    expect(cleared).toHaveLength(6);
-  });
+  it.each(["failed", "reaped", "moved", "stopped", "relaunched"])(
+    "retires a %s agent too",
+    async (status) => {
+      await retireAgent(req({ status }), deps());
+      expect(cleared).toHaveLength(7);
+    },
+  );
 
   it.each([["working"], ["blocked"], [null]])(
     "a %s agent → refused, nothing touched",
@@ -125,5 +134,39 @@ describe("retireAgent", () => {
     );
     await retireAgent(req({ lockPath: path }), deps());
     expect(existsSync(path)).toBe(true);
+  });
+
+  it("closes only its own workspace; a ref it cannot trust (closeWorkspace null) is left, journaled closed: false", async () => {
+    const closed: string[] = [];
+    await retireAgent(req({ workspace: "workspace:1" }), {
+      ...deps(),
+      closeWorkspace: async (ws: string) => {
+        closed.push(ws);
+      },
+    });
+    expect(closed).toEqual(["workspace:1"]);
+    expect(events.at(-1)?.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
+    await retireAgent(req({ workspace: "workspace:2" }), { ...deps(), closeWorkspace: null });
+    expect(closed).toEqual(["workspace:1"]);
+    expect(events.at(-1)?.data).toMatchObject({
+      workspace: "workspace:2",
+      workspace_closed: false,
+    });
+  });
+});
+
+describe("closableAfterRestart (a workspace ref read back from the journal)", () => {
+  const session = "w1-T1-implementer";
+  it("a UUID or the agent's own tmux session (with a free-name suffix) is still its own", () => {
+    expect(closableAfterRestart("0f8b5c1e-2d3a-4b5c-8d9e-0a1b2c3d4e5f", session)).toBe(true);
+    expect(closableAfterRestart(session, session)).toBe(true);
+    expect(closableAfterRestart(`${session}-2`, session)).toBe(true);
+  });
+  it("a short cmux ref, an index or another agent's session may name anyone's workspace now", () => {
+    expect(closableAfterRestart("workspace:3", session)).toBe(false);
+    expect(closableAfterRestart("3", session)).toBe(false);
+    expect(closableAfterRestart("w1-T2-implementer", session)).toBe(false);
+    expect(closableAfterRestart(`${session}-reviewer`, session)).toBe(false);
+    expect(closableAfterRestart("", session)).toBe(false);
   });
 });

@@ -104,6 +104,13 @@ describe("LocalCmuxHost", () => {
     expect(fake.argvs()).toEqual([["cmux", "close-workspace", "--workspace", "workspace:3"]]);
   });
 
+  it("a retire's own consent token closes the retiring agent's workspace through the real fence", async () => {
+    const fake = fakeExec();
+    const host = new LocalCmuxHost(fake.exec);
+    await host.close("workspace:4", mintConsentToken("retire w1-t1-implementer-1"));
+    expect(fake.argvs()).toEqual([["cmux", "close-workspace", "--workspace", "workspace:4"]]);
+  });
+
   it("writeFile creates parents and applies the mode", async () => {
     const dir = mkdtempSync(join(tmpdir(), "volleyd-host-"));
     try {

@@ -40,6 +40,9 @@
                 "ci_failed",
                 "wave_complete",
                 "plan_change",
+                "pr_closed",
+                "pr_head_moved",
+                "spawn_budget_exhausted",
                 "account_limit"
               ]
             },

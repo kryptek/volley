@@ -1,16 +1,25 @@
 import {
   type ArtifactReport,
   type CiRun,
+  type CiState,
+  type Landed,
+  type MovedHeadFacts,
+  type OperatorMergeCheck,
   type RebaseCheck,
   artifactOutcome,
   checkRebase,
+  ciStateOf,
+  landed,
+  probeLanded,
+  probeMovedHead,
   verifyArtifacts,
+  verifyOperatorMerge,
 } from "./artifacts";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput, DecisionRecord } from "./decisions";
-import { type EvidenceInput, writeEvidence } from "./evidence";
+import { type EvidenceInput, markEvidenceStale, writeEvidence } from "./evidence";
 import type { ExecFn, ExecOptions, ExecResult } from "./exec";
 import type { WaveRecord } from "./reducer";
 import {
@@ -119,17 +128,70 @@ export interface TaskPipeline {
   /** Every fixup that ran, oldest first, with the review round it worked from. */
   fixups: { round: number; from?: string; to: string; result?: FixupResult; worktree?: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
-  /** Heads pushed to the PR outside the pipeline after a verification, re-verified (CI only). */
-  moves: { from: string; to: string; touched: string[] }[];
+  /**
+   * Heads pushed to the PR outside the pipeline after a verification. `accepted_by`: the owner
+   * answered a pr_head_moved decision with `fixup`, so the reviews of `from` still hold for `to`.
+   */
+  moves: { from: string; to: string; touched: string[]; accepted_by?: string }[];
   /** Reviewers to re-run because the last rebase touched files they flagged. */
   rereview: ReviewerRole[];
   /** The owner's answer to a `reviewers_disagree` decision, for the round it was asked in. */
   disagreement?: { round: number; answer: string; by?: string };
+  /** Why the task is `blocked` (its stage_entered's `why`), while it is. */
+  why?: string | undefined;
+  /** Alarms raised on the task that still hold, by alarm name (alarm_cleared drops one). */
+  alarms: Record<string, Record<string, unknown>>;
+  /** The pipeline holds for CI on a role's pushed head (its latest `ci_pending`), until it settles. */
+  ci_hold?: CiHold | undefined;
+  /** The PR head moved after a gate (`pr_head_moved`), until the owner's answer. */
+  moved?: MovedHead | undefined;
+  /** Every head the task was gated at (evidence head history). */
+  gated: string[];
+  /** What the next fixup must do about a moved head (the CI failure, the diff), until it is verified. */
+  directive?: Directive | undefined;
+}
+
+export interface MovedHead {
+  from: string;
+  to: string;
+  during: TaskStage;
+  /** Its pr_head_moved decision is open. */
+  asked?: boolean;
+}
+
+/** A moved head's fixup directive (kept on the pr_head_moved decision as `directive`). */
+export interface Directive {
+  from: string;
+  to: string;
+  ci: CiState;
+  failed_jobs: string[];
+  failing_tests: string[];
+  log: string;
+  diffstat: string;
+  runs: CiRun[];
+  /** The owner chose `fixup`: the fixup works from this directive only (no review findings). */
+  only?: boolean;
+}
+
+/** A `ci_pending` event's facts: whose head, how far its runs are, when it is checked again. */
+export interface CiHold {
+  /** The role whose pushed head is held; `moved` for a head pushed outside the pipeline. */
+  role: Role | "moved";
+  sha: string;
+  checks: { done: number; total: number };
+  next_poll_at: string;
+  pr?: { number: number; url: string };
 }
 
 export type SteerReason = "artifacts" | "result";
 
-/** What a pipeline decision is about; kept on the decision as `pipeline`. */
+/**
+ * What a pipeline decision is about; kept on the decision as `pipeline`. The single mechanism
+ * by which a decision's answer reaches its consumer: every decision whose answer the pipeline
+ * acts on carries one. Spawn-type decisions (spawn.ts: hooks_auth_failed, mcp_not_registered,
+ * unknown_screen; the daemon's spawn_failed) carry `relaunch` / `spawn_failed` with the run they
+ * are about (`wave`, `task`, `role`, `attempt`, `agent_id`).
+ */
 export interface PipelineMarker {
   on:
     | "verify"
@@ -139,11 +201,22 @@ export interface PipelineMarker {
     | "fixup_result"
     | "agent_failed"
     | "reviewers_disagree"
-    | "merge_ready_invariant";
+    | "merge_ready_invariant"
+    | "relaunch"
+    | "spawn_failed"
+    | "pr_closed"
+    | "pr_head_moved";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
   touched?: string[];
+  /** pr_head_moved: the head the gate saw (`head` is the one it moved to). */
+  from?: string;
+  /** Spawn-type decisions: the run they are about. */
+  wave?: WaveId;
+  task?: TaskId;
+  attempt?: number;
+  agent_id?: string;
 }
 
 /** Decisions whose `respawn` answer replaces the role's run (the next advance spawns it). */
@@ -169,6 +242,8 @@ export const emptyPipeline = (): TaskPipeline => ({
   rebases: [],
   moves: [],
   rereview: [],
+  alarms: {},
+  gated: [],
 });
 
 const isRole = (r: unknown): r is Role => typeof r === "string" && r in ROLE_STAGE;
@@ -198,6 +273,7 @@ export function reducePipeline(
       if (role === "implementer" && typeof d.branch === "string") p.branch = d.branch;
       break;
     case "stage_entered":
+      p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
@@ -222,6 +298,12 @@ export function reducePipeline(
       break;
     }
     case "artifact_verified": {
+      if (p.ci_hold?.role === role) p.ci_hold = undefined;
+      if (role === "gate" && typeof d.head_sha === "string") {
+        p.gated = p.gated ?? [];
+        if (p.gated.at(-1) !== d.head_sha) p.gated.push(d.head_sha);
+      }
+      if (role === "fixup") p.directive = undefined;
       if (!isRole(role)) break;
       const run = p.runs[role];
       const from = p.head;
@@ -231,7 +313,8 @@ export function reducePipeline(
       }
       if (typeof d.head_sha === "string") p.head = d.head_sha;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
-      if (pr !== undefined) {
+      // The merge record describes the commit that merged (its own CI): not the pipeline's head.
+      if (pr !== undefined && d.role !== "merged") {
         p.pr = { number: pr.number, url: pr.url };
         p.ci = pr.ci === "none" ? "none" : "green";
       }
@@ -285,7 +368,45 @@ export function reducePipeline(
       }
       break;
     }
+    case "relaunched":
+      // The old agent is retired (the delete path ran first): the next advance spawns the role
+      // at the next attempt. Only the run it names, never a newer one.
+      if (isRole(role) && p.runs[role]?.agent_id === d.from_agent) delete p.runs[role];
+      break;
+    case "pr_head_moved":
+      if (typeof d.from === "string" && typeof d.to === "string")
+        p.moved = { from: d.from, to: d.to, during: d.during as TaskStage };
+      if (p.pr === undefined && typeof d.pr === "string" && typeof d.pr_number === "number")
+        p.pr = { number: d.pr_number, url: d.pr };
+      break;
+    case "ci_pending":
+      if ((isRole(role) || role === "moved") && typeof d.sha === "string")
+        p.ci_hold = {
+          role,
+          sha: d.sha,
+          checks: d.checks as CiHold["checks"],
+          next_poll_at: String(d.next_poll_at),
+          ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
+        };
+      break;
+    case "ci_green":
+    case "decision_opened":
+    case "task_cancelled":
+      // Settled, or someone is asked about it: the hold is over.
+      p.ci_hold = undefined;
+      if (ev.type === "task_cancelled") p.moved = undefined;
+      if (
+        ev.type === "decision_opened" &&
+        p.moved !== undefined &&
+        (d.pipeline as PipelineMarker | undefined)?.on === "pr_head_moved"
+      )
+        p.moved.asked = true;
+      break;
+    case "alarm_cleared":
+      if (typeof d.alarm === "string" && p.alarms !== undefined) delete p.alarms[d.alarm];
+      break;
     case "alarm_raised": {
+      if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // The PR is no longer at the verified head: that role's acceptance no longer holds.
       const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
       if (run !== undefined) {
@@ -306,6 +427,28 @@ export function reducePipeline(
       // A respawn replaces the run; advance spawns the role again (and retries a held spawn).
       if (m !== undefined && RESPAWNABLE.has(m.on) && isRole(m.role) && isAnswer(answer, "respawn"))
         delete p.runs[m.role];
+      if (m?.on === "pr_head_moved" && p.moved !== undefined && m.head === p.moved.to) {
+        const fixup = isAnswer(answer, "fixup");
+        // Only an answer the decision offered (onResolved re-asks any other): a rereview of a
+        // red head with no fixup stage after it is not offered, and leaves the move to answer.
+        const offered = (ctx.decision?.options ?? []).includes("rereview");
+        if (fixup || (offered && isAnswer(answer, "rereview"))) {
+          const dir = (ctx.decision as { directive?: Directive } | undefined)?.directive;
+          p.moves.push({
+            from: p.moved.from,
+            to: p.moved.to,
+            touched: [],
+            ...(fixup && typeof d.by === "string" ? { accepted_by: d.by } : {}),
+          });
+          p.head = p.moved.to;
+          if (dir !== undefined) {
+            p.directive = { ...dir, ...(fixup ? { only: true } : {}) };
+            p.ci = dir.ci === "none" ? "none" : "green";
+            p.ci_runs = dir.runs;
+          }
+          p.moved = undefined;
+        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+      }
       break;
     }
   }
@@ -343,23 +486,51 @@ export type PipelineEvent =
       report: ArtifactReport;
       result?: FixupResult;
       waited_ms?: number;
+      /** When the check ran (epoch ms on the driver's clock): the next one is a ci_poll_ms on. */
+      at?: number;
     }
   /** Before the gate: the release branch checked at `head`; `diffstats` per fixup `from..to`. */
   | { kind: "rebase_checked"; head: string; check: RebaseCheck; diffstats: Record<string, string> }
   /** Before the gate: the PR's head is not the verified one (someone pushed after it). */
   | { kind: "head_moved"; expected: string; actual: string }
-  /** At the gate: the PR as `gh pr view` reports it. */
-  | { kind: "merge_checked"; view: PrView }
+  /** At the gate: the PR as `gh pr view` reports it (`merged_ci`: CI of a head other than the gated one). */
+  | { kind: "merge_checked"; view: PrView; merged_ci?: MergedCi }
+  /** At the gate, the PR closed unmerged: did `head` land on the release branch anyway? */
+  | { kind: "landed_checked"; head: string; landed: Landed | null; merged_ci?: MergedCi }
+  /** At a review gate: the PR's head as GitHub has it now (`expected`: the head when asked). */
+  | { kind: "pr_head"; head: string; expected: string }
+  /** The moved head's CI (and, settled, the facts the pr_head_moved decision carries). */
+  | {
+      kind: "moved_ci";
+      to: string;
+      facts: MovedHeadFacts;
+      pr: { number: number; url: string };
+      at: number;
+      waited_ms: number;
+    }
+  /** `volleyd merged --sha`: the owner's merge outside GitHub, verified (verifyOperatorMerge). */
+  /** `head`: the gated head the merge was verified against (stale if the task's head moved since). */
+  | {
+      kind: "operator_merged";
+      sha: string;
+      by: string;
+      how: string;
+      head: string;
+      merged_ci?: MergedCi;
+    }
   /** A pipeline git / gh check failed (`timed_out`: the hard timeout fired). */
   | {
       kind: "io_failed";
-      what: "verify" | "check_rebase" | "check_merged";
+      what: "verify" | "check_rebase" | "check_merged" | "watch_head" | "check_landed" | "moved_ci";
       role?: Role;
       agent_id?: string;
       message: string;
       timed_out: boolean;
     }
   | { kind: "decision_resolved"; decision: DecisionRecord };
+
+/** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
+export type MergedCi = CiState | "unknown";
 
 export interface PrView {
   state?: string;
@@ -389,10 +560,21 @@ export type PipelineAction =
       marker: PipelineMarker;
       data?: Record<string, unknown>;
     }
-  | { kind: "retire"; agent_id: string }
+  /** Retire an agent; `status` is a DAEMON_ENDED one for an agent that never ended itself. */
+  | { kind: "retire"; agent_id: string; status?: string }
+  /** Replace `agent_id` (a spawn decision's run): retire it, journal `relaunched`. */
+  | { kind: "relaunch"; role: Role; agent_id: string }
   | { kind: "check_rebase" }
   /** At the gate: has a human merged the PR? (volleyd only ever reads this.) */
   | { kind: "check_merged" }
+  /** The PR closed unmerged: look for its head on the release branch (read-only git). */
+  | { kind: "check_landed" }
+  /** At a review gate: read the PR's head (rate-limited to ci_poll_ms). */
+  | { kind: "watch_head" }
+  /** The PR head moved: CI on the new head, its failures and the diff (rate-limited). */
+  | { kind: "check_moved_ci" }
+  /** The PR head moved after the gate: mark the evidence package stale. */
+  | { kind: "evidence_stale"; from: string; to: string }
   | { kind: "gate"; check: RebaseCheck; diffstats: Record<string, string> };
 
 /** Stages in which the pipeline does nothing for the task. */
@@ -420,7 +602,15 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "head_moved":
       return onHeadMoved(v, ev);
     case "merge_checked":
-      return onMergeChecked(v, ev.view);
+      return onMergeChecked(v, ev);
+    case "landed_checked":
+      return onLandedChecked(v, ev);
+    case "pr_head":
+      return ev.expected === v.p.head ? onPrHead(v, ev.head) : [];
+    case "moved_ci":
+      return onMovedCi(v, ev);
+    case "operator_merged":
+      return onOperatorMerged(v, ev);
     case "io_failed":
       return onIoFailed(v, ev);
     case "decision_resolved":
@@ -437,8 +627,10 @@ export type MergeReadyCheck =
  * The merge_ready invariant: every reviewer role in the task's pipeline has a stored review with
  * a verdict that holds for the current head — a review of the head itself, or of a head the
  * current one descends from only through fixups that worked from that review's round or later
- * (they ran after it) and rebases. A head pushed outside the pipeline (`moves`) was reviewed by
- * nobody. A pipeline without review stages passes, as `skippedByPlan`: the wave file said so.
+ * (they ran after it), rebases, and heads pushed outside the pipeline that the owner accepted
+ * without a re-review (a `pr_head_moved` answered `fixup`: `moves[].accepted_by`, kept in the
+ * evidence; SPEC §4.6.8). Any other outside push (`moves`) was reviewed by nobody. A pipeline
+ * without review stages passes, as `skippedByPlan`: the wave file said so.
  */
 export function mergeReadyCheck(stages: PipelineStage[][], p: TaskPipeline): MergeReadyCheck {
   const planned = REVIEWER_ROLES.filter((r) =>
@@ -464,7 +656,11 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
     seen.add(head);
     const to = head;
     const fixup = p.fixups.find((f) => f.to === to && f.round >= rv.round);
-    head = fixup?.from ?? p.rebases.find((r) => r.to === to)?.from;
+    head =
+      fixup?.from ??
+      p.rebases.find((r) => r.to === to)?.from ??
+      // A head moved outside the pipeline that the owner sent straight to a fixup.
+      p.moves.find((m) => m.to === to && m.accepted_by !== undefined)?.from;
   }
   return false;
 }
@@ -566,7 +762,11 @@ function onHeadMoved(
   ];
 }
 
-function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
+function onMergeChecked(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "merge_checked" }>,
+): PipelineAction[] {
+  const { view } = ev;
   const { pr, head } = v.p;
   if (v.stage !== "merge_ready" || pr === undefined) return [];
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
@@ -585,41 +785,269 @@ function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
             },
           ]
         : []),
-      {
-        kind: "journal",
-        event: {
-          type: "artifact_verified",
-          task: v.task,
-          data: {
-            role: "merged",
-            pr: { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" },
-            head_sha: head,
-            ...(merged !== undefined ? { merged_head_sha: merged } : {}),
-            merge_sha: view.mergeCommit?.oid ?? null,
-            merged_at: view.mergedAt ?? null,
-          },
-        },
-      },
-      {
-        kind: "journal",
-        event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
-      },
+      ...mergedActions(
+        v,
+        { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
+        unverified ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
+      ),
     ];
   }
-  if (view.state === "CLOSED") {
-    return [
-      {
-        kind: "alarm",
-        key: `${v.task}/pr_closed_unmerged`,
-        event: {
-          type: "alarm_raised",
-          task: v.task,
-          data: { alarm: "pr_closed_unmerged", pr: pr.url },
-        },
-      },
-    ];
-  }
+  // Closed unmerged on GitHub — but a local squash + push closes it that way too.
+  if (view.state === "CLOSED") return [{ kind: "check_landed" }];
+  // Still open, at another head than the gate saw (e.g. the release branch merged into it).
+  if (typeof view.headRefOid === "string" && head !== undefined && view.headRefOid !== head)
+    return headMovedAtGate(v, view.headRefOid);
   return [];
+}
+
+/** Stages in which the PR head is watched for pushes outside the pipeline (merge_ready aside). */
+const WATCHED: ReadonlySet<TaskStage> = new Set(["spec_review", "quality_review"]);
+
+/** At a review gate, GitHub reports the PR at `head`. */
+function onPrHead(v: PipelineView, head: string): PipelineAction[] {
+  const { p } = v;
+  if (p.moved !== undefined || p.head === undefined || head === p.head || !WATCHED.has(v.stage))
+    return [];
+  // A role of this step is publishing (its push is the pipeline's own): not a move.
+  if (p.roles.some((r) => PUBLISHING_ROLES.has(r))) return [];
+  return headMovedAtGate(v, head);
+}
+
+/**
+ * The PR head moved to `to` while the task sat at a gate: journal it, invalidate the gate (at
+ * merge_ready the task leaves it and its evidence is stale; nothing downstream is admitted), then
+ * the CI on the new head is awaited before the owner is asked (movedAdvance).
+ */
+function headMovedAtGate(
+  v: PipelineView,
+  to: string,
+  from = v.p.head as string,
+  heldPr?: { number: number; url: string },
+): PipelineAction[] {
+  const gate = v.stage === "merge_ready";
+  const pr = v.p.pr ?? heldPr;
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "pr_head_moved",
+        task: v.task,
+        data: {
+          from,
+          to,
+          during: v.stage,
+          ...(pr !== undefined ? { pr: pr.url } : {}),
+          // A move in the implementer's CI hold: the PR the hold was on (none verified yet).
+          ...(v.p.pr === undefined && pr !== undefined ? { pr_number: pr.number } : {}),
+        },
+      },
+    },
+    ...(gate
+      ? [
+          { kind: "evidence_stale" as const, from, to },
+          {
+            kind: "journal" as const,
+            event: {
+              type: "stage_entered" as const,
+              task: v.task,
+              data: { stage: "fixup", gate_invalidated: true, from, to },
+            },
+          },
+        ]
+      : []),
+  ];
+}
+
+/** While a moved head's decision is not asked yet: keep checking CI on it. */
+function movedAdvance(v: PipelineView): PipelineAction[] {
+  return v.p.moved?.asked === true ? [] : [{ kind: "check_moved_ci" }];
+}
+
+/** The reviewer roles the task's pipeline plans, and the first group that runs them. */
+function reviewStep(stages: PipelineStage[][]): { i: number; roles: Role[] } | null {
+  const i = stages.findIndex((g) => g.some((s) => isReviewerRole(STAGE_ROLE[s] as Role)));
+  if (i < 0) return null;
+  const roles = (stages[i] ?? []).flatMap((s) => {
+    const r = STAGE_ROLE[s];
+    return r !== undefined && isReviewerRole(r) ? [r] : [];
+  });
+  return { i, roles };
+}
+
+/** CI on the moved head: still running → visible hold; settled → the pr_head_moved decision. */
+function onMovedCi(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "moved_ci" }>,
+): PipelineAction[] {
+  const m = v.p.moved;
+  if (m === undefined || m.to !== ev.to || m.asked === true) return [];
+  const ci = ev.facts.ci;
+  const waiting =
+    ci.state === "running" ||
+    (ci.state === "none" && ev.waited_ms < DAEMON_DEFAULTS.ci_none_grace_ms);
+  if (waiting) return holdFor(v, "moved", ev.to, ci.runs, ev.pr, ev.at);
+  const at = (x: string) => x.slice(0, 7);
+  const failure =
+    ci.state === "red"
+      ? ` — failed jobs: ${ci.failed_jobs.join(", ") || "(no job details)"}; failing tests: ${ci.failing_tests.join(", ") || "(none found in the logs)"}`
+      : "";
+  // A red head only reaches the gate through a fixup: rereview needs a fixup stage after it.
+  const hasFixup = v.stages.some((g) => g.includes("fixup"));
+  const review = ci.state === "red" && !hasFixup ? null : reviewStep(v.stages);
+  const directive: Directive = {
+    from: m.from,
+    to: m.to,
+    ci: ci.state,
+    failed_jobs: ci.failed_jobs,
+    failing_tests: ci.failing_tests,
+    log: ev.facts.log,
+    diffstat: ev.facts.diffstat,
+    runs: ci.runs,
+  };
+  return [
+    {
+      kind: "decide",
+      marker: { on: "pr_head_moved", head: m.to, from: m.from },
+      decision: {
+        kind: "pr_head_moved",
+        task: v.task,
+        question: `PR #${ev.pr.number}'s head moved from ${at(m.from)} to ${at(m.to)} outside the pipeline (during ${m.during}); CI on ${at(m.to)} is ${ci.state}${failure}. The reviews saw ${at(m.from)}. ${review !== null ? "rereview: the reviewers again on the new head, then the fixup and the gate; " : ""}fixup: a fixup agent on ${at(m.to)} with the CI result and the ${at(m.from)}..${at(m.to)} diff as its directive, then the gate; or cancel?`,
+        pointers: { pr: ev.pr.url },
+        options: [...(review !== null ? ["rereview"] : []), "fixup", "cancel"],
+      },
+      data: {
+        from: m.from,
+        to: m.to,
+        ci: ci.state,
+        failed_jobs: ci.failed_jobs,
+        failing_tests: ci.failing_tests,
+        run_urls: ci.runs.map((r) => r.url),
+        directive,
+      },
+    },
+  ];
+}
+
+/**
+ * The task is merged: its PR's head is on the release branch (`extra`: how it is known). Any
+ * alarm that said otherwise (`pr_closed_unmerged`) is cleared; dependents follow `done`. When
+ * the commit that merged is not the gated head (`merged`), the record — and the task's PR —
+ * describe that commit and its own CI (`unknown`: not read), never the gated head's.
+ */
+function mergedActions(
+  v: PipelineView,
+  extra: Record<string, unknown>,
+  merged?: { sha: string; ci: MergedCi },
+): PipelineAction[] {
+  const { pr, head } = v.p;
+  if (pr === undefined) return [];
+  const other = merged !== undefined && merged.sha !== head ? merged : undefined;
+  const prOf =
+    other === undefined
+      ? { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" }
+      : {
+          number: pr.number,
+          url: pr.url,
+          head_sha: other.sha,
+          ...(other.ci !== "unknown" ? { ci: other.ci } : {}),
+        };
+  return [
+    ...(v.p.alarms?.pr_closed_unmerged !== undefined
+      ? [
+          {
+            kind: "journal" as const,
+            event: {
+              type: "alarm_cleared" as const,
+              task: v.task,
+              data: {
+                alarm: "pr_closed_unmerged",
+                why: "the PR's head landed on the release branch",
+              },
+            },
+          },
+        ]
+      : []),
+    {
+      kind: "journal",
+      event: {
+        type: "artifact_verified",
+        task: v.task,
+        data: {
+          role: "merged",
+          pr: prOf,
+          head_sha: head,
+          ...(other !== undefined
+            ? { gated_head_sha: head, merged_head_sha: other.sha, merged_ci: other.ci }
+            : {}),
+          ...extra,
+        },
+      },
+    },
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
+    },
+  ];
+}
+
+/** A closed PR's head found on the release branch → merged; not found → ask (pr_closed). */
+function onLandedChecked(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "landed_checked" }>,
+): PipelineAction[] {
+  const pr = v.p.pr;
+  if (v.stage !== "merge_ready" || pr === undefined || ev.head !== v.p.head) return [];
+  if (ev.landed !== null)
+    return mergedActions(
+      v,
+      { via: "outside_github", how: ev.landed.how, sha: ev.landed.sha },
+      { sha: ev.landed.sha, ci: ev.merged_ci ?? "unknown" },
+    );
+  const at = ev.head.slice(0, 12);
+  const why = `PR #${pr.number} was closed without a merge, and ${v.release_branch} does not contain ${at} (no ancestor, no equivalent patches, no commit naming #${pr.number})`;
+  return [
+    // A closed PR is no gate: the task leaves merge_ready until the owner says what happened.
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "blocked", why } },
+    },
+    {
+      kind: "decide",
+      marker: { on: "pr_closed", head: ev.head },
+      decision: {
+        kind: "pr_closed",
+        task: v.task,
+        question: `${why}. landed: it is merged some other way (\`volleyd merged\` with its sha verifies and records where); abandoned: cancel the task?`,
+        pointers: { pr: pr.url },
+        options: ["landed", "abandoned"],
+      },
+    },
+  ];
+}
+
+/** `volleyd merged`: verified by the driver before this event; journal it, then merged. */
+function onOperatorMerged(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "operator_merged" }>,
+): PipelineAction[] {
+  if (v.stage === "done" || v.stage === "cancelled" || v.p.pr === undefined) return [];
+  // Verified against a head the task has since moved off: that check says nothing about this one.
+  if (ev.head !== v.p.head) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "merged_by_operator",
+        task: v.task,
+        data: { by: ev.by, sha: ev.sha, head: v.p.head, how: ev.how },
+      },
+    },
+    ...mergedActions(
+      v,
+      { via: "operator", sha: ev.sha, how: ev.how, by: ev.by },
+      { sha: ev.sha, ci: ev.merged_ci ?? "unknown" },
+    ),
+  ];
 }
 
 function onIoFailed(
@@ -769,6 +1197,19 @@ function onVerified(
     return [];
   const out = artifactOutcome(v.task, ev.role, ev.report);
   const head = ev.report.kind === "ok" ? ev.report.head : undefined;
+  // In the CI hold of a role that is done (its push is in), the PR branch moved: a push from
+  // outside the pipeline, the same as at any other gate.
+  const hold = v.p.ci_hold;
+  if (
+    ev.report.kind === "missing" &&
+    ev.report.remote_head !== undefined &&
+    hold?.role === ev.role &&
+    run.retired === "done" &&
+    v.p.moved === undefined &&
+    !v.p.rebasing &&
+    ev.report.remote_head !== hold.sha
+  )
+    return headMovedAtGate(v, ev.report.remote_head, v.p.head ?? hold.sha, hold.pr);
   switch (out.kind) {
     case "missing": {
       if (run.retired === undefined && (run.steers.artifacts ?? 0) < 1) {
@@ -837,11 +1278,24 @@ function onVerified(
           },
         ];
       }
-      // The pushed work is in place; CI is re-checked on later ticks. The agent is done.
-      return retireIfLive(run);
+      // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
+      // hold is the pipeline's, and it says so (once per change of head or counts).
+      return [...ciPending(v, ev, out.head), ...retireIfLive(run)];
     }
     case "verified":
       return [
+        ...(v.p.ci_hold?.role === ev.role
+          ? [
+              {
+                kind: "journal" as const,
+                event: {
+                  type: "ci_green" as const,
+                  task: v.task,
+                  data: { role: ev.role, sha: head, from_checks: v.p.ci_hold.checks },
+                },
+              },
+            ]
+          : []),
         {
           kind: "journal",
           event: {
@@ -859,6 +1313,55 @@ function onVerified(
   }
 }
 
+/** The `ci_pending` event for a verification whose CI is still running (or has no run yet). */
+function ciPending(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  head: string,
+): PipelineAction[] {
+  if (ev.report.kind !== "ok") return [];
+  const { number, url } = ev.report.pr;
+  return holdFor(v, ev.role, head, ev.report.ci.runs, { number, url }, ev.at);
+}
+
+/** Journal `ci_pending` for `role`'s head (once per change of head or counts). */
+function holdFor(
+  v: PipelineView,
+  role: Role | "moved",
+  head: string,
+  runs: CiRun[],
+  pr: { number: number; url: string },
+  at: number | undefined,
+): PipelineAction[] {
+  const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
+  const hold = v.p.ci_hold;
+  if (
+    hold?.role === role &&
+    hold.sha === head &&
+    hold.checks.done === checks.done &&
+    hold.checks.total === checks.total
+  )
+    return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "ci_pending",
+        task: v.task,
+        data: {
+          role,
+          sha: head,
+          checks,
+          ...(at !== undefined
+            ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
+            : {}),
+          pr,
+        },
+      },
+    },
+  ];
+}
+
 /** The missing-artifact steer: what this role publishes, and where. */
 function missingSteer(role: Role, detail: string, branch: string, release: string): string {
   const what =
@@ -870,10 +1373,16 @@ function missingSteer(role: Role, detail: string, branch: string, release: strin
   return `volleyd could not verify your work: ${detail}. ${what}, then publish done again.`;
 }
 
+/** The prefix a re-ask puts before the original question (dropped before it is asked again). */
+const ASKED_AGAIN = /^".*?" (is not one of|needs the commit that carries it:) [^.]*\. /;
+
 function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   const m = (d as { pipeline?: PipelineMarker }).pipeline;
   const answer = d.resolved?.answer ?? "";
   if (m === undefined || d.task !== v.task) return [];
+  // Merged meanwhile (`volleyd merged`, GitHub): no answer brings a done task back.
+  if (v.stage === "done") return [];
+  if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
   if (isAnswer(answer, "cancel")) {
     return [
       {
@@ -896,10 +1405,12 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       decision: {
         kind: d.kind,
         task: v.task,
-        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(/^".*?" is not one of [^.]*\. /, "")}`,
+        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(ASKED_AGAIN, "")}`,
         pointers: d.pointers,
         ...(d.options !== undefined ? { options: d.options } : {}),
       },
+      // The facts the answer acts on (a pr_head_moved's directive) carry over to the new ask.
+      data: decisionFacts(d),
     },
   ];
   switch (m.on) {
@@ -958,7 +1469,54 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
       return isAnswer(answer, "respawn") ? [] : reask();
+    case "pr_head_moved": {
+      // The reducer moved the task's head to the new one and kept the directive.
+      const live = REVIEWER_ROLES.flatMap((r) => {
+        const run = v.p.runs[r];
+        return run !== undefined && !run.accepted ? retireIfLive(run) : [];
+      });
+      if (isAnswer(answer, "fixup")) {
+        const i = v.stages.findIndex((g) => g.includes("fixup"));
+        return [...live, ...enterStep(v, i >= 0 ? i : Math.max(v.p.step, 0), ["fixup"])];
+      }
+      const review = reviewStep(v.stages);
+      // Offered only when the decision listed it (a red head needs a fixup stage after it).
+      if (isAnswer(answer, "rereview") && review !== null && (d.options ?? []).includes("rereview"))
+        return [...live, ...enterStep(v, review.i, review.roles)];
+      return reask();
+    }
+    case "pr_closed":
+      // A closed, unmerged PR never counts as landed on an answer alone: where it landed is
+      // verified by `volleyd merged --sha`, which answers this decision once it has.
+      if (isAnswer(answer, "landed"))
+        return [
+          {
+            kind: "decide",
+            marker: m,
+            decision: {
+              kind: d.kind,
+              task: v.task,
+              question: `"landed" needs the commit that carries it: run \`volleyd merged <wave> ${v.task} --sha <sha>\`, which verifies the sha is on the release branch and carries the gated head, records the merge and answers this. ${d.question.replace(ASKED_AGAIN, "")}`,
+              pointers: d.pointers,
+              ...(d.options !== undefined ? { options: d.options } : {}),
+            },
+          },
+        ];
+      if (isAnswer(answer, "abandoned"))
+        return [
+          {
+            kind: "journal",
+            event: {
+              type: "task_cancelled",
+              task: v.task,
+              data: { by: d.resolved?.by, decision_id: d.decision_id, why: "PR abandoned" },
+            },
+          },
+        ];
+      return reask();
     case "reviewers_disagree":
+    case "spawn_failed":
+      // spawn_failed: the daemon's resolveNow acts on it (retry now / stop task).
       return [];
     case "merge_ready_invariant": {
       if (!isAnswer(answer, "rereview")) return reask();
@@ -972,6 +1530,74 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/** Facts kept on a decision beside its payload (decisions.ts decisionPayload drops them). */
+const FACT_KEYS = [
+  "from",
+  "to",
+  "ci",
+  "failed_jobs",
+  "failing_tests",
+  "run_urls",
+  "directive",
+  "agent_id",
+];
+
+function decisionFacts(d: DecisionRecord): Record<string, unknown> {
+  const x = d as unknown as Record<string, unknown>;
+  return Object.fromEntries(FACT_KEYS.filter((k) => x[k] !== undefined).map((k) => [k, x[k]]));
+}
+
+/**
+ * A spawn-type decision answered: `relaunch` retires the agent through the delete path and the
+ * next advance spawns the same role at the next attempt (the reducer dropped the run); `cancel`
+ * retires it and blocks the task with the decision text. Anything else is asked again.
+ */
+function onRelaunchResolved(
+  v: PipelineView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+  answer: string,
+): PipelineAction[] {
+  if (!isRole(m.role) || m.agent_id === undefined) return [];
+  if (isAnswer(answer, "relaunch")) {
+    // A newer run of the role already replaced it: only make sure the old agent is gone.
+    const run = v.p.runs[m.role];
+    if (run !== undefined && run.agent_id !== m.agent_id)
+      return [{ kind: "retire", agent_id: m.agent_id, status: "relaunched" }];
+    return [{ kind: "relaunch", role: m.role, agent_id: m.agent_id }];
+  }
+  if (isAnswer(answer, "cancel")) {
+    return [
+      { kind: "retire", agent_id: m.agent_id, status: "stopped" },
+      {
+        kind: "journal",
+        event: {
+          type: "stage_entered",
+          task: v.task,
+          data: {
+            stage: "blocked",
+            why: `${d.kind} cancelled by ${d.resolved?.by}: ${d.question}`,
+            decision_id: d.decision_id,
+          },
+        },
+      },
+    ];
+  }
+  return [
+    {
+      kind: "decide",
+      marker: m,
+      decision: {
+        kind: d.kind,
+        task: v.task,
+        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(ASKED_AGAIN, "")}`,
+        pointers: d.pointers,
+        ...(d.options !== undefined ? { options: d.options } : {}),
+      },
+    },
+  ];
 }
 
 /** The spawn for `role` in the current step: reviewers at the head (detached), others from it. */
@@ -1001,13 +1627,17 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
     };
   }
   if (role === "fixup") {
-    const items = fixupItems(roundReviews(v.p), { notBlockers: answeredNotBlockers(v.p) });
+    const d = v.p.directive;
+    const items =
+      d?.only === true
+        ? []
+        : fixupItems(roundReviews(v.p), { notBlockers: answeredNotBlockers(v.p) });
     return {
       kind: "spawn",
       role,
       start: { ref: head, detach: false },
       files: {
-        "findings.md": renderFindingsMd(items, base),
+        "findings.md": `${d !== undefined ? renderDirectiveMd(d) : ""}${renderFindingsMd(items, base)}`,
         "findings.json": `${JSON.stringify(items, null, 2)}\n`,
       },
     };
@@ -1044,9 +1674,17 @@ function answeredNotBlockers(p: TaskPipeline) {
 
 function advance(v: PipelineView): PipelineAction[] {
   const { p } = v;
+  // The PR head moved after a gate: nothing moves on until its CI and the owner's answer.
+  if (p.moved !== undefined && v.stage !== "cancelled" && v.stage !== "done")
+    return movedAdvance(v);
   // volleyd never merges; a gated task becomes done once a human has merged its PR.
   if (v.stage === "merge_ready" && p.pr !== undefined) return [{ kind: "check_merged" }];
   if (IDLE.has(v.stage) || p.step < 0) return [];
+  // While reviews run at the verified head, a push to the PR outside the pipeline is watched for.
+  const watch: PipelineAction[] =
+    WATCHED.has(v.stage) && !p.rebasing && p.pr !== undefined && p.head !== undefined
+      ? [{ kind: "watch_head" }]
+      : [];
   const pending: PipelineAction[] = [];
   for (const r of p.roles) {
     const run = p.runs[r];
@@ -1056,7 +1694,8 @@ function advance(v: PipelineView): PipelineAction[] {
     else if (!run.accepted && run.retired === "done" && PUBLISHING_ROLES.has(r))
       pending.push({ kind: "verify", role: r });
   }
-  if (pending.length > 0 || p.roles.some((r) => p.runs[r]?.accepted !== true)) return pending;
+  if (pending.length > 0 || p.roles.some((r) => p.runs[r]?.accepted !== true))
+    return [...pending, ...watch];
   if (p.rebasing) {
     if (p.rereview.length > 0) {
       const i = v.stages.findIndex((g) =>
@@ -1088,8 +1727,10 @@ function enter(v: PipelineView, i: number): PipelineAction[] {
         },
       ];
     }
-    // Nothing to fix: skip the fixup (it would only spend a spawn).
-    if (roles.length === 1 && fixupItems(reviews).length === 0) return enter(v, i + 1);
+    // Nothing to fix: skip the fixup (it would only spend a spawn) — unless a moved head's CI
+    // failed: its directive is the fixup's job.
+    const red = v.p.directive?.ci === "red";
+    if (roles.length === 1 && fixupItems(reviews).length === 0 && !red) return enter(v, i + 1);
   }
   return enterStep(v, i, roles);
 }
@@ -1130,6 +1771,52 @@ function enterRebase(v: PipelineView): PipelineAction[] {
     },
     spawnFor(v, "rebase"),
   ];
+}
+
+/**
+ * The directive section that opens `.volley/findings.md` when the PR head moved after a gate:
+ * what moved, CI on the new head (failed jobs, failing tests) and the diff. Pure.
+ */
+function renderDirectiveMd(d: Directive): string {
+  const short = (x: string) => x.slice(0, 12);
+  const lines = [
+    "# Directive: the PR head moved",
+    "",
+    `The PR head moved from \`${short(d.from)}\` to \`${short(d.to)}\` outside the pipeline, after a gate (\`${short(d.from)}..${short(d.to)}\`). This worktree starts at the new head. This directive is your first job.`,
+    "",
+    `## CI on ${short(d.to)}: ${d.ci}`,
+    "",
+  ];
+  if (d.ci === "red") {
+    lines.push("Failed jobs:", "", ...d.failed_jobs.map((j) => `- ${j}`), "");
+    lines.push(
+      "Failing tests:",
+      "",
+      ...(d.failing_tests.length > 0
+        ? d.failing_tests.map((t) => `- \`${t}\``)
+        : ["- (none found in the logs: read the failed jobs)"]),
+      "",
+      'Make CI green on this head without undoing what the new commits intend. Publish your result with `{ "finding": "CI", "how": "…" }` among `resolved`.',
+      "",
+    );
+  } else {
+    lines.push(
+      'CI is not failing. Check the new commits against the plan and the reviews below, fix what they broke, and publish `{ "finding": "MOVE", "how": "…" }` among `resolved`.',
+      "",
+    );
+  }
+  lines.push(
+    `## What changed ${short(d.from)}..${short(d.to)}`,
+    "",
+    "```",
+    d.log || "(no log)",
+    "",
+    d.diffstat || "(no diffstat)",
+    "```",
+    "",
+    "",
+  );
+  return lines.join("\n");
 }
 
 interface BriefCtx {
@@ -1205,7 +1892,10 @@ export interface PipelineDeps {
   ) => Promise<unknown>;
   /** Open a decision; `extra` facts (the `pipeline` marker) are kept on it. */
   decide: (input: DecisionInput, extra: Record<string, unknown>) => Promise<unknown>;
-  retire: (agentId: string) => Promise<unknown>;
+  /** Retire an agent (`status`: a DAEMON_ENDED one when it never ended itself; default done). */
+  retire: (agentId: string, status?: string) => Promise<unknown>;
+  /** The agent id and attempt the next spawn of `role` on `task` takes. */
+  nextAgent: (task: TaskId, role: Role) => { agent_id: string; attempt: number };
   /**
    * Run `fn` on the caller's serial queue (the daemon's). Git / gh checks run beside the queue
    * and hand their results back through this, so the queue never waits on the network.
@@ -1420,9 +2110,26 @@ export class PipelineDriver {
           progressed = true;
           break;
         case "retire":
-          await this.deps.retire(a.agent_id);
+          await this.deps.retire(a.agent_id, a.status);
           progressed = true;
           break;
+        case "relaunch": {
+          // The old run's lock, login and retained records go first: the new attempt needs them.
+          await this.deps.retire(a.agent_id, "relaunched");
+          const next = this.deps.nextAgent(task, a.role);
+          await this.deps.journal({
+            type: "relaunched",
+            task,
+            data: {
+              from_agent: a.agent_id,
+              to_agent: next.agent_id,
+              role: a.role,
+              attempt: next.attempt,
+            },
+          });
+          progressed = true;
+          break;
+        }
         case "verify": {
           const agent = this.view(task)?.p.runs[a.role]?.agent_id;
           if (agent === undefined) break;
@@ -1448,6 +2155,35 @@ export class PipelineDriver {
           const key = `${task}/check_merged`;
           if (v?.p.pr === undefined || this.inflight.has(key) || !this.due(key)) break;
           this.beside(task, key, { what: "check_merged" }, () => this.mergeCheck(v));
+          break;
+        }
+        case "watch_head": {
+          const v = this.view(task);
+          const key = `${task}/watch_head`;
+          if (v?.p.pr === undefined || this.inflight.has(key) || !this.due(key)) break;
+          this.beside(task, key, { what: "watch_head" }, () => this.headCheck(v));
+          break;
+        }
+        case "check_moved_ci": {
+          const v = this.view(task);
+          const key = `${task}/moved_ci`;
+          if (v?.p.moved === undefined || this.inflight.has(key)) break;
+          if (!this.due(`${key}/${v.p.moved.to}`)) break;
+          this.beside(task, key, { what: "moved_ci" }, () => this.movedCheck(v));
+          break;
+        }
+        case "evidence_stale":
+          markEvidenceStale(this.deps.home, this.wave, task, {
+            from: a.from,
+            to: a.to,
+            at: new Date(this.now()).toISOString(),
+          });
+          break;
+        case "check_landed": {
+          const v = this.view(task);
+          const key = `${task}/check_landed`;
+          if (v?.p.pr === undefined || v.p.head === undefined || this.inflight.has(key)) break;
+          this.beside(task, key, { what: "check_landed" }, () => this.landedCheck(v));
           break;
         }
         case "gate":
@@ -1507,6 +2243,7 @@ export class PipelineDriver {
       report,
       ...(result !== undefined ? { result } : {}),
       ...(waited !== undefined ? { waited_ms: waited } : {}),
+      at: this.now(),
     };
   }
 
@@ -1564,7 +2301,120 @@ export class PipelineDriver {
       cwd !== undefined ? { cwd } : {},
     );
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
-    return view === null ? null : { kind: "merge_checked", view };
+    if (view === null) return null;
+    const merged = view.headRefOid;
+    if (view.state === "MERGED" && typeof merged === "string" && merged !== v.p.head)
+      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, cwd, merged) };
+    return { kind: "merge_checked", view };
+  }
+
+  /** Beside the queue: is the closed PR's head on the release branch anyway? */
+  private async landedCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const { pr, head } = v.p;
+    const cwd = this.headWorktree(v.p);
+    if (pr === undefined || head === undefined) return null;
+    if (cwd === undefined) throw new Error("no worktree to check the closed PR's head from");
+    const f = await probeLanded(this.io(v.task), {
+      cwd,
+      head,
+      release_branch: v.release_branch,
+      pr: pr.number,
+    });
+    const l = landed(f, head, f.release_sha, pr.number);
+    return {
+      kind: "landed_checked",
+      head,
+      landed: l,
+      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, cwd, l.sha) } : {}),
+    };
+  }
+
+  /** Beside the queue, at a review gate: the PR's head as GitHub has it now. */
+  private async headCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const pr = v.p.pr;
+    if (pr === undefined) return null;
+    const cwd = this.headWorktree(v.p);
+    const r = await this.io(v.task)(
+      ["gh", "pr", "view", String(pr.number), "--json", "headRefOid,state"],
+      cwd !== undefined ? { cwd } : {},
+    );
+    const view = r.code === 0 ? parsePrView(r.stdout) : null;
+    if (view?.state !== "OPEN" || typeof view.headRefOid !== "string") return null;
+    return { kind: "pr_head", head: view.headRefOid, expected: v.p.head as string };
+  }
+
+  /** Beside the queue: CI on a moved head, its failing tests, and the diff from the gated head. */
+  private async movedCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const { moved, pr, branch } = v.p;
+    const cwd = this.headWorktree(v.p);
+    if (moved === undefined || pr === undefined) return null;
+    if (branch === undefined || cwd === undefined)
+      throw new Error("no PR branch / worktree to check the moved head from");
+    const facts = await probeMovedHead(this.io(v.task), {
+      cwd,
+      branch,
+      from: moved.from,
+      to: moved.to,
+    });
+    const key = `${v.task}/${moved.to}`;
+    let waited = 0;
+    if (facts.ci.state === "none") {
+      const first = this.noCiSince.get(key) ?? this.now();
+      this.noCiSince.set(key, first);
+      waited = this.now() - first;
+    }
+    return {
+      kind: "moved_ci",
+      to: moved.to,
+      facts,
+      pr: { number: pr.number, url: pr.url },
+      at: this.now(),
+      waited_ms: waited,
+    };
+  }
+
+  /** CI on a merged commit other than the gated head; `unknown` when it cannot be read. */
+  async ciOf(task: TaskId, cwd: string | undefined, sha: string): Promise<MergedCi> {
+    try {
+      return await ciStateOf(this.io(task), cwd ?? ".", sha);
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /** The worktree the task's PR head is checked out in (pipeline git / gh calls run there). */
+  headCwd(task: TaskId): string | undefined {
+    const v = this.view(task);
+    return v === null ? undefined : this.headWorktree(v.p);
+  }
+
+  /**
+   * `volleyd merged <wave> <task> --sha <sha>`: verify the owner's merge outside GitHub (read-only
+   * git, off the serial queue). An ok is folded in by handing `operator_merged` to `handle`.
+   */
+  async verifyMerge(task: TaskId, sha: string): Promise<OperatorMergeCheck & { head?: string }> {
+    const v = this.view(task);
+    if (v === null) return { ok: false, error: `unknown task '${task}'` };
+    const { pr, head } = v.p;
+    if (v.stage === "done" || v.stage === "cancelled")
+      return { ok: false, error: `task '${task}' is ${v.stage}` };
+    if (pr === undefined || head === undefined)
+      return { ok: false, error: `task '${task}' has no verified PR head yet` };
+    const cwd = this.headWorktree(v.p);
+    if (cwd === undefined)
+      return { ok: false, error: `task '${task}' has no worktree at its head` };
+    const r = await verifyOperatorMerge(this.io(task), {
+      cwd,
+      head,
+      sha,
+      release_branch: v.release_branch,
+    });
+    return r.ok ? { ...r, head } : r;
+  }
+
+  /** The task's gated (verified) PR head. */
+  headOf(task: TaskId): string | undefined {
+    return this.view(task)?.p.head;
   }
 
   /** Write the evidence package and enter merge_ready. volleyd never merges. */
@@ -1604,6 +2454,7 @@ export class PipelineDriver {
       fixups,
       rebases: p.rebases,
       moves: p.moves,
+      head_history: [...new Set([...(p.gated ?? []), ...p.moves.map((m) => m.to), head])],
       ...(notBlockers.length > 0
         ? { not_blockers: notBlockers, ...(ruled?.by !== undefined ? { ruled_by: ruled.by } : {}) }
         : {}),

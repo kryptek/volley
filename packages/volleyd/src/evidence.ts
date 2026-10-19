@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CiRun, RebaseCheck } from "./artifacts";
 import {
@@ -35,7 +35,9 @@ export interface EvidenceInput {
   fixups: { round: number; from?: string; to: string; result?: FixupResult; diffstat?: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
   /** Heads pushed to the PR outside the pipeline after a verification (CI re-verified on each). */
-  moves?: { from: string; to: string; touched: string[] }[];
+  moves?: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  /** Every head this task was gated at or moved to before this one, oldest first, then `head`. */
+  head_history?: string[];
   /** P1s the owner ruled not blockers (`reviewers_disagree` → fine), and who ruled. */
   not_blockers?: Disagreement[];
   ruled_by?: string;
@@ -75,7 +77,11 @@ export interface EvidenceJson {
   unresolved_p1: string[];
   fixups: { round: number; diffstat: string | null; from: string | null; to: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
-  moves: { from: string; to: string; touched: string[] }[];
+  moves: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  /** Present when the gate saw more than one head: each of them, oldest first. */
+  head_history?: string[];
+  /** Set when the PR head moved after this package was written: it no longer describes the PR. */
+  stale?: { from: string; to: string; at: string };
   current_with_release_branch: boolean;
   behind_by: number;
   release_sha: string;
@@ -146,6 +152,7 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
     })),
     rebases: e.rebases,
     moves: e.moves ?? [],
+    ...((e.head_history ?? []).length > 1 ? { head_history: e.head_history } : {}),
     current_with_release_branch: e.release.behind === 0,
     behind_by: e.release.behind,
     release_sha: e.release.release_sha,
@@ -161,8 +168,17 @@ export function renderEvidenceMd(j: EvidenceJson): string {
   const out = [
     `# Merge-ready evidence: ${j.wave} / ${j.task} (issue #${j.issue})`,
     "",
+    ...(j.stale !== undefined
+      ? [
+          `> **STALE**: the PR head moved from \`${j.stale.from}\` to \`${j.stale.to}\` at ${j.stale.at}, after this package was written. Nothing below describes the PR as it is now; volleyd re-gates it.`,
+          "",
+        ]
+      : []),
     `- PR: ${j.pr_url}`,
     `- Head: \`${j.head_sha}\` (branch \`${j.branch}\` → \`${j.release_branch}\`)`,
+    ...(j.head_history !== undefined
+      ? [`- Head history: ${j.head_history.map((x) => `\`${x.slice(0, 12)}\``).join(" → ")}`]
+      : []),
     `- CI on this exact head: **${j.ci.status}**`,
     ...j.ci.runs.map((r) => `  - ${r.name}: ${r.conclusion ?? r.status} — ${r.url}`),
     `- Branch current with release branch: ${j.current_with_release_branch ? "yes" : `no (behind by ${j.behind_by})`} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
@@ -212,8 +228,12 @@ export function renderEvidenceMd(j: EvidenceJson): string {
   if (j.moves.length > 0) {
     out.push("", "## Pushes outside the pipeline", "");
     for (const m of j.moves) {
+      const owner =
+        m.accepted_by !== undefined
+          ? ` Accepted without a re-review by ${m.accepted_by} (fixup).`
+          : "";
       out.push(
-        `- \`${m.from}\` → \`${m.to}\`: pushed outside the pipeline after verification; CI re-verified on the new head, the reviews above stay at the heads they name; touched: ${m.touched.length > 0 ? m.touched.join(", ") : "(nothing)"}`,
+        `- \`${m.from}\` → \`${m.to}\`: pushed outside the pipeline after verification; CI re-verified on the new head, the reviews above stay at the heads they name; touched: ${m.touched.length > 0 ? m.touched.join(", ") : "(nothing)"}.${owner}`,
       );
     }
   }
@@ -223,11 +243,31 @@ export function renderEvidenceMd(j: EvidenceJson): string {
 
 /** Write `<home>/waves/<wave>/evidence/<task>.{md,json}` atomically; returns both paths. */
 export function writeEvidence(home: string, e: EvidenceInput): { md: string; json: string } {
-  const dir = join(home, "waves", e.wave, "evidence");
+  return writeEvidenceJson(home, evidenceJson(e));
+}
+
+/**
+ * The PR head moved after the gate: mark the task's package stale (both files rewritten with
+ * the banner). No package yet: nothing to mark. Returns whether one was marked.
+ */
+export function markEvidenceStale(
+  home: string,
+  wave: WaveId,
+  task: TaskId,
+  stale: { from: string; to: string; at: string },
+): boolean {
+  const path = join(home, "waves", wave, "evidence", `${task}.json`);
+  if (!existsSync(path)) return false;
+  const j = JSON.parse(readFileSync(path, "utf-8")) as EvidenceJson;
+  writeEvidenceJson(home, { ...j, stale });
+  return true;
+}
+
+function writeEvidenceJson(home: string, j: EvidenceJson): { md: string; json: string } {
+  const dir = join(home, "waves", j.wave, "evidence");
   mkdirSync(dir, { recursive: true });
-  const j = evidenceJson(e);
-  const md = join(dir, `${e.task}.md`);
-  const json = join(dir, `${e.task}.json`);
+  const md = join(dir, `${j.task}.md`);
+  const json = join(dir, `${j.task}.json`);
   for (const [path, body] of [
     [json, `${JSON.stringify(j, null, 2)}\n`],
     [md, renderEvidenceMd(j)],

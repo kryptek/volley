@@ -46,6 +46,8 @@ export interface WaveRecord {
    * cancelled or done.
    */
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
+  /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
+  budget_raised?: number;
 }
 
 /** A role's latest failed spawn: what failed, how often in a row, and when it is retried. */
@@ -102,6 +104,7 @@ export function emptyRecord(): WaveRecord {
     steers: {},
     pipeline: {},
     spawnFailures: {},
+    budget_raised: 0,
   };
 }
 
@@ -255,6 +258,17 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         pointers: (ev.data.pointers as DecisionRecord["pointers"] | undefined) ?? {},
         opened_at: (ev.data.opened_at as string | undefined) ?? ev.at,
       };
+      // CI failed on a head (T6's ci_failed): the task's PR says so.
+      const marker = ev.data.pipeline as { on?: string } | undefined;
+      const failedPr = ev.data.pr as { number: number; url: string } | undefined;
+      if (task !== undefined && marker?.on === "ci_failed" && (task.pr ?? failedPr) !== undefined) {
+        const { checks: _c, ...pr } = (task.pr ?? failedPr) as NonNullable<TaskState["pr"]>;
+        task.pr = {
+          ...pr,
+          ...(typeof ev.data.head_sha === "string" ? { head_sha: ev.data.head_sha } : {}),
+          ci: "red",
+        };
+      }
       if (task !== undefined && parksTask(d)) {
         // Park the task; a second open decision keeps the stage the first one saved.
         const parked = Object.values(next.decisions).find(
@@ -277,6 +291,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           at: (ev.data.at as string | undefined) ?? ev.at,
         };
         if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
+        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
         // Only a parking decision keeps the task parked (one opened with `park: false` never does).
         const stillOpen = state.open_decisions.some((o) => {
           const x = next.decisions[o];
@@ -376,18 +392,55 @@ function derive(state: WaveState, rec: WaveRecord): void {
           };
     },
   );
-  state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
+  state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
+    withStageGroup(t, rec.pipeline[t.id]),
+  );
+  state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, alarms: _a, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);
       return ids.length > 0
         ? { ...t, waiting_on: ids, why_waiting: `awaiting decision ${ids.join(", ")}` }
         : t;
     }
+    // Blocked on purpose (a cancelled relaunch decision): its stage_entered says why.
+    const blockedWhy = t.stage === "blocked" ? rec.pipeline[t.id]?.why : undefined;
+    if (blockedWhy !== undefined) return { ...t, why_waiting: blockedWhy };
+    // Held for CI on a pushed head (the agent is already retired): say so, with the PR's state.
+    const hold = rec.pipeline[t.id]?.ci_hold;
+    if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
+      const at = hold.sha.slice(0, 7);
+      const why =
+        hold.checks.total === 0
+          ? `CI pending on ${at} (no run yet)`
+          : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
+      const pr = hold.pr ?? t.pr;
+      return {
+        ...t,
+        why_waiting: why,
+        ...(pr !== undefined
+          ? {
+              pr: {
+                number: pr.number,
+                url: pr.url,
+                head_sha: hold.sha,
+                ci: hold.checks.total === 0 ? ("none" as const) : ("running" as const),
+                checks: hold.checks,
+              },
+            }
+          : {}),
+      };
+    }
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
         : [];
-    if (pending.length === 0) return t;
+    if (pending.length === 0) {
+      // A done task's merge that went in at another head than the gate saw (merged_unverified_head).
+      const alarms = surfacedAlarms(rec.pipeline[t.id]);
+      const first = alarms[0];
+      if (first === undefined) return t;
+      return { ...t, alarms, ...(t.stage === "done" ? { why_waiting: first.message } : {}) };
+    }
     // A dependency parked on a decision parks its dependents, naming the decision.
     const parked = pending.filter((d) => stageOf.get(d) === "awaiting_decision");
     const ids = parked.flatMap(openOn);
@@ -398,6 +451,63 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+}
+
+/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
+export function raiseBy(answer: string): number | null {
+  const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
+  const n = m !== null ? Number(m[1]) : 0;
+  return n >= 1 ? n : null;
+}
+
+/** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */
+function surfacedAlarms(p: TaskPipeline | undefined): NonNullable<TaskState["alarms"]> {
+  const m = p?.alarms?.merged_unverified_head;
+  if (m === undefined) return [];
+  const short = (x: unknown) => (typeof x === "string" ? x.slice(0, 7) : "?");
+  return [
+    {
+      alarm: "merged_unverified_head",
+      message: `merged with an unverified head: gated ${short(m.gated)}, merged ${short(m.merged)}`,
+    },
+  ];
+}
+
+/** Role → its short name in a stage group's label. */
+const GROUP_NAME: Record<string, string> = {
+  spec_reviewer: "spec",
+  quality_reviewer: "quality",
+  fixup: "fixup",
+  implementer: "implement",
+};
+
+/**
+ * While a parallel stage group runs (more than one role in the step), the task carries the
+ * group's label — `review (spec + quality)` — and each role with its agent and state. The
+ * closed stage enum is unchanged: `stage` is the group's first stage.
+ */
+function withStageGroup(t: TaskState, p: TaskPipeline | undefined): TaskState {
+  if (p === undefined || p.roles.length < 2 || p.rebasing) return t;
+  const groupStages = new Set(["spec_review", "quality_review", "fixup", "implement"]);
+  if (!groupStages.has(t.stage)) return t;
+  const reviewing = p.roles.every((r) => r === "spec_reviewer" || r === "quality_reviewer");
+  const names = p.roles.map((r) => GROUP_NAME[r] ?? r).join(" + ");
+  return {
+    ...t,
+    stage_label: reviewing ? `review (${names})` : names,
+    stage_group: p.roles.map((role) => {
+      const run = p.runs[role];
+      const state =
+        run === undefined
+          ? ("pending" as const)
+          : run.accepted
+            ? ("done" as const)
+            : run.retired !== undefined
+              ? ("retired" as const)
+              : ("running" as const);
+      return { role, ...(run !== undefined ? { agent_id: run.agent_id } : {}), state };
+    }),
+  };
 }
 
 /** Fold events onto a record (default: empty). */

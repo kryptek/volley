@@ -114,9 +114,23 @@ describe("admit", () => {
 });
 
 describe("spawnBudget", () => {
-  it("is the wave's spawn_budget when set, else ceil(multiplier × task count)", () => {
-    expect(spawnBudget(epic, 3)).toBe(12);
-    expect(spawnBudget(epic, 2.5)).toBe(10);
-    expect(spawnBudget({ ...epic, spawn_budget: 5 }, 3)).toBe(5);
+  const wave3 = (pipeline: string) =>
+    parseWaveFile(
+      `wave: w3\nrepo: /r\nrelease_branch: release/w3\nmodel: claude-opus-5-5\npipeline: ${pipeline}\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n  T3: { issue: 3 }\n`,
+    );
+  it("a 3-task wave on the default pipeline (4 roles a task) gets every role plus retry headroom", () => {
+    // 3 tasks × 4 roles = 12 spawns with zero retries; + 50% headroom = 18. Never 3 × 3 = 9.
+    const w = wave3("[implement, [spec_review, quality_review], fixup, merge_ready]");
+    expect(spawnBudget(w, 3)).toBe(18);
+    expect(spawnBudget(w, 3)).toBeGreaterThanOrEqual(12);
+  });
+  it("a small pipeline still gets at least two retries", () => {
+    expect(spawnBudget(wave3("[implement, merge_ready]"), 1)).toBe(5);
+  });
+  it("the multiplier is an override upwards; the wave's spawn_budget is the hard override", () => {
+    const w = wave3("[implement, [spec_review, quality_review], fixup, merge_ready]");
+    expect(spawnBudget(w, 10)).toBe(30);
+    expect(spawnBudget({ ...w, spawn_budget: 5 }, 3)).toBe(5);
+    expect(spawnBudget(epic, 3)).toBeGreaterThanOrEqual(12);
   });
 });

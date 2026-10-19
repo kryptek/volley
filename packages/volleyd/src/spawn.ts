@@ -552,7 +552,7 @@ async function verifyAndRecover(
         {
           question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
           options: ["relaunch", "cancel"],
-          data: { agent_id: cur.agentId },
+          data: { agent_id: cur.agentId, pipeline: relaunchMarker(ctx, cur) },
         },
       );
       return decision(cur, "mcp_not_registered", decisionId);
@@ -564,9 +564,14 @@ async function verifyAndRecover(
         "hooks_auth_failed",
         decisionIdFor("hooks_auth_failed", cur.agentId),
         {
-          question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}). Check its credentials (volley auth add-agent / the .volley/agent.json broker block), then relaunch?`,
+          question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}); volleyd paused it. relaunch: retire it (its login deleted), mint a fresh login and start the ${ctx.req.role} again as attempt ${cur.attempt + 1}; or cancel (the task is blocked)?`,
           options: ["relaunch", "cancel"],
-          data: { agent_id: cur.agentId, username: result.username, hook_event: result.hook_event },
+          data: {
+            agent_id: cur.agentId,
+            username: result.username,
+            hook_event: result.hook_event,
+            pipeline: relaunchMarker(ctx, cur),
+          },
         },
       );
       return decision(cur, "hooks_auth_failed", decisionId);
@@ -602,11 +607,30 @@ async function verifyAndRecover(
         question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
         options: ["relaunch", "cancel"],
         screen,
-        data: { agent_id: cur.agentId, screen_class: result.screen_class },
+        data: {
+          agent_id: cur.agentId,
+          screen_class: result.screen_class,
+          pipeline: relaunchMarker(ctx, cur),
+        },
       },
     );
     return decision(cur, "unknown_screen", decisionId, screen);
   }
+}
+
+/**
+ * The pipeline marker of a relaunch decision (pipeline.ts PipelineMarker): `relaunch` retires
+ * exactly this run and spawns its role at the next attempt; `cancel` retires it and blocks the task.
+ */
+function relaunchMarker(ctx: Ctx, cur: Launched): Record<string, unknown> {
+  return {
+    on: "relaunch",
+    wave: ctx.req.wave.wave,
+    task: ctx.req.task,
+    role: ctx.req.role,
+    attempt: cur.attempt,
+    agent_id: cur.agentId,
+  };
 }
 
 /**

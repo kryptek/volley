@@ -86,7 +86,7 @@ tasks:
 # optional:
 # version: 1                 # bumped by a versioned re-submission
 # namespace: dispatch        # Volley namespace for the wave's agents
-# spawn_budget: 20           # default: spawn_budget_multiplier × task count
+# spawn_budget: 20           # default: every task's pipeline roles + 50% retry headroom (min 2), or spawn_budget_multiplier × task count if more
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
@@ -546,8 +546,19 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
 - `stop <wave>`: journals `wave_stopped` (no new admissions), then sends a mailbox `cancel`
   to every running agent of the wave (journaled as `steering_sent { type: "cancel" }`). The
   daemon also interrupts each agent: with spawning on, Escape into its cmux workspace (from its
-  `agent_spawned`); with `--no-spawn`, only the mailbox cancel is sent. A stopped
-  wave can be resumed explicitly. Known gap until the pipeline stages can respawn: `stop` journals
+  `agent_spawned`); with `--no-spawn`, only the mailbox cancel is sent. The wave's agents leave
+  screen capture at once. Agents then get `stop_grace_s` (default 30 s, a tunable, on the
+  daemon's clock) to publish a terminal status; one that acks is retired as usual. Every agent
+  still running when the grace ends is **force-retired** without its ack, through the same
+  delete path as a retire: `agent_force_retired { agent_id, role, reason: "stop" }`, then its
+  retained `registry`/`status`/`progress`/`result`/`capability`/`screen`/`usage` records are cleared, its
+  login deleted, its lock released (`agent_retired { status: "stopped" }`), so the Desk stops
+  drawing it. A daemon restarted into a stopped wave gives its agents what is left of the grace
+  (counted from `wave_stopped`), then force-retires what is left; a workspace ref read back from
+  the journal is closed only when it still names that agent (a UUID or its own tmux session; a
+  short `workspace:<n>` ref may name another workspace by then, so it is left for `cleanup --yes`
+  with `workspace_closed: false`). A stopped wave can be resumed explicitly; resumed within the
+  grace, its agents carry on and their screens are captured again. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
   in their stage, counting against `hard_ceiling`) with no agent working them.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
@@ -627,6 +638,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
+| `stop_grace_s` | the next `stop` | a grace already running keeps its length |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 
@@ -852,7 +864,37 @@ launch command is typed into that pane (`agent_spawned { recovered_from, recover
 "update_prompt" }`). A second workspace is never opened in the same worktree. A second failed
 verification opens `unknown_screen`.
 
+### Relaunch decisions
+
+`hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel`, and
+the answer is acted on: each carries a pipeline marker naming the run it is about (`{ on:
+"relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed` carries one too).
+An agent whose hooks the broker refused is **paused** as soon as the decision opens (Escape in its
+workspace and a steering "stop: your broker login is being repaired"), so it does no work it
+cannot deliver; nobody is asked to edit credentials by hand.
+
+- `relaunch`: the failed agent is retired through the delete path (retained records cleared,
+  its login deleted, its worktree lock released; `agent_retired { status: "relaunched" }`),
+  `relaunched { from_agent, to_agent, role, attempt }` is journaled, and the same role is spawned
+  again at attempt + 1 through the pipeline's role spawn (admission and budget apply): a new
+  agent id, a freshly minted login, `<role>-<n+1>` registering as usual.
+- `cancel`: the agent is retired the same way and the task is `blocked`
+  (`stage_entered { stage: "blocked", why }`, the decision text as its `why_waiting`).
+
 ### Unattended coordinator starts
+
+A coordinator session that runs without a human at the keyboard needs two things in its Claude
+Code configuration. Its settings must list the release checkout it reads (the repository's main
+clone, outside the session's own working directory) under `permissions.additionalDirectories`,
+or every read there stops at the "read outside the working directories" prompt:
+
+```json
+{ "permissions": { "additionalDirectories": ["/path/to/the/repo/checkout"] } }
+```
+
+And its volley-mcp server must be registered with the coordinator's id **prefix**
+(`env.VOLLEY_AGENT_ID=coordinator`: the server appends `-xxxx`), so the session registers as
+`coordinator-xxxx`, the id its waves are submitted with (`--owner`).
 
 Claude Code's first-run *Claude in Chrome* prompt ("use Chrome browser?") waits for a key, and
 it is asked once per user profile, whenever Chrome is found and `claudeInChromeDefaultEnabled`
@@ -899,6 +941,9 @@ reading the screen again. A read slower than 2 s (flagged the moment 2 s pass, n
 returns), or three failed reads in a row, backs that agent off to one capture every 30 s and sets
 `screen_stale: true` on its task in the wave state (the Desk shows a stale marker) until a read
 succeeds in time. Every read is bounded at 5 s; a read still pending then counts as failed.
+Three timed-out reads in a row mean the workspace is gone: the agent is then read at most hourly
+and its `read timed out` line is logged once more, not every capture. An agent leaves capture
+when it is retired and, at once, when its wave is stopped.
 Captures run on their own 1 s timer beside the daemon's serial queue, never on it, so a slow or
 hung terminal cannot delay admissions, control ops or retire (the timer is off when `tickMs` is
 0, as in tests). Retire stops the agent's capture — after any publish in flight, never waiting
@@ -910,6 +955,18 @@ record and has the same trust boundary: anyone who can subscribe to `volley/<ns>
 read it, so restrict broker access (per-agent credentials and ACLs) as for the rest of the
 namespace.
 
+### Spawn budget
+
+A wave's spawn budget counts every agent it spawns (retries and reviewers included). Its default
+is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
+(implement, each review, fixup: 4 for the default pipeline) plus 50% of that for retries (at
+least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
+`spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
+`spawn_budget_exhausted` decision (`raise by <n>` | `cancel`; on a task it parks the task, so its
+`why_waiting` names the decision). `raise by <n>` adds n spawns to the wave's budget (journaled
+with the answer, so it survives a restart) and the next tick spawns; `cancel` cancels the task (a
+wave-level one stops the wave).
+
 ### Retire and cleanup
 
 When a supervised agent's `failed` status arrives, the daemon retires it; a `done` is first
@@ -919,11 +976,13 @@ LWT) is retired only after the reap grace passes with no fresh status or heartbe
 [Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
-retained payloads on its `registry`, `status`, `result`, `capability`, `screen` and `usage` topics, the
-lock released, and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+retained payloads on its `registry`, `status`, `progress`, `result`, `capability`, `screen` and
+`usage` topics, the lock released, the agent's workspace closed (its cmux workspace, or its tmux
+session on an ssh host: `agent_retired { workspace, workspace_closed }`), and `agent_retired {
+status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes the retired agents' workspaces and runs `git worktree remove` with the fence's
+--yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's
 consent token (`--force` for dirty worktrees); worktrees of agents not yet retired are skipped,
 and branches are never deleted.
 
@@ -1106,6 +1165,11 @@ journaled inside it:
 | any sign it may be alive (registry, live status, lock, recent heartbeat), or `done` without a green PR, or `failed` | `re_wait` | watched again; the normal status path takes over |
 | no registry entry, no status, no heartbeat, no lock | `respawn_needed` | decision `agent_blocked`, `class: "respawn_needed"` (options `respawn`, `stop task`; `stop task` only with spawning off) — not a second one while it is open |
 
+A wave whose status is `stopped` or `complete` is not reconciled at all: each of its unretired
+agents is reported as `reconciled { agent_id, drift: [], skipped: "stopped" }` — never re_wait'ed,
+respawned or asked about — and a stopped wave's leftovers are force-retired (see
+[Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)).
+
 Nothing is respawned automatically — only on the owner's `respawn` answer, through the normal
 spawn path (its lock check still applies). Either answer journals `agent_retired { status:
 "gone" }` for the vanished agent (its minted credentials revoked), so no later restart
@@ -1206,7 +1270,16 @@ The steer names what the role publishes: the implementer its branch and PR, the 
 job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
 "check the hosting provider's status page first". Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
-`ci_none_grace_ms` asks the owner (`accept` / `cancel`).
+`ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
+every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
+next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
+`pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
+CI green journals `ci_green` and clears it.
+
+**Stage groups.** While a parallel group runs, the task's `stage` stays the closed enum (its
+first stage, `spec_review`) and the state adds `stage_label: "review (spec + quality)"` and
+`stage_group: [{ role, agent_id, state: pending|running|done|retired }]`; `volleyd status`
+prints the label and one line per role.
 
 **Reviews.** Reviewers publish `vol_publish(channel="result", type="review", payload={ findings:
 [{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene: { checked: true, findings } })`
@@ -1245,7 +1318,9 @@ goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's
 have a stored review with a verdict that holds for the **current head** — a review of that
 head, or of one it descends from only through fixups that ran after that review (they worked
 from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
-re-verified) was reviewed by nobody, so reviews of the heads before it no longer count. A
+re-verified) was reviewed by nobody, so reviews of the heads before it no longer count — unless
+the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
+(`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals
 `alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
@@ -1273,10 +1348,48 @@ with its `evidence_path`.
 **volleyd never merges.** A human merges the PR. The pipeline polls the gated PR read-only
 (`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`);
 once it is `MERGED` into the release branch it journals `artifact_verified { role: "merged",
-head_sha, merged_head_sha, merge_sha }` and `stage_entered done`, which releases the task's
-dependents. Merged at another head than the gated one → also `alarm_raised { alarm:
-"merged_unverified_head", gated, merged }`. A PR closed unmerged raises one
-`pr_closed_unmerged` alarm and stays at the gate. The fence denies `gh pr merge`, `git merge`,
+head_sha, merge_sha }` and `stage_entered done`, which releases the task's dependents. Merged at
+another head than the gated one → also `alarm_raised { alarm: "merged_unverified_head", gated,
+merged }`, and the merge record describes the commit that merged: `gated_head_sha`,
+`merged_head_sha` and `merged_ci`, the CI of that head (read with `gh run list --commit`;
+`unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
+that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
+`why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
+`volleyd status`; the task still completes.
+
+**Merges outside GitHub's merge button.** A local squash + push closes the PR with
+`mergedAt: null`. Before calling it abandoned, the release branch is checked read-only for the
+gated head: `git merge-base --is-ancestor <head> origin/<release>`, else every head commit has an
+equivalent patch there (`git log --left-right --cherry-pick <release>...<head>`, the fenced form
+of `git cherry`), else a release commit whose subject ends with the PR as GitHub's squash writes it
+(`… (#<n>)`, not a revert) **and** whose own diff is the PR's whole diff — a subject alone, a
+mention (`follow-up to (#<n>)`) or a superseding PR never counts. A match journals
+`artifact_verified { role: "merged", via: "outside_github", how, sha }` (plus the merged
+commit's own CI as above) and the task is done; an older `pr_closed_unmerged` alarm is cleared
+(`alarm_cleared`). No match: the task leaves the gate (`blocked`) and decision `pr_closed`
+asks `landed` or `abandoned` (cancelled). A closed, unmerged PR never counts as landed on an
+answer alone: `landed` asks again, pointing at `volleyd merged`. `volleyd merged <wave> <task> --sha <sha>` (owner only) records such a merge with
+proof: the sha must be on the release branch and carry the gated head (an ancestor, equivalent
+patches, or one squashed patch equal to the PR's whole diff); then `merged_by_operator { by,
+sha, head, how }` and the task is done (an open `pr_closed` is answered `landed`). Anything else
+is refused.
+
+**A PR head that moves at a gate.** At `merge_ready`, and while the reviews run, the PR's
+`headRefOid` is read every `ci_poll_ms` (the driver's injected clock). In the CI hold after an
+implementer's or fixup's `done`, the hold's re-verification watches it: origin's branch at
+another commit than the role pushed is the same move (from the last verified head). A head the pipeline did
+not push journals `pr_head_moved { from, to, during }` and invalidates the gate: the task leaves
+`merge_ready` (`stage_entered { stage: "fixup", gate_invalidated: true }`), its evidence package
+is marked stale (`stale: { from, to, at }` and a banner), nothing downstream is admitted. CI on
+the new head is awaited (`ci_pending`, as above), then decision `pr_head_moved` asks
+`rereview` (the reviewers again on the new head, a new review round, then the fixup and the
+gate), `fixup` (a fixup agent at the next attempt on the new head; the reviews of the old head
+hold for it on the owner's word) or `cancel`. The fixup's `.volley/findings.md` opens with a
+directive: CI on the new head, and when it is red its failed jobs and the failing test ids read
+from `gh run view <id> --log-failed`, plus the diff since the gated head. A red CI on a moved
+head is routed there, not into a `ci_failed` dead end, and a fixup is never skipped while that
+CI is red; a green CI still asks (the reviews saw another head). The gate is re-entered through
+the normal machinery and its evidence regenerated with every head in `head_history`. The fence denies `gh pr merge`, `git merge`,
 `git push` and `gh workflow run` anyway; `test/no-merge.test.ts` also holds the source and a full
 pipeline run (on an unfenced fake exec) to never build one.
 
@@ -1302,7 +1415,8 @@ DENY (never, consent or not):
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
 
-CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
+CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
+retire for the retired agent's own workspace only):
   git worktree remove · cmux close-workspace
 
 ALLOW (program by bare name only — never a path):

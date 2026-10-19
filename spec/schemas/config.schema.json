@@ -87,7 +87,7 @@
           "minimum": 1,
           "maximum": 10,
           "default": 3,
-          "description": "Per-wave spawn budget = multiplier x task count (counts retries and reviewers)."
+          "description": "Raises a wave's derived spawn budget (every task's pipeline roles plus retry headroom) to multiplier x task count when that is more. Counts retries and reviewers; spawn_budget in the wave file overrides both."
         },
         "lease_pools": {
           "type": "object",
@@ -198,6 +198,12 @@
           "minimum": 1,
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
+        },
+        "stop_grace_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Seconds a stopped wave's agents get to publish a terminal status after their cancel; any still running then is force-retired (records cleared, login deleted)."
         },
         "claude": {
           "type": "object",

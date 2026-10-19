@@ -69,6 +69,10 @@ export interface SupervisedEnvOptions {
   exec?: [string[], Parameters<FakeExec["on"]>[1]][];
   /** Runs when the implementer is launched (credentials minted, not yet supervised). */
   onLaunch?: (daemon: Daemon) => void;
+  /** The wave's pipeline (default `[implement]`). */
+  pipeline?: string;
+  /** Extra top-level wave-file lines (e.g. `spawn_budget: 1`). */
+  waveExtra?: string;
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -123,10 +127,12 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     pub(buildTopic(ns, AGENT, "status"), type, "status", payload);
 
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
+  /** Simulated sessions still publishing (cleanup waits for them before disconnecting). */
+  const sessions = new Set<Promise<void>>();
   host.onLaunch = () => {
     o.onLaunch?.(daemon);
     // Started at once: the daemon subscribed to the agent before launching it.
-    void (async () => {
+    const session = (async () => {
       await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
@@ -144,6 +150,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
         false,
       );
     })();
+    sessions.add(session);
+    void session.finally(() => sessions.delete(session));
   };
   const daemonOptions: Partial<DaemonOptions> = {
     spawner: {
@@ -158,7 +166,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   const waveFile = join(env.home, "w1.yaml");
   writeFileSync(
     waveFile,
-    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
   const r = await runCli(["run", waveFile], env.env);
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);
@@ -198,6 +206,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     },
     daemonOptions,
     cleanup: async () => {
+      await Promise.allSettled([...sessions]);
       await control?.close();
       await agent.disconnect();
       await env.cleanup();

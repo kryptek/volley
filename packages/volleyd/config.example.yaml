@@ -5,7 +5,7 @@
 # than by editing this file while the daemon runs. Bounds: spec/schemas/config.schema.json.
 
 # hard_ceiling: 12              # max live supervised agents across all waves (runaway fuse)
-# spawn_budget_multiplier: 3    # per-wave spawn budget = multiplier x task count
+# spawn_budget_multiplier: 3    # raises the derived spawn budget to multiplier x task count
 
 # Heavy-operation lease pools. A command matching a pool's `match` regex (checked by the
 # volley-hooks PreToolUse lease hook) runs inside `volley lease run --pool <pool> -- ...` and
@@ -46,6 +46,7 @@
 # brief_preface_max_bytes: 16384  # largest brief preface; a larger one refuses run / the spawn
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+# stop_grace_s: 30              # after `volleyd stop`: seconds agents get to end; then force-retired
 
 # Claude account profiles (README "Claude accounts"): the account an agent runs under when its
 # task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or
