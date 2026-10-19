@@ -3,9 +3,9 @@
  * SessionStart: bootstrap the persistent drain session (and inject anything queued), publish
  * the registry entry with the harness-reported `model` (`model_source: "harness-hook"`, or
  * `"unknown"` keeping the last known model when the input has none — non-interactive `-p`
- * sessions omit it), flip a `spawning`/`registered` status to `working`, heartbeat. The model
- * is remembered in `model.json` so drain hooks can restore it after the MCP server's own
- * register overwrites the entry. On `source` compact or resume, re-inject the live steering
+ * sessions omit it), flip a `spawning`/`registered` status (or none at all) to `working`,
+ * heartbeat. The model is remembered in `model.json` so drain hooks can restore it after the MCP
+ * server's own register overwrites the entry. On `source` compact or resume, re-inject the live steering
  * directives already delivered, for context only: `cancel`/`nudge`/`query` were one-shot and
  * are not repeated, and nothing asks for a new acknowledgement. Directives never delivered
  * are injected as new mail.
@@ -70,7 +70,9 @@ export async function handle(ctx: HookContext): Promise<string | null> {
     const statusTopic = session.topic("status");
     const raw = await session.broker.queryRetained(statusTopic, 300);
     const status = raw === null ? null : parseEnvelope(raw);
-    if (status !== null && (status.type === "spawning" || status.type === "registered")) {
+    // No status at all (the agent's MCP server is not on this broker, or not up yet): publish
+    // `working` anyway, so a hook-only registration never shows as `unknown`.
+    if (status === null || status.type === "spawning" || status.type === "registered") {
       await session.publish(
         statusTopic,
         "status",

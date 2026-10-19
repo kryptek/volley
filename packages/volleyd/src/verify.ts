@@ -13,11 +13,20 @@ import { type ScreenClass, classifyScreen, modelFromScreen } from "./screens";
  *   - a registry entry with `model_source` `harness-hook` or `unknown` (the SessionStart hook's
  *     re-publish; the MCP server's own auto-registration carries no model_source).
  *
- * Expected sequence: MCP auto-registration (no model) → hooks registry re-publish (+ model) →
- * status flipped to `working` → SessionStart heartbeat. If that does not arrive in time, the hooks'
- * own error file is consulted first (a broker that refused their credentials is not a screen
- * problem); only then is the terminal's screen read and classified (screens.ts).
+ * and, besides those, the agent's MCP server itself on this broker: its retained `spawning` (or
+ * `registered`) status, which only volley-mcp's lifecycle publishes (the hooks publish `working`).
+ * Its absence while the hooks did register means the session runs some other MCP server (an
+ * older user-scope install, another broker): `mcp_not_registered`.
+ *
+ * Expected sequence: MCP `spawning` status + auto-registration (no model) → hooks registry
+ * re-publish (+ model) → status flipped to `working` → SessionStart heartbeat. If that does not
+ * arrive in time, the hooks' own error file is consulted first (a broker that refused their
+ * credentials is not a screen problem); only then is the terminal's screen read and classified
+ * (screens.ts).
  */
+
+/** Statuses only the agent's MCP server publishes (volley-mcp lifecycle + vol_register). */
+const MCP_STATUSES = new Set(["spawning", "registered"]);
 
 /** Model sources that prove the SessionStart hook ran. */
 const HOOK_MODEL_SOURCES = new Set(["harness-hook", "unknown"]);
@@ -29,6 +38,8 @@ export interface SignalState {
   hookRegistryAt: string | null;
   /** True once a SessionStart heartbeat arrived. */
   sessionStart: boolean;
+  /** True once the agent's MCP server published its `spawning`/`registered` status here. */
+  mcpStatus: boolean;
   /** The agent's latest retained status (`wall_time` tells a re-delivery from a new one). */
   status: { type: string; payload: unknown; wall_time: string } | null;
   /** Epoch ms of the latest heartbeat. */
@@ -49,6 +60,9 @@ export interface AgentWatch {
 }
 
 export const hookSignalsArrived = (s: SignalState) => s.sessionStart && s.hookRegistry !== null;
+
+/** A verified spawn: the hook signals and the agent's own MCP server, both on this broker. */
+export const registrationComplete = (s: SignalState) => hookSignalsArrived(s) && s.mcpStatus;
 
 /**
  * Subscribes `deliver` to one topic and returns its unsubscribe (`VolleyBroker.subscribeStream`'s
@@ -76,6 +90,7 @@ export async function watchAgent(
     hookRegistry: null,
     hookRegistryAt: null,
     sessionStart: false,
+    mcpStatus: false,
     status: null,
     lastHeartbeatAt: null,
   };
@@ -98,6 +113,7 @@ export async function watchAgent(
       }
     } else if (topic === statusTopic) {
       state.status = { type: env.type, payload: env.payload, wall_time: env.wall_time };
+      if (MCP_STATUSES.has(env.type)) state.mcpStatus = true;
       for (const cb of statusCbs) cb(env.type, env.payload);
     } else if (topic === progressTopic) {
       if (env.type === "heartbeat") {
@@ -181,6 +197,8 @@ export type VerifyResult =
       screen_read: boolean;
     }
   | { kind: "timeout"; screen: string | null; screen_class: ScreenClass }
+  /** The hooks verified, but the agent's MCP server never published its status on this broker. */
+  | { kind: "mcp_not_registered" }
   /** The broker refused the hooks' CONNECT (`<worktree>/.volley/hooks-error.json`). */
   | { kind: "hooks_auth_failed"; username: string | null; hook_event: string; at: string };
 
@@ -222,11 +240,13 @@ export function readHooksError(
 }
 
 /**
- * Wait for the hook signals. Registered → check the model (the registry's, or for
- * `model_source: "unknown"` the status line on screen). Timeout → read and classify the screen.
+ * Wait for the hook signals and the MCP status. Registered → check the model (the registry's, or
+ * for `model_source: "unknown"` the status line on screen). Hooks only → `mcp_not_registered`.
+ * Timeout → read and classify the screen.
  */
 export async function verifyRegistration(v: VerifyInput): Promise<VerifyResult> {
-  const ok = await v.watch.waitFor(hookSignalsArrived, v.timeoutMs);
+  const ok = await v.watch.waitFor(registrationComplete, v.timeoutMs);
+  if (!ok && hookSignalsArrived(v.watch.state)) return { kind: "mcp_not_registered" };
   if (!ok) {
     const refused =
       v.hooksErrorPath !== undefined ? readHooksError(v.hooksErrorPath, v.launchedAt) : null;

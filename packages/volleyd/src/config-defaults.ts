@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Tunables } from "./types";
 
 /**
@@ -26,10 +27,24 @@ export const CONFIG_DEFAULTS: Tunables = {
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
   spawn_timeout_s: 120,
+  spawn_retry_max_s: 900,
+  spawn_retry_max: 8,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
   hosts: {},
 };
+
+/**
+ * The defaults a daemon starts from: CONFIG_DEFAULTS, with `worktree_root` under
+ * `$VOLLEYD_HOME/worktrees` when VOLLEYD_HOME is set (a second, smoke daemon keeps its
+ * worktrees beside its state). config.yaml and per-wave `config:` still override it.
+ */
+export function defaultsFor(env: { VOLLEYD_HOME?: string | undefined }): Tunables {
+  const home = env.VOLLEYD_HOME;
+  return home === undefined || home === ""
+    ? CONFIG_DEFAULTS
+    : { ...CONFIG_DEFAULTS, worktree_root: join(home, "worktrees") };
+}
 
 /** Defaults for a remote host's unset keys (config `hosts.<name>`). */
 export const REMOTE_HOST_DEFAULTS = {
@@ -91,10 +106,12 @@ export const DAEMON_DEFAULTS = {
   screen_lines: 40,
   /** After pressing Enter on an update prompt, how long the original launch gets to continue. */
   relaunch_settle_ms: 3_000,
-  /** First retry delay of an automatic spawn that was refused; doubles per refusal. */
+  /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
+   * `spawn_retry_max_s` tunable. */
   spawn_retry_base_ms: 30_000,
-  /** Cap on that retry delay. */
-  spawn_retry_max_ms: 900_000,
+  /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
+   * treated as failed (an ssh remote with no agent, a credential prompt). */
+  git_fetch_timeout_ms: 30_000,
   /** Read-modify-write attempts on `~/.claude.json` while Claude Code keeps rewriting it. */
   trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */

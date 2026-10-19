@@ -35,9 +35,9 @@ Teardown (§8) prints what it will remove and asks before removing it.
 - [ ] **Second machine** ("the box"; Linux or macOS) reachable by key-based, non-interactive ssh
   from the laptop (`ssh -o BatchMode=yes <target> true` succeeds), with every prerequisite in
   [volleyd README → Remote hosts](../packages/volleyd/README.md#remote-hosts-ssh--tmux): `bash`,
-  `bun`, `claude` (logged in, on the PATH of a non-interactive ssh session, volley MCP server
-  registered at user scope), `gh`, `git`, `tmux`, `nc`, `base64`, `cmp`, a clone of the test repo
-  and a volley checkout of this release with `bun install` run.
+  `bun` and `claude` (logged in; both on the PATH of a non-interactive ssh session), `gh`, `git`,
+  `tmux`, `nc`, `base64`, `cmp`, a clone of the test repo and a volley checkout of this release
+  with `bun install` run (it runs the agents' MCP server; user-scope MCP servers are not loaded).
 - [ ] **A phone** on the same Wi-Fi as the laptop.
 - [ ] **A throwaway GitHub repo** you can open PRs and merge into, cloned on both machines, with
   3–4 small open issues. Make one depend on another (`Depends on: #<n>` in its body) and leave
