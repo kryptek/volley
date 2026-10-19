@@ -189,13 +189,15 @@ describe("relaunch of a spawn-type decision", () => {
     });
     // No by-hand credential edits are asked of anyone.
     expect(String(opened.data.question)).not.toMatch(/volley auth add-agent|agent\.json/);
-    // Paused at once: Escape in its workspace and a steering that says why.
-    expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
-    const steer = journal().find(
+    // Paused at once: Escape in its workspace and a steering that says why. The pause runs after
+    // the verification resolves, which `settled()` does not count, and its steer is a broker round
+    // trip: await its journal event rather than read the journal and race it.
+    const steer = await event(
       (e) =>
         e.type === "steering_sent" && e.data.agent_id === A1 && e.data.reason === "auth_failed",
     );
-    expect(steer?.data.text).toMatch(/stop: your broker login is being repaired/);
+    expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
+    expect(steer.data.text).toMatch(/stop: your broker login is being repaired/);
 
     await resolve(opened.data.decision_id as string, "relaunch");
     const relaunched = await event("relaunched");
