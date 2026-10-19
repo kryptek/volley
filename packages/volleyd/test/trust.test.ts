@@ -92,11 +92,11 @@ describe("spawn: repo trust check", () => {
     expect(out.kind).toBe("decision");
     if (out.kind !== "decision") return;
     expect(out.decision).toBe("repo_untrusted");
-    expect(out.decisionId).toBe(trustDecisionId(env.repo));
+    expect(out.decisionId).toBe(trustDecisionId("w1", env.repo));
     const opened = env.events.filter((e) => e.type === "decision_opened");
     expect(opened).toHaveLength(1);
     expect(opened[0]?.data).toMatchObject({
-      decision_id: trustDecisionId(env.repo),
+      decision_id: trustDecisionId("w1", env.repo),
       kind: "repo_untrusted",
       question: `Needs you: trust ${env.repo} for dispatch?`,
       options: ["trust", "cancel"],
@@ -108,9 +108,20 @@ describe("spawn: repo trust check", () => {
     expect(progs.some((p) => p === "volley auth")).toBe(false);
   });
 
+  it("the decision id is unique per wave: two waves on one repo never share it", () => {
+    // `volleyd resolve <id>` without --wave answers the first wave that has the id.
+    const a = trustDecisionId("w1", "/repo");
+    expect(a).toMatch(/^repo_untrusted-[0-9a-f]{12}$/);
+    expect(trustDecisionId("w2", "/repo")).not.toBe(a);
+    expect(trustDecisionId("w2", "/repo", "dev@box")).not.toBe(
+      trustDecisionId("w1", "/repo", "dev@box"),
+    );
+    expect(trustDecisionId("w1", "/repo")).toBe(a);
+  });
+
   it("does not re-open the decision while it is open (the wave stays parked)", async () => {
     env = await makeSpawnEnv({ trusted: false });
-    env.openDecisions.push(trustDecisionId(env.repo));
+    env.openDecisions.push(trustDecisionId("w1", env.repo));
     const out = await spawnAgent(env.request(), env.deps);
     expect(out).toMatchObject({ kind: "decision", decision: "repo_untrusted", opened: false });
     expect(env.events.filter((e) => e.type === "decision_opened")).toEqual([]);
@@ -125,12 +136,12 @@ describe("spawn: repo trust check", () => {
 
   it("trust accepted after the decision opened resolves it and proceeds", async () => {
     env = await makeSpawnEnv({ trusted: true });
-    env.openDecisions.push(trustDecisionId(env.repo));
+    env.openDecisions.push(trustDecisionId("w1", env.repo));
     const out = await spawnAgent(env.request(), env.deps);
     expect(out.kind).toBe("launched");
     const resolved = env.events.find((e) => e.type === "decision_resolved");
     expect(resolved?.data).toMatchObject({
-      decision_id: trustDecisionId(env.repo),
+      decision_id: trustDecisionId("w1", env.repo),
       answer: "trusted",
     });
   });

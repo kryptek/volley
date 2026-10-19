@@ -37,7 +37,9 @@ const SCRIPT = (m: FakeMachine, pkg: "volley-cli" | "volleyd") =>
 const READ_ONLY = (a: string[]) =>
   a.includes("--dry-run") ||
   (a[0] === "launchctl" && a[1] === "print") ||
-  (a[0] === "systemctl" && a[2] === "is-active");
+  (a[0] === "systemctl" && (a[2] === "is-active" || a[2] === "show")) ||
+  a[0] === "lsof" ||
+  a[0] === "ss";
 
 describe("setup: services", () => {
   let dir: string;
@@ -73,6 +75,9 @@ describe("setup: services", () => {
         "Install `volley desk serve` as a launchd service on 0.0.0.0:5199",
       ]);
       expect(p.changes[2]?.detail).toContain('+  "hooks": {');
+      expect(p.changes[2]?.detail).toContain(
+        "Your Claude Code status line keeps working: Volley runs it after its own (same input, 2 s timeout).",
+      );
       expect(p.changes[4]?.detail).toContain("<string>serve</string>");
       expect(m.execCalls.every(READ_ONLY)).toBe(true);
       expect(existsSync(m.settingsFile)).toBe(false);
@@ -163,7 +168,7 @@ describe("setup: services", () => {
         const i = m.execCalls.findIndex(
           (a) => a[2] === "install" && a.includes("--dry-run") === dry,
         );
-        expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin`);
+        expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
         expect(m.execEnvs[i]?.VOLLEY_AUTH_DIR).toBe(m.ctx.auth.dir);
       }
       // volleyd's own service change is in this plan: the commands change says sign-in waits for it.
@@ -223,12 +228,50 @@ describe("setup: services", () => {
       expect(readFileSync(join(bin, "volleyd"), "utf-8")).toBe(SCRIPT(m, "volleyd"));
     });
 
-    it("moves the links to the front of a PATH that has them further back", async () => {
+    it("puts the links first, and no other `volley` on the shell's PATH, on the services' PATH", async () => {
       const bin = join(m.ctx.home, ".volley", "bin");
       m.ctx.auth.env.PATH = `/opt/old-volley/bin:${bin}:/usr/bin`;
       await applyAll(await planServices(m.ctx));
       const i = m.execCalls.findIndex((a) => a[2] === "install" && !a.includes("--dry-run"));
-      expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/opt/old-volley/bin:/usr/bin`);
+      expect(m.execEnvs[i]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
+    });
+
+    it("a rerun from another terminal (another PATH, a per-session shim dir) changes nothing", async () => {
+      // Stable install dirs on this (fake) Mac: Homebrew, cmux's app, claude's installer.
+      const local = join(m.ctx.home, ".local", "bin");
+      mkdirSync(local, { recursive: true });
+      writeFileSync(join(local, "claude"), "");
+      for (const d of ["/opt/homebrew/bin", "/Applications/cmux.app/Contents/Resources/bin"]) {
+        m.present.add(d);
+      }
+      const shim = "/var/folders/xy/abc/T/cmux-cli-shims/1234-5678";
+      // A cmux terminal: a shim dir, a project's node_modules, ~/.local/bin and Homebrew on PATH.
+      m.ctx.auth.env.PATH = `${shim}:${local}:/opt/homebrew/bin:/some/project/node_modules/.bin:/usr/bin:/bin`;
+      await applyAll(await planServices(m.ctx));
+      const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+      const written = readFileSync(plist, "utf-8");
+      expect(written).not.toContain("cmux-cli-shims");
+      expect(written).not.toContain("node_modules");
+      const want = [
+        join(m.ctx.home, ".volley", "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Applications/cmux.app/Contents/Resources/bin",
+        local,
+        "/usr/bin:/bin:/usr/sbin:/sbin",
+      ].join(":");
+      expect(written).toContain(`<string>${want}</string>`);
+      // Terminal.app without ~/.local/bin or Homebrew on its PATH: the same PATH, nothing to do.
+      m.ctx.auth.env.PATH = "/usr/bin:/bin:/usr/sbin:/var/folders/xy/abc/T/cmux-cli-shims/9999";
+      const again = await planServices(m.ctx);
+      expect(again.changes).toEqual([]);
+      // And a shell with no PATH at all.
+      m.ctx.auth.env.PATH = undefined as unknown as string;
+      expect((await planServices(m.ctx)).changes).toEqual([]);
+      const installs = m.execCalls
+        .map((a, i) => (a[2] === "install" ? m.execEnvs[i]?.PATH : null))
+        .filter((p) => p !== null);
+      expect(new Set(installs)).toEqual(new Set([want]));
     });
 
     it("with volleyd's service already in place, the commands alone fix sign-in", async () => {
@@ -277,7 +320,7 @@ describe("setup: services", () => {
       expect(unit).toContain(`Environment="VOLLEY_BROKER_URL=${m.ctx.auth.url}"`);
       expect(unit).toContain(`Environment="VOLLEY_AUTH_DIR=${m.ctx.auth.dir}"`);
       expect(unit).toContain(
-        `Environment="PATH=${join(m.ctx.home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin"`,
+        `Environment="PATH=${join(m.ctx.home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"`,
       );
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "daemon-reload"]);
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "enable", "volleyd.service"]);

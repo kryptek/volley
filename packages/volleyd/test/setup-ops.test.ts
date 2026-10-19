@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "volley-cli/auth/config";
 import { realAuthDeps } from "volley-cli/auth/context";
 import { planAccounts } from "volley-cli/setup/accounts";
+import { CMUX_CHECK_SCRIPT } from "volley-cli/setup/cmux";
 import { planServices } from "volley-cli/setup/services";
 import type { SetupContext } from "volley-cli/setup/step";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -186,6 +187,8 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     ) as Record<string, unknown>;
 
   let platform: NodeJS.Platform = "darwin";
+  /** Paths outside the test's root that exist (the cmux app): never the real machine's. */
+  let present: Set<string>;
   const setupOptions = (): Partial<SetupOpsOptions> => ({
     brokerUrl: BROKER,
     authDir: m.layout.authDir,
@@ -200,6 +203,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       lanHost: () => "desk.example",
       repoRoot: m.repo,
       bun: BUN,
+      exists: (p) => (p.startsWith(`${root}/`) ? existsSync(p) : present.has(p)),
       probeAnonymous: async (url) =>
         url.startsWith("ws:")
           ? url.includes("desk.example")
@@ -235,6 +239,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     });
     fake = await startFakeDynsec({ version: "2.1.2" });
     platform = "darwin";
+    present = new Set();
     root = mkdtempSync(join(tmpdir(), "volleyd-setup-ops-"));
     m = machine(root);
     secured(m, fake);
@@ -303,6 +308,24 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     return r?.result as { steps: WireStep[]; last_setup?: string; broker?: unknown };
   };
   const step = (steps: WireStep[], name: string) => steps.find((s) => s.step === name) as WireStep;
+  /**
+   * cmux installed and answering the service-like check with `said` (exit `code`). volleyd's own
+   * fence refuses that check; this stands in for a volleyd that could run it, so the planners
+   * offer their cmux changes.
+   */
+  const cmuxSays = (code: number, said: string) => {
+    const bin = "/Applications/cmux.app/Contents/Resources/bin";
+    present.add(bin);
+    present.add(`${bin}/cmux`);
+    const inner = m.exec;
+    m.exec = async (argv, opts) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(argv[4] as string, `${said}\nvolley-cmux-exit=${code}\n`);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      }
+      return inner(argv, opts);
+    };
+  };
   const apply = (name: string, planId: string, fields: Record<string, unknown> = {}) =>
     op("admin-1", {
       op: "setup_apply",
@@ -677,6 +700,32 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(result.problems).toEqual([]);
   });
 
+  it("services: cmux's socket password is a terminal's, with the command, and never fails on Apply", async () => {
+    cmuxSays(1, "ERROR: Invalid password");
+    await start();
+    const services = step((await plan()).steps, "services");
+    const cmux = services.changes.find((c) =>
+      c.summary.startsWith("Give volleyd the cmux socket password"),
+    );
+    expect(cmux?.terminal).toEqual({
+      reason: expect.stringContaining("hidden prompt"),
+      command: "volley setup --step services",
+    });
+    expect(services.found.join("\n")).toContain("(cmux said: ERROR: Invalid password)");
+    const r = await apply("services", services.plan_id);
+    expect(r?.ok, r?.error).toBe(true);
+    const result = r?.result as { terminal: { summary: string; command: string }[] };
+    expect(result.terminal.map((t) => t.summary)).toContain(cmux?.summary);
+    // cmux not answering: the change that checks again is a terminal's too.
+    expect(
+      terminalOnly(
+        "services",
+        "Make volleyd's service reach cmux (cmux's socket is not answering): checked again when applied",
+        { auth: { layout: LAYOUTS["brew-arm64"] } } as unknown as SetupContext,
+      )?.command,
+    ).toBe("volley setup --step services");
+  });
+
   it("a sudo layout's security changes are listed for a terminal, with the command, and never run", async () => {
     m = machine(root, "etc");
     writeFileSync(m.layout.config, "listener 1883\nallow_anonymous true\n");
@@ -903,6 +952,11 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       ).reply.ok,
     ).toBe(true);
     rmSync(join(m.volleydHome, "broker.json"));
+    await collect();
+    // cmux refusing volleyd's service, then not answering: the password, then the recheck.
+    cmuxSays(1, "Access denied - only processes started inside cmux can connect");
+    await collect();
+    cmuxSays(1, "Failed to connect to /tmp/cmux.sock: Connection refused");
     await collect();
     // A root-owned broker (etc) not secured yet: its config, its state file and its restart.
     m = machine(root, "etc");

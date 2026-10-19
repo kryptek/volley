@@ -72,6 +72,8 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
         password: parsed.values.password as string | undefined,
       },
       env,
+      process.cwd(),
+      brokerUrl,
     );
     payload = parseJsonPayload(parsed.values.payload as string | undefined);
   } catch (e) {

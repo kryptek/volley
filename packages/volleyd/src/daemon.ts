@@ -104,6 +104,7 @@ import {
   openEvent,
   renderDecisionsMd,
   resolveEvent,
+  waveDecisionId,
   writeDecisionsFile,
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
@@ -471,6 +472,13 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/**
+ * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
+ * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
+ */
+export function spawnFailedDecisionId(wave: WaveId, task: TaskId, role: Role): string {
+  return waveDecisionId("spawn_failed", wave, task, role);
+}
 /** How volleyd resolves the decision it supersedes once the automatic retries stop. */
 const SPAWN_RETRIES_STOPPED = { answer: "retries_stopped", by: DAEMON_AGENT_ID };
 
@@ -562,8 +570,8 @@ const LOCK_FILE = "volleyd.lock";
 /** Owner statuses that make its `coordinator.state` `gone`. */
 const OWNER_GONE = new Set(["reaped", "done", "failed"]);
 
-/** The wave_complete decision's id (one per wave). */
-const WAVE_COMPLETE_DECISION = "wave_complete";
+/** The wave_complete decision's id (one per wave, never shared with another wave). */
+const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
 
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
@@ -1841,12 +1849,12 @@ export class Daemon {
     const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
     // The decision first: once wave_complete is journaled the wave is no longer `running` and no
     // later tick comes back here, so a failed open must leave the wave to retry.
-    if (rec.decisions[WAVE_COMPLETE_DECISION] === undefined) {
+    if (rec.decisions[waveCompleteDecisionId(wave)] === undefined) {
       const merged = done.length > 0 ? ` merged into ${state.release_branch}` : "";
       await this.openDecisionNow(wave, {
         kind: "wave_complete",
         task: null,
-        id: WAVE_COMPLETE_DECISION,
+        id: waveCompleteDecisionId(wave),
         question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
         options: ["acknowledged"],
       });
@@ -2067,7 +2075,7 @@ export class Daemon {
       const question = stopped
         ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
         : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
-      const base = `spawn_failed-${createHash("sha256").update(`${task}/${role}`).digest("hex").slice(0, 12)}`;
+      const base = spawnFailedDecisionId(wave, task, role);
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
       await this.openDecisionNow(
@@ -2672,7 +2680,7 @@ export class Daemon {
     const w = log.record.wave as NonNullable<WaveLog["record"]["wave"]>;
     const { spec } = remote;
     const journal = deps.journal;
-    const decisionId = `remote_repo_missing-${createHash("sha256").update(`${spec.target}:${spec.repo}`).digest("hex").slice(0, 12)}`;
+    const decisionId = waveDecisionId("remote_repo_missing", wave, `${spec.target}:${spec.repo}`);
     const openId = openDecisionFor(log.record.state?.open_decisions ?? [], decisionId);
     // An ssh failure is not a missing clone: it throws a transient LAUNCH_FAILED (backed off).
     const exists = await remote.repoExists().catch(async (e: unknown) => {
@@ -3059,8 +3067,9 @@ export class Daemon {
         : 1,
     );
     const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
-    let id = "spawn_budget_exhausted";
-    for (let k = 2; rec.decisions[id] !== undefined; k++) id = `spawn_budget_exhausted-${k}`;
+    const base = waveDecisionId("spawn_budget_exhausted", wave);
+    let id = base;
+    for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
     try {
       await this.openDecisionNow(
         wave,

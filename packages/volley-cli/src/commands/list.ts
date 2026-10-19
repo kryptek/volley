@@ -73,6 +73,8 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
         password: parsed.values.password as string | undefined,
       },
       env,
+      process.cwd(),
+      brokerUrl,
     );
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
     nsFilter = allNamespaces

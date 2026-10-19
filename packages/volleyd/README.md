@@ -458,7 +458,10 @@ at 80% wins over a primary that simply has not reported (it may be at 0%). A spa
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses;
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses (the fence
+seals a `CLAUDE_CONFIG_DIR` only when it is exactly `<root>/<acct>` for an account in that root's
+registry: a real directory, not a symlink, never in or above the agent's worktree; a root that is,
+holds or sits in `$VOLLEYD_HOME` admits none);
 `.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
 Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
 `repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
@@ -716,7 +719,7 @@ lists every key with its default and example pools, commented out.
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
-| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
+| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
@@ -1716,13 +1719,28 @@ volleyd uninstall             # unload + remove the plist
 
 The plist (`launchd/systems.volley.volleyd.plist.tmpl`) runs `bun src/cli.ts daemon` with
 `RunAtLoad` and `KeepAlive`, logs to `$VOLLEYD_HOME/volleyd.log`, and captures `VOLLEYD_HOME`,
-`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, your `PATH` (so `git`, `gh`, `cmux` and `claude`
-resolve) and, when set, `VOLLEY_AUTH_DIR` (the auth dir volleyd's `volley auth` calls use) at
-install time. Re-run `volleyd install` after changing any of them. `volley setup` runs it for you
-on macOS, with `~/.volley/bin` first on that `PATH` and `VOLLEY_AUTH_DIR` set to the auth dir it
-used (volleyd runs `volley auth` by name to redeem the Desk's sign-in links); on Linux it writes
-the systemd user unit `volleyd.service` instead, with the same two
-(`systemctl --user status volleyd.service`).
+`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` and, when set, `VOLLEY_AUTH_DIR` (the auth dir volleyd's
+`volley auth` calls use) at install time. Its `PATH` is a stable list, never your shell's whole
+`PATH` (a terminal's per-session entries, such as cmux's shim directory under the temp dir, would
+make every rerun from another terminal a change): a fixed list of candidates, each kept when it
+exists on this machine: `~/.volley/bin`, bun's directory, Homebrew's `bin` and `sbin`,
+`/usr/local/bin`, the cmux app's `bin`, `~/.local/bin`, `~/.bun/bin`, `~/.claude/local`,
+`~/.npm-global/bin`, `~/.volta/bin`, nix's and snap's `bin`, then `/usr/bin:/bin:/usr/sbin:/sbin`.
+Nothing comes from your shell's `PATH`. Re-run `volleyd install` after changing any of them. `volley
+setup` runs it for you on macOS, with `VOLLEY_AUTH_DIR` set to the auth dir it used (volleyd runs
+`volley auth` by name to redeem the Desk's sign-in links); on Linux it writes the systemd user
+unit `volleyd.service` instead, with the same PATH (`systemctl --user status volleyd.service`).
+
+**cmux from a service.** cmux lets only programs it started use its socket by default, and the
+service is not one, so every local spawn would be refused. `volley setup` (Services) checks this
+the way the service runs cmux, explains where to set a socket password in cmux (Settings… →
+Automation → Socket control mode → Password mode), asks for it hidden and stores it in
+`$VOLLEYD_HOME/cmux.json` (mode 0600; and the keychain, service `volley-cmux`). volleyd reads the
+file each time it runs cmux (spawns, screens, the `cmux ping` pressure sample) and passes it as
+`CMUX_SOCKET_PASSWORD`, so a new password needs no restart; it never goes in the plist. A
+`CMUX_SOCKET_PASSWORD` in volleyd's own environment wins. When cmux still refuses a spawn, the
+`spawn_failed` decision says what to do in those words, then what cmux said (`(cmux said: …)`;
+its full text stays in the journal).
 
 ---
 

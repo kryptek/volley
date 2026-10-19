@@ -138,6 +138,8 @@ export const KEYCHAIN_STALE =
 /** setup.log's event for a change a Desk's apply left for a terminal (its summary). */
 const LEFT = "left";
 
+const CMUX_PASSWORD = "Give volleyd the cmux socket password";
+const CMUX_REACH = "Make volleyd's service reach cmux";
 /** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
 export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   WRITE,
@@ -146,14 +148,16 @@ export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   KEYCHAIN,
   VOLLEYD_PASSWORD,
   VOLLEYD_SERVICE,
+  CMUX_PASSWORD,
+  CMUX_REACH,
 ];
 
 /**
  * Which changes a Desk may not apply, keyed by the step, the change's summary (the planners'
  * wording) and the layout: anything that needs sudo or that the fence runs only on a brew layout
  * (a root-owned or containerised broker's config, state file and restart), volleyd's own service
- * or password (either would stop the volleyd answering), and the macOS keychain (the logged-in
- * session's).
+ * or password (either would stop the volleyd answering), the macOS keychain (the logged-in
+ * session's), and cmux's socket password and reach (a hidden prompt, a check from outside cmux).
  */
 export function terminalOnly(
   step: StepName,
@@ -204,6 +208,20 @@ export function terminalOnly(
   if (step === "services" && summary.startsWith(VOLLEYD_SERVICE)) {
     return {
       reason: "it installs and restarts volleyd itself, which would stop the volleyd answering",
+      command: "volley setup --step services",
+    };
+  }
+  if (step === "services" && summary.startsWith(CMUX_PASSWORD)) {
+    return {
+      reason:
+        "the cmux socket password is typed at a hidden prompt and checked with cmux from outside it, which only a terminal on the supervisor's machine can do",
+      command: "volley setup --step services",
+    };
+  }
+  if (step === "services" && summary.startsWith(CMUX_REACH)) {
+    return {
+      reason:
+        "it checks cmux again from outside cmux, which only a terminal on the supervisor's machine can do: open cmux (or set its socket password) first",
       command: "volley setup --step services",
     };
   }

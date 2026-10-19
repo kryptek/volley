@@ -7,6 +7,7 @@
   "type": "module",
   "bin": { "volley": "./src/cli.ts" },
   "exports": {
+    "./auth/coordinator-login": "./src/auth/coordinator-login.ts",
     "./auth/version": "./src/auth/version.ts",
     "./auth/dynsec": "./src/auth/dynsec.ts",
     "./auth/roles": "./src/auth/roles.ts",
@@ -18,7 +19,9 @@
     "./io": "./src/io.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/broker": "./src/setup/broker.ts",
+    "./setup/cmux": "./src/setup/cmux.ts",
     "./setup/journal": "./src/setup/journal.ts",
+    "./setup/service-path": "./src/setup/service-path.ts",
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",
     "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts"

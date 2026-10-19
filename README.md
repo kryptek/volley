@@ -207,7 +207,7 @@ claude mcp add-json -s user volley '{
 }'
 ```
 
-The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. Export the same identity in your shell profile too:
+The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. On the machine `volley setup` ran on, those commands find the coordinator login on their own (the macOS keychain, then `coordinator.json` in the auth dir), for a broker on that machine. Anywhere else, export the same identity in that shell:
 
 ```sh
 export VOLLEY_AUTH_USERNAME=coordinator

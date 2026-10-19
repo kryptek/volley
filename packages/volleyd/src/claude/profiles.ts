@@ -45,22 +45,34 @@ export interface ClaudeRegistry {
   accounts: ClaudeAccount[];
 }
 
-/** `$VOLLEY_CLAUDE_DIR`, else `~/.volley/claude`. */
+/** `$VOLLEY_CLAUDE_DIR`, else `~/.volley/claude` (`$HOME` as `env` has it, else the OS's). */
 export function claudeRoot(env: Record<string, string | undefined> = process.env): string {
   const dir = env.VOLLEY_CLAUDE_DIR;
-  return dir !== undefined && dir !== "" ? dir : join(homedir(), ".volley", "claude");
+  if (dir !== undefined && dir !== "") return dir;
+  return join(
+    env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir(),
+    ".volley",
+    "claude",
+  );
 }
 
 export const registryPath = (root: string) => join(root, "accounts.json");
 
+/** The profiles root as one canonical absolute path: normalised, no trailing slash. */
+export function canonicalRoot(root: string): string {
+  if (!isAbsolute(root)) throw new ClaudeAccountError(`profile root ${root} is not absolute`);
+  return normalize(root).replace(/(.)\/+$/, "$1");
+}
+
 /**
  * The profile's `CLAUDE_CONFIG_DIR`. Claude Code keys the profile's Keychain item to a hash of
- * this exact string, so it is always one canonical absolute path with no trailing slash.
+ * this exact string, so it is always one canonical absolute path with no trailing slash. The one
+ * definition of a profile dir: the launch fence admits exactly these.
  */
 export function profileDir(root: string, id: string): string {
-  if (!isAbsolute(root)) throw new ClaudeAccountError(`profile root ${root} is not absolute`);
+  const r = canonicalRoot(root);
   if (!isValidAccountId(id)) throw new ClaudeAccountError(`invalid Claude account id '${id}'`);
-  return normalize(join(root, id)).replace(/\/+$/, "");
+  return join(r, id);
 }
 
 /** A label as an account id: lowercased, runs of anything else collapsed to `-`. */

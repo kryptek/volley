@@ -3,7 +3,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { decisionTopic } from "../src/decisions";
+import { decisionTopic, waveDecisionId } from "../src/decisions";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
@@ -72,6 +72,35 @@ describe("a wave completes", () => {
     expect(schemaErrors("decision.schema.json", d)).toEqual([]);
     expect(d.payload).toMatchObject({ kind: "wave_complete", task: null });
     expect(d.payload.question).toContain(`release/${WAVE}`);
+  });
+
+  it("two waves' wave_complete decisions have their own ids: resolve without --wave answers each", async () => {
+    const W2 = "w-done-2";
+    const res = await client.request("run", {
+      wave_yaml: WAVE_YAML.replaceAll(WAVE, W2),
+      owner: "coord-a",
+    });
+    expect(res.error).toBeUndefined();
+    for (const w of [WAVE, W2])
+      for (const task of ["A", "B"])
+        await daemon.recordEvent(w, { type: "stage_entered", task, data: { stage: "done" } });
+    await daemon.tick();
+    await daemon.tick();
+    const ids = [WAVE, W2].map((w) => daemon.record(w)?.state?.open_decisions ?? []);
+    expect(ids).toEqual([
+      [waveDecisionId("wave_complete", WAVE)],
+      [waveDecisionId("wave_complete", W2)],
+    ]);
+    for (const [i, w] of [WAVE, W2].entries()) {
+      const r = await client.request("resolve", {
+        decision_id: ids[i]?.[0],
+        answer: "acknowledged",
+        by: "coord-a",
+      });
+      expect(r.error).toBeUndefined();
+      expect(r.result).toMatchObject({ wave: w });
+      expect(daemon.record(w)?.state?.open_decisions).toEqual([]);
+    }
   });
 
   it("done + cancelled tasks complete the wave too", async () => {
