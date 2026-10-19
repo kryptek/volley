@@ -10,6 +10,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { dateOf, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { type WaveRecord, apply, emptyRecord, normalizeRecord, replay } from "./reducer";
 import type { JournalEvent, NewEvent } from "./types";
@@ -61,6 +62,7 @@ export class Journal {
   readonly dir: string;
   readonly path: string;
   private last: number;
+  private readonly listeners = new Set<(event: JournalEvent) => void>();
 
   private constructor(dir: string, lastSeq: number) {
     this.dir = dir;
@@ -88,7 +90,8 @@ export class Journal {
   }
 
   /** Append one event durably. Assigns `seq`; `at` defaults to now. */
-  append(ev: NewEvent, now: Date = new Date()): JournalEvent {
+  // real clock: the default for a caller without a clock (the daemon passes its own)
+  append(ev: NewEvent, now: Date = dateOf(systemClock)): JournalEvent {
     const event: JournalEvent = {
       seq: this.last + 1,
       at: ev.at ?? now.toISOString(),
@@ -104,7 +107,14 @@ export class Journal {
       closeSync(fd);
     }
     this.last = event.seq;
+    for (const fn of this.listeners) fn(event);
     return event;
+  }
+
+  /** Call `fn` after every durable append; returns the unsubscribe (tests await events). */
+  onAppend(fn: (event: JournalEvent) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
   }
 
   readAll(): JournalEvent[] {

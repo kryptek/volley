@@ -294,6 +294,9 @@ describe("daemon: restart reconciliation", () => {
       ...probes(),
       branch: async (_repo, branch) => {
         await heartbeat();
+        // The daemon's reconcile watch has no event to await for a heartbeat it reads; and the
+        // daemon answers no control request before its start completes, so no round-trip either.
+        // broker round-trip: the heartbeat's delivery to the daemon's connection.
         await new Promise((r) => setTimeout(r, 100));
         return { name: branch, exists: true, head: "abc123" };
       },

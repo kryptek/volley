@@ -19,6 +19,7 @@ import {
   step,
 } from "../src/leases";
 import { type JournalEvent, type LeasePoolConfig, SYSTEM_WAVE } from "../src/types";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -315,19 +316,17 @@ describe("volleyd daemon: lease requests over MQTT", () => {
         payload: { held: { lease_id: string }[]; queue: { lease_id: string }[]; reasons: string[] };
       } | null
     )?.payload;
-  /** Poll the retained pool state until `pred` holds. */
+  /** Re-read the retained pool state (it arrives over MQTT) until `pred` holds. */
   const until = async (
     name: string,
     pred: (p: NonNullable<Awaited<ReturnType<typeof pool>>>) => boolean,
   ) => {
-    const deadline = Date.now() + 3000;
-    for (;;) {
-      const p = await pool(name);
-      if (p !== undefined && p !== null && pred(p)) return p;
-      if (Date.now() > deadline)
-        throw new Error(`pool ${name}: condition not met: ${JSON.stringify(p)}`);
-      await new Promise((r) => setTimeout(r, 25));
-    }
+    let p: Awaited<ReturnType<typeof pool>>;
+    await eventually(async () => {
+      p = await pool(name);
+      return p !== undefined && p !== null && pred(p);
+    });
+    return p as NonNullable<Awaited<ReturnType<typeof pool>>>;
   };
   const ids = (xs: { lease_id: string }[]) => xs.map((x) => x.lease_id);
   const systemEvents = () =>
