@@ -27,6 +27,11 @@ export interface DaemonEnv {
   start: (extra?: Partial<DaemonOptions>) => Promise<Daemon>;
   /** Read one retained topic as JSON (null when absent). */
   retained: (topic: string) => Promise<unknown>;
+  /**
+   * The topics that still hold a retained record, read in parallel: each absent one waits out
+   * the read timeout, so a loop of `retained` pays it once per topic.
+   */
+  stillRetained: (topics: string[]) => Promise<string[]>;
   cleanup: () => Promise<void>;
 }
 
@@ -45,6 +50,10 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
   });
   const reader = new VolleyBroker();
   await reader.connect({ url: broker.url, agentId: "test-reader" });
+  const retained = async (topic: string): Promise<unknown> => {
+    const raw = await reader.queryRetained(topic, 500);
+    return raw === null || raw === "" ? null : JSON.parse(raw);
+  };
   return {
     broker,
     home,
@@ -55,9 +64,10 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
       daemons.push(d);
       return d;
     },
-    retained: async (topic) => {
-      const raw = await reader.queryRetained(topic, 500);
-      return raw === null || raw === "" ? null : JSON.parse(raw);
+    retained,
+    stillRetained: async (topics) => {
+      const values = await Promise.all(topics.map(retained));
+      return topics.filter((_, i) => values[i] !== null);
     },
     cleanup: async () => {
       for (const d of daemons) await d.stop().catch(() => {});

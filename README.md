@@ -181,7 +181,7 @@ cd volley
 bun install
 ```
 
-Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`.
+Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`. Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). CI tests both: on each, it installs with that bun and runs volleyd's suite under `bun test` (bun's own runner, on bun); the packages' vitest suites run on Node.
 
 ### 4. Register the MCP server with Claude Code
 

@@ -241,7 +241,10 @@ describe("runSignin", () => {
       return { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
     });
     const last = await w.run(abort.signal);
-    expect(last).toMatchObject({ type: "claude_signin_failed", reason: /superseded/ });
+    expect(last).toMatchObject({
+      type: "claude_signin_failed",
+      reason: expect.stringMatching(/superseded/),
+    });
     // Only the start's own replace-the-old-session kill; none after the abort.
     expect(w.fx.argvs(["tmux", "kill-session"])).toHaveLength(1);
     expect(existsSync(join(signinDir(w.root, "work"), "url"))).toBe(true);
