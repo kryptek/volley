@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { writeCmuxPassword } from "volley-cli/setup/cmux";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { FenceError, mintConsentToken, mintModelSwitchToken, sealLaunchScript } from "../src/fence";
 import { LocalCmuxHost, parseWorkspaceRef } from "../src/hosts/local-cmux";
@@ -92,6 +93,61 @@ describe("LocalCmuxHost", () => {
       .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") })
       .catch((e: unknown) => e);
     expect((err as SpawnError).code).toBe("LAUNCH_FAILED");
+  });
+
+  it("a launch cmux refuses (volleyd runs outside cmux) says what to do, not the raw error", async () => {
+    const home = mkdtempSync(join(tmpdir(), "volleyd-cmux-"));
+    try {
+      const fake = fakeExec().on(["cmux", "new-workspace"], {
+        code: 1,
+        stderr: "Access denied - only processes started inside cmux can connect",
+      });
+      const err = (await new LocalCmuxHost(fake.exec, home, {})
+        .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") })
+        .catch((e: unknown) => e)) as SpawnError;
+      expect(err.code).toBe("LAUNCH_FAILED");
+      expect(err.message).toContain("Socket control mode");
+      expect(err.message).toContain("Password mode");
+      expect(err.message).toContain("volley setup --repair");
+      // The raw cmux text stays in the journaled detail.
+      expect(err.detail.cmux).toContain("Access denied");
+      // With a stored password, it says that one was refused.
+      writeCmuxPassword(home, "stale");
+      const stale = (await new LocalCmuxHost(fake.exec, home, {})
+        .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") })
+        .catch((e: unknown) => e)) as SpawnError;
+      expect(stale.message).toContain("refused the socket password volleyd has");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("gives every cmux call the stored socket password in its environment, read each time", async () => {
+    const home = mkdtempSync(join(tmpdir(), "volleyd-cmux-"));
+    try {
+      const fake = fakeExec()
+        .on(["cmux", "new-workspace"], { stdout: "OK workspace:3\n" })
+        .on(["cmux", "read-screen"], { stdout: "x" });
+      const host = new LocalCmuxHost(fake.exec, home, { PATH: "/usr/bin" });
+      await host.readScreen("workspace:3", 5);
+      expect(fake.calls[0]?.opts.env).toBeUndefined();
+      writeCmuxPassword(home, "s3cret");
+      await host.launch({
+        cwd: "/wt/x",
+        name: "n",
+        command: LAUNCH_COMMAND,
+        launch: sealed("/wt/x"),
+      });
+      await host.readScreen("workspace:3", 5);
+      await host.sendKeys("workspace:3", "Enter");
+      for (const c of fake.calls.slice(1)) {
+        expect(c.opts.env?.CMUX_SOCKET_PASSWORD).toBe("s3cret");
+        expect(c.opts.env?.PATH).toBe("/usr/bin");
+        expect(c.argv.join(" ")).not.toContain("s3cret");
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("close needs the cleanup consent token", async () => {

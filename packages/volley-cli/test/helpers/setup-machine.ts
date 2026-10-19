@@ -50,6 +50,9 @@ export interface FakeMachine {
   /** Answers `confirm` gives, in order (then false); and the questions it was asked. */
   answers: boolean[];
   questions: string[];
+  /** Answers `askSecret` gives, in order (then null); and the prompts it showed. */
+  secrets: (string | null)[];
+  secretPrompts: string[];
   keychain: Map<string, string>;
   loaded: Set<string>;
   active: Set<string>;
@@ -87,6 +90,8 @@ export function fakeMachine(
     anonymous: { tcp: "accepted", ws: "unreachable" },
     answers: [],
     questions: [],
+    secrets: [],
+    secretPrompts: [],
     keychain: new Map(),
     loaded: new Set(),
     active: new Set(),
@@ -198,6 +203,10 @@ export function fakeMachine(
       return m.answers.shift() ?? false;
     },
     interactive: true,
+    askSecret: async (prompt) => {
+      m.secretPrompts.push(prompt);
+      return m.secrets.shift() ?? null;
+    },
     sleep: async () => {},
     platform: opts.platform ?? "darwin",
     uid: 501,

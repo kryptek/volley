@@ -97,6 +97,37 @@ function findBun(path: string): string {
   return process.execPath;
 }
 
+/**
+ * Read one line from the terminal without echoing it (raw mode: Enter ends it, Backspace edits,
+ * Ctrl-C or Ctrl-D gives up). Null when stdin is not a terminal.
+ */
+function askHidden(prompt: string): Promise<string | null> {
+  const stdin = process.stdin;
+  if (stdin.isTTY !== true) return Promise.resolve(null);
+  process.stdout.write(prompt);
+  return new Promise((resolve) => {
+    let value = "";
+    const done = (v: string | null) => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stdout.write("\n");
+      resolve(v);
+    };
+    const onData = (d: Buffer) => {
+      for (const ch of d.toString("utf-8")) {
+        if (ch === "\r" || ch === "\n") return done(value);
+        if (ch === "\u0003" || ch === "\u0004") return done(null);
+        if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
+        else if (ch >= " ") value += ch;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+}
+
 export const realSetupDeps = (env: Record<string, string | undefined>): SetupDeps => ({
   auth: realAuthDeps,
   exec: (argv, opts) =>
@@ -143,6 +174,7 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
     }
   },
   interactive: process.stdin.isTTY === true,
+  askSecret: (prompt) => askHidden(prompt),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   platform: process.platform,
   uid: process.getuid?.() ?? 0,
@@ -338,6 +370,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       );
       return EXIT.ERROR;
     }
+    for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
     journal(name, "verified");
   }
   // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
@@ -349,7 +382,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         ? "Setup complete."
         : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
       "Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
-      `${join(auth.dir, "coordinator.json")} (in the MCP server env and your shell profile).`,
+      `${join(auth.dir, "coordinator.json")}, in the MCP server's env. The volley and volleyd`,
+      "commands on this machine use that login on their own (keychain, then coordinator.json).",
       `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
       "",
     ].join("\n"),
@@ -374,8 +408,11 @@ before changing anything.
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
   4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
-               PATH), volleyd (launchd / systemd --user), the Volley hooks for coordinator
-               sessions, the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
+               PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
+               --user), on macOS the cmux socket password volleyd's service needs (asked for,
+               hidden), the Volley hooks for coordinator sessions (your status line keeps
+               working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
+               (stops if another program listens on that port)
   5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 

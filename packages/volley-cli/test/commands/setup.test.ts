@@ -16,7 +16,10 @@ import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers
 const READ_ONLY = (a: string[]) =>
   a.includes("--dry-run") ||
   (a[0] === "launchctl" && a[1] === "print") ||
-  (a[0] === "security" && a[1] === "find-generic-password");
+  (a[0] === "security" && a[1] === "find-generic-password") ||
+  // Who listens on the Desk's port.
+  a[0] === "lsof" ||
+  a[0] === "ss";
 
 /** What the run's last lines say once every step is in place. */
 const COMPLETE = "Setup complete.";
@@ -104,6 +107,17 @@ describe("volley setup", () => {
     expect(r.stdout).toMatch(/vly_admin_[0-9a-f]{8}_[0-9a-f]{32}/);
     expect(r.stdout).toMatch(/http:\/\/desk\.example:5199\/#signin=vly_signin_/);
     expect(r.stdout).toContain(COMPLETE);
+    // The security step says what it checked once it passed.
+    expect(r.stdout).toContain(
+      `  ✓ Listener ${new URL(fake.url).port}: refuses anonymous clients\n`,
+    );
+    expect(r.stdout).toContain("  ✓ Listener 9001: refuses anonymous clients\n");
+    expect(r.stdout).toContain(
+      "  ✓ Listener 9001 from the LAN (ws://desk.example:9001): reachable, refuses anonymous clients\n",
+    );
+    // The CLIs here find the coordinator's login themselves: no password for a shell profile.
+    expect(r.stdout).not.toContain("shell profile");
+    expect(r.stdout).toContain("use that login on their own");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     // The journal records every step, never a secret.
     const log = readFileSync(join(m.ctx.volleydHome, "setup.log"), "utf-8");

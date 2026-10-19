@@ -468,6 +468,30 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).toContain("<key>KeepAlive</key>");
   });
 
+  it("--dry-run writes the same stable PATH from two shells (no per-terminal shim dir)", async () => {
+    const bunDir = join(home, "bun-bin");
+    mkdirSync(bunDir);
+    writeFileSync(join(bunDir, "bun"), "");
+    const env = { HOME: home, VOLLEYD_HOME: join(home, "state") };
+    const shim = "/var/folders/xy/abc/T/cmux-cli-shims/1234-5678";
+    const a = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `${shim}:${bunDir}:/some/project/node_modules/.bin:/usr/bin:/bin`,
+    });
+    const b = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `/usr/bin:${bunDir}:/bin:/another/dir`,
+    });
+    expect(a.exitCode).toBe(0);
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.stdout).not.toContain("cmux-cli-shims");
+    expect(a.stdout).not.toContain("node_modules");
+    // The test's home is under the temp dir, so bun's directory there is not baked in either.
+    expect(a.stdout).toContain(
+      `<string>${join(home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>`,
+    );
+  });
+
   it("renders VOLLEY_AUTH_DIR only when an auth dir is given", () => {
     const without = renderPlist(paths());
     expect(without).not.toContain("VOLLEY_AUTH_DIR");

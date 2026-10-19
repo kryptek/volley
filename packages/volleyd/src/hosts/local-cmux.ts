@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { classifyCmux, cmuxAdvice, cmuxEnv, readCmuxPassword } from "volley-cli/setup/cmux";
 import { DAEMON_DEFAULTS } from "../config-defaults";
-import type { ExecFn } from "../exec";
+import { volleydHome } from "../config-store";
+import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import type { ConsentToken } from "../fence";
 import { SpawnError } from "../spawn-error";
 import { addWorktree } from "../worktree";
@@ -11,12 +13,24 @@ import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } 
 /**
  * The local host: worktrees on this machine, agents in cmux workspaces. Every command goes
  * through the fenced `exec`; closing a workspace needs a consent token (`cleanup --yes`, or a
- * retire for its agent's own workspace).
+ * retire for its agent's own workspace). volleyd runs as a service, outside cmux, so cmux lets it
+ * in only with its socket password: every cmux call gets the one `volley setup` stored
+ * (`$VOLLEYD_HOME/cmux.json`, read each time) as `CMUX_SOCKET_PASSWORD` in its environment.
  */
 export class LocalCmuxHost implements Host {
   readonly name = "local";
   readonly screenSource = "cmux";
-  constructor(readonly exec: ExecFn) {}
+  constructor(
+    readonly exec: ExecFn,
+    private readonly home: string = volleydHome(process.env),
+    private readonly env: Record<string, string | undefined> = process.env,
+  ) {}
+
+  /** `exec` for a cmux argv, with the socket password in its environment when one is stored. */
+  private cmux(argv: readonly string[], opts: ExecOptions = {}): Promise<ExecResult> {
+    const env = cmuxEnv(this.home, this.env);
+    return this.exec(argv, env === undefined ? opts : { ...opts, env });
+  }
 
   prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult> {
     return addWorktree(this.exec, spec);
@@ -38,7 +52,7 @@ export class LocalCmuxHost implements Host {
   }
 
   async launch(spec: LaunchSpec): Promise<{ workspace: string }> {
-    const r = await this.exec(
+    const r = await this.cmux(
       ["cmux", "new-workspace", "--cwd", spec.cwd, "--name", spec.name, "--command", spec.command],
       spec.launch !== undefined ? { launch: spec.launch } : {},
     ).catch((e: unknown) => {
@@ -49,17 +63,24 @@ export class LocalCmuxHost implements Host {
     });
     const workspace = r.code === 0 ? parseWorkspaceRef(r.stdout) : null;
     if (workspace === null) {
-      throw new SpawnError("LAUNCH_FAILED", `cmux new-workspace failed: ${r.stderr.trim()}`, {
-        exit: r.code,
-        stdout: r.stdout.trim(),
-      });
+      // cmux refusing volleyd (or not running) is something the owner can fix: say how.
+      const access = r.code === 0 ? "unknown" : classifyCmux(r);
+      const hasPassword =
+        (this.env.CMUX_SOCKET_PASSWORD ?? "") !== "" || readCmuxPassword(this.home) !== null;
+      throw new SpawnError(
+        "LAUNCH_FAILED",
+        access === "refused" || access === "not_running" || access === "missing"
+          ? `volleyd cannot open a cmux workspace. ${cmuxAdvice(access, hasPassword)}`
+          : `cmux new-workspace failed: ${r.stderr.trim()}`,
+        { exit: r.code, stdout: r.stdout.trim(), cmux: r.stderr.trim() },
+      );
     }
     return { workspace };
   }
 
   async readScreen(workspace: string, lines: number): Promise<string | null> {
     // Bounded: a hung cmux must not hold a caller (the screen publisher, verification) forever.
-    const r = await this.exec(
+    const r = await this.cmux(
       ["cmux", "read-screen", "--workspace", workspace, "--lines", String(lines)],
       { timeoutMs: DAEMON_DEFAULTS.screen_read_timeout_ms },
     ).catch(() => null);
@@ -67,15 +88,15 @@ export class LocalCmuxHost implements Host {
   }
 
   async sendKeys(workspace: string, key: string): Promise<void> {
-    await this.exec(["cmux", "send-key", "--workspace", workspace, key]);
+    await this.cmux(["cmux", "send-key", "--workspace", workspace, key]);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
-    await this.exec(["cmux", "send", "--workspace", workspace, text], tokens);
+    await this.cmux(["cmux", "send", "--workspace", workspace, text], tokens);
   }
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
-    await this.exec(["cmux", "close-workspace", "--workspace", workspace], { consent });
+    await this.cmux(["cmux", "close-workspace", "--workspace", workspace], { consent });
   }
 }
 

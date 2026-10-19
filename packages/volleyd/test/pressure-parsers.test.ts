@@ -151,6 +151,18 @@ describe("cmux ping", () => {
     expect(s.ok).toBe(false);
   });
 
+  it("pings with the stored cmux socket password, as volleyd's spawns do", async () => {
+    let seen: Record<string, string | undefined> | undefined;
+    const exec: ExecFn = async (_argv, opts) => {
+      seen = opts?.env;
+      return ok("pong");
+    };
+    await sampleCmuxPing(exec, 3000, () => 0, { CMUX_SOCKET_PASSWORD: "pw" });
+    expect(seen?.CMUX_SOCKET_PASSWORD).toBe("pw");
+    await sampleCmuxPing(exec, 3000, () => 0, undefined);
+    expect(seen).toBeUndefined();
+  });
+
   it("uses the fenced argv", async () => {
     const f = fakeExec({ cmux: ok("pong") });
     await sampleCmuxPing(f.exec, 3000);

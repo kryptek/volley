@@ -1,10 +1,17 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { ADMIN_FILE, BROKER_FILE, daemonAdminAuth, daemonAuth } from "../src/broker-auth";
+import {
+  ADMIN_FILE,
+  BROKER_FILE,
+  controlAuth,
+  daemonAdminAuth,
+  daemonAuth,
+} from "../src/broker-auth";
 import { daemonStartOptions } from "../src/commands/daemon";
+import { resolveControlTarget } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
@@ -194,5 +201,55 @@ describe("volleyd against a broker that requires credentials", () => {
     const r = await runCli(["daemon", "--no-spawn"], env);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("chmod 600");
+  });
+});
+
+describe("control clients on the supervisor machine (volleyd config get, status, …)", () => {
+  const linux = { platform: "linux" as const, keychain: () => null };
+  let dirs = 0;
+  /** An auth dir holding the coordinator.json `volley setup` writes. */
+  const saved = () => {
+    const authDir = join(home, `auth-${dirs++}`);
+    mkdirSync(authDir);
+    writeFileSync(
+      join(authDir, "coordinator.json"),
+      JSON.stringify({ username: "coordinator", password: "saved-pw" }),
+      { mode: 0o600 },
+    );
+    return { VOLLEY_AUTH_DIR: authDir };
+  };
+
+  it("use the coordinator login setup saved when nothing else names one", () => {
+    expect(controlAuth(saved(), home, "mqtt://localhost:1883", linux)).toEqual({
+      username: "coordinator",
+      password: "saved-pw",
+    });
+    // The macOS keychain item comes first.
+    expect(
+      controlAuth(saved(), home, "mqtt://127.0.0.1:1883", {
+        platform: "darwin",
+        keychain: () => "keychain-pw",
+      }),
+    ).toEqual({ username: "coordinator", password: "keychain-pw" });
+  });
+
+  it("keep VOLLEY_AUTH_* first, and never send the saved login to another machine's broker", () => {
+    const env = { ...saved(), VOLLEY_AUTH_USERNAME: "alice", VOLLEY_AUTH_PASSWORD: "a" };
+    expect(controlAuth(env, home, "mqtt://localhost:1883", linux)).toEqual({
+      username: "alice",
+      password: "a",
+    });
+    expect(controlAuth(saved(), home, "mqtt://broker.example:1883", linux)).toBeNull();
+  });
+
+  it("resolveControlTarget passes the broker URL, so the fallback applies", () => {
+    const env = { ...saved(), VOLLEY_BROKER_URL: "mqtt://localhost:1883" };
+    // On macOS the real keychain would be asked first; the file is what Linux CI can check.
+    if (process.platform !== "darwin") {
+      expect(resolveControlTarget({}, env, home).auth).toEqual({
+        username: "coordinator",
+        password: "saved-pw",
+      });
+    }
   });
 });

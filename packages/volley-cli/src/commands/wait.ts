@@ -76,6 +76,8 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
         password: parsed.values.password as string | undefined,
       },
       env,
+      process.cwd(),
+      brokerUrl,
     );
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
   } catch (e) {

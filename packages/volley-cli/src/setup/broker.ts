@@ -314,8 +314,16 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
   if (restart) plan.changes.push(restartChange(ctx));
   plan.verify = async () => {
     const problems: string[] = [];
+    plan.verified = [];
     for (const url of probed) {
       const p = await ctx.deps.probeAnonymous(url);
+      if (p === "refused") {
+        plan.verified.push(
+          url === lanUrl && url !== ctx.wsUrl
+            ? `Listener 9001 from the LAN (${url}): reachable, refuses anonymous clients`
+            : `Listener ${port(url)}: refuses anonymous clients`,
+        );
+      }
       if (p === "accepted") problems.push(`${url} still accepts anonymous clients`);
       if (p === "unreachable") {
         problems.push(

@@ -10,6 +10,7 @@ import {
   withAdmin,
   writeSecret,
 } from "../auth/context";
+import { KEYCHAIN_SERVICE } from "../auth/coordinator-login";
 import { type RoleDrift, classify, clientOf, cmd, inspectRoles } from "../auth/dynsec";
 import { type MigrateFlags, initOrMigrate } from "../auth/migrate";
 import {
@@ -35,8 +36,7 @@ import { lanWsUrl } from "./step";
  * passwords and only what is missing is created.
  */
 
-/** The keychain item holding the coordinator's broker login (macOS `security`). */
-export const KEYCHAIN_SERVICE = "volley-broker";
+export { KEYCHAIN_SERVICE };
 
 const list = (xs: readonly string[]) => xs.join(", ");
 

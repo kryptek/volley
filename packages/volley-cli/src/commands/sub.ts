@@ -65,6 +65,8 @@ export async function sub({ argv, env, io }: SubArgs): Promise<ExitCode> {
         password: parsed.values.password as string | undefined,
       },
       env,
+      process.cwd(),
+      brokerUrl,
     );
   } catch (e) {
     io.stderr(`volley sub: ${e instanceof Error ? e.message : String(e)}\n`);

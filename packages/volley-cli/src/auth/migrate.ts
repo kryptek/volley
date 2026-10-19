@@ -378,7 +378,7 @@ async function fixedIdentities(
     if (fresh.size > 0) {
       out.push(
         "Give each client its identity: coordinator sessions VOLLEY_AUTH_USERNAME=coordinator +",
-        "VOLLEY_AUTH_PASSWORD in the MCP server env and your shell profile (or coordinator.json);",
+        "VOLLEY_AUTH_PASSWORD in the MCP server env (this machine's volley CLIs read coordinator.json);",
         "the Desk / volley dash: sign in as desk; volleyd: $VOLLEYD_HOME/broker.json (--volleyd-file).",
       );
     }

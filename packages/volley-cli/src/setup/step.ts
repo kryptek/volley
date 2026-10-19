@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
+import { CMUX_CHECK_OUT, CMUX_CHECK_SCRIPT } from "./cmux";
+import { lsofArgv, ssArgv } from "./desk-port";
 
 /**
  * What every `volley setup` step shares. A step is a planner: it reads the machine's state and
@@ -70,6 +72,11 @@ export interface SetupDeps {
   repoRoot: string | null;
   /** The `bun` the services run (a stable PATH entry, not a versioned install). */
   bun: string;
+  /**
+   * Ask for a secret at the terminal without echoing it (the cmux socket password); null when
+   * nobody is there to answer. Unset: setup never asks (volleyd planning for the Desk).
+   */
+  askSecret?: (prompt: string) => Promise<string | null>;
 }
 
 export interface SetupContext {
@@ -132,6 +139,8 @@ export interface StepPlan {
   skipped?: string;
   /** Checks after the changes; returns the problems left. */
   verify?: () => Promise<string[]>;
+  /** What `verify` confirmed, one line each (filled by it; printed once it passes). */
+  verified?: string[];
 }
 
 export type Planner = (ctx: SetupContext) => Promise<StepPlan>;
@@ -170,6 +179,17 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
       (a0 === "systemctl" &&
         a1 === "--user" &&
         ["daemon-reload", "enable", "restart", "is-active"].includes(a2 ?? "")) ||
+      // The Desk's port: who listens on it, and the Desk service's own PID.
+      (a0 === "lsof" &&
+        argv.length === 5 &&
+        line === lsofArgv(portOf(argv[2], "-iTCP:")).join(" ")) ||
+      (a0 === "ss" && argv.length === 9 && line === ssArgv(portOf(argv[8], ":")).join(" ")) ||
+      line === "systemctl --user show -p MainPID --value volley-desk.service" ||
+      // cmux, reached the way volleyd's service reaches it (outside cmux; output to a file).
+      (argv.length === 5 &&
+        same(argv.slice(0, 4), ["sh", "-c", CMUX_CHECK_SCRIPT, "sh"]) &&
+        /^\/[^\n\0]*$/.test(argv[4] ?? "") &&
+        (argv[4] ?? "").endsWith(`/${CMUX_CHECK_OUT}`)) ||
       (a0 === "security" &&
         (a1 === "find-generic-password" || (a1 === "-i" && argv.length === 2))) ||
       (a0 === "bash" &&
@@ -186,6 +206,15 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
     if (!ok) throw new Error(`volley setup does not run \`${line}\``);
   };
 }
+
+const same = (argv: readonly string[], want: readonly string[]) =>
+  argv.length === want.length && want.every((w, i) => argv[i] === w);
+
+/** The port in `<prefix><port>`, or NaN (which no probe argv matches). */
+const portOf = (arg: string | undefined, prefix: string) =>
+  arg?.startsWith(prefix) === true && /^\d{1,5}$/.test(arg.slice(prefix.length))
+    ? Number(arg.slice(prefix.length))
+    : Number.NaN;
 
 /** `exec` behind `fence`: a refused command throws before anything is spawned. */
 export function fencedExec(exec: SetupExec, fence: ReturnType<typeof setupFence>): SetupExec {

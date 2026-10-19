@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { stableServicePath } from "volley-cli/setup/service-path";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { type ExecFn, exec as realExec } from "../exec";
@@ -23,8 +24,13 @@ $VOLLEYD_HOME/volleyd.log) and loads it with \`launchctl bootstrap gui/$UID\`. -
 the plist instead. Restart the service with:
   launchctl kickstart -k gui/$UID/${SERVICE_LABEL}
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
-The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE, PATH and, when set,
-VOLLEY_AUTH_DIR (the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in.
+The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE and, when set, VOLLEY_AUTH_DIR
+(the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in. Its PATH is
+a fixed list (~/.volley/bin, bun's directory, Homebrew's bin, /usr/local/bin, the cmux app's bin,
+/usr/bin:/bin:/usr/sbin:/sbin) plus the directories of claude, gh, git… found on your PATH, never
+a temporary one: the same from any terminal.
+The cmux socket password (\`volley setup\` stores it) never goes in the plist either: volleyd
+reads $VOLLEYD_HOME/cmux.json (mode 0600) each time it runs cmux.
 Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,
 written by \`volley auth init --volleyd-file\`).
 `;
@@ -126,12 +132,15 @@ function servicePaths(
   env: Record<string, string | undefined>,
 ): ServicePaths {
   const target = resolveTarget(values, env);
+  const userHome = env.HOME ?? homedir();
+  const bun = findBun(env.PATH ?? "", process.execPath);
   return {
-    launchAgentsDir: join(env.HOME ?? homedir(), "Library", "LaunchAgents"),
+    launchAgentsDir: join(userHome, "Library", "LaunchAgents"),
     home: volleydHome(env),
     uid: process.getuid?.() ?? 0,
-    bun: findBun(env.PATH ?? "", process.execPath),
-    path: env.PATH ?? "/usr/bin:/bin",
+    bun,
+    // Never the shell's whole PATH (per-terminal entries would make every rerun a change).
+    path: stableServicePath({ home: userHome, bun, path: env.PATH, tmpdir: env.TMPDIR }),
     ...(env.VOLLEY_AUTH_DIR !== undefined && env.VOLLEY_AUTH_DIR !== ""
       ? { authDir: env.VOLLEY_AUTH_DIR }
       : {}),

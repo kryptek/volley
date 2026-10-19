@@ -238,8 +238,13 @@ on GitHub with one small open issue and a pushed release branch
    machine: http://localhost:5199/#signin=vly_admin_…` and `From another device:
    http://<LAN address>:5199/#signin=vly_admin_…` (keep the terminal open: you use them in step
    5). Services says `Installed volley and volleyd in ~/.volley/bin (scripts that run this
-   checkout with <your bun>)` and loads volleyd and the Desk. Phone prints a QR code. Last line: `Setup complete.` Anything that asks you to read
-   source or guess is a fail: note the step.
+   checkout with <your bun>)` and loads volleyd and the Desk; its hooks change says your status
+   line keeps working. With cmux on its default socket mode, Services explains that cmux lets
+   only its own programs in, gives the menu path (cmux → Settings… → Automation → Socket control
+   mode → Password mode → Set) and offers *Give volleyd the cmux socket password*: set one in
+   cmux, answer yes, type it at the hidden prompt; it says `volleyd's service reaches cmux now`.
+   A wrong password is refused and nothing is stored. Phone prints a QR code. Last line:
+   `Setup complete.` Anything that asks you to read source or guess is a fail: note the step.
 2. **Phone sign-in, then stop the stopwatch.** Right away (the QR lasts 10 minutes), scan the QR
    with the phone camera and open the link.
    **Pass:** within about 10 s the Desk loads signed in (Settings › account row: a `steer`
@@ -249,7 +254,12 @@ on GitHub with one small open issue and a pushed release branch
    target; `volley setup` again issues a new one.)
 3. **Rerun and PATH.**
    `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc && exec zsh`, then
-   `volley --version` → `0.3.0`, and `volley setup --repair` → every step `✓ already done`.
+   `volley --version` → `0.3.0`, and `volley setup --repair` → every step `✓ already done`, also
+   from a terminal outside cmux (Terminal.app). Services' found lines include `cmux: volleyd's
+   service reaches it`. With no VOLLEY_AUTH_* exported, `volleyd config get` and `volley list`
+   work (the saved coordinator login). Start any server on 127.0.0.1:5199 beside the Desk
+   (`python3 -m http.server 5199 --bind 127.0.0.1`): `volley setup --repair` stops at Services
+   naming `python3 (PID …)` and `kill …`; stop it and the rerun passes again.
 4. **Expiry.** `volley auth signin-link --role steer --label expiry-check --ttl 5` prints a
    token. Wait 10 s, then on the phone open `http://<the Mac's LAN IP>:5199/#signin=<token>` in a
    **new tab** (`ipconfig getifaddr en0` gives the IP).
