@@ -29,6 +29,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   spawn_timeout_s: 120,
   spawn_retry_max_s: 900,
   spawn_retry_max: 8,
+  brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
   hosts: {},

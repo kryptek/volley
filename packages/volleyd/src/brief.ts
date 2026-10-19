@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { constants, accessSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExecFn } from "./exec";
 import { mintScriptToken } from "./fence";
 import { SpawnError } from "./spawn-error";
+import { expandHome } from "./worktree";
 
 /** The roles volleyd spawns; each has `briefs/<role>.md.tmpl`. */
 export const ROLES = [
@@ -68,6 +70,90 @@ export function briefExtra(repoRoot: string): string {
 export function briefExtraFrom(content: string | null): string {
   const text = (content ?? "").trim();
   return text === "" ? "" : `\n## Repository notes\n\n${text}\n`;
+}
+
+/** The preface file when the wave file names none: `<repo>/.volley/brief-preface.md`. */
+export const DEFAULT_BRIEF_PREFACE = join(".volley", "brief-preface.md");
+
+/** Between the preface and the role template (blank lines first: never a setext heading). */
+export const BRIEF_PREFACE_RULE = "\n\n---\n\n";
+
+/** What the wave state shows of a preface (wave-state `brief_preface`). */
+export interface BriefPrefaceInfo {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** A loaded preface: its info plus its text. */
+export interface BriefPreface extends BriefPrefaceInfo {
+  text: string;
+}
+
+/** A preface over `brief_preface_max_bytes`. */
+export class BriefPrefaceTooLarge extends Error {
+  readonly code = "BRIEF_PREFACE_TOO_LARGE";
+  readonly detail: Record<string, unknown>;
+  constructor(path: string, bytes: number, max: number) {
+    super(
+      `BRIEF_PREFACE_TOO_LARGE: ${path} is ${bytes} B; brief_preface_max_bytes is ${max} B (shorten it, or raise the tunable)`,
+    );
+    this.name = "BriefPrefaceTooLarge";
+    this.detail = { path, bytes, max };
+  }
+}
+
+/**
+ * The preface file of a wave in `repo`: the wave file's `brief_preface:` (relative to the repo,
+ * or absolute), else `<repo>/.volley/brief-preface.md`. Resolved on the supervisor's host.
+ */
+export function briefPrefacePath(repo: string, configured?: string): string {
+  const file = configured ?? DEFAULT_BRIEF_PREFACE;
+  return isAbsolute(file) || file.startsWith("~") ? expandHome(file) : join(expandHome(repo), file);
+}
+
+/**
+ * Read the preface at `path`: null when there is no file, or a blank one (no agent would get
+ * anything, so it is reported and journaled as missing). Over `maxBytes`, or not valid UTF-8 (the
+ * brief carries the file's exact bytes), throws.
+ */
+export function readBriefPreface(path: string, maxBytes: number): BriefPreface | null {
+  if (!existsSync(path)) return null;
+  const bytes = readFileSync(path);
+  if (bytes.length > maxBytes) throw new BriefPrefaceTooLarge(path, bytes.length, maxBytes);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(`brief preface ${path} is not valid UTF-8`);
+  }
+  if (text.trim() === "") return null;
+  return {
+    path,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    bytes: bytes.length,
+    text,
+  };
+}
+
+/** The wave-state shape of a preface (no text). */
+export const prefaceInfo = (p: BriefPreface | null): BriefPrefaceInfo | null =>
+  p === null ? null : { path: p.path, sha256: p.sha256, bytes: p.bytes };
+
+/**
+ * The brief an agent gets: the preface verbatim (no placeholder expansion), the rule, then the
+ * rendered role template.
+ */
+export function withPreface(preface: BriefPreface | null, brief: string): string {
+  if (preface === null) return brief;
+  return `${preface.text}${BRIEF_PREFACE_RULE}${brief}`;
+}
+
+/** `brief preface: <path> (<bytes> B, sha256 <12 hex>)`, or `brief preface: none`. */
+export function formatBriefPreface(p: BriefPrefaceInfo | null): string {
+  return p === null
+    ? "brief preface: none"
+    : `brief preface: ${p.path} (${p.bytes} B, sha256 ${p.sha256.slice(0, 12)})`;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -204,6 +205,73 @@ describe("volleyd status formatting", () => {
       "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 1  alarms: 1",
     );
     expect(out).toContain("spawn failed: WORKTREE_FAILED — retry in 30s (attempt 1)");
+  });
+
+  const plain = {
+    wave: "w1",
+    version: 1,
+    owner: null,
+    repo: "r",
+    release_branch: "release/w1",
+    status: "running" as const,
+    tasks: [{ id: "T1", issue: 101, stage: "merge_ready" as const, agents: {} }],
+    open_decisions: [],
+    gates: ["T1"],
+    updated_at: "2026-10-18T12:00:00.000Z",
+  };
+
+  it("shows the wave's brief preface under the header (none when it has none)", () => {
+    const sha = "0123456789abcdef".repeat(4);
+    const out = formatWave({
+      ...plain,
+      brief_preface: { path: "/r/.volley/p.md", sha256: sha, bytes: 912 },
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  brief preface: /r/.volley/p.md (912 B, sha256 0123456789ab)",
+    );
+    expect(formatWave({ ...plain, brief_preface: null }).split("\n")[1]).toBe(
+      "  brief preface: none",
+    );
+    // A state from before the field existed: no line.
+    expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
+  });
+
+  it("marks a task gated without reviews because its plan has none", () => {
+    const out = formatWave({
+      ...plain,
+      tasks: [
+        { id: "T1", issue: 101, stage: "merge_ready", agents: {}, reviews_skipped_by_plan: true },
+      ],
+    });
+    expect(out).toContain("  T1  #101   merge_ready     reviews skipped by plan\n");
+  });
+
+  it("status --json carries brief_preface with the sha256 of the file's bytes", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      await env.start();
+      const repo = join(env.home, "repo");
+      mkdirSync(join(repo, ".volley"), { recursive: true });
+      const preface = "Public repo: no names.\n";
+      writeFileSync(join(repo, ".volley", "brief-preface.md"), preface);
+      const file = join(env.home, "w1.yaml");
+      writeFileSync(
+        file,
+        `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`,
+      );
+      expect((await runCli(["run", file], env.env)).exitCode).toBe(0);
+      const json = JSON.parse((await runCli(["status", "w1", "--json"], env.env)).stdout);
+      expect(json.brief_preface).toEqual({
+        path: join(repo, ".volley", "brief-preface.md"),
+        bytes: Buffer.byteLength(preface),
+        sha256: createHash("sha256").update(preface).digest("hex"),
+      });
+      expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
+        `  brief preface: ${join(repo, ".volley", "brief-preface.md")} (`,
+      );
+    } finally {
+      await env.cleanup();
+    }
   });
 });
 

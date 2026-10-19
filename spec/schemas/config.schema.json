@@ -179,6 +179,13 @@
           "default": 8,
           "description": "Failed spawn attempts in a row after which the supervisor stops retrying automatically (its spawn_failed decision then says so)."
         },
+        "brief_preface_max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 16384,
+          "description": "Largest brief preface (spec section 4.6.9) the supervisor accepts, in bytes; a larger one refuses the wave (BRIEF_PREFACE_TOO_LARGE). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "wake_grace_s": {
           "type": "integer",
           "minimum": 0,

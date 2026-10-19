@@ -124,7 +124,16 @@ import { WaveFileError, parseWaveFile } from "./wave-file";
 
 import { PipelineDriver, type SpawnStart, roleSpawnHold } from "./pipeline";
 
-import { type Role, briefGatePath, isRole } from "./brief";
+import {
+  type BriefPrefaceInfo,
+  BriefPrefaceTooLarge,
+  type Role,
+  briefGatePath,
+  briefPrefacePath,
+  isRole,
+  prefaceInfo,
+  readBriefPreface,
+} from "./brief";
 import {
   type ClockSample,
   type ClockState,
@@ -3549,14 +3558,16 @@ export class Daemon {
   private async submit(p: Record<string, unknown>): Promise<HandlerResult> {
     const first = this.checkSubmit(p);
     if ("refusal" in first) return first.refusal;
+    const preface = this.briefPreface(first.wave);
+    if ("refusal" in preface) return preface.refusal;
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
     if (first.existing !== undefined) {
-      return this.resubmit(first.existing, first.wave, p.wave_yaml as string);
+      return this.resubmit(first.existing, first.wave, p.wave_yaml as string, preface);
     }
     const text = p.wave_yaml as string;
     if (this.opts.issueBody === undefined)
-      return this.commitSubmit(first.wave, first.owner, {}, text);
+      return this.commitSubmit(first.wave, first.owner, {}, text, preface);
     // Fetching issue bodies can take seconds: do it off the serial queue (control ops and ticks,
     // the kill switch included, keep running), then commit inside it, re-checking what may have
     // changed meanwhile (the kill switch, a racing submit of the same wave id).
@@ -3568,11 +3579,31 @@ export class Daemon {
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
-          if (again.existing !== undefined) return this.resubmit(again.existing, again.wave, text);
-          return this.commitSubmit(again.wave, again.owner, files, text);
+          if (again.existing !== undefined)
+            return this.resubmit(again.existing, again.wave, text, preface);
+          return this.commitSubmit(again.wave, again.owner, files, text, preface);
         }),
       ),
     };
+  }
+
+  /**
+   * The wave's brief preface as its agents will get it (`info: null`: no file, `path` says where
+   * it was looked for), or BRIEF_PREFACE_TOO_LARGE over `brief_preface_max_bytes` (the wave's
+   * `config:` override, else the global value).
+   */
+  private briefPreface(
+    wave: Wave,
+  ): { info: BriefPrefaceInfo | null; path: string } | { refusal: Reply } {
+    const path = briefPrefacePath(wave.repo, wave.brief_preface);
+    const max =
+      wave.config.brief_preface_max_bytes ?? this.config.effective().brief_preface_max_bytes;
+    try {
+      return { info: prefaceInfo(readBriefPreface(path, max)), path };
+    } catch (e) {
+      if (e instanceof BriefPrefaceTooLarge) return { refusal: { ok: false, error: e.message } };
+      throw e;
+    }
   }
 
   /**
@@ -3651,13 +3682,23 @@ export class Daemon {
     owner: string | null,
     issueFiles: Record<TaskId, string[]>,
     text: string,
+    preface: { info: BriefPrefaceInfo | null; path: string },
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
     this.waves.set(wave.wave, WaveLog.open(join(this.opts.home, "waves", wave.wave)));
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
     this.storeVersion(this.versionFile(wave.wave, 1), text);
-    await this.append(wave.wave, { type: "wave_submitted", data: { wave, owner } });
+    await this.append(wave.wave, {
+      type: "wave_submitted",
+      data: { wave, owner, brief_preface: preface.info },
+    });
+    if (preface.info === null) {
+      await this.append(wave.wave, {
+        type: "alarm_raised",
+        data: { alarm: "brief_preface_missing", path: preface.path },
+      });
+    }
     for (const id of wave.task_order) {
       const files = issueFiles[id];
       await this.append(wave.wave, {
@@ -4208,7 +4249,12 @@ export class Daemon {
   }
 
   /** A new version of a submitted wave: store the file, journal the plan change, re-admit. */
-  private async resubmit(log: WaveLog, wave: Wave, text: string): Promise<Reply> {
+  private async resubmit(
+    log: WaveLog,
+    wave: Wave,
+    text: string,
+    preface: { info: BriefPrefaceInfo | null; path: string },
+  ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
     if (state === null) return { ok: false, error: `wave '${wave.wave}' has no state` };
@@ -4244,7 +4290,23 @@ export class Daemon {
     }
     this.storeVersion(file, text);
     this.config.setWaveOverrides(wave.wave, wave.config);
-    for (const ev of res.planEvents) await this.append(wave.wave, ev);
+    // Which preface this version's agents get; missing is journaled once per wave.
+    const journaledMissing = log.journal
+      .readAll()
+      .some((e) => e.type === "alarm_raised" && e.data.alarm === "brief_preface_missing");
+    for (const ev of res.planEvents) {
+      const versioned = ev.type === "wave_versioned";
+      await this.append(
+        wave.wave,
+        versioned ? { ...ev, data: { ...ev.data, brief_preface: preface.info } } : ev,
+      );
+      if (versioned && preface.info === null && !journaledMissing) {
+        await this.append(wave.wave, {
+          type: "alarm_raised",
+          data: { alarm: "brief_preface_missing", path: preface.path },
+        });
+      }
+    }
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
       if (d.op === "resolve") {

@@ -8,5 +8,6 @@
     },
     { "severity": "P2", "file": "src/api.ts", "line": 10, "text": "Error is swallowed." }
   ],
-  "verdict": "changes_requested"
+  "verdict": "changes_requested",
+  "hygiene": { "checked": true, "findings": [] }
 }

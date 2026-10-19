@@ -51,6 +51,10 @@
               "$ref": "config.schema.json#/$defs/tunables",
               "description": "Global config with this wave's config: overrides applied."
             },
+            "brief_preface": {
+              "oneOf": [{ "$ref": "#/$defs/briefPreface" }, { "type": "null" }],
+              "description": "The brief preface every agent of the current plan version gets (spec section 4.6.9), or null when the wave has none."
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
@@ -139,7 +143,28 @@
         "next_retry_at": {
           "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
           "description": "When the supervisor retries the failed spawn on its own; null once it stopped retrying (with last_error)."
+        },
+        "reviews_skipped_by_plan": {
+          "type": "boolean",
+          "description": "True once the task reached merge_ready without reviews because its wave-file pipeline lists no review stage (spec section 4.6.8)."
         }
+      }
+    },
+    "briefPreface": {
+      "type": "object",
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The preface file, as resolved on the supervisor's host."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the file's bytes."
+        },
+        "bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "pipelineStep": {

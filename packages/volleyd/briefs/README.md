@@ -2,8 +2,8 @@
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
 `fixup`, `rebase`. At spawn, `src/brief.ts` renders `<role>.md.tmpl` into the agent's
-`.volley/brief.md`; `launch.sh` passes that file to `claude` as its prompt, so the brief never
-appears in an argv.
+`.volley/brief.md`, below the repo's brief preface (if any); `launch.sh` passes that file to
+`claude` as its prompt, so the brief never appears in an argv.
 
 ## Placeholders
 
@@ -41,14 +41,22 @@ Pipeline roles get their inputs as files the spawn writes into `.volley/` before
 `findings.md` + `findings.json` (fixup: every finding, numbered `S1…`/`Q1…`, the trivial-only
 rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push).
 Reviewers and the fixup publish a retained `result` before `done` — `type: "review"` with
-`{ findings, verdict }`, `type: "fixup"` with `{ resolved: [{ finding, how }] }`
-(`spec/schemas/review-result.schema.json`); the templates spell out that contract.
+`{ findings, verdict, hygiene: { checked: true, findings } }`, `type: "fixup"` with
+`{ resolved: [{ finding, how }] }` (`spec/schemas/review-result.schema.json`); the templates
+spell out that contract. Both reviewer templates carry the fixed public-hygiene line (person
+names, local usernames, machine paths, private hostnames or IPs in the diff, commit messages or
+PR text are P1s) whatever the repo's preface says; `reviews.ts` `HYGIENE_CHECK` is that line and
+`test/reviews.test.ts` holds the templates to it. Keep it in both when you edit one.
 
-## Repo extras and the brief gate
+## Repo preface, extras and the brief gate
 
-- `<repo>/.volley/brief-extra.md` — appended to every brief for that repo as a
-  "Repository notes" section (build commands, gates). `.volley/` is kept out of git through
-  the repo's `info/exclude`.
+- `<repo>/.volley/brief-preface.md` (or the wave file's `brief_preface:`) — the repo's
+  **rules**, put verbatim at the very top of every brief, above the template and a `---` rule.
+  No placeholder is expanded in it. Capped at `brief_preface_max_bytes`. Public-repo hygiene
+  rules belong here; `/volley-issues` creates the file from its template when it is missing.
+- `<repo>/.volley/brief-extra.md` — the repo's **notes**: appended to every brief for that repo
+  as a "Repository notes" section (build commands, gates), through `{{extra}}`. `.volley/` is
+  kept out of git through the repo's `info/exclude`.
 - `$VOLLEYD_HOME/brief-gate` — an executable run as `brief-gate <path to brief.md>` before any
   launch; a non-zero exit refuses the spawn with `SPAWN_BRIEF_REJECTED` (stderr is journaled).
   Use it to enforce house rules on briefs. It is a local file, never a tunable: tunables can be

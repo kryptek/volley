@@ -62,6 +62,11 @@
       "last_seen": "2026-10-18T14:02:00.000Z"
     },
     "effective_config": { "hard_ceiling": 12, "spawn_budget_multiplier": 3 },
+    "brief_preface": {
+      "path": "/srv/example-repo/.volley/brief-preface.md",
+      "sha256": "3f8a1c6e0b9d2f47a5e8c1d06b3e9f2a7c4d8e1f0a6b5c2d9e3f7a1b8c4d0e6f",
+      "bytes": 912
+    },
     "updated_at": "2026-10-18T14:02:11.000Z"
   }
 }

@@ -48,6 +48,7 @@ interface RawWave {
   heavy_pools?: string[];
   spawn_budget?: number;
   config?: TunablesPatch;
+  brief_preface?: string;
 }
 
 /** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
@@ -175,6 +176,7 @@ function normalise(w: RawWave): Wave {
     heavy_pools: w.heavy_pools ?? [],
     ...(w.spawn_budget !== undefined ? { spawn_budget: w.spawn_budget } : {}),
     config: w.config ?? {},
+    ...(w.brief_preface !== undefined ? { brief_preface: w.brief_preface } : {}),
   };
 }
 

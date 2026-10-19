@@ -79,6 +79,8 @@ export interface Tunables {
   spawn_retry_max_s: number;
   /** Failed spawn attempts in a row after which automatic retries stop. */
   spawn_retry_max: number;
+  /** Largest brief preface accepted (bytes); a larger one refuses the wave or the spawn. */
+  brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
   hosts: Record<string, RemoteHostConfig>;
@@ -134,6 +136,8 @@ export interface Wave {
   heavy_pools: string[];
   spawn_budget?: number;
   config: TunablesPatch;
+  /** `brief_preface:` as written (relative to `repo`, or absolute); absent: the default file. */
+  brief_preface?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +177,8 @@ export interface TaskState {
   attempt?: number;
   /** When the next automatic retry runs; null once `spawn_retry_max` stopped them. */
   next_retry_at?: string | null;
+  /** Gated without reviews because its wave-file pipeline lists no review stage. */
+  reviews_skipped_by_plan?: boolean;
 }
 
 export interface WaveSpec {
@@ -197,6 +203,8 @@ export interface WaveState {
   /** The owner's attention state, maintained by the daemon (not journaled). */
   coordinator?: CoordinatorAttention;
   effective_config?: TunablesPatch;
+  /** The brief preface the current plan version's agents get (null: none). */
+  brief_preface?: { path: string; sha256: string; bytes: number } | null;
   updated_at: string;
 }
 

@@ -1,6 +1,17 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { isReservedChannel } from "volley-mcp/channels";
+
+/** The wave file's `brief_preface:` unless told otherwise (relative to the repo). */
+export const DEFAULT_BRIEF_PREFACE = ".volley/brief-preface.md";
+
+/** The starting preface: public-repo hygiene rules plus a slot for the repo's own. */
+export const BRIEF_PREFACE_TEMPLATE = fileURLToPath(
+  new URL("../templates/brief-preface.md", import.meta.url),
+);
 
 /** One issue as `gh issue view <n> --json number,title,body` prints it. */
 export interface IssueInput {
@@ -24,6 +35,8 @@ export interface WaveOptions {
   repoSlug?: string;
   /** Issues already merged: a dependency on one of them is dropped instead of rejected. */
   satisfied?: number[];
+  /** The wave's `brief_preface:` (relative to the repo, or absolute); default `.volley/brief-preface.md`. */
+  briefPreface?: string;
 }
 
 export interface WaveResult {
@@ -232,6 +245,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     `release_branch: ${q(opts.releaseBranch)}`,
     `model: ${q(opts.model)}`,
     ...(opts.namespace !== undefined ? [`namespace: ${q(opts.namespace)}`] : []),
+    `brief_preface: ${q(opts.briefPreface ?? DEFAULT_BRIEF_PREFACE)}`,
     `pipeline: ${opts.pipeline !== undefined ? q(opts.pipeline) : "[implement, [spec_review, quality_review], fixup, merge_ready]"}`,
     "tasks:",
   ];
@@ -263,9 +277,34 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
   return { yaml: `${lines.join("\n")}\n`, undeclared, warnings };
 }
 
+/**
+ * Create the preface at `file` (relative to `repo`, or absolute) from the template when there
+ * is none. An existing file is never touched: it is the repo's own rules.
+ */
+export function ensureBriefPreface(
+  repo: string,
+  file: string = DEFAULT_BRIEF_PREFACE,
+  home: string = homedir(),
+): { path: string; created: boolean } {
+  // `~` / `~/…` is the home directory, as volleyd reads it.
+  const tilde = (p: string) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
+  const path = isAbsolute(tilde(file)) ? tilde(file) : join(tilde(repo), file);
+  if (existsSync(path)) return { path, created: false };
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    // `wx`: a file that appeared meanwhile is kept, not overwritten.
+    writeFileSync(path, readFileSync(BRIEF_PREFACE_TEMPLATE), { flag: "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return { path, created: false };
+    throw e;
+  }
+  return { path, created: true };
+}
+
 const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <id> --repo <path>
          --release-branch <branch> --model <model> [--pipeline <json>] [--namespace <ns>]
-         [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--out <wave.yaml>]
+         [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--brief-preface <path>]
+         [--out <wave.yaml>]
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
@@ -277,6 +316,10 @@ names this repository, and "- #N" list items under an empty label). A dependency
 set is an error unless listed in --satisfied; so is a dependency line it cannot read.
 Writes the wave YAML to --out (default stdout). Issues with no dependency line are listed on
 stderr: confirm their order with the human before submitting.
+The wave file names a brief preface (--brief-preface, default .volley/brief-preface.md in the
+repo) that volleyd puts at the top of every agent's brief. When --repo is a directory on this
+machine and that file does not exist, it is written from templates/brief-preface.md (public-repo
+hygiene rules); an existing one is never changed.
 `;
 
 function main(argv: string[]): number {
@@ -343,10 +386,20 @@ function main(argv: string[]): number {
       ...(pipeline !== undefined ? { pipeline } : {}),
       ...(v.namespace !== undefined ? { namespace: v.namespace } : {}),
       ...(v["repo-slug"] !== undefined ? { repoSlug: v["repo-slug"] } : {}),
+      ...(v["brief-preface"] !== undefined ? { briefPreface: v["brief-preface"] } : {}),
       satisfied,
     });
     if (v.out !== undefined) writeFileSync(v.out, yaml);
     else process.stdout.write(yaml);
+    const repo = v.repo as string;
+    if (existsSync(repo) && statSync(repo).isDirectory()) {
+      const p = ensureBriefPreface(repo, v["brief-preface"]);
+      process.stderr.write(
+        p.created
+          ? `wrote ${p.path} from the template: add this repository's rules to it\n`
+          : `brief preface: ${p.path} (kept)\n`,
+      );
+    }
     for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
     if (undeclared.length > 0) {
       process.stderr.write(
@@ -372,6 +425,7 @@ function parse(argv: string[]) {
       namespace: { type: "string" },
       "repo-slug": { type: "string" },
       satisfied: { type: "string" },
+      "brief-preface": { type: "string" },
       out: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
