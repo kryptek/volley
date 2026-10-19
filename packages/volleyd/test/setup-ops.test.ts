@@ -372,6 +372,10 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     // Services: volleyd's own service is a terminal's; the hooks and the Desk are not.
     const services = step(r.steps, "services");
     expect(services.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
+      [
+        `Install the volley and volleyd commands in ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+        undefined,
+      ],
       ["Install volleyd as a launchd service (volleyd install)", "volley setup --step services"],
       [
         `Install the Volley hooks for coordinator sessions into ${join(m.home, ".claude", "settings.json")}`,
@@ -688,6 +692,10 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     await start();
     const services = step((await plan()).steps, "services");
     expect(services.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
+      [
+        `Install the volley and volleyd commands in ${join(m.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+        undefined,
+      ],
       [
         "Install volleyd as a systemd user service (volleyd.service)",
         "volley setup --step services",

@@ -23,6 +23,8 @@ $VOLLEYD_HOME/volleyd.log) and loads it with \`launchctl bootstrap gui/$UID\`. -
 the plist instead. Restart the service with:
   launchctl kickstart -k gui/$UID/${SERVICE_LABEL}
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
+The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE, PATH and, when set,
+VOLLEY_AUTH_DIR (the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in.
 Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,
 written by \`volley auth init --volleyd-file\`).
 `;
@@ -36,6 +38,8 @@ export interface ServicePaths {
   brokerUrl: string;
   namespace: string;
   path: string;
+  /** The auth dir volleyd's `volley auth` calls use (`VOLLEY_AUTH_DIR`); unset: theirs to detect. */
+  authDir?: string;
 }
 
 const xml = (s: string) =>
@@ -56,7 +60,16 @@ export function renderPlist(
     PATH: p.path,
     LOG: join(p.home, "volleyd.log"),
   };
+  // An optional entry: the whole key/string pair, or nothing.
+  const raw: Record<string, string> = {
+    AUTH_DIR_ENTRY:
+      p.authDir === undefined
+        ? ""
+        : `\n    <key>VOLLEY_AUTH_DIR</key>\n    <string>${xml(p.authDir)}</string>`,
+  };
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, k: string) => {
+    const r = raw[k];
+    if (r !== undefined) return r;
     const v = vars[k];
     return v === undefined ? m : xml(v);
   });
@@ -119,6 +132,9 @@ function servicePaths(
     uid: process.getuid?.() ?? 0,
     bun: findBun(env.PATH ?? "", process.execPath),
     path: env.PATH ?? "/usr/bin:/bin",
+    ...(env.VOLLEY_AUTH_DIR !== undefined && env.VOLLEY_AUTH_DIR !== ""
+      ? { authDir: env.VOLLEY_AUTH_DIR }
+      : {}),
     ...target,
   };
 }

@@ -42,6 +42,8 @@ export interface FakeMachine {
   execCalls: string[][];
   /** What each exec call got on stdin (undefined: the terminal's), by call index. */
   execInputs: (string | undefined)[];
+  /** The environment each exec call got (undefined: setup's own), by call index. */
+  execEnvs: (Record<string, string | undefined> | undefined)[];
   anonymous: { tcp: AnonymousProbe; ws: AnonymousProbe };
   /** Whether the running broker's WebSocket listener is open to the LAN (set at restart). */
   lanWs: boolean;
@@ -80,6 +82,7 @@ export function fakeMachine(
   const m: FakeMachine = {
     execCalls: [],
     execInputs: [],
+    execEnvs: [],
     lanWs: false,
     anonymous: { tcp: "accepted", ws: "unreachable" },
     answers: [],
@@ -102,6 +105,7 @@ export function fakeMachine(
     const a = [...argv];
     m.execCalls.push(a);
     m.execInputs.push(o?.input);
+    m.execEnvs.push(o?.env);
     const line = a.join(" ");
     if (line === layout.restart) {
       auth.adminUp = true;

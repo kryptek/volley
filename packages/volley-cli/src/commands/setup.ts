@@ -38,7 +38,8 @@ import { DESK_PORT } from "./desk-serve";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Services  volleyd, the hooks for coordinator sessions, the Desk built and served
+ *   4. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *                coordinator sessions, the Desk built and served
  *   5. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
@@ -347,8 +348,9 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Services  volleyd (launchd / systemd --user), the Volley hooks for coordinator sessions,
-               the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
+  4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+               PATH), volleyd (launchd / systemd --user), the Volley hooks for coordinator
+               sessions, the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
   5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 

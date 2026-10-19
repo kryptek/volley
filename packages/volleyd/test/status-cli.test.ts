@@ -468,6 +468,29 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).toContain("<key>KeepAlive</key>");
   });
 
+  it("renders VOLLEY_AUTH_DIR only when an auth dir is given", () => {
+    const without = renderPlist(paths());
+    expect(without).not.toContain("VOLLEY_AUTH_DIR");
+    expect(without).not.toMatch(/\{\{[A-Z_]+\}\}/);
+    const withDir = renderPlist({ ...paths(), authDir: "/opt/mq/volley&co" });
+    expect(withDir).toContain(
+      "<key>VOLLEY_AUTH_DIR</key>\n    <string>/opt/mq/volley&amp;co</string>",
+    );
+    expect(withDir).not.toMatch(/\{\{[A-Z_]+\}\}/);
+  });
+
+  it("--dry-run carries VOLLEY_AUTH_DIR into the plist (volleyd's `volley auth` uses it)", async () => {
+    const r = await runCli(["install", "--dry-run"], {
+      HOME: home,
+      VOLLEYD_HOME: join(home, "state"),
+      VOLLEY_AUTH_DIR: "/srv/mosquitto/volley",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "<key>VOLLEY_AUTH_DIR</key>\n    <string>/srv/mosquitto/volley</string>",
+    );
+  });
+
   it("never writes broker credentials into the (world-readable) plist", async () => {
     const r = await runCli(["install", "--dry-run"], {
       HOME: home,
@@ -477,6 +500,7 @@ describe("volleyd install / uninstall", () => {
     });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).not.toContain("plist-must-not-hold-this");
-    expect(r.stdout).not.toContain("VOLLEY_AUTH");
+    expect(r.stdout).not.toContain("VOLLEY_AUTH_USERNAME");
+    expect(r.stdout).not.toContain("VOLLEY_AUTH_PASSWORD");
   });
 });
