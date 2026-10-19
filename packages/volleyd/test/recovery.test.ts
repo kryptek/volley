@@ -49,7 +49,7 @@ describe("respawn on <best> (SPEC §4.6.15: an agent whose host is down or not e
     options: ["respawn", "cancel"],
   };
 
-  it("adds the third option right after respawn, saying where and why", () => {
+  it("adds the third option right after respawn, saying where, why and what no answer does", () => {
     const d = withRespawnOn(failed, {
       host: "box-a",
       why: "down (no heartbeat for 90 s)",
@@ -58,10 +58,37 @@ describe("respawn on <best> (SPEC §4.6.15: an agent whose host is down or not e
     });
     expect(d.options).toEqual(["respawn", "respawn on studio", "cancel"]);
     expect(d.question).toBe(
-      `${failed.question} box-a is down (no heartbeat for 90 s): respawn on studio starts the implementer on studio instead (the best eligible machine now), in a fresh worktree there; respawn starts it on box-a again.`,
+      `${failed.question} Where: box-a is down (no heartbeat for 90 s): respawn on studio starts the implementer on studio instead (the best eligible machine now), in a fresh worktree there (an implementer continues the branch and PR it pushed); respawn starts it on box-a again (it waits there until box-a takes new agents). If nobody answers, nothing is respawned.`,
     );
-    // Asked again with the same options: not added twice.
-    expect(withRespawnOn(d, { host: "box-a", why: "down", best: "box-b" })).toEqual(d);
+    // Asked again: the offer is made afresh, never twice.
+    const again = withRespawnOn(
+      { ...d, question: `"x" is not one of respawn / cancel. ${d.question}` },
+      { host: "box-a", why: "down", best: "box-b" },
+    );
+    expect(again.options).toEqual(["respawn", "respawn on box-b", "cancel"]);
+    expect(again.question.match(/Where: /g)).toHaveLength(1);
+    expect(again.question).toContain("respawn on box-b starts the agent on box-b");
+    // The machine is fine again: plain respawn alone, the note gone.
+    expect(withRespawnOn(d, null)).toEqual(failed);
+  });
+
+  it("a machine closed to new agents offers only respawn on <best>, and plain respawn is no answer", () => {
+    const d = withRespawnOn(failed, {
+      host: "box-a",
+      why: "being removed",
+      best: "studio",
+      role: "implementer",
+      closed: true,
+    });
+    expect(d.options).toEqual(["respawn on studio", "cancel"]);
+    expect(d.question).toContain(
+      "Where: box-a is being removed, so nothing new starts there: respawn on studio starts the implementer on studio instead",
+    );
+    expect(d.question).not.toContain("respawn starts it on box-a");
+    expect(isRespawnAnswer("respawn", d.options)).toBe(false);
+    expect(isRespawnAnswer("respawn on studio", d.options)).toBe(true);
+    // Asked again once the machine is fine: plain respawn comes back.
+    expect(withRespawnOn(d, null).options).toEqual(["respawn", "cancel"]);
   });
 
   it("only decisions that offer respawn get it", () => {
@@ -158,6 +185,16 @@ describe("daemon: a reaped agent on a down machine offers respawn on <best>", ()
     );
     expect(f.local.launches).toHaveLength(0);
 
+    // The first attempt pushed its branch and opened PR #7 from it.
+    f.exec.on(["gh", "pr", "list", "--head", "w1/T1-implementer-1"], {
+      stdout: JSON.stringify([
+        {
+          number: 7,
+          url: "https://github.com/example/repo/pull/7",
+          headRefName: "w1/T1-implementer-1",
+        },
+      ]),
+    });
     await f.resolve("w1", d?.decision_id as string, "respawn on control");
     const placed = f.journal("w1").filter((e) => e.type === "task_placed");
     expect(placed.at(-1)?.data).toMatchObject({
@@ -169,14 +206,127 @@ describe("daemon: a reaped agent on a down machine offers respawn on <best>", ()
     });
     await f.tick();
     expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
-    // A fresh worktree there, cut from the release branch.
-    expect(f.local.worktrees.at(-1)).toMatchObject({
-      branch: "w1/T1-implementer-2",
-      base: "release/w1",
+    // A fresh worktree there, on the branch the first attempt pushed (origin's copy), and the
+    // brief names it and its open PR: no second branch, no second PR.
+    const wt = f.local.worktrees.at(-1);
+    expect(wt).toMatchObject({
+      branch: "w1/T1-implementer-1",
+      base: "w1/T1-implementer-1",
+      releaseBase: true,
     });
+    const spawned = f.journal("w1").filter((e) => e.type === "agent_spawned");
+    expect(spawned.at(-1)?.data).toMatchObject({
+      agent_id: "w1-t1-implementer-2",
+      branch: "w1/T1-implementer-1",
+    });
+    expect(spawned.at(-1)?.data.base_sha).toBeUndefined();
+    const brief = readFileSync(join(wt?.path as string, ".volley", "brief.md"), "utf-8");
+    expect(brief).toContain(
+      "An earlier attempt of this task pushed `w1/T1-implementer-1`, and this worktree continues it",
+    );
+    expect(brief).toContain(
+      "PR #7 (https://github.com/example/repo/pull/7) is open from it: push your commits to `w1/T1-implementer-1` and that PR picks them up. Do not open another PR.",
+    );
     expect((await f.task("w1", "T1"))?.placement).toMatchObject({
       host: "control",
       by: "decision",
+    });
+  });
+});
+
+describe("daemon: respawn on <machine> is checked again when it is answered", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("a machine no longer eligible refuses the answer, re-places nothing and asks again afresh", async () => {
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await f.tick();
+    const first = f.agentOf("w1", "T1");
+    await f.supervised(first);
+    await f.lwt();
+    await f.finish(first, "reaped");
+    let d: DecisionPayload | null = null;
+    for (let i = 0; i < 20 && d === null; i++) {
+      await f.tick(60_000);
+      const opened = f
+        .journal("w1")
+        .find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      if (opened !== undefined) d = await f.decision("w1", opened.data.decision_id as string);
+    }
+    expect(d?.options).toEqual(["respawn", "respawn on control", "cancel"]);
+    // Hours later control is overloaded: its next record says so.
+    f.setLocalLoad([9999, 9999, 9999]);
+    await eventually(async () => {
+      await f.tick(30_000);
+      return (await f.verdict("control"))?.eligible === false;
+    });
+    await f.resolve("w1", d?.decision_id as string, "respawn on control");
+    const resolved = f
+      .journal("w1")
+      .find((e) => e.type === "decision_resolved" && e.data.decision_id === d?.decision_id);
+    expect(resolved?.data.answer).toMatch(
+      /^respawn on control \(refused: control cannot take it now: it is not eligible \(overloaded: load 9999\.0 on \d+ cores · no new agents\)\)$/,
+    );
+    expect(f.journal("w1").some((e) => e.type === "task_placed" && e.data.by === "decision")).toBe(
+      false,
+    );
+    await f.tick();
+    expect(f.local.launches).toHaveLength(0);
+    // Asked again: nothing else is eligible now, so plain respawn and cancel.
+    const again = f
+      .journal("w1")
+      .filter((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked")
+      .at(-1);
+    expect(again?.data.decision_id).not.toBe(d?.decision_id);
+    expect(again?.data.options).toEqual(["respawn", "cancel"]);
+    expect(again?.data.question).toMatch(
+      /^"respawn on control \(refused: control cannot take it now/,
+    );
+    expect(String(again?.data.question)).not.toContain("Where: ");
+  });
+});
+
+describe("daemon: an implementer respawn whose earlier branch was never pushed", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("starts a fresh branch from the release branch", async () => {
+    await f.submit("w1", "", "  T1: { issue: 42 }\n");
+    await f.tick();
+    const first = f.agentOf("w1", "T1");
+    await f.supervised(first);
+    const repo = f.local.worktrees[0]?.repo as string;
+    f.exec.on(["git", "-C", repo, "fetch", "--quiet", "origin", "w1/T1-implementer-1"], {
+      code: 1,
+      stderr: "fatal: couldn't find remote ref w1/T1-implementer-1",
+    });
+    await f.finish(first, "failed");
+    let id: string | undefined;
+    for (let i = 0; i < 20 && id === undefined; i++) {
+      await f.tick();
+      id = f
+        .journal("w1")
+        .find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked")?.data
+        .decision_id as string | undefined;
+    }
+    await f.resolve("w1", id as string, "respawn");
+    await eventually(async () => {
+      await f.tick();
+      return f.local.worktrees.length === 2;
+    });
+    expect(f.local.worktrees.at(-1)).toMatchObject({
+      branch: "w1/T1-implementer-2",
+      base: "release/w1",
     });
   });
 });

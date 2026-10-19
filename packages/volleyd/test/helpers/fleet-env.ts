@@ -49,6 +49,15 @@ export interface Fleet {
   waits: JournalWait;
   client: ControlClient;
   local: FakeHost;
+  /** The supervisor's fake exec (git, gh): add replies with `on`. */
+  exec: FakeExec;
+  /**
+   * Hold launched sessions (true): an agent launches but does not register until released
+   * (false), so it stays launched and unverified.
+   */
+  holdSessions: (hold: boolean) => void;
+  /** The supervisor's own load averages, read into its next machine record. */
+  setLocalLoad: (load: [number, number, number]) => void;
   /** The peer's host (created on its first use). */
   box: () => FakeRemoteHost | undefined;
   /** The fake `volley auth` accounts: name → role. */
@@ -111,6 +120,7 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
       return {};
     });
   const local = fakeHost(fake);
+  let localLoad: [number, number, number] = [0.5, 0.5, 0.5];
   const claudeJson = join(dir, "local-claude.json");
   writeFileSync(
     claudeJson,
@@ -142,6 +152,7 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
       { qos: 1, retain: channel !== "progress" },
     );
   const launched = new Map<string, string>();
+  let held: (() => void)[] | null = null;
   const onLaunch = (spec: LaunchSpec) => {
     const [wave = "", task = "", role = ""] = spec.name.split(" ");
     const attempt =
@@ -150,6 +161,13 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
       ).length + 1;
     const id = agentIdFor(wave, task, role, attempt);
     launched.set(`${wave}/${task}/${role}`, id);
+    if (held !== null) {
+      held.push(() => run(id, spec));
+      return;
+    }
+    run(id, spec);
+  };
+  const run = (id: string, spec: LaunchSpec) => {
     const session = (async () => {
       await pub(id, buildTopic(NS, id, "status"), "spawning", "status", {});
       await pub(id, registryTopic(id), "registered", "_system/registry", {
@@ -183,6 +201,7 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
         versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
       }),
       localPath: () => ({ claude: true, bun: true }),
+      os: { loadavg: () => localLoad },
     },
     spawner: {
       host: local,
@@ -272,6 +291,15 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
     waits,
     client,
     local,
+    exec: fake,
+    holdSessions: (hold) => {
+      const pending = held ?? [];
+      held = hold ? pending : null;
+      if (!hold) for (const start of pending) start();
+    },
+    setLocalLoad: (load) => {
+      localLoad = load;
+    },
     box: () => box,
     accounts,
     journal,

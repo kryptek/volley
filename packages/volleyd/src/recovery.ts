@@ -24,24 +24,49 @@ const RESPAWN = "respawn";
 const RESPAWN_ON = "respawn on ";
 const norm = (s: string) => s.trim().toLowerCase();
 
+/** Where a decision's `respawn on <best>` note starts (cut before the question is asked again). */
+const WHERE = " Where: ";
+
 /**
  * A decision that offers `respawn` about an agent whose host is down or not eligible also offers
  * `respawn on <best>` (the best eligible machine now), right after `respawn`, and its question
- * says what it does. A decision that does not offer `respawn`, or offers a `respawn on` already
- * (asked again), is returned unchanged. Pure.
+ * says what each does and what happens if nobody answers. A host `closed` to new agents
+ * (draining, being removed, removed) offers only `respawn on <best>`. Asked again, the offer is
+ * made afresh: an earlier `respawn on` option and note are replaced, and `o` null restores plain
+ * `respawn` alone. A decision that offers neither is returned unchanged. Pure.
  */
 export function withRespawnOn(
   input: DecisionInput,
-  o: { host: string; why: string; best: string; role?: string },
+  o: { host: string; why: string; best: string; role?: string; closed?: boolean } | null,
 ): DecisionInput {
   const options = input.options ?? [];
-  const at = options.findIndex((x) => norm(x) === RESPAWN);
-  if (at === -1 || options.some((x) => norm(x).startsWith(RESPAWN_ON))) return input;
+  const isOffer = (x: string) => norm(x) === RESPAWN || norm(x).startsWith(RESPAWN_ON);
+  const at = options.findIndex(isOffer);
+  if (at === -1) return input;
+  const kept = options.filter((x) => !isOffer(x));
+  const offer =
+    o === null
+      ? [RESPAWN]
+      : o.closed === true
+        ? [`${RESPAWN_ON}${o.best}`]
+        : [RESPAWN, `${RESPAWN_ON}${o.best}`];
+  const base = input.question.split(WHERE)[0] ?? input.question;
+  if (o === null)
+    return {
+      ...input,
+      options: [...kept.slice(0, at), ...offer, ...kept.slice(at)],
+      question: base,
+    };
   const role = o.role ?? "agent";
+  const elsewhere = `${RESPAWN_ON}${o.best} starts the ${role} on ${o.best} instead (the best eligible machine now), in a fresh worktree there (an implementer continues the branch and PR it pushed)`;
+  const note =
+    o.closed === true
+      ? `${o.host} is ${o.why}, so nothing new starts there: ${elsewhere}. If nobody answers, nothing is respawned.`
+      : `${o.host} is ${o.why}: ${elsewhere}; respawn starts it on ${o.host} again (it waits there until ${o.host} takes new agents). If nobody answers, nothing is respawned.`;
   return {
     ...input,
-    options: [...options.slice(0, at + 1), `${RESPAWN_ON}${o.best}`, ...options.slice(at + 1)],
-    question: `${input.question} ${o.host} is ${o.why}: ${RESPAWN_ON}${o.best} starts the ${role} on ${o.best} instead (the best eligible machine now), in a fresh worktree there; respawn starts it on ${o.host} again.`,
+    options: [...kept.slice(0, at), ...offer, ...kept.slice(at)],
+    question: `${base}${WHERE}${note}`,
   };
 }
 
@@ -53,9 +78,14 @@ export function respawnTarget(answer: string, options: readonly string[] = []): 
   return name === "" ? null : name;
 }
 
-/** `respawn`, or an offered `respawn on <machine>`: both replace the role's run. */
+/**
+ * `respawn` (when offered: a machine closed to new agents offers only `respawn on`), or an
+ * offered `respawn on <machine>`: both replace the role's run.
+ */
 export const isRespawnAnswer = (answer: string, options: readonly string[] = []): boolean =>
-  norm(answer) === RESPAWN || respawnTarget(answer, options) !== null;
+  norm(answer) === RESPAWN
+    ? options.length === 0 || options.some((o) => norm(o) === RESPAWN)
+    : respawnTarget(answer, options) !== null;
 
 /** `class` of the decision a credit_exhausted signal opens. */
 export const CREDIT_CLASS = "credit_exhausted";

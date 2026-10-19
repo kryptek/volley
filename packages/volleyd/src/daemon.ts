@@ -116,6 +116,7 @@ import {
   ID_RE,
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
+  MACHINE_DOWN_WAIT,
   attentionPayload,
   decisionPayload,
   decisionTopic,
@@ -323,6 +324,7 @@ import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
+  AGENT_BRANCH,
   checkFreshBase,
   checkReleaseBranch,
   expandHome,
@@ -894,6 +896,17 @@ export class Daemon {
   private usage: UsageBook;
   /** Every spawned agent's wave and host (from `agent_spawned`): where its usage belongs. */
   private readonly spawnedAgents = new Map<string, { wave: WaveId; host: string }>();
+  // --- Fleet (F6): down, drain and remove-now ---
+  /** Agents launched and still being verified (not supervised yet), by id. */
+  private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
+  /** A remove-now's agents told to stop, by id: when (their grace counts from it). */
+  private readonly evicted = new Map<string, number>();
+  /** Since when a configured host has been seen draining (`hosts.<name>.drain`). */
+  private readonly drainSeen = new Map<string, number>();
+  /** When each paired machine was removed (`_system`'s `peer_removed`). */
+  private readonly removedAt = new Map<string, number>();
+  /** A `respawn` approved while the task's machine was closed, by `<wave>/<task>`: its role. */
+  private readonly heldRespawn = new Map<string, Role>();
   // --- Fleet (F2): the supervisor's own record, readiness verdicts, PATH probes ---
   /** The version a machine must run (its readiness `requirements.volley`). */
   private readonly version: string;
@@ -2210,6 +2223,75 @@ export class Daemon {
     return host === LOCAL_HOST ? this.config.localName() : host;
   }
 
+  /** Whether task `task` has a live agent: supervised, launched and being verified, or spawning. */
+  private taskLive(wave: WaveId, task: TaskId): boolean {
+    for (const a of this.supervised.values()) if (a.wave === wave && a.task === task) return true;
+    for (const a of this.launching.values()) if (a.wave === wave && a.task === task) return true;
+    for (const key of this.spawning) if (key.startsWith(`${wave}/${task}/`)) return true;
+    return false;
+  }
+
+  /**
+   * Why nothing new may start on paired machine `name` (SPEC §4.6.15), and since when: it was
+   * `removed` (a `peer_removed`, and no host of that name since), is being removed (`removing`:
+   * a pending `peer_remove`) or is `draining` (`hosts.<name>.drain`). Null: it may (a down
+   * machine's spawns park on its tunnel instead).
+   */
+  private closedMachine(
+    name: string,
+  ): { machine: "draining" | "removing" | "removed"; since: number } | null {
+    if (name === this.config.localName()) return null;
+    const pending = this.peers.removals()[name];
+    if (pending !== undefined) return { machine: "removing", since: Date.parse(pending.at) };
+    const hosts = this.config.effective().hosts;
+    if (Object.hasOwn(hosts, name)) {
+      if (hosts[name]?.drain !== true) {
+        this.drainSeen.delete(name);
+        return null;
+      }
+      const since = this.drainSeen.get(name) ?? this.now();
+      this.drainSeen.set(name, since);
+      return { machine: "draining", since };
+    }
+    const removed = this.removedAt.get(name);
+    return removed !== undefined ? { machine: "removed", since: removed } : null;
+  }
+
+  /** The line a task waiting on closed machine `name` shows. */
+  private closedLine(name: string, machine: "draining" | "removing" | "removed"): string {
+    return machine === "removed"
+      ? `${name} was removed`
+      : `${name} is ${machine === "draining" ? "draining" : "being removed"}: nothing new starts there`;
+  }
+
+  /** The closed machine task `task` is placed on (`closedMachine`); null for any other. */
+  private closedFor(wave: WaveId, task: TaskId): { line: string; machine: string } | null {
+    const def = this.waves.get(wave)?.record.wave?.tasks[task];
+    if (def === undefined || def.host === LOCAL_HOST || def.host === AUTO_HOST) return null;
+    // A task's own inline `host:` is no paired machine.
+    if (def.host_spec !== undefined && !Object.hasOwn(this.config.effective().hosts, def.host))
+      return null;
+    const c = this.closedMachine(def.host);
+    return c !== null ? { line: this.closedLine(def.host, c.machine), machine: def.host } : null;
+  }
+
+  /**
+   * True (and the reason kept for why_waiting) when task `task`'s machine is closed to new
+   * agents: its spawn waits for the owner's re-place answer (`machineDownPass` asks). Running
+   * agents are never touched.
+   */
+  private parkClosed(wave: WaveId, task: TaskId): boolean {
+    const closed = this.closedFor(wave, task);
+    if (closed === null) return false;
+    const key = `${wave}/${task}`;
+    const reason = `${closed.line}; re-place or cancel ${task} (its machine_down decision)`;
+    if (this.parked.get(key) !== reason) {
+      this.parked.set(key, reason);
+      void this.enqueue(() => this.publishState(wave));
+    }
+    return true;
+  }
+
   /**
    * Where task `task` of `wave` would be placed now, never on `exclude`: F3's `place` with the
    * same machine filter and score, as if the task asked for placement. `snap` carries the
@@ -2251,80 +2333,191 @@ export class Daemon {
       },
     });
     // It no longer waits on the machine it left; its next spawn goes where it now is.
-    this.parked.delete(`${wave}/${task}`);
-    for (const key of this.refused.keys()) {
-      if (key.startsWith(`${wave}/${task}/`)) this.refused.delete(key);
+    const key = `${wave}/${task}`;
+    this.parked.delete(key);
+    for (const k of this.refused.keys()) {
+      if (k.startsWith(`${key}/`)) this.refused.delete(k);
+    }
+    // A respawn the owner approved while the machine was closed starts now.
+    const role = this.heldRespawn.get(key);
+    if (role !== undefined) {
+      this.heldRespawn.delete(key);
+      void this.startSpawn(wave, task, role).catch((e: unknown) =>
+        this.log(`respawn ${key}: ${e instanceof Error ? e.message : String(e)}`),
+      );
     }
   }
 
-  /** The wave's unfinished tasks on machine `name`: with no agent yet (queued) and with one. */
-  private tasksOn(rec: WaveRecord, name: string): { queued: TaskId[]; running: TaskId[] } {
+  /**
+   * The wave's unfinished tasks on machine `name`: those with no live agent (queued, or between
+   * roles: they would be re-placed) and those with one (never moved). A task whose own open
+   * decision already offers `respawn on <machine>` is left to that question.
+   */
+  private tasksOn(wave: WaveId, name: string): { queued: TaskId[]; running: TaskId[] } {
+    const rec = this.waves.get(wave)?.record;
     const queued: TaskId[] = [];
     const running: TaskId[] = [];
+    if (rec === undefined) return { queued, running };
+    const elsewhere = new Set(
+      openDecisions(rec)
+        .filter((d) => d.task !== null && (d.options ?? []).some((o) => respawnTarget(o, [o])))
+        .map((d) => d.task),
+    );
     for (const t of rec.state?.tasks ?? []) {
       if (t.stage === "done" || t.stage === "cancelled") continue;
       if (this.machineOfTask(rec, t.id) !== name) continue;
-      (Object.keys(t.agents).length === 0 ? queued : running).push(t.id);
+      if (this.taskLive(wave, t.id)) running.push(t.id);
+      else if (!elsewhere.has(t.id)) queued.push(t.id);
     }
     return { queued, running };
   }
 
+  /** What is wrong with machine `name` for its waiting tasks, since when; null: nothing. */
+  private troubleOf(
+    name: string,
+  ): { machine: "down" | "draining" | "removing" | "removed"; since: number; why: string } | null {
+    const closed = this.closedMachine(name);
+    if (closed !== null) return { ...closed, why: "" };
+    const since = this.machines.downSince(name);
+    const record = this.machines.record(name);
+    if (since === undefined || record === undefined) return null;
+    return { machine: "down", since, why: this.machines.whyDown(record) };
+  }
+
   /**
-   * Every tick: a machine down for `placement.down_decision_after_s` with unfinished tasks of a
-   * running wave opens that wave's `machine_down` decision (one per wave and machine). Once
-   * answered it is asked again only when a task with no agent yet would park there that the last
-   * question did not name (`wait` holds until then). Nothing is re-placed without an answer.
+   * Every tick, per running wave and machine with trouble (SPEC §4.6.15): a machine down for
+   * `placement.down_decision_after_s` with unfinished tasks of the wave, or one closed to new
+   * agents (draining, being removed, removed) with tasks of the wave waiting for an agent there,
+   * opens the wave's `machine_down` decision. Once answered it is asked again only when a waiting
+   * task appears that the last question about the same trouble did not name (`wait` holds until
+   * then). A `re-place queued tasks` answer keeps applying: a task it could not move yet moves as
+   * soon as a machine is eligible. An open question whose trouble changed (the machine was
+   * removed, or its drain lifted) closes itself. Nothing is re-placed without an answer.
    */
   private async machineDownPass(): Promise<void> {
     const now = this.now();
-    for (const m of this.machines.all()) {
-      const since = this.machines.downSince(m.name);
-      if (since === undefined) continue;
+    const names = new Set(this.machines.all().map((m) => m.name));
+    for (const [, log] of this.runningWaves()) {
+      for (const t of log.record.state?.tasks ?? []) {
+        const m = this.machineOfTask(log.record, t.id);
+        if (m !== undefined) names.add(m);
+      }
+    }
+    for (const name of names) {
+      const trouble = this.troubleOf(name);
       for (const [wave, log] of this.runningWaves()) {
         const rec = log.record;
-        const after = secondsMs(this.config.effective(wave).placement.down_decision_after_s);
-        if (now - since < after) continue;
-        const on = this.tasksOn(rec, m.name);
-        if (on.queued.length + on.running.length === 0) continue;
         const asked = Object.values(rec.decisions).filter(
-          (d) => d.kind === "machine_down" && d.host === m.name,
+          (d) => d.kind === "machine_down" && d.host === name,
         );
+        await this.supersedeMachineDown(wave, name, asked, trouble?.machine ?? null);
+        if (trouble === null) continue;
+        const after = secondsMs(this.config.effective(wave).placement.down_decision_after_s);
+        if (trouble.machine === "down" && now - trouble.since < after) continue;
+        const current = asked.filter(
+          (d) =>
+            (d.machine ?? "down") === trouble.machine && Date.parse(d.opened_at) >= trouble.since,
+        );
+        await this.keepRePlacing(wave, name, current);
+        const on = this.tasksOn(wave, name);
+        const none =
+          trouble.machine === "down" ? on.queued.length + on.running.length : on.queued.length;
+        if (none === 0) continue;
         if (asked.some((d) => d.resolved === undefined)) continue;
-        const last = asked
-          .filter((d) => Date.parse(d.opened_at) >= since)
-          .sort((a, b) => a.opened_at.localeCompare(b.opened_at))
-          .at(-1);
+        const last = current.sort((a, b) => a.opened_at.localeCompare(b.opened_at)).at(-1);
         if (last !== undefined && on.queued.every((t) => last.tasks?.includes(t) === true))
           continue;
         const probe = on.queued[0] ?? on.running[0] ?? "";
-        const best = this.placeAway(wave, probe, [m.name]);
+        const best = this.placeAway(wave, probe, [name]);
         const { input, data } = machineDownInput({
-          host: m.name,
-          downSince: since,
+          host: name,
+          machine: trouble.machine,
+          downSince: trouble.since,
           now,
-          why: this.machines.whyDown(m),
+          why: trouble.why,
           queued: on.queued,
           running: on.running,
           best: best !== null && best.host !== null ? best.host : null,
         });
-        let id = `machine_down-${m.name}`;
-        for (let k = 2; rec.decisions[id] !== undefined; k++) id = `machine_down-${m.name}-${k}`;
+        let id = `machine_down-${name}`;
+        for (let k = 2; rec.decisions[id] !== undefined; k++) id = `machine_down-${name}-${k}`;
         try {
           await this.openDecisionNow(wave, { ...input, ...(ID_RE.test(id) ? { id } : {}) }, data);
         } catch (e) {
-          this.log(`machine_down ${wave}/${m.name}: ${e instanceof Error ? e.message : String(e)}`);
+          this.log(`machine_down ${wave}/${name}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }
   }
 
-  /** Machine `name` is back: its open `machine_down` questions close themselves with `wait`. */
+  /**
+   * An open `machine_down` question about trouble machine `name` no longer has (`now`: what it
+   * has, null: none) closes itself: answered `wait` when the machine takes new agents again,
+   * `superseded` when its trouble changed (the question about the new trouble follows).
+   */
+  private async supersedeMachineDown(
+    wave: WaveId,
+    name: string,
+    asked: DecisionRecord[],
+    now: string | null,
+  ): Promise<void> {
+    for (const d of asked) {
+      if (d.resolved !== undefined || (d.machine ?? "down") === now) continue;
+      const what =
+        now === null
+          ? "takes new agents again"
+          : now === "removed"
+            ? "was removed"
+            : now === "removing"
+              ? "is being removed"
+              : `is ${now}`;
+      await this.resolveNow(wave, d.decision_id, {
+        answer: now === null ? MACHINE_DOWN_WAIT : "superseded",
+        by: DAEMON_AGENT_ID,
+        rationale: `${name} ${what}`,
+      });
+    }
+  }
+
+  /**
+   * The owner answered `re-place queued tasks` about this trouble (`asked`): each task it named
+   * that is still waiting on machine `name` and could not be moved then is placed again as soon
+   * as a machine is eligible (`by: decision`).
+   */
+  private async keepRePlacing(wave: WaveId, name: string, asked: DecisionRecord[]): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.wave == null) return;
+    const answered = asked.filter(
+      (d) => d.resolved?.answer.trim().toLowerCase() === MACHINE_DOWN_REPLACE,
+    );
+    const ids = new Set(answered.flatMap((d) => d.tasks ?? []));
+    if (ids.size === 0) return;
+    const waiting = new Set(this.tasksOn(wave, name).queued);
+    let snap: Snapshot | undefined;
+    let moved = false;
+    for (const id of ids) {
+      if (!waiting.has(id)) continue;
+      snap ??= this.placementSnapshot(
+        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        this.config.effective(wave),
+      );
+      const p = this.placeAway(wave, id, [name], snap);
+      if (p === null || p.host === null) continue;
+      await this.rePlace(wave, id, p, name);
+      snap = reserve(snap, p.host, rec.wave.tasks[id], rec.wave);
+      moved = true;
+    }
+    if (moved) await this.publishState(wave);
+  }
+
+  /** Machine `name` is back: its open `machine_down` questions about it being down close (`wait`). */
   private async machineBack(name: string): Promise<void> {
     for (const [wave, log] of this.waves) {
       for (const d of openDecisions(log.record)) {
-        if (d.kind !== "machine_down" || d.host !== name) continue;
+        if (d.kind !== "machine_down" || d.host !== name || (d.machine ?? "down") !== "down")
+          continue;
         await this.resolveNow(wave, d.decision_id, {
-          answer: "wait",
+          answer: MACHINE_DOWN_WAIT,
           by: DAEMON_AGENT_ID,
           rationale: `${name} is back`,
         });
@@ -2333,11 +2526,11 @@ export class Daemon {
   }
 
   /**
-   * A `machine_down` answer. `re-place queued tasks`: each listed task that still has no agent
-   * and still sits on the down machine is placed again without it (journaled `by: decision`),
-   * each placement reserved for the next; one with no eligible machine stays and says so.
-   * `cancel`: every listed task not finished is cancelled (a running agent is told to stop).
-   * `wait`, or anything else: everything stays parked until the machine is back.
+   * A `machine_down` answer. `re-place queued tasks`: each listed task that still has no live
+   * agent and still sits on the machine is placed again without it (journaled `by: decision`),
+   * each placement reserved for the next; one with no eligible machine stays, says so, and moves
+   * once one is (`keepRePlacing`). `cancel`: every listed task not finished is cancelled (a
+   * running agent is told to stop). `wait`, or anything else: everything stays parked.
    */
   private async onMachineDownResolved(wave: WaveId, d: DecisionRecord): Promise<void> {
     const rec = this.waves.get(wave)?.record;
@@ -2356,7 +2549,7 @@ export class Daemon {
       );
       const moved = new Set<string>();
       for (const t of listed) {
-        if (Object.keys(t.agents).length > 0 || this.machineOfTask(rec, t.id) !== host) continue;
+        if (this.taskLive(wave, t.id) || this.machineOfTask(rec, t.id) !== host) continue;
         const p = this.placeAway(wave, t.id, [host], snap);
         if (p === null) continue;
         if (p.host === null) {
@@ -2365,7 +2558,7 @@ export class Daemon {
             task: t.id,
             data: {
               code: "NOT_REPLACED",
-              message: `${t.id} stays queued for ${host}: ${p.why}`,
+              message: `${t.id} stays queued for ${host}: ${p.why}; it is placed as soon as a machine is eligible`,
               host,
             },
           });
@@ -2380,7 +2573,7 @@ export class Daemon {
       return;
     }
     if (answer === MACHINE_DOWN_CANCEL) {
-      const why = `${d.resolved.by} cancelled it: ${host} stayed down (decision ${d.decision_id})`;
+      const why = `${d.resolved.by} cancelled it: ${host} ${(d.machine ?? "down") === "down" ? "stayed down" : `is ${d.machine}`} (decision ${d.decision_id})`;
       for (const t of listed) {
         const live = [...this.supervised].filter(([, a]) => a.wave === wave && a.task === t.id);
         const [first, ...rest] = live;
@@ -2411,13 +2604,19 @@ export class Daemon {
   }
 
   /**
-   * Why machine `host` should not take a respawn now: down, or not eligible (readiness and
-   * placement's filter); null when it may.
+   * Why machine `host` should not take a respawn now: closed to new agents (draining, being
+   * removed, removed: `closed`), down, or not eligible (readiness and placement's filter); null
+   * when it may.
    */
-  private hostTrouble(host: string): string | null {
+  private hostTrouble(host: string): { why: string; closed: boolean } | null {
+    const closed = this.closedMachine(host);
+    if (closed !== null) {
+      const why = closed.machine === "removing" ? "being removed" : closed.machine;
+      return { why, closed: true };
+    }
     const record = this.machines.record(host);
     if (this.machines.status(host) === "down" && record !== undefined) {
-      return `down (${this.machines.whyDown(record)})`;
+      return { why: `down (${this.machines.whyDown(record)})`, closed: false };
     }
     const cfg = this.config.effective();
     const local = this.config.localName();
@@ -2430,13 +2629,16 @@ export class Daemon {
       cfg,
       this.pressure(GLOBAL),
     ).verdict;
-    return v.eligible ? null : `not eligible (${v.ineligible_reason ?? "not ready"})`;
+    return v.eligible
+      ? null
+      : { why: `not eligible (${v.ineligible_reason ?? "not ready"})`, closed: false };
   }
 
   /**
    * A decision that offers `respawn` for a task whose machine is down or not eligible also
-   * offers `respawn on <best>` (SPEC §4.6.15). Unchanged when the machine is fine or nothing
-   * else is eligible.
+   * offers `respawn on <best>` (SPEC §4.6.15); one whose machine is closed to new agents offers
+   * only that. Asked again, the offer is made afresh (a new best, or plain `respawn` back once
+   * the machine is fine). Unchanged when the machine is fine or nothing else is eligible.
    */
   private withRespawnElsewhere(
     wave: WaveId,
@@ -2445,61 +2647,111 @@ export class Daemon {
   ): DecisionInput {
     const rec = this.waves.get(wave)?.record;
     if (rec === undefined || input.task === null) return input;
-    if (!(input.options ?? []).some((o) => o.trim().toLowerCase() === "respawn")) return input;
+    const offers = (input.options ?? []).some((o) => {
+      const n = o.trim().toLowerCase();
+      return n === "respawn" || respawnTarget(o, [o]) !== null;
+    });
+    if (!offers) return input;
     const host = this.machineOfTask(rec, input.task);
     if (host === undefined) return input;
-    const why = this.hostTrouble(host);
-    if (why === null) return input;
-    const best = this.placeAway(wave, input.task, [host]);
-    if (best === null || best.host === null) return input;
+    const trouble = this.hostTrouble(host);
+    const best = trouble !== null ? this.placeAway(wave, input.task, [host]) : null;
+    if (trouble === null || best === null || best.host === null) return withRespawnOn(input, null);
     const marker = extra.pipeline as { role?: unknown } | undefined;
     const role = typeof marker?.role === "string" ? marker.role : extra.role;
     return withRespawnOn(input, {
       host,
-      why,
+      why: trouble.why,
       best: best.host,
+      closed: trouble.closed,
       ...(typeof role === "string" ? { role } : {}),
     });
   }
 
   /**
    * `respawn on <machine>` answered: the task is re-placed there first (journaled `by:
-   * decision`), so the respawn the answer then triggers starts on it.
+   * decision`), so the respawn the answer then triggers starts on it. Returns why the machine
+   * cannot take it now (down, closed or not eligible since the question was asked: nothing is
+   * re-placed), else null.
    */
-  private async respawnOn(wave: WaveId, d: DecisionRecord, target: string): Promise<void> {
+  private async respawnOn(wave: WaveId, d: DecisionRecord, target: string): Promise<string | null> {
     const rec = this.waves.get(wave)?.record;
-    if (rec === undefined || d.task === null) return;
+    if (rec === undefined || d.task === null) return null;
     const local = this.config.localName();
     if (target !== local && !Object.hasOwn(this.config.effective().hosts, target)) {
-      throw new Error(`no machine named "${target}" to respawn on`);
+      return `no machine named "${target}" to respawn on`;
     }
     const from = this.machineOfTask(rec, d.task) ?? local;
+    const trouble =
+      target === from ? { why: "the machine it is leaving" } : this.hostTrouble(target);
+    if (trouble !== null) return `${target} cannot take it now: it is ${trouble.why}`;
     const p = this.placeAway(wave, d.task, [from]);
     const candidates = p?.candidates ?? [];
+    const row = candidates.find((c) => c.host === target);
+    if (row === undefined || row.score === null) {
+      const line = row?.line.replace(/^ineligible: /, "") ?? "not a candidate";
+      return `${target} cannot take it now: ${line}`;
+    }
     await this.rePlace(
       wave,
       d.task,
-      {
-        host: target,
-        local: target === local,
-        by: "auto",
-        score: candidates.find((c) => c.host === target)?.score ?? null,
-        candidates,
-      },
+      { host: target, local: target === local, by: "auto", score: row.score, candidates },
       from,
     );
+    return null;
+  }
+
+  /** A refused `respawn on <machine>` answer: the same question again, with a fresh offer. */
+  private async askAgainRefused(
+    wave: WaveId,
+    d: DecisionRecord,
+    answer: string,
+    why: string,
+  ): Promise<void> {
+    const {
+      decision_id: _id,
+      wave: _wave,
+      task,
+      kind,
+      question,
+      options,
+      pointers,
+      opened_at: _at,
+      resolved: _resolved,
+      resume_stage: _stage,
+      parks: _parks,
+      rationale: _why,
+      ...extra
+    } = d;
+    const base = question.replace(/^".*?" was refused: [^.]*\. /, "");
+    try {
+      await this.openDecisionNow(
+        wave,
+        {
+          kind,
+          task,
+          question: `"${answer}" was refused: ${why}. ${base}`,
+          pointers,
+          ...(options !== undefined ? { options } : {}),
+        },
+        extra,
+      );
+    } catch (e) {
+      this.log(`ask again ${d.decision_id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /**
-   * The live supervised agents on machine `name`, plus spawns in flight for tasks there (a drain
-   * waits for them too).
+   * The live agents on machine `name`: supervised, launched and still being verified, and the
+   * spawns in flight for tasks there (a drain waits for all of them).
    */
   private agentsOn(name: string): string[] {
     const local = this.config.localName();
-    const ids = [...this.supervised.keys()].filter((id) => {
+    const on = (id: string) => {
       const host = this.spawnedAgents.get(id)?.host ?? LOCAL_HOST;
       return (host === LOCAL_HOST ? local : host) === name;
-    });
+    };
+    const ids = [...this.supervised.keys(), ...this.launching.keys()].filter(on);
     for (const key of this.spawning) {
       const [wave = "", task = "", role = ""] = key.split("/");
       const rec = this.waves.get(wave)?.record;
@@ -2508,54 +2760,62 @@ export class Daemon {
       const id = agentIdFor(wave, task, role, this.agentAttempt(wave, task, role));
       if (!ids.includes(id)) ids.push(id);
     }
-    return ids;
+    return [...new Set(ids)];
   }
 
-  /** The machine a `peer_remove { now }` is stopping `agentId` for; undefined: none. */
-  private evictedFrom(agentId: string): string | undefined {
-    const host = this.spawnedAgents.get(agentId)?.host;
-    if (host === undefined || host === LOCAL_HOST) return undefined;
-    return this.peers.removals()[host]?.mode === "now" ? host : undefined;
+  /** `peer_remove { now }`: tell supervised agent `id` on machine `name` to stop (once). */
+  private async evictOne(name: string, id: string, a: Supervised, by: string): Promise<void> {
+    this.evicted.set(id, this.now());
+    await this.cancelAgent(a.wave, { task: a.task, role: a.role, agent_id: id }, by, {
+      text: `volleyd: ${name} is being removed (by ${by}). Stop work on ${a.task} now: do not push, open or merge anything further, publish your terminal status and exit.`,
+      from_agent_id: DAEMON_AGENT_ID,
+      wave: a.wave,
+      task: a.task,
+    });
   }
 
   /** `peer_remove { now }`: tell every agent on the machine to stop (the sweep force-retires). */
   private async evict(name: string, by: string): Promise<void> {
     for (const id of this.agentsOn(name)) {
       const a = this.supervised.get(id);
-      if (a === undefined) continue;
-      await this.cancelAgent(a.wave, { task: a.task, role: a.role, agent_id: id }, by, {
-        text: `volleyd: ${name} is being removed (by ${by}). Stop work on ${a.task} now: do not push, open or merge anything further, publish your terminal status and exit.`,
-        from_agent_id: DAEMON_AGENT_ID,
-        wave: a.wave,
-        task: a.task,
-      });
+      if (a !== undefined && !this.evicted.has(id)) await this.evictOne(name, id, a, by);
     }
   }
 
   /**
-   * Every tick: a drain or remove-now whose machine has no live agent left finishes
-   * (`peer_removed`); a remove-now's agents still live `stop_grace_s` after it was asked for are
-   * force-retired, which opens their respawn decisions.
+   * Every tick: a drain or remove-now whose machine has no live agent left (none supervised,
+   * launched or spawning there) finishes (`peer_removed`). A remove-now tells each agent there to
+   * stop, those that came up after it began too, and force-retires each one still live
+   * `stop_grace_s` after it was told, which opens its respawn decision.
    */
   private async removalSweep(): Promise<void> {
     for (const [name, pending] of Object.entries(this.peers.removals())) {
       const live = this.agentsOn(name);
       if (live.length === 0) {
+        for (const id of this.evicted.keys()) if (!this.supervised.has(id)) this.evicted.delete(id);
         const r = await this.peers.finishRemoval(name);
         if (!r.ok) this.log(`peer_remove ${name}: ${r.error}`);
         continue;
       }
+      if (pending.mode !== "now") continue;
       const grace = secondsMs(this.config.effective().stop_grace_s);
-      if (pending.mode !== "now" || this.now() < Date.parse(pending.at) + grace) continue;
       for (const id of live) {
         const a = this.supervised.get(id);
+        // Launched but not verified yet: told to stop once it is supervised.
         if (a === undefined) continue;
+        const told = this.evicted.get(id);
+        if (told === undefined) {
+          await this.evictOne(name, id, a, pending.by);
+          continue;
+        }
+        if (this.now() < told + grace) continue;
+        this.evicted.delete(id);
         await this.append(a.wave, {
           type: "agent_force_retired",
           task: a.task,
           data: { agent_id: id, role: a.role, reason: "peer_remove" },
         });
-        await this.onFinal(id, "stopped");
+        await this.onFinal(id, "stopped", `was stopped: ${name} is being removed`);
       }
     }
   }
@@ -2658,6 +2918,13 @@ export class Daemon {
     const t = w.tasks[task];
     if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
     const key = `${wave}/${task}/${role}`;
+    // Its machine takes no new agents (draining, being removed, removed): it waits for the
+    // owner's re-place answer, never a spawn that fails on a host that is gone.
+    const closed = this.closedFor(wave, task);
+    if (closed !== null) {
+      this.parkClosed(wave, task);
+      throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
+    }
     let remote: RemoteHost | undefined;
     if (t.host !== "local") {
       try {
@@ -2697,6 +2964,11 @@ export class Daemon {
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
       const { resumeNote, ...rest } = pipeline;
+      // An implementer respawn continues the branch (and PR) an earlier attempt pushed.
+      const carried =
+        role === "implementer" && rest.start === undefined && rest.worktreeAttempt === undefined
+          ? this.lastBranch(wave, task, role)
+          : undefined;
       let req = {
         wave: w,
         task,
@@ -2705,6 +2977,7 @@ export class Daemon {
         ...rest,
         account: { id: account.id, dir: account.dir },
         ...(resumeNote !== undefined ? { resumeNote } : {}),
+        ...(carried !== undefined ? { continueBranch: carried } : {}),
       };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
@@ -2717,15 +2990,20 @@ export class Daemon {
       const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
       if (res.kind === "launched") {
         this.refused.delete(key);
+        this.launching.set(res.agentId, { wave, task, role });
         void res.verified.then(
           (outcome) => {
+            this.launching.delete(res.agentId);
             this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
             // Refused by the broker: no work it does can be delivered. Pause it until the
             // decision's answer (relaunch / cancel) replaces or retires it.
             if (outcome.kind === "decision" && outcome.decision === "hooks_auth_failed")
               void this.enqueue(() => this.pauseAuthFailed(outcome.agentId));
           },
-          (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
+          (e: unknown) => {
+            this.launching.delete(res.agentId);
+            this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`);
+          },
         );
         // Best effort, after supervision is attached: the agent is launched whatever it says.
         void this.spawnRecovered(wave, task, role, res.agentId, prior).catch((e: unknown) =>
@@ -2862,6 +3140,16 @@ export class Daemon {
     if (open !== undefined) {
       await this.resolveNow(wave, open.decision_id, { answer: "recovered", by: DAEMON_AGENT_ID });
     }
+  }
+
+  /** The branch the latest agent of a task's role was cut on (`agent_spawned`), if any. */
+  private lastBranch(wave: WaveId, task: TaskId, role: Role): string | undefined {
+    const spawned = this.waves
+      .get(wave)
+      ?.journal.readAll()
+      .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
+      .at(-1)?.data.branch;
+    return typeof spawned === "string" && AGENT_BRANCH.test(spawned) ? spawned : undefined;
   }
 
   /** The attempt number the next agent spawned for a task's role gets (its branch's `-<n>`). */
@@ -3240,6 +3528,7 @@ export class Daemon {
    * tunnel: its spawn waits. Only new spawns wait; running agents are never touched.
    */
   private parkOnTunnel(wave: WaveId, task: string): boolean {
+    if (this.parkClosed(wave, task)) return true;
     const key = `${wave}/${task}`;
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
     let target: string | undefined;
@@ -3574,7 +3863,10 @@ export class Daemon {
         ? { max_agents: cfg.hard_ceiling, drain: false }
         : {
             max_agents: h?.max_agents ?? REMOTE_HOST_DEFAULTS.max_agents,
-            drain: h?.drain ?? REMOTE_HOST_DEFAULTS.drain,
+            // A pending removal keeps it closed, whatever its drain says now.
+            drain:
+              (h?.drain ?? REMOTE_HOST_DEFAULTS.drain) ||
+              Object.hasOwn(this.peers.removals(), name),
           },
       hostVersion: this.version,
       hostOrigin:
@@ -4176,12 +4468,9 @@ export class Daemon {
    * tells the pipeline it failed; `done` goes to the pipeline, which verifies the claim (steering
    * the agent while it is still live) and retires it.
    */
-  private async onFinal(agentId: string, final: string): Promise<void> {
+  private async onFinal(agentId: string, type: string, why?: string): Promise<void> {
     const a = this.supervised.get(agentId);
     if (a === undefined || this.moving.has(agentId)) return;
-    // Stopped by a remove-now (F6): whatever it said last, its role did not finish.
-    const evicted = this.evictedFrom(agentId);
-    const type = evicted !== undefined && final === "done" ? "stopped" : final;
     if (type !== "done") await this.retire(agentId, type);
     const raw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
@@ -4193,7 +4482,7 @@ export class Daemon {
       agent_id: agentId,
       status: type === "done" ? "done" : "failed",
       ...(result !== undefined ? { result } : {}),
-      ...(evicted !== undefined ? { why: `was stopped: ${evicted} is being removed` } : {}),
+      ...(why !== undefined ? { why } : {}),
     });
   }
 
@@ -4255,6 +4544,8 @@ export class Daemon {
     if (this.opts.spawner === undefined || rec?.wave == null) return;
     const key = `${wave}/${task}/${role}`;
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
+    // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
+    if (this.parkClosed(wave, task)) return;
     const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
     const hold = roleSpawnHold({
       killSwitch: this.killSwitch,
@@ -4713,6 +5004,11 @@ export class Daemon {
       const role = String(x.role) as Role;
       const task = d.task;
       this.refused.delete(`${wave}/${task}/${role}`);
+      // Its machine takes no new agents: it starts once the task is re-placed.
+      if (this.parkClosed(wave, task)) {
+        this.heldRespawn.set(`${wave}/${task}`, role);
+        return;
+      }
       void this.startSpawn(wave, task, role).catch((e: unknown) =>
         this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
       );
@@ -5199,9 +5495,13 @@ export class Daemon {
   }
 
   private observeJournal(wave: WaveId, journal: Journal): void {
-    if (wave !== SYSTEM_WAVE) for (const e of journal.readAll()) this.noteSpawn(wave, e);
+    for (const e of journal.readAll()) {
+      if (wave !== SYSTEM_WAVE) this.noteSpawn(wave, e);
+      else this.noteRemoved(e);
+    }
     journal.onAppend((event) => {
       if (wave !== SYSTEM_WAVE) this.noteSpawn(wave, event);
+      else this.noteRemoved(event);
       for (const fn of this.journalListeners) fn(wave, event);
     });
   }
@@ -5211,6 +5511,12 @@ export class Daemon {
     const { agent_id: id, host } = e.data as { agent_id?: unknown; host?: unknown };
     if (e.type !== "agent_spawned" || typeof id !== "string") return;
     this.spawnedAgents.set(id, { wave, host: typeof host === "string" ? host : "local" });
+  }
+
+  /** A `peer_removed` (F6): when the machine went, for the tasks still placed on it. */
+  private noteRemoved(e: JournalEvent): void {
+    if (e.type === "peer_removed" && typeof e.data.name === "string")
+      this.removedAt.set(e.data.name, Date.parse(e.at));
   }
 
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
@@ -5265,6 +5571,14 @@ export class Daemon {
       if (f === undefined || t.stage === "done" || t.stage === "cancelled") continue;
       if (t.stage !== "queued" && t.why_waiting !== undefined) continue;
       t.why_waiting = spawnFailedWhy(f, this.now());
+    }
+    // On a machine that takes no new agents (F6): what it waits for, whatever its stage.
+    for (const t of state.tasks) {
+      if (t.stage === "done" || t.stage === "cancelled" || t.why_waiting !== undefined) continue;
+      if (this.taskLive(wave, t.id)) continue;
+      const closed = this.closedFor(wave, t.id);
+      if (closed !== null)
+        t.why_waiting = `${closed.line}; re-place or cancel ${t.id} (its machine_down decision)`;
     }
     for (const t of state.tasks) {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
@@ -5386,14 +5700,28 @@ export class Daemon {
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const ev = resolveEvent(log.record, id, r, dateOf(this.time));
+    let ev = resolveEvent(log.record, id, r, dateOf(this.time));
     if ("error" in ev) throw new Error(ev.error);
     if ("already" in ev) return { decision: ev.already, already_resolved: true };
     // `respawn on <machine>` (F6): the task moves there before the respawn the answer triggers.
+    // A machine that cannot take it now refuses the answer: journaled as not offered, so the
+    // question is asked again with a fresh best.
     const asked = log.record.decisions[id];
     const target =
       asked !== undefined && asked.task !== null ? respawnTarget(r.answer, asked.options) : null;
-    if (asked !== undefined && target !== null) await this.respawnOn(wave, asked, target);
+    const refused =
+      asked !== undefined && target !== null ? await this.respawnOn(wave, asked, target) : null;
+    if (refused !== null) {
+      const again = resolveEvent(
+        log.record,
+        id,
+        { ...r, answer: `${r.answer} (refused: ${refused})` },
+        dateOf(this.time),
+      );
+      if ("error" in again) throw new Error(again.error);
+      if ("already" in again) return { decision: again.already, already_resolved: true };
+      ev = again;
+    }
     const move = this.accountLimitMove(wave, log.record.decisions[id], r.answer);
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
@@ -5413,6 +5741,9 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
+    // The pipeline asks its own questions again; a supervisor's is asked again here.
+    if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
+      await this.askAgainRefused(wave, d, r.answer, refused);
     if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       if (r.answer.trim().toLowerCase() === "cancel") {

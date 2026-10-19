@@ -1514,35 +1514,60 @@ running agent is never migrated.
 unfinished task there shows `host_down`, and each wave with tasks there journals `MACHINE_DOWN`
 (§4.6.14). volleyd remembers since when, on its own clock (`MachineHealth.downSince`). Once it has
 been down for `placement.down_decision_after_s` (default 300), each running wave with unfinished
-tasks there gets one wave-level `machine_down` decision carrying `host`, `down_since` and `tasks`
-(running and queued):
+tasks there gets one wave-level `machine_down` decision carrying `host`, `down_since`, `tasks`
+(running and waiting) and `machine: "down"`. A task counts as running only while an agent of it
+is live (supervised, launched and being verified, or spawning); one whose agent ended (between
+roles, or waiting on its respawn question) is waiting:
 
 ```
-box-a has been down 5 min (no heartbeat for 90 s). 2 queued tasks were placed there: T3 and T4.
-T1 is running there and is left alone: a running agent is never moved. wait: keep the queued
-tasks parked until box-a is back; this is what happens if nobody answers, and this question
-closes itself when box-a returns. re-place queued tasks: place T3 and T4 again without box-a
-(best now: studio). cancel: cancel T1, T3 and T4.
+box-a has been down 5 min (no heartbeat for 90 s). 2 tasks placed there have no agent running
+(queued, or waiting for their next role): T3 and T4. T1 is running there and is left alone: a
+running agent is never moved. wait: keep them parked until box-a is back; this is what happens if
+nobody answers, and this question closes itself when box-a returns. re-place queued tasks: place
+T3 and T4 again without box-a (best now for T3: studio). cancel: cancel T1, T3 and T4 (T1's
+running agent is told to stop).
 ```
 
 - `wait` (also what happens with no answer): everything stays parked. volleyd asks again only when
-  a task with no agent yet would park there that the last question did not name.
-- `re-place queued tasks` (the Desk pre-fills it): each listed task that still has no agent and is
-  still on that machine goes through placement again (F3's `place`, with the down machine
+  a waiting task appears there that the last question did not name.
+- `re-place queued tasks` (the Desk pre-fills it): each listed task that still has no live agent
+  and is still on that machine goes through placement again (F3's `place`, with the machine
   excluded and each choice reserved for the next), journaled `task_placed { by: "decision",
-  from: "box-a" }`. Tasks with an agent stay where they are. A task with no eligible machine stays
-  and says why (`alarm_raised { code: NOT_REPLACED }`).
+  from: "box-a" }`; its next role starts where it now is. Tasks with a live agent stay where they
+  are. A task with no eligible machine stays and says why (`alarm_raised { code: NOT_REPLACED }`),
+  and the answer keeps applying: it is placed as soon as a machine is eligible.
 - `cancel`: every listed task not finished is cancelled; a running agent there is sent `cancel`
   (it waits in its mailbox while the machine is away).
 - The machine coming back resolves an open `machine_down` with `wait` (`by: volleyd`).
 
+**Closed to new agents: draining, being removed, removed.** Nothing new starts on a machine that is
+draining (`hosts.<name>.drain`), being removed (a pending `peer_remove { drain | now }`) or was
+removed: a spawn for a task placed there (its first agent, its next role, a respawn) parks with a
+plain `why_waiting` (`box-a is being removed: nothing new starts there; re-place or cancel T3 (its
+machine_down decision)`), never a spawn that fails on a host that is gone. Each running wave with
+such a waiting task gets a `machine_down` decision at once, with `machine: "draining" |
+"removing" | "removed"`: `re-place queued tasks` and `cancel` as above, and `wait` only while the
+machine is draining (until its drain is lifted; a machine being removed or removed is not coming
+back, and its tasks stay parked if nobody answers). A task whose own open question already offers
+`respawn on <best>` is left to that question. An open `machine_down` whose trouble changed (a
+down machine removed, a drain lifted) closes itself (`superseded`, or `wait`), and the question
+about the new trouble follows.
+
 **Respawn on another machine.** A decision that offers `respawn` for an agent whose machine is
 down or not eligible (an agent reaped while its machine is away, an agent stopped by a remove-now)
 also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened (F3's
-placement with that machine excluded), and its question says what it does. Answering it re-places
-the task there first (`task_placed { by: "decision", from }`), then respawns the role: a fresh
-worktree cut from `origin/<release>` there; a later role (reviewer, fixup) starts at the task's
-verified head with its branch and PR, by name. Only the offered machine counts as an answer.
+placement with that machine excluded), and its question says what each option does and that
+nothing is respawned without an answer. On a machine closed to new agents, plain `respawn` is not
+offered (it could only park). Answering `respawn on <machine>` checks that machine again: one that
+is down, closed or not eligible by then refuses the answer (journaled as `respawn on <machine>
+(refused: <why>)`, nothing re-placed), and the question is asked again with a fresh offer.
+Otherwise the task is re-placed there first (`task_placed { by: "decision", from }`), then the
+role respawns in a fresh worktree there. An implementer respawn (anywhere) continues the branch
+the earlier attempt pushed: when origin has it, the new worktree is that branch, cut from origin's
+copy, and the brief names it and the PR open from it, so no second branch or PR is started; a
+branch never pushed starts afresh from `origin/<release>`. A later role (reviewer, fixup) starts
+at the task's verified head with its branch and PR, by name. Only the offered machine counts as
+an answer.
 
 **Overloaded.** A machine whose load per core (the higher of the 1- and 5-minute averages) is over
 `placement.load_per_core_max`, or whose available memory is under
@@ -1551,24 +1576,29 @@ verified head with its branch and PR, by name. Only the offered machine counts a
 touched. A peer stays ineligible until `admission.hysteresis_samples` (3) clean heartbeats in a
 row (`recovering: load per core clear for 2/3 samples`).
 
-**Drain.** `hosts.<name>.drain: true` (hot, `config set`) takes a machine out of placement; its
-readiness shows `drain: true` and `placed` (the Desk: "draining · 2 agents left").
+**Drain.** `hosts.<name>.drain: true` (hot, `config set`) takes a machine out of placement and
+stops new spawns there (above); its readiness shows `drain: true` and `placed`.
 
 **Remove: at once, drain, now.** `peer_remove { name }` (`volley peer remove <name>`) removes a
-paired machine at once. With live agents there:
+paired machine at once. With live agents there (supervised, launched and still being verified,
+or spawning):
 
 - `{ name, drain: true }` (`--drain`) sets `hosts.<name>.drain`, answers at once
   (`result: { removing: "drain", agents }`) and journals `peer_drain_started { by, name, mode,
-  agents }` in `_system`; each tick, once no agent (or spawn in flight) is left there, volleyd
-  finishes the removal and journals `peer_removed`.
-- `{ name, now: true }` (`--now`) does the same and sends each agent there a `cancel` at once; one
-  still live `stop_grace_s` later is force-retired (`agent_force_retired { reason: peer_remove }`).
-  Either way its role ends as stopped (a `done` it publishes meanwhile is not accepted) and the
-  pipeline opens its respawn decision, which offers `respawn on <best>`.
+  agents }` in `_system`; each tick, once no agent is left there, volleyd finishes the removal and
+  journals `peer_removed`.
+- `{ name, now: true }` (`--now`) does the same and sends each agent there a `cancel` (an agent
+  that comes up after the removal began gets it once it is supervised); one still live
+  `stop_grace_s` after its own `cancel` is force-retired (`agent_force_retired { reason:
+  peer_remove }`), its role ends as stopped and the pipeline opens its respawn decision, which
+  offers `respawn on <best>`. A `done` an agent publishes before that is verified as usual: a
+  finished implementer's pushed work and PR count.
 
 With no live agent either removes at once. A pending removal is kept in `peers.json`
-(`removing`), so it survives a restart. `drain` and `now` exclude each other, and a second
-removal of a machine being removed is refused.
+(`removing`), so it survives a restart, and it cannot be called off: the machine stays closed to
+new agents (its readiness keeps `drain: true`, whatever `hosts.<name>.drain` says) until the
+removal finishes; pair it again afterwards to bring it back. `drain` and `now` exclude each other,
+and a second removal of a machine being removed is refused.
 
 ---
 

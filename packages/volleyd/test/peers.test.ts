@@ -799,7 +799,8 @@ describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
         `^${t1} \\(implementer\\) was stopped: box is being removed\\. Respawn the implementer`,
       ),
     );
-    expect(opened?.data.options).toEqual(["respawn", "respawn on control", "cancel"]);
+    // Its machine is being removed: only elsewhere.
+    expect(opened?.data.options).toEqual(["respawn on control", "cancel"]);
     await eventually(async () => {
       await f.tick();
       return types().includes("peer_removed");
@@ -807,17 +808,225 @@ describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
     expect(config()).not.toContain("box:");
   });
 
-  it("an agent that ends itself during a remove-now counts as stopped, not done", async () => {
+  it("a done that arrives during a remove-now goes to the pipeline as done: it is verified, never rewritten", async () => {
     const t1 = await runOnBox();
     await f.adminOp({ op: "peer_remove", name: "box", now: true });
+    // Its work is pushed and its PR open: what verification checks.
+    const wt = f.journal("w1").find((e) => e.type === "agent_spawned")?.data.worktree as string;
+    f.exec.on(["git", "-C", wt, "rev-parse"], { stdout: `${"a".repeat(40)}\n` });
+    f.exec.on(["gh", "pr", "list", "--head", "w1/T1-implementer-1"], {
+      stdout: JSON.stringify([
+        {
+          number: 7,
+          url: "https://github.com/example/repo/pull/7",
+          headRefName: "w1/T1-implementer-1",
+          baseRefName: "release/w1",
+          headRefOid: "a".repeat(40),
+        },
+      ]),
+    });
     await f.finish(t1, "done");
     await eventually(async () => {
       await f.tick();
-      return f
-        .journal("w1")
-        .some((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      return types().includes("peer_removed");
     });
-    expect(f.journal("w1").some((e) => e.type === "artifact_verified")).toBe(false);
+    const j = f.journal("w1");
+    // Verified as the done it is (its PR is in its CI hold), retired as done.
+    expect(j.find((e) => e.type === "ci_pending")?.data).toMatchObject({
+      role: "implementer",
+      pr: { number: 7 },
+    });
+    expect(j.find((e) => e.type === "agent_retired")?.data).toMatchObject({
+      agent_id: t1,
+      status: "done",
+    });
+    expect(j.some((e) => e.type === "agent_force_retired")).toBe(false);
+    expect(j.some((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked")).toBe(
+      false,
+    );
+  });
+
+  /** The latest decision of `kind` opened in w1 (journal data). */
+  const lastOpened = (kind: string) =>
+    f
+      .journal("w1")
+      .filter((e) => e.type === "decision_opened" && e.data.kind === kind)
+      .at(-1)?.data;
+  const spawnFailures = () =>
+    f
+      .journal("w1")
+      .filter(
+        (e) =>
+          e.type === "spawn_failed" ||
+          (e.type === "alarm_raised" && e.data.code === "LAUNCH_FAILED"),
+      );
+
+  it("drain: an agent that fails meanwhile is offered only respawn on <best>; plain respawn after the removal never spawns on the gone host", async () => {
+    const t1 = await runOnBox();
+    await f.adminOp({ op: "peer_remove", name: "box", drain: true });
+    await f.finish(t1, "failed");
+    await eventually(async () => {
+      await f.tick();
+      return lastOpened("agent_blocked") !== undefined;
+    });
+    const first = lastOpened("agent_blocked");
+    expect(first?.options).toEqual(["respawn on control", "cancel"]);
+    expect(first?.question).toContain(
+      "Where: box is being removed, so nothing new starts there: respawn on control starts the implementer on control instead",
+    );
+    await eventually(async () => {
+      await f.tick();
+      return types().includes("peer_removed");
+    });
+    // Plain respawn is not offered: asked again, nothing spawns, nothing fails.
+    await f.resolve("w1", first?.decision_id as string, "respawn");
+    await f.tick();
+    await f.tick();
+    expect(spawnFailures()).toEqual([]);
+    expect(f.box()?.launches).toHaveLength(1);
+    const again = lastOpened("agent_blocked");
+    expect(again?.decision_id).not.toBe(first?.decision_id);
+    expect(again?.question).toMatch(/^"respawn" is not one of respawn on control \/ cancel\. /);
+    expect(again?.question).toContain("Where: box is removed, so nothing new starts there");
+    expect(again?.options).toEqual(["respawn on control", "cancel"]);
+    await f.resolve("w1", again?.decision_id as string, "respawn on control");
+    expect(
+      f
+        .journal("w1")
+        .filter((e) => e.type === "task_placed")
+        .at(-1)?.data,
+    ).toMatchObject({ host: "control", by: "decision", from: "box" });
+    await f.tick();
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(spawnFailures()).toEqual([]);
+  });
+
+  it("a task with no agent when its machine is removed waits with a plain why_waiting and a re-place question, never a spawn-failure loop", async () => {
+    const t1 = await runOnBox();
+    await f.finish(t1, "failed");
+    await eventually(async () => {
+      await f.tick();
+      return lastOpened("agent_blocked") !== undefined;
+    });
+    const blocked = lastOpened("agent_blocked");
+    expect(blocked?.options).toEqual(["respawn", "cancel"]);
+    // Nothing runs on box: the drain removes it at once.
+    expect(await f.adminOp({ op: "peer_remove", name: "box", drain: true })).toMatchObject({
+      ok: true,
+      result: { host_removed: true },
+    });
+    await f.tick();
+    const md = lastOpened("machine_down");
+    expect(md).toMatchObject({ host: "box", machine: "removed", tasks: ["T1"] });
+    expect(md?.options).toEqual(["re-place queued tasks", "cancel"]);
+    expect(md?.question).toContain(
+      "box was removed. 1 task placed there has no agent running (queued, or waiting for its next role): T1.",
+    );
+    // The respawn answered on the old question parks: no spawn on a host that is gone.
+    await f.resolve("w1", blocked?.decision_id as string, "respawn");
+    for (let i = 0; i < 5; i++) await f.tick(60_000);
+    expect(spawnFailures()).toEqual([]);
+    expect((await f.task("w1", "T1"))?.why_waiting).toBe(
+      "box was removed; re-place or cancel T1 (its machine_down decision)",
+    );
+    await f.resolve("w1", md?.decision_id as string, "re-place queued tasks");
+    expect(
+      f
+        .journal("w1")
+        .filter((e) => e.type === "task_placed")
+        .at(-1)?.data,
+    ).toMatchObject({ task: "T1", host: "control", by: "decision", from: "box" });
+    await f.tick();
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(spawnFailures()).toEqual([]);
+  });
+
+  it("drain: a queued task already placed there does not start; it waits and is asked about", async () => {
+    await runOnBox();
+    await f.adminOp({ op: "peer_remove", name: "box", drain: true });
+    await f.submit("w2", "", "  T2: { issue: 42, host: box }\n");
+    for (let i = 0; i < 3; i++) await f.tick();
+    expect(f.box()?.launches).toHaveLength(1);
+    expect(f.journal("w2").some((e) => e.type === "agent_spawned")).toBe(false);
+    expect((await f.task("w2", "T2"))?.why_waiting).toBe(
+      "box is being removed: nothing new starts there; re-place or cancel T2 (its machine_down decision)",
+    );
+    const md = f
+      .journal("w2")
+      .find((e) => e.type === "decision_opened" && e.data.kind === "machine_down")?.data;
+    expect(md).toMatchObject({ host: "box", machine: "removing", tasks: ["T2"] });
+    expect(md?.options).toEqual(["re-place queued tasks", "cancel"]);
+    // w1's running agent is not asked about: it is left to finish.
+    expect(
+      f.journal("w1").some((e) => e.type === "decision_opened" && e.data.kind === "machine_down"),
+    ).toBe(false);
+    await f.daemon.resolveDecision("w2", md?.decision_id as string, {
+      answer: "re-place queued tasks",
+      by: "owner",
+    });
+    await f.waits.settled();
+    await f.tick();
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w2 T2 implementer"]);
+    expect(types()).not.toContain("peer_removed");
+  });
+
+  it("a drain waits for an agent launched but not registered yet", async () => {
+    f.holdSessions(true);
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await eventually(async () => {
+      await f.tick();
+      return f.journal("w1").some((e) => e.type === "agent_spawned");
+    });
+    const t1 = f.agentOf("w1", "T1");
+    expect(await f.adminOp({ op: "peer_remove", name: "box", drain: true })).toMatchObject({
+      ok: true,
+      result: { removing: "drain", agents: 1, host_removed: false },
+    });
+    await f.tick();
+    await f.tick();
+    expect(types()).not.toContain("peer_removed");
+    f.holdSessions(false);
+    await f.supervised(t1);
+    await f.tick();
+    expect(types()).not.toContain("peer_removed");
+    await f.finish(t1, "failed");
+    await eventually(async () => {
+      await f.tick();
+      return types().includes("peer_removed");
+    });
+  });
+
+  it("now: an agent that comes up after the remove-now began is told to stop too, and gets its own grace", async () => {
+    f.holdSessions(true);
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await eventually(async () => {
+      await f.tick();
+      return f.journal("w1").some((e) => e.type === "agent_spawned");
+    });
+    const t1 = f.agentOf("w1", "T1");
+    await f.adminOp({ op: "peer_remove", name: "box", now: true });
+    const cancels = () =>
+      f
+        .journal("w1")
+        .filter(
+          (e) => e.type === "steering_sent" && e.data.agent_id === t1 && e.data.type === "cancel",
+        );
+    // Past the grace of the removal itself before it comes up.
+    await f.tick(CONFIG_DEFAULTS.stop_grace_s * 1000 + 5000);
+    expect(cancels()).toEqual([]);
+    f.holdSessions(false);
+    await f.supervised(t1);
+    await f.tick();
+    expect(cancels()).toHaveLength(1);
+    expect(f.journal("w1").some((e) => e.type === "agent_force_retired")).toBe(false);
+    await f.tick(CONFIG_DEFAULTS.stop_grace_s * 1000 - 2000);
+    expect(f.journal("w1").some((e) => e.type === "agent_force_retired")).toBe(false);
+    await f.tick(2000);
+    expect(f.journal("w1").find((e) => e.type === "agent_force_retired")?.data).toMatchObject({
+      agent_id: t1,
+      reason: "peer_remove",
+    });
+    expect(cancels()).toHaveLength(1);
     await eventually(async () => {
       await f.tick();
       return types().includes("peer_removed");

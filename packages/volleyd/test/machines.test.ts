@@ -921,9 +921,14 @@ describe("a machine that stays down: the machine_down decision (SPEC §4.6.15)",
       options: ["wait", "re-place queued tasks", "cancel"],
     });
     expect(d?.question).toContain("box has been down 5 min (disconnected).");
-    expect(d?.question).toContain("2 queued tasks were placed there: T3 and T4.");
+    expect(d?.question).toContain(
+      "2 tasks placed there have no agent running (queued, or waiting for their next role): T3 and T4.",
+    );
     expect(d?.question).toContain("T1 is running there and is left alone");
-    expect(d?.question).toContain("(best now: control)");
+    expect(d?.question).toContain("(best now for T3: control)");
+    expect(d?.question).toContain(
+      "cancel: cancel T1, T3 and T4 (T1's running agent is told to stop).",
+    );
     expect(
       schemaErrors(
         "decision.schema.json",
@@ -995,6 +1000,117 @@ describe("a machine that stays down: the machine_down decision (SPEC §4.6.15)",
       .find((e) => e.type === "decision_resolved" && e.data.decision_id === second);
     expect(resolved?.data).toMatchObject({ answer: "wait", by: "volleyd" });
     expect((await f.state("w1")).open_decisions).not.toContain(second);
+  });
+
+  it("a task whose agent ended is not running: it is named as waiting and re-place moves it", async () => {
+    await f.submit("w1", "placement: auto\n", "  T1: { issue: 42, host: box }\n");
+    await f.tick();
+    const t1 = f.agentOf("w1", "T1");
+    await f.supervised(t1);
+    await f.finish(t1, "failed");
+    let blocked: string | undefined;
+    for (let i = 0; i < 20 && blocked === undefined; i++) {
+      await f.tick();
+      blocked = f
+        .journal("w1")
+        .find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked")?.data
+        .decision_id as string | undefined;
+    }
+    // Its agent is retired, though the task still lists it.
+    expect(f.daemon.snapshot("w1")?.tasks.find((t) => t.id === "T1")?.agents.implementer).toBe(t1);
+    await f.lwt();
+    await f.tick(DOWN_AFTER);
+    const id = machineDown("w1")[0]?.data.decision_id as string;
+    const d = await f.decision("w1", id);
+    expect(d?.question).toContain(
+      "1 task placed there has no agent running (queued, or waiting for its next role): T1.",
+    );
+    expect(d?.question).not.toContain("running there and is left alone");
+    expect(d?.question).toContain("re-place queued tasks: place T1 again without box");
+    await f.resolve("w1", id, "re-place queued tasks");
+    expect(placedBy("w1", "T1").at(-1)?.data).toMatchObject({
+      host: "control",
+      by: "decision",
+      from: "box",
+    });
+    // Its respawn starts where it now is.
+    await f.resolve("w1", blocked as string, "respawn");
+    await f.tick();
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+  });
+
+  it("re-place with no machine eligible: the task waits, then moves as soon as one is", async () => {
+    await runOnBox();
+    await f.lwt();
+    f.setLocalLoad([9999, 9999, 9999]);
+    await eventually(async () => {
+      await f.tick(30_000);
+      return (await f.verdict("control"))?.eligible === false;
+    });
+    await f.tick(DOWN_AFTER);
+    const id = machineDown("w1")[0]?.data.decision_id as string;
+    expect((await f.decision("w1", id))?.question).toContain(
+      "no other machine is eligible now: they wait for one and are placed as soon as one is",
+    );
+    await f.resolve("w1", id, "re-place queued tasks");
+    const notReplaced = f
+      .journal("w1")
+      .filter((e) => e.type === "alarm_raised" && e.data.code === "NOT_REPLACED")
+      .map((e) => e.task)
+      .sort();
+    expect(notReplaced).toEqual(["T3", "T4"]);
+    expect(placedBy("w1", "T3").some((e) => e.data.by === "decision")).toBe(false);
+    // control is fine again (three clean records): the answer still applies.
+    f.setLocalLoad([0.5, 0.5, 0.5]);
+    await eventually(async () => {
+      await f.tick(30_000);
+      return placedBy("w1", "T3").some((e) => e.data.by === "decision");
+    });
+    for (const t of ["T3", "T4"]) {
+      expect(placedBy("w1", t).at(-1)?.data).toMatchObject({
+        host: "control",
+        by: "decision",
+        from: "box",
+      });
+    }
+    // Never asked again for them.
+    expect(machineDown("w1")).toHaveLength(1);
+  });
+
+  it("a down machine that is removed: its open question closes and one without wait follows", async () => {
+    await f.submit(
+      "w1",
+      "placement: auto\n",
+      "  T1: { issue: 42 }\n  T3: { issue: 42, host: box, after: [T1] }\n",
+    );
+    await f.tick();
+    await f.lwt();
+    await f.tick(DOWN_AFTER);
+    const first = machineDown("w1")[0]?.data.decision_id as string;
+    expect((await f.decision("w1", first))?.options).toEqual([
+      "wait",
+      "re-place queued tasks",
+      "cancel",
+    ]);
+    expect(await f.adminOp({ op: "peer_remove", name: "box" })).toMatchObject({ ok: true });
+    await f.tick();
+    const closed = f
+      .journal("w1")
+      .find((e) => e.type === "decision_resolved" && e.data.decision_id === first);
+    expect(closed?.data).toMatchObject({
+      answer: "superseded",
+      by: "volleyd",
+      rationale: "box was removed",
+    });
+    expect(machineDown("w1")).toHaveLength(2);
+    const second = machineDown("w1")[1]?.data.decision_id as string;
+    expect(await f.decision("w1", second)).toMatchObject({
+      host: "box",
+      machine: "removed",
+      tasks: ["T3"],
+      options: ["re-place queued tasks", "cancel"],
+    });
+    expect((await f.state("w1")).open_decisions).toEqual([second]);
   });
 
   it("cancel cancels the named tasks that have not finished", async () => {
