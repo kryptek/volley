@@ -206,7 +206,11 @@ describe("relaunch of a spawn-type decision", () => {
     });
     // The failed agent went through the delete path: login deleted, records cleared, retired.
     const retired = await event((e) => e.type === "agent_retired" && e.data.agent_id === A1);
-    expect(retired.data).toMatchObject({ status: "relaunched", credentials_revoked: true });
+    expect(retired.data).toMatchObject({
+      status: "relaunched",
+      credentials_revoked: true,
+      lock_released: true,
+    });
     expect(host.fake.argvs(["volley", "auth", "rm-agent", A1])).toHaveLength(1);
     for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
     // A new login for attempt 2, the same role spawned again, and it registers.
@@ -252,6 +256,9 @@ describe("relaunch of a spawn-type decision", () => {
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
   });
+
+  // S5 (#95) owns `reaped`-on-delete; this base has no S5 yet. Its integration fills this in.
+  it.todo("publishes reaped for <role>-1 through the S5 delete path once S5 lands");
 });
 
 describe("relaunch of a pipeline role (the review stage continues)", () => {

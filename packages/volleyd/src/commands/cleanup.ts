@@ -40,11 +40,12 @@ export function cleanupPlan(home: string, wave: string): { repo: string; targets
   const retired = new Set(
     events.filter((e) => e.type === "agent_retired").map((e) => e.data.agent_id as string),
   );
-  // Workspaces a retire already closed (agent_retired { workspace, workspace_closed }).
+  // Agents whose retire already closed their workspace (agent_retired { workspace_closed }). By
+  // agent, not by ref: a closed cmux ref can be handed to a later agent whose close failed.
   const closed = new Set(
     events
       .filter((e) => e.type === "agent_retired" && e.data.workspace_closed === true)
-      .map((e) => e.data.workspace as string),
+      .map((e) => e.data.agent_id as string),
   );
   const byPath = new Map<string, Target>();
   for (const e of events) {
@@ -62,7 +63,7 @@ export function cleanupPlan(home: string, wave: string): { repo: string; targets
       t.remote = { host: String(e.data.host), target: remote.target, repo: remote.repo };
     }
     const ws = e.data.workspace;
-    if (typeof ws === "string" && !closed.has(ws) && !t.workspaces.includes(ws))
+    if (typeof ws === "string" && !closed.has(id) && !t.workspaces.includes(ws))
       t.workspaces.push(ws);
     if (!retired.has(id)) t.live.push(id);
     byPath.set(t.worktree, t);

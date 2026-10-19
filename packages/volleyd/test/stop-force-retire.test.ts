@@ -54,7 +54,10 @@ describe("stop force-retires agents that never ack", () => {
 
   it("a wave resumed within the grace keeps its agents", async () => {
     await stopped();
+    expect(s.daemon.capturing()).toEqual([]);
     expect((await runCli(["resume", "w1", "--by", "tester"], s.env.env)).exitCode).toBe(0);
+    // Its terminal is captured again: a live agent never shows a frozen screen.
+    expect(s.daemon.capturing()).toEqual([AGENT]);
     await clock.advance(30_000);
     await s.settled();
     expect(s.journal().some((e) => e.type === "agent_force_retired")).toBe(false);
@@ -68,4 +71,8 @@ describe("stop force-retires agents that never ack", () => {
     await clock.advance(5_000);
     expect((await s.event("agent_force_retired")).data.agent_id).toBe(AGENT);
   });
+
+  // S5 (#95) owns `reaped`-on-delete and the orphan sweep (the same force path); not in this base.
+  it.todo("a force-retired agent publishes reaped through the S5 delete path once S5 lands");
+  it.todo("the S5 orphan sweep force-retires through forceRetireWave's path once S5 lands");
 });

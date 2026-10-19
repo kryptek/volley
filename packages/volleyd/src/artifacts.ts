@@ -42,7 +42,8 @@ export interface PrRef {
 }
 
 export type ArtifactReport =
-  | { kind: "missing"; missing: "push" | "pr" | "base"; detail: string }
+  /** `remote_head`: origin's branch is at another commit than the local head (a push from elsewhere). */
+  | { kind: "missing"; missing: "push" | "pr" | "base"; detail: string; remote_head?: string }
   | {
       kind: "ok";
       head: string;
@@ -97,6 +98,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
       kind: "missing",
       missing: "push",
       detail: `origin/${spec.branch} is ${remoteHead.slice(0, 12)}, the local head is ${head.slice(0, 12)}`,
+      remote_head: remoteHead,
     };
   }
 
@@ -351,8 +353,11 @@ export interface LandedFacts {
   ancestor: boolean;
   /** The head's commits with no equivalent patch on the release branch (cherry-pick marks). */
   unmatched: string[];
-  /** The release branch's commits since it and the head forked, newest first. */
-  subjects: { sha: string; subject: string }[];
+  /**
+   * The release branch's commits since it and the head forked, newest first. `patch`: the commit's
+   * own diff is the PR's whole diff (probed only for a subject that names the PR).
+   */
+  subjects: { sha: string; subject: string; patch?: boolean }[];
 }
 
 export interface Landed {
@@ -362,9 +367,19 @@ export interface Landed {
 }
 
 /**
+ * A release commit's subject names the PR the way GitHub's squash does: `(#<pr>)` at its end, and
+ * it is not a revert. A subject that merely mentions the PR (`follow-up to (#7)`, `replaces (#7)
+ * (#9)`, `Revert "… (#7)"`) does not. Pure.
+ */
+export function namesPr(subject: string, pr: number): boolean {
+  return new RegExp(`\\(#${pr}\\)$`).test(subject.trim()) && !/^revert\b/i.test(subject.trim());
+}
+
+/**
  * Did `head` land on the release branch (at `releaseSha`) without GitHub's merge? It is an
  * ancestor; or every one of its commits has an equivalent patch there; or a release commit's
- * subject names the PR (`(#<pr>)`, a squash's default). Null: nothing says so. Pure.
+ * subject names the PR (namesPr, a squash's default) AND that commit's diff is the PR's whole
+ * diff — a subject alone is never enough. Null: nothing says so. Pure.
  */
 export function landed(
   f: LandedFacts,
@@ -374,17 +389,22 @@ export function landed(
 ): Landed | null {
   if (f.ancestor) return { how: "ancestor", sha: head };
   if (f.unmatched.length === 0) return { how: "patch", sha: releaseSha };
-  const ref = new RegExp(`\\(#${pr}\\)`);
-  const named = f.subjects.find((c) => ref.test(c.subject));
+  const named = f.subjects.find((c) => namesPr(c.subject, pr) && c.patch === true);
   return named !== undefined ? { how: "subject", sha: named.sha } : null;
 }
 
+type Git = (...a: string[]) => Promise<{ code: number; stdout: string }>;
+
+/** Is commit `sha`'s own diff the whole diff of `head` since it forked from `sha`'s parent? */
+async function isSquashOf(git: Git, head: string, sha: string): Promise<boolean> {
+  const squash = await git("show", "--format=", sha);
+  const base = line((await git("merge-base", head, `${sha}~1`)).stdout);
+  const whole = base !== "" ? await git("diff", base, head) : null;
+  return squash.code === 0 && whole?.code === 0 && samePatch(squash.stdout, whole.stdout);
+}
+
 /** The head-side commits of `<base>...<head>` that have no equivalent patch on the base side. */
-async function unmatchedCommits(
-  git: (...a: string[]) => Promise<{ code: number; stdout: string }>,
-  base: string,
-  head: string,
-): Promise<string[]> {
+async function unmatchedCommits(git: Git, base: string, head: string): Promise<string[]> {
   const r = await git("log", "--left-right", "--cherry-pick", "--format=%m%H", `${base}...${head}`);
   if (r.code !== 0) throw new Error(`git log ${base}...${head} exited ${r.code}`);
   return r.stdout
@@ -396,7 +416,7 @@ async function unmatchedCommits(
 /** Gather LandedFacts for `head` against `origin/<release_branch>` (read-only git). */
 export async function probeLanded(
   exec: ExecFn,
-  o: { cwd: string; head: string; release_branch: string },
+  o: { cwd: string; head: string; release_branch: string; pr: number },
 ): Promise<LandedFacts & { release_sha: string }> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
@@ -416,6 +436,8 @@ export async function probeLanded(
     .map((l) => l.trim())
     .filter((l) => l !== "")
     .map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) }));
+  for (const c of subjects)
+    if (namesPr(c.subject, o.pr)) Object.assign(c, { patch: await isSquashOf(git, o.head, c.sha) });
   return { ancestor: false, unmatched, subjects, release_sha: tip };
 }
 
@@ -461,11 +483,7 @@ export async function verifyOperatorMerge(
     return { ok: true, how: "ancestor", sha };
   if ((await unmatchedCommits(git, sha, o.head)).length === 0)
     return { ok: true, how: "patch", sha };
-  const squash = await git("show", "--format=", sha);
-  const base = line((await git("merge-base", o.head, `${sha}~1`)).stdout);
-  const whole = base !== "" ? await git("diff", base, o.head) : null;
-  if (squash.code === 0 && whole?.code === 0 && samePatch(squash.stdout, whole.stdout))
-    return { ok: true, how: "squash", sha };
+  if (await isSquashOf(git, o.head, sha)) return { ok: true, how: "squash", sha };
   return {
     ok: false,
     error: `${o.sha} does not contain the gated head ${o.head}'s changes (not an ancestor, no equivalent patches, not its squash)`,

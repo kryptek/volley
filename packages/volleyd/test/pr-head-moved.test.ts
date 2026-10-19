@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { failingTests } from "../src/artifacts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { EvidenceJson } from "../src/evidence";
+import { ready } from "../src/scheduler";
 import { FIXTURES } from "./helpers/fake-host";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
@@ -26,9 +27,9 @@ const result = (name: string): unknown =>
 let h: Harness;
 afterEach(() => h?.cleanup());
 
-/** Implement → reviews with P1s → fixup-1 → merge_ready at A. */
+/** Implement → reviews with P1s → fixup-1 → merge_ready at A. T2 waits for T1. */
 async function gatedAtA() {
-  h = pipelineHarness();
+  h = pipelineHarness({ dependents: { T2: ["T1"] } });
   await h.start();
   h.openPr(H1);
   await h.finish("implementer", { head: H1, ci: "green" });
@@ -59,6 +60,66 @@ function redOnB() {
   h.world.runLog = fixture("gh-run-log-failed.txt");
 }
 
+describe("PR head moved during the CI hold", () => {
+  it("fixup-1 done, CI on its head running, B pushed → pr_head_moved from the reviewed head, then the decision", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
+    await h.finish("fixup", { head: A, ci: "running", result: result("fixup-resolved") });
+    expect(h.events.some((e) => e.type === "ci_pending" && e.data.sha === A)).toBe(true);
+    pushB("running");
+    await poll();
+    const moved = h.events.find((e) => e.type === "pr_head_moved");
+    // The reviews saw H1: the move is from there (fixup-1's A was never accepted).
+    expect(moved?.data).toMatchObject({ from: H1, to: B, during: "fixup" });
+    // No verify-mismatch question about the agent's push.
+    expect(
+      h.events.some((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked"),
+    ).toBe(false);
+    redOnB();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "pr_head_moved", options: ["rereview", "fixup", "cancel"] });
+    await h.resolve(d?.decision_id as string, "fixup");
+    expect(h.spawns.filter((s) => s.role === "fixup").map((s) => s.agent_id)).toEqual([
+      "w1-t1-fixup-1",
+      "w1-t1-fixup-2",
+    ]);
+  });
+
+  it("the implementer's CI hold: a push to its PR is a move too (the PR comes from the hold)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "running" });
+    expect(h.events.some((e) => e.type === "ci_pending" && e.data.sha === H1)).toBe(true);
+    pushB("green");
+    await poll();
+    expect(h.events.find((e) => e.type === "pr_head_moved")?.data).toMatchObject({
+      from: H1,
+      to: B,
+    });
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "pr_head_moved" });
+    expect(d?.pointers?.pr).toBe("https://github.com/example/repo/pull/7");
+  });
+
+  it("CI settling on the held head without a push is not a move", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "running" });
+    h.world.ci[H1] = "green";
+    await poll();
+    expect(h.events.some((e) => e.type === "pr_head_moved")).toBe(false);
+    expect(h.events.some((e) => e.type === "ci_green")).toBe(true);
+  });
+});
+
 describe("PR head moved at merge_ready", () => {
   it("is noticed: pr_head_moved, gate invalidated, evidence stale, CI awaited on the new head", async () => {
     await gatedAtA();
@@ -69,6 +130,8 @@ describe("PR head moved at merge_ready", () => {
     expect(h.task()?.stage).not.toBe("merge_ready");
     expect(h.record().state?.gates).toEqual([]);
     expect(evidence().stale).toMatchObject({ from: A, to: B });
+    // Nothing downstream is admitted while the head is unanswered.
+    expect(ready(h.record())).toEqual([]);
     // CI on B is awaited (and visible); nothing is asked yet.
     const pending = h.events.find((e) => e.type === "ci_pending" && e.data.sha === B);
     expect(pending?.data.checks).toEqual({ done: 0, total: 1 });
@@ -252,6 +315,17 @@ describe("PR head moved: answers that must not go wrong", () => {
     expect(d?.options).toEqual(["fixup", "cancel"]);
     await h.resolve(d?.decision_id as string, "rereview");
     expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    // The answer it was not offered leaves the move to answer: the re-ask's fixup is the
+    // owner's acceptance of B, so the gate holds at the fixup's head.
+    const [again] = h.openDecisions();
+    expect(again?.options).toEqual(["fixup", "cancel"]);
+    await h.resolve(again?.decision_id as string, "fixup");
+    await h.finish("fixup", { head: C, ci: "green", result: result("fixup-resolved") });
+    expect(h.openDecisions()).toEqual([]);
+    expect(h.task()?.stage).toBe("merge_ready");
+    expect(evidence().moves).toContainEqual(
+      expect.objectContaining({ from: A, to: B, accepted_by: "coord-1" }),
+    );
   });
 
   it("merged while its pr_head_moved decision is open: the late answer spawns nothing", async () => {
@@ -265,9 +339,11 @@ describe("PR head moved: answers that must not go wrong", () => {
       sha: B,
       by: "coord-1",
       how: "ancestor",
+      head: A,
     });
     await h.resolve(d?.decision_id as string, "fixup");
     expect(h.task()?.stage).toBe("done");
     expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+    expect(ready(h.record())).toEqual(["T2"]);
   });
 });

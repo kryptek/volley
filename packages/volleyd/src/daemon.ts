@@ -91,6 +91,7 @@ import {
   type RemoteHostSpec,
   SshTmuxHost,
   resolveRemoteHost,
+  sessionName,
 } from "./hosts/ssh-tmux";
 import {
   TunnelChecks,
@@ -214,7 +215,7 @@ import {
   switchModel,
   switchesSent,
 } from "./recovery";
-import { retireAgent } from "./retire";
+import { closableAfterRestart, retireAgent } from "./retire";
 import { ScreenPublisher } from "./screen-publisher";
 import {
   type SpawnDecision,
@@ -2407,13 +2408,7 @@ export class Daemon {
       a.pendingReap = holdReap(agentId, this.now(), g.ms, g.wake);
       this.scheduleReap(agentId, a);
     };
-    this.screens.track({
-      agentId,
-      namespace: watch.namespace,
-      workspace: outcome.workspace,
-      host,
-      intervalS: () => this.config.effective(wave).screen_tail_interval_s,
-    });
+    this.trackScreen(agentId, a);
     const check = (type: string) => {
       if (this.supervised.get(agentId) !== a) return;
       if (type === "reaped") {
@@ -2496,9 +2491,26 @@ export class Daemon {
             unlinkSync(path);
           } catch {}
         },
-        closeWorkspace: (ws) => host.close(ws, mintConsentToken(`retire ${agentId}`)),
+        // A ref from the journal is closed only if it still names this agent's workspace.
+        closeWorkspace: closableAfterRestart(
+          typeof d.workspace === "string" ? d.workspace : "",
+          sessionName(`${wave} ${spawned.task} ${String(d.role)}`),
+        )
+          ? (ws) => host.close(ws, mintConsentToken(`retire ${agentId}`))
+          : null,
       },
     );
+  }
+
+  /** Capture a supervised agent's terminal (screen-publisher.ts): at spawn, and on resume. */
+  private trackScreen(agentId: string, a: Supervised): void {
+    this.screens.track({
+      agentId,
+      namespace: a.namespace,
+      workspace: a.workspace,
+      host: a.host,
+      intervalS: () => this.config.effective(a.wave).screen_tail_interval_s,
+    });
   }
 
   private async retire(agentId: string, status: string): Promise<void> {
@@ -3331,8 +3343,20 @@ export class Daemon {
                 task: t.task,
                 data: { agent_id: t.agent_id, drift: [], skipped },
               });
-            // The stop's grace ran out while the daemon was down: nothing of the wave lives on.
-            if (rec.state?.status === "stopped") await this.forceRetireWave(wave, "stop");
+            // A stopped wave's agents get what is left of the stop's grace (none, if it ran out
+            // while the daemon was down); then nothing of the wave lives on.
+            if (rec.state?.status === "stopped") {
+              const stop = log.journal
+                .readAll()
+                .filter((e) => e.type === "wave_stopped" && e.data.all !== true)
+                .at(-1);
+              const at = stop !== undefined ? Date.parse(stop.at) : Number.NaN;
+              const left = Number.isNaN(at)
+                ? 0
+                : at + secondsMs(this.config.effective(wave).stop_grace_s) - this.now();
+              if (left > 0) this.armStopGrace(wave, left);
+              else await this.forceRetireWave(wave, "stop");
+            }
           }).catch((e: unknown) =>
             this.log(`reconcile ${wave}: ${e instanceof Error ? e.message : String(e)}`),
           ),
@@ -3650,12 +3674,12 @@ export class Daemon {
     return event;
   }
 
-  /** The wave state as published: the reduced journal plus effective config and admission reasons. */
   /** The agents whose terminals are being captured (screen-publisher.ts). */
   capturing(): string[] {
     return this.screens.tracked();
   }
 
+  /** The wave state as published: the reduced journal plus effective config and admission reasons. */
   snapshot(wave: WaveId): WaveState | null {
     const rec = this.waves.get(wave)?.record;
     if (rec?.state == null) return null;
@@ -4476,7 +4500,10 @@ export class Daemon {
       const full = r.sha;
       // The record describes the commit that merged, and its own CI.
       const merged_ci = await driver.ciOf(task, driver.headCwd(task), full);
-      await this.serial(async () => {
+      const moved = await this.serial(async () => {
+        // The head moved while it was verified: the check describes a head the task left.
+        const now = driver.headOf(task);
+        if (now !== r.head) return now ?? "none";
         // The merge settles every open question about the task (a pr_closed is answered
         // landed; any other is superseded, and a done task acts on no answer).
         for (const d of openDecisions(w.log.record)) {
@@ -4493,9 +4520,16 @@ export class Daemon {
           sha: full,
           by,
           how: r.how,
+          head: r.head as string,
           merged_ci,
         });
+        return null;
       });
+      if (moved !== null)
+        return {
+          ok: false,
+          error: `the PR head moved from ${r.head} to ${moved} while ${full} was verified; run \`volleyd merged\` again`,
+        };
       return { ok: true, result: { wave: w.wave, task, sha: full, how: r.how } };
     })();
     return { ok: true, defer };
@@ -4680,6 +4714,9 @@ export class Daemon {
       await this.append(w.wave, { type: "wave_resumed", data: { by } });
       this.time.clearTimeout(this.stopGrace.get(w.wave));
       this.stopGrace.delete(w.wave);
+      // Resumed within the grace: its agents live on, and so does their screen capture.
+      for (const [id, a] of this.supervised)
+        if (a.wave === w.wave && !this.screens.tracked().includes(id)) this.trackScreen(id, a);
       await this.tickNow();
       return done(true);
     }
@@ -4712,16 +4749,23 @@ export class Daemon {
       cancelled.push(a.agent_id);
     }
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
-    const graceS = this.config.effective(wave).stop_grace_s;
+    this.armStopGrace(wave, secondsMs(this.config.effective(wave).stop_grace_s));
+    return cancelled;
+  }
+
+  /** Force-retire a stopped wave's remaining agents once `ms` have passed (the daemon clock). */
+  private armStopGrace(wave: WaveId, ms: number): void {
     this.time.clearTimeout(this.stopGrace.get(wave));
     this.stopGrace.set(
       wave,
-      this.time.setTimeout(() => {
-        this.stopGrace.delete(wave);
-        void this.enqueue(() => this.forceRetireWave(wave, "stop"));
-      }, secondsMs(graceS)),
+      this.time.setTimeout(
+        () => {
+          this.stopGrace.delete(wave);
+          void this.enqueue(() => this.forceRetireWave(wave, "stop"));
+        },
+        Math.max(0, ms),
+      ),
     );
-    return cancelled;
   }
 
   /**

@@ -79,6 +79,10 @@ describe("merged_unverified_head", () => {
     await gated();
     h.world.prState[7] = "CLOSED";
     h.world.releaseLog = `${SQUASH} Batch the uploads (#7)\n`;
+    // The squash's own diff is the PR's whole diff (a subject alone is never enough).
+    const diff = "diff --git a/up.ts b/up.ts\n@@ -1 +1 @@\n-a\n+batched\n";
+    h.world.patches[SQUASH] = diff;
+    h.world.patches[`${h.world.releaseTip}..${A}`] = diff;
     h.world.ci[SQUASH] = "green";
     await checkMerged();
     expect(merged()?.data).toMatchObject({

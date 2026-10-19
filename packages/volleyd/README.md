@@ -520,8 +520,12 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   delete path as a retire: `agent_force_retired { agent_id, role, reason: "stop" }`, then its
   retained `registry`/`status`/`progress`/`result`/`capability`/`screen` records are cleared, its
   login deleted, its lock released (`agent_retired { status: "stopped" }`), so the Desk stops
-  drawing it. A daemon restarted into a stopped wave force-retires what is left at once. A stopped
-  wave can be resumed explicitly. Known gap until the pipeline stages can respawn: `stop` journals
+  drawing it. A daemon restarted into a stopped wave gives its agents what is left of the grace
+  (counted from `wave_stopped`), then force-retires what is left; a workspace ref read back from
+  the journal is closed only when it still names that agent (a UUID or its own tmux session; a
+  short `workspace:<n>` ref may name another workspace by then, so it is left for `cleanup --yes`
+  with `workspace_closed: false`). A stopped wave can be resumed explicitly; resumed within the
+  grace, its agents carry on and their screens are captured again. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
   in their stage, counting against `hard_ceiling`) with no agent working them.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
@@ -1281,7 +1285,9 @@ goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's
 have a stored review with a verdict that holds for the **current head** — a review of that
 head, or of one it descends from only through fixups that ran after that review (they worked
 from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
-re-verified) was reviewed by nobody, so reviews of the heads before it no longer count. A
+re-verified) was reviewed by nobody, so reviews of the heads before it no longer count — unless
+the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
+(`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals
 `alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
@@ -1322,19 +1328,23 @@ that head. The alarm is published in the wave state (`alarms: [{ alarm, message 
 `mergedAt: null`. Before calling it abandoned, the release branch is checked read-only for the
 gated head: `git merge-base --is-ancestor <head> origin/<release>`, else every head commit has an
 equivalent patch there (`git log --left-right --cherry-pick <release>...<head>`, the fenced form
-of `git cherry`), else a release commit whose subject names the PR (`(#<n>)`). A match journals
+of `git cherry`), else a release commit whose subject ends with the PR as GitHub's squash writes it
+(`… (#<n>)`, not a revert) **and** whose own diff is the PR's whole diff — a subject alone, a
+mention (`follow-up to (#<n>)`) or a superseding PR never counts. A match journals
 `artifact_verified { role: "merged", via: "outside_github", how, sha }` (plus the merged
 commit's own CI as above) and the task is done; an older `pr_closed_unmerged` alarm is cleared
 (`alarm_cleared`). No match: the task leaves the gate (`blocked`) and decision `pr_closed`
-asks `landed` (merged some other way: the task is done, `via: "owner_answer"`) or `abandoned`
-(cancelled). `volleyd merged <wave> <task> --sha <sha>` (owner only) records such a merge with
+asks `landed` or `abandoned` (cancelled). A closed, unmerged PR never counts as landed on an
+answer alone: `landed` asks again, pointing at `volleyd merged`. `volleyd merged <wave> <task> --sha <sha>` (owner only) records such a merge with
 proof: the sha must be on the release branch and carry the gated head (an ancestor, equivalent
 patches, or one squashed patch equal to the PR's whole diff); then `merged_by_operator { by,
 sha, head, how }` and the task is done (an open `pr_closed` is answered `landed`). Anything else
 is refused.
 
 **A PR head that moves at a gate.** At `merge_ready`, and while the reviews run, the PR's
-`headRefOid` is read every `ci_poll_ms` (the driver's injected clock). A head the pipeline did
+`headRefOid` is read every `ci_poll_ms` (the driver's injected clock). In the CI hold after an
+implementer's or fixup's `done`, the hold's re-verification watches it: origin's branch at
+another commit than the role pushed is the same move (from the last verified head). A head the pipeline did
 not push journals `pr_head_moved { from, to, during }` and invalidates the gate: the task leaves
 `merge_ready` (`stage_entered { stage: "fixup", gate_invalidated: true }`), its evidence package
 is marked stale (`stale: { from, to, at }` and a banner), nothing downstream is admitted. CI on
@@ -1372,7 +1382,8 @@ DENY (never, consent or not):
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
 
-CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
+CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
+retire for the retired agent's own workspace only):
   git worktree remove · cmux close-workspace
 
 ALLOW (program by bare name only — never a path):

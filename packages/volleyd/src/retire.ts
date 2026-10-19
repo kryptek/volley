@@ -52,15 +52,33 @@ export interface RetireDeps {
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
   /** Remove the lock file at `path` (only called when it names this agent). */
   releaseLock: (path: string) => void;
-  /** Close the retired agent's own workspace (through the fence, with its retire consent). */
-  closeWorkspace?: (workspace: string) => Promise<void>;
+  /**
+   * Close the retired agent's own workspace (through the fence, with its retire consent). `null`:
+   * the ref cannot be trusted to still name it, so it is left for `volleyd cleanup --yes`
+   * (journaled `workspace_closed: false`).
+   */
+  closeWorkspace?: ((workspace: string) => Promise<void>) | null;
+}
+
+const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * May a workspace ref read back from the journal (an agent the daemon no longer supervises, e.g.
+ * after a restart) still be closed? Only one that cannot have been handed to another session
+ * meanwhile: a UUID, or the agent's own tmux session (`sessionName` of its `<wave> <task> <role>`
+ * title, with free-name suffix `-<n>`). A short cmux ref (`workspace:<n>`) may since name anyone's
+ * workspace — the owner's own included. Pure.
+ */
+export function closableAfterRestart(ref: string, session: string): boolean {
+  return UUID.test(ref) || ref === session || new RegExp(`^${session}-\\d+$`).test(ref);
 }
 
 /**
  * Retire one agent after the daemon has consumed its terminal status: revoke its broker
  * credentials, clear its retained records, release its worktree lock, journal `agent_retired`.
- * Only this wave's own agents, only terminal (or DAEMON_ENDED) ones. The worktree, branch and workspace stay:
- * removing them is `volleyd cleanup <wave> --yes`.
+ * Only this wave's own agents, only terminal (or DAEMON_ENDED) ones. Its workspace is closed
+ * (`closeWorkspace`, the retire's own consent); the worktree and branch stay: removing them is
+ * `volleyd cleanup <wave> --yes`.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {
   if (!req.waveAgents.has(req.agentId)) {
@@ -86,8 +104,11 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
   let closed: boolean | null = null;
   if (req.workspace !== undefined && req.workspace !== "" && deps.closeWorkspace !== undefined) {
     try {
-      await deps.closeWorkspace(req.workspace);
-      closed = true;
+      if (deps.closeWorkspace === null) closed = false;
+      else {
+        await deps.closeWorkspace(req.workspace);
+        closed = true;
+      }
     } catch {
       closed = false;
     }

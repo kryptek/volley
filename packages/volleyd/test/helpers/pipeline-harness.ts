@@ -85,6 +85,8 @@ export interface HarnessOptions {
   fence?: boolean;
   /** Wrap the harness exec per task (the daemon's remote-host routing). */
   execFor?: (task: string, exec: ExecFn) => ExecFn;
+  /** More tasks after T1 (queued, never admitted or driven), e.g. `{ T2: [T1] }` → `after: [T1]`. */
+  dependents?: Record<string, string[]>;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -98,6 +100,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
       "tasks:",
       "  T1: { issue: 42 }",
+      ...Object.entries(o.dependents ?? {}).map(
+        ([id, after], i) => `  ${id}: { issue: ${43 + i}, after: [${after.join(", ")}] }`,
+      ),
       "",
     ].join("\n"),
   );
@@ -388,6 +393,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await journal({ type: "wave_submitted", data: { wave, owner: "coord-1" } });
       await journal({ type: "task_queued", task: "T1", data: { issue: 42 } });
       await journal({ type: "task_admitted", task: "T1", data: {} });
+      for (const [i, id] of Object.keys(o.dependents ?? {}).entries())
+        await journal({ type: "task_queued", task: id, data: { issue: 43 + i } });
       return spawnAgent("implementer");
     },
     /** The implementer opens its PR once (the first push). */
