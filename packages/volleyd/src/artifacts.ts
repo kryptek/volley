@@ -278,7 +278,14 @@ export function artifactOutcome(
         pointers: { pr: pr.url },
         options: ["re-verify", "cancel"],
       },
-      data: { head_sha: head, run_urls: urls, failed_jobs: ci.failed_jobs, infra: ci.infra, role },
+      data: {
+        head_sha: head,
+        run_urls: urls,
+        failed_jobs: ci.failed_jobs,
+        infra: ci.infra,
+        role,
+        pr: { number: pr.number, url: pr.url },
+      },
     };
   }
   if (ci.state === "running" || ci.state === "none")

@@ -177,7 +177,19 @@ export interface TaskState {
     url: string;
     head_sha?: string;
     ci?: "green" | "red" | "running" | "none";
+    /** While the pipeline holds for CI on `head_sha`: its runs completed / all of them. */
+    checks?: { done: number; total: number };
   };
+  /** While a parallel stage group runs: its label (`review (spec + quality)`); `stage` stays the enum. */
+  stage_label?: string;
+  /** While a parallel stage group runs: each role, its agent and how far it is. */
+  stage_group?: {
+    role: string;
+    agent_id?: string;
+    state: "pending" | "running" | "done" | "retired";
+  }[];
+  /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
+  alarms?: { alarm: string; message: string }[];
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
   last_error?: { code: string; message: string; at: string };

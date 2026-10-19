@@ -12,7 +12,8 @@ const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
 else the session registered for this directory).
---json prints the wave-state payload(s) exactly as published on volley/_waves/<wave>/state.
+--json prints the wave-state payload(s) exactly as published on volley/_waves/<wave>/state
+(each task's pr { number, head_sha, ci, checks }, stage_group and alarms included).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -103,8 +104,10 @@ export function formatWave(
     pending > 0
       ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
       : `plan v${s.version}`;
-  // Open alarms: tasks whose spawn failed and has not recovered since.
-  const alarms = s.tasks.filter((t) => t.last_error !== undefined).length;
+  // Open alarms: tasks whose spawn failed and has not recovered since, or with an alarm that holds.
+  const alarms = s.tasks.filter(
+    (t) => t.last_error !== undefined || (t.alarms ?? []).length > 0,
+  ).length;
   const header =
     `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
@@ -115,7 +118,13 @@ export function formatWave(
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
     const pr = t.pr !== undefined ? `  PR #${t.pr.number}` : "";
     const skipped = t.reviews_skipped_by_plan === true ? "  reviews skipped by plan" : "";
-    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${t.stage.padEnd(14)}${pr}${skipped}${why}\n`;
+    const stage = t.stage_label ?? t.stage;
+    // A parallel stage group: every role of it, with its agent and state.
+    const group = (t.stage_group ?? [])
+      .map((g) => `    ${g.role} ${g.agent_id ?? "-"} (${g.state})\n`)
+      .join("");
+    const alarms = (t.alarms ?? []).map((a) => `    ! ${a.alarm}: ${a.message}\n`).join("");
+    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${why}\n${group}${alarms}`;
   });
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))

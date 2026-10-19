@@ -134,6 +134,17 @@ export interface TaskPipeline {
   why?: string | undefined;
   /** Alarms raised on the task that still hold, by alarm name (alarm_cleared drops one). */
   alarms: Record<string, Record<string, unknown>>;
+  /** The pipeline holds for CI on a role's pushed head (its latest `ci_pending`), until it settles. */
+  ci_hold?: CiHold | undefined;
+}
+
+/** A `ci_pending` event's facts: whose head, how far its runs are, when it is checked again. */
+export interface CiHold {
+  role: Role;
+  sha: string;
+  checks: { done: number; total: number };
+  next_poll_at: string;
+  pr?: { number: number; url: string };
 }
 
 export type SteerReason = "artifacts" | "result";
@@ -247,6 +258,7 @@ export function reducePipeline(
       break;
     }
     case "artifact_verified": {
+      if (p.ci_hold?.role === role) p.ci_hold = undefined;
       if (!isRole(role)) break;
       const run = p.runs[role];
       const from = p.head;
@@ -310,6 +322,22 @@ export function reducePipeline(
       }
       break;
     }
+    case "ci_pending":
+      if (isRole(role) && typeof d.sha === "string")
+        p.ci_hold = {
+          role,
+          sha: d.sha,
+          checks: d.checks as CiHold["checks"],
+          next_poll_at: String(d.next_poll_at),
+          ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
+        };
+      break;
+    case "ci_green":
+    case "decision_opened":
+    case "task_cancelled":
+      // Settled, or someone is asked about it: the hold is over.
+      p.ci_hold = undefined;
+      break;
     case "alarm_cleared":
       if (typeof d.alarm === "string" && p.alarms !== undefined) delete p.alarms[d.alarm];
       break;
@@ -381,6 +409,8 @@ export type PipelineEvent =
       report: ArtifactReport;
       result?: FixupResult;
       waited_ms?: number;
+      /** When the check ran (epoch ms on the driver's clock): the next one is a ci_poll_ms on. */
+      at?: number;
     }
   /** Before the gate: the release branch checked at `head`; `diffstats` per fixup `from..to`. */
   | { kind: "rebase_checked"; head: string; check: RebaseCheck; diffstats: Record<string, string> }
@@ -970,11 +1000,24 @@ function onVerified(
           },
         ];
       }
-      // The pushed work is in place; CI is re-checked on later ticks. The agent is done.
-      return retireIfLive(run);
+      // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
+      // hold is the pipeline's, and it says so (once per change of head or counts).
+      return [...ciPending(v, ev, out.head), ...retireIfLive(run)];
     }
     case "verified":
       return [
+        ...(v.p.ci_hold?.role === ev.role
+          ? [
+              {
+                kind: "journal" as const,
+                event: {
+                  type: "ci_green" as const,
+                  task: v.task,
+                  data: { role: ev.role, sha: head, from_checks: v.p.ci_hold.checks },
+                },
+              },
+            ]
+          : []),
         {
           kind: "journal",
           event: {
@@ -990,6 +1033,44 @@ function onVerified(
         ...retireIfLive(run),
       ];
   }
+}
+
+/** The `ci_pending` event for a verification whose CI is still running (or has no run yet). */
+function ciPending(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  head: string,
+): PipelineAction[] {
+  if (ev.report.kind !== "ok") return [];
+  const runs = ev.report.ci.runs;
+  const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
+  const hold = v.p.ci_hold;
+  if (
+    hold?.role === ev.role &&
+    hold.sha === head &&
+    hold.checks.done === checks.done &&
+    hold.checks.total === checks.total
+  )
+    return [];
+  const at = ev.at;
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "ci_pending",
+        task: v.task,
+        data: {
+          role: ev.role,
+          sha: head,
+          checks,
+          ...(at !== undefined
+            ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
+            : {}),
+          pr: { number: ev.report.pr.number, url: ev.report.pr.url },
+        },
+      },
+    },
+  ];
 }
 
 /** The missing-artifact steer: what this role publishes, and where. */
@@ -1736,6 +1817,7 @@ export class PipelineDriver {
       report,
       ...(result !== undefined ? { result } : {}),
       ...(waited !== undefined ? { waited_ms: waited } : {}),
+      at: this.now(),
     };
   }
 

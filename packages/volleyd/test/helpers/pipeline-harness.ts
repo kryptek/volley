@@ -38,6 +38,8 @@ export interface World {
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
+  /** Several CI runs per head (overrides `ci`): each run's status and conclusion. */
+  ciRuns: Record<string, { status: string; conclusion: string }[]>;
   releaseTip: string;
   /** merge-base(head, releaseTip) per head (default: the release tip, i.e. current). */
   mergeBase: Record<string, string>;
@@ -110,6 +112,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     origin: {},
     prs: [],
     ci: {},
+    ciRuns: {},
     releaseTip: sha(0xbea5e),
     mergeBase: {},
     prState: {},
@@ -195,6 +198,21 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "list") {
       const head = a[a.indexOf("--commit") + 1] as string;
+      const many = world.ciRuns[head];
+      if (many !== undefined)
+        return out(
+          JSON.stringify(
+            many.map((r, i) => ({
+              databaseId: 900 + i,
+              name: `check-${i + 1}`,
+              workflowName: `check-${i + 1}`,
+              status: r.status,
+              conclusion: r.conclusion,
+              headSha: head,
+              url: `https://github.com/example/repo/actions/runs/${900 + i}`,
+            })),
+          ),
+        );
       const state = world.ci[head];
       if (state === undefined) return out("[]");
       return out(
