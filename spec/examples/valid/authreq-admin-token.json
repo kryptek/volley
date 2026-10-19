@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "admin-0123abcd",
+  "wall_time": "2026-10-19T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "6f1c2a9e-3b7d-4e21-8a5f-0c9d2e7b4a13",
+  "payload": {
+    "op": "admin_token",
+    "reply_key": {
+      "kty": "RSA",
+      "n": "xPNUfrSTG-aLr2sQsVKPpITFOinhuAoNHTkmDuaipSh3OcODvQzMdhMopzNjalZCEfqsrrg3WYHEx172ihkLTb1JnFeYs3E_a93hCRyhcuZdn_wnPNij41wn8oABPLqoQh74I4sH91m6tyso30uzFi7D_78v2QK49RORtdDbWAJ-tlOklAF7R0uk80mnFjobHYXcopwlGM3hNLK-ZJwLKgjAiIYvT4rUVKNXbVnhufMszH9-_5TmRKcJQ1K1-bxlYtDWzkmisiS_xIpBg2WO69wU8KfroibtNGeksINH1eqiJ-p_P3Tr_ztWilDVKbZCBLbPLMsXSVsfcHgOZmaFCw",
+      "e": "AQAB"
+    }
+  }
+}

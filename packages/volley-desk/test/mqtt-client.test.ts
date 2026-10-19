@@ -55,6 +55,8 @@ describe("createMqttClient (desk)", () => {
       "volley/+/+/usage",
       "volley/_system/claude-accounts/+",
       "volley/_system/claude/+/signin",
+      "volley/_system/machines/+",
+      "volley/_system/auth/replies/+",
     ]);
     client = createMqttClient({ url: broker.url, reconnectPeriod: 0 });
     const received: DeskMessage[] = [];

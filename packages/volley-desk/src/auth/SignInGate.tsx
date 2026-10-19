@@ -18,6 +18,15 @@
  * card that tilts toward the pointer, recessed fields and a Specular Button.
  * After a submit the card stays up, busy, until the first connect settles
  * (connected, or disconnected: the Desk then shows its own offline state).
+ *
+ * A one-time link (`<desk>#signin=<token>`, from a sign-in link or the admin
+ * token `volley auth token` prints) skips the form: the token leaves the
+ * address bar at once (it is single use), the card says it is signing in with
+ * the link, and `redeemToken` trades it with volleyd for an account bound to
+ * "Desk on <device>" (SPEC §4.6.10). The minted credential is stored like a
+ * typed one, with its role; an admin token also asks the Desk to open
+ * Settings › Setup & Security once. A used or expired link shows the form
+ * with the reason and what to do next.
  */
 import {
   type CSSProperties,
@@ -25,6 +34,7 @@ import {
   type PointerEvent,
   type ReactNode,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import SpecularButton from "../rb/SpecularButton/SpecularButton";
@@ -36,6 +46,14 @@ import {
   useDesk,
   viteEnv,
 } from "../store/context";
+import {
+  type RedeemRequest,
+  type RedeemResult,
+  deviceLabel,
+  markFirstRun,
+  redeemToken,
+  signinTokenFromHash,
+} from "../store/control";
 import { isDemoMode } from "../store/fixtures";
 import type { BrokerCredentials, DeskMqttClient } from "../store/mqtt-client";
 import { Clawd } from "../windows/wave/Clawd";
@@ -69,7 +87,10 @@ function readStored(storage: Storage0 | null): BrokerCredentials | null {
   }
 }
 
-function writeStored(storage: Storage0 | null, creds: BrokerCredentials | null): void {
+/** A stored sign-in: the credentials, and the role and label when a redeemed token told them. */
+type StoredSignIn = BrokerCredentials & { role?: string; label?: string };
+
+function writeStored(storage: Storage0 | null, creds: StoredSignIn | null): void {
   try {
     if (creds === null) storage?.removeItem(CREDENTIALS_STORAGE_KEY);
     else storage?.setItem(CREDENTIALS_STORAGE_KEY, JSON.stringify(creds));
@@ -87,6 +108,18 @@ export interface SignInGateProps {
   brokerUrl?: string;
   clientFactory?: (url: string, auth?: BrokerCredentials) => DeskMqttClient;
   settleMs?: number;
+  /** Redeems a `#signin=<token>` link (tests inject one); default `redeemToken`. */
+  redeem?: (req: RedeemRequest) => Promise<RedeemResult>;
+}
+
+/** Strip the fragment (the single-use token) from the address bar and the history entry. */
+function dropFragment(): void {
+  try {
+    const { pathname, search } = window.location;
+    window.history.replaceState(window.history.state, "", `${pathname}${search}`);
+  } catch {
+    // No history API: the token is burned on use anyway.
+  }
 }
 
 export function SignInGate({
@@ -96,22 +129,58 @@ export function SignInGate({
   brokerUrl,
   clientFactory,
   settleMs,
+  redeem = redeemToken,
 }: SignInGateProps) {
   const env = envProp ?? viteEnv();
   const demo = demoProp ?? isDemoMode(window.location.search, env);
   const [storage] = useState(localStorageOrNull);
+  /** The one-time token in the address bar, read once (the effect below drops it from there). */
+  const [link] = useState(() => (demo ? null : signinTokenFromHash(window.location.hash)));
   const [creds, setCreds] = useState<BrokerCredentials | null>(() =>
-    demo ? null : (readCredentials(env, null) ?? readStored(storage)),
+    demo || link !== null ? null : (readCredentials(env, null) ?? readStored(storage)),
   );
-  const [lastUsername, setLastUsername] = useState(creds?.username ?? "desk");
+  const [lastUsername, setLastUsername] = useState(
+    () => creds?.username ?? readStored(storage)?.username ?? "desk",
+  );
   const [error, setError] = useState<string | null>(null);
   /** A submitted sign-in whose first connect hasn't settled yet. */
   const [pending, setPending] = useState(false);
+  /** The link is being redeemed. */
+  const [redeeming, setRedeeming] = useState(link !== null);
+  /** A token is single use: redeem it once, even when an effect runs twice. */
+  const started = useRef(false);
   const passthrough = {
     ...(brokerUrl !== undefined ? { brokerUrl } : {}),
     ...(clientFactory !== undefined ? { clientFactory } : {}),
     ...(settleMs !== undefined ? { settleMs } : {}),
   };
+
+  const url = resolveBrokerUrl(brokerUrl);
+  useEffect(() => {
+    if (link === null || started.current) return;
+    started.current = true;
+    dropFragment();
+    void redeem({ url, token: link, label: deviceLabel(navigator.userAgent) }).then((r) => {
+      setRedeeming(false);
+      if (!r.ok) {
+        setError(
+          `This sign-in link did not work: ${r.error}. Ask for a new link (Settings › Setup & Security on a signed-in Desk, or \`volley auth signin-link\` in a terminal), or sign in below.`,
+        );
+        return;
+      }
+      const next = { username: r.username, password: r.password };
+      writeStored(storage, {
+        ...next,
+        ...(r.role !== null ? { role: r.role } : {}),
+        label: r.label,
+      });
+      if (r.role === "admin") markFirstRun();
+      setLastUsername(r.username);
+      setError(null);
+      setPending(true);
+      setCreds(next);
+    });
+  }, [link, redeem, storage, url]);
 
   if (demo) {
     return (
@@ -120,12 +189,22 @@ export function SignInGate({
       </DeskStoreProvider>
     );
   }
-  const url = resolveBrokerUrl(brokerUrl);
   // The backdrop keeps its slot from the form to the busy card, so Line Waves isn't remounted.
   return (
     <>
       {(creds === null || pending) && <SignInBackdrop />}
-      {creds === null ? (
+      {redeeming ? (
+        <SignInCard
+          brokerUrl={url}
+          initialUsername=""
+          initialPassword=""
+          error={null}
+          busy
+          link
+          onError={() => {}}
+          onSubmit={() => {}}
+        />
+      ) : creds === null ? (
         <SignInCard
           brokerUrl={url}
           initialUsername={lastUsername}
@@ -174,6 +253,48 @@ export function SignInGate({
   );
 }
 
+/**
+ * The sign-in screen as a new browser or phone sees it (Settings › Setup &
+ * Security › Preview): the same backdrop and card, signing nothing in.
+ */
+export function SignInPreview({ brokerUrl, onClose }: { brokerUrl: string; onClose: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  return (
+    <div
+      className="signin-preview"
+      // biome-ignore lint/a11y/useSemanticElements: a full-screen overlay, as the real sign-in is
+      role="dialog"
+      aria-modal="true"
+      aria-label="Sign-in screen preview"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }}
+    >
+      <SignInBackdrop />
+      <SignInCard
+        brokerUrl={brokerUrl}
+        initialUsername="desk"
+        initialPassword=""
+        error={note}
+        onError={setNote}
+        onSubmit={() => setNote("This is a preview: nothing was signed in.")}
+      />
+      <button
+        type="button"
+        className="btn signin-preview-close"
+        // biome-ignore lint/a11y/noAutofocus: the overlay takes focus so Escape closes it
+        autoFocus
+        onClick={onClose}
+      >
+        Close preview
+      </button>
+    </div>
+  );
+}
+
 /** Shows `children` (the busy card) until the first connect leaves `connecting`. */
 function Connecting({ children, onSettled }: { children: ReactNode; onSettled: () => void }) {
   const { connection } = useDesk();
@@ -191,6 +312,7 @@ function SignInCard({
   initialPassword,
   error,
   busy = false,
+  link = false,
   onError,
   onSubmit,
 }: {
@@ -199,6 +321,8 @@ function SignInCard({
   initialPassword: string;
   error: string | null;
   busy?: boolean;
+  /** Signing in with a one-time link: no fields, just what is happening. */
+  link?: boolean;
   onError: (message: string) => void;
   onSubmit: (creds: BrokerCredentials) => void;
 }) {
@@ -252,28 +376,34 @@ function SignInCard({
             <i className="dot" aria-hidden />
             {brokerUrl}
           </div>
-          <label className="f3d">
-            <span>Username</span>
-            <input
-              autoComplete="username"
-              autoCapitalize="none"
-              spellCheck={false}
-              value={username}
-              readOnly={busy}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label className="f3d">
-            <span>Password</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              placeholder="••••••••••"
-              value={password}
-              readOnly={busy}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
+          {link ? (
+            <output className="signin-hint">Signing in with your one-time link…</output>
+          ) : (
+            <>
+              <label className="f3d">
+                <span>Username</span>
+                <input
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={username}
+                  readOnly={busy}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+              </label>
+              <label className="f3d">
+                <span>Password</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="••••••••••"
+                  value={password}
+                  readOnly={busy}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </label>
+            </>
+          )}
           {error !== null && (
             <div className="signin-err" role="alert">
               {error}
@@ -300,10 +430,12 @@ function SignInCard({
               {busy ? "Signing in…" : "Sign in"}
             </SpecularButton>
           </div>
-          <p className="signin-hint">
-            Use the account from Setup or Settings → Broker accounts. Leave the username empty to
-            watch read-only.
-          </p>
+          {!link && (
+            <p className="signin-hint">
+              Use the account from Setup or Settings → Broker accounts, or open a sign-in link.
+              Leave the username empty to watch read-only.
+            </p>
+          )}
         </form>
       </div>
     </div>

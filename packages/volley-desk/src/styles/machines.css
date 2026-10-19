@@ -1,0 +1,143 @@
+/* Settings › Machines (prototype `MachinesBody`). */
+.machines-section > .dim {
+  margin: 0 0 12px;
+}
+.machines {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.machine {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.045);
+  text-align: left;
+  min-width: 0;
+}
+.machine--add {
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--mute);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  min-height: 120px;
+}
+.machine--add:hover {
+  color: var(--ink);
+  border-color: rgba(110, 231, 249, 0.5);
+}
+.m-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.m-head b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.m-note {
+  margin: 0;
+}
+.m-remove {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.m-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.m-confirm .s-hint {
+  margin: 0;
+}
+.m-confirm .ny-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.machine .btn--danger {
+  background: #ff453a;
+  border-color: #ff453a;
+  color: #fff;
+}
+.machine .btn--danger:hover:not(:disabled) {
+  background: #ff6961;
+}
+.m-notice {
+  display: block;
+  margin: 0 0 10px;
+  color: #7ee2a0;
+}
+.m-readonly {
+  margin: 12px 0 0;
+}
+.pair--machine {
+  border-color: rgba(110, 231, 249, 0.35);
+}
+.pair--machine .ny-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.m-to {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 10px;
+}
+.m-to input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 320px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.m-command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border-radius: 10px;
+  min-width: 0;
+}
+.m-command code {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow-wrap: break-word;
+  user-select: all;
+}
+/* A flag (`--to`) never breaks at its hyphens. */
+.m-flag {
+  white-space: nowrap;
+}
+.m-command .btn {
+  flex: none;
+}
+
+@media (max-width: 720px) {
+  .machines {
+    grid-template-columns: 1fr;
+  }
+}
