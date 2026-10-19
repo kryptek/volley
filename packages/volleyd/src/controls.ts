@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { type Clock, systemClock } from "./clock";
 import {
   type ControlOp,
   type ControlResponse,
@@ -151,17 +152,18 @@ interface AckWaiter {
  */
 export class AckTracker {
   private readonly waiters = new Map<string, AckWaiter>();
+  constructor(private readonly clock: Clock = systemClock) {}
 
   /** Resolves once `agent` acts on `messageId`, or after `ms` with what was heard so far. */
   wait(messageId: string, agent: string, ms: number): Promise<SteerAck> {
     return new Promise((resolve) => {
       const state: SteerAck = { received: false, acked: false };
       const settle = () => {
-        clearTimeout(timer);
+        this.clock.clearTimeout(timer);
         this.waiters.delete(messageId);
         resolve(state);
       };
-      const timer = setTimeout(settle, ms);
+      const timer = this.clock.setTimeout(settle, ms);
       this.waiters.set(messageId, { agent, state, settle });
     });
   }

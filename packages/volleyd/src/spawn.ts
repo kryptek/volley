@@ -14,6 +14,7 @@ import {
   runBriefGate,
   withPreface,
 } from "./brief";
+import { dateOf, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
@@ -281,7 +282,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
         attempt: req.attempt,
         agent_id: agentId,
         pid: process.pid,
-        at: new Date().toISOString(),
+        at: dateOf(systemClock).toISOString(),
       },
       deps.probe,
       { staleAfterMs: secondsMs(deps.tunables.heartbeat_alarm_s) },
@@ -447,7 +448,8 @@ async function launchAttempt(
 
     // Subscribe before launching, so no hook signal can be missed.
     const watch = await deps.watch(ctx.namespace, agentId);
-    const launchedAt = Date.now();
+    // The real wall clock: the hooks process stamps its error file with its own.
+    const launchedAt = systemClock.now();
     let workspace: string;
     try {
       if (recovered !== undefined) {
@@ -745,7 +747,7 @@ async function openDecision(
       question: d.question,
       options: d.options,
       pointers,
-      opened_at: new Date().toISOString(),
+      opened_at: dateOf(systemClock).toISOString(),
       ...d.data,
     },
   });
@@ -757,7 +759,7 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   await ctx.deps.journal({
     type: "decision_resolved",
     task: ctx.req.task,
-    data: { decision_id: id, answer, by, at: new Date().toISOString() },
+    data: { decision_id: id, answer, by, at: dateOf(systemClock).toISOString() },
   });
 }
 
@@ -797,7 +799,10 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   if (screen === null) return undefined;
   const dir = join(ctx.deps.home, "waves", ctx.req.wave.wave, "screens");
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${agentId}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`);
+  const path = join(
+    dir,
+    `${agentId}-${dateOf(systemClock).toISOString().replace(/[:.]/g, "-")}.txt`,
+  );
   writeFileSync(path, screen);
   return path;
 }

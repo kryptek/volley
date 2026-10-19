@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import type { NewEvent } from "../types";
@@ -48,6 +49,8 @@ export interface ClaudeServiceDeps {
   publish: (topic: string, e: SigninEvent) => Promise<void>;
   journal: (ev: NewEvent) => Promise<void>;
   log: (line: string) => void;
+  /** The sign-in poll's timers and wall clock (default: real). */
+  clock?: Clock;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   signinPollMs?: number;
@@ -66,7 +69,10 @@ interface Pending {
 
 export class ClaudeService {
   private readonly signins = new Map<string, Pending>();
-  constructor(private readonly d: ClaudeServiceDeps) {}
+  private readonly clock: Clock;
+  constructor(private readonly d: ClaudeServiceDeps) {
+    this.clock = d.clock ?? systemClock;
+  }
 
   private get primaryDir(): string {
     return this.d.primaryDir ?? join(homedir(), ".claude");
@@ -136,7 +142,7 @@ export class ClaudeService {
       };
     let acct: ClaudeAccount;
     try {
-      acct = addAccount(this.d.root, { label, machine }, new Date().toISOString());
+      acct = addAccount(this.d.root, { label, machine }, dateOf(this.clock).toISOString());
     } catch (e) {
       if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
       throw e;
@@ -205,23 +211,9 @@ export class ClaudeService {
       root: this.d.root,
       acct,
       signal: abort.signal,
-      now: this.d.now ?? Date.now,
+      now: this.d.now ?? this.clock.now,
       // The daemon stopping ends a wait at once.
-      sleep:
-        this.d.sleep ??
-        ((ms) =>
-          new Promise<void>((r) => {
-            if (abort.signal.aborted) return r();
-            const wake = () => {
-              clearTimeout(t);
-              r();
-            };
-            const t = setTimeout(() => {
-              abort.signal.removeEventListener("abort", wake);
-              r();
-            }, ms);
-            abort.signal.addEventListener("abort", wake, { once: true });
-          })),
+      sleep: this.d.sleep ?? ((ms) => sleep(this.clock, ms, abort.signal)),
       pollMs: this.d.signinPollMs ?? DAEMON_DEFAULTS.claude_signin_poll_ms,
       timeoutMs: this.d.signinTimeoutMs ?? DAEMON_DEFAULTS.claude_signin_timeout_ms,
       publish: async (e) => {

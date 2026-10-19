@@ -5,6 +5,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
+import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
@@ -155,7 +156,7 @@ export class ControlClient {
         }
       },
     );
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: TimerHandle | undefined;
     try {
       const request = buildEnvelope({
         agentId: this.agentId,
@@ -173,11 +174,14 @@ export class ControlClient {
       return await Promise.race([
         reply,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new ControlTimeoutError(op, timeoutMs)), timeoutMs);
+          timer = systemClock.setTimeout(
+            () => reject(new ControlTimeoutError(op, timeoutMs)),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
-      clearTimeout(timer);
+      systemClock.clearTimeout(timer);
       await unsubscribe();
     }
   }

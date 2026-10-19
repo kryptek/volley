@@ -1,3 +1,4 @@
+import { type Clock, sleep as clockSleep, systemClock, withNow } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 
@@ -51,8 +52,11 @@ export interface TunnelSupervisorDeps {
    * keeps failing (e.g. the box's port is taken).
    */
   onExit?: (exit: TunnelExit) => void;
-  /** Injectable wait (tests); resolves early when `signal` aborts. */
+  /** The restart backoff's timers and the wall clock (default: real). */
+  clock?: Clock;
+  /** Injectable wait (tests); resolves early when `signal` aborts. Default: `clock`'s. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Wall clock override on top of `clock`. */
   now?: () => number;
   /** How long a fresh ssh may take to bring its forward up. Default tunnel_settle_ms. */
   settleMs?: number;
@@ -73,19 +77,6 @@ export interface TunnelExit {
  */
 export type TunnelHealth = "ok" | "settling" | "failing";
 
-const abortableSleep = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-
 interface Supervised {
   abort: AbortController;
   done: Promise<void>;
@@ -97,10 +88,13 @@ interface Supervised {
 /** Keeps one reverse tunnel per forward up until `stop()`. */
 export class TunnelSupervisor {
   private readonly tunnels = new Map<string, Supervised>();
-  constructor(private readonly deps: TunnelSupervisorDeps) {}
+  private readonly clock: Clock;
+  constructor(private readonly deps: TunnelSupervisorDeps) {
+    this.clock = withNow(deps.clock ?? systemClock, deps.now);
+  }
 
   private now(): number {
-    return (this.deps.now ?? Date.now)();
+    return this.clock.now();
   }
 
   /** Start the forward's tunnel unless it is already supervised. */
@@ -144,7 +138,8 @@ export class TunnelSupervisor {
     t: Supervised,
   ): Promise<void> {
     const { signal } = t.abort;
-    const sleep = this.deps.sleep ?? abortableSleep;
+    const sleep =
+      this.deps.sleep ?? ((ms: number, s: AbortSignal) => clockSleep(this.clock, ms, s));
     const settle = this.deps.settleMs ?? DAEMON_DEFAULTS.tunnel_settle_ms;
     let backoff: number = DAEMON_DEFAULTS.tunnel_restart_ms;
     while (!signal.aborted) {
@@ -210,17 +205,20 @@ export class TunnelChecks {
     if (s !== undefined) s.checkedAt = 0;
   }
 
-  /** Run `check` for the forward if its last result is older than the check interval. */
-  poke(key: string, check: () => Promise<TunnelStatus>): void {
+  /**
+   * Run `check` for the forward if its last result is older than the check interval. Resolves
+   * once that check's result is folded in (`onChange` called); at once when none was due.
+   */
+  poke(key: string, check: () => Promise<TunnelStatus>): Promise<void> {
     const s = this.state.get(key) ?? { status: "unknown", checkedAt: 0, inFlight: false };
     this.state.set(key, s);
     const due =
       s.status === "unknown" ||
       s.checkedAt === 0 ||
       this.deps.now() - s.checkedAt >= DAEMON_DEFAULTS.tunnel_check_ms;
-    if (s.inFlight || !due) return;
+    if (s.inFlight || !due) return Promise.resolve();
     s.inFlight = true;
-    void check()
+    return check()
       .catch((): TunnelStatus => "down")
       .then((next) => {
         s.inFlight = false;

@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
+import { systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 
 /**
@@ -201,7 +202,7 @@ function editClaudeJson(
       break;
     } catch {
       try {
-        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+        if (systemClock.now() - statSync(lock).mtimeMs > staleMs) {
           rmdirSync(lock);
           continue;
         }

@@ -10,6 +10,7 @@ import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "..
 import { Daemon, daemonClientId } from "../src/daemon";
 import { SYSTEM_WAVE } from "../src/types";
 import { startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
@@ -336,14 +337,8 @@ describe("volleyd daemon + control channel", () => {
   });
 });
 
-/** Poll `cond` until true (or fail after `ms`). */
-async function waitFor(cond: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
-  const until = Date.now() + ms;
-  while (!(await cond())) {
-    if (Date.now() > until) throw new Error("waitFor: condition not met");
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
+/** Event mirrors, acks and retained statuses reach the test's clients over MQTT. */
+const waitFor = eventually;
 
 /**
  * Send one raw control query to the daemon and collect what comes back on the sender's mailbox:
@@ -375,7 +370,13 @@ async function rawRequest(
     });
     // A later status round trip through the same serial queue proves the request was handled.
     expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
-    await new Promise((r) => setTimeout(r, 50));
+    // Its acks were published before that answer; a sentinel the sender sends itself now arrives
+    // after every one of them (one connection delivers in order), so a second ack would show.
+    const sentinel = `volley/${NS}/${agentId}/progress`;
+    const token = randomUUID();
+    const back = sender.subscribeUntil(sentinel, (p) => p === token, 5000);
+    await sender.publish(sentinel, token, { qos: 1, retain: false });
+    expect(await back).not.toBeNull();
     return got.map((m) => JSON.parse(m.payload));
   } finally {
     await unsubscribe();

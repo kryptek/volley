@@ -10,6 +10,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { dateOf, systemClock } from "./clock";
 import { SpawnError } from "./spawn-error";
 
 /**
@@ -148,7 +149,7 @@ export async function acquireLock(
           registered: await probe.registered(holder.agent_id),
           lastHeartbeat: probe.lastHeartbeat(holder.agent_id),
           pidAlive: pidAliveOther(holder.pid),
-          now: (opts.now ?? Date.now)(),
+          now: (opts.now ?? systemClock.now)(),
           staleAfterMs: opts.staleAfterMs,
         });
         if (verdict === "live") {
@@ -182,7 +183,7 @@ export async function acquireLock(
         return current;
       },
       update(patch) {
-        current = { ...current, ...patch, at: new Date().toISOString() };
+        current = { ...current, ...patch, at: dateOf(systemClock).toISOString() };
         writeAtomic(path, current);
       },
       release() {

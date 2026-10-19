@@ -1,4 +1,5 @@
 import type { Sample } from "../admission";
+import { systemClock } from "../clock";
 import type { ExecFn } from "../exec";
 import { bounded } from "./run";
 
@@ -14,7 +15,7 @@ export const CMUX_PING_ARGV = ["cmux", "ping"] as const;
 export async function sampleCmuxPing(
   exec: ExecFn,
   timeoutMs: number,
-  now: () => number = () => performance.now(),
+  now: () => number = systemClock.mono,
 ): Promise<Sample> {
   const started = now();
   try {

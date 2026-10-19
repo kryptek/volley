@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ID_PATTERN } from "volley-mcp/topics";
+import { dateOf, systemClock } from "./clock";
 import { readJournalFile, writeFileAtomic } from "./journal";
 import { type JournalEvent, SYSTEM_WAVE } from "./types";
 
@@ -57,7 +58,7 @@ export function ackCursor(
   wave: string,
   name: string,
   seq: number,
-  now: Date = new Date(),
+  now: Date = dateOf(systemClock),
 ): { previous: number; seq: number } {
   const dir = waveDir(home, wave);
   const file = cursorFile(dir, name);

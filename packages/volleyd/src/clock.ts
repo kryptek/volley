@@ -1,6 +1,67 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 
 /**
+ * The daemon's clock and timer scheduler. Every timer in volleyd (spawn backoff, ticks, reap
+ * graces, verification windows, tunnel restarts, screen captures, sweeps) and every wall-clock read
+ * goes through a `Clock` — the only place real timers live is `systemClock` below (a grep-guard
+ * test enforces it). Tests inject a fake one (test/helpers/fake-clock.ts) and move time by hand,
+ * so daemon timing never races the machine's load.
+ */
+
+declare const timerBrand: unique symbol;
+/** An armed timer, as returned by `Clock.setTimeout` / `Clock.setInterval`. */
+export type TimerHandle = { readonly [timerBrand]: true };
+
+export interface Clock {
+  /** Wall-clock epoch ms. */
+  now(): number;
+  /** Monotonic ms (does not advance while the host sleeps). */
+  mono(): number;
+  setTimeout(fn: () => void, ms: number): TimerHandle;
+  clearTimeout(handle: TimerHandle | undefined): void;
+  setInterval(fn: () => void, ms: number): TimerHandle;
+  clearInterval(handle: TimerHandle | undefined): void;
+}
+
+type RealHandle = ReturnType<typeof setTimeout>;
+
+/** Real timers and the machine's clocks. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  mono: () => performance.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms) as unknown as TimerHandle,
+  clearTimeout: (h) => clearTimeout(h as unknown as RealHandle | undefined),
+  setInterval: (fn, ms) => setInterval(fn, ms) as unknown as TimerHandle,
+  clearInterval: (h) => clearInterval(h as unknown as RealHandle | undefined),
+};
+
+/** `clock` with its wall clock read from `now` instead (an injected `now` beside a clock). */
+export const withNow = (clock: Clock, now: (() => number) | undefined): Clock =>
+  now === undefined ? clock : { ...clock, now };
+
+/** Resolves after `ms` on `clock`, or at once when `signal` aborts. */
+export function sleep(clock: Clock, ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = clock.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clock.clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** The wall clock as a Date. */
+export const dateOf = (clock: Clock): Date => new Date(clock.now());
+
+/** One sleep/wake sample of `clock` (sampleClock below). */
+export const sampleOf = (clock: Clock): ClockSample => ({ mono: clock.mono(), wall: clock.now() });
+
+/**
  * Sleep/wake detection and reap re-verification. Pure.
  *
  * The daemon samples a monotonic clock (which stands still while the host sleeps) and the wall
