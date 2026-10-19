@@ -1182,7 +1182,8 @@ volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
 there needs it; if not, the join stops before the code is used) and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
-ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
+`VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
 account named after the machine (`--name`, default its short hostname) and adds
 `hosts.<name>`:
 
