@@ -213,7 +213,7 @@ describe("relaunch of a spawn-type decision", () => {
       lock_released: true,
     });
     expect(creds.revoked).toEqual([A1]);
-    for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
+    expect(await env.stillRetained(retainedTopics(NS, A1))).toEqual([]);
     // A new login for attempt 2, the same role spawned again, and it registers.
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
     expect(creds.minted).toEqual([A1, A2]);
@@ -253,7 +253,7 @@ describe("relaunch of a spawn-type decision", () => {
     await resolve(opened.data.decision_id as string, "relaunch");
     expect((await event("relaunched")).data).toMatchObject({ from_agent: A1, to_agent: A2 });
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
-    for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
+    expect(await env.stillRetained(retainedTopics(NS, A1))).toEqual([]);
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
   });

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
@@ -6,6 +6,7 @@ import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { claimVerdict, detectOwner, guardMutation, resolveCaller } from "../src/ownership";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 
 const WAVE = "w-owned";
 const yaml = (wave: string) => `wave: ${wave}
@@ -19,6 +20,7 @@ tasks:
 `;
 
 let t: DaemonEnv;
+let clock: FakeClock;
 let daemon: Daemon;
 let client: ControlClient;
 let pub: VolleyBroker;
@@ -32,7 +34,7 @@ async function agentStatus(agentId: string, type: string) {
 }
 async function heartbeat(agentId: string, sentAt?: Date) {
   const env = buildEnvelope({
-    ...(sentAt !== undefined ? { now: () => sentAt } : {}),
+    now: () => sentAt ?? new Date(clock.now()),
     agentId,
     parentId: null,
     channel: "progress",
@@ -45,10 +47,9 @@ async function heartbeat(agentId: string, sentAt?: Date) {
     retain: false,
   });
 }
-/** Move the wall clock (Date only; timers stay real so MQTT keeps working). */
+/** Move the daemon's wall clock (its timers stay put; MQTT runs on real time). */
 function advanceClock(ms: number) {
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(Date.now() + ms);
+  clock.sleepHost(ms);
 }
 /** What was published before it has been read by the daemon: a control round-trip behind it. */
 const settle = async () => {
@@ -77,7 +78,8 @@ async function agentRegistry(agentId: string, cwd: string, wallTime?: string) {
 
 beforeEach(async () => {
   t = await makeDaemonEnv();
-  daemon = await t.start();
+  clock = fakeClock(Date.now());
+  daemon = await t.start({ clock });
   client = await ControlClient.connect(t.broker.url, NS);
   pub = new VolleyBroker();
   await pub.connect({ url: t.broker.url, agentId: "test-pub" });
@@ -85,7 +87,6 @@ beforeEach(async () => {
   expect(res.error).toBeUndefined();
 });
 afterEach(async () => {
-  vi.useRealTimers();
   await pub.disconnect();
   await client.close();
   await t.cleanup();
@@ -128,14 +129,15 @@ describe("wave ownership", () => {
     await agentStatus("coord-a", "working");
     advanceClock(TWO_HOURS); // registry, status, submit and daemon start are now 2 h old
     // Without the heartbeat the owner is claimable…
+    const now = clock.now();
     const probe = claimVerdict({
       owner: "coord-a",
       by: "coord-b",
-      status: { type: "working", at: new Date(Date.now() - TWO_HOURS).toISOString() },
-      registryAt: new Date(Date.now() - TWO_HOURS).toISOString(),
-      heartbeatAt: Date.now() - TWO_HOURS,
-      ownedSince: new Date(Date.now() - TWO_HOURS).toISOString(),
-      now: Date.now(),
+      status: { type: "working", at: new Date(now - TWO_HOURS).toISOString() },
+      registryAt: new Date(now - TWO_HOURS).toISOString(),
+      heartbeatAt: now - TWO_HOURS,
+      ownedSince: new Date(now - TWO_HOURS).toISOString(),
+      now,
       claimAfterS: 1800,
     });
     expect(probe.ok).toBe(true);
@@ -180,7 +182,7 @@ describe("wave ownership", () => {
     await heartbeat("coord-a");
     await settle();
     await daemon.stop(); // …and the restarted daemon has not seen one yet
-    daemon = await t.start();
+    daemon = await t.start({ clock });
     const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
     expect(res.ok).toBe(false);
     expect(res.error).toContain("owned by coord-a");

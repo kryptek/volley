@@ -181,7 +181,10 @@ describe("claude_* control ops", () => {
       await t.client.request("claude_account_add", { label: "work" });
       await t.signedIn();
       const r = await t.client.request("claude_signin", { acct: "work" });
-      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/already signed in/) });
+      // Asserts on the string, not toMatchObject with a matcher: bun's runner writes the matcher
+      // into the received object, so a later read of r.error would see the matcher.
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/already signed in/);
       expect(r.error).toContain("claude auth logout");
     } finally {
       await t.client.close();
