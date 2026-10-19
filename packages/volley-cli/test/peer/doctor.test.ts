@@ -623,6 +623,16 @@ describe("volley peer doctor: machine and secrets", () => {
     expect(ok.stdout).not.toContain("from being ready");
   });
 
+  it("the Claude profile's four checks come after Claude's own, in the documented order", async () => {
+    const r = await report(machine({ trusted: true }));
+    const ids = r.checks.map((c) => c.id);
+    const at = ids.indexOf("claude.trust");
+    expect(ids.slice(at + 1, at + 5)).toEqual(["skills", "hooks", "mcp", "sharing"]);
+    for (const id of ["skills", "hooks", "mcp", "sharing"]) {
+      expect(check(r, id)).toMatchObject({ ok: true, severity: "warn" });
+    }
+  });
+
   it("runDoctor returns the report and the facts it was built from", async () => {
     const m = machine();
     const { report: r } = await runDoctor(m.deps(), { repo: m.repoPath });

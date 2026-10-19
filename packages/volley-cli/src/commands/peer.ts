@@ -18,6 +18,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
+import { type Sharing, parseSharing } from "volleyd/claude/sharing";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { openClient, reportConnectError } from "../connect";
@@ -36,6 +37,7 @@ import {
   renderHuman,
   runDoctor,
 } from "../peer/doctor";
+import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
 import { authOpsTopic } from "./auth-roles";
 
 export { isRepoTrusted };
@@ -75,6 +77,7 @@ const HELP = `Usage:
                      [--remote-volley <command>] [--no-service] [--replace]
     volley peer doctor [--fix] [--yes] [--json] [--repo <path>] [--clone]
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
+                       [--sharing <json>]
                                                Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
@@ -96,13 +99,17 @@ join options:
 
 doctor options:
   --fix                    Apply the safe fixes (the volley checkout's install and version, a
-                           clone with --clone); print the rest as commands to run yourself
+                           clone with --clone, this machine's Claude profile: the Volley
+                           skills, hooks and MCP server); print the rest as commands to run
+                           yourself
   --yes                    Do not ask before applying them
   --json                   The report as JSON (the machine record's doctor fields)
   --repo <path>            This machine's clone of the wave repo (default: peer.json's)
   --clone                  With --fix: clone the wave repo at --repo when nothing is there
   --origin <url>           The wave repo's URL: compared with the clone's origin, cloned by --clone
   --release <branch>       Check this branch is fetchable from origin
+  --sharing <json>         The Claude profile's sharing modes, e.g. '{"skills":"own"}' (default:
+                           the supervisor's, read through the tunnel; else the defaults)
 
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -129,6 +136,7 @@ const OPTIONS = {
   clone: { type: "boolean" },
   origin: { type: "string" },
   release: { type: "string" },
+  sharing: { type: "string" },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -146,6 +154,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   clone: ["doctor"],
   origin: ["doctor"],
   release: ["doctor"],
+  sharing: ["doctor"],
   for: ["invite"],
   replace: ["join"],
 };
@@ -685,7 +694,14 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   io.stdout("Checking this machine (volley peer doctor)...\n");
   const checked = await runDoctor(
     { ...deps, volleyDir },
-    { ...(repo !== undefined ? { repo } : {}) },
+    {
+      ...(repo !== undefined ? { repo } : {}),
+      // The profile is checked against the tunnel this join sets up.
+      profile: {
+        ...peerProfile(null, null, "defaults"),
+        brokerUrl: `mqtt://127.0.0.1:${port}`,
+      },
+    },
   );
   const blocked = blocking(checked.report);
   // Trust is reported after pairing (step 5), with what to do about it.
@@ -1057,19 +1073,49 @@ async function connectPeer(
 }
 
 /**
- * The volley version the supervisor requires of this machine: its retained readiness verdict's
- * `requirements.volley`, believed only from the supervisor's own identities (SPEC §4.6.15).
+ * What the supervisor requires of this machine, from its retained readiness verdict, believed
+ * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, and the
+ * sharing modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null
+ * when absent or invalid).
  */
-async function requiredVolley(broker: VolleyBroker, name: string): Promise<string | null> {
+async function requirements(
+  broker: VolleyBroker,
+  name: string,
+): Promise<{ volley: string | null; sharing: Sharing | null }> {
+  const none = { volley: null, sharing: null };
   const raw = await broker
     .queryRetained(`${machineTopic(name)}/readiness`, PEER_DEFAULTS.readiness_wait_ms)
     .catch(() => null);
   const e = raw !== null ? parseEnvelope(raw) : null;
-  if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return null;
-  const v = (e.payload as { requirements?: { volley?: unknown } } | null)?.requirements?.volley;
-  // Never one that starts with "-": it ends up in a git argv.
-  return typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null;
+  if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return none;
+  const req = (e.payload as { requirements?: { volley?: unknown; sharing?: unknown } } | null)
+    ?.requirements;
+  const v = req?.volley;
+  let sharing: Sharing | null = null;
+  if (typeof req?.sharing === "object" && req.sharing !== null) {
+    try {
+      // JSON is YAML: the same validation as the supervisor's own sharing.yaml.
+      sharing = parseSharing(JSON.stringify(req.sharing));
+    } catch {}
+  }
+  return {
+    // Never one that starts with "-": it ends up in a git argv.
+    volley: typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null,
+    sharing,
+  };
 }
+
+/** The Claude profile a paired machine's doctor checks: the tunnel's URL, the given modes. */
+const peerProfile = (
+  cfg: PeerConfig | null,
+  sharing: Sharing | null,
+  from: ProfileTarget["from"],
+): ProfileTarget => ({
+  brokerUrl: cfg !== null ? brokerThroughTunnel(cfg) : null,
+  namespace: cfg?.namespace ?? null,
+  sharing: sharing ?? { ...DEFAULT_SHARING },
+  from: sharing !== null ? from : "defaults",
+});
 
 /** The doctor as `run` and the `doctor` verb run it for a paired machine. */
 async function peerDoctor(
@@ -1077,10 +1123,11 @@ async function peerDoctor(
   cfg: PeerConfig,
   broker: VolleyBroker | null,
 ): Promise<DoctorReport> {
-  const required = broker !== null ? await requiredVolley(broker, cfg.name) : null;
+  const req = broker !== null ? await requirements(broker, cfg.name) : null;
   const { report } = await runDoctor(deps, {
     ...(cfg.repo !== undefined ? { repo: cfg.repo } : {}),
-    requiredVolley: required,
+    requiredVolley: req?.volley ?? null,
+    profile: peerProfile(cfg, req?.sharing ?? null, "supervisor"),
   });
   return report;
 }
@@ -1268,7 +1315,8 @@ const hasCredential = (url: string) =>
 
 /**
  * `volley peer doctor`: the repo defaults to peer.json's, and on a paired machine the supervisor's
- * version requirement is read from its readiness verdict through the tunnel (when it is up).
+ * version requirement and sharing modes are read from its readiness verdict through the tunnel
+ * (when it is up); `--sharing` sets the modes by hand.
  */
 async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> {
   if (v.origin !== undefined && hasCredential(v.origin)) {
@@ -1285,24 +1333,42 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     io.stderr("volley peer doctor: --clone needs --fix\n");
     return EXIT.USAGE;
   }
+  let flagSharing: Sharing | null = null;
+  if (v.sharing !== undefined) {
+    try {
+      const raw = JSON.parse(v.sharing) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("must be a JSON object of item: mode");
+      }
+      flagSharing = parseSharing(JSON.stringify(raw));
+    } catch (e) {
+      io.stderr(`volley peer doctor: --sharing: ${e instanceof Error ? e.message : String(e)}\n`);
+      return EXIT.USAGE;
+    }
+  }
   let cfg: PeerConfig | null = null;
   try {
     if (existsSync(peerFile(deps.home))) cfg = readPeerConfig(deps.home);
   } catch {}
-  let required: string | null = null;
+  let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
   if (cfg !== null) {
     const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
     if (b !== null) {
-      required = await requiredVolley(b, cfg.name);
+      req = await requirements(b, cfg.name);
       await b.disconnect().catch(() => {});
     }
   }
+  const required = req.volley;
   const repo = v.repo ?? cfg?.repo;
   const opts: DoctorOptions = {
     ...(repo !== undefined ? { repo: resolve(repo) } : {}),
     ...(v.origin !== undefined ? { origin: v.origin } : {}),
     ...(v.release !== undefined ? { release: v.release } : {}),
     requiredVolley: required,
+    profile:
+      flagSharing !== null
+        ? peerProfile(cfg, flagSharing, "flag")
+        : peerProfile(cfg, req.sharing, "supervisor"),
     json: v.json === true,
     fix: v.fix === true,
     yes: v.yes === true,

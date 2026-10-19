@@ -224,6 +224,7 @@ volley peer doctor                       # one line per check: ✓ ok, ! warning
 volley peer doctor --fix                 # print the plan, ask, apply the safe fixes, check again
 volley peer doctor --fix --yes --clone --origin https://github.com/example-org/example-repo
 volley peer doctor --json                # the machine record's doctor fields (SPEC §4.6.15)
+volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's sharing modes
 ```
 
 | Check | Severity | What it looks at |
@@ -237,6 +238,10 @@ volley peer doctor --json                # the machine record's doctor fields (S
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
+| `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
+| `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |
+| `mcp` | warn | `~/.claude.json`'s `mcpServers.volley` runs this checkout's `packages/volley-mcp/src/index.ts` with bun, with `VOLLEY_BROKER_URL` at the tunnel's port and the peer's namespace (`mcp: own`: left as is) |
+| `sharing` | warn | the three rows above follow the sharing modes (SPEC §4.6.11): `--sharing`, else the supervisor's readiness `requirements.sharing`, read through the tunnel, else the defaults; the detail names where they came from and which items are left as is |
 | `machine.memory`, `machine.disk` | warn | available memory (Linux: `MemAvailable`; macOS: `vm_stat`'s free + inactive + speculative + purgeable pages, as free pages alone under-count), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
 
 Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
@@ -261,6 +266,31 @@ package repository on apt), the line that puts Claude Code on the ssh `PATH` (Li
 or an sshd `SetEnv PATH=…`), `gh auth login && gh auth setup-git`, the Claude sign-in, a wrong
 `origin` (explained, never changed), and `package.json` disagreeing with `bun.lock` (local
 edits: `git -C <dir> status`). Exit status 1 while a `block` check fails.
+
+**The Claude profile.** The last four rows prepare this machine's own Claude profile the way
+`volley setup` and the packages' installers do locally, so a session you start here has
+`/volley`, `/volley-issues`, the hooks and the volley MCP server without reading a README. They
+only warn: an agent volleyd spawns runs without them (its spawn writes `.volley/mcp.json` and
+brings the hooks itself). Their `--fix` writes only inside `~/.claude`, `~/.claude.json`'s
+`mcpServers` and the hooks' state folder: the two skill installers (idempotent; a folder in the
+way is backed up), or `cp -R` of a missing skill under `skills: copy`; the hooks installer with
+`CLAUDE_SETTINGS`, `--broker-url mqtt://127.0.0.1:<remote_port>` and, outside the `default`
+namespace, `--namespace` (it carries them in every hook's prefix; the usage statusLine comes with
+it; a login in the URL is left out and said so, as the hooks take theirs from their own login
+file); `claude mcp add-json -s user volley …`
+(`claude mcp remove -s user volley` first when an entry is there but differs, so a new port is
+re-registered). The registration carries no broker login, and an entry with settings of your own
+(env keys such as a login, or an agent id other than `coordinator`) is never rewritten: its fix
+is printed for you to run, and keeps those settings (each value shown as `<yours>`, for you to
+fill in). A skill link that points at nothing is reported as a broken link and repaired (under
+`skills: copy`, the link is removed and the copy made). On a machine that is not paired there is
+no tunnel to expect: the hooks are checked against the URL they already carry (none: the
+installer runs without `--broker-url`) and the MCP entry's URL is not compared. The modes come
+from the supervisor's readiness verdict (`requirements.sharing`, its own `sharing.yaml`);
+`--sharing <json>` sets them by hand and wins over the verdict (validated like `sharing.yaml`: an
+unknown item or mode, or `mcp: linked`, is a usage error), and without either the defaults
+apply (`skills` linked, `settings.json` and `mcp` copied). `.claude.json` is never linked or
+copied whole, and the doctor runs no `volley auth` command.
 
 **No secrets.** The doctor keeps states and plain labels only: exit codes of `gh auth status`,
 the `loggedIn` and plan of `claude auth status`, an origin with any credentials stripped. Nothing

@@ -10,28 +10,60 @@
 #   scripts/install.sh               install (re-running replaces the previous install)
 #   scripts/install.sh --uninstall   remove every volley-hooks entry
 #   scripts/install.sh --dry-run     print the merged settings instead of writing them
+#   --broker-url <url>               carry VOLLEY_BROKER_URL=<url> in every command's prefix
+#   --namespace <ns>                 carry VOLLEY_NAMESPACE=<ns> in every command's prefix
 #
 # CLAUDE_SETTINGS overrides the target file. A timestamped backup is written before changes.
+# The prefix values come from the flags only, never from the environment (a session's own
+# VOLLEY_BROKER_URL is read by the hooks at run time; one in the prefix overrides it): `volley
+# peer doctor --fix` passes a paired machine's tunnel URL. The URL must be a plain one without a
+# login; the hooks take their credentials from VOLLEY_AUTH_* or coordinator.json.
 set -euo pipefail
+
+usage() {
+  echo "usage: $0 [--uninstall|--dry-run] [--broker-url <url>] [--namespace <ns>]" >&2
+  exit 2
+}
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 MODE=install
-case "${1:-}" in
-  "") ;;
-  --uninstall) MODE=uninstall ;;
-  --dry-run) MODE=dry-run ;;
-  *) echo "usage: $0 [--uninstall|--dry-run]" >&2; exit 2 ;;
-esac
+BROKER_URL=""
+NAMESPACE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uninstall) MODE=uninstall ;;
+    --dry-run) MODE=dry-run ;;
+    --broker-url) [[ $# -ge 2 ]] || usage; BROKER_URL="$2"; shift ;;
+    --namespace) [[ $# -ge 2 ]] || usage; NAMESPACE="$2"; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
 
 command -v bun >/dev/null || { echo "install.sh: bun is required" >&2; exit 1; }
 
 STATE_ROOT="${VOLLEY_HOOKS_STATE_DIR:-$HOME/.volley/hooks}"
 
-HOOKS_DIR="$HOOKS_DIR" SETTINGS="$SETTINGS" MODE="$MODE" STATE_ROOT="$STATE_ROOT" bun -e '
+# Both land in settings.json and in a shell command line: never a login, nothing to quote.
+if [[ "$BROKER_URL" == *@* ]]; then
+  echo "install.sh: --broker-url must not carry a login: pass the bare URL, and give the login as VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD or in coordinator.json (see the README's Broker credentials)" >&2
+  exit 2
+fi
+URL_RE='^(mqtt|mqtts|tcp|ws|wss)://[]A-Za-z0-9._~:/[-]+$'
+if [[ -n "$BROKER_URL" && ! "$BROKER_URL" =~ $URL_RE ]]; then
+  echo "install.sh: --broker-url must be a plain mqtt(s)://, tcp://, or ws(s):// URL" >&2
+  exit 2
+fi
+if [[ -n "$NAMESPACE" && ! "$NAMESPACE" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
+  echo "install.sh: --namespace must match [a-z0-9][a-z0-9_-]{0,62}" >&2
+  exit 2
+fi
+
+HOOKS_DIR="$HOOKS_DIR" SETTINGS="$SETTINGS" MODE="$MODE" STATE_ROOT="$STATE_ROOT" BROKER_URL="$BROKER_URL" NAMESPACE="$NAMESPACE" bun -e '
 const fs = require("node:fs");
 const path = require("node:path");
-const { HOOKS_DIR, SETTINGS, MODE, STATE_ROOT } = process.env;
+const { HOOKS_DIR, SETTINGS, MODE, STATE_ROOT, BROKER_URL, NAMESPACE } = process.env;
 const MARK = "/volley-hooks/src/hooks/";
 const STATUS_MARK = "/volley-hooks/src/statusline/";
 const CHAIN = path.join(STATE_ROOT, "statusline-chain.json");
@@ -67,16 +99,20 @@ if (MODE === "uninstall") {
 
 if (MODE !== "uninstall") {
   const quoted = JSON.stringify(HOOKS_DIR).slice(1, -1);
+  const prefix =
+    "VOLLEY_HOOKS_COORDINATOR=1 " +
+    (BROKER_URL ? "VOLLEY_BROKER_URL=" + BROKER_URL + " " : "") +
+    (NAMESPACE ? "VOLLEY_NAMESPACE=" + NAMESPACE + " " : "");
   settings.statusLine = {
     ...template.statusLine,
-    command: "VOLLEY_HOOKS_COORDINATOR=1 " + template.statusLine.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
+    command: prefix + template.statusLine.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
   };
   for (const [event, groups] of Object.entries(template.hooks)) {
     const resolved = groups.map((g) => ({
       ...g,
       hooks: g.hooks.map((h) => ({
         ...h,
-        command: "VOLLEY_HOOKS_COORDINATOR=1 " + h.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
+        command: prefix + h.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
       })),
     }));
     hooks[event] = [...(hooks[event] ?? []), ...resolved];
