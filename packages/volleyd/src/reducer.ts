@@ -390,7 +390,7 @@ function derive(state: WaveState, rec: WaveRecord): void {
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );
-  state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, ...t }) => {
+  state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, alarms: _a, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);
       return ids.length > 0
@@ -429,7 +429,13 @@ function derive(state: WaveState, rec: WaveRecord): void {
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
         : [];
-    if (pending.length === 0) return t;
+    if (pending.length === 0) {
+      // A done task's merge that went in at another head than the gate saw (merged_unverified_head).
+      const alarms = surfacedAlarms(rec.pipeline[t.id]);
+      const first = alarms[0];
+      if (first === undefined) return t;
+      return { ...t, alarms, ...(t.stage === "done" ? { why_waiting: first.message } : {}) };
+    }
     // A dependency parked on a decision parks its dependents, naming the decision.
     const parked = pending.filter((d) => stageOf.get(d) === "awaiting_decision");
     const ids = parked.flatMap(openOn);
@@ -440,6 +446,19 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+}
+
+/** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */
+function surfacedAlarms(p: TaskPipeline | undefined): NonNullable<TaskState["alarms"]> {
+  const m = p?.alarms?.merged_unverified_head;
+  if (m === undefined) return [];
+  const short = (x: unknown) => (typeof x === "string" ? x.slice(0, 7) : "?");
+  return [
+    {
+      alarm: "merged_unverified_head",
+      message: `merged with an unverified head: gated ${short(m.gated)}, merged ${short(m.merged)}`,
+    },
+  ];
 }
 
 /** Role → its short name in a stage group's label. */

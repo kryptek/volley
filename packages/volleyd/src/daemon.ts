@@ -4377,6 +4377,8 @@ export class Daemon {
     const defer = (async (): Promise<Reply> => {
       const r = await driver.verifyMerge(task, sha);
       if (!r.ok) return { ok: false, error: r.error };
+      // The record describes the commit that merged, and its own CI.
+      const merged_ci = await driver.ciOf(task, driver.headCwd(task), sha);
       await this.serial(async () => {
         for (const d of openDecisions(w.log.record)) {
           const marker = (d as { pipeline?: { on?: string } }).pipeline;
@@ -4387,7 +4389,7 @@ export class Daemon {
               rationale: `volleyd merged --sha ${sha}`,
             });
         }
-        await driver.handle(task, { kind: "operator_merged", sha, by, how: r.how });
+        await driver.handle(task, { kind: "operator_merged", sha, by, how: r.how, merged_ci });
       });
       return { ok: true, result: { wave: w.wave, task, sha, how: r.how } };
     })();

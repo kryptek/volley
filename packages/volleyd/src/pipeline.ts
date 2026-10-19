@@ -1,11 +1,13 @@
 import {
   type ArtifactReport,
   type CiRun,
+  type CiState,
   type Landed,
   type OperatorMergeCheck,
   type RebaseCheck,
   artifactOutcome,
   checkRebase,
+  ciStateOf,
   landed,
   probeLanded,
   verifyArtifacts,
@@ -416,12 +418,12 @@ export type PipelineEvent =
   | { kind: "rebase_checked"; head: string; check: RebaseCheck; diffstats: Record<string, string> }
   /** Before the gate: the PR's head is not the verified one (someone pushed after it). */
   | { kind: "head_moved"; expected: string; actual: string }
-  /** At the gate: the PR as `gh pr view` reports it. */
-  | { kind: "merge_checked"; view: PrView }
+  /** At the gate: the PR as `gh pr view` reports it (`merged_ci`: CI of a head other than the gated one). */
+  | { kind: "merge_checked"; view: PrView; merged_ci?: MergedCi }
   /** At the gate, the PR closed unmerged: did `head` land on the release branch anyway? */
-  | { kind: "landed_checked"; head: string; landed: Landed | null }
+  | { kind: "landed_checked"; head: string; landed: Landed | null; merged_ci?: MergedCi }
   /** `volleyd merged --sha`: the owner's merge outside GitHub, verified (verifyOperatorMerge). */
-  | { kind: "operator_merged"; sha: string; by: string; how: string }
+  | { kind: "operator_merged"; sha: string; by: string; how: string; merged_ci?: MergedCi }
   /** A pipeline git / gh check failed (`timed_out`: the hard timeout fired). */
   | {
       kind: "io_failed";
@@ -432,6 +434,9 @@ export type PipelineEvent =
       timed_out: boolean;
     }
   | { kind: "decision_resolved"; decision: DecisionRecord };
+
+/** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
+export type MergedCi = CiState | "unknown";
 
 export interface PrView {
   state?: string;
@@ -497,7 +502,7 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "head_moved":
       return onHeadMoved(v, ev);
     case "merge_checked":
-      return onMergeChecked(v, ev.view);
+      return onMergeChecked(v, ev);
     case "landed_checked":
       return onLandedChecked(v, ev);
     case "operator_merged":
@@ -647,7 +652,11 @@ function onHeadMoved(
   ];
 }
 
-function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
+function onMergeChecked(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "merge_checked" }>,
+): PipelineAction[] {
+  const { view } = ev;
   const { pr, head } = v.p;
   if (v.stage !== "merge_ready" || pr === undefined) return [];
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
@@ -666,25 +675,11 @@ function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
             },
           ]
         : []),
-      {
-        kind: "journal",
-        event: {
-          type: "artifact_verified",
-          task: v.task,
-          data: {
-            role: "merged",
-            pr: { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" },
-            head_sha: head,
-            ...(merged !== undefined ? { merged_head_sha: merged } : {}),
-            merge_sha: view.mergeCommit?.oid ?? null,
-            merged_at: view.mergedAt ?? null,
-          },
-        },
-      },
-      {
-        kind: "journal",
-        event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
-      },
+      ...mergedActions(
+        v,
+        { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
+        unverified ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
+      ),
     ];
   }
   // Closed unmerged on GitHub — but a local squash + push closes it that way too.
@@ -694,11 +689,27 @@ function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
 
 /**
  * The task is merged: its PR's head is on the release branch (`extra`: how it is known). Any
- * alarm that said otherwise (`pr_closed_unmerged`) is cleared; dependents follow `done`.
+ * alarm that said otherwise (`pr_closed_unmerged`) is cleared; dependents follow `done`. When
+ * the commit that merged is not the gated head (`merged`), the record — and the task's PR —
+ * describe that commit and its own CI (`unknown`: not read), never the gated head's.
  */
-function mergedActions(v: PipelineView, extra: Record<string, unknown>): PipelineAction[] {
+function mergedActions(
+  v: PipelineView,
+  extra: Record<string, unknown>,
+  merged?: { sha: string; ci: MergedCi },
+): PipelineAction[] {
   const { pr, head } = v.p;
   if (pr === undefined) return [];
+  const other = merged !== undefined && merged.sha !== head ? merged : undefined;
+  const prOf =
+    other === undefined
+      ? { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" }
+      : {
+          number: pr.number,
+          url: pr.url,
+          head_sha: other.sha,
+          ...(other.ci !== "unknown" ? { ci: other.ci } : {}),
+        };
   return [
     ...(v.p.alarms?.pr_closed_unmerged !== undefined
       ? [
@@ -722,8 +733,11 @@ function mergedActions(v: PipelineView, extra: Record<string, unknown>): Pipelin
         task: v.task,
         data: {
           role: "merged",
-          pr: { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" },
+          pr: prOf,
           head_sha: head,
+          ...(other !== undefined
+            ? { gated_head_sha: head, merged_head_sha: other.sha, merged_ci: other.ci }
+            : {}),
           ...extra,
         },
       },
@@ -743,7 +757,11 @@ function onLandedChecked(
   const pr = v.p.pr;
   if (v.stage !== "merge_ready" || pr === undefined || ev.head !== v.p.head) return [];
   if (ev.landed !== null)
-    return mergedActions(v, { via: "outside_github", how: ev.landed.how, sha: ev.landed.sha });
+    return mergedActions(
+      v,
+      { via: "outside_github", how: ev.landed.how, sha: ev.landed.sha },
+      { sha: ev.landed.sha, ci: ev.merged_ci ?? "unknown" },
+    );
   const at = ev.head.slice(0, 12);
   const why = `PR #${pr.number} was closed without a merge, and ${v.release_branch} does not contain ${at} (no ancestor, no equivalent patches, no commit naming #${pr.number})`;
   return [
@@ -781,7 +799,11 @@ function onOperatorMerged(
         data: { by: ev.by, sha: ev.sha, head: v.p.head, how: ev.how },
       },
     },
-    ...mergedActions(v, { via: "operator", sha: ev.sha, how: ev.how, by: ev.by }),
+    ...mergedActions(
+      v,
+      { via: "operator", sha: ev.sha, how: ev.how, by: ev.by },
+      { sha: ev.sha, ci: ev.merged_ci ?? "unknown" },
+    ),
   ];
 }
 
@@ -1875,7 +1897,11 @@ export class PipelineDriver {
       cwd !== undefined ? { cwd } : {},
     );
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
-    return view === null ? null : { kind: "merge_checked", view };
+    if (view === null) return null;
+    const merged = view.headRefOid;
+    if (view.state === "MERGED" && typeof merged === "string" && merged !== v.p.head)
+      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, cwd, merged) };
+    return { kind: "merge_checked", view };
   }
 
   /** Beside the queue: is the closed PR's head on the release branch anyway? */
@@ -1884,7 +1910,28 @@ export class PipelineDriver {
     const cwd = this.headWorktree(v.p);
     if (pr === undefined || head === undefined || cwd === undefined) return null;
     const f = await probeLanded(this.io(v.task), { cwd, head, release_branch: v.release_branch });
-    return { kind: "landed_checked", head, landed: landed(f, head, f.release_sha, pr.number) };
+    const l = landed(f, head, f.release_sha, pr.number);
+    return {
+      kind: "landed_checked",
+      head,
+      landed: l,
+      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, cwd, l.sha) } : {}),
+    };
+  }
+
+  /** CI on a merged commit other than the gated head; `unknown` when it cannot be read. */
+  async ciOf(task: TaskId, cwd: string | undefined, sha: string): Promise<MergedCi> {
+    try {
+      return await ciStateOf(this.io(task), cwd ?? ".", sha);
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /** The worktree the task's PR head is checked out in (pipeline git / gh calls run there). */
+  headCwd(task: TaskId): string | undefined {
+    const v = this.view(task);
+    return v === null ? undefined : this.headWorktree(v.p);
   }
 
   /**

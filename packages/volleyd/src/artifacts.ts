@@ -154,6 +154,11 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
   return report;
 }
 
+/** The aggregate CI state on exactly `head` (e.g. a head merged other than the gated one). */
+export async function ciStateOf(exec: ExecFn, cwd: string, head: string): Promise<CiState> {
+  return (await ciOn(exec, cwd, head)).state;
+}
+
 /** CI on exactly `head`: its runs, the aggregate state, failed job names, infra-shaped or not. */
 async function ciOn(
   exec: ExecFn,
