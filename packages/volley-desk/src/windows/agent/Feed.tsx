@@ -12,6 +12,13 @@ import { type UIEvent, useLayoutEffect, useRef, useState } from "react";
 import { isControlTraffic } from "../../store/reducer";
 import type { FeedEntry } from "../../store/types";
 
+/** Some text inside `el` is selected (the reader is copying it). */
+function selectedIn(el: Element): boolean {
+  const sel = typeof window === "undefined" ? null : window.getSelection();
+  if (!sel || sel.isCollapsed || sel.toString() === "") return false;
+  return el.contains(sel.anchorNode) || el.contains(sel.focusNode);
+}
+
 /** Within this many px of the bottom a scroller keeps following new content. */
 const FOLLOW_PX = 24;
 
@@ -141,17 +148,28 @@ export function Feed({
           const isOpen = open === e;
           return (
             <div key={rowId(e)} className={`env ch-${ch}`}>
-              <button
-                type="button"
+              <div
+                // biome-ignore lint/a11y/useSemanticElements: a browser will not select a <button>'s text, and a row is copyable
+                role="button"
+                tabIndex={0}
                 className="env-row"
                 aria-expanded={isOpen}
-                onClick={() => setOpen(isOpen ? null : e)}
+                onClick={(ev) => {
+                  // The click that ends selecting the row's text is a copy, not a toggle.
+                  if (selectedIn(ev.currentTarget)) return;
+                  setOpen(isOpen ? null : e);
+                }}
+                onKeyDown={(ev) => {
+                  if (ev.key !== "Enter" && ev.key !== " ") return;
+                  ev.preventDefault();
+                  setOpen(isOpen ? null : e);
+                }}
               >
                 <span className="mono dim">{clock(t)}</span>
                 <span className="env-ch">{ch}</span>
                 <span className="env-type">{e.envelope.type}</span>
                 <span className="env-msg">{summary(e)}</span>
-              </button>
+              </div>
               {isOpen && (
                 <pre className="env-json recessed">{JSON.stringify(e.envelope, null, 2)}</pre>
               )}
