@@ -1,5 +1,6 @@
 import { type DecisionInput, ID_RE } from "../decisions";
 import type { JournalEvent } from "../types";
+import { PRIMARY_ACCOUNT } from "./profiles";
 
 /**
  * Usage metering (SPEC §4.6.12). Each agent's statusLine publisher (volley-hooks) publishes a
@@ -288,8 +289,8 @@ export function parseMoveAnswer(answer: string): { wave: string; to: string } | 
  * The `account_limit` decisions to open: for each account whose 5-hour window is at or over
  * `warnAtPct` (and has not reset), each wave with agents on it, unless that wave has one open
  * for the account or already answered one for this window (same `resets_at`). The suggestion is
- * the candidate with the most known headroom, else one with no usage yet (a newly signed-in
- * account), labelled so. Never a move.
+ * the candidate with the most known headroom, else one with no 5-hour usage yet (a newly
+ * signed-in profile before `primary`), labelled so. Never a move.
  */
 export function limitDecisions(o: {
   accounts: Record<string, AccountUsage>;
@@ -314,20 +315,32 @@ export function limitDecisions(o: {
         (livePct(r?.weekly ?? null, o.now) ?? 0) < o.warnAtPct
       );
     });
-    // known headroom first; else a signed-in account with no usage yet (offered, never taken)
+    // Known headroom first; else an account with no 5-hour usage yet (offered, never taken).
+    // Signed-in profiles come before primary: interactive sessions use the owner's own login
+    // without reporting usage, so its lack of a sample says least about its headroom.
     const suggested =
       mostHeadroom(o.accounts, roomy, o.now) ??
-      roomy.find((c) => (o.accounts[c]?.five_hour ?? null) === null) ??
+      [
+        ...roomy.filter((c) => c !== PRIMARY_ACCOUNT),
+        ...roomy.filter((c) => c === PRIMARY_ACCOUNT),
+      ].find((c) => (o.accounts[c]?.five_hour ?? null) === null) ??
       null;
-    const used =
-      suggested === null ? null : livePct(o.accounts[suggested]?.five_hour ?? null, o.now);
+    const target = suggested === null ? undefined : o.accounts[suggested];
+    const used = livePct(target?.five_hour ?? null, o.now);
+    // "no usage yet" only for an account that reported none; a weekly-only sample is usage
+    const label =
+      used !== null
+        ? `${Math.round(used)}%`
+        : (target?.weekly ?? null) !== null
+          ? "no 5-hour usage yet"
+          : "no usage yet";
     for (const wave of a.waves) {
       const seen = o.existing.filter((e) => e.wave === wave && e.acct === a.account);
       if (seen.some((e) => e.open || e.resets_at === w.resets_at)) continue;
       const resets = w.resets_at !== null ? ` (resets ${w.resets_at})` : "";
       const ask =
         suggested !== null
-          ? ` Move wave ${wave} to ${suggested} (${used === null ? "no usage yet" : `${Math.round(used)}%`})? New agents would start there; running agents finish where they are.`
+          ? ` Move wave ${wave} to ${suggested} (${label})? New agents would start there; running agents finish where they are.`
           : " No other signed-in account has room to suggest; nothing moves unless you move the wave.";
       out.push({
         wave,

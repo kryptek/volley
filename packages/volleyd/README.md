@@ -510,7 +510,9 @@ When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave
 can override it), each running wave with agents on that account gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
 most headroom among those under the threshold in both windows, else a signed-in account that
-has not reported usage yet (labelled "no usage yet"; none: only `not now`), with
+has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
+reported weekly usage; a signed-in profile before `primary`, whose interactive use goes
+unreported; none: only `not now`), with
 the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
 nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
