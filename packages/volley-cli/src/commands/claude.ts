@@ -152,10 +152,11 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
   } catch (e) {
     return usage(e instanceof Error ? e.message : String(e));
   }
+  const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
   const broker = await connectAsClient(
-    resolveBrokerUrl(v["broker-url"], env),
+    brokerUrl,
     io,
-    resolveAuth({ username: v.username, password: v.password }, env),
+    resolveAuth({ username: v.username, password: v.password }, env, process.cwd(), brokerUrl),
   );
   if (broker === null) return EXIT.ERROR;
   try {

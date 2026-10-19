@@ -234,7 +234,12 @@ function resolve(
     auth:
       values.coordinator === true && values.username === undefined
         ? coordinatorAuth(values.password, env)
-        : resolveAuth({ username: str(values.username), password: str(values.password) }, env, dir),
+        : resolveAuth(
+            { username: str(values.username), password: str(values.password) },
+            env,
+            dir,
+            resolveBrokerUrl(str(values["broker-url"]), env),
+          ),
     json: values.json === true,
   };
 }

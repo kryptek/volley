@@ -13,6 +13,9 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { backupPath, writeConfig } from "../auth/config";
+import { planCmux } from "./cmux";
+import { deskPortListeners, portConflict } from "./desk-port";
+import { stableServicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
@@ -21,7 +24,9 @@ import { unifiedDiff } from "./step";
  * services' PATH: volleyd runs `volley auth` to redeem the Desk's sign-in links), volleyd as a
  * service (`volleyd install` on macOS, a systemd user unit on Linux), the Volley hooks for
  * coordinator sessions (volley-hooks' install.sh), and the built Desk served by
- * `volley desk serve` as a service, for the phone.
+ * `volley desk serve` as a service, for the phone. On macOS it also checks that volleyd's
+ * service can use cmux (cmux.ts), and it stops when another program has the Desk's port
+ * (desk-port.ts).
  */
 
 /** A long-running service setup installs. */
@@ -209,13 +214,16 @@ async function systemdChange(
 export const binDir = (ctx: SetupContext) => join(ctx.home, ".volley", "bin");
 
 /**
- * The services' PATH: the linked commands first (moved there when the PATH setup runs with has
- * them further back, behind another `volley`), then the rest of that PATH.
+ * The services' PATH: the linked commands first, then a fixed list (`stableServicePath`), never
+ * the invoking shell's whole PATH, so a rerun from another terminal changes nothing.
  */
-function servicePath(ctx: SetupContext): string {
-  const path = ctx.auth.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  const bin = binDir(ctx);
-  return [bin, ...path.split(":").filter((d) => d !== bin && d !== "")].join(":");
+export function servicePath(ctx: SetupContext): string {
+  return stableServicePath({
+    home: ctx.home,
+    bun: ctx.deps.bun,
+    tmpdir: ctx.auth.env.TMPDIR,
+    ...(ctx.deps.exists !== undefined ? { exists: ctx.deps.exists } : {}),
+  });
 }
 
 /**
@@ -353,6 +361,10 @@ function commandsChange(
   };
 }
 
+/** What the hooks change says about the user's own status line (install.sh chains it). */
+const STATUS_LINE_NOTE =
+  "Your Claude Code status line keeps working: Volley runs it after its own (same input, 2 s timeout).";
+
 /** Where a Desk build records what it was built from (`deskStamp` of its checkout). */
 export const DESK_STAMP = ".volley-build";
 
@@ -399,6 +411,54 @@ export function deskEnvLeaks(deskDir: string): string[] {
     const text = read(join(deskDir, f));
     return /^\s*(export\s+)?VITE_VOLLEY_BROKER_\w*\s*=/m.test(text);
   });
+}
+
+/**
+ * Why the Desk cannot have its port: another program listening on it (any address), or null.
+ * The Desk's own service is no conflict. A probe that cannot tell says so in `found`.
+ */
+async function deskPortConflict(
+  ctx: SetupContext,
+  platform: NodeJS.Platform,
+  found: string[],
+): Promise<string | null> {
+  const listeners = await deskPortListeners(ctx.deps.exec, ctx.deskPort);
+  if (!Array.isArray(listeners)) {
+    found.push(
+      `Desk port ${ctx.deskPort}: could not check who listens on it (${listeners.cannotTell}). If http://localhost:${ctx.deskPort} does not reach the Desk, run \`volley setup --repair\` in a terminal`,
+    );
+    return null;
+  }
+  if (listeners.length === 0) return null;
+  const own = await deskServicePid(ctx, platform);
+  const others = listeners.filter((l) => l.pid === null || l.pid !== own);
+  return others.length === 0 ? null : portConflict(ctx.deskPort, others);
+}
+
+/** The PID of the running Desk service, or null. */
+async function deskServicePid(
+  ctx: SetupContext,
+  platform: NodeJS.Platform,
+): Promise<number | null> {
+  const r =
+    platform === "darwin"
+      ? await ctx.deps.exec(["launchctl", "print", `gui/${ctx.deps.uid}/${DESK_LABEL}`])
+      : platform === "linux"
+        ? await ctx.deps.exec([
+            "systemctl",
+            "--user",
+            "show",
+            "-p",
+            "MainPID",
+            "--value",
+            "volley-desk.service",
+          ])
+        : null;
+  if (r === null || r.code !== 0) return null;
+  const pid = Number(
+    platform === "darwin" ? /^\s*pid = (\d+)/m.exec(r.stdout)?.[1] : r.stdout.trim(),
+  );
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 export async function planServices(ctx: SetupContext): Promise<StepPlan> {
@@ -477,6 +537,10 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     );
   }
 
+  // cmux (macOS): volleyd's service must reach its socket to start local agents. Its change is
+  // applied last: one only a terminal can make fails after every other change is in place.
+  const cmux = await planCmux(ctx, env, plan.found);
+
   // The hooks, for coordinator sessions.
   const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
   const hooks = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
@@ -491,7 +555,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
   else {
     plan.changes.push({
       summary: `Install the Volley hooks for coordinator sessions into ${settings}`,
-      detail: unifiedDiff(settings, currentSettings, dry.stdout),
+      detail: `${STATUS_LINE_NOTE}\n${unifiedDiff(settings, currentSettings, dry.stdout)}`,
       apply: async () => {
         // install.sh backs the settings file up itself (<file>.bak-<timestamp>).
         const r = await must(ctx, ["bash", hooks], { env: hooksEnv });
@@ -554,6 +618,11 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
+  const conflict = await deskPortConflict(ctx, platform, plan.found);
+  if (conflict !== null) {
+    plan.blocked = conflict;
+    return plan;
+  }
   if (platform === "darwin") {
     push(
       await launchdChange(
@@ -573,8 +642,14 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
       ),
     );
   }
+  push(cmux);
   // After the changes every service must be in place: planning again must find nothing to do.
-  plan.verify = async () =>
-    (await planServices(ctx)).changes.map((c) => `still not in place: ${c.summary}`);
+  plan.verify = async () => {
+    const again = await planServices(ctx);
+    return [
+      ...(again.blocked !== undefined ? [again.blocked] : []),
+      ...again.changes.map((c) => `still not in place: ${c.summary}`),
+    ];
+  };
   return plan;
 }

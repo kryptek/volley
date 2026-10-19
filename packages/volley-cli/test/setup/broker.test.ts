@@ -140,6 +140,11 @@ describe("setup: broker", () => {
       expect(m.execCalls).toEqual([["brew", "services", "restart", "mosquitto"]]);
       expect(out.join("\n")).toContain("Backed the previous config up");
       expect(await p.verify?.()).toEqual([]);
+      // The promised check, said after it passed.
+      expect(p.verified).toEqual([
+        "Listener 1883: refuses anonymous clients",
+        "Listener 9001: refuses anonymous clients",
+      ]);
       // Planned again: nothing left to do.
       const again = await planSecurity(m.ctx);
       expect(again.changes).toEqual([]);
@@ -202,6 +207,11 @@ describe("setup: broker", () => {
       expect(readFileSync(m.layout.config, "utf-8")).toContain("not encrypted (no TLS)");
       expect(m.lanWs).toBe(true);
       expect(await p.verify?.()).toEqual([]);
+      expect(p.verified).toEqual([
+        "Listener 1883: refuses anonymous clients",
+        "Listener 9001: refuses anonymous clients",
+        "Listener 9001 from the LAN (ws://desk.example:9001): reachable, refuses anonymous clients",
+      ]);
       expect(probed).toContain("ws://desk.example:9001");
       // A LAN listener the phone cannot reach (a firewall) fails the step.
       m.lanWs = false;

@@ -18,11 +18,10 @@ import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
-import { volleydHome } from "../auth/context";
+import { withSetupAuthDir } from "../auth/coordinator-login";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { readSetupInstall } from "../setup/journal";
 import { authOpsTopic } from "./auth-roles";
 
 /**
@@ -259,16 +258,6 @@ function unseal(key: KeyObject, sealed: string | undefined): Record<string, unkn
   } catch {
     return null;
   }
-}
-
-/**
- * `env`, with VOLLEY_AUTH_DIR set to the auth dir in `$VOLLEYD_HOME/setup.json` when it names none
- * (a `--dir` or `--layout container` setup keeps coordinator.json outside the default dir).
- */
-function withSetupAuthDir(env: Record<string, string | undefined>) {
-  if (env.VOLLEY_AUTH_DIR !== undefined) return env;
-  const saved = readSetupInstall(volleydHome(env));
-  return saved === null ? env : { ...env, VOLLEY_AUTH_DIR: saved.auth_dir };
 }
 
 /** Where volleyd answers an account-op request (accounts.ts in volleyd). */

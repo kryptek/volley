@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { stableServicePath } from "volley-cli/setup/service-path";
 import pkg from "../package.json";
 import type { AdmissionSummary } from "../src/admission";
 import { admissionFor, formatAdmission } from "../src/commands/admission";
@@ -466,6 +467,31 @@ describe("volleyd install / uninstall", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("LaunchAgents/systems.volley.volleyd.plist");
     expect(r.stdout).toContain("<key>KeepAlive</key>");
+  });
+
+  it("--dry-run writes the same stable PATH from two shells (no per-terminal shim dir)", async () => {
+    const bunDir = join(home, "bun-bin");
+    mkdirSync(bunDir);
+    writeFileSync(join(bunDir, "bun"), "");
+    const env = { HOME: home, VOLLEYD_HOME: join(home, "state") };
+    const shim = "/var/folders/xy/abc/T/cmux-cli-shims/1234-5678";
+    const a = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `${shim}:${bunDir}:/some/project/node_modules/.bin:/usr/bin:/bin`,
+    });
+    const b = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `/usr/bin:${bunDir}:/bin:/another/dir`,
+    });
+    expect(a.exitCode).toBe(0);
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.stdout).not.toContain("cmux-cli-shims");
+    expect(a.stdout).not.toContain("node_modules");
+    // The fixed list, probed on this machine (Homebrew or the cmux app join it on a Mac); the
+    // test's home is under the temp dir, so bun's directory there is not baked in.
+    const want = stableServicePath({ home, bun: join(bunDir, "bun") });
+    expect(want).not.toContain(bunDir);
+    expect(a.stdout).toContain(`<string>${want}</string>`);
   });
 
   it("renders VOLLEY_AUTH_DIR only when an auth dir is given", () => {

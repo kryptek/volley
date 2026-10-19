@@ -147,6 +147,8 @@ export async function notify({
         password: parsed.values.password as string | undefined,
       },
       env,
+      process.cwd(),
+      brokerUrl,
     );
   } catch (e) {
     io.stderr(`volley notify: ${e instanceof Error ? e.message : String(e)}\n`);

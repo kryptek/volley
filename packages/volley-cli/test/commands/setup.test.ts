@@ -1,12 +1,27 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
 import { cmd } from "../../src/auth/dynsec";
-import { SETUP_HELP, lanAddress, setup } from "../../src/commands/setup";
+import {
+  type HiddenInput,
+  SETUP_HELP,
+  hiddenKeys,
+  lanAddress,
+  setup,
+} from "../../src/commands/setup";
 import { makeBufferIO } from "../../src/io";
 import { LAN_QUESTION } from "../../src/setup/broker";
+import { CMUX_CHECK_SCRIPT } from "../../src/setup/cmux";
 import { readSetupInstall } from "../../src/setup/journal";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
@@ -16,7 +31,10 @@ import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers
 const READ_ONLY = (a: string[]) =>
   a.includes("--dry-run") ||
   (a[0] === "launchctl" && a[1] === "print") ||
-  (a[0] === "security" && a[1] === "find-generic-password");
+  (a[0] === "security" && a[1] === "find-generic-password") ||
+  // Who listens on the Desk's port.
+  a[0] === "lsof" ||
+  a[0] === "ss";
 
 /** What the run's last lines say once every step is in place. */
 const COMPLETE = "Setup complete.";
@@ -104,6 +122,17 @@ describe("volley setup", () => {
     expect(r.stdout).toMatch(/vly_admin_[0-9a-f]{8}_[0-9a-f]{32}/);
     expect(r.stdout).toMatch(/http:\/\/desk\.example:5199\/#signin=vly_signin_/);
     expect(r.stdout).toContain(COMPLETE);
+    // The security step says what it checked once it passed.
+    expect(r.stdout).toContain(
+      `  ✓ Listener ${new URL(fake.url).port}: refuses anonymous clients\n`,
+    );
+    expect(r.stdout).toContain("  ✓ Listener 9001: refuses anonymous clients\n");
+    expect(r.stdout).toContain(
+      "  ✓ Listener 9001 from the LAN (ws://desk.example:9001): reachable, refuses anonymous clients\n",
+    );
+    // The CLIs here find the coordinator's login themselves: no password for a shell profile.
+    expect(r.stdout).not.toContain("shell profile");
+    expect(r.stdout).toContain("use that login on their own");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     // The journal records every step, never a secret.
     const log = readFileSync(join(m.ctx.volleydHome, "setup.log"), "utf-8");
@@ -222,6 +251,35 @@ describe("volley setup", () => {
     expect(r.stdout).toMatch(
       /From another device: http:\/\/desk\.example:5288\/#signin=vly_admin_/,
     );
+  });
+
+  it("when cmux refuses volleyd's service and nobody can answer, it never says done or complete", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(argv[4] as string, "ERROR: Invalid password\nvolley-cmux-exit=1\n");
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    m.deps.interactive = false;
+    const r = await run(["--yes", "--lan"]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain(COMPLETE);
+    expect(r.stdout).toContain("(cmux said: ERROR: Invalid password)");
+    expect(r.stderr).toContain("Give volleyd the cmux socket password");
+    expect(r.stderr).toContain("volley setup --step services");
+    // Every other service is in place: only cmux is left.
+    expect(
+      existsSync(join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist")),
+    ).toBe(true);
+    // A rerun does not call the Services step done either.
+    const again = await run([]);
+    expect(again.stdout).not.toContain(COMPLETE);
+    expect(again.stdout.match(/already done/g)?.length ?? 0).toBeLessThan(5);
   });
 
   it("a second run reports every step as already done and changes nothing", async () => {
@@ -362,5 +420,30 @@ describe("volley setup", () => {
     expect(r.stdout).toBe(SETUP_HELP);
     expect((await run(["--frobnicate"])).code).toBe(2);
     expect(existsSync(join(m.ctx.volleydHome, "setup.log"))).toBe(false);
+  });
+});
+
+describe("the hidden password prompt", () => {
+  const type = (...chunks: string[]) => {
+    const state: HiddenInput = { value: "", skip: "" };
+    let end: ReturnType<typeof hiddenKeys> = null;
+    for (const c of chunks) end = end ?? hiddenKeys(state, c);
+    return { value: state.value, end };
+  };
+
+  it("ends on Enter, edits on Backspace", () => {
+    expect(type("hunter", "3\u007f2\r")).toEqual({ value: "hunter2", end: "enter" });
+  });
+
+  it("drops arrow and function keys whole, even split across reads", () => {
+    expect(type("ab\u001b[A\u001b[1;5Cc\u001bOP", "\u001b", "[", "D", "d\r")).toEqual({
+      value: "abcd",
+      end: "enter",
+    });
+  });
+
+  it("Ctrl-C cancels, Ctrl-D gives up", () => {
+    expect(type("abc\u0003")).toEqual({ value: "abc", end: "cancel" });
+    expect(type("\u0004")).toEqual({ value: "", end: "eof" });
   });
 });

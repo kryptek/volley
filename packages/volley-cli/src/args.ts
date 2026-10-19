@@ -1,5 +1,6 @@
 import { type BrokerAuth, resolveBrokerAuth } from "volley-mcp/config";
 import { isValidNamespace } from "volley-mcp/topics";
+import { type SavedLoginDeps, savedCoordinatorLogin } from "./auth/coordinator-login";
 
 export interface ParsedGlobal {
   subcommand: string | null;
@@ -130,14 +131,17 @@ export function resolveNamespace(
 
 /**
  * Broker credentials: `--username`/`--password` flags win, then the `broker` block of
- * `<cwd>/.volley/agent.json`, then `VOLLEY_AUTH_USERNAME`/`VOLLEY_AUTH_PASSWORD`; null means
- * anonymous. Flags pass straight through so the caller can override an identity file; a
+ * `<cwd>/.volley/agent.json`, then `VOLLEY_AUTH_USERNAME`/`VOLLEY_AUTH_PASSWORD`, then (given
+ * `brokerUrl`, a broker on this machine, an operator not an agent, and the fallback turned on by
+ * the entry point) the coordinator login `volley setup` saved; null means anonymous. Flags pass straight through so the caller can override an identity file; a
  * `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`.
  */
 export function resolveAuth(
   flags: { username?: string | undefined; password?: string | undefined },
   env: Record<string, string | undefined>,
   cwd: string = process.cwd(),
+  brokerUrl?: string,
+  saved?: SavedLoginDeps,
 ): BrokerAuth | null {
   if (flags.username !== undefined) {
     // `--username` + VOLLEY_AUTH_PASSWORD is the documented way to keep the password off argv.
@@ -147,5 +151,8 @@ export function resolveAuth(
       : { username: flags.username };
   }
   if (flags.password !== undefined) throw new Error("--password requires --username");
-  return resolveBrokerAuth(env, cwd);
+  return (
+    resolveBrokerAuth(env, cwd) ??
+    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
+  );
 }
