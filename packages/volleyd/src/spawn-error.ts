@@ -8,6 +8,8 @@ export type SpawnErrorCode =
   | "CREDENTIALS_FAILED"
   | "WORKTREE_FAILED"
   | "RELEASE_BRANCH_MISSING"
+  // The release branch could not be fetched and require_fresh_base is on (worktree.ts).
+  | "BASE_STALE"
   | "LAUNCH_FAILED"
   | "REMOTE_REPO_MISSING"
   | "RETIRE_REFUSED"

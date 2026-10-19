@@ -37,6 +37,9 @@ export const CONFIG_DEFAULTS: Tunables = {
   credential_sweep_interval_s: 600,
   claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
+  // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
+  require_fresh_base: true,
+  placement: { nudge_on_merge: "files" },
 };
 
 /**

@@ -195,6 +195,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+        // A worktree cut from the release branch (not a pipeline start ref): its base.
+        if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));

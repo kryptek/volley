@@ -645,6 +645,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
+| `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
+| `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -668,7 +670,7 @@ lists every key with its default and example pools, commented out.
 |---|---|---|---|
 | 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch?"), the wave's spawns park on it |
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
-| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
+| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
@@ -685,8 +687,7 @@ spawn` retries at once. While the kill switch is engaged nothing is spawned.
 An agent's branch is cut from the wave's release branch **as origin has it**: the branch is
 often pushed from another clone (`git push -u` in a batch setup), so the daemon's clone may
 know it only as `origin/<release_branch>`, or have a stale local copy. Before `worktree add`,
-volleyd runs `git -C <repo> fetch origin <release_branch>` (a failed fetch — offline, no remote
-— leaves what the repo has), then picks the base:
+volleyd runs `git -C <repo> fetch origin <release_branch>`, then picks the base:
 
 | The repo has | Base |
 |---|---|
@@ -696,13 +697,25 @@ volleyd runs `git -C <repo> fetch origin <release_branch>` (a failed fetch — o
 | neither | refused: `RELEASE_BRANCH_MISSING: <repo> has neither <b> nor origin/<b> — push it first` |
 
 `git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
-fetch. When a task of the wave runs on the local host, `volleyd validate` checks the same
+fetch. A failed fetch (offline, no remote, a timeout) refuses the spawn while
+`require_fresh_base` is on (the default, on every host): `BASE_STALE: git fetch origin <b> failed
+in <repo> (<why>)`, a [spawn failure](#spawn-failures-and-retries) like any other, retried with
+the usual backoff, so no agent starts from a stale copy of the release branch. With
+`require_fresh_base: false` the base is picked from what the repo has and the spawn goes on; the
+wave journals a warning, `alarm_raised { code: "BASE_STALE", severity: "warning", base_sha,
+fetch_error }`.
+
+The commit the worktree was cut from is the spawn's `base_sha`: on its `agent_spawned` event, on
+the task in the wave state (`tasks[].base_sha`, kept across restarts and pipeline roles cut from
+a start commit) and in the [evidence package](#the-pipeline-and-the-merge-ready-gate)
+("cut from `<sha7>`, N behind"). When a task of the wave runs on the local host, `volleyd validate` checks the same
 (locally or `origin/<b>`, offline — it says to fetch a branch pushed from another clone) when
 the wave's repo is on its machine, and the daemon fetches, then refuses `run` with
 `RELEASE_BRANCH_MISSING` before any task is admitted (`<repo> is not a git repository` for a
 directory that is not one). A pipeline role cut from a start commit
-(reviewers, fixups) uses that commit as given. A remote host fetches and cuts from
-`origin/<b>` on the box.
+(reviewers, fixups) uses that commit as given (no `base_sha`). A remote host fetches and cuts
+from `origin/<b>` on the box, under the same `require_fresh_base` rule, and reports the commit
+it cut from.
 
 ### Spawn failures and retries
 
@@ -1446,7 +1459,8 @@ A review the owner `skip`ped through a decision is a stored review and counts.
 **Evidence package** at the gate: `$VOLLEYD_HOME/waves/<wave>/evidence/<task>.md` + `.json` —
 PR URL, head SHA, CI status and run links on that exact head, both reviews' findings and how each
 was resolved (unresolved P1s called out), each fixup's diffstat, the rebases, and "branch current
-with release branch: yes/no (behind by N)". A P1 the owner ruled not a blocker is listed as a P3
+with release branch: yes/no (behind by N)", or, with the task's [`base_sha`](#base-ref), "yes/no
+— cut from `<sha7>`, N behind" (`base_sha` in the `.json` too). A P1 the owner ruled not a blocker is listed as a P3
 with the ruling (`owner: not a blocker (<who>)`), not as an unresolved P1. Just before gating, the
 PR's head is read again (`gh pr view --json headRefOid`): if someone pushed after the
 verification, `alarm_raised { alarm: "pr_head_moved", expected, actual }` re-opens that role's
@@ -1467,6 +1481,18 @@ merged }`, and the merge record describes the commit that merged: `gated_head_sh
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
 `why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
 `volleyd status`; the task still completes.
+
+**The merge nudge.** volleyd never rebases anyone. When a task's PR merges (any of the ways
+above), each running implementer of the same wave whose task's wave-file `files` hints overlap
+the merged PR's changed files (`gh pr view <n> --json files`, read-only, beside the queue) gets
+exactly one mailbox steering, through the same path as `volleyd steer` (`steering_sent { reason:
+"merge_nudge" }`): `origin/<release> moved to <sha7> with #<n> (touches N of your files: …);
+rebase when convenient, before you push again.` Each is journaled on the nudged task as
+`merge_nudge_sent { task, agent_id, merged_pr, files, merged_task, pr_url }`, and an agent is
+nudged at most once per merged PR, however often the merge is observed. `placement.nudge_on_merge`
+chooses who: `files` (the default; a task with no `files` hint is never nudged), `all` (every
+running implementer of the wave, `files: []`, no PR file list read) or `off`. The agent rebases
+in its own session; the fence denies volleyd `git rebase` anyway.
 
 **Merges outside GitHub's merge button.** A local squash + push closes the PR with
 `mergedAt: null`. Before calling it abandoned, the release branch is checked read-only for the

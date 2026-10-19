@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Role } from "../../src/brief";
@@ -8,9 +8,10 @@ import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
-import type { JournalEvent, NewEvent } from "../../src/types";
+import type { JournalEvent, NewEvent, NudgeOnMerge } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
+import { FIXTURES } from "./fake-host";
 
 /**
  * The pipeline driver on an in-memory journal and a scripted git/GitHub "world": no broker, no
@@ -55,6 +56,8 @@ export interface World {
   releaseLog: string;
   /** `git diff <a> <b>` / `git show --format= <sha>` text per `a..b` / sha. */
   patches: Record<string, string>;
+  /** `gh pr view <n> --json files` by PR number (default: fixtures/gh-pr-view-files.json). */
+  prFiles: Record<number, string>;
   /** `gh pr view` overrides by PR number (e.g. a `headRefOid` GitHub reports after a merge). */
   prView: Record<number, Record<string, unknown>>;
   /** `gh run view <id> --json jobs` (default: one failed `test` job). */
@@ -87,6 +90,13 @@ export interface HarnessOptions {
   execFor?: (task: string, exec: ExecFn) => ExecFn;
   /** More tasks after T1 (queued, never admitted or driven), e.g. `{ T2: [T1] }` → `after: [T1]`. */
   dependents?: Record<string, string[]>;
+  /**
+   * Sibling tasks of T1 (no `after:`), each with its wave-file `files` hint (null: none); their
+   * implementers are started with `startSibling`.
+   */
+  siblings?: Record<string, string[] | null>;
+  /** The `placement.nudge_on_merge` the driver reads (default: the driver's own default). */
+  nudgeOnMerge?: NudgeOnMerge;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -102,6 +112,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       "  T1: { issue: 42 }",
       ...Object.entries(o.dependents ?? {}).map(
         ([id, after], i) => `  ${id}: { issue: ${43 + i}, after: [${after.join(", ")}] }`,
+      ),
+      ...Object.entries(o.siblings ?? {}).map(
+        ([id, files], i) =>
+          `  ${id}: { issue: ${60 + i}${files !== null ? `, files: [${files.join(", ")}]` : ""} }`,
       ),
       "",
     ].join("\n"),
@@ -131,6 +145,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     releaseLog: "",
     patches: {},
     prView: {},
+    prFiles: {},
     runLog: "",
   };
   const calls: string[][] = [];
@@ -191,6 +206,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "list") {
       const branch = a[a.indexOf("--head") + 1];
       return out(JSON.stringify(world.prs.filter((p) => p.headRefName === branch)));
+    }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "view" && a.at(-1) === "files") {
+      const n = Number(a[3]);
+      return out(
+        world.prFiles[n] ?? readFileSync(join(FIXTURES, "gh-pr-view-files.json"), "utf-8"),
+      );
     }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "view") {
       const n = Number(a[3]);
@@ -258,7 +279,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   };
 
   const spawns: Spawned[] = [];
-  const steers: { role: Role; agent_id: string; text: string; reason: string }[] = [];
+  const steers: { task: string; role: Role; agent_id: string; text: string; reason: string }[] = [];
   const attempts: Record<string, number> = {};
   /** The last result each agent reported (retire journals it, as retireAgent does). */
   const lastResult: Record<string, unknown> = {};
@@ -283,7 +304,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         attempt,
         worktree,
         branch,
-        ...(start !== undefined ? { start: start.ref } : {}),
+        // Cut from the release branch as it is (the spawn's base_sha), or from a start ref.
+        ...(start !== undefined ? { start: start.ref } : { base_sha: world.releaseTip }),
       },
     });
     if (role === "implementer" && attempt === 1)
@@ -295,6 +317,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   let queue: Promise<unknown> = Promise.resolve();
   const driver = new PipelineDriver("w1", {
     now: () => clock,
+    ...(o.nudgeOnMerge !== undefined ? { nudgeOnMerge: () => o.nudgeOnMerge as NudgeOnMerge } : {}),
     exec,
     ...(o.execFor !== undefined
       ? {
@@ -313,7 +336,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return p;
     },
     steer: async (task, role, agentId, text, reason) => {
-      steers.push({ role, agent_id: agentId, text, reason });
+      steers.push({ task, role, agent_id: agentId, text, reason });
       await journal({
         type: "steering_sent",
         task,
@@ -395,7 +418,28 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await journal({ type: "task_admitted", task: "T1", data: {} });
       for (const [i, id] of Object.keys(o.dependents ?? {}).entries())
         await journal({ type: "task_queued", task: id, data: { issue: 43 + i } });
+      for (const [i, id] of Object.keys(o.siblings ?? {}).entries())
+        await journal({ type: "task_queued", task: id, data: { issue: 60 + i } });
       return spawnAgent("implementer");
+    },
+    /** A sibling task (`siblings`) is admitted and its implementer starts. */
+    async startSibling(id: string) {
+      await journal({ type: "task_admitted", task: id, data: {} });
+      const agent_id = agentIdFor("w1", id, "implementer", 1);
+      await journal({
+        type: "agent_spawned",
+        task: id,
+        data: {
+          agent_id,
+          role: "implementer",
+          attempt: 1,
+          worktree: `/wt/w1/${id}-implementer`,
+          branch: branchName("w1", id, "implementer", 1),
+          base_sha: world.releaseTip,
+        },
+      });
+      await journal({ type: "stage_entered", task: id, data: { stage: "implement" } });
+      return agent_id;
     },
     /** The implementer opens its PR once (the first push). */
     openPr(head: string) {

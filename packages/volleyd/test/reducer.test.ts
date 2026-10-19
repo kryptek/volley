@@ -85,6 +85,47 @@ describe("reduce", () => {
     expect(rec.spawns).toBe(1);
   });
 
+  it("tasks[].base_sha comes from agent_spawned, survives replay, and a start-ref spawn keeps it", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const base = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const more: JournalEvent[] = [
+      {
+        seq: last.seq + 1,
+        at,
+        type: "agent_spawned",
+        task: "T1",
+        data: {
+          role: "implementer",
+          agent_id: "2026-10-20-example-t1-implementer-1",
+          base_sha: base,
+        },
+      },
+      // A reviewer cut from the PR head (a pipeline start ref) names no release base.
+      {
+        seq: last.seq + 2,
+        at,
+        type: "agent_spawned",
+        task: "T1",
+        data: {
+          role: "spec_reviewer",
+          agent_id: "2026-10-20-example-t1-spec_reviewer-1",
+          start: "f".repeat(40),
+        },
+      },
+    ];
+    const state = reduce([...events, ...more]);
+    const t1 = state.tasks.find((t) => t.id === "T1");
+    expect(t1?.base_sha).toBe(base);
+    expect(state.tasks.find((t) => t.id === "T2")?.base_sha).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    // Replayed (twice over, as after a restart) it is the same.
+    const all = [...events, ...more];
+    expect(replay([...all, ...all]).state?.tasks.find((t) => t.id === "T1")?.base_sha).toBe(base);
+  });
+
   it("throws when the journal has no wave_submitted", () => {
     expect(() => reduce([])).toThrow(/wave_submitted/);
     expect(emptyRecord().state).toBeNull();

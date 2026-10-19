@@ -168,6 +168,7 @@ import type {
   CoordinatorAttention,
   JournalEvent,
   NewEvent,
+  NudgeOnMerge,
   TaskAgents,
   TaskId,
   Tunables,
@@ -2956,6 +2957,8 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
+      nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.

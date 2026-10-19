@@ -300,10 +300,33 @@ describe("SshTmuxHost", () => {
     expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
   });
 
-  it("a failed fetch or worktree add is WORKTREE_FAILED", async () => {
+  it("a failed fetch is BASE_STALE (require_fresh_base); off, the box's copy is used and reported", async () => {
+    const tip = "c".repeat(40);
     const r = remote((s) =>
       argvIs("git", "-C", SPEC.repo, "fetch")(s)
         ? { code: 128, stderr: "couldn't find remote ref release/w1" }
+        : argvIs("git", "-C", "/wt", "rev-parse", "--is-inside-work-tree")(s)
+          ? { code: 128 }
+          : argvIs("git", "-C", "/wt", "rev-parse", "HEAD")(s)
+            ? { stdout: `${tip}\n` }
+            : undefined,
+    );
+    const spec = { repo: SPEC.repo, path: "/wt", branch: "b", base: "release/w1" };
+    const err = await r.host.prepareWorktree(spec).catch((e: unknown) => e as SpawnError);
+    expect(err).toMatchObject({ code: "BASE_STALE" });
+    expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
+    const res = await r.host.prepareWorktree({ ...spec, releaseBase: true, requireFresh: false });
+    expect(res.base).toEqual({
+      sha: tip,
+      fresh: false,
+      fetch_error: "couldn't find remote ref release/w1",
+    });
+  });
+
+  it("a failed worktree add is WORKTREE_FAILED", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "worktree")(s)
+        ? { code: 128, stderr: "fatal: already exists" }
         : argvIs("git", "-C", "/wt", "rev-parse")(s)
           ? { code: 128 }
           : undefined,

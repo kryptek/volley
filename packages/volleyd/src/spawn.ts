@@ -119,7 +119,8 @@ export interface SpawnDeps {
   tunables: Pick<
     Tunables,
     "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
-  >;
+  > &
+    Partial<Pick<Tunables, "require_fresh_base">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -372,8 +373,27 @@ async function launchAttempt(
     branch,
     base: req.start?.ref ?? req.wave.release_branch,
     ...(req.start?.detach === true ? { detach: true } : {}),
-    ...(req.start === undefined ? { releaseBase: true } : {}),
+    ...(req.start === undefined
+      ? { releaseBase: true, requireFresh: deps.tunables.require_fresh_base !== false }
+      : {}),
   });
+  // require_fresh_base off and the fetch failed: cut from the host's last copy, said out loud.
+  if (wt.base !== undefined && !wt.base.fresh) {
+    await deps.journal({
+      type: "alarm_raised",
+      task: req.task,
+      data: {
+        code: "BASE_STALE",
+        severity: "warning",
+        message: `${req.wave.release_branch} could not be fetched (${wt.base.fetch_error ?? "fetch failed"}); require_fresh_base is off, so ${branch} was cut from the last fetched copy at ${wt.base.sha.slice(0, 7)}`,
+        role: req.role,
+        attempt,
+        host: host.name,
+        base_sha: wt.base.sha,
+        ...(wt.base.fetch_error !== undefined ? { fetch_error: wt.base.fetch_error } : {}),
+      },
+    });
+  }
 
   // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
   if (req.role !== "quality_reviewer")
@@ -494,6 +514,7 @@ async function launchAttempt(
         worktree: ctx.worktree,
         branch: wt.branch,
         worktree_reused: wt.reused,
+        ...(wt.base !== undefined ? { base_sha: wt.base.sha } : {}),
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
