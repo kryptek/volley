@@ -510,9 +510,11 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["bash", hooks, "--dry-run"]],
     [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883", "--dry-run"]],
     [[inputs.bun, "run", "build"], desk],
-    [["volley", "auth", "token", "--json"]],
   ];
   const SETUP_DENIED: [string[], string?][] = [
+    // No setup step runs it (the accounts step issues the token in-process; admin_token runs it
+    // as an account verb, without a setup token).
+    [["volley", "auth", "token", "--json"]],
     // volleyd's own service: installing or reloading it would stop the volleyd answering.
     [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883"]],
     [["volleyd", "install"]],

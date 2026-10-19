@@ -35,7 +35,8 @@
                 "token_redeem",
                 "setup_plan",
                 "setup_apply",
-                "admin_token"
+                "admin_token",
+                "desk_password"
               ]
             },
             "step": {
@@ -177,6 +178,19 @@
                 "properties": {
                   "op": {
                     "const": "admin_token"
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "reply_key"],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "desk_password"
                   }
                 }
               },

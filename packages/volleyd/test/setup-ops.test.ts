@@ -13,13 +13,21 @@ import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "volley-cli/auth/config";
 import { realAuthDeps } from "volley-cli/auth/context";
+import { planAccounts } from "volley-cli/setup/accounts";
+import { planServices } from "volley-cli/setup/services";
+import type { SetupContext } from "volley-cli/setup/step";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { Daemon } from "../src/daemon";
 import type { ExecFn } from "../src/exec";
 import { readJournalFile } from "../src/journal";
-import type { SetupOpsOptions } from "../src/setup-ops";
+import {
+  SetupOps,
+  type SetupOpsOptions,
+  TERMINAL_ONLY_PREFIXES,
+  terminalOnly,
+} from "../src/setup-ops";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { type FakeDynsec, startFakeDynsec } from "./helpers/fake-dynsec";
@@ -29,7 +37,11 @@ import { schemaErrors } from "./helpers/schema";
 const NS = "setup-ops-test";
 const pw = (u: string) => `${u}-pw`;
 const BUN = "/opt/bun/bin/bun";
-const BROKER = "mqtt://127.0.0.1:1883";
+// The planners' broker: nothing listens there (connectAdmin goes to the fake Dynamic Security,
+// the probes are faked), so a planner path that ever opened a real client could not reach a live
+// broker by accident.
+const BROKER = "mqtt://127.0.0.1:1";
+const BROKER_PORT = Number(new URL(BROKER).port);
 const HOOKED = `${JSON.stringify({ hooks: { SessionStart: [] } }, null, 2)}\n`;
 const RESTART_ARGV = ["brew", "services", "restart", "mosquitto"];
 
@@ -68,10 +80,12 @@ interface Machine {
   loaded: Set<string>;
   /** Holds the broker restart until released (null: no hold). */
   restartGate: Promise<void> | null;
+  /** Holds the Desk build until released (null: no hold). */
+  buildGate: Promise<void> | null;
   restarts: number;
 }
 
-function machine(root: string, layoutName: "brew-arm64" | "etc" = "brew-arm64"): Machine {
+function machine(root: string, layoutName: "brew-arm64" | "etc" | "snap" = "brew-arm64"): Machine {
   const layout: Layout = {
     ...LAYOUTS[layoutName],
     config: join(root, "mosquitto.conf"),
@@ -91,6 +105,7 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" = "brew-arm64"):
     anonymous: { tcp: "refused", ws: "refused" },
     loaded: new Set<string>(),
     restartGate: null,
+    buildGate: null,
     restarts: 0,
   } as Machine;
   const hooks = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
@@ -126,6 +141,8 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" = "brew-arm64"):
       writeFileSync(settings, HOOKED);
       return { stdout: `installed volley-hooks into ${settings}\n` };
     })
+    // Nothing is active under systemd until a step starts it.
+    .on(["systemctl", "--user", "is-active"], () => ({ code: 3 }))
     .on([BUN, "run", "build"], (_argv, opts) => {
       mkdirSync(join(opts.cwd as string, "dist"), { recursive: true });
       writeFileSync(join(opts.cwd as string, "dist", "index.html"), "<!doctype html>");
@@ -133,6 +150,7 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" = "brew-arm64"):
     });
   m.exec = async (argv, opts) => {
     if (argv.join(" ") === RESTART_ARGV.join(" ") && m.restartGate !== null) await m.restartGate;
+    if (argv.join(" ") === `${BUN} run build` && m.buildGate !== null) await m.buildGate;
     return m.fake.exec(argv, opts);
   };
   return m;
@@ -164,6 +182,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       ).toString("utf-8"),
     ) as Record<string, unknown>;
 
+  let platform: NodeJS.Platform = "darwin";
   const setupOptions = (): Partial<SetupOpsOptions> => ({
     brokerUrl: BROKER,
     authDir: m.layout.authDir,
@@ -173,7 +192,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     brokerVersion: () => null,
     sleep: async () => {},
     deps: {
-      platform: "darwin",
+      platform,
       uid: 501,
       lanHost: () => "desk.example",
       repoRoot: m.repo,
@@ -212,6 +231,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       users: Object.fromEntries(["volleyd", "admin-1", "steer-1"].map((u) => [u, pw(u)])),
     });
     fake = await startFakeDynsec({ version: "2.1.2" });
+    platform = "darwin";
     root = mkdtempSync(join(tmpdir(), "volleyd-setup-ops-"));
     m = machine(root);
     secured(m, fake);
@@ -224,6 +244,20 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     await broker.close();
     rmSync(root, { recursive: true, force: true });
   });
+
+  /** The setup ops as the daemon builds them, without the daemon (no MQTT in between). */
+  const direct = () =>
+    new SetupOps({
+      exec: m.exec,
+      volleydHome: m.volleydHome,
+      brokerUrl: BROKER,
+      env: {},
+      now: () => new Date(),
+      sleep: async () => {},
+      liveAgents: async () => 2,
+      brokerVersion: () => null,
+      ...setupOptions(),
+    });
 
   /** One account op from `user`; resolves with volleyd's answer (null on timeout). */
   async function op(user: string, payload: Record<string, unknown>, timeoutMs = 15_000) {
@@ -309,7 +343,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(r.broker).toEqual({
       accounts_required: true,
       listeners: [
-        { port: 1883, anonymous: "refused" },
+        { port: BROKER_PORT, anonymous: "refused" },
         { port: 9001, anonymous: "refused" },
       ],
     });
@@ -322,7 +356,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     const accounts = step(r.steps, "accounts");
     expect(accounts.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
       [
-        "Create Volley's 8 shared roles and the identities volleyd, desk, coordinator (passwords shown once)",
+        "Create Volley's 8 shared roles and the identities volleyd, desk, coordinator (desk's password is not shown here: Setup & Security › New desk password issues one, shown once)",
         undefined,
       ],
       [
@@ -350,6 +384,25 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       "cannot reach the broker's WebSocket listener",
     );
     for (const s of r.steps) expect(s.plan_id).toMatch(new RegExp(`^${s.step}-[0-9a-f]{16}$`));
+    // What the planners themselves plan on the same machine, never rewritten on the way out.
+    const ctx = direct().context({}) as SetupContext;
+    for (const [name, planner] of [
+      ["accounts", planAccounts],
+      ["services", planServices],
+    ] as const) {
+      const own = await planner(ctx);
+      expect(step(r.steps, name).changes.map((c) => c.summary)).toEqual(
+        own.changes.map((c) => c.summary),
+      );
+      expect(step(r.steps, name).found).toEqual(own.found.filter((f) => f !== ""));
+    }
+    expect(
+      accounts.changes.some(
+        (c) =>
+          c.summary.includes("shown once)") &&
+          !c.summary.includes("desk's password is not shown here"),
+      ),
+    ).toBe(false);
     // Planning changed nothing and read no keychain.
     expect(m.fake.argvs(["security"])).toEqual([]);
     expect([...fake.clients().keys()]).toEqual([fake.admin.username]);
@@ -399,7 +452,9 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       readFileSync(join(m.layout.authDir, "coordinator.json"), "utf-8"),
     );
     expect(JSON.stringify(r)).not.toContain(coordinator.password);
-    expect(result.lines.join("\n")).toContain("desk got a password the Desk does not show");
+    expect(result.lines.join("\n")).toContain(
+      "The new login desk got a password the Desk does not show (no file keeps it): Setup & Security › New desk password issues one, shown once",
+    );
     // The keychain copy: listed for a terminal, never run.
     expect(result.terminal).toEqual([
       {
@@ -456,12 +511,59 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(setupLog()).toEqual([]);
   });
 
-  it("setup_apply refuses a plan that changed since it was shown", async () => {
+  it("setup_apply refuses a plan the machine changed under since it was shown", async () => {
     await start();
-    const r = await apply("accounts", "accounts-0000000000000000");
+    expect((await apply("accounts", step((await plan()).steps, "accounts").plan_id))?.ok).toBe(
+      true,
+    );
+    const shown = step((await plan()).steps, "accounts");
+    // The machine changes between the plan shown and its apply: the coordinator's file is gone.
+    const file = join(m.layout.authDir, "coordinator.json");
+    const before = fake.clients().get("coordinator")?.password;
+    rmSync(file);
+    const log = setupLog().length;
+    const r = await apply("accounts", shown.plan_id);
     expect(r).toMatchObject({ ok: false });
     expect(r?.error).toMatch(/^plan changed\b/);
-    expect([...fake.clients().keys()]).toEqual([fake.admin.username]);
+    expect(fake.clients().get("coordinator")?.password).toBe(before);
+    expect(existsSync(file)).toBe(false);
+    expect(setupLog()).toHaveLength(log);
+  });
+
+  it("desk_password gives the desk login a new password, sealed to the admin who asked", async () => {
+    await start();
+    expect((await apply("accounts", step((await plan()).steps, "accounts").plan_id))?.ok).toBe(
+      true,
+    );
+    const before = fake.clients().get("desk")?.password;
+    const r = await op("admin-1", { op: "desk_password", reply_key: replyKey });
+    expect(r?.ok, r?.error).toBe(true);
+    expect(r?.result).toEqual({ username: "desk" });
+    const { username, password } = unseal(r?.sealed);
+    expect(username).toBe("desk");
+    expect(password).not.toBe(before);
+    expect(fake.clients().get("desk")?.password).toBe(password);
+    expect(JSON.stringify(r)).not.toContain(password as string);
+    const ev = systemEvents().find((e) => e.type === "desk_password_issued");
+    expect(ev?.data).toEqual({ by: "admin-1" });
+    expect(JSON.stringify(systemEvents())).not.toContain(password as string);
+    // The plan after it is unchanged: the login exists, no file is expected to keep it.
+    expect(step((await plan()).steps, "accounts").changes.filter((c) => !c.terminal)).toEqual([]);
+  });
+
+  it("desk_password is refused from a steer sender, without a reply_key, and before the login exists", async () => {
+    await start();
+    const steer = await op("steer-1", { op: "desk_password", reply_key: replyKey });
+    expect(steer).toMatchObject({ ok: false, op: "desk_password" });
+    expect(steer?.error).toMatch(/admin/);
+    const noKey = await op("admin-1", { op: "desk_password" });
+    expect(noKey).toMatchObject({ ok: false });
+    expect(noKey?.error).toContain("reply_key");
+    const missing = await op("admin-1", { op: "desk_password", reply_key: replyKey });
+    expect(missing).toMatchObject({ ok: false });
+    expect(missing?.error).toMatch(/no desk login .*accounts step/);
+    expect(fake.clients().has("desk")).toBe(false);
+    expect(systemEvents().some((e) => e.type === "desk_password_issued")).toBe(false);
   });
 
   it("services: the hooks and the Desk are applied, volleyd's own service never is", async () => {
@@ -517,6 +619,8 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(m.fake.argvs(["sudo"])).toEqual([]);
     expect(m.fake.calls.some((c) => c.argv.includes("restart"))).toBe(false);
     expect(systemEvents().some((e) => e.type === "setup_step_applied")).toBe(false);
+    // Nothing was applied: setup.log (and so last_setup) has nothing to say.
+    expect(setupLog()).toEqual([]);
   });
 
   it("a brew security apply answers with restarting: true, then restarts; another apply meanwhile is refused", async () => {
@@ -575,5 +679,175 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(r?.error).toMatch(/^Security is blocked/);
     expect(m.fake.argvs(["bash"]).every((a) => a.includes("--dry-run"))).toBe(true);
     expect(setupLog()).toEqual([]);
+  });
+
+  it("snap on Linux: volleyd's own systemd service is a terminal's, the Desk's is applied", async () => {
+    platform = "linux";
+    m = machine(root, "snap");
+    secured(m, fake);
+    await start();
+    const services = step((await plan()).steps, "services");
+    expect(services.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
+      [
+        "Install volleyd as a systemd user service (volleyd.service)",
+        "volley setup --step services",
+      ],
+      [
+        `Install the Volley hooks for coordinator sessions into ${join(m.home, ".claude", "settings.json")}`,
+        undefined,
+      ],
+      ["Build the Desk (vite build in packages/volley-desk)", undefined],
+      [
+        "Install `volley desk serve` as a systemd user service (volley-desk.service) on 0.0.0.0:5199",
+        undefined,
+      ],
+    ]);
+    const r = await apply("services", services.plan_id);
+    expect(r?.ok, r?.error).toBe(true);
+    expect(
+      (r?.result as { terminal: { summary: string }[] }).terminal.map((t) => t.summary),
+    ).toEqual(["Install volleyd as a systemd user service (volleyd.service)"]);
+    // Only probes ever touched volleyd.service; the Desk's unit was enabled and started.
+    const systemctl = m.fake.argvs(["systemctl"]).map((a) => a.slice(2).join(" "));
+    expect(systemctl.filter((a) => a.includes("volleyd.service"))).toEqual(
+      systemctl.filter((a) => a === "is-active volleyd.service"),
+    );
+    expect(systemctl).toContain("enable volley-desk.service");
+    expect(systemctl).toContain("restart volley-desk.service");
+  });
+
+  it("a command killed at setup_apply_timeout_ms is reported as timed out", async () => {
+    m.fake.on([BUN, "run", "build"], () => ({
+      code: 143,
+      stderr: "vite: building…\n",
+      timedOut: true,
+    }));
+    await start();
+    const r = await apply("services", step((await plan()).steps, "services").plan_id);
+    expect(r).toMatchObject({ ok: false });
+    expect(r?.error).toContain("vite: building… (killed after 110 s)");
+  });
+
+  it("a re-delivered setup_apply is applied and answered once; queued ops are answered meanwhile", async () => {
+    let release = () => {};
+    m.buildGate = new Promise<void>((r) => {
+      release = r;
+    });
+    await start();
+    const services = step((await plan()).steps, "services");
+    const c = new VolleyBroker();
+    const cid = randomUUID();
+    await c.connect({
+      url: broker.url,
+      agentId: "desk-redeliver",
+      username: "admin-1",
+      password: pw("admin-1"),
+    });
+    clients.push(c);
+    const answers: Reply[] = [];
+    await c.subscribeStream(authReplyTopic(cid), ({ payload: raw }) => {
+      const env = parseEnvelope(raw);
+      if (env?.type === "ack" && env.correlation_id === cid) answers.push(env.payload as Reply);
+    });
+    const env = JSON.stringify(
+      buildEnvelope({
+        agentId: "admin-1",
+        parentId: null,
+        channel: "_system/auth",
+        type: "query",
+        correlationId: cid,
+        payload: {
+          op: "setup_apply",
+          step: "services",
+          plan_id: services.plan_id,
+          reply_key: replyKey,
+        },
+      }),
+    );
+    await c.publish(authOpsTopic("admin-1"), env, { qos: 1, retain: false });
+    // broker round-trip: wait until the step is held in the build, then deliver it again.
+    await until(
+      () =>
+        m.fake.argvs([BUN, "run", "build"]).length === 0 &&
+        m.fake.argvs(["bash"]).some((a) => a.length === 2),
+    );
+    await c.publish(authOpsTopic("admin-1"), env, { qos: 1, retain: false });
+    // Beside the queue: an account op is answered while the step is still held.
+    const list = await op("admin-1", { op: "account_list", reply_key: replyKey });
+    expect(list?.ok, list?.error).toBe(true);
+    expect(answers).toEqual([]);
+    release();
+    await until(() => answers.length > 0, 10_000);
+    // broker round-trip: give a second (wrong) answer time to arrive.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.ok, answers[0]?.error).toBe(true);
+    expect(m.fake.argvs([BUN, "run", "build"])).toHaveLength(1);
+    expect(setupLog().filter((e) => e.event === "planned")).toHaveLength(1);
+  });
+
+  it("every terminal-only rule still matches a change the planners make (a reworded summary fails here)", async () => {
+    const flagged: string[] = [];
+    const collect = async () => {
+      const r = await direct().handle("admin-1", { op: "setup_plan" });
+      expect(r.reply.ok, r.reply.error).toBe(true);
+      for (const s of (r.reply.result as { steps: WireStep[] }).steps) {
+        for (const c of s.changes) if (c.terminal !== undefined) flagged.push(c.summary);
+      }
+    };
+    // brew on macOS: the keychain copy and volleyd's own service.
+    await collect();
+    // volleyd's own password, once its file is gone.
+    const accounts = direct();
+    const planned = await accounts.handle("admin-1", { op: "setup_plan" });
+    const id = (planned.reply.result as { steps: WireStep[] }).steps.find(
+      (s) => s.step === "accounts",
+    )?.plan_id;
+    expect(
+      (
+        await accounts.handle("admin-1", {
+          op: "setup_apply",
+          step: "accounts",
+          plan_id: id,
+          reply_key: replyKey,
+        })
+      ).reply.ok,
+    ).toBe(true);
+    rmSync(join(m.volleydHome, "broker.json"));
+    await collect();
+    // A root-owned broker (etc) not secured yet: its config, its state file and its restart.
+    m = machine(root, "etc");
+    writeFileSync(m.layout.config, "listener 1883\nallow_anonymous true\n");
+    rmSync(m.layout.stateFile);
+    rmSync(join(m.layout.authDir, "admin.json"));
+    m.anonymous = { tcp: "accepted", ws: "accepted" };
+    await collect();
+    for (const prefix of TERMINAL_ONLY_PREFIXES) {
+      expect(
+        flagged.some((f) => f.startsWith(prefix)),
+        prefix,
+      ).toBe(true);
+    }
+  });
+
+  it("a container broker's state file and restart are a terminal's (the fence runs neither)", () => {
+    const ctx = {
+      auth: { layout: { ...LAYOUTS.etc, name: "container", restart: "docker restart mosquitto" } },
+      config: "/c/mosquitto.conf",
+      stateFile: "/c/dynamic-security.json",
+    } as unknown as SetupContext;
+    expect(
+      terminalOnly("security", "Restart the broker (docker restart mosquitto)", ctx)?.command,
+    ).toBe("docker restart mosquitto");
+    expect(
+      terminalOnly(
+        "security",
+        "Create /c/dynamic-security.json with the admin login dynsec-admin",
+        ctx,
+      )?.command,
+    ).toBe("volley setup --step security");
+    expect(
+      terminalOnly("security", "Write /c/mosquitto.conf (Dynamic Security, …)", ctx),
+    ).toBeUndefined();
   });
 });

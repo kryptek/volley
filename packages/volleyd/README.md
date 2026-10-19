@@ -341,10 +341,12 @@ before the answer arrives (rotate yourself with `volley auth rotate` or through 
 | `admin_token` | — | `{ token_id, expires_at }` | `{ token }` (`volley auth token --json`) | `admin_token_issued { by, token_id, expires_at }` |
 | `setup_plan` | `lan?`, `repair?` | `{ steps: [{ step, title, found, changes: [{ summary, detail?, terminal? }], blocked?, skipped?, plan_id, lan? }], last_setup?, broker? }` | — | — |
 | `setup_apply` | `step`, `plan_id`, `lan?`, `repair?` | `{ step, lines, problems, terminal?, restarting? }` | `{ token }` when the accounts step issued the one-time admin token | `setup_step_applied { by, step, summaries }`; `setup.log` lines with `by: "desk:<username>"` |
+| `desk_password` | — | `{ username: "desk" }` | `{ username, password }`: the shared `desk` login's new password | `desk_password_issued { by }` |
 
 **Setup ops** (`src/setup-ops.ts`) run `volley setup`'s own planners and steps (volley-cli's
 `setup/`) for the Desk's wizard; no step logic lives in the daemon. Every command a step runs goes
-through the fenced exec with a setup token (the fence's SETUP rows) behind O3's own `setupFence`;
+through the fenced exec with a setup token (the fence's SETUP rows) behind the terminal's own fence
+(volley-cli's `setupFence`);
 nothing asks (the Desk's `setup_apply` naming a plan is the confirmation). Planning is fresh every
 time, and `setup_apply` plans the step again, refusing with `plan changed` when its `plan_id`
 differs, while an earlier step is `blocked`, or while another `setup_apply` runs (one at a time).
@@ -357,9 +359,11 @@ coordinator's login (the logged-in session's: `volley setup --step accounts`). O
 broker restart is applied last, after the answer is published (`restarting: true`); its result and
 the step's checks land in `setup.log`, and the Desk re-plans once it has reconnected. Setup ops are
 answered beside the daemon's serial queue, so a long step (the Desk build) never holds up waves.
-Each command a step runs is killed after `setup_apply_timeout_ms` (110 s, inside the Desk's 120 s).
-Passwords `volley auth init` prints for a new identity never reach the answer; a new `desk` login's
-password is not shown at all (the report says so).
+Each command a step runs is killed after `setup_apply_timeout_ms` (110 s; the step's error then
+says so). A step runs several commands, so its answer can come after the Desk's 120 s wait: the
+Desk keeps listening for a late answer. Passwords `volley auth init` prints for a new identity
+never reach the answer. The shared `desk` login's password, which no file keeps, is issued only by
+`desk_password` (Setup & Security › New desk password), sealed to the admin who asked.
 
 **Token redemption.** `volley auth token` prints a one-time admin token in the operator's
 terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
@@ -1601,8 +1605,9 @@ SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gat
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
 
 SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the commands a
-  `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run, O3's own commands for
-  the detected layout minus those only a terminal may run:
+  `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run: the terminal's own
+  commands (volley-cli's `setupFence`) for the detected layout, minus those only a terminal
+  may run:
     the layout's restart (brew layouts; never one starting with sudo) ·
     <ctrl> dynsec init <the layout's state file> dynsec-admin <password> (brew layouts) ·
     mosquitto -h
@@ -1613,7 +1618,7 @@ SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the
       is-active | enable | restart volley-desk.service
     bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
     <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
-      plan's probe only) · <bun> run build in <repo>/packages/volley-desk · volley auth token --json
+      plan's probe only) · <bun> run build in <repo>/packages/volley-desk
   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
   sudo, or the keychain (the logged-in session's): those stay terminal-only.
 

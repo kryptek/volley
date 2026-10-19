@@ -5,6 +5,7 @@ import {
   createPublicKey,
   publicEncrypt,
 } from "node:crypto";
+import { tokenIdOf } from "volley-cli/auth/roles";
 import { isValidAgentId } from "volley-mcp/topics";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
@@ -95,7 +96,8 @@ export interface AuthEvent {
     | "signin_link_issued"
     | "token_redeemed"
     | "admin_token_issued"
-    | "setup_step_applied";
+    | "setup_step_applied"
+    | "desk_password_issued";
   data: Record<string, unknown>;
 }
 
@@ -340,7 +342,7 @@ async function signinLink(exec: ExecFn, sender: string, p: Fields): Promise<Auth
   const token = r.out?.token;
   if (typeof token !== "string") return refuse(op, "volley auth signin-link printed no token");
   const expiresAt = r.out?.expires_at;
-  const tokenId = token.split("_")[2];
+  const tokenId = tokenIdOf(token) ?? "";
   return {
     reply: reply(op, {
       ok: true,
@@ -376,7 +378,7 @@ async function adminToken(exec: ExecFn, sender: string, p: Fields): Promise<Auth
   if (typeof token !== "string" || typeof expiresAt !== "string") {
     return refuse(op, "volley auth token printed no token");
   }
-  const tokenId = token.split("_")[2] ?? "";
+  const tokenId = tokenIdOf(token) ?? "";
   return {
     reply: reply(op, {
       ok: true,

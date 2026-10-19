@@ -74,8 +74,9 @@ import { AGENT_BRANCH } from "./worktree";
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
  *
  * SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the commands a
- *   `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run, O3's own commands for
- *   the detected layout minus those only a terminal may run:
+ *   `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run: the terminal's own
+ *   commands (volley-cli's `setupFence`) for the detected layout, minus those only a terminal
+ *   may run:
  *     the layout's restart (brew layouts; never one starting with sudo) ·
  *     <ctrl> dynsec init <the layout's state file> dynsec-admin <password> (brew layouts) ·
  *     mosquitto -h
@@ -86,7 +87,7 @@ import { AGENT_BRANCH } from "./worktree";
  *       is-active | enable | restart volley-desk.service
  *     bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
  *     <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
- *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk · volley auth token --json
+ *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
  *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
  *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
  *
@@ -266,7 +267,7 @@ export function sealSigninScript(dir: string, content: string): SigninToken {
 
 const setups = new WeakSet<object>();
 
-/** What one setup run may execute: O3's fence inputs for the detected layout, Desk-safe. */
+/** What one setup run may execute: `setupFence`'s inputs for the detected layout, Desk-safe. */
 export interface SetupFenceInputs {
   /** The layout's restart command, or null when only a terminal may restart this broker. */
   restart: string | null;
@@ -274,7 +275,7 @@ export interface SetupFenceInputs {
   ctrl: { bin: string; stateFile: string } | null;
   /** This Volley checkout, or null (then no hooks installer, Desk build or volleyd probe). */
   repoRoot: string | null;
-  /** The `bun` the services run (O3's `SetupDeps.bun`): the one program allowed by path. */
+  /** The `bun` the services run (`SetupDeps.bun`): the one program allowed by path. */
   bun: string;
   /** The user's home (the Desk service's plist). */
   home: string;
@@ -351,8 +352,7 @@ function setupVerdict(argv: readonly string[], t: SetupFenceInputs, cwd?: string
       argv[5] === "--dry-run") ||
     (same(argv, [t.bun, "run", "build"]) &&
       t.repoRoot !== null &&
-      cwd === repo("packages", "volley-desk")) ||
-    same(argv, ["volley", "auth", "token", "--json"]);
+      cwd === repo("packages", "volley-desk"));
   return ok ? ALLOW : deny(`${line.slice(0, 60)} (not a setup command volleyd runs for the Desk)`);
 }
 

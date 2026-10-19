@@ -7,7 +7,7 @@ import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { realSetupDeps } from "volley-cli/commands/setup";
 import type { IO } from "volley-cli/io";
-import { PHONE_LABEL, planAccounts, planPhone } from "volley-cli/setup/accounts";
+import { PHONE_LABEL, newDeskPassword, planAccounts, planPhone } from "volley-cli/setup/accounts";
 import { planDetect, planSecurity } from "volley-cli/setup/broker";
 import { appendSetupLog, lastSetup } from "volley-cli/setup/journal";
 import { planServices } from "volley-cli/setup/services";
@@ -22,6 +22,7 @@ import {
   type StepName,
   type StepPlan,
   fencedExec,
+  listenerUrls,
   setupFence,
 } from "volley-cli/setup/step";
 import {
@@ -40,18 +41,24 @@ import { FenceError, mintSetupToken } from "./fence";
  * The setup ops (SPEC §4.6.10): `setup_plan` and `setup_apply` run `volley setup`'s own planners
  * and steps (volley-cli's setup/) for the Desk. Nothing of a step lives here: this module builds
  * the planners' context with volleyd's deps, applies the remote policy (which changes only a
- * terminal may make), turns a `StepPlan` into the wire shape and journals.
+ * terminal may make), turns a `StepPlan` into the wire shape and journals. `desk_password` gives
+ * the shared `desk` login a new password (no file keeps one), sealed to the admin who asked.
  *
  * Deps: every command goes through volleyd's fenced exec with a setup token (the fence's SETUP
- * rows), behind O3's own `setupFence`. Nothing asks (`confirm` is false, never `--yes`): the
- * Desk is the confirmation, and a step is applied only by a `setup_apply` naming its plan.
+ * rows), behind the terminal's own fence (volley-cli's `setupFence`). Nothing asks (`confirm` is
+ * false, never `--yes`): the Desk is the confirmation, and a step is applied only by a
+ * `setup_apply` naming its plan.
  *
  * The terminal-only policy is per change (`terminalOnly`): such a change is planned with
  * `terminal: { reason, command }`, never applied, and comes back in the report's `terminal`.
  * A broker restart is applied last, after the answer is published (`after`).
  */
 
-export const SETUP_OPS: ReadonlySet<string> = new Set(["setup_plan", "setup_apply"]);
+export const SETUP_OPS: ReadonlySet<string> = new Set([
+  "setup_plan",
+  "setup_apply",
+  "desk_password",
+]);
 
 const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
@@ -79,7 +86,11 @@ export interface SetupOpsOptions {
   env: Record<string, string | undefined>;
   now: () => Date;
   sleep: (ms: number) => Promise<void>;
-  /** Agents with a live retained status, from volleyd's own view; null when it cannot tell. */
+  /**
+   * Agents with a live retained status; null when it cannot tell. volleyd reads it with a short
+   * registry scan (`registry_scan_ms`), not the terminal's 10 s collect, which would outlast the
+   * Desk's wait for the plan.
+   */
   liveAgents: () => Promise<number | null>;
   /** The broker's version as volleyd read it (`$SYS/broker/version`), or null. */
   brokerVersion: () => string | null;
@@ -99,12 +110,29 @@ const refuse = (op: string, error: string): SetupOutcome => ({
   reply: authReply(op, { ok: false, error }),
 });
 
+// The start of each summary (the planners' wording) a terminal-only rule keys on.
+const WRITE = "Write ";
+const CREATE = "Create ";
 const RESTART = "Restart the broker (";
+const KEYCHAIN = "Store the coordinator's broker login in the macOS keychain";
+const VOLLEYD_PASSWORD = "New password for volleyd,";
+const VOLLEYD_SERVICE = "Install volleyd as a ";
+/** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
+export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
+  WRITE,
+  CREATE,
+  RESTART,
+  KEYCHAIN,
+  VOLLEYD_PASSWORD,
+  VOLLEYD_SERVICE,
+];
 
 /**
- * Which changes a Desk may not apply, keyed by the step, the change's summary (O3's wording) and
- * the layout: anything that needs sudo, volleyd's own service or password (either would stop the
- * volleyd answering), and the macOS keychain (the logged-in session's).
+ * Which changes a Desk may not apply, keyed by the step, the change's summary (the planners'
+ * wording) and the layout: anything that needs sudo or that the fence runs only on a brew layout
+ * (a root-owned or containerised broker's config, state file and restart), volleyd's own service
+ * or password (either would stop the volleyd answering), and the macOS keychain (the logged-in
+ * session's).
  */
 export function terminalOnly(
   step: StepName,
@@ -113,10 +141,9 @@ export function terminalOnly(
 ): TerminalOnly | undefined {
   const layout = ctx.auth.layout;
   if (step === "security") {
+    const stateFile = summary.startsWith(`${CREATE}${ctx.stateFile} `);
     const needsRoot =
-      summary.startsWith(`Write ${ctx.config} `) ||
-      summary.startsWith(`Create ${ctx.stateFile} `) ||
-      summary.startsWith(RESTART);
+      summary.startsWith(`${WRITE}${ctx.config} `) || stateFile || summary.startsWith(RESTART);
     if ((layout.name === "etc" || layout.name === "snap") && needsRoot) {
       const lan = ctx.lan === true ? " --lan" : ctx.lan === false ? " --no-lan" : "";
       return {
@@ -130,23 +157,30 @@ export function terminalOnly(
         command: layout.restart,
       };
     }
+    if (layout.name === "container" && stateFile) {
+      return {
+        reason:
+          "the broker runs in a container: its state file is made with the broker's own tools, on the host",
+        command: "volley setup --step security",
+      };
+    }
   }
   if (step === "accounts") {
-    if (summary.startsWith("Store the coordinator's broker login in the macOS keychain")) {
+    if (summary.startsWith(KEYCHAIN)) {
       return {
         reason:
           "the macOS keychain opens only in your logged-in session, which volleyd running as a service may not have",
         command: "volley setup --step accounts",
       };
     }
-    if (summary.startsWith("New password for volleyd,")) {
+    if (summary.startsWith(VOLLEYD_PASSWORD)) {
       return {
         reason: "it changes volleyd's own password, which disconnects volleyd before it can answer",
         command: "volley setup --step accounts",
       };
     }
   }
-  if (step === "services" && summary.startsWith("Install volleyd as a ")) {
+  if (step === "services" && summary.startsWith(VOLLEYD_SERVICE)) {
     return {
       reason: "it installs and restarts volleyd itself, which would stop the volleyd answering",
       command: "volley setup --step services",
@@ -173,10 +207,11 @@ export class SetupOps {
 
   constructor(private readonly o: SetupOpsOptions) {}
 
-  /** `setup_plan` / `setup_apply` from `sender` (the username the account-op topic names). */
+  /** A setup op from `sender` (the username the account-op topic names). */
   async handle(sender: string, p: Fields): Promise<SetupOutcome> {
     const op = typeof p.op === "string" ? p.op : "";
     if (op === "setup_apply") return this.apply(sender, p);
+    if (op === "desk_password") return this.deskPassword(sender, p);
     const accounts = await listAccounts(this.o.exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return refuse(op, why);
@@ -206,6 +241,45 @@ export class SetupOps {
             : {}),
         },
       }),
+    };
+  }
+
+  /** The planners' context one request gets (`lan`, `repair` from it), or why there is none. */
+  context(p: Fields = {}): SetupContext | string {
+    const run = this.run(p);
+    return typeof run === "string" ? run : run.ctx;
+  }
+
+  /**
+   * `desk_password { reply_key }`: a new password for the shared `desk` login, sealed to the
+   * admin who asked (an admin may already create an account of any role, so this adds no
+   * privilege). No file keeps it, and the journal never names it.
+   */
+  private async deskPassword(sender: string, p: Fields): Promise<SetupOutcome> {
+    const op = "desk_password";
+    const key = replyKey(p.reply_key);
+    if (typeof key === "string") return refuse(op, key);
+    const accounts = await listAccounts(this.o.exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return refuse(op, why);
+    if (this.applying) {
+      return refuse(op, "a setup_apply is still running: wait for its answer, then ask again");
+    }
+    const run = this.run(p);
+    if (typeof run === "string") return refuse(op, run);
+    let password: string;
+    try {
+      password = await newDeskPassword(run.ctx);
+    } catch (e) {
+      return refuse(op, e instanceof Error ? e.message : String(e));
+    }
+    return {
+      reply: authReply(op, {
+        ok: true,
+        result: { username: "desk" },
+        sealed: seal(key, { username: "desk", password }),
+      }),
+      event: { type: "desk_password_issued", data: { by: sender } },
     };
   }
 
@@ -306,6 +380,10 @@ export class SetupOps {
     const applied: string[] = [];
     if (plan.changes.length === 0) {
       log("done");
+      return { applied, result: { step: name, lines, problems: [], terminal: leftover } };
+    }
+    if (now.length === 0 && restart === undefined) {
+      // Every change is a terminal's: nothing happened here, so setup.log has nothing to say.
       return { applied, result: { step: name, lines, problems: [], terminal: leftover } };
     }
     log("planned", plan.changes.map((c) => c.summary).join("; "));
@@ -432,14 +510,9 @@ export class SetupOps {
     const o = this.o;
     // `volley auth init` finds volleyd's files through VOLLEYD_HOME: this volleyd's own home.
     const env: Record<string, string | undefined> = { ...o.env, VOLLEYD_HOME: o.volleydHome };
-    let broker: URL;
-    try {
-      broker = new URL(o.brokerUrl);
-    } catch {
-      return `volleyd's broker URL is not one setup can use (${o.brokerUrl})`;
-    }
-    if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
-      return "setup runs over mqtt:// only (TLS is not supported by `volley setup` yet): run `volley setup` in a terminal";
+    const listeners = listenerUrls(o.brokerUrl);
+    if ("error" in listeners) {
+      return `volleyd's broker URL is not one setup can use (${listeners.error}): run \`volley setup\` in a terminal`;
     }
     const real = realSetupDeps(env);
     const given = { ...real, ...o.deps };
@@ -455,13 +528,15 @@ export class SetupOps {
       uid: given.uid,
     });
     // volleyd's exec, with the setup token: the fence allows the SETUP rows and nothing else.
+    const limit = DAEMON_DEFAULTS.setup_apply_timeout_ms;
     const fenced: SetupExec = async (argv, opts) => {
       try {
-        return await o.exec(argv, {
-          ...opts,
-          setup,
-          timeoutMs: DAEMON_DEFAULTS.setup_apply_timeout_ms,
-        });
+        const r = await o.exec(argv, { ...opts, setup, timeoutMs: limit });
+        // The step's error is the command's stderr: say that it was killed, not just how it ended.
+        const killed = `(killed after ${Math.round(limit / 1000)} s)`;
+        return r.timedOut
+          ? { ...r, stderr: r.stderr.trim() === "" ? killed : `${r.stderr.trim()} ${killed}` }
+          : r;
       } catch (e) {
         if (e instanceof FenceError) throw e;
         return { code: 127, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
@@ -531,7 +606,6 @@ export class SetupOps {
       env,
       deps: authDeps,
     };
-    const host = broker.hostname.includes(":") ? `[${broker.hostname}]` : broker.hostname;
     const run: Run = {
       probes,
       out,
@@ -540,8 +614,7 @@ export class SetupOps {
         deps,
         config: layout.config,
         stateFile: layout.stateFile,
-        tcpUrl: o.brokerUrl,
-        wsUrl: `ws://${host}:9001`,
+        ...listeners,
         home,
         volleydHome: o.volleydHome,
         repair: p.repair === true,
@@ -587,6 +660,6 @@ export function unshownPasswords(stdout: string): string[] {
     .filter((u): u is string => u !== undefined && u !== "coordinator" && u !== "volleyd");
   if (users.length === 0) return [];
   return [
-    `The new login${users.length === 1 ? "" : "s"} ${users.join(", ")} got a password the Desk does not show (no file keeps it); sign devices in with a one-time token or a sign-in link instead.`,
+    `The new login${users.length === 1 ? "" : "s"} ${users.join(", ")} got a password the Desk does not show (no file keeps it): Setup & Security › New desk password issues one, shown once; or sign devices in with a one-time token or a sign-in link.`,
   ];
 }
