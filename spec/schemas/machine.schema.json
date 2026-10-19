@@ -85,7 +85,7 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["peer", "volley", "bun", "git"],
-              "description": "Tool versions as the machine's doctor found them on the non-interactive ssh PATH; null when the tool is missing.",
+              "description": "Tool versions as the machine's doctor found them (bun and claude: the copy on the non-interactive ssh PATH when one resolves there); null when the tool is missing.",
               "properties": {
                 "peer": { "$ref": "#/$defs/version" },
                 "volley": { "$ref": "#/$defs/version" },

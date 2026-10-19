@@ -139,6 +139,17 @@ const OPTIONS = {
   help: { type: "boolean", short: "h" },
 } as const;
 
+/** Flags only some verbs take. */
+const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
+  fix: ["doctor"],
+  yes: ["doctor"],
+  clone: ["doctor"],
+  origin: ["doctor"],
+  release: ["doctor"],
+  for: ["invite"],
+  replace: ["join"],
+};
+
 /** Mirrors volleyd's config-defaults (separate package: no import across the boundary). */
 export const PEER_DEFAULTS = {
   remote_port: 21883,
@@ -154,6 +165,11 @@ export const PEER_DEFAULTS = {
   remote_exec_timeout_ms: 60_000,
   /** `run` re-runs the doctor this often; heartbeats in between repeat its last result. */
   doctor_interval_s: 600,
+  /**
+   * `run`'s doctor runs beside the heartbeat, never in its way; a run that takes longer than this
+   * is given up (the last result stays) so the next interval can start a fresh one.
+   */
+  doctor_timeout_ms: 300_000,
   /** How long the doctor waits for the supervisor's retained readiness verdict (its requirements). */
   readiness_wait_ms: 1_000,
 } as const;
@@ -189,6 +205,10 @@ export interface PeerDeps extends DoctorDeps {
   cpus: () => number;
   loadavg: () => [number, number, number];
   now: () => Date;
+  /** A monotonic clock in ms (the doctor's interval: a wall-clock step never stalls it). */
+  monotonic: () => number;
+  /** This process's PATH: the service gets the one `join` ran with (launchd's own is bare). */
+  envPath: () => string | undefined;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readStdin: () => Promise<string>;
   /** argv that runs this volley CLI (the service's ExecStart / ProgramArguments). */
@@ -255,6 +275,12 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
     io.stderr(`volley peer ${verb}: ${msg}\n`);
     return EXIT.USAGE;
   };
+  // The one options table is shared: a flag another verb owns is refused, never ignored.
+  for (const [flag, owner] of Object.entries(OWNED_BY)) {
+    if (v[flag as keyof Values] !== undefined && !owner.includes(verb)) {
+      return usage(`--${flag} is an option of volley peer ${owner.join(", ")} only`);
+    }
+  }
   switch (verb) {
     case "invite":
       if (pos.length !== 0) return usage("takes no arguments");
@@ -504,7 +530,8 @@ async function invite(
     return EXIT.ERROR;
   }
   const r = (a.result ?? {}) as { expires_at?: string };
-  const join = `volley peer join ${code} --to ${deps.user()}@${deps.hostname()}`;
+  // join needs --repo (the doctor blocks without a clone of the wave repo there).
+  const join = `volley peer join ${code} --to ${deps.user()}@${deps.hostname()} --repo <path to its clone of the wave repo>`;
   io.stdout(
     v.for !== undefined
       ? `Pairing code: ${code} (single use, valid until ${r.expires_at ?? "it expires"}); it re-pairs ${v.for} only.\n\nOn ${v.for}, run:\n  ${join} --name ${v.for} --replace\n`
@@ -665,8 +692,13 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   const failing = checked.report.checks.filter((c) => !c.ok && c.id !== "claude.trust");
   if (blocked.length > 0) {
     io.stdout(renderHuman(failing));
+    const doctorCmd = [
+      "volley peer doctor --fix",
+      `--repo ${repo !== undefined ? sq(repo) : "<path>"}`,
+      ...(v["volley-dir"] !== undefined ? [`--volley-dir ${sq(volleyDir)}`] : []),
+    ].join(" ");
     return fail(
-      `${blocked.length} check(s) above keep this machine from running agents: fix them (\`volley peer doctor --fix\` applies the safe ones) and run join again. Nothing was redeemed: the code is still valid.`,
+      `${blocked.length} check(s) above keep this machine from running agents: fix them (\`${doctorCmd}\` applies the safe ones) and run join again. Nothing was redeemed: the code is still valid.`,
     );
   }
   io.stdout(failing.length > 0 ? renderHuman(failing) : "All checks passed.\n");
@@ -831,7 +863,7 @@ async function installService(
   if (deps.platform === "linux") {
     const unit = join(deps.home, ".config", "systemd", "user", SYSTEMD_UNIT);
     mkdirSync(dirname(unit), { recursive: true });
-    writeFileSync(unit, systemdUnit(argv));
+    writeFileSync(unit, systemdUnit(argv, deps.envPath()));
     // Without lingering, systemd stops a user's services when their last session ends (the ssh
     // session this join runs in) and starts them only at their next login.
     const user = deps.user();
@@ -863,7 +895,10 @@ async function installService(
   if (deps.platform === "darwin") {
     const plist = join(deps.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     mkdirSync(dirname(plist), { recursive: true });
-    writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
+    writeFileSync(
+      plist,
+      launchdPlist(argv, join(deps.home, ".volley", "peer.log"), deps.envPath()),
+    );
     // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
     // user/<uid>. A service from an earlier join is replaced (bootout fails harmlessly).
     const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
@@ -882,7 +917,11 @@ async function installService(
   };
 }
 
-export function systemdUnit(argv: string[]): string {
+/**
+ * The service files carry `join`'s PATH: the doctor in every heartbeat must find the tools the
+ * person's own terminal finds (a user service's default PATH, launchd's above all, is bare).
+ */
+export function systemdUnit(argv: string[], path?: string): string {
   const quote = (a: string) =>
     /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `"${a.replace(/(["\\])/g, "\\$1")}"`;
   return `[Unit]
@@ -890,7 +929,7 @@ Description=Volley peer: broker tunnel and machine heartbeat (volley peer run)
 
 [Service]
 ExecStart=${argv.map(quote).join(" ")}
-# Exit 0 means the peer account was revoked (volley peer remove): stay stopped.
+${path !== undefined && path !== "" ? `Environment=${quote(`PATH=${path.replace(/%/g, "%%")}`)}\n` : ""}# Exit 0 means the peer account was revoked (volley peer remove): stay stopped.
 Restart=on-failure
 RestartSec=10
 
@@ -899,7 +938,7 @@ WantedBy=default.target
 `;
 }
 
-export function launchdPlist(argv: string[], log: string): string {
+export function launchdPlist(argv: string[], log: string, path?: string): string {
   const x = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -911,7 +950,7 @@ export function launchdPlist(argv: string[], log: string): string {
   <array>
 ${argv.map((a) => `    <string>${x(a)}</string>`).join("\n")}
   </array>
-  <key>RunAtLoad</key><true/>
+${path !== undefined && path !== "" ? `  <key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>${x(path)}</string></dict>\n` : ""}  <key>RunAtLoad</key><true/>
   <!-- Exit 0 means the peer account was revoked (volley peer remove): stay stopped. -->
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>${x(log)}</string>
@@ -1028,7 +1067,8 @@ async function requiredVolley(broker: VolleyBroker, name: string): Promise<strin
   const e = raw !== null ? parseEnvelope(raw) : null;
   if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return null;
   const v = (e.payload as { requirements?: { volley?: unknown } } | null)?.requirements?.volley;
-  return typeof v === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(v) ? v : null;
+  // Never one that starts with "-": it ends up in a git argv.
+  return typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null;
 }
 
 /** The doctor as `run` and the `doctor` verb run it for a paired machine. */
@@ -1133,20 +1173,51 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   })();
   let broker: VolleyBroker | null = null;
   let exit: ExitCode = EXIT.OK;
-  // The last doctor run (every doctor_interval_s; heartbeats in between repeat it).
+  // The last finished doctor run. The doctor runs beside the heartbeat (every doctor_interval_s,
+  // bounded by doctor_timeout_ms): its probes reach the network, and a beat that waited on them
+  // could miss the supervisor's machine_down_after_ms. Beats in between repeat its last result;
+  // the beat after a run finishes is published at once.
   let report: DoctorReport | null = null;
   let doctorAt = Number.NEGATIVE_INFINITY;
+  let doctoring = false;
+  const startDoctor = (b: VolleyBroker) => {
+    doctoring = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`gave up after ${PEER_DEFAULTS.doctor_timeout_ms} ms`)),
+        PEER_DEFAULTS.doctor_timeout_ms,
+      );
+      // Never what keeps the process alive after the service stops.
+      timer.unref?.();
+    });
+    void Promise.race([peerDoctor(deps, cfg, b), timeout])
+      .then(async (r) => {
+        report = r;
+        if (stop.signal.aborted || broker === null) return;
+        await broker
+          .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up", r), {
+            qos: 1,
+            retain: true,
+          })
+          .catch(() => {});
+      })
+      .catch((e: unknown) => {
+        io.stderr(`volley peer run: doctor: ${e instanceof Error ? e.message : String(e)}\n`);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        doctoring = false;
+      });
+  };
   try {
     while (!stop.signal.aborted) {
       try {
         broker ??= await connectPeer(deps, cfg, report);
-        const now = deps.now().getTime();
-        if (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000) {
+        const now = deps.monotonic();
+        if (!doctoring && now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000) {
           doctorAt = now;
-          report = await peerDoctor(deps, cfg, broker).catch((e: unknown) => {
-            io.stderr(`volley peer run: doctor: ${e instanceof Error ? e.message : String(e)}\n`);
-            return report;
-          });
+          startDoctor(broker);
         }
         await broker.publish(
           machineTopic(cfg.name),
@@ -1204,6 +1275,10 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     io.stderr(
       "volley peer doctor: --origin must not carry a password or token (gh auth setup-git signs git in)\n",
     );
+    return EXIT.USAGE;
+  }
+  if (v.origin?.startsWith("-")) {
+    io.stderr("volley peer doctor: --origin must be the wave repo's URL\n");
     return EXIT.USAGE;
   }
   if (v.clone === true && v.fix !== true) {
@@ -1274,6 +1349,8 @@ function realDeps(): PeerDeps {
     cpus: () => Math.max(1, os.cpus().length),
     loadavg: () => os.loadavg() as [number, number, number],
     now: () => new Date(),
+    monotonic: () => performance.now(),
+    envPath: () => process.env.PATH,
     sleep: (ms, signal) =>
       new Promise((r) => {
         const t = setTimeout(r, ms);
@@ -1305,7 +1382,8 @@ function realDeps(): PeerDeps {
     },
     confirm: async (question) => {
       if (process.stdin.isTTY !== true) return false;
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      // stderr: under --fix --json, stdout is the report alone.
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
         return /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim());
       } finally {

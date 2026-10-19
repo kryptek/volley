@@ -1165,10 +1165,11 @@ volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 `join` first runs `volley peer doctor` (the volley-cli README's "`volley peer doctor`": tools and
 their versions, `claude` and `bun` on the non-interactive ssh `PATH`, the volley checkout, the
 clone and its origin, GitHub push access, the Claude sign-in and folder trust, memory and disk).
-A failing `block` check (no bun, no tmux, `claude` off the ssh `PATH`, no clone or no `--repo`)
-stops the join *before* the code is used, so it stays valid while you fix things
-(`volley peer doctor --fix` applies the safe fixes); `warn` checks are printed and the join goes
-on. Then it checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
+A failing `block` check (no bun, no tmux, no clone or no `--repo`) stops the join *before* the
+code is used, so it stays valid while you fix things (the join prints the
+`volley peer doctor --fix --repo …` that applies the safe fixes); `warn` checks are printed and the
+join goes on. `claude` and `bun` on the ssh `PATH` are among them: the doctor can only estimate
+that `PATH`, and volleyd's own probe of the real one (readiness `path_ok`) decides. Then it checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
 daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
 there needs it; if not, the join stops before the code is used) and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
@@ -1210,11 +1211,14 @@ backoff) and publishes the machine's retained record on `volley/_system/machines
 30 s through it: os, cores, load averages, its tmux session count, `tunnel: up`. Its LWT is the
 record with `tunnel: down` (built when it connected: volleyd keeps the last heartbeat's
 `last_seen`, load and agents). Every record also carries the Fleet fields (SPEC §4.6.15):
-`kind: peer`, `memory`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat,
-and the last doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`,
-`claude_plan`), `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor
-every 600 s (`PEER_DEFAULTS.doctor_interval_s`); the version it compares the checkout against is
-the supervisor's readiness verdict's `requirements.volley`. volleyd only counts records for a configured host, and marks a
+`kind: peer`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat, `memory`
+too (on macOS, `available_pct` is the last doctor run's `memory_pressure` reading), and the last
+finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
+`repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
+(`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
+beat past `machine_down_after_ms`; the version it compares the checkout against is the
+supervisor's readiness verdict's `requirements.volley`. The service file carries the `PATH` the
+join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
 machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
@@ -1234,7 +1238,7 @@ install) re-pairs without being removed first. On the daemon's machine, as an ad
 volley peer invite --for box-a     # a code that re-pairs box-a only
 ```
 
-and on the machine, `volley peer join <code> --to dev@supervisor --name box-a --replace --repo ...`.
+and on the machine, `volley peer join <code> --to dev@supervisor --repo <its clone> --name box-a --replace`.
 volleyd (`peer_invite { for }`, `peer_join { replace: true }`) keeps the binding in the code's
 hashed entry; with such a code it rotates the `peer` account's password (`volley auth rotate`)
 and rewrites `hosts.box-a` with the join's fields (a hand-set `max_agents` or `drain` stays)

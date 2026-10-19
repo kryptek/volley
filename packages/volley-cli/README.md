@@ -229,24 +229,38 @@ volley peer doctor --json                # the machine record's doctor fields (S
 | Check | Severity | What it looks at |
 |---|---|---|
 | `tool.<name>` | block (`gh`: warn) | `bun git gh tmux nc base64 cmp claude` installed (`command -v`), and their versions |
-| `bun_on_path`, `claude_on_path` | block | the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets (sshd's default `PATH` through your login shell's non-interactive startup) |
-| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin` and `bun install --frozen-lockfile --dry-run` is clean |
+| `bun_on_path`, `claude_on_path` | warn | **an estimate**: whether the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets, guessed as sshd's default `PATH` through your login shell's `-c` (sshd's `SetEnv`, `~/.ssh/environment` and `pam_env` are invisible to it). The detail says "estimated"; the supervisor's own probe of the real ssh `PATH` (readiness `path_ok`) decides |
+| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install records the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
 | `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
 | `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
-| `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with `GIT_TERMINAL_PROMPT=0` |
+| `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
 | `machine.memory`, `machine.disk` | warn | available memory (macOS: `memory_pressure`), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
 
+Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
+shell's), so the doctor inside the `volley peer run` service reads the machine the way a terminal
+does. `gh.auth` and `claude.signin` only warn (a join is not held up by them), but the
+supervisor's readiness needs both, so the human output ends with a line naming them while they
+fail.
+
 **Fixes.** `--fix` runs only what writes inside the volley checkout (`bun install
 --frozen-lockfile`; with a known requirement, `git fetch origin --tags && git checkout --detach
 v<version> && bun install --frozen-lockfile`) and, with `--clone` and `--origin`, one `git clone`
-into an empty `--repo`. It prints its plan and asks first unless `--yes`, and a second run reports
-each of those as "already done". Everything else is printed for you to run: installing a tool,
-the `sudo ln -s ~/.local/bin/claude /usr/local/bin/claude` that puts Claude Code on the ssh
-`PATH` (macOS: a line in `~/.zshenv`), `gh auth login && gh auth setup-git`, the Claude sign-in,
-a wrong `origin` (explained, never changed). Exit status 1 while a `block` check fails.
+into an empty `--repo` (`git clone -- <url> <path>`, prompt-free like `repo.fetch`). A step two
+fixes share runs once, at its last place, so a fresh checkout behind the supervisor gets `fetch`,
+`checkout`, then the install. It prints its plan (on stderr under `--json`) and asks first unless
+`--yes`, checks everything again afterwards, and a second run reports each of those as "already
+done" (`volley.version` says "not checked" while the supervisor's requirement is unknown).
+Everything else is printed for you to run: installing a tool (`brew install …` on macOS,
+`sudo apt-get install -y …` or `sudo dnf install -y …` on Linux; `gh` from cli.github.com's
+package repository on apt), the line that puts Claude Code on the ssh `PATH` (Linux:
+`sudo ln -s ~/.local/bin/claude /usr/local/bin/claude`; macOS: a line in `~/.zshenv` for zsh,
+`fish_add_path -U` for fish, and for bash, which reads no startup file there, `chsh -s /bin/zsh`
+or an sshd `SetEnv PATH=…`), `gh auth login && gh auth setup-git`, the Claude sign-in, a wrong
+`origin` (explained, never changed), and `package.json` disagreeing with `bun.lock` (local
+edits: `git -C <dir> status`). Exit status 1 while a `block` check fails.
 
 **No secrets.** The doctor keeps states and plain labels only: exit codes of `gh auth status`,
 the `loggedIn` and plan of `claude auth status`, an origin with any credentials stripped. Nothing
@@ -254,10 +268,15 @@ it prints or publishes carries a token (it also scrubs anything token-shaped), a
 refuses a URL with a password or token in it.
 
 **Where it runs.** `volley peer join` runs it first and stops on a `block` check before the
-pairing code is used, so the code stays valid while you fix things; `warn` checks are printed and
-the join goes on. `volley peer run` runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s) and
-puts its last result (`versions`, `auth`, `repo`, `checks` without fix text, `doctor_at`) in
-every heartbeat, with `kind: peer`, `memory`, `disk` and `uptime_s` read fresh each time.
+pairing code is used, so the code stays valid while you fix things (it prints the exact
+`volley peer doctor --fix --repo …` to run); `warn` checks, the ssh `PATH` estimate among them,
+are printed and the join goes on. `volley peer run` (whose service file carries the `PATH` the
+join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock)
+beside the heartbeat, never in its way: a beat never waits for it, a run is given up after
+`PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
+heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
+text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`
+too except on macOS, whose `available_pct` is the last doctor run's `memory_pressure` reading.
 
 ---
 

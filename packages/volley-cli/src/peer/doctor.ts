@@ -1,15 +1,17 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { claudeChecks, isRepoTrusted, parseClaudeStatus } from "./checks/claude";
 import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import { diskOf, machineChecks, memoryOf, pressurePct, worktreeRoot } from "./checks/machine";
-import { githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
-import { ON_PATH, toolChecks, versionOf } from "./checks/tools";
+import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
+import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
 
 export { normalizeOrigin } from "./checks/repo";
+export { binOf } from "./checks/tools";
 
 /**
  * `volley peer doctor`: everything an agent on this machine needs, checked (SPEC §4.6.15, the
@@ -41,6 +43,8 @@ export const DOCTOR_DEFAULTS = {
   /**
    * sshd's default PATH for a non-interactive session (Debian/Ubuntu's OpenSSH; macOS's): what
    * volleyd's `ssh <box> bash -s` starts from before the login shell's non-interactive startup.
+   * An estimate: sshd's SetEnv, ~/.ssh/environment, pam_env and other distros' compiled-in PATH
+   * are invisible here, so the PATH checks only warn (the supervisor's own probe decides).
    */
   ssh_path_linux:
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games",
@@ -49,6 +53,19 @@ export const DOCTOR_DEFAULTS = {
 
 /** The checks a `--fix` can make pass by itself: each reports "already done" when it passes. */
 const FIXABLE = ["volley.installed", "volley.version", "repo.clone"];
+
+/**
+ * Warn checks that do not hold up a join but that the supervisor's readiness still needs (SPEC
+ * §4.6.15: GitHub may push and Claude is signed in): the human output says so.
+ */
+const NEEDED_FOR_READY = ["gh.auth", "claude.signin"];
+
+/**
+ * In `node_modules`: the sha256 of the `bun.lock` the doctor last installed from. `bun install
+ * --frozen-lockfile --dry-run` compares package.json with bun.lock, never node_modules, so this
+ * is how the doctor tells a `git pull` without a reinstall from a current install.
+ */
+export const LOCK_MARKER = ".volley-lock-sha256";
 
 export type Severity = "block" | "warn";
 export type AuthGh = "ok" | "unauthenticated" | "missing" | "no_write";
@@ -98,12 +115,20 @@ export interface ToolFact {
 
 export interface Facts {
   platform: NodeJS.Platform;
+  /** The login shell the ssh PATH estimate ran through. */
+  shell: string;
+  /** Linux's package manager (what the install fixes name); null on macOS or when unknown. */
+  pkg: "apt" | "dnf" | null;
   peerVersion: string;
   tools: Record<ToolName, ToolFact>;
   volley: {
     dir: string;
     installed: boolean;
-    lockClean: boolean;
+    /**
+     * `synced`: installed from the current bun.lock; `stale`: from another (or by hand: not
+     * verified); `drift`: package.json and bun.lock disagree; `unknown`: no bun to ask.
+     */
+    lock: "synced" | "stale" | "drift" | "unknown";
     version: string | null;
     required: string | null;
   };
@@ -132,6 +157,25 @@ export interface Facts {
     disk: Disk | null;
     limits: { mem_low_pct: number; disk_low_gb: number };
   };
+}
+
+/** sha256 of `<dir>/bun.lock`; null without one. */
+export function lockHash(dir: string): string | null {
+  try {
+    return createHash("sha256")
+      .update(readFileSync(join(dir, "bun.lock")))
+      .digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/** After the doctor's own install: remember the bun.lock it installed from. */
+function markInstalled(dir: string): void {
+  const h = lockHash(dir);
+  try {
+    if (h !== null) writeFileSync(join(dir, "node_modules", LOCK_MARKER), `${h}\n`);
+  } catch {}
 }
 
 /** What the doctor touches on this machine: the `PeerDeps` subset, injectable for tests. */
@@ -251,7 +295,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   const sshPath =
     deps.platform === "darwin" ? DOCTOR_DEFAULTS.ssh_path_darwin : DOCTOR_DEFAULTS.ssh_path_linux;
 
-  // Tools: where each is, on the non-interactive ssh PATH too, and its version.
+  const shell = deps.shell();
+  // Tools: where each is, on the (estimated) non-interactive ssh PATH too, and its version
+  // (the copy agents get when there is one: binOf).
   const tools = {} as Record<ToolName, ToolFact>;
   for (const t of TOOLS) {
     const path = await found(["sh", "-c", `command -v ${t}`]);
@@ -262,17 +308,27 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
           `HOME=${deps.home}`,
           `USER=${deps.user()}`,
           `PATH=${sshPath}`,
-          deps.shell(),
+          shell,
           "-c",
           `command -v ${t}`,
         ])
       : path;
-    let version: string | null = null;
-    if ((path ?? ssh) !== null && (VERSIONED as readonly string[]).includes(t)) {
-      const r = await sh([t, t === "tmux" ? "-V" : "--version"]);
-      version = r.code === 0 ? versionOf(r.stdout) : null;
+    const fact: ToolFact = { path, sshPath: ssh, version: null };
+    const bin = binOf(fact);
+    if (bin !== null && (VERSIONED as readonly string[]).includes(t)) {
+      const r = await sh([bin, t === "tmux" ? "-V" : "--version"]);
+      fact.version = r.code === 0 ? versionOf(r.stdout) : null;
     }
-    tools[t] = { path, sshPath: ssh, version };
+    tools[t] = fact;
+  }
+  const bun = binOf(tools.bun);
+  const gitBin = binOf(tools.git);
+  const ghBin = binOf(tools.gh);
+  const claudeBin = binOf(tools.claude);
+  let pkg: Facts["pkg"] = null;
+  if (deps.platform === "linux") {
+    if ((await found(["sh", "-c", "command -v apt-get"])) !== null) pkg = "apt";
+    else if ((await found(["sh", "-c", "command -v dnf"])) !== null) pkg = "dnf";
   }
 
   // The volley checkout.
@@ -280,10 +336,18 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   const pkgVersion = (readJson(join(dir, "package.json")) as { version?: unknown } | undefined)
     ?.version;
   const installed = existsSync(join(dir, "node_modules", ".bin"));
-  const lockClean =
-    installed && tools.bun.path !== null
-      ? (await sh(["bun", "install", "--cwd", dir, "--frozen-lockfile", "--dry-run"])).code === 0
-      : false;
+  let lock: Facts["volley"]["lock"] = "unknown";
+  if (installed && bun !== null) {
+    if ((await sh([bun, "install", "--cwd", dir, "--frozen-lockfile", "--dry-run"])).code !== 0) {
+      lock = "drift";
+    } else {
+      let marker: string | null = null;
+      try {
+        marker = readFileSync(join(dir, "node_modules", LOCK_MARKER), "utf-8").trim();
+      } catch {}
+      lock = marker !== null && marker === lockHash(dir) ? "synced" : "stale";
+    }
+  }
 
   // The wave repo's clone.
   const path = opts.repo !== undefined ? resolve(opts.repo) : null;
@@ -294,35 +358,23 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       empty = statSync(path).isDirectory() && readdirSync(path).length === 0;
     } catch {}
   }
-  const git = tools.git.path !== null;
   const isGit =
     exists &&
     !empty &&
-    git &&
-    firstLine((await sh(["git", "-C", path, "rev-parse", "--is-inside-work-tree"])).stdout) ===
+    gitBin !== null &&
+    firstLine((await sh([gitBin, "-C", path, "rev-parse", "--is-inside-work-tree"])).stdout) ===
       "true";
   let origin: string | null = null;
   let fetchable: boolean | null = null;
   let fetchedAt: string | null = null;
   const release = opts.release ?? null;
-  if (isGit) {
-    const r = await sh(["git", "-C", path, "remote", "get-url", "origin"]);
+  if (isGit && gitBin !== null) {
+    const r = await sh([gitBin, "-C", path, "remote", "get-url", "origin"]);
     origin = r.code === 0 ? normalizeOrigin(firstLine(r.stdout)) : null;
     const ref = release !== null ? `refs/heads/${release}` : "HEAD";
     fetchable =
-      (
-        await sh([
-          "env",
-          "GIT_TERMINAL_PROMPT=0",
-          "git",
-          "-C",
-          path,
-          "ls-remote",
-          "--exit-code",
-          "origin",
-          ref,
-        ])
-      ).code === 0;
+      (await sh([...GIT_QUIET, gitBin, "-C", path, "ls-remote", "--exit-code", "origin", ref]))
+        .code === 0;
     try {
       fetchedAt = statSync(join(path, ".git", "FETCH_HEAD")).mtime.toISOString();
     } catch {}
@@ -330,16 +382,19 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   const expected = opts.origin !== undefined ? normalizeOrigin(opts.origin) : null;
 
   // GitHub.
-  const ghPresent = tools.gh.path !== null;
-  const signedIn = ghPresent && (await sh(["gh", "auth", "status"])).code === 0;
-  const user = signedIn ? ghUser((await sh(["gh", "api", "user", "--jq", ".login"])).stdout) : null;
+  const ghPresent = ghBin !== null;
+  const signedIn = ghBin !== null && (await sh([ghBin, "auth", "status"])).code === 0;
+  const user =
+    signedIn && ghBin !== null
+      ? ghUser((await sh([ghBin, "api", "user", "--jq", ".login"])).stdout)
+      : null;
   const slug = githubSlug(origin ?? expected);
   const permission =
-    signedIn && slug !== null
+    signedIn && ghBin !== null && slug !== null
       ? ghPermission(
           (
             await sh([
-              "gh",
+              ghBin,
               "repo",
               "view",
               slug,
@@ -354,8 +409,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
 
   // Claude Code: sign-in state and folder trust.
   let claude: { state: AuthClaude; plan: string | null } = { state: "missing", plan: null };
-  if ((tools.claude.path ?? tools.claude.sshPath) !== null) {
-    const r = await sh(["claude", "auth", "status"]);
+  if (claudeBin !== null) {
+    const r = await sh([claudeBin, "auth", "status"]);
     claude = parseClaudeStatus(r.code, r.stdout);
   }
   let trust: AuthTrust = "unknown";
@@ -376,14 +431,16 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
 
   return {
     platform: deps.platform,
+    shell,
+    pkg,
     peerVersion: deps.version,
     tools,
     volley: {
       dir,
       installed,
-      lockClean,
+      lock,
       version:
-        typeof pkgVersion === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(pkgVersion)
+        typeof pkgVersion === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(pkgVersion)
           ? pkgVersion
           : null,
       required: opts.requiredVolley ?? null,
@@ -493,14 +550,21 @@ export const blocking = (r: DoctorReport) =>
 const mark = (c: { ok: boolean; severity: Severity }) =>
   c.ok ? "✓" : c.severity === "block" ? "✗" : "!";
 
-/** One line per check (`✓` / `!` / `✗`), the fix under a failing one. */
+/**
+ * One line per check (`✓` / `!` / `✗`), the fix under a failing one, and a closing line naming
+ * the `!` checks the supervisor's readiness still needs.
+ */
 export function renderHuman(checks: DoctorReport["checks"]): string {
-  return checks
+  const lines = checks
     .map(
       (c) =>
         `${mark(c)} ${c.id}: ${c.detail}\n${!c.ok && c.fix !== undefined ? `    fix: ${c.fix}\n` : ""}`,
     )
     .join("");
+  const needed = checks.filter((c) => !c.ok && NEEDED_FOR_READY.includes(c.id)).map((c) => c.id);
+  return needed.length > 0
+    ? `${lines}${needed.length} warning(s) still keep this machine from being ready for agents (the supervisor needs them): ${needed.join(", ")}\n`
+    : lines;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -510,6 +574,8 @@ export function renderHuman(checks: DoctorReport["checks"]): string {
 export interface FixPlan {
   /** Fixable checks that already pass. */
   done: Check[];
+  /** Fixable checks that pass only because nothing was known to check against. */
+  unchecked: Check[];
   /** Safe fixes the doctor runs (after asking, unless --yes). */
   run: Check[];
   /** Failing checks the person fixes: their commands, printed. */
@@ -517,10 +583,12 @@ export interface FixPlan {
 }
 
 export function planFixes(checks: Check[], opts: DoctorOptions): FixPlan {
-  const plan: FixPlan = { done: [], run: [], manual: [] };
+  const plan: FixPlan = { done: [], unchecked: [], run: [], manual: [] };
   for (const c of checks) {
     if (c.ok) {
-      if (FIXABLE.includes(c.id)) plan.done.push(c);
+      if (c.id === "volley.version" && (opts.requiredVolley ?? null) === null) {
+        plan.unchecked.push(c);
+      } else if (FIXABLE.includes(c.id)) plan.done.push(c);
     } else if (c.fix?.steps !== undefined && (c.fix.needsClone !== true || opts.clone === true)) {
       plan.run.push(c);
     } else if (c.fix !== undefined) plan.manual.push(c);
@@ -540,6 +608,9 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     const plan = planFixes(checks, opts);
     const lines: string[] = [];
     for (const c of plan.done) lines.push(`✓ ${c.id}: already done`);
+    for (const c of plan.unchecked) {
+      lines.push(`· ${c.id}: not checked (the supervisor's requirement is not known here)`);
+    }
     for (const c of plan.run) lines.push(`→ ${c.id}: ${c.fix?.command}`);
     for (const c of plan.manual) {
       const hint =
@@ -554,21 +625,32 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
       if (!go) {
         say("Nothing changed (answer yes, or pass --yes).\n\n");
       } else {
-        const seen = new Set<string>();
-        for (const c of plan.run) {
-          for (const step of c.fix?.steps ?? []) {
-            const key = step.join("\0");
-            if (seen.has(key)) continue;
-            seen.add(key);
-            say(scrub(`$ ${step.join(" ")}\n`));
-            const r = await deps
-              .exec(step, { timeoutMs: DOCTOR_DEFAULTS.fix_timeout_ms })
-              .catch((e: unknown) => ({ code: -1, stdout: "", stderr: String(e) }));
-            if (r.code !== 0) {
-              const why = r.stderr.trim().split("\n").pop() ?? "";
-              say(scrub(`✗ ${c.id}: fix failed (exit ${r.code})${why !== "" ? `: ${why}` : ""}\n`));
-              break;
-            }
+        // Every step in plan order; a step two fixes share runs once, at its LAST place: the
+        // install volley.installed asks for is the one volley.version ends with, after its
+        // checkout (installing before the checkout only would leave the old dependencies).
+        const all = plan.run.flatMap((c) => (c.fix?.steps ?? []).map((step) => ({ c, step })));
+        const key = (step: string[]) => step.join("\0");
+        const todo = all.filter(
+          ({ step }, i) => !all.slice(i + 1).some((later) => key(later.step) === key(step)),
+        );
+        const failed = new Set<string>();
+        for (const { c, step } of todo) {
+          // A failed step stops the rest of its own fix (a checkout's install needs the checkout).
+          if (failed.has(c.id)) continue;
+          say(scrub(`$ ${step.join(" ")}\n`));
+          const r = await deps
+            .exec(step, { timeoutMs: DOCTOR_DEFAULTS.fix_timeout_ms })
+            .catch((e: unknown) => ({ code: -1, stdout: "", stderr: String(e) }));
+          if (r.code !== 0) {
+            const why = r.stderr.trim().split("\n").pop() ?? "";
+            say(scrub(`✗ ${c.id}: fix failed (exit ${r.code})${why !== "" ? `: ${why}` : ""}\n`));
+            failed.add(c.id);
+          } else if (
+            basename(step[0] ?? "") === "bun" &&
+            step[1] === "install" &&
+            step[2] === "--cwd"
+          ) {
+            markInstalled(step[3] as string);
           }
         }
         say("\n");

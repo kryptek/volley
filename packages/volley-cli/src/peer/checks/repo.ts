@@ -1,4 +1,5 @@
 import type { Check, Facts } from "../doctor";
+import { binOf } from "./tools";
 
 /**
  * The wave repo's clone on this machine: there (a git clone at `--repo`), pointing at the wave
@@ -7,9 +8,23 @@ import type { Check, Facts } from "../doctor";
  */
 
 /**
+ * The environment of every git command that reaches the wave repo's host: no prompt of any kind
+ * (git's own, an askpass helper, or ssh's for a key passphrase or an unknown host key), so a
+ * probe answers for the unattended agent, not for the person at this terminal.
+ */
+export const GIT_QUIET = [
+  "env",
+  "GIT_TERMINAL_PROMPT=0",
+  "GIT_ASKPASS=",
+  "SSH_ASKPASS=",
+  "GIT_SSH_COMMAND=ssh -o BatchMode=yes",
+];
+
+/**
  * `origin` as `<host>[:port]/<path>`: no scheme, user or credentials, no `.git`, ssh and https
  * forms folded (`git@github.com:o/r.git` and `https://github.com/o/r` are both
- * `github.com/o/r`). Null for a local path or anything else without a host.
+ * `github.com/o/r`; GitHub's names are case-insensitive, so its path is lower-cased). Null for a
+ * local path or anything else without a host.
  */
 export function normalizeOrigin(url: string): string | null {
   const u = url.trim();
@@ -38,6 +53,7 @@ export function normalizeOrigin(url: string): string | null {
     .replace(/\/+$/, "")
     .replace(/\.git$/, "");
   host = host.toLowerCase();
+  if (host === "github.com") path = path.toLowerCase();
   if (!/^[a-z0-9.-]+$/.test(host) || path === "" || /[\s@:]/.test(path)) return null;
   const out = `${host}${port}/${path}`;
   return out.length <= 512 ? out : null;
@@ -73,9 +89,11 @@ export function repoChecks(f: Facts): Check[] {
     ];
   }
   if (!r.isGit) {
+    const git = binOf(f.tools.git);
+    // `--`: the URL is never read as an option.
     const steps =
-      r.cloneUrl !== null
-        ? [["env", "GIT_TERMINAL_PROMPT=0", "git", "clone", r.cloneUrl, r.path]]
+      r.cloneUrl !== null && git !== null
+        ? [[...GIT_QUIET, git, "clone", "--", r.cloneUrl, r.path]]
         : null;
     return [
       {
@@ -87,7 +105,7 @@ export function repoChecks(f: Facts): Check[] {
           steps !== null
             ? { command: `git clone ${r.cloneUrl} ${r.path}`, steps, needsClone: true }
             : {
-                command: `git clone <the wave repo's URL> ${r.path} (or pass --origin <url> --clone to let the doctor do it)`,
+                command: `git clone ${r.cloneUrl ?? "<the wave repo's URL>"} ${r.path} (or run volley peer doctor --fix --clone --origin <url> --repo ${r.path} to let the doctor do it)`,
               },
       },
     ];

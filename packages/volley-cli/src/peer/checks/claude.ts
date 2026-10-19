@@ -82,8 +82,7 @@ export function claudeChecks(f: Facts): Check[] {
           ...(c.state !== "missing"
             ? {
                 fix: {
-                  command:
-                    "sign in on this machine: run claude and /login (or use Sign in on the Desk)",
+                  command: "sign in on this machine: run claude and /login",
                 },
               }
             : {}),
