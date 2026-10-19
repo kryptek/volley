@@ -199,10 +199,24 @@ describe("reducer: the machines slice", () => {
 function fakeClient() {
   const handlers = new Set<(m: DeskMessage) => void>();
   const published: { topic: string; env: Envelope }[] = [];
+  const waiters = new Set<() => void>();
   return {
     published,
+    /** Resolves once `n` requests have been published; event-driven, so key generation may take any time. */
+    until(n: number): Promise<void> {
+      if (published.length >= n) return Promise.resolve();
+      return new Promise((resolve) => {
+        const w = () => {
+          if (published.length < n) return;
+          waiters.delete(w);
+          resolve();
+        };
+        waiters.add(w);
+      });
+    },
     publish: vi.fn(async (topic: string, payload: string) => {
       published.push({ topic, env: JSON.parse(payload) as Envelope });
+      for (const w of [...waiters]) w();
     }),
     onMessage(h: (m: DeskMessage) => void) {
       handlers.add(h);
@@ -241,9 +255,13 @@ function sealTo(req: Envelope, secret: Record<string, unknown>): string {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-/** Wait until the client has published `n` requests (key generation is async). */
+/**
+ * Wait until the client has published `n` requests. Key generation is async and, with real RSA keys,
+ * its duration depends on the machine (a loaded CI runner took longer than any fixed tick count),
+ * so this waits on the publish itself; the test's own timeout bounds it.
+ */
 async function published(c: ReturnType<typeof fakeClient>, n: number) {
-  for (let i = 0; i < 200 && c.published.length < n; i++) await flush();
+  await c.until(n);
   expect(c.published.length).toBe(n);
   return c.published[n - 1] as { topic: string; env: Envelope };
 }
