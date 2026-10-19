@@ -129,7 +129,10 @@
             }
           },
           "if": { "properties": { "kind": { "const": "machine_down" } }, "required": ["kind"] },
-          "then": { "required": ["host", "down_since", "tasks"] }
+          "then": {
+            "required": ["host", "down_since", "tasks"],
+            "properties": { "task": { "type": "null" } }
+          }
         }
       },
       "required": ["channel", "type", "payload"],

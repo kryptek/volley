@@ -147,8 +147,7 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\\[[A-Za-z0-9]{1,16}\\])?$"
         },
         "host": {
-          "default": "local",
-          "description": "Where the task's agents run: local (the supervisor's own host), auto (the supervisor places it, spec section 4.6.15), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one). Default: auto under a wave's placement: auto, else local.",
+          "description": "Where the task's agents run: local (the supervisor's own host), auto (the supervisor places it, spec section 4.6.15), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one). Absent: auto under a wave's placement: auto, else local (no static default, so a tool filling in defaults cannot pin a task to local under placement: auto).",
           "type": ["string", "object"],
           "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
           "$ref": "#/$defs/remoteHost"

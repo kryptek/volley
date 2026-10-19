@@ -136,6 +136,7 @@
                   "type": "string",
                   "maxLength": 512,
                   "pattern": "^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[^\\s@:]+$",
+                  "not": { "pattern": "\\.git$" },
                   "description": "The clone's origin normalised to <host>/<path> (e.g. github.com/example-org/example-repo): no scheme, no user, no credentials, no .git suffix."
                 },
                 "release_branch": { "type": "string", "minLength": 1, "maxLength": 255 },

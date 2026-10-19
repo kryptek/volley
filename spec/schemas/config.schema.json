@@ -292,7 +292,16 @@
             "weights": {
               "type": "object",
               "additionalProperties": false,
-              "description": "How much each kind of headroom counts in a candidate's score, in percent of the score.",
+              "description": "Relative weights of each kind of headroom in a candidate's score, renormalised over the headrooms that are known (spec section 4.6.15). They need not sum to 100, but not all four may be 0.",
+              "not": {
+                "required": ["cpu", "slots", "mem", "usage"],
+                "properties": {
+                  "cpu": { "const": 0 },
+                  "slots": { "const": 0 },
+                  "mem": { "const": 0 },
+                  "usage": { "const": 0 }
+                }
+              },
               "properties": {
                 "cpu": {
                   "type": "integer",
@@ -347,7 +356,7 @@
                 { "type": "null" }
               ],
               "default": null,
-              "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: the machine's host name, lowercased into the topic-segment grammar."
+              "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: derived from the machine's host name (spec section 4.6.15). Never a hosts.<name> key. The retained effective config carries the resolved name, never null."
             }
           }
         }

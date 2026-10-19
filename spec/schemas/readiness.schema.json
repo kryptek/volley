@@ -34,7 +34,7 @@
             },
             "ready": {
               "type": "boolean",
-              "description": "true when no blocking check fails: the machine can run an agent (tunnel up or local, toolchain on the non-interactive ssh PATH, versions the supervisor accepts, the wave repo cloned, GitHub and Claude signed in)."
+              "description": "true when no blocking check fails: the machine can run an agent (tunnel up or local, no failing block check, claude and bun on the PATH an agent gets, the supervisor's volley version, GitHub push access and Claude signed in). No doctor report yet: false."
             },
             "reasons": {
               "type": "array",
@@ -59,7 +59,7 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["claude", "bun"],
-              "description": "Whether claude and bun resolve on the machine's non-interactive ssh PATH (the one an agent's tmux session gets); null when not probed yet.",
+              "description": "Whether claude and bun resolve on the PATH an agent's session gets: the non-interactive ssh PATH on a peer, the supervisor's own agent environment on its own machine; null when not probed yet.",
               "properties": {
                 "claude": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] },
                 "bun": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] }
@@ -94,7 +94,10 @@
                     "agents": { "$ref": "#/$defs/shareMode" },
                     "commands": { "$ref": "#/$defs/shareMode" },
                     "plugins": { "$ref": "#/$defs/shareMode" },
-                    "mcp": { "$ref": "#/$defs/shareMode" }
+                    "mcp": {
+                      "enum": ["copy", "own"],
+                      "description": "Never linked (spec section 4.6.11)."
+                    }
                   }
                 }
               }
@@ -110,7 +113,9 @@
                 "required": ["held", "per_machine"],
                 "properties": {
                   "held": { "type": "integer", "minimum": 0 },
-                  "per_machine": { "type": "integer", "minimum": 1, "maximum": 64 }
+                  "per_machine": {
+                    "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine"
+                  }
                 }
               }
             },
@@ -141,7 +146,11 @@
               "maxLength": 200,
               "description": "Why eligible is false, in one line; required then, absent otherwise."
             },
-            "checked_at": { "type": "string", "format": "date-time" }
+            "checked_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the supervisor last computed this verdict. It re-publishes at least every machine_down_after_ms, so an older checked_at, or a supervisor whose own status is not live, means the verdict is stale."
+            }
           },
           "if": { "properties": { "eligible": { "const": false } }, "required": ["eligible"] },
           "then": { "required": ["ineligible_reason"] },
