@@ -44,6 +44,7 @@ export async function volRegister(
         cwd: input.cwd,
         model: input.model,
         started_at: new Date().toISOString(),
+        ...(config.claudeAccount !== undefined ? { claude_account: config.claudeAccount } : {}),
       },
     }),
     namespace: config.namespace,

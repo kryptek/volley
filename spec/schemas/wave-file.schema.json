@@ -62,6 +62,10 @@
       "$ref": "config.schema.json#/$defs/tunables",
       "description": "Per-wave overrides of the supervisor tunables, layered over the global config."
     },
+    "account": {
+      "$ref": "#/$defs/id",
+      "description": "The Claude account (spec section 4.6.11) every agent of the wave runs under: an id from the supervisor's Claude account registry, primary (the default profile) or most_headroom. Default: the claude.default_account tunable, else primary."
+    },
     "brief_preface": {
       "type": "string",
       "minLength": 1,
@@ -129,6 +133,10 @@
           "type": ["string", "object"],
           "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
           "$ref": "#/$defs/remoteHost"
+        },
+        "account": {
+          "$ref": "#/$defs/id",
+          "description": "The Claude account this task's agents run under; overrides the wave's account."
         },
         "files": {
           "type": "array",

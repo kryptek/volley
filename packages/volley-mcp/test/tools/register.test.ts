@@ -49,6 +49,13 @@ describe("vol_register", () => {
     await observer.endAsync();
   });
 
+  it("the registry entry records the Claude account the supervisor launched it under", async () => {
+    state.config.claudeAccount = "work";
+    await volRegister(state, { capabilities: [] });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.claude_account).toBe("work");
+  });
+
   it("publishes a retained status: registered", async () => {
     await volRegister(state, { capabilities: [] });
     const got = await state.broker.queryRetained("volley/test/reg-aaaa/status", 1000);

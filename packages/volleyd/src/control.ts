@@ -46,7 +46,13 @@ export type ControlOp =
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
   | "admission"
   // Spawn one task's agent now (spawn.ts).
-  | "spawn";
+  | "spawn"
+  // Claude account profiles (claude/service.ts, claude/move.ts).
+  | "claude_accounts"
+  | "claude_account_add"
+  | "claude_signin"
+  | "claude_sync"
+  | "agent_move_account";
 
 export interface ControlResponse {
   text: string;

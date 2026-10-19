@@ -32,6 +32,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  claude: { default_account: null },
   hosts: {},
 };
 
@@ -197,4 +198,15 @@ export const DAEMON_DEFAULTS = {
   decision_text_max: 300,
   /** Bound on each git / gh call of restart reconciliation. */
   reconcile_probe_ms: 15_000,
+  /** How often a Claude account sign-in checks for its URL and `claude auth status`. */
+  claude_signin_poll_ms: 2_000,
+  /** How long a background Claude sign-in may wait for the browser before it is failed. */
+  claude_signin_timeout_ms: 900_000,
+  /** Bound on one `claude auth status`. */
+  claude_auth_status_timeout_ms: 15_000,
+  /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
+  claude_json_lock_attempts: 50,
+  claude_json_lock_wait_ms: 20,
+  /** How long an account move waits for the agent to stop before it respawns it. */
+  account_move_stop_ms: 60_000,
 } as const;

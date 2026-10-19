@@ -145,5 +145,5 @@ export function trustDecisionId(root: string, target?: string): string {
 }
 
 /** The decision's question, as the owner sees it. */
-export const trustQuestion = (root: string, target?: string) =>
-  `Needs you: trust ${root}${target !== undefined ? ` on ${target}` : ""} for dispatch?`;
+export const trustQuestion = (root: string, target?: string, account?: string) =>
+  `Needs you: trust ${root}${target !== undefined ? ` on ${target}` : ""}${account !== undefined ? ` in Claude account ${account}` : ""} for dispatch?`;

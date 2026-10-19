@@ -136,7 +136,7 @@ The following top-level namespace prefixes are reserved:
 - `volley/_system/*` — protocol-level state (registry, broker health, federation config)
 - `volley/_meta/*` — implementation tooling (debug taps, replay logs, capture files)
 - `volley/_waves/*` — supervisor state: wave snapshots, decisions, journal events, effective supervisor config (§4.6)
-- `volley-auth/*` — one-time token redemption (§4.6.9), outside the `volley/` root so a broker ACL can confine a token's login to its own two topics
+- `volley-auth/*` — one-time token redemption (§4.6.10), outside the `volley/` root so a broker ACL can confine a token's login to its own two topics
 
 Implementations MUST NOT publish user-space messages under these prefixes. One exception: any agent MAY publish lease requests to `volley/_system/leases/<pool>/requests` (§4.6.5). Every other topic under these prefixes is written only by the broker, the implementation's own tooling, or a supervisor (§4.6).
 
@@ -256,8 +256,9 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `volley/<ns>/<agent_id>/screen` | 0 | yes | `screen` / `screen_tail` | `screen.schema.json` |
 | `volley/_system/auth/ops/<username>` | 1 | no | `_system/auth` / `query` | `auth-request.schema.json` |
 | `volley-auth/redeem/<token_id>` | 1 | no | `_system/auth` / `query` | `auth-request.schema.json` |
-| `volley-auth/redeem/<token_id>/reply` | 1 | no | `_system/auth` / `ack` | — (§4.6.9) |
-| `volley/_system/auth/replies/<correlation_id>` | 1 | no | `_system/auth` / `ack` | — (§4.6.9) |
+| `volley-auth/redeem/<token_id>/reply` | 1 | no | `_system/auth` / `ack` | — (§4.6.10) |
+| `volley/_system/auth/replies/<correlation_id>` | 1 | no | `_system/auth` / `ack` | — (§4.6.10) |
+| `volley/_system/claude/<acct>/signin` | 1 | no | `_system/claude` / `claude_signin_url` \| `claude_signin_done` \| `claude_signin_failed` | — (§4.6.11) |
 
 `_config` is not a valid wave id (wave ids start with `[a-z0-9]`), so the config topic cannot collide with a wave.
 
@@ -312,7 +313,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 `volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits:
 
-`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `spawn_retry_max_s`, `spawn_retry_max`, `brief_preface_max_bytes`, `wake_grace_s`, `screen_tail_interval_s`, `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
+`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `spawn_retry_max_s`, `spawn_retry_max`, `brief_preface_max_bytes`, `wake_grace_s`, `screen_tail_interval_s`, `claude: { default_account }` (string \| null: the Claude account an agent runs under when its task and wave name none, §4.6.11), `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
 
 Per-wave overrides use the same shape with every key optional (a wave file's `config:` block) and appear in the wave state as `effective_config`. The exception is `lease_pools`: pools are machine-global (§4.6.5), so a supervisor rejects a wave file that overrides them rather than accept an override it cannot apply.
 
@@ -340,7 +341,7 @@ A supervisor that runs review roles MUST NOT move a task to `merge_ready` unless
 
 A supervisor that writes briefs for the agents it spawns SHOULD let a repository set rules every one of them gets. The **brief preface** is a file — `<repo>/.volley/brief-preface.md` by default, or the path in the wave file's `brief_preface` key (relative to `repo`, or absolute) — whose bytes the supervisor puts verbatim (no placeholder expansion) at the top of every brief it writes for that wave, for every role, above the role's own text and separated from it by a rule. The file MUST be UTF-8; a supervisor refuses one that is not, rather than alter its bytes. A blank file (only whitespace) counts as no preface. A supervisor bounds its size (`brief_preface_max_bytes`, §4.6.4) and refuses a wave whose preface is larger. The wave state's `brief_preface` (§4.6.1) is `{ path, sha256, bytes }` of the file as read for the current plan version (`sha256` over its bytes), or `null` when there is none, so a client can show which rules the agents got.
 
-#### 4.6.9 Accounts and one-time tokens
+#### 4.6.10 Accounts and one-time tokens
 
 A deployment with broker authentication keeps **accounts**: broker usernames with a **role** that selects their ACL template. `admin` may do everything a coordinator may, plus the account ops below; `steer` reads everything and writes mailboxes (steering, control requests) and lease requests; `watch` only reads; `supervisor` (a volleyd) reads and writes everything except the account-op and answer topics below (its ACL denies `volley/_system/auth/ops/#` and `volley/_system/auth/replies/#`, so it can neither impersonate an admin nor forge an answer); `peer` (a paired machine) writes its own agent channels and `volley/_system/machines/<username>[/#]`. Every authenticated client also keeps the ACL's shared grants (read `volley/#`, its own channels and registry entry, lease requests). Per-agent identities minted for dispatched agents are not accounts. The registry is a file next to the broker's password file (`account.schema.json`: `{ name, role, kind, created, label? }`); it never holds a password. `account_list` adds `last_seen`: the newest of the account's retained registry entry, its retained `status` (where its LWT lands) and its last auth request to this supervisor process.
 
@@ -352,6 +353,20 @@ A deployment with broker authentication keeps **accounts**: broker usernames wit
 
 **Owner decisions (2026-10-18).** The redemption path uses per-token broker logins, not an anonymous redeem topic; account ops use the dedicated `volley/_system/auth/ops/<username>` topic, not the supervisor's mailbox; every request whose answer carries a secret MUST carry `reply_key`; a token login reaches only its own two topics.
 
+
+#### 4.6.11 Claude account profiles
+
+A supervisor that launches Claude Code agents MAY run them under several Claude accounts. Each account is a separate Claude Code profile: its own configuration directory, passed to the agent as `CLAUDE_CONFIG_DIR` (one canonical absolute path with no trailing slash; Claude Code keys the profile's login to that exact string). `primary` names the user's own default profile (no `CLAUDE_CONFIG_DIR`). A profile is signed in only through Claude Code's own sign-in flow. A supervisor MUST NOT collect, store, forward or relay a Claude credential, session token or authorization code: it never reads a profile's credential store, never uses a flow that prints a bearer token, never sets a credential variable (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) in an agent's environment, and never offers a field that would pass a code to the sign-in process.
+
+**Selection.** An agent runs under its task's `account` (wave file), else the wave's `account`, else the `claude.default_account` tunable (§4.6.4), else `primary`. `most_headroom` asks the supervisor for the account with the most usage left; a supervisor without usage data resolves it to `primary`. A spawn under an unknown account, or one whose sign-in has not finished, is refused with a reason. The agent's `.volley/agent.json` and its registry entry carry `claude_account` (§6.2, §6.5). Folder trust is per profile, so a `repo_untrusted` decision (§4.6.2) for such an agent carries `claude_config_dir` and is answered in that profile.
+
+**Sign-in.** `claude_account_add { label, machine?, by }` creates the profile and starts Claude Code's sign-in for it in the background; `claude_signin { acct }` restarts it for an existing profile. The supervisor publishes the authorize URL Claude Code produced, as `claude_signin_url { acct, url, flow, attach }`, on `volley/_system/claude/<acct>/signin`, then `claude_signin_done { acct, plan? }` or `claude_signin_failed { acct, reason }` there. The topic is not retained: whoever opens the URL first chooses the account bound to the profile. `flow` is `browser_callback` (the URL redirects to Claude Code's own listener on the supervisor's machine, so it must be opened in a browser there) or `manual_code` (the page shows a code the user pastes into the sign-in terminal named by `attach`, never into a Volley client). The URL is not journaled; while a sign-in waits, `claude_accounts` returns it, so a client that attached late can still show it.
+
+**Ops.** Mailbox control queries (§4.6.4's request/acknowledgement shape): `claude_accounts` (the registry: `{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }`, plus the sharing modes); `claude_account_add`; `claude_signin`; `claude_sync { acct? }`; `agent_move_account { agent, acct }`. A move is never silent: the supervisor journals `agent_account_moved { agent_id, role, from, to, by }` first, cancels the agent (§4.4), and only once it has stopped retires it and respawns its role under the other account, as a new attempt in the same working directory with a resume note in its brief. An agent that does not stop is not respawned.
+
+**Sharing.** What a profile shares with the primary is chosen per item (`settings.json`, `CLAUDE.md`, `skills`, `agents`, `commands`, `plugins`, `mcp`): `linked` (a symbolic link to the primary's; Claude Code writes through it), `copy` (copied once) or `own`. `mcp` is the `mcpServers` section of the profile's `.claude.json`, copied from the primary's and re-synced by `claude_sync` and before each spawn; it is never linked. The profile's `.claude.json` holds its own account and is never linked or copied whole. MCP server entries can hold third-party secrets, so a supervisor never publishes or journals them.
+
+The `_system` journal (§4.6.3) records `claude_account_added`, `claude_signin_started`, `claude_signin_done`, `claude_signin_failed` and `claude_profile_synced`; a move is journaled in its wave.
 ---
 
 ## 5. Lifecycle states
@@ -409,6 +424,8 @@ Agents register themselves on a reserved retained topic so observers can enumera
 }
 ```
 
+An agent a supervisor launched under a Claude account profile (§4.6.11) adds `claude_account` (the account id, or `primary`), from its assigned identity (§6.5).
+
 ### 6.3 Requirements
 
 - Conforming agents MUST publish a registry entry retained, QoS 1, before publishing any channel other than the initial `spawning` status.
@@ -447,6 +464,7 @@ A supervisor that spawns an agent usually needs to know the agent's id *before* 
 - Supervisors SHOULD keep the file out of commits by adding `.volley/` to the repository's `info/exclude` (`git rev-parse --git-path info/exclude`) when the working directory is a git worktree.
 - `broker` (`{ "username", "password" }`, both strings) carries broker credentials minted for this agent by the supervisor, conventionally with `username` equal to `agent_id` so an ACL can pin the agent to its own topics (§11.5). Every client that runs with the identity (MCP server, CLI, hooks) MUST prefer it over `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. The file then holds a secret: supervisors SHOULD create it mode `0600` and revoke the credentials when the agent retires.
 - `wave`, `task` and `role` are informational for tools that read the file (hooks, the supervisor itself); the MCP server does not interpret them.
+- `claude_account` names the Claude account profile the supervisor launched the agent under (§4.6.11; `primary` for the default profile). A conforming MCP server that finds it copies it into its registry entry (§6.2).
 
 ---
 

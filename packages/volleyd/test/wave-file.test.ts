@@ -223,3 +223,35 @@ describe("parseWaveFile", () => {
     expect(errorsOf("- just\n- a list\n")).toEqual(["(root): must be a mapping"]);
   });
 });
+
+describe("account: (Claude account profiles)", () => {
+  const TASKS = `tasks:
+  T1:
+    issue: 1
+  T2:
+    issue: 2
+    account: personal
+`;
+
+  it("keeps the wave's and a task's account as written", () => {
+    const w = parseWaveFile(`${HEADER}account: work\n${TASKS}`);
+    expect(w.account).toBe("work");
+    expect(w.tasks.T1?.account).toBeUndefined();
+    expect(w.tasks.T2?.account).toBe("personal");
+  });
+
+  it("is optional, and must be an account id", () => {
+    expect(parseWaveFile(`${HEADER}${TASKS}`).account).toBeUndefined();
+    expect(errorsOf(`${HEADER}account: Not An Id\n${TASKS}`)).toEqual([
+      expect.stringMatching(/^account: /),
+    ]);
+  });
+
+  it("claude.default_account is a per-wave config override", () => {
+    const w = parseWaveFile(`${HEADER}config:\n  claude:\n    default_account: work\n${TASKS}`);
+    expect(w.config.claude).toEqual({ default_account: "work" });
+    expect(errorsOf(`${HEADER}config:\n  claude:\n    pick: x\n${TASKS}`)[0]).toMatch(
+      /^config\.claude/,
+    );
+  });
+});

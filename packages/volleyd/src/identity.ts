@@ -26,6 +26,8 @@ export interface AgentIdentityFile {
   task: string;
   role: string;
   broker_url: string;
+  /** The Claude account profile the agent runs under (`primary`: the default profile). */
+  claude_account?: string;
   broker?: BrokerCredentials;
 }
 

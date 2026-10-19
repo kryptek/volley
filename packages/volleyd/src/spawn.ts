@@ -76,6 +76,13 @@ export interface SpawnRequest {
   start?: { ref: string; detach: boolean };
   /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
   files?: Record<string, string>;
+  /**
+   * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
+   * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
+   */
+  account?: { id: string; dir: string | null };
+  /** Appended to the brief: an account move's resume note (claude/move.ts). */
+  resumeNote?: string;
 }
 
 export interface SpawnDeps {
@@ -126,6 +133,11 @@ export interface SpawnDeps {
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
   relaunchSettleMs?: number;
+  /**
+   * Bring a Claude account profile in line before its agent launches (sharing.yaml, the MCP
+   * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
+   */
+  prepareAccount?: (account: { id: string; dir: string }) => Promise<void>;
 }
 
 export type DecisionKind =
@@ -238,14 +250,14 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const cfg =
       deps.remoteTrust !== undefined
         ? await deps.remoteTrust.read()
-        : readClaudeJson(deps.claudeJsonPath);
+        : readClaudeJson(claudeJsonOf(ctx));
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
       if (open !== undefined) {
         return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
       const decisionId = await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-        question: trustQuestion(ctx.root, deps.remoteTrust?.target),
+        question: trustAsk(ctx),
         options: ["trust", "cancel"],
         data: trustData(ctx),
       });
@@ -297,6 +309,18 @@ interface Launched {
   /** Epoch ms just before the launch (an older hooks-error.json is stale). */
   launchedAt: number;
 }
+
+/** The Claude account the spawn runs under, `primary` when none is selected. */
+const accountId = (req: SpawnRequest) => req.account?.id ?? "primary";
+
+/** A Claude account profile's directory, or undefined for the primary. */
+const profileDirOf = (req: SpawnRequest) => req.account?.dir ?? undefined;
+
+/** Folder trust is per profile: its own `.claude.json` (the primary's is `claudeJsonPath`). */
+const claudeJsonOf = (ctx: Ctx) => {
+  const dir = profileDirOf(ctx.req);
+  return dir !== undefined ? join(dir, ".claude.json") : ctx.deps.claudeJsonPath;
+};
 
 /**
  * The wave's brief preface, read at each spawn on the supervisor's host (the wave state shows
@@ -360,9 +384,26 @@ async function launchAttempt(
         ? briefExtraFrom(await host.readFile(briefExtraPath(ctx.root)))
         : briefExtra(ctx.root),
   });
-  await host.writeFile(briefPath, withPreface(preface, rendered));
+  const brief = withPreface(preface, rendered);
+  await host.writeFile(
+    briefPath,
+    req.resumeNote !== undefined ? `${brief.trimEnd()}\n\n---\n\n${req.resumeNote}\n` : brief,
+  );
   if (deps.briefGate !== null)
     await runBriefGate(host.exec, deps.briefGate, briefPath, ctx.worktree);
+
+  const profile = profileDirOf(req);
+  if (profile !== undefined && deps.prepareAccount !== undefined) {
+    try {
+      await deps.prepareAccount({ id: accountId(req), dir: profile });
+    } catch (e) {
+      throw new SpawnError(
+        "CLAUDE_ACCOUNT_PREPARE_FAILED",
+        `Claude account '${accountId(req)}': ${e instanceof Error ? e.message : String(e)}`,
+        { claude_account: accountId(req) },
+      );
+    }
+  }
 
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
@@ -380,6 +421,7 @@ async function launchAttempt(
       task: req.task,
       role: req.role,
       broker_url: deps.brokerUrl,
+      claude_account: accountId(req),
       ...(creds !== undefined ? { broker: creds } : {}),
     });
     // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker.
@@ -389,6 +431,7 @@ async function launchAttempt(
       model: task.model,
       agentId,
       worktree: ctx.worktree,
+      ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -435,6 +478,7 @@ async function launchAttempt(
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
+        claude_account: accountId(req),
         ...(ctx.lock !== undefined ? { lock: ctx.lock.path } : {}),
         ...(recovered !== undefined
           ? { recovered_from: recovered.from, recovery: recovered.reason }
@@ -515,7 +559,7 @@ async function verifyAndRecover(
       const decisionId =
         openDecisionFor(deps.openDecisions, trustId(ctx)) ??
         (await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-          question: trustQuestion(ctx.root, deps.remoteTrust?.target),
+          question: trustAsk(ctx),
           options: ["trust", "cancel"],
           screen,
           data: { ...trustData(ctx), agent_id: cur.agentId },
@@ -711,13 +755,35 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   });
 }
 
-/** The repo_untrusted decision id for the spawn's repo root, on the machine it runs on. */
-const trustId = (ctx: Ctx) => trustDecisionId(ctx.root, ctx.deps.remoteTrust?.target);
+/**
+ * The repo_untrusted decision id for the spawn's repo root, on the machine it runs on, in the
+ * Claude account profile it runs under (each profile has its own folder trust).
+ */
+const trustId = (ctx: Ctx) =>
+  trustDecisionId(
+    ctx.root,
+    ctx.deps.remoteTrust?.target ??
+      (profileDirOf(ctx.req) !== undefined ? `claude-account:${accountId(ctx.req)}` : undefined),
+  );
+
+/** The repo_untrusted question, naming the host and the Claude account where it is answered. */
+const trustAsk = (ctx: Ctx) =>
+  trustQuestion(
+    ctx.root,
+    ctx.deps.remoteTrust?.target,
+    profileDirOf(ctx.req) !== undefined ? accountId(ctx.req) : undefined,
+  );
 
 /** A repo_untrusted decision's facts: the root, and for a remote host where it is trusted. */
 const trustData = (ctx: Ctx): Record<string, unknown> => {
   const r = ctx.deps.remoteTrust;
-  return { repo: ctx.root, ...(r !== undefined ? { host: r.host, target: r.target } : {}) };
+  const profile = profileDirOf(ctx.req);
+  return {
+    repo: ctx.root,
+    ...(r !== undefined ? { host: r.host, target: r.target } : {}),
+    // Answered in that profile's own .claude.json (daemon.ts trustAnswer).
+    ...(profile !== undefined ? { claude_config_dir: profile } : {}),
+  };
 };
 
 /** Keep the screen that triggered a decision under `$VOLLEYD_HOME/waves/<wave>/screens/`. */

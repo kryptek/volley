@@ -31,6 +31,7 @@ coordinator session.
 - [Spawn admission](#spawn-admission)
 - [Topics and the control channel](#topics-and-the-control-channel)
 - [Accounts and one-time tokens](#accounts-and-one-time-tokens)
+- [Claude accounts](#claude-accounts)
 - [Decisions](#decisions)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
@@ -88,11 +89,12 @@ tasks:
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
+# account: work              # the Claude account its agents run under (see Claude accounts)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run;
-default `local`), and `files` (a scheduling hint: paths the task will touch; tasks overlapping
-active ones start later).
+default `local`), `account` (overrides the wave's; see [Claude accounts](#claude-accounts)), and
+`files` (a scheduling hint: paths the task will touch; tasks overlapping active ones start later).
 
 The schema is [`spec/schemas/wave-file.schema.json`](../../spec/schemas/wave-file.schema.json).
 The parser adds the rules a schema cannot express and reports everything with a path:
@@ -264,6 +266,7 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
 | `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
 | `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
+| `volley/_system/claude/<acct>/signin` | no | A Claude account sign-in: its URL, then done / failed (see [Claude accounts](#claude-accounts)). |
 
 **Control requests** go to the daemon's mailbox `volley/<ns>/volleyd/mailbox` as `type: "query"`
 with a fresh `correlation_id` and `payload: { op, text, ... }`. The daemon answers on the sender's
@@ -293,6 +296,11 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], sharing }` |
+| `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
+| `claude_signin` | `acct`, `by` | the same, for an existing profile |
+| `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
+| `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
 wave adds `kill_switch: true` while the kill switch is engaged. `steer` answers once the ack
@@ -305,7 +313,7 @@ while its answer is still pending is not run twice; it gets the one answer.
 ## Accounts and one-time tokens
 
 The Desk manages broker accounts through the daemon, never by writing the password file itself
-(SPEC §4.6.9). The daemon in turn only runs `volley auth` through the [fence](#the-authority-fence):
+(SPEC §4.6.10). The daemon in turn only runs `volley auth` through the [fence](#the-authority-fence):
 `volley auth` owns `passwd`, `acl.conf`, `accounts.json` and `tokens.json` in `$VOLLEY_AUTH_DIR`.
 
 **Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
@@ -352,6 +360,91 @@ bits (WebCrypto: `generateKey({ name: "RSA-OAEP", hash: "SHA-256", modulusLength
 the public key as JWK, decrypt with the private one). An op that would return a secret without a
 usable `reply_key` is refused before anything is created. A redelivered request (same topic and
 `correlation_id`) gets the first answer again.
+
+---
+
+## Claude accounts
+
+volleyd can run agents under several Claude accounts. Each account is its own Claude Code
+profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` moves the root) that
+the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
+`CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
+`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
+SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
+evidence behind each choice below.
+
+> **Terms note.** Volley never collects, stores or intermediates Claude credentials. Sign-in
+> completes through Anthropic's own flow (`claude auth login`, in your browser); volleyd sees the
+> authorize URL and the plan label, never a code, a token or a Keychain item. Usage limits assume
+> individual use: several profiles are for an individual's own accounts, not for pooling or
+> sharing one subscription among people.
+
+```sh
+volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
+volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude signin work           # sign an existing profile in again
+volley claude list                  # profiles, sign-in state, plan, sharing modes
+volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude move <agent-id> work  # stop an agent and respawn it under another account
+```
+
+**Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
+`claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
+(`volley-signin-<acct>`, from a script the [fence](#the-authority-fence) seals) with `$BROWSER`
+set to a helper that only writes down the URL Claude Code asks it to open. That URL redirects to
+Claude Code's own listener on this machine, so open it in a browser **here**; the browser hands
+the code straight back to the `claude` process. volleyd answers the op with the URL and publishes
+`claude_signin_url { acct, url, flow, attach }` on `volley/_system/claude/<acct>/signin` (not
+retained: whoever opens it first picks the account), then polls `claude auth status` until
+`loggedIn` → `claude_signin_done { acct, plan }`, or `claude_signin_failed { acct, reason }`
+(the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
+run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
+the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
+sign-in terminal (`tmux attach -t volley-signin-<acct>`), never into the Desk. `claude setup-token`
+is never used: it prints a bearer token Volley would have to carry. The `_system` journal records
+`claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
+URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
+
+**Selection.** An agent runs under its task's `account:`, else the wave's, else
+`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` falls
+back to the primary until usage metering can rank accounts. A spawn under an unknown account, one
+not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
+usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses;
+`.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
+Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
+`repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
+Remote-host tasks run under the box's default profile: an account named for one is refused, and
+the config default does not apply there.
+
+**Sharing** (`~/.volley/claude/sharing.yaml`, `item: mode`): what each profile shares with the
+primary. Applied before every spawn under a profile and by `volley claude sync`.
+
+| Item | Default | Why |
+| --- | --- | --- |
+| `CLAUDE.md`, `agents`, `commands` | `linked` | read-only in practice |
+| `skills`, `plugins` | `linked` | account-synced content lands in per-account buckets; installs from any profile affect all |
+| `settings.json` | `copy` | `/model` and other settings writes go through a link into every profile |
+| `mcp` | `copy` | the `mcpServers` section of `.claude.json`, re-synced from `~/.claude.json` |
+
+`linked` is a symlink to `~/.claude/<item>` (Claude Code reads **and writes** through it);
+`copy` is copied once, when the profile has none, and is the profile's own from then on; `own` is
+never touched (a link volleyd made is removed). A real file or directory of the profile's own is
+never replaced. `.claude.json` holds the profile's own account and is never linked or copied
+whole: only `mcpServers` is rewritten (read → replace that key → temp file `0600` → rename, under
+Claude Code's own `.claude.json.lock/`). MCP entries can carry third-party secrets (`env`,
+`headers`), so volleyd never publishes or journals them (`claude_profile_synced` carries counts).
+`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched;
+`test/no-credentials.test.ts` keeps every credential location out of `src/`.
+
+**Moving an agent.** `agent_move_account { agent, acct }` journals `agent_account_moved
+{ agent_id, role, from, to, by }` first, cancels the agent (mailbox `cancel` + Escape) and waits
+up to `account_move_stop_ms` for its terminal status. Then it retires it (`moved`) and respawns
+the role under the other account: a new attempt in the same worktree, with a resume note at the
+end of its brief. The move is replayed from the journal, so later spawns of that task role keep
+the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
+alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
 
 ---
 
@@ -496,6 +589,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
+| `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -1190,9 +1284,16 @@ ALLOW (program by bare name only — never a path):
     send --workspace <ref> <text>   text: TYPED_TEXT only
     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
     list-workspaces · ping
-  claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
-    which the launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS),
-    including `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>`
+  claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
+    launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
+    `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+    sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
+    a profile's login state and plan, never a credential)
+  tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
+    `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
+    SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
+    `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
+    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
   volley auth rm-agent <agent_id> [--no-reload]

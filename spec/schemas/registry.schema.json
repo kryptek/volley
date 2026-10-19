@@ -21,6 +21,11 @@
             "capabilities": { "type": "array", "items": { "type": "string" } },
             "cwd": { "type": "string" },
             "model": { "type": "string" },
+            "claude_account": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "The Claude account profile the agent runs under (spec section 4.6.11), from its assigned identity."
+            },
             "started_at": { "type": "string", "format": "date-time" }
           }
         }

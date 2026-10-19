@@ -65,6 +65,11 @@
               "minLength": 1,
               "description": "repo_untrusted / remote_repo_missing on a remote host: its ssh destination. A repo_untrusted decision with a target is answered on that host."
             },
+            "claude_config_dir": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted for an agent under a Claude account profile (spec section 4.6.11): that profile's directory, whose own folder trust answers it."
+            },
             "change": {
               "enum": ["removed", "issue"],
               "description": "plan_change: what the new wave version changed about the task (removed from the plan, or moved to another issue)."

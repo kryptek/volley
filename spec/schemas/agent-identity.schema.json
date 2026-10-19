@@ -23,6 +23,11 @@
       "description": "Pipeline role, e.g. implementer, spec_reviewer, quality_reviewer, fixup."
     },
     "broker_url": { "type": "string", "minLength": 1 },
+    "claude_account": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "description": "The Claude account profile the supervisor launched the agent under (spec section 4.6.11); primary for the default profile."
+    },
     "broker": {
       "type": "object",
       "description": "Broker credentials for this agent (spec section 11.5). The supervisor mints them (volley auth add-agent) with username = agent_id. Beats VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD.",

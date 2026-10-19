@@ -1,0 +1,176 @@
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
+import { parseEnvelope } from "volley-mcp/envelope";
+import { signinDir } from "../../src/claude/signin";
+import { ControlClient } from "../../src/control";
+import { readJournalFile } from "../../src/journal";
+import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
+import { fakeExec } from "../helpers/fake-exec";
+
+/** The claude_* control ops end to end: a real daemon on Aedes, a fake tmux / claude. */
+
+const CALLBACK = readFileSync(
+  new URL("../fixtures/claude/browser-url.txt", import.meta.url),
+  "utf-8",
+).trim();
+
+let env: DaemonEnv;
+afterEach(() => env.cleanup());
+
+async function setup(opts: { signInAfter?: number } = {}) {
+  env = await makeDaemonEnv();
+  const base = mkdtempSync(join(tmpdir(), "volleyd-claude-"));
+  const root = join(base, "claude");
+  const primary = join(base, ".claude");
+  const primaryJson = join(base, ".claude.json");
+  mkdirSync(join(primary, "agents"), { recursive: true });
+  writeFileSync(join(primary, "CLAUDE.md"), "# rules\n");
+  writeFileSync(primaryJson, JSON.stringify({ mcpServers: { volley: { env: { K: "secret" } } } }));
+  let polls = 0;
+  const fx = fakeExec()
+    .on(["tmux", "new-session"], (argv) => {
+      writeFileSync(join(argv[6] as string, "url"), CALLBACK);
+      return {};
+    })
+    .on(["claude", "auth", "status"], () =>
+      ++polls >= (opts.signInAfter ?? 3)
+        ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+        : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
+    );
+  await env.start({
+    claude: { root, primaryDir: primary, exec: fx.exec, signinPollMs: 20, signinTimeoutMs: 5000 },
+    spawner: { claudeJsonPath: primaryJson },
+  });
+  const client = await ControlClient.connect(env.broker.url, NS);
+  const watcher = new VolleyBroker();
+  await watcher.connect({ url: env.broker.url, agentId: "signin-watcher" });
+  const seen: { type: string; payload: Record<string, unknown> }[] = [];
+  await watcher.subscribeStream("volley/_system/claude/+/signin", ({ payload }) => {
+    const e = parseEnvelope(payload);
+    if (e !== null) seen.push({ type: e.type, payload: e.payload as Record<string, unknown> });
+  });
+  const system = () => readJournalFile(join(env.home, "waves", "_system", "journal.jsonl"));
+  return { root, primary, fx, client, watcher, seen, system };
+}
+
+const until = async (pred: () => boolean, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
+describe("claude_* control ops", () => {
+  it("claude_account_add answers with the sign-in URL; done flips the registry; nothing secret is journaled", async () => {
+    const t = await setup();
+    try {
+      const r = await t.client.request("claude_account_add", { label: "Work", by: "owner-1" });
+      expect(r.ok).toBe(true);
+      expect(r.result).toMatchObject({
+        account: { id: "work", label: "Work", machine: "local" },
+        acct: "work",
+        url: CALLBACK,
+        flow: "browser_callback",
+        topic: "volley/_system/claude/work/signin",
+      });
+      await until(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      expect(t.seen.map((e) => e.type)).toEqual(["claude_signin_url", "claude_signin_done"]);
+      // non-retained: nothing left on the topic
+      expect(await env.retained("volley/_system/claude/work/signin")).toBeNull();
+
+      const list = await t.client.request("claude_accounts", {});
+      const accounts = (list.result as { accounts: Record<string, unknown>[] }).accounts;
+      expect(accounts[0]).toMatchObject({
+        id: "work",
+        plan: "max",
+        signin: { state: "signed_in" },
+      });
+
+      await until(() => t.system().some((e) => e.type === "claude_signin_done"));
+      const types = t.system().map((e) => e.type);
+      expect(types).toEqual(
+        expect.arrayContaining([
+          "claude_account_added",
+          "claude_signin_started",
+          "claude_signin_done",
+        ]),
+      );
+      const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
+      expect(journal).not.toContain("oauth/authorize");
+      expect(journal).not.toContain("secret");
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("while a sign-in waits for the browser, claude_accounts shows its URL to a late client", async () => {
+    const t = await setup({ signInAfter: 10_000 });
+    try {
+      await t.client.request("claude_account_add", { label: "slow" });
+      const list = await t.client.request("claude_accounts", {});
+      const a = (list.result as { accounts: Record<string, unknown>[] }).accounts[0];
+      expect(a?.signin).toEqual({
+        state: "pending",
+        url: CALLBACK,
+        flow: "browser_callback",
+        attach: "tmux attach -t volley-signin-slow",
+      });
+      expect(signinDir(t.root, "slow")).toContain(t.root);
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("claude_account_add refuses another machine and a duplicate", async () => {
+    const t = await setup();
+    try {
+      const far = await t.client.request("claude_account_add", { label: "x", machine: "studio" });
+      expect(far).toMatchObject({ ok: false, error: expect.stringMatching(/studio/) });
+      await t.client.request("claude_account_add", { label: "dup" });
+      const again = await t.client.request("claude_account_add", { label: "dup" });
+      expect(again).toMatchObject({ ok: false, error: expect.stringMatching(/already exists/) });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("claude_sync applies sharing and syncs the MCP servers, journaling counts only", async () => {
+    const t = await setup({ signInAfter: 1 });
+    try {
+      await t.client.request("claude_account_add", { label: "work" });
+      const r = await t.client.request("claude_sync", { acct: "work" });
+      expect(r.ok).toBe(true);
+      const dir = join(t.root, "work");
+      expect(lstatSync(join(dir, "CLAUDE.md")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(dir, "agents")).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(readFileSync(join(dir, ".claude.json"), "utf-8")).mcpServers).toEqual({
+        volley: { env: { K: "secret" } },
+      });
+      const synced = t.system().find((e) => e.type === "claude_profile_synced");
+      expect(synced?.data).toMatchObject({ acct: "work", mcp_servers: 1 });
+      expect(JSON.stringify(synced)).not.toContain("secret");
+      expect(await t.client.request("claude_sync", { acct: "nope" })).toMatchObject({ ok: false });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("agent_move_account refuses an agent volleyd does not supervise", async () => {
+    const t = await setup();
+    try {
+      const r = await t.client.request("agent_move_account", { agent: "nobody-1", acct: "work" });
+      expect(r).toMatchObject({ ok: false, error: "no supervised agent 'nobody-1'" });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+});

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { FenceError, sealLaunchScript } from "../src/fence";
 import { LocalCmuxHost } from "../src/hosts/local-cmux";
 import {
   HOOKS_DIR,
@@ -51,6 +52,35 @@ describe("launch.sh", () => {
     expect(JSON.parse(renderMcpConfig(MCP_ENTRY))).toEqual({
       mcpServers: { volley: { command: "bun", args: ["run", MCP_ENTRY] } },
     });
+  });
+
+  it("under a Claude account profile: exports CLAUDE_CONFIG_DIR and strips credential env", () => {
+    const vars = {
+      hooksDir: "/opt/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree: "/wt/w1/T1-implementer",
+      claudeConfigDir: "/srv/claude/work",
+    };
+    const s = renderLaunchScript(vars);
+    const lines = s.split("\n");
+    expect(lines).toContain("export CLAUDE_CONFIG_DIR='/srv/claude/work'");
+    expect(lines).toContain(
+      "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    );
+    expect(lines.findIndex((l) => l.startsWith("export CLAUDE_CONFIG_DIR"))).toBeLessThan(
+      lines.findIndex((l) => l.startsWith("exec claude")),
+    );
+    // The fence seals it like any other launch script; a tampered profile line is refused.
+    expect(() => sealLaunchScript(vars.worktree, s)).not.toThrow();
+    expect(() =>
+      sealLaunchScript(vars.worktree, s.replace("'/srv/claude/work'", "'relative/dir'")),
+    ).toThrow(FenceError);
+    expect(() => sealLaunchScript(vars.worktree, s.replace(/^unset .*$/m, "unset PATH"))).toThrow(
+      FenceError,
+    );
+    // The primary profile: no CLAUDE_CONFIG_DIR line at all.
+    expect(script).not.toContain("CLAUDE_CONFIG_DIR");
   });
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
