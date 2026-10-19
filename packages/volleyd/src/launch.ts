@@ -41,6 +41,37 @@ export function renderMcpConfig(entry: string): string {
   return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
 
+/** An MCP server entry, other than volleyd's own `volley`, that runs volley-mcp. */
+export interface StrayVolleyServer {
+  /** Where the entry was found (a `.claude.json`, the worktree's `.mcp.json`). */
+  source: string;
+  name: string;
+}
+
+/**
+ * The entries in `configs` (each a parsed `.claude.json` or `.mcp.json`, or null) that run
+ * volley-mcp under a name other than `volley`. Under `agent_mcp: inherit` such an entry is not
+ * taken over by volleyd's server, so it starts too: a second Volley server in the agent's
+ * session. A command or argument naming `volley-mcp` counts; a URL-based server is never one.
+ */
+export function strayVolleyServers(
+  configs: readonly { source: string; config: unknown }[],
+): StrayVolleyServer[] {
+  const out: StrayVolleyServer[] = [];
+  for (const { source, config } of configs) {
+    const servers = (config as { mcpServers?: unknown } | null)?.mcpServers;
+    if (typeof servers !== "object" || servers === null) continue;
+    for (const [name, entry] of Object.entries(servers)) {
+      if (name === VOLLEY_MCP_SERVER || typeof entry !== "object" || entry === null) continue;
+      const { command, args } = entry as { command?: unknown; args?: unknown };
+      const argv = [command, ...(Array.isArray(args) ? args : [])];
+      if (argv.some((a) => typeof a === "string" && a.includes("volley-mcp")))
+        out.push({ source, name });
+    }
+  }
+  return out;
+}
+
 /** Single-quote for bash: the value is taken literally. */
 export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;

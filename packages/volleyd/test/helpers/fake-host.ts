@@ -218,6 +218,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
       spawn_timeout_s: o.spawnTimeoutS ?? 1,
       heartbeat_alarm_s: 600,
       brief_preface_max_bytes: CONFIG_DEFAULTS.brief_preface_max_bytes,
+      agent_mcp: CONFIG_DEFAULTS.agent_mcp,
     },
     owner: null,
     journal: (ev) => {

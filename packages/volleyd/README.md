@@ -830,9 +830,13 @@ session started by hand. volleyd's server keeps the name `volley`, which Claude 
 `volley` entry (the coordinator's, with its own `VOLLEY_AGENT_ID`) never starts in an agent's
 session and the agent registers only as itself. A user server under another name that runs
 volley-mcp would start too (and read the agent's `.volley/agent.json`): keep the everyday entry
-named `volley`. The trade-off: more tools, but an agent whose tool set depends on the machine and
-on servers that may prompt, fail to connect or slow its start. The fence accepts both forms and
-nothing else; `agent_spawned` records `agent_mcp: "inherit"` when it applies. The cmux command starts with two spaces, which keeps it out of shell history and away
+named `volley`. volleyd warns at each `inherit` spawn that has one in the profile's `.claude.json`
+`mcpServers` or the worktree's `.mcp.json` (it logs it and journals
+`alarm_raised { alarm: "agent_mcp_stray_volley", servers }`; the spawn goes on). The trade-off:
+more tools, but an agent whose tool set depends on the machine and on servers that may prompt,
+fail to connect or slow its start. The fence accepts both forms and nothing else;
+`agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
+vanished agent keeps the servers it launched with. The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
@@ -1498,20 +1502,22 @@ is for repositories that allow no force-push of any kind: the step's agent gets 
 `git merge --no-edit origin/<release branch>` and a normal `git push origin HEAD:<PR branch>`, and
 its verification also requires the new head to descend from the head the step started at
 (`git merge-base --is-ancestor <old> <new>`): a rewritten branch (a rebase force-pushed anyway) is
-`artifact_missing` (`push`), steered once and then put to the owner. The merge commit contains
+`artifact_missing` (`push`), steered once with its own fix (no force-push: `git checkout -B fix
+<old>`, merge the release branch and then the rewritten branch into it, a normal push) and then
+put to the owner. The merge commit contains
 the release head, so the gate's check finds the branch current. The mode is read when the step
 starts and journaled on its `stage_entered` (`branch_update: "merge"`), so the agent's brief, its
 `.volley/rebase.md` and the check agree even if the tunable changes meanwhile (an account move
-keeps it too). Steers and decisions call that role's work "merge (branch update)"; the role is
+or the respawn of a vanished agent keeps it too). Steers and decisions call that role's work "merge (branch update)"; the role is
 still `rebase` in the wave state and the journal.
 
 **The merge_ready invariant.** The review stage is load-bearing, so the transition into the gate
 goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's pipeline must
 have a stored review with a verdict that holds for the **current head** — a review of that
 head, or of one it descends from only through fixups that ran after that review (they worked
-from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
-re-verified) was reviewed by nobody, so reviews of the heads before it no longer count — unless
-the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
+from its round or a later one) and branch updates (rebase or merge). A head pushed outside the
+pipeline (`pr_head_moved`, re-verified) was reviewed by nobody, so reviews of the heads before
+it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
 (`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals

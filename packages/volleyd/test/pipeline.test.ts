@@ -299,8 +299,14 @@ describe("pipeline: branch_update: merge (no force-push)", () => {
     );
     const steer = h.steers.find((s) => s.role === "rebase");
     expect(steer?.text).toContain(`does not descend from ${H2.slice(0, 12)}`);
-    expect(steer?.text).toContain("merge");
-    expect(steer?.text).not.toMatch(/force-with-lease|lease-guarded/);
+    expect(steer?.text).toContain("Do not force-push.");
+    expect(steer?.text).toContain(
+      `\`git fetch origin && git checkout -B fix ${H2} && git merge --no-edit origin/release/w1 && git merge --no-edit origin/${h.record().pipeline.T1?.branch}\``,
+    );
+    expect(steer?.text).toContain(
+      `then \`git push origin HEAD:${h.record().pipeline.T1?.branch}\` (a normal push)`,
+    );
+    expect(steer?.text).not.toMatch(/force-with-lease|lease-guarded|--force\b/);
 
     // A second miss goes to the owner, worded as the merge step it is.
     await h.finish("rebase", { head: H3, ci: "green" });

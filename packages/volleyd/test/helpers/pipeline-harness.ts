@@ -324,7 +324,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     journal,
     spawn: async (_task, role, req) =>
       holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
-    ...(o.branchUpdate !== undefined ? { branchUpdate: () => branchUpdate ?? "rebase" } : {}),
+    branchUpdate: () => branchUpdate ?? "rebase",
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);

@@ -1243,13 +1243,21 @@ function onVerified(
             role: ev.role,
             agent_id: run.agent_id,
             reason: "artifacts",
-            text: missingSteer(
-              ev.role,
-              out.detail,
-              v.p.branch ?? "the PR branch",
-              v.release_branch,
-              v.p.branch_update,
-            ),
+            text:
+              ev.report.kind === "missing" && ev.report.rewritten_from !== undefined
+                ? rewrittenSteer(
+                    out.detail,
+                    ev.report.rewritten_from,
+                    v.p.branch ?? "the PR branch",
+                    v.release_branch,
+                  )
+                : missingSteer(
+                    ev.role,
+                    out.detail,
+                    v.p.branch ?? "the PR branch",
+                    v.release_branch,
+                    v.p.branch_update,
+                  ),
           },
         ];
       }
@@ -1403,6 +1411,15 @@ function missingSteer(
           ? `Publish the merged branch as \`.volley/rebase.md\` says (merge, never rebase; a normal push to ${branch}, never a force-push)`
           : `Publish the rebased branch as \`.volley/rebase.md\` says (its lease-guarded push to ${branch})`;
   return `volleyd could not verify your work: ${detail}. ${what}, then publish done again.`;
+}
+
+/**
+ * A merge-mode update whose push rewrote the PR history (it does not descend from the step's
+ * start): rebuild the merge on top of that start, merge the rewritten branch in so nothing it
+ * carries is lost, and push forward. Never a force-push.
+ */
+function rewrittenSteer(detail: string, start: string, branch: string, release: string): string {
+  return `volleyd could not verify your work: ${detail}. Do not force-push. Rebuild the merge on the PR history: \`git fetch origin && git checkout -B fix ${start} && git merge --no-edit origin/${release} && git merge --no-edit origin/${branch}\`, then \`git push origin HEAD:${branch}\` (a normal push), then publish done again.`;
 }
 
 /** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
@@ -2334,6 +2351,7 @@ export class PipelineDriver {
           kind: "missing",
           missing: "push",
           detail: `origin/${v.p.branch} is ${report.head.slice(0, 12)}, which does not descend from ${run.start.slice(0, 12)} (the PR head this merge started at): the branch was rewritten, and branch_update: merge allows no force-push`,
+          rewritten_from: run.start,
         };
     }
     let waited: number | undefined;
