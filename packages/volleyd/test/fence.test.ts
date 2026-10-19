@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -861,5 +861,71 @@ describe("single spawn point", () => {
       return /child_process|Bun\.spawn|Bun\.\$|execa|\bspawnSync\b/.test(text);
     });
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () => {
+  const WT = "/wt/w1/T1-implementer";
+  const seal = (claudeConfigDir: string, env: Record<string, string | undefined> = {}) => {
+    vi.stubEnv("HOME", env.HOME ?? "/home/u");
+    vi.stubEnv("VOLLEY_CLAUDE_DIR", env.VOLLEY_CLAUDE_DIR);
+    try {
+      return sealLaunchScript(
+        WT,
+        renderLaunchScript({
+          hooksDir: "/opt/volley/packages/volley-hooks",
+          model: "claude-opus-5-5",
+          agentId: "w1-t1-implementer-1",
+          worktree: WT,
+          claudeConfigDir,
+        }),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  };
+
+  it("allows a profile in the default root, ~/.volley/claude/<acct>", () => {
+    expect(() => seal("/home/u/.volley/claude/work")).not.toThrow();
+  });
+
+  it("allows a profile in a configured root ($VOLLEY_CLAUDE_DIR), even inside a .volley/", () => {
+    expect(() => seal("/srv/claude/work", { VOLLEY_CLAUDE_DIR: "/srv/claude" })).not.toThrow();
+    expect(() =>
+      seal("/data/.volley/profiles/work", { VOLLEY_CLAUDE_DIR: "/data/.volley/profiles" }),
+    ).not.toThrow();
+  });
+
+  it("allows a profile outside any .volley/, wherever its root is", () => {
+    expect(() => seal("/srv/claude/work")).not.toThrow();
+  });
+
+  it("refuses a profile inside the agent's worktree, its .volley/ included", () => {
+    for (const dir of [
+      WT,
+      `${WT}/profile`,
+      `${WT}/.volley/claude/work`,
+      `${WT}/.volley/launch.sh`,
+    ]) {
+      expect(() => seal(dir), dir).toThrow(FenceError);
+      // … even when the profiles root is configured to be there
+      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR: `${WT}/.volley/claude` }), dir).toThrow(
+        FenceError,
+      );
+    }
+  });
+
+  it("refuses any other .volley/ path: not a direct child of the root, or not an account id", () => {
+    for (const dir of [
+      "/home/u/.volley/claude",
+      "/home/u/.volley/claude/work/nested",
+      "/home/u/.volley/claude/Work",
+      "/home/u/.volley/volleyd/work",
+      "/home/u/.volley/claude/../volleyd",
+      "/srv/x/.volley/claude/work",
+      "/srv/x/.VOLLEY/work",
+    ]) {
+      expect(() => seal(dir), dir).toThrow(FenceError);
+    }
   });
 });

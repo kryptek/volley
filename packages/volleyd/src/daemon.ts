@@ -471,6 +471,13 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/**
+ * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
+ * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
+ */
+export function spawnFailedDecisionId(wave: WaveId, task: TaskId, role: Role): string {
+  return `spawn_failed-${createHash("sha256").update(`${wave}/${task}/${role}`).digest("hex").slice(0, 12)}`;
+}
 /** How volleyd resolves the decision it supersedes once the automatic retries stop. */
 const SPAWN_RETRIES_STOPPED = { answer: "retries_stopped", by: DAEMON_AGENT_ID };
 
@@ -2065,7 +2072,7 @@ export class Daemon {
       const question = stopped
         ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
         : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
-      const base = `spawn_failed-${createHash("sha256").update(`${task}/${role}`).digest("hex").slice(0, 12)}`;
+      const base = spawnFailedDecisionId(wave, task, role);
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
       await this.openDecisionNow(

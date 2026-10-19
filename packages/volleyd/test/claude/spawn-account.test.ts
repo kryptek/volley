@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { claudeRoot, profileDir } from "../../src/claude/profiles";
 import { spawnAgent } from "../../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "../helpers/fake-host";
 
@@ -121,5 +122,29 @@ describe("spawn under a Claude account", () => {
       detached: true,
       worktree: first,
     });
+  });
+
+  it("a profile in the DEFAULT root (~/.volley/claude/<acct>) passes the real fence", async () => {
+    // The owner's smoke: every spawn under a profile there was FENCE_DENIED (launch.sh), because
+    // the fence refused any CLAUDE_CONFIG_DIR with a `.volley` segment.
+    env = await makeSpawnEnv();
+    vi.stubEnv("HOME", env.home);
+    vi.stubEnv("VOLLEY_CLAUDE_DIR", undefined);
+    try {
+      const dir = profileDir(claudeRoot(), "work");
+      expect(dir).toBe(join(env.home, ".volley", "claude", "work"));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, ".claude.json"),
+        JSON.stringify({ projects: { [env.repo]: { hasTrustDialogAccepted: true } } }),
+      );
+      const out = await spawnAgent(env.request({ account: { id: "work", dir } }), env.deps);
+      expect(out.kind).toBe("launched");
+      const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+      expect(script).toContain(`export CLAUDE_CONFIG_DIR='${dir}'`);
+      expect(env.events.some((e) => e.type === "agent_spawned")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

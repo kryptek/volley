@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
+import { claudeRoot, isValidAccountId } from "./claude/profiles";
 import { SIGNIN_COMMAND, renderSigninScript } from "./claude/signin-script";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
 import { AGENT_BRANCH } from "./worktree";
@@ -1269,12 +1270,29 @@ function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean
 const outsideVolley = (p: string) =>
   absPath(p) && !p.split("/").some((seg) => seg.toLowerCase() === ".volley");
 
+/** `p` is `dir` or anything below it (both clean absolute paths). */
+const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
+
+/**
+ * A launch script's `CLAUDE_CONFIG_DIR`: an absolute, clean path never inside the agent's own
+ * worktree (which the agent writes, its `.volley/` included), and either outside any `.volley/`
+ * or exactly `<root>/<account id>` — a profile in the configured profiles root (`claudeRoot()`:
+ * `$VOLLEY_CLAUDE_DIR`, default `~/.volley/claude`), the one place volleyd keeps profiles.
+ */
+function profileDirAllowed(dir: string, worktree: string): boolean {
+  if (!absPath(dir) || within(dir, worktree)) return false;
+  if (outsideVolley(dir)) return true;
+  const root = normalize(claudeRoot()).replace(/\/+$/, "");
+  const slash = dir.lastIndexOf("/");
+  return absPath(root) && dir.slice(0, slash) === root && isValidAccountId(dir.slice(slash + 1));
+}
+
 /**
  * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
  * bash and point every hook at other code), optional Claude account profile (`CLAUDE_CONFIG_DIR`,
- * absolute and outside any `.volley/`, with its credential env unset) and `worktree` — so
+ * `profileDirAllowed`, with its credential env unset) and `worktree` — so
  * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and
  * `--` before the prompt). Parsed back into its values and re-rendered, so not one byte can
  * differ from a script volleyd writes.
@@ -1303,7 +1321,7 @@ function isLaunchScript(content: string, worktree: string): boolean {
     ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
   };
   return (
-    (claudeConfigDir === undefined || outsideVolley(claudeConfigDir)) &&
+    (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
