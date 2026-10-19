@@ -203,6 +203,47 @@ describe("Frame depth (D10)", () => {
     expect(section().style.getPropertyValue("--rx")).toBe("");
     fireEvent.pointerUp(bar, { pointerId: 1 });
   });
+
+  it("reads the window's box once per hover, not on every pointer move", () => {
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    const box = vi.spyOn(section(), "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 300,
+    } as DOMRect);
+    fireEvent.pointerEnter(section());
+    for (let i = 0; i < 10; i++) {
+      fireEvent.pointerMove(section(), { clientX: 40 * i, clientY: 30 * i });
+    }
+    expect(section()).toHaveAttribute("data-tilt");
+    expect(box).toHaveBeenCalledTimes(1);
+    // After a drag the window has moved: the next move measures again.
+    const bar = section().querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(bar, { pointerId: 1 });
+    fireEvent.pointerMove(section(), { clientX: 200, clientY: 150 });
+    expect(box).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the Desk when its title bar is dragged (tethers sway only then)", () => {
+    const onDrag = vi.fn();
+    render(
+      <Frame {...base} chrome="glass" onDrag={onDrag}>
+        body
+      </Frame>,
+    );
+    const bar = section().querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10, pointerId: 1 });
+    expect(onDrag).toHaveBeenLastCalledWith(true);
+    fireEvent.pointerUp(bar, { pointerId: 1 });
+    expect(onDrag).toHaveBeenLastCalledWith(false);
+    expect(onDrag).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Frame Needs-you effects", () => {

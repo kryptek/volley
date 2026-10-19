@@ -5,7 +5,10 @@
  * focus (only the selected tab is in the Tab order), ←/→ (wrapping) and
  * Home/End to move, and `aria-controls` pointing the selected tab at the
  * panel the caller renders with `tabPanelProps`. Gooey Nav already settles
- * without the goo under `prefers-reduced-motion`.
+ * without the goo under `prefers-reduced-motion`. The goo is drawn as a CSS
+ * clip-path (`gl={false}`), never WebGL: a page keeps only about 16 live
+ * WebGL contexts, so one per agent window would evict the background's and
+ * the earliest windows' past a dozen agents.
  */
 import type { KeyboardEvent, ReactNode } from "react";
 import GooeyNav from "../rb/GooeyNav/GooeyNav";
@@ -45,22 +48,15 @@ export function GooeyTabs<K extends string>({
     tabs.findIndex((t) => t.key === value),
   );
   const keys = (e: KeyboardEvent<HTMLElement>) => {
-    const last = tabs.length - 1;
-    const next =
-      e.key === "ArrowRight"
-        ? index === last
-          ? 0
-          : index + 1
-        : e.key === "ArrowLeft"
-          ? index === 0
-            ? last
-            : index - 1
-          : e.key === "Home"
-            ? 0
-            : e.key === "End"
-              ? last
-              : null;
-    if (next === null) return;
+    const n = tabs.length;
+    const moves: Record<string, number> = {
+      ArrowRight: (index + 1) % n,
+      ArrowLeft: (index - 1 + n) % n,
+      Home: 0,
+      End: n - 1,
+    };
+    const next = moves[e.key];
+    if (next === undefined) return;
     e.preventDefault();
     const t = tabs[next];
     if (!t) return;
@@ -74,6 +70,7 @@ export function GooeyTabs<K extends string>({
       aria-label={label}
       size="sm"
       color={accent}
+      gl={false}
       items={tabs.map((t) => ({ label: t.label, icon: t.icon }))}
       activeIndex={index}
       onChange={(i: number) => {

@@ -305,11 +305,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tether,
   .tether-pulse {
     animation: none;
-  }
-  .tether-pulse {
     display: none;
   }
 }

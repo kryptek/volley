@@ -408,3 +408,66 @@ describe("App auto-arrange (live store)", () => {
     expect(at("w1")).not.toEqual(dragged);
   });
 });
+
+describe("App tethers (live store, D10)", () => {
+  it("a live progress envelope for an agent sends one pulse along that agent's tether", async () => {
+    localStorage.clear();
+    const broker = scriptedClient();
+    const { container } = render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        clientFactory={broker.factory}
+        settleMs={SETTLE}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+    await broker.deliver(retained());
+    await settle();
+    const tether = () => container.querySelector('.world g.tether[data-agent="impl-1"]');
+    const pulses = () => [...container.querySelectorAll(".world path.tether-pulse")];
+    expect(tether()).not.toBeNull();
+    expect(pulses()).toHaveLength(0);
+    await broker.deliver([
+      msg(
+        "volley/default/impl-1/progress",
+        env("impl-1", "progress", "narration", { progress: 40, msg: "writing tests" }),
+        false,
+      ),
+    ]);
+    expect(pulses()).toHaveLength(1);
+    expect(pulses()[0]?.getAttribute("data-agent")).toBe("impl-1");
+  });
+
+  it("dragging an agent window by its title bar sways its tether; arranging sways none", () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const sways = () => container.querySelectorAll(".world g.tether[data-sway]");
+      const win = [...container.querySelectorAll<HTMLElement>(".world .win")].find((w) =>
+        w.querySelector(".gooey-tabs"),
+      ) as HTMLElement;
+      const bar = win.querySelector(".win-bar") as HTMLElement;
+      fireEvent.pointerDown(bar, { clientX: 100, clientY: 100, pointerId: 1 });
+      fireEvent.pointerMove(bar, { clientX: 260, clientY: 220, pointerId: 1 });
+      fireEvent.pointerUp(bar, { pointerId: 1 });
+      const dragged = win.style.left;
+      expect(sways()).toHaveLength(1);
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(sways()).toHaveLength(0);
+      // `f` arranges and fits: the dragged window moves, and no cable sways.
+      fireEvent.keyDown(screen.getByRole("region", { name: /Desk canvas/ }), { key: "f" });
+      expect(win.style.left).not.toBe(dragged);
+      expect(sways()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

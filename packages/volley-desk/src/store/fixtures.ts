@@ -3,7 +3,9 @@
  * as the Volley topics a supervisor and its agents would publish
  * (`volley/_waves/<wave>/state`, `volley/<ns>/<agent>/{status,progress,screen}`,
  * …) and folded through the real reducer, so demo mode exercises the same code
- * path as a live broker. Enabled by `?demo=1` or `VITE_VOLLEY_DEMO=1`.
+ * path as a live broker. Enabled by `?demo=1` or `VITE_VOLLEY_DEMO=1`;
+ * `&agents=N` (dev only) adds working agents on a `load-test` wave, for the
+ * 20-agent fps check.
  */
 import { initialState, reduceAll } from "./reducer";
 import type {
@@ -498,17 +500,68 @@ function globals(now: number): DeskMessage[] {
   ];
 }
 
+// ------------------------------------------------------ sized demo (dev)
+
+/** The most agents `?agents=N` asks for. */
+export const DEMO_AGENTS_MAX = 40;
+
+/** `?agents=N` → the demo's agent count, clamped to the stock demo's … `DEMO_AGENTS_MAX`. */
+export function demoAgentCount(search: string): number {
+  const n = Number.parseInt(new URLSearchParams(search).get("agents") ?? "", 10);
+  return Number.isFinite(n) ? Math.min(DEMO_AGENTS_MAX, Math.max(AGENTS.length, n)) : AGENTS.length;
+}
+
+const LOAD_WAVE = "load-test";
+const LOAD_OWNER = "coordinator-load";
+const loadAgentId = (k: number) => `${LOAD_WAVE}-l${k}-implementer-1`;
+/** The narrating stock agents (`NARRATION_POOL`) the load agents copy, in turn. */
+const LOAD_BASES = ["status-chip-t1-fixup-1", "ci-speed-t3b-implementer-1"];
+
+/** The stock agent a load agent copies (its feed, screen and narration), or `undefined`. */
+function loadBase(id: string): string | undefined {
+  const k = /^load-test-l(\d+)-implementer-1$/.exec(id)?.[1];
+  return k === undefined ? undefined : LOAD_BASES[(Number(k) - 1) % LOAD_BASES.length];
+}
+
+function loadMessages(extra: number, now: number): DeskMessage[] {
+  if (extra <= 0) return [];
+  const ks = Array.from({ length: extra }, (_, i) => i + 1);
+  const wave: WaveDef = {
+    id: LOAD_WAVE,
+    owner: LOAD_OWNER,
+    coordinator: { state: "working", lastSeenMin: 0 },
+    status: "running",
+    releaseBranch: `release/2026-10-18-${LOAD_WAVE}`,
+    tasks: ks.map((k) => ({
+      id: `L${k}`,
+      issue: 900 + k,
+      title: `Load task ${k}`,
+      after: [],
+      stage: "implement" as const,
+      agents: { implementer: loadAgentId(k) },
+    })),
+  };
+  return [
+    waveState(wave, now),
+    ...ks.flatMap((k) => {
+      const base = AGENTS.find((a) => a.id === loadBase(loadAgentId(k))) as AgentDef;
+      return agentMessages({ ...base, id: loadAgentId(k), parent: LOAD_OWNER }, now);
+    }),
+  ];
+}
+
 /** Every retained/live message the demo starts from, oldest agent history first per agent. */
-export function demoMessages(now: number): DeskMessage[] {
+export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[] {
   return [
     ...globals(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
     ...AGENTS.flatMap((a) => agentMessages(a, now)),
+    ...loadMessages(agents - AGENTS.length, now),
   ];
 }
 
-export function demoState(now = Date.now()): DeskState {
-  return reduceAll(initialState(), demoMessages(now));
+export function demoState(now = Date.now(), agents = AGENTS.length): DeskState {
+  return reduceAll(initialState(), demoMessages(now, agents));
 }
 
 // -------------------------------------------------------------- simulation
@@ -557,7 +610,11 @@ const SCREEN_POOL: Record<string, string[]> = {
  */
 export function tick(state: DeskState, step: number, now = Date.now()): DeskState {
   const msgs: DeskMessage[] = [];
-  for (const [id, pool] of Object.entries(NARRATION_POOL)) {
+  // The pooled stock agents, then any `?agents=N` load agents on their base's pool.
+  const ids = [...Object.keys(NARRATION_POOL), ...Object.keys(state.agents).filter(loadBase)];
+  for (const id of ids) {
+    const base = loadBase(id) ?? id;
+    const pool = NARRATION_POOL[base] as string[];
     const a = state.agents[id];
     if (!a || a.status?.type !== "working") continue;
     msgs.push(heartbeat(id, step + 1, now));
@@ -571,7 +628,7 @@ export function tick(state: DeskState, step: number, now = Date.now()): DeskStat
         receivedAt: now,
       });
     }
-    const s = SCREEN_POOL[id];
+    const s = SCREEN_POOL[base];
     if (s)
       msgs.push(
         screen(id, [...(a.screen?.lines ?? []), s[step % s.length] as string].slice(-30), now),

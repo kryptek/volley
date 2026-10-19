@@ -1,7 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line except the
 // lines marked `Desk:` (tab semantics: a `role`, label, key handler and per-item props, with the lists and
-// items presentational, so the Desk's agent tabs keep role=tablist / role=tab; and measuring in the nav's
-// own pixels, since the Desk's canvas is zoomed with a CSS transform).
+// items presentational, so the Desk's agent tabs keep role=tablist / role=tab; measuring in the nav's
+// own pixels, since the Desk's canvas is zoomed with a CSS transform; and WebGL made optional: `gl={false}`
+// draws the goo as a CSS clip-path pill, which is also the fallback once a context is lost, and the
+// context is released on unmount, since a page keeps only about 16 live WebGL contexts).
 'use client';
 
 import {
@@ -54,6 +56,7 @@ interface GooeyNavProps {
   'aria-label'?: string;
   onKeyDown?: (event: KeyboardEvent<HTMLElement>) => void;
   itemProps?: (index: number) => Record<string, unknown>;
+  gl?: boolean; // Desk: false never opens a WebGL context.
 }
 
 interface Rect {
@@ -331,7 +334,8 @@ const GooeyNav = ({
   role,
   'aria-label': ariaLabel,
   onKeyDown,
-  itemProps
+  itemProps,
+  gl: useGL = true // Desk
 }: GooeyNavProps) => {
   const presentational = role ? ('presentation' as const) : undefined; // Desk
   const [innerIndex, setInnerIndex] = useState(initialActiveIndex);
@@ -378,10 +382,14 @@ const GooeyNav = ({
     if (!stage || !canvas || !list || !overlay || !fallback) return;
 
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false });
-    const pipeline = gl ? build(gl) : null;
-    fallback.style.display = pipeline ? 'none' : 'block';
-    canvas.style.display = pipeline ? 'block' : 'none';
+    const context = useGL ? canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false }) : null; // Desk
+    let gl = context; // Desk
+    let pipeline = gl ? build(gl) : null; // Desk
+    const pick = () => { // Desk
+      fallback.style.display = pipeline ? 'none' : 'block';
+      canvas.style.display = pipeline ? 'block' : 'none';
+    }; // Desk
+    pick(); // Desk
 
     const view = { width: 0, height: 0 };
     let rects: Rect[] = [];
@@ -401,7 +409,7 @@ const GooeyNav = ({
       const box = stage.getBoundingClientRect();
       // Desk: inside the zoomed canvas, measure in the nav's own (unscaled) pixels.
       const k = stage.offsetWidth > 0 && box.width > 0 ? box.width / stage.offsetWidth : 1;
-      const ratio = Math.min(window.devicePixelRatio || 1, 2) * Math.max(k, 0.5); // Desk
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
       view.width = box.width / k; // Desk
       view.height = box.height / k; // Desk
       const outerWidth = view.width + MARGIN * 2; // Desk
@@ -585,13 +593,12 @@ const GooeyNav = ({
       overlay.style.visibility = 'visible';
 
       if (!pipeline || !gl) {
-        const box = shape(target, 1);
-        if (box) {
-          fallback.style.transform = `translate(${box.x.toFixed(2)}px, ${box.y.toFixed(2)}px)`;
-          fallback.style.width = `${box.w}px`;
-          fallback.style.height = `${box.h}px`;
-        }
-        fallback.style.opacity = box ? '1' : '0';
+        // Desk: the pill and its goo, clipped to the same traced shape as the active labels.
+        fallback.style.width = `${view.width}px`; // Desk
+        fallback.style.height = `${view.height}px`; // Desk
+        fallback.style.clipPath = overlay.style.clipPath; // Desk
+        fallback.style.borderRadius = '0'; // Desk: the clip draws the pill's ends.
+        fallback.style.opacity = boxes.length || blobs.length ? '1' : '0'; // Desk
         return;
       }
 
@@ -812,6 +819,15 @@ const GooeyNav = ({
       wake();
     };
 
+    // Desk: a lost context (the browser drops the oldest past its limit) falls back to the CSS pill.
+    const onLost = () => { // Desk
+      pipeline = null; // Desk
+      gl = null; // Desk
+      pick(); // Desk
+      render(); // Desk
+    }; // Desk
+    canvas.addEventListener('webglcontextlost', onLost); // Desk
+
     const resizeObserver = new ResizeObserver(() => {
       measure();
       if (!drops.length) settle(target < 0 ? indexRef.current : target);
@@ -845,13 +861,16 @@ const GooeyNav = ({
       resizeObserver.disconnect();
       list.removeEventListener('pointerover', onOver);
       list.removeEventListener('pointerleave', onLeave);
+      canvas.removeEventListener('webglcontextlost', onLost); // Desk
       if (gl && pipeline) {
         gl.deleteBuffer(pipeline.buffer);
         gl.deleteProgram(pipeline.program);
       }
+      // Desk: release the context once the canvas has left the page (StrictMode re-runs this effect on it).
+      if (gl) setTimeout(() => !canvas.isConnected && context?.getExtension('WEBGL_lose_context')?.loseContext()); // Desk
       engineRef.current = null;
     };
-  }, [items.length]);
+  }, [items.length, useGL]); // Desk
 
   useEffect(() => {
     engineRef.current?.go(current);

@@ -92,9 +92,23 @@ describe("recessed text boxes", () => {
     const field = screen.getByRole("textbox", { name: "Fallback model" });
     expect(field).toHaveClass("recessed");
     expect(field).toBeEnabled();
+    // The focus-ring rules of desk.css (the 3 px ring): none applies until the field is focused.
+    const ringSelectors = [...css.matchAll(/([^{}]+)\{[^}]*0 0 0 3px[^}]*\}/g)].flatMap((m) =>
+      (m[1] ?? "").split(",").map((sel) => sel.trim()),
+    );
+    expect(ringSelectors.length).toBeGreaterThan(0);
+    const ringed = () =>
+      ringSelectors.filter((sel) => {
+        try {
+          return field.matches(sel);
+        } catch {
+          return false; // a selector jsdom cannot evaluate
+        }
+      });
+    expect(ringed()).toEqual([]);
     field.focus();
-    expect(document.activeElement).toBe(field);
-    expect(document.activeElement?.matches(".recessed")).toBe(true);
+    expect(field.matches(":focus")).toBe(true);
+    expect(ringed()).toContain("input.recessed:focus");
   });
 
   it("the background search and the Appearance number field are recessed", () => {

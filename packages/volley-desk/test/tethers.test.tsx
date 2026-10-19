@@ -1,4 +1,5 @@
 import { act, render } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
 import {
@@ -12,9 +13,27 @@ import {
 import { PULSE_MS, SWAY } from "../src/look/tetherPulses";
 
 const tethers: Tether[] = [
-  { id: "a1", wave: { x: 0, y: 0, w: 620 }, agent: { x: 656, y: 0 }, accent: "#6ee7f9" },
-  { id: "a2", wave: { x: 0, y: 0, w: 620 }, agent: { x: 656, y: 506 }, accent: "#6ee7f9" },
-  { id: "b1", wave: { x: 0, y: 700, w: 620 }, agent: { x: 1152, y: 700 }, accent: "#c4b5fd" },
+  {
+    id: "a1",
+    waveId: "wa",
+    wave: { x: 0, y: 0, w: 620 },
+    agent: { x: 656, y: 0 },
+    accent: "#6ee7f9",
+  },
+  {
+    id: "a2",
+    waveId: "wa",
+    wave: { x: 0, y: 0, w: 620 },
+    agent: { x: 656, y: 506 },
+    accent: "#6ee7f9",
+  },
+  {
+    id: "b1",
+    waveId: "wb",
+    wave: { x: 0, y: 700, w: 620 },
+    agent: { x: 1152, y: 700 },
+    accent: "#c4b5fd",
+  },
 ];
 
 const setWidth = (w: number) =>
@@ -152,7 +171,7 @@ describe("Tethers", () => {
     const { container, rerender } = render(<Tethers on tethers={tethers} />);
     const cable = (id: string) => container.querySelector(`g.tether[data-agent="${id}"]`);
     const moved = tethers.map((t) => (t.id === "b1" ? { ...t, agent: { x: 1190, y: 760 } } : t));
-    rerender(<Tethers on tethers={moved} />);
+    rerender(<Tethers on tethers={moved} dragging="b1" />);
     expect(cable("b1")).toHaveAttribute("data-sway");
     expect(cable("a1")).not.toHaveAttribute("data-sway");
     const still = tetherPath(moved[2] as Tether, sagOf(moved[2] as Tether));
@@ -165,6 +184,106 @@ describe("Tethers", () => {
     });
     expect(cable("b1")).not.toHaveAttribute("data-sway");
     expect(cable("b1")?.querySelector(".tether-core")?.getAttribute("d")).toBe(still);
+  });
+
+  it("dragging a wave window sways all of its cables", () => {
+    fakeClock();
+    const { container, rerender } = render(<Tethers on tethers={tethers} />);
+    const moved = tethers.map((t) =>
+      t.waveId === "wa" ? { ...t, wave: { ...t.wave, x: t.wave.x + 30, y: t.wave.y + 20 } } : t,
+    );
+    rerender(<Tethers on tethers={moved} dragging="wa" />);
+    expect(container.querySelectorAll("[data-sway]")).toHaveLength(2);
+    expect(container.querySelector('g.tether[data-agent="b1"]')).not.toHaveAttribute("data-sway");
+  });
+
+  it("windows moved without a drag (arrange, auto-fit) do not sway their cables", () => {
+    fakeClock();
+    const { container, rerender } = render(<Tethers on tethers={tethers} />);
+    const arranged = tethers.map((t) => ({
+      ...t,
+      agent: { x: t.agent.x + 200, y: t.agent.y + 90 },
+    }));
+    rerender(<Tethers on tethers={arranged} />);
+    expect(container.querySelectorAll("[data-sway]")).toHaveLength(0);
+    // Another window being dragged does not sway these.
+    const again = arranged.map((t) => ({ ...t, agent: { x: t.agent.x + 10, y: t.agent.y } }));
+    rerender(<Tethers on tethers={again} dragging="some-other-window" />);
+    expect(container.querySelectorAll("[data-sway]")).toHaveLength(0);
+  });
+
+  it("a pulse runs on CSS alone: no animation frames, and one render to retire it", () => {
+    fakeClock();
+    const raf = vi.spyOn(window, "requestAnimationFrame");
+    let commits = 0;
+    const tree = (ts: Tether[]) => (
+      <Profiler id="t" onRender={() => commits++}>
+        <Tethers on tethers={ts} />
+      </Profiler>
+    );
+    const { container, rerender } = render(tree(tethers));
+    rerender(tree(tethers.map((t) => (t.id === "a1" ? { ...t, beat: 1 } : t))));
+    expect(container.querySelectorAll("path.tether-pulse")).toHaveLength(1);
+    commits = 0;
+    act(() => {
+      vi.advanceTimersByTime(PULSE_MS + 50);
+    });
+    expect(container.querySelectorAll("path.tether-pulse")).toHaveLength(0);
+    expect(commits).toBe(1);
+    expect(raf).not.toHaveBeenCalled();
+  });
+
+  it("pulses retire in order when several are in flight", () => {
+    fakeClock();
+    const { container, rerender } = render(<Tethers on tethers={tethers} />);
+    const pulses = () => container.querySelectorAll("path.tether-pulse").length;
+    rerender(<Tethers on tethers={tethers.map((t) => (t.id === "a1" ? { ...t, beat: 1 } : t))} />);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    rerender(
+      <Tethers
+        on
+        tethers={tethers.map((t) => ({ ...t, beat: t.id === "b1" ? 2 : t.id === "a1" ? 1 : null }))}
+      />,
+    );
+    expect(pulses()).toBe(2);
+    act(() => {
+      vi.advanceTimersByTime(PULSE_MS - 500 + 10);
+    });
+    expect(pulses()).toBe(1);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(pulses()).toBe(0);
+  });
+
+  it("off: beats and drags do no work (no pulses pooled, no frames, no renders)", () => {
+    fakeClock();
+    const raf = vi.spyOn(window, "requestAnimationFrame");
+    let commits = 0;
+    const tree = (on: boolean, ts: Tether[], dragging?: string) => (
+      <Profiler id="t" onRender={() => commits++}>
+        <Tethers on={on} tethers={ts} {...(dragging ? { dragging } : {})} />
+      </Profiler>
+    );
+    const { container, rerender } = render(tree(false, tethers));
+    const next = tethers.map((t) => ({
+      ...t,
+      beat: 3,
+      agent: { x: t.agent.x + 40, y: t.agent.y },
+    }));
+    rerender(tree(false, next, "a1"));
+    commits = 0;
+    act(() => {
+      vi.advanceTimersByTime(PULSE_MS + 50);
+    });
+    expect(commits).toBe(0);
+    expect(raf).not.toHaveBeenCalled();
+    // Turned back on: nothing queued while off shows up.
+    rerender(tree(true, next));
+    expect(container.querySelectorAll("path.tether-pulse")).toHaveLength(0);
+    expect(container.querySelectorAll("[data-sway]")).toHaveLength(0);
   });
 
   it.each([

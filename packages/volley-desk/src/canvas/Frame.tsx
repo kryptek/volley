@@ -13,7 +13,9 @@
  * `win-edge` overlay drawing the lit top edge, dark bottom edge and inner
  * highlight ring above the content. The window tilts toward the pointer by up
  * to `TILT_MAX_DEG` (`--rx` / `--ry` + `data-tilt`, set on the element, so no
- * re-render); never while dragged, under reduced motion or at phone width.
+ * re-render); never while dragged, under reduced motion or at phone width. The
+ * box and the gate are read once per hover (again after a drag), not on every
+ * pointer move. `onDrag` reports the title-bar drag (the tethers sway then).
  */
 import type React from "react";
 import "../styles/attention.css";
@@ -137,6 +139,8 @@ export interface FrameProps {
   onMove: (dx: number, dy: number) => void;
   onFocus: () => void;
   onSize?: (w: number, h: number) => void;
+  /** The title bar is grabbed (`true`) or let go (`false`). */
+  onDrag?: (dragging: boolean) => void;
   born?: boolean;
 }
 
@@ -161,6 +165,8 @@ export function Frame(p: FrameProps) {
     return () => ro.disconnect();
   }, []);
 
+  // The hovered box and whether tilt is allowed, until the pointer leaves or a drag moves the window.
+  const hovered = useRef<{ r: DOMRect; allowed: boolean } | null>(null);
   const untilt = () => {
     const el = box.current;
     if (!el?.hasAttribute("data-tilt")) return;
@@ -170,9 +176,10 @@ export function Frame(p: FrameProps) {
   };
   const tilt = (e: React.PointerEvent) => {
     const el = box.current;
-    if (!el || last.current || e.pointerType === "touch" || !tiltAllowed()) return;
-    const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return;
+    if (!el || last.current || e.pointerType === "touch") return;
+    hovered.current ??= { r: el.getBoundingClientRect(), allowed: tiltAllowed() };
+    const { r, allowed } = hovered.current;
+    if (!allowed || r.width <= 0 || r.height <= 0) return;
     const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
     const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     el.style.setProperty("--rx", `${((0.5 - fy) * 2 * TILT_MAX_DEG).toFixed(2)}deg`);
@@ -183,8 +190,10 @@ export function Frame(p: FrameProps) {
   const down = (e: React.PointerEvent) => {
     if ((e.target as Element).closest("button")) return;
     untilt();
+    hovered.current = null;
     last.current = { x: e.clientX, y: e.clientY };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    p.onDrag?.(true);
   };
   const move = (e: React.PointerEvent) => {
     if (!last.current) return;
@@ -192,7 +201,10 @@ export function Frame(p: FrameProps) {
     last.current = { x: e.clientX, y: e.clientY };
   };
   const up = () => {
+    if (!last.current) return;
     last.current = null;
+    hovered.current = null;
+    p.onDrag?.(false);
   };
 
   const inner = (
@@ -265,8 +277,14 @@ export function Frame(p: FrameProps) {
         } as CSSProperties
       }
       onPointerDownCapture={p.onFocus}
+      onPointerEnter={() => {
+        hovered.current = null;
+      }}
       onPointerMove={tilt}
-      onPointerLeave={untilt}
+      onPointerLeave={() => {
+        hovered.current = null;
+        untilt();
+      }}
       aria-label={p.label ?? (typeof p.title === "string" ? p.title : undefined)}
     >
       {p.attn === "you" ? wrap(framed) : framed}

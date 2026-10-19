@@ -58,6 +58,15 @@
   --gn-muted: var(--mute);
   --gn-ink: var(--ink);
 }
+/* The goo is a CSS clip-path pill (no WebGL per window): lit from above like the windows. */
+.gooey-tabs .gooey-nav__fallback {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--gn-pill) 72%, white),
+    var(--gn-pill) 55%,
+    color-mix(in srgb, var(--gn-pill) 80%, black)
+  );
+}
 .feed,
 .term {
   height: 190px;

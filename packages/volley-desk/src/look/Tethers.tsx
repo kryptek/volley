@@ -10,10 +10,12 @@
  * each cable is a bright core and a thin specular highlight lifted 1 px. Each
  * time an agent publishes `progress` (`beat`) an energy pulse runs from the
  * wave window to the agent window (a short dash on a CSS `stroke-dashoffset`
- * animation, pooled by `PulsePool`), and dragging a window sways its cables on
- * a damped spring. One `requestAnimationFrame` loop runs only while a pulse
- * or a sway is live. Under reduced motion or at phone width the cables are
- * static: no pulses, no sway.
+ * animation, pooled by `PulsePool`, each retired by one timer at the pool's
+ * `nextEnd`), and dragging a window (`dragging`: the id of the window whose
+ * title bar is held) sways its cables on a damped spring; windows moved by
+ * arrange or fit do not sway. One `requestAnimationFrame` loop runs only
+ * while a sway is live. Under reduced motion, at phone width or with the
+ * tethers off nothing moves: no pulses, no sway.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useReducedMotion } from "../a11y/motion";
@@ -25,6 +27,8 @@ type Pos = { x: number; y: number };
 export interface Tether {
   /** The agent id. */
   id: string;
+  /** The wave window's id: dragging it sways all of its cables. */
+  waveId?: string;
   /** The wave window's top-left and width. */
   wave: Pos & { w: number };
   /** The agent window's top-left. */
@@ -88,18 +92,50 @@ const ends = (t: Tether): Ends => ({
   beat: t.beat ?? null,
 });
 
-export function Tethers({ on, tethers }: { on: boolean; tethers: readonly Tether[] }) {
+export function Tethers({
+  on,
+  tethers,
+  dragging = null,
+}: {
+  on: boolean;
+  tethers: readonly Tether[];
+  /** The window being dragged by its title bar, if any. */
+  dragging?: string | null;
+}) {
   const id = useId().replace(/:/g, "");
   const reduced = useReducedMotion();
   const narrow = useViewportWidth() < NARROW_PX;
   const still = reduced || narrow;
+  // Nothing moves on cables that are static or not drawn.
+  const idle = still || !on;
 
   const pool = useRef(new PulsePool());
   const sways = useRef(new Map<string, Sway>());
   const seen = useRef(new Map<string, Ends>());
   const raf = useRef(0);
   const last = useRef(0);
+  const retireAt = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setFrame] = useState(0);
+
+  // One timer, at the end of the oldest pulse in flight; the pulse itself is CSS.
+  const disarm = () => {
+    if (retireAt.current !== null) clearTimeout(retireAt.current);
+    retireAt.current = null;
+  };
+  const arm = () => {
+    disarm();
+    const end = pool.current.nextEnd();
+    if (end === null) return;
+    retireAt.current = setTimeout(
+      () => {
+        retireAt.current = null;
+        pool.current.retire(performance.now());
+        setFrame((f) => f + 1);
+        arm();
+      },
+      Math.max(0, end - performance.now()),
+    );
+  };
 
   const loop = useRef<(now: number) => void>(() => {});
   loop.current = (now: number) => {
@@ -111,11 +147,8 @@ export function Tethers({ on, tethers }: { on: boolean; tethers: readonly Tether
       if (swaySettled(next)) sways.current.delete(agent);
       else sways.current.set(agent, next);
     }
-    pool.current.retire(performance.now());
     setFrame((f) => f + 1);
-    if (sways.current.size > 0 || pool.current.list().length > 0) {
-      raf.current = requestAnimationFrame((t) => loop.current(t));
-    }
+    if (sways.current.size > 0) raf.current = requestAnimationFrame((t) => loop.current(t));
   };
   const wake = () => {
     if (raf.current) return;
@@ -123,27 +156,29 @@ export function Tethers({ on, tethers }: { on: boolean; tethers: readonly Tether
     raf.current = requestAnimationFrame((t) => loop.current(t));
   };
 
-  // New beats and moved ends since the last render: pulses and sways.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `wake` only touches refs
+  // New beats and dragged ends since the last render: pulses and sways.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `wake`, `arm` and `disarm` only touch refs
   useLayoutEffect(() => {
     const now = performance.now();
-    let live = false;
+    let pulsed = false;
+    let swayed = false;
     const ids = new Set<string>();
     for (const t of tethers) {
       ids.add(t.id);
       const cur = ends(t);
       const prev = seen.current.get(t.id);
       seen.current.set(t.id, cur);
-      if (!prev || still) continue;
+      if (!prev || idle) continue;
       if (cur.beat !== null && cur.beat !== prev.beat) {
         pool.current.add(t.id, now);
-        live = true;
+        pulsed = true;
       }
+      if (dragging === null || (dragging !== t.id && dragging !== t.waveId)) continue;
       const dx = cur.x2 - prev.x2 - (cur.x1 - prev.x1);
       const dy = cur.y2 - prev.y2 - (cur.y1 - prev.y1);
       if (dx !== 0 || dy !== 0) {
         sways.current.set(t.id, kickSway(sways.current.get(t.id), dx, dy));
-        live = true;
+        swayed = true;
       }
     }
     for (const agent of seen.current.keys()) {
@@ -152,20 +187,24 @@ export function Tethers({ on, tethers }: { on: boolean; tethers: readonly Tether
         sways.current.delete(agent);
       }
     }
-    if (still) {
+    if (idle) {
       sways.current.clear();
       pool.current.retire(Number.POSITIVE_INFINITY);
+      disarm();
+      cancelAnimationFrame(raf.current);
+      raf.current = 0;
     }
-    if (live) {
-      setFrame((f) => f + 1);
-      wake();
-    }
-  }, [tethers, still]);
+    if (pulsed) arm();
+    if (swayed) wake();
+    if (pulsed || swayed) setFrame((f) => f + 1);
+  }, [tethers, idle, dragging]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `disarm` only touches refs
   useEffect(
     () => () => {
       cancelAnimationFrame(raf.current);
       raf.current = 0;
+      disarm();
     },
     [],
   );
