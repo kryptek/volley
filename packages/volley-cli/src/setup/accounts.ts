@@ -313,13 +313,36 @@ function adminTokenChange(ctx: SetupContext): Change {
   return {
     summary:
       "Issue a one-time admin token (10 minutes, single use) to sign in to the Desk as admin",
-    detail: "volley auth token: printed here only; tokens.json keeps its hash",
+    detail:
+      ctx.deliverToken === undefined
+        ? "volley auth token: printed here only; tokens.json keeps its hash"
+        : "volley auth token: shown once, to this browser only; tokens.json keeps its hash",
     apply: async () => {
-      const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
-        withAdmin(ctx.auth, fn),
+      const deliver = ctx.deliverToken;
+      if (deliver === undefined) {
+        const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
+          withAdmin(ctx.auth, fn),
+        );
+        if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
+        return [];
+      }
+      // The token comes back as JSON on a captured stdout and goes to `deliver` only.
+      const capture = makeBufferIO({ now: () => ctx.auth.io.now() });
+      const code = await accountVerb(
+        { ...ctx.auth, io: { ...capture, stderr: ctx.auth.io.stderr } },
+        "token",
+        undefined,
+        { json: true },
+        (fn) => withAdmin(ctx.auth, fn),
       );
       if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
-      return [];
+      const { token, expires_at } = JSON.parse(capture.readStdout()) as {
+        token: string;
+        expires_at: string;
+      };
+      const tokenId = token.split("_")[2] ?? "";
+      deliver({ token, token_id: tokenId, expires_at });
+      return [`Issued a one-time admin token (${tokenId}, until ${expires_at}).`];
     },
   };
 }

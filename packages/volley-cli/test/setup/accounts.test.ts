@@ -98,6 +98,26 @@ describe("setup: accounts", () => {
     expect(tokens[0].kind).toBe("admin");
   });
 
+  it("hands the one-time admin token to deliverToken when set, never to stdout", async () => {
+    await setUp();
+    const delivered: { token: string; token_id: string; expires_at: string }[] = [];
+    m.ctx.deliverToken = (t) => {
+      delivered.push(t);
+    };
+    const lines = await applyAll(await planAccounts(m.ctx));
+    expect(delivered).toHaveLength(1);
+    const [t] = delivered;
+    expect(t?.token).toMatch(/^vly_admin_[0-9a-f]{8}_[0-9a-f]{32}$/);
+    expect(t?.token).toContain(`_${t?.token_id}_`);
+    const stored = JSON.parse(readFileSync(authFile("tokens.json"), "utf-8")).tokens;
+    expect(t?.expires_at).toBe(stored[0].expires_at);
+    expect(m.io.readStdout()).not.toMatch(/vly_admin_/);
+    expect(lines.join("\n")).not.toMatch(/vly_admin_/);
+    expect(lines).toContain(
+      `Issued a one-time admin token (${t?.token_id}, until ${t?.expires_at}).`,
+    );
+  });
+
   it("a second plan finds everything done (the admin token is pending)", async () => {
     await setUp();
     await applyAll(await planAccounts(m.ctx));

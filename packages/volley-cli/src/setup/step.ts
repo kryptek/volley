@@ -75,6 +75,18 @@ export interface SetupContext {
   lan?: boolean;
   deskHost: string;
   deskPort: number;
+  /**
+   * Where the accounts step's one-time admin token goes. Unset (the terminal): printed on
+   * stdout. volleyd sets it to seal the token to the Desk that asked (`setup_apply`).
+   */
+  deliverToken?: (t: IssuedToken) => void;
+}
+
+/** A one-time admin token as `volley auth token --json` prints it. */
+export interface IssuedToken {
+  token: string;
+  token_id: string;
+  expires_at: string;
 }
 
 export interface Change {
