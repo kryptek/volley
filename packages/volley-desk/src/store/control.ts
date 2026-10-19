@@ -24,8 +24,8 @@
  *
  * **Setup ops** (SPEC §4.6.10, `setup-result.schema.json`). The wizard
  * mirrors `volley setup`'s five steps (detect → security → accounts →
- * services → phone) as volleyd runs O3's own planners for it. They are admin
- * ops, so they travel the account-op topic:
+ * services → phone), and volleyd runs setup's own planners for it. They are
+ * admin ops, so they travel the account-op topic:
  * - `setup_plan { lan?, repair? }` plans every step fresh: what it found, the
  *   changes it would make (a change only a terminal can make carries
  *   `terminal: { reason, command }`), blocked / skipped, and a `plan_id` per
@@ -47,6 +47,9 @@
  * - `admin_token` issues a one-time admin token: `{ token_id, expires_at }`,
  *   the token sealed (a volleyd that prints it in its terminal instead answers
  *   without `sealed`).
+ * - `desk_password` gives the shared `desk` login (which no file keeps) a new
+ *   password: `{ username: "desk" }`, the password sealed (`{ username,
+ *   password }`), shown once.
  * A volleyd that does not run setup answers `unknown op` (`isUnknownOp`), and
  * the wizard points at `volley setup` in a terminal instead.
  */
