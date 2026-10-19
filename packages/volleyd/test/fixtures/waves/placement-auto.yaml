@@ -1,0 +1,22 @@
+# A wave whose tasks the supervisor places across machines (SPEC §4.6.15).
+wave: placement-auto
+repo: ~/repos/example
+release_branch: release/placement-auto
+model: claude-opus-5-5
+pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]
+placement: auto
+placement_prefer: [box-a]
+placement_avoid: [box-c]
+heavy_pools: [backend-it]
+tasks:
+  T1:
+    issue: 201
+  T2:
+    issue: 202
+    heavy: true
+  T3:
+    issue: 203
+    host: local
+  T4:
+    issue: 204
+    after: [T1]

@@ -23,10 +23,17 @@ function sourceFiles(dir: string): string[] {
   );
 }
 
+/**
+ * Keys whose children are not tunable names: `lease_pools` is keyed by pool, and the children of
+ * `placement.weights` are generic words (`cpu`, `slots`, `mem`, `usage`) that name kinds of
+ * headroom, not settings a line could hard-code under their own name.
+ */
+const OPAQUE = new Set(["lease_pools", "weights"]);
+
 /** Every tunable key, including nested ones (admission.*, mailbox.*). */
 function tunableKeys(obj: Record<string, unknown>): string[] {
   return Object.entries(obj).flatMap(([k, v]) =>
-    typeof v === "object" && v !== null && !Array.isArray(v) && k !== "lease_pools"
+    typeof v === "object" && v !== null && !Array.isArray(v) && !OPAQUE.has(k)
       ? [k, ...tunableKeys(v as Record<string, unknown>)]
       : [k],
   );

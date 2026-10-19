@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { AUTO_HOST } from "./placement";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
   PipelineStage,
@@ -35,6 +36,7 @@ interface RawTask {
   host?: string | InlineHost;
   files?: string[];
   account?: string;
+  heavy?: boolean;
 }
 
 interface RawWave {
@@ -51,6 +53,9 @@ interface RawWave {
   config?: TunablesPatch;
   brief_preface?: string;
   account?: string;
+  placement?: "auto" | "local";
+  placement_prefer?: string[];
+  placement_avoid?: string[];
 }
 
 /** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
@@ -160,9 +165,10 @@ function normalise(w: RawWave): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
-      ...normaliseHost(t.host),
+      ...normaliseHost(t.host, w.placement),
       files: t.files ?? [],
       ...(t.account !== undefined ? { account: t.account } : {}),
+      ...(t.heavy === true ? { heavy: true } : {}),
     };
   }
   return {
@@ -181,12 +187,21 @@ function normalise(w: RawWave): Wave {
     config: w.config ?? {},
     ...(w.brief_preface !== undefined ? { brief_preface: w.brief_preface } : {}),
     ...(w.account !== undefined ? { account: w.account } : {}),
+    ...(w.placement === "auto" ? { placement: "auto" as const } : {}),
+    ...(w.placement_prefer !== undefined ? { placement_prefer: w.placement_prefer } : {}),
+    ...(w.placement_avoid !== undefined ? { placement_avoid: w.placement_avoid } : {}),
   };
 }
 
-/** `host:` as a name (`local`, a config `hosts.<name>`) plus the inline spec when there is one. */
-function normaliseHost(h: RawTask["host"]): Pick<WaveTask, "host" | "host_spec"> {
-  if (h === undefined) return { host: "local" };
+/**
+ * `host:` as a name (`local`, `auto`, a config `hosts.<name>`) plus the inline spec when there is
+ * one. No `host:` is `auto` under the wave's `placement: auto`, else `local`.
+ */
+function normaliseHost(
+  h: RawTask["host"],
+  placement: RawWave["placement"],
+): Pick<WaveTask, "host" | "host_spec"> {
+  if (h === undefined) return { host: placement === "auto" ? AUTO_HOST : "local" };
   if (typeof h === "string") return { host: h };
   return { host: h.name ?? (h.target as string), host_spec: h };
 }

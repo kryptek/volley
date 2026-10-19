@@ -47,11 +47,16 @@ import {
 import {
   type AdmissionState,
   type AdmissionSummary,
+  type HostVerdict,
   type Sample,
   type Samples,
   type Verdict,
   allowJson,
   decide,
+  decideHost,
+  forHost,
+  hostSamples,
+  machineReasons,
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
@@ -165,6 +170,7 @@ import {
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
 import { type DoctorRun, type PeerReply, PeerService } from "./peers";
+import { AUTO_HOST, type Snapshot, needsPlacement, place, reserve } from "./placement";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -630,6 +636,11 @@ type HandlerResult = Reply & {
 };
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+/** Whether a wave places tasks (SPEC §4.6.15): `placement: auto`, or a task still `host: auto`. */
+const placing = (w: Wave): boolean =>
+  w.placement === AUTO_HOST ||
+  w.task_order.some((id) => needsPlacement(w.tasks[id] ?? { host: "" }));
+
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -883,6 +894,11 @@ export class Daemon {
   private readonly published = new Map<string, { key: string; at: number }>();
   /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
   private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
+  // --- Fleet (F3): placement ---
+  /** Each peer's own admission verdict, decided at each of its heartbeats (per-host admission). */
+  private readonly hostAdmission = new Map<string, HostVerdict>();
+  /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
+  private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
   private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
@@ -1203,7 +1219,10 @@ export class Daemon {
         const name = m.topic.split("/")[3] ?? "";
         // A cleared record (peer_remove) forgets the machine, so a late `down` cannot revive it.
         if (m.payload === "") {
-          void this.enqueue(async () => this.machines.forget(name));
+          void this.enqueue(async () => {
+            this.machines.forget(name);
+            this.hostAdmission.delete(name);
+          });
           return;
         }
         const record = parseMachine(m.topic, m.payload);
@@ -1215,6 +1234,7 @@ export class Daemon {
             return;
           }
           this.machines.observe(record);
+          if (record.tunnel === "up") this.sampleHost(name, record);
           await this.publishReadiness(name);
         });
       }),
@@ -1907,6 +1927,18 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
+      // --- Fleet (F3): a wave that places its tasks admits them one by one, each on its machine ---
+      if (placing(rec.wave)) {
+        const before = JSON.stringify(this.heldBack.get(wave) ?? []);
+        const r = await this.admitPlaced(wave, rec, candidates, live, eff);
+        live += r.admitted;
+        this.heldBack.set(wave, r.reasons);
+        if (r.budget) await this.budgetExhausted(wave, null);
+        if (r.changed || (r.admitted === 0 && before !== JSON.stringify(r.reasons)))
+          await this.publishState(wave);
+        continue;
+      }
+      // --- end Fleet (F3) ---
       const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
         live,
         hardCeiling: eff.hard_ceiling,
@@ -1945,6 +1977,163 @@ export class Daemon {
         }
       }
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F3, SPEC §4.6.15): placement at admission, per-host admission
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Admit a placing wave's ready tasks in order: within the hard ceiling, the spawn budget and the
+   * global signals; each task placed (an auto task on the best eligible machine, a pinned one where
+   * the wave file says), then admitted by its machine's own signals (a peer's per-host verdict, the
+   * local verdict on the supervisor's own machine), journaled `task_placed` then `task_admitted`,
+   * and reserved, so the next placement of the tick sees it. A task with no eligible machine stays
+   * queued with the closest machine's reason, and is placed again next tick.
+   */
+  private async admitPlaced(
+    wave: WaveId,
+    rec: WaveRecord,
+    candidates: TaskId[],
+    live: number,
+    eff: Tunables,
+  ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
+    const w = rec.wave as Wave;
+    let changed = false;
+    const prefix = `${wave}/`;
+    for (const k of [...this.heldTask.keys()]) {
+      if (k.startsWith(prefix) && !candidates.includes(k.slice(prefix.length))) {
+        this.heldTask.delete(k);
+        changed = true;
+      }
+    }
+    const hold = (id: TaskId, why: string) => {
+      if (this.heldTask.get(`${prefix}${id}`) === why) return;
+      this.heldTask.set(`${prefix}${id}`, why);
+      changed = true;
+    };
+    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const global = forHost(gate, OPEN_ADMISSION);
+    const reasons = new Set(global.reasons);
+    if (global.allow <= 0) return { admitted: 0, reasons: [...reasons], budget: false, changed };
+    const budget = spawnBudget(w, eff.spawn_budget_multiplier, rec.budget_raised ?? 0);
+    const opts = {
+      placement: eff.placement,
+      warn_at_pct: eff.claude.warn_at_pct,
+      localName: this.config.localName(),
+    };
+    let snap = this.placementSnapshot(gate);
+    let used = spawnsUsed(rec);
+    let admitted = 0;
+    let localLeft = gate.allow;
+    let budgetHit = false;
+    for (const id of candidates) {
+      if (live + admitted >= eff.hard_ceiling) {
+        reasons.add(`hard ceiling reached: ${live + admitted}/${eff.hard_ceiling} live agents`);
+        break;
+      }
+      if (used >= budget) {
+        reasons.add(`spawn budget exhausted: ${used}/${budget} spawns`);
+        budgetHit = true;
+        break;
+      }
+      const def = w.tasks[id];
+      if (def === undefined) continue;
+      const p = place(def, w, snap, opts);
+      if (p.host === null) {
+        hold(id, p.why);
+        continue;
+      }
+      // A placement (not a task of a wave that does not opt in) is admitted by its machine.
+      const placed = needsPlacement(def) || w.placement === AUTO_HOST;
+      const v =
+        !placed || p.local ? gate : forHost(gate, this.hostAdmission.get(p.host) ?? OPEN_ADMISSION);
+      if (v.allow <= 0 || ((!placed || p.local) && localLeft <= 0)) {
+        hold(id, v.reasons.join("; ") || `${p.host}: no start allowed now`);
+        continue;
+      }
+      if (this.heldTask.delete(`${prefix}${id}`)) changed = true;
+      if (placed && rec.state?.tasks.find((t) => t.id === id)?.placement === undefined) {
+        await this.append(wave, {
+          type: "task_placed",
+          task: id,
+          data: {
+            task: id,
+            host: p.host,
+            score: p.score,
+            candidates: p.candidates,
+            by: p.by,
+            ...(p.local ? { local: true } : {}),
+          },
+        });
+      }
+      snap = reserve(snap, p.host);
+      await this.append(wave, { type: "task_admitted", task: id, data: {} });
+      admitted++;
+      used++;
+      if (!placed || p.local) localLeft--;
+    }
+    return { admitted, reasons: [...reasons], budget: budgetHit, changed };
+  }
+
+  /** What placement knows now: the own machine and every configured host, with their verdicts. */
+  private placementSnapshot(gate: Admission): Snapshot {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const extra = this.requirementsExtra();
+    const names = [local, ...Object.keys(cfg.hosts).filter((n) => n !== local)];
+    return {
+      machines: names.map((name) => {
+        const isLocal = name === local;
+        const input = this.readinessInput(name, isLocal, cfg, extra);
+        const v = readiness(input);
+        return {
+          name,
+          local: isLocal,
+          ...(input.record !== undefined ? { record: input.record } : {}),
+          ready: v.ready,
+          reasons: v.reasons,
+          drain: v.drain,
+          max_agents: v.max_agents,
+          agents: v.placed,
+          heavy: v.heavy,
+          usage_pct: v.usage.five_hour_pct,
+          held: isLocal ? machineReasons(gate) : (this.hostAdmission.get(name)?.reasons ?? []),
+        };
+      }),
+      reservations: {},
+    };
+  }
+
+  /** A peer's heartbeat is one per-host admission sample (memory available, load per core). */
+  private sampleHost(name: string, record: MachineRecord): void {
+    const eff = this.config.effective();
+    this.hostAdmission.set(
+      name,
+      decideHost(name, hostSamples(record), this.hostAdmission.get(name)?.state ?? {}, {
+        mem_available_min_pct: eff.placement.mem_available_min_pct,
+        load_per_core_max: eff.placement.load_per_core_max,
+        hysteresis_samples: eff.admission.hysteresis_samples,
+      }),
+    );
+  }
+
+  /**
+   * Placements reserved on machine `name` (null: on any) that have not spawned: placed, admitted
+   * and still queued without an implementer.
+   */
+  private reservedOn(name: string | null): number {
+    let n = 0;
+    for (const log of this.waves.values()) {
+      const rec = log.record;
+      for (const t of rec.state?.tasks ?? []) {
+        if (t.placement === undefined || t.stage !== "queued" || t.agents.implementer !== undefined)
+          continue;
+        if (!rec.admitted.includes(t.id)) continue;
+        if (name === null || t.placement.host === name) n++;
+      }
+    }
+    return n;
   }
 
   /**
@@ -2958,7 +3147,9 @@ export class Daemon {
       ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
-      placed: isLocal ? this.supervised.size : this.placedOn(name),
+      placed: isLocal
+        ? this.supervised.size + this.reservedOn(null)
+        : this.placedOn(name) + this.reservedOn(name),
       heavy: Object.fromEntries(
         Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
           c.per_machine === undefined
@@ -4432,6 +4623,11 @@ export class Daemon {
     if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
       return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
     if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    if (this.waves.get(wave)?.record.wave?.tasks[task]?.host === AUTO_HOST)
+      return {
+        ok: false,
+        error: `task ${task} is not placed yet (host: auto): it is placed when the scheduler admits it`,
+      };
     this.refused.delete(`${wave}/${task}/${role}`);
     try {
       const res = await this.startSpawn(wave, task, role);
@@ -4603,7 +4799,7 @@ export class Daemon {
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
       const host = rec.wave?.tasks[t.id]?.host;
-      if (host !== undefined && host !== "local") t.host = host;
+      if (host !== undefined && host !== "local" && host !== AUTO_HOST) t.host = host;
       // A paired machine that is down: its running agents too (SPEC §4.6.14).
       const machine = t.host !== undefined ? this.machines.record(t.host) : undefined;
       if (machine?.tunnel === "down" && t.stage !== "done" && t.stage !== "cancelled") {
@@ -4622,6 +4818,8 @@ export class Daemon {
       const parked = this.parked.get(`${wave}/${t.id}`);
       if (parked !== undefined) t.why_waiting = parked;
       else if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
+      else if (candidates.has(t.id) && this.heldTask.has(`${wave}/${t.id}`))
+        t.why_waiting = this.heldTask.get(`${wave}/${t.id}`) as string;
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
     }
     for (const t of state.tasks) {
