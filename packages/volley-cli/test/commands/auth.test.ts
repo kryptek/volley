@@ -17,6 +17,7 @@ import { realAuthDeps } from "../../src/auth/context";
 import { ACCOUNT_ROLE_MAP, DYNSEC_ADMIN_USER, VOLLEY_ROLES, roleName } from "../../src/auth/roles";
 import { auth } from "../../src/commands/auth";
 import { makeBufferIO } from "../../src/io";
+import { encodeQr, renderQr } from "../../src/setup/qr";
 import { type TestDeps, fakeDeps } from "../helpers/auth-deps";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 
@@ -710,6 +711,39 @@ describe("volley auth", () => {
         const r = await run(["token"], deps);
         expect(r.stdout).toContain(`http://localhost:5288/#signin=${TOKEN}`);
         expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
+      });
+
+      it("signin-link prints the ready-to-open link on setup's LAN address, and its QR code", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+          }),
+        );
+        const r = await run(["signin-link", "--role", "steer", "--label", "tablet"], deps);
+        expect(r.code).toBe(0);
+        const token = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(r.stdout)?.[0] as string;
+        const url = `http://192.0.2.7:5288/#signin=${token}`;
+        expect(r.stdout).toContain(`  ${url}\n`);
+        expect(r.stdout).toContain(renderQr(encodeQr(url)));
+        expect(r.stdout).not.toContain("localhost");
+        // Without a setup record: this machine's Desk, saying to use its address elsewhere.
+        rmSync(join(home, "setup.json"));
+        const local = await run(["signin-link", "--role", "watch", "--label", "tv"], deps);
+        const t2 = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(local.stdout)?.[0] as string;
+        expect(local.stdout).toContain(`http://localhost:5199/#signin=${t2}`);
+        expect(local.stdout).toContain("use this machine's address instead");
+        // --json stays the bare machine-readable answer.
+        const j = await run(["signin-link", "--role", "steer", "--label", "x", "--json"], deps);
+        expect(Object.keys(JSON.parse(j.stdout))).toEqual(["token", "username", "expires_at"]);
       });
 
       it("token --json prints the token, its broker login and expiry", async () => {
