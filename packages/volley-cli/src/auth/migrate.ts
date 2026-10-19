@@ -73,7 +73,7 @@ export interface MigrateFlags {
 const RESTART_WAIT_MS = 10_000;
 
 /** The files an `include_dir` line names, as text (mosquitto reads them as part of the config). */
-function includedFiles(configText: string): string[] {
+export function includedFiles(configText: string): string[] {
   const out: string[] = [];
   for (const line of configText.split("\n")) {
     const m = /^\s*include_dir\s+(\S+)/.exec(line);

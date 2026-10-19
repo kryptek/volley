@@ -18,6 +18,8 @@ Subcommands:
   auth     Manage broker credentials (init, agents, accounts, one-time tokens)
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)
   claude   Claude account profiles on volleyd (add, signin, list, sync, move)
+  setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
+  desk     Serve the built Volley Desk (desk serve) for phones and the setup service
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -65,6 +67,10 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/lease")).lease as Subcommand;
     case "claude":
       return (await import("./commands/claude")).claude as Subcommand;
+    case "setup":
+      return (await import("./commands/setup")).setup as Subcommand;
+    case "desk":
+      return (await import("./commands/desk-serve")).desk as Subcommand;
     default:
       return null;
   }
