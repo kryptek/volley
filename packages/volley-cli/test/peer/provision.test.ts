@@ -54,6 +54,10 @@ const installs = (m: FakePeerMachine, pkg: string) =>
     .filter((a) => a[0] === "env" && a.some((w) => w.endsWith(`/${pkg}/scripts/install.sh`)));
 const mcpCalls = (m: FakePeerMachine) =>
   m.calls.map((c) => c.argv).filter((a) => basename(a[0] ?? "") === "claude" && a[1] === "mcp");
+const flagOf = (argv: string[] | undefined, flag: string) => {
+  const i = argv?.indexOf(flag) ?? -1;
+  return i >= 0 ? argv?.[i + 1] : undefined;
+};
 const linkOf = (p: string) => (lstatSync(p).isSymbolicLink() ? readlinkSync(p) : null);
 
 describe("volley peer doctor: the Claude profile's skills", () => {
@@ -102,6 +106,29 @@ describe("volley peer doctor: the Claude profile's skills", () => {
     );
   });
 
+  it("a dangling link is a broken link, and the installer re-links it", async () => {
+    const m = machine({ profile: { skills: "broken", url: TUNNEL } });
+    const r = await report(m);
+    expect(check(r, "skills")?.ok).toBe(false);
+    expect(check(r, "skills")?.detail).toContain("volley is a broken link");
+    await run(m, { fix: true, yes: true });
+    expect(linkOf(join(m.skillsDir, "volley"))).toBe(join(m.volleyDir, "packages", "volley-skill"));
+    expect(check(await report(m), "skills")?.ok).toBe(true);
+  });
+
+  it("skills: copy repairs a dangling link (the link removed, then the copy made)", async () => {
+    const m = machine({ profile: { skills: "broken", url: TUNNEL } });
+    const sharing = { ...DEFAULT_SHARING, skills: "copy" as const };
+    const r = await report(m, { profile: target({ sharing }) });
+    expect(check(r, "skills")).toMatchObject({ ok: false, severity: "warn" });
+    expect(check(r, "skills")?.detail).toContain("volley is a broken link");
+    const at = join(m.skillsDir, "volley");
+    expect(check(r, "skills")?.fix).toContain(`rm ${at} && cp -R`);
+    await run(m, { profile: target({ sharing }), fix: true, yes: true });
+    expect(lstatSync(at).isDirectory()).toBe(true);
+    expect(check(await report(m, { profile: target({ sharing }) }), "skills")?.ok).toBe(true);
+  });
+
   it("skills: copy copies a missing skill once and keeps one that is there", async () => {
     const m = machine({ profile: { skills: "absent", url: TUNNEL } });
     const sharing = { ...DEFAULT_SHARING, skills: "copy" as const };
@@ -145,16 +172,45 @@ describe("volley peer doctor: the Claude profile's hooks", () => {
     expect(dry).toHaveLength(1);
     expect(dry[0]).toContain("--dry-run");
     expect(dry[0]).toContain(`CLAUDE_SETTINGS=${m.settingsFile}`);
-    expect(dry[0]).toContain(`VOLLEY_BROKER_URL=${TUNNEL}`);
+    expect(flagOf(dry[0], "--broker-url")).toBe(TUNNEL);
+    // The URL is a flag, never the installer's env (it ignores an ambient VOLLEY_BROKER_URL).
+    expect(dry[0]?.some((w) => w.startsWith("VOLLEY_BROKER_URL="))).toBe(false);
 
     m.calls.length = 0;
     await run(m, { fix: true, yes: true });
     const ran = installs(m, "volley-hooks").filter((a) => !a.includes("--dry-run"));
     expect(ran).toHaveLength(1);
     expect(ran[0]).toContain(`CLAUDE_SETTINGS=${m.settingsFile}`);
-    expect(ran[0]).toContain("VOLLEY_BROKER_URL=mqtt://127.0.0.1:21883");
+    expect(flagOf(ran[0], "--broker-url")).toBe("mqtt://127.0.0.1:21883");
     expect(readFileSync(m.settingsFile, "utf-8")).toBe(fakeHooksSettings(m.volleyDir, TUNNEL));
     expect(check(await report(m), "hooks")?.ok).toBe(true);
+  });
+
+  it("a namespace other than the default is passed to the hooks; the default is not", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const r = await report(m, { profile: target({ namespace: "team-a" }) });
+    expect(check(r, "hooks")?.ok).toBe(false);
+    expect(flagOf(installs(m, "volley-hooks")[0], "--namespace")).toBe("team-a");
+    await run(m, { profile: target({ namespace: "team-a" }), fix: true, yes: true });
+    expect(readFileSync(m.settingsFile, "utf-8")).toBe(
+      fakeHooksSettings(m.volleyDir, TUNNEL, "team-a"),
+    );
+    m.calls.length = 0;
+    expect(check(await report(m, { profile: target({ namespace: "default" }) }), "hooks")?.ok).toBe(
+      false,
+    );
+    expect(installs(m, "volley-hooks")[0]).not.toContain("--namespace");
+  });
+
+  it("a URL with a login is never handed to the hooks: the login is dropped, and said so", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const r = await report(m, {
+      profile: target({ brokerUrl: "mqtt://someone:pw-not-printed@127.0.0.1:21883" }),
+    });
+    expect(flagOf(installs(m, "volley-hooks")[0], "--broker-url")).toBe(TUNNEL);
+    expect(check(r, "hooks")?.ok).toBe(true);
+    expect(check(r, "hooks")?.detail).toContain("login");
+    expect(JSON.stringify(r)).not.toContain("pw-not-printed");
   });
 
   it("hooks installed for another port differ and are re-installed", async () => {
@@ -230,6 +286,23 @@ describe("volley peer doctor: the Claude profile's MCP server", () => {
     expect(r.stdout).toMatch(/mcp: run it yourself/);
     expect(r.stdout).not.toContain("hunter2");
     expect(r.stdout).not.toContain("someone");
+    // The printed re-registration keeps the entry's own settings (by name, never by value).
+    const fix = check(await report(m), "mcp")?.fix ?? "";
+    expect(fix).toContain('"VOLLEY_AUTH_USERNAME":"<yours>"');
+    expect(fix).toContain('"VOLLEY_AUTH_PASSWORD":"<yours>"');
+    expect(fix).toContain(`"VOLLEY_BROKER_URL":"${TUNNEL}"`);
+  });
+
+  it("an entry with an agent id of its own is the person's: kept in the printed fix, never rewritten", async () => {
+    const mine = {
+      ...fakeMcpEntry("/elsewhere/volley", "mqtt://127.0.0.1:21999"),
+      env: { VOLLEY_AGENT_ID: "laptop", VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21999" },
+    };
+    const m = machine({ profile: { mcp: mine, url: TUNNEL } });
+    const r = await report(m);
+    expect(check(r, "mcp")?.fix).toContain('"VOLLEY_AGENT_ID":"laptop"');
+    await run(m, { fix: true, yes: true });
+    expect(mcpCalls(m)).toEqual([]);
   });
 
   it("mcp: own is left as is", async () => {
@@ -262,6 +335,8 @@ describe("volley peer doctor: the Claude profile overall", () => {
       expect(check(r, id)).toMatchObject({ ok: false, severity: "warn" });
     }
     expect(check(r, "sharing")?.detail).toContain("from the supervisor");
+    // Each item carries its own fix: the sharing row has none (it would run nothing).
+    expect(check(r, "sharing")?.fix).toBeUndefined();
     const d = await report(m, { profile: target({ from: "defaults" }) });
     expect(check(d, "sharing")?.detail).toContain("default");
   });
@@ -283,9 +358,10 @@ describe("volley peer doctor: the Claude profile overall", () => {
     const r = await report(m, { profile: target({ brokerUrl: null, from: "defaults" }) });
     expect(check(r, "hooks")?.ok).toBe(true);
     expect(check(r, "mcp")?.ok).toBe(true);
-    const dry = installs(m, "volley-hooks")[0] ?? [];
-    expect(dry).toContain("VOLLEY_BROKER_URL=mqtt://broker.example:1883");
-    // No URL anywhere: the dry run runs without the doctor's own VOLLEY_BROKER_URL.
+    expect(flagOf(installs(m, "volley-hooks")[0], "--broker-url")).toBe(
+      "mqtt://broker.example:1883",
+    );
+    // No URL anywhere: the dry run passes none.
     box?.cleanup();
     const bare = machine();
     // No profile target at all (the doctor's default): the default modes, no URL.
@@ -294,11 +370,7 @@ describe("volley peer doctor: the Claude profile overall", () => {
     const b = JSON.parse(io.readStdout()) as DoctorReport;
     expect(check(b, "sharing")?.detail).toContain("default");
     expect(check(b, "hooks")?.ok).toBe(true);
-    expect(installs(bare, "volley-hooks")[0]?.slice(0, 3)).toEqual([
-      "env",
-      "-u",
-      "VOLLEY_BROKER_URL",
-    ]);
+    expect(installs(bare, "volley-hooks")[0]).not.toContain("--broker-url");
   });
 
   for (const token of [

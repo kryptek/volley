@@ -1,4 +1,5 @@
 import {
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -26,8 +27,8 @@ import { type DoctorDeps, LOCK_MARKER, type ToolName, lockHash } from "../../src
 
 /** The Claude profile volley provisions (default: everything in place, with no broker URL). */
 export interface FakeProfile {
-  /** `~/.claude/skills/{volley,volley-issues}`: links to the checkout, absent, a real folder, a link elsewhere. */
-  skills?: "linked" | "absent" | "stray" | "elsewhere";
+  /** `~/.claude/skills/{volley,volley-issues}`: links to the checkout, absent, a real folder, a link elsewhere, a dangling link. */
+  skills?: "linked" | "absent" | "stray" | "elsewhere" | "broken";
   hooks?: "installed" | "absent";
   /** The broker URL the installed hooks and MCP entry carry (none by default). */
   url?: string;
@@ -105,8 +106,8 @@ export const FAKE_SKILLS = [
   ["volley-issues", "volley-issues"],
 ] as const;
 
-/** What the fake hooks installer merges: one hook, its prefix carrying the broker URL if any. */
-export const fakeHooksSettings = (volleyDir: string, url?: string) =>
+/** What the fake hooks installer merges: one hook, its prefix carrying the broker URL and namespace if any. */
+export const fakeHooksSettings = (volleyDir: string, url?: string, namespace?: string) =>
   `${JSON.stringify(
     {
       hooks: {
@@ -115,7 +116,7 @@ export const fakeHooksSettings = (volleyDir: string, url?: string) =>
             hooks: [
               {
                 type: "command",
-                command: `VOLLEY_HOOKS_COORDINATOR=1 ${url !== undefined ? `VOLLEY_BROKER_URL=${url} ` : ""}bun run "${volleyDir}/packages/volley-hooks/src/hooks/stop.ts"`,
+                command: `VOLLEY_HOOKS_COORDINATOR=1 ${url !== undefined ? `VOLLEY_BROKER_URL=${url} ` : ""}${namespace !== undefined ? `VOLLEY_NAMESPACE=${namespace} ` : ""}bun run "${volleyDir}/packages/volley-hooks/src/hooks/stop.ts"`,
               },
             ],
           },
@@ -195,6 +196,7 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       mkdirSync(join(root, "elsewhere", pkg), { recursive: true });
       symlinkSync(join(root, "elsewhere", pkg), at);
     }
+    if (skillsState === "broken") symlinkSync(join(root, "deleted", pkg), at);
   }
   if ((profile.hooks ?? "installed") === "installed") {
     writeFileSync(settingsFile, fakeHooksSettings(volleyDir, profile.url));
@@ -291,6 +293,15 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       }
       envArgs = a.slice(i);
     }
+    // The copy-mode skill fixes act on the real temp folders.
+    if (cmd === "rm" && a.length === 1) {
+      rmSync(a[0] as string);
+      return {};
+    }
+    if (cmd === "cp" && a[0] === "-R") {
+      cpSync(a[1] as string, a[2] as string, { recursive: true });
+      return {};
+    }
     if (envArgs?.[0] === "bash") {
       const script = envArgs[1] ?? "";
       const skill = FAKE_SKILLS.find(([, pkg]) => script.endsWith(`/${pkg}/scripts/install.sh`));
@@ -306,8 +317,13 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
         return { stdout: `/${skill[0]} skill installed\n` };
       }
       if (script.endsWith("/volley-hooks/scripts/install.sh")) {
-        const out = fakeHooksSettings(volleyDir, envVars.VOLLEY_BROKER_URL);
-        if (envArgs[2] === "--dry-run") return { stdout: out };
+        // The installer never reads VOLLEY_BROKER_URL from its env: only its flags.
+        const flag = (f: string) => {
+          const i = envArgs.indexOf(f);
+          return i > 1 ? envArgs[i + 1] : undefined;
+        };
+        const out = fakeHooksSettings(volleyDir, flag("--broker-url"), flag("--namespace"));
+        if (envArgs.includes("--dry-run")) return { stdout: out };
         const file = envVars.CLAUDE_SETTINGS ?? settingsFile;
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, out);

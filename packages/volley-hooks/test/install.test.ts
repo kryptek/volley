@@ -89,15 +89,16 @@ describe("scripts/install.sh", () => {
     expect(existsSync(chain)).toBe(false);
   });
 
-  it("VOLLEY_BROKER_URL is carried in every hook's and the statusLine's prefix", () => {
+  it("--broker-url and --namespace are carried in every hook's and the statusLine's prefix", () => {
     const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
     const url = "mqtt://127.0.0.1:21883";
-    const dry = JSON.parse(installWith({ VOLLEY_BROKER_URL: url }, settings, "--dry-run")) as {
+    const flags = ["--broker-url", url, "--namespace", "team-a"];
+    const dry = JSON.parse(install(settings, ...flags, "--dry-run")) as {
       hooks: Settings["hooks"];
       statusLine: { command: string };
     };
     expect(existsSync(settings)).toBe(false);
-    const prefix = `VOLLEY_HOOKS_COORDINATOR=1 VOLLEY_BROKER_URL=${url} bun run "${PACKAGE_ROOT}/src/`;
+    const prefix = `VOLLEY_HOOKS_COORDINATOR=1 VOLLEY_BROKER_URL=${url} VOLLEY_NAMESPACE=team-a bun run "${PACKAGE_ROOT}/src/`;
     expect(dry.statusLine.command.startsWith(prefix)).toBe(true);
     const commands = Object.values(dry.hooks).flatMap((gs) =>
       gs.flatMap((g) => g.hooks.map((h) => h.command)),
@@ -106,22 +107,53 @@ describe("scripts/install.sh", () => {
     for (const c of commands) expect(c.startsWith(prefix)).toBe(true);
 
     // Installed for another URL, a re-install replaces it (never two prefixes).
-    installWith({ VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21999" }, settings);
-    installWith({ VOLLEY_BROKER_URL: url }, settings);
+    install(settings, "--broker-url", "mqtt://127.0.0.1:21999");
+    install(settings, ...flags);
     const again = read(settings);
     expect(again.hooks.Stop).toHaveLength(1);
     expect(again.hooks.Stop?.[0]?.hooks[0]?.command.startsWith(prefix)).toBe(true);
-    // Without it, no prefix.
+    // Without them, no prefix.
     install(settings);
-    expect(read(settings).hooks.Stop?.[0]?.hooks[0]?.command).not.toContain("VOLLEY_BROKER_URL");
+    const bare = read(settings).hooks.Stop?.[0]?.hooks[0]?.command;
+    expect(bare).not.toContain("VOLLEY_BROKER_URL");
+    expect(bare).not.toContain("VOLLEY_NAMESPACE");
   });
 
-  it("refuses a VOLLEY_BROKER_URL with a login in it, or one that is not a plain URL", () => {
+  it("never reads VOLLEY_BROKER_URL from its environment (local volley setup passes its own env)", () => {
     const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
-    for (const url of ["mqtt://user:pw@127.0.0.1:1883", "mqtt://h:1883; rm -rf ~", "http://h"]) {
-      expect(() => installWith({ VOLLEY_BROKER_URL: url }, settings)).toThrow(/VOLLEY_BROKER_URL/);
-      expect(existsSync(settings)).toBe(false);
+    const plain = install(settings, "--dry-run");
+    for (const url of ["tcp://localhost:1883", "mqtt://user:pw@127.0.0.1:1883", "mqtt://h:1883"]) {
+      const env = { VOLLEY_BROKER_URL: url, VOLLEY_NAMESPACE: "team-a" };
+      expect(installWith(env, settings, "--dry-run")).toBe(plain);
     }
+    expect(plain).not.toContain("VOLLEY_BROKER_URL");
+  });
+
+  it("accepts tcp:// like the CLI does", () => {
+    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    const out = install(settings, "--broker-url", "tcp://localhost:1883", "--dry-run");
+    expect(out).toContain("VOLLEY_BROKER_URL=tcp://localhost:1883 ");
+  });
+
+  it("refuses a --broker-url with a login (saying where the login goes) or one that is not a plain URL", () => {
+    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    const err = (args: string[]) => {
+      try {
+        install(settings, ...args);
+      } catch (e) {
+        return String((e as { stderr?: unknown }).stderr);
+      }
+      return null;
+    };
+    expect(err(["--broker-url", "mqtt://user:pw@127.0.0.1:1883"])).toMatch(
+      /VOLLEY_AUTH_USERNAME.*coordinator\.json/s,
+    );
+    for (const url of ["mqtt://h:1883; rm -rf ~", "http://h"]) {
+      expect(err(["--broker-url", url])).toMatch(/--broker-url/);
+    }
+    expect(err(["--namespace", "Not A Namespace"])).toMatch(/--namespace/);
+    expect(err(["--broker-url"])).toMatch(/usage/);
+    expect(existsSync(settings)).toBe(false);
   });
 
   it("removes its statusLine on uninstall when the user had none", () => {

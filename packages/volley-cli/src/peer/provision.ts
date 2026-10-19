@@ -16,8 +16,9 @@ export { DEFAULT_SHARING, type Sharing };
  * `.volley/mcp.json` and the hooks itself); they are for the sessions people start here. The
  * fixes write only inside `~/.claude`, `~/.claude.json`'s `mcpServers` and the hooks' state dir,
  * through the packages' own installers and `claude mcp`. No credential is read, printed or
- * registered: the MCP entry carries no broker login, and an entry that has env of its own is
- * never rewritten (its fix is printed for the person to run).
+ * registered: the MCP entry carries no broker login, the hooks get the URL without one, and an
+ * entry that has settings of its own is never rewritten (its fix is printed for the person to
+ * run, naming those settings but not their values).
  */
 
 export const PROFILE_CHECKS = ["skills", "hooks", "mcp", "sharing"] as const;
@@ -48,6 +49,8 @@ const SKILLS = [
 
 /** The env keys the doctor's MCP registration sets: any other is the person's own. */
 const MCP_ENV = ["VOLLEY_AGENT_ID", "VOLLEY_NAMESPACE", "VOLLEY_BROKER_URL"];
+/** The agent id prefix the doctor registers; another one is the person's own. */
+const MCP_AGENT_ID = "coordinator";
 
 /** The PATH the hooks installer runs with besides bun's folder (a service's PATH may lack bun). */
 const BASE_PATH = "/usr/bin:/bin";
@@ -58,8 +61,11 @@ export interface SkillFact {
   at: string;
   pkg: string;
   installer: string;
-  /** linked: resolves to `pkg`; elsewhere: a link to another folder; stray: a folder of its own. */
-  state: "linked" | "elsewhere" | "stray" | "absent";
+  /**
+   * linked: resolves to `pkg`; elsewhere: a link to another folder; broken: a link to nothing;
+   * stray: a folder of its own.
+   */
+  state: "linked" | "elsewhere" | "broken" | "stray" | "absent";
 }
 
 export interface ProfileFacts {
@@ -70,8 +76,15 @@ export interface ProfileFacts {
   hooks: {
     installer: string;
     settings: string;
-    /** The URL the installer ran with: the target's, else the one the installed hooks carry. */
+    /**
+     * The URL the installer ran with (`--broker-url`): the target's, else the one the installed
+     * hooks carry, never with a login (the hooks take credentials from their own login file).
+     */
     brokerUrl: string | null;
+    /** A login was dropped from that URL. */
+    loginDropped: boolean;
+    /** The namespace the installer ran with (`--namespace`); null for the default. */
+    namespace: string | null;
     argv: string[] | null;
     state: "installed" | "differs" | "failed" | "no_bun" | "no_installer";
     why: string | null;
@@ -84,8 +97,13 @@ export interface ProfileFacts {
     state: "ok" | "missing" | "differs" | "unreadable";
     /** What differs (never a value from the entry: its env can hold secrets). */
     why: string | null;
-    /** The entry has env of its own (a login, say): the doctor never rewrites it. */
+    /**
+     * The entry has settings of its own (a login, another agent id): the doctor never rewrites
+     * it, and its printed fix keeps them.
+     */
     own: boolean;
+    /** For an `own` entry: the re-registration that keeps them (other keys as placeholders). */
+    keep: string[] | null;
   };
 }
 
@@ -107,11 +125,22 @@ function skillState(at: string, pkg: string): SkillFact["state"] {
     return "absent";
   }
   if (!st.isSymbolicLink()) return "stray";
-  return existsSync(at) && realOf(at) === realOf(pkg) ? "linked" : "elsewhere";
+  if (!existsSync(at)) return "broken";
+  return realOf(at) === realOf(pkg) ? "linked" : "elsewhere";
+}
+
+/** `url` without a login (`user:pw@`), and whether it had one. */
+export function withoutLogin(url: string): { url: string; dropped: boolean } {
+  const m = /^([a-z]+:\/\/)[^/@]*@(.*)$/i.exec(url);
+  return m === null ? { url, dropped: false } : { url: `${m[1]}${m[2]}`, dropped: true };
 }
 
 /** The broker URL the Volley hooks in `settings` carry (`VOLLEY_BROKER_URL=<url>` in their prefix). */
-export function installedBrokerUrl(settings: string): string | null {
+export const installedBrokerUrl = (settings: string) =>
+  installedPrefix(settings, "VOLLEY_BROKER_URL");
+
+/** A variable the Volley hooks in `settings` carry in their prefix (`<name>=<value>`). */
+function installedPrefix(settings: string, name: string): string | null {
   let j: { hooks?: unknown; statusLine?: { command?: unknown } };
   try {
     j = JSON.parse(settings);
@@ -132,7 +161,7 @@ export function installedBrokerUrl(settings: string): string | null {
   }
   for (const c of commands) {
     if (typeof c !== "string" || !c.includes("/volley-hooks/src/")) continue;
-    const m = /^(?:[A-Z_]+=\S* )*?VOLLEY_BROKER_URL=(\S+) /.exec(c);
+    const m = new RegExp(`^(?:[A-Z_]+=\\S* )*?${name}=(\\S+) `).exec(c);
     if (m !== null) return m[1] as string;
   }
   return null;
@@ -147,9 +176,12 @@ const shellLine = (argv: string[]) => argv.map(sq).join(" ");
 export async function gatherProfile(
   sh: Sh,
   where: { home: string; volleyDir: string; bun: string | null; claude: string | null },
-  target: ProfileTarget,
+  given: ProfileTarget,
 ): Promise<ProfileFacts> {
   const { home, volleyDir, bun, claude } = where;
+  // A login never reaches the profile: neither the hooks' prefix nor the MCP registration.
+  const expected = given.brokerUrl !== null ? withoutLogin(given.brokerUrl) : null;
+  const target = { ...given, brokerUrl: expected?.url ?? null };
   const pkgs = join(volleyDir, "packages");
   const skillsDir = join(home, ".claude", "skills");
   const skills = SKILLS.map(({ name, pkg }): SkillFact => {
@@ -172,11 +204,17 @@ export async function gatherProfile(
     current = readFileSync(settings, "utf-8");
   } catch {}
   const installer = join(pkgs, "volley-hooks", "scripts", "install.sh");
-  const brokerUrl = target.brokerUrl ?? installedBrokerUrl(current);
+  const login = withoutLogin(target.brokerUrl ?? installedBrokerUrl(current) ?? "");
+  const brokerUrl = login.url !== "" ? login.url : null;
+  // Passed only when it is not the default (the hooks' own default).
+  const ns = target.namespace ?? installedPrefix(current, "VOLLEY_NAMESPACE");
+  const namespace = ns !== null && ns !== "default" ? ns : null;
   const hooks: ProfileFacts["hooks"] = {
     installer,
     settings,
     brokerUrl,
+    loginDropped: login.dropped || expected?.dropped === true,
+    namespace,
     argv: null,
     state: "installed",
     why: null,
@@ -185,16 +223,16 @@ export async function gatherProfile(
     if (!existsSync(installer)) hooks.state = "no_installer";
     else if (bun === null) hooks.state = "no_bun";
     else {
+      // The URL and namespace are flags: the installer never reads them from its environment.
       hooks.argv = [
         "env",
-        // Never the doctor's own environment's URL: only the one expected or already installed.
-        ...(brokerUrl === null ? ["-u", "VOLLEY_BROKER_URL"] : []),
         `HOME=${home}`,
         `CLAUDE_SETTINGS=${settings}`,
-        ...(brokerUrl !== null ? [`VOLLEY_BROKER_URL=${brokerUrl}`] : []),
         `PATH=${dirname(bun)}:${BASE_PATH}`,
         "bash",
         installer,
+        ...(brokerUrl !== null ? ["--broker-url", brokerUrl] : []),
+        ...(namespace !== null ? ["--namespace", namespace] : []),
       ];
       const r = await sh([...hooks.argv, "--dry-run"]);
       if (r.code !== 0) {
@@ -207,23 +245,31 @@ export async function gatherProfile(
   // The MCP server: `mcpServers.volley` in ~/.claude.json (where `claude mcp add-json -s user`
   // puts it).
   const entry = join(pkgs, "volley-mcp", "src", "index.ts");
-  const json = JSON.stringify({
-    type: "stdio",
-    command: bun ?? "bun",
-    args: ["run", entry],
-    env: {
-      VOLLEY_AGENT_ID: "coordinator",
-      ...(target.namespace !== null ? { VOLLEY_NAMESPACE: target.namespace } : {}),
-      ...(target.brokerUrl !== null ? { VOLLEY_BROKER_URL: target.brokerUrl } : {}),
-    },
-  });
+  const registration = (env: Record<string, string>) =>
+    claude === null
+      ? null
+      : [
+          claude,
+          "mcp",
+          "add-json",
+          "-s",
+          "user",
+          "volley",
+          JSON.stringify({ type: "stdio", command: bun ?? "bun", args: ["run", entry], env }),
+        ];
+  const ours = {
+    VOLLEY_AGENT_ID: MCP_AGENT_ID,
+    ...(target.namespace !== null ? { VOLLEY_NAMESPACE: target.namespace } : {}),
+    ...(target.brokerUrl !== null ? { VOLLEY_BROKER_URL: target.brokerUrl } : {}),
+  };
   const mcp: ProfileFacts["mcp"] = {
     entry,
-    add: claude !== null ? [claude, "mcp", "add-json", "-s", "user", "volley", json] : null,
+    add: registration(ours),
     remove: claude !== null ? [claude, "mcp", "remove", "-s", "user", "volley"] : null,
     state: "ok",
     why: null,
     own: false,
+    keep: null,
   };
   const file = join(home, ".claude.json");
   let j: unknown = {};
@@ -246,7 +292,18 @@ export async function gatherProfile(
     else {
       const { command, args, env } = v as { command?: unknown; args?: unknown; env?: unknown };
       const envs = (typeof env === "object" && env !== null ? env : {}) as Record<string, unknown>;
-      mcp.own = Object.keys(envs).some((k) => !MCP_ENV.includes(k));
+      const theirs = Object.keys(envs).filter((k) => !MCP_ENV.includes(k));
+      const agentId = envs.VOLLEY_AGENT_ID;
+      const ownId = typeof agentId === "string" && agentId !== MCP_AGENT_ID ? agentId : null;
+      mcp.own = theirs.length > 0 || ownId !== null;
+      if (mcp.own) {
+        // Their other settings by name only: the values (a login, say) are never read out.
+        mcp.keep = registration({
+          ...ours,
+          ...(ownId !== null ? { VOLLEY_AGENT_ID: ownId } : {}),
+          ...Object.fromEntries(theirs.map((k) => [k, "<yours>"])),
+        });
+      }
       const runsEntry =
         typeof command === "string" &&
         /(^|\/)bun$/.test(command) &&
@@ -283,37 +340,46 @@ const stepsFix = (steps: string[][]): Fix => ({
   steps,
 });
 const leftAsIs = (item: string) => `left as is (sharing: ${item} own)`;
+const skillWhy = (s: SkillFact) =>
+  s.state === "absent"
+    ? `${s.name} is not installed`
+    : s.state === "broken"
+      ? `${s.name} is a broken link`
+      : s.state === "elsewhere"
+        ? `${s.name} links to another folder`
+        : `${s.name} is a folder of its own (the installer backs it up)`;
 
 function skillsCheck(p: ProfileFacts): Check {
   const mode = p.target.sharing.skills;
   const names = p.skills.map((s) => s.name).join(" and ");
   if (mode === "own") return warn("skills", true, `~/.claude/skills: ${leftAsIs("skills")}`);
   if (mode === "copy") {
-    const absent = p.skills.filter((s) => s.state === "absent");
-    if (absent.length === 0) {
+    // A broken link is missing too: the link goes first (cp will not write through it).
+    const missing = p.skills.filter((s) => s.state === "absent" || s.state === "broken");
+    if (missing.length === 0) {
       return warn("skills", true, `skills ${names} are in ~/.claude/skills (sharing: copy, kept)`);
     }
     return warn(
       "skills",
       false,
-      `not in ~/.claude/skills: ${absent.map((s) => s.name).join(", ")} (sharing: copy)`,
-      stepsFix([["mkdir", "-p", p.skillsDir], ...absent.map((s) => ["cp", "-R", s.pkg, s.at])]),
+      `~/.claude/skills: ${missing.map(skillWhy).join("; ")} (sharing: copy)`,
+      stepsFix([
+        ["mkdir", "-p", p.skillsDir],
+        ...missing.flatMap((s) => [
+          ...(s.state === "broken" ? [["rm", s.at]] : []),
+          ["cp", "-R", s.pkg, s.at],
+        ]),
+      ]),
     );
   }
   const bad = p.skills.filter((s) => s.state !== "linked");
   if (bad.length === 0) {
     return warn("skills", true, `skills ${names} link to this checkout`);
   }
-  const why = (s: SkillFact) =>
-    s.state === "absent"
-      ? `${s.name} is not installed`
-      : s.state === "elsewhere"
-        ? `${s.name} links to another folder`
-        : `${s.name} is a folder of its own (the installer backs it up)`;
   return warn(
     "skills",
     false,
-    `~/.claude/skills: ${bad.map(why).join("; ")}`,
+    `~/.claude/skills: ${bad.map(skillWhy).join("; ")}`,
     stepsFix(bad.map((s) => ["env", `HOME=${p.home}`, "bash", s.installer])),
   );
 }
@@ -323,7 +389,12 @@ function hooksCheck(p: ProfileFacts): Check {
   if (p.target.sharing["settings.json"] === "own") {
     return warn("hooks", true, `~/.claude/settings.json: ${leftAsIs("settings.json")}`);
   }
-  const at = h.brokerUrl !== null ? ` for ${h.brokerUrl}` : "";
+  const at =
+    (h.brokerUrl !== null ? ` for ${h.brokerUrl}` : "") +
+    (h.namespace !== null ? ` in namespace ${h.namespace}` : "") +
+    (h.loginDropped
+      ? " (the login in that URL is left out: the hooks take theirs from their own login file)"
+      : "");
   switch (h.state) {
     case "installed":
       return warn("hooks", true, `the Volley hooks are installed in ~/.claude/settings.json${at}`);
@@ -362,14 +433,17 @@ function mcpCheck(p: ProfileFacts): Check {
   if (m.state === "missing") {
     return warn("mcp", false, "the volley MCP server is not registered", stepsFix([m.add]));
   }
+  // Not atomic: should add-json fail after the remove, the next check reports the server
+  // missing and its fix adds it back.
   const steps = [m.remove, m.add];
-  if (m.own) {
-    // Its env holds settings of the person's own (a broker login, say): never rewritten here.
+  if (m.own && m.keep !== null) {
+    // Settings of the person's own (a broker login, say): never rewritten here. The printed
+    // command keeps them, with each value left for them to fill in.
     return warn(
       "mcp",
       false,
-      `the volley MCP server ${m.why}; it has settings of its own, so it is yours to update`,
-      { command: steps.map(shellLine).join(" && ") },
+      `the volley MCP server ${m.why}; it has settings of its own, so it is yours to update (replace each <yours> with your value)`,
+      { command: [m.remove, m.keep].map(shellLine).join(" && ") },
     );
   }
   return warn("mcp", false, `the volley MCP server ${m.why}`, stepsFix(steps));
@@ -389,19 +463,14 @@ export function profileChecks(p: ProfileFacts): Check[] {
   const modes = `skills ${s.skills}, settings.json ${s["settings.json"]}, mcp ${s.mcp}`;
   const failing = items.filter((c) => !c.ok);
   const detail = `${from}: ${modes}${own.length > 0 ? `; left as is: ${own.join(", ")}` : ""}`;
-  // Each item's own fix applies its mode: the sharing row points at them and runs nothing
-  // itself (a step two rows shared would run once, attributed to the last).
+  // Each item's own fix applies its mode: the sharing row names the items not applied yet and
+  // carries no fix of its own (it would run nothing).
   const sharing = warn(
     "sharing",
     failing.length === 0,
     failing.length === 0
       ? detail
       : `${detail}; not applied yet: ${failing.map((c) => c.id).join(", ")}`,
-    failing.length === 0
-      ? undefined
-      : failing.every((c) => c.fix?.steps !== undefined)
-        ? { command: `the ${failing.map((c) => c.id).join(", ")} fix(es) above`, steps: [] }
-        : { command: `fix ${failing.map((c) => c.id).join(", ")} (above)` },
   );
   return [...items, sharing];
 }

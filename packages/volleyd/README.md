@@ -1251,10 +1251,10 @@ machine whose record stopped for 90 s down (republishing the record with
 **What the machine's Claude profile gets.** The doctor (by hand, at join, in every heartbeat
 and on a Desk's Repair) also checks the machine's own Claude profile, `~/.claude` of the user
 the service runs as, and its `--fix` prepares it: the `/volley` and `/volley-issues` skills
-linked to its volley checkout, the hooks installed with `VOLLEY_BROKER_URL` at the tunnel
-(`mqtt://127.0.0.1:<remote_port>`), and the volley MCP server registered there
-(`claude mcp add-json -s user volley`, again after a port change), each under the per-item
-sharing modes this daemon publishes in the machine's readiness verdict
+linked to its volley checkout, the hooks installed with `--broker-url` at the tunnel
+(`mqtt://127.0.0.1:<remote_port>`) and `--namespace` outside `default`, and the volley MCP
+server registered there (`claude mcp add-json -s user volley`, again after a port change), each
+under the per-item sharing modes this daemon publishes in the machine's readiness verdict
 (`requirements.sharing`, from its own `sharing.yaml`: `own` leaves an item as is). One `warn`
 row each (`skills`, `hooks`, `mcp`, `sharing`): agents volleyd spawns there do not need them.
 No credential is involved: the MCP registration carries no broker login, the hooks keep their
