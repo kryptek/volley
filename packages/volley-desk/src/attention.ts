@@ -75,6 +75,8 @@ export const DEFAULT_NO_SIGNAL_AFTER_S = DEFAULT_QUIET_AFTER_S;
 export const NO_SIGNAL_LABEL = "no signal — MCP not on this broker?";
 /** The wave's reason while its coordinator idles with a background wait armed. */
 export const IDLE_WAIT_REASON = "idle — waiting on wave events";
+/** The message of Claude Code's `idle_prompt` Notification: no question, the turn just ended. */
+const GENERIC_IDLE_PROMPT = /^claude is waiting for your input\.?$/i;
 /** Shown instead of any liveness judgement during the reconnect / resume grace window. */
 export const SYNCING_LABEL = "syncing…";
 
@@ -174,7 +176,9 @@ const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
  * The wave's coordinator: the store's view (owner topics, else the
  * supervisor's), with a `working` coordinator silent for longer than
  * `claim_after_s` counted as `gone`. An `awaiting_input` coordinator stays
- * waiting: it is quiet because it is waiting for the owner.
+ * waiting: it is quiet because it is waiting for the owner; one waiting on
+ * the wave's events (a live background wait, or the generic idle prompt with
+ * nothing pending for the owner) stays `working` for the same reason.
  */
 export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordinator {
   const s = w.state;
@@ -189,25 +193,39 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
   );
   const lastSeen = seen.length ? Math.max(...seen) : undefined;
   let state: CoordinatorState = view?.state ?? sup?.state ?? "gone";
+  const question = view?.question ?? sup?.question;
+  // Only the harness's generic idle prompt, and nothing pending for the owner: the turn
+  // ended without a question, so the next wave event wakes it (design point ii). This is
+  // what a cold load sees, since volleyd's retained `coordinator` drops `background_wait`.
+  const idleOnly =
+    state === "awaiting_input" &&
+    a?.attention?.notificationType !== "permission_prompt" &&
+    question !== undefined &&
+    GENERIC_IDLE_PROMPT.test(question.trim()) &&
+    openDecisions(w).length === 0 &&
+    (s?.gates.length ?? 0) === 0;
+  if (idleOnly) state = "working";
+  const waitingOnEvents = state === "working" && (idleOnly || view?.waitingOnEvents === true);
+  // Waiting on events is quiet on purpose too: only a terminal status (the LWT) ends it.
   if (
     state === "working" &&
+    !waitingOnEvents &&
     lastSeen !== undefined &&
     connectedSilence(lastSeen, ctx.now, ctx.offline) > tunables(w, ctx).claimMs
   ) {
     state = "gone";
   }
-  const question = view?.question ?? sup?.question;
   const sessionUrl = view?.sessionUrl ?? sup?.session_url;
   const workspace = view?.workspace ?? sup?.workspace;
   return {
     id,
     state,
-    ...(question ? { question } : {}),
-    ...(view?.text ? { text: view.text } : {}),
+    ...(question && !idleOnly ? { question } : {}),
+    ...(view?.text && !idleOnly ? { text: view.text } : {}),
     ...(sessionUrl ? { sessionUrl } : {}),
     ...(workspace ? { workspace } : {}),
     ...(lastSeen !== undefined ? { lastSeen } : {}),
-    ...(state === "working" && view?.waitingOnEvents ? { waitingOnEvents: true } : {}),
+    ...(waitingOnEvents ? { waitingOnEvents: true } : {}),
   };
 }
 
@@ -286,6 +304,16 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   return infoFor(s.tasks, agentIds, ctx);
 }
 
+/** volleyd holds the task for CI (S7 sets `why_waiting: "CI pending on <sha> (n/m checks)"`). */
+export function ciPending(t: WaveTask): boolean {
+  return /^CI pending\b/i.test(t.why_waiting ?? "");
+}
+
+/** A `why_waiting` that is a pipeline hold (CI pending, a lease), never a stall. */
+function isHoldReason(why: string): boolean {
+  return /^CI pending\b/i.test(why) || /lease/i.test(why);
+}
+
 function parseTime(t: string | undefined): number | undefined {
   const ms = Date.parse(t ?? "");
   return Number.isNaN(ms) ? undefined : ms;
@@ -331,8 +359,9 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
     }
   }
   const ns = noSignalFor(a, w, ctx);
-  // Quiet is neutral: only the supervisor's why_waiting makes it somebody's job.
-  if (ns && (ns.kind === "mcp" || ns.reason !== ns.label)) {
+  // Quiet is neutral: only the supervisor's why_waiting makes it somebody's job, and not
+  // a hold (CI, a lease): the agent is quiet because the pipeline waits, not stalled.
+  if (ns && (ns.kind === "mcp" || (ns.reason !== ns.label && !isHoldReason(ns.reason)))) {
     const stage = s?.tasks.find((t) => t.id === task)?.stage;
     const theirs = live && a.role === "implementer" && stage === "implement";
     return theirs ? handled(ns.reason, ns.since, w, ctx) : { tier: "info", reason: ns.reason };
@@ -350,7 +379,7 @@ export interface NoSignal {
   reason: string;
   /** Tooltip: what is missing and where the session runs, when its registry says. */
   title: string;
-  /** ms the silence began: the last signal plus `no_signal_after_s`, else its registration. */
+  /** ms the item began: for `quiet`, the last signal plus `quiet_after_s`; for `mcp`, its registration. */
   since: number;
 }
 
@@ -364,8 +393,8 @@ function quietFor(ms: number): string {
 function mcpNotRegistered(a: AgentView, w: WaveView | undefined): boolean {
   return openDecisions(w).some(
     (d) =>
-      d.kind === "mcp_not_registered" &&
-      ((a.task !== null && d.task === a.task) || d.decision_id.includes(a.id)),
+      // volleyd's decision id hashes the agent id, so the task is the only key to match on.
+      d.kind === "mcp_not_registered" && a.task !== null && d.task === a.task,
   );
 }
 
@@ -394,12 +423,9 @@ export function noSignalFor(
     ? connectedSilence(Math.max(...signals), ctx.now, ctx.offline)
     : null;
   if (a.registered && (a.status === null || mcpNotRegistered(a, w))) {
-    const limit = tunables(w, ctx).quietMs;
-    // Never a signal: the silence began at its registration.
-    const since =
-      silent === null
-        ? (parseTime(reg.started_at) ?? a.lastSeen)
-        : ctx.now - Math.max(0, silent - limit);
+    // Timed from its registration: the hint is about a missing MCP registration, not
+    // silence, and the hooks' heartbeats (on this broker) do not make it any less missing.
+    const since = parseTime(reg.started_at) ?? a.lastSeen;
     const head =
       a.status === null
         ? `${a.id} registered here but has published no status.`

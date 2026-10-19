@@ -1,8 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { waveAttention } from "../src/attention";
+import { ciPending, waveAttention } from "../src/attention";
 import { initialState, reduceAll } from "../src/store/reducer";
-import { WaveWindow, ciPending } from "../src/windows/wave/WaveWindow";
+import { WaveWindow } from "../src/windows/wave/WaveWindow";
 import { NOW, S, registry, status, waveMsg, waveState, waveView } from "./helpers/desk-msgs";
 
 const WHY = "CI pending on abc1234 (2/5 checks)";

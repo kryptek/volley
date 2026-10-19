@@ -373,7 +373,9 @@ function reduceAgent(
     next.lastProgress = { type: env.type, at };
   }
   const narration = str(payload.msg);
-  if (narration !== undefined && at >= (prev.narrationAt ?? at)) {
+  // Live traffic is the newest by definition; only a replay can be older than what is shown
+  // (and its `wall_time` is the sender's clock, which may run ahead of ours).
+  if (narration !== undefined && (!m.retained || at >= (prev.narrationAt ?? at))) {
     next.narration = narration;
     next.narrationAt = at;
     next.narrationRestored = false;

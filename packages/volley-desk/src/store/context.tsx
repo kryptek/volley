@@ -21,8 +21,8 @@
  * `syncing` is the reconnect / resume grace window: from every connect, and
  * from the page coming back to the foreground (`visibilitychange → visible`,
  * when the Desk also probes the broker with `client.reconnect()` instead of
- * waiting for the keepalive to notice a dead socket), for `graceMsFor(config)`
- * (two heartbeat intervals, 30 s by default). Retained state alone says
+ * waiting for the keepalive to notice a dead socket), for `SYNC_GRACE_MS`
+ * (30 s). Retained state alone says
  * nothing about liveness, so nobody is judged quiet or without signal then.
  * A reconnect never clears feed rows or narration (see `resync`). Each agent's
  * last narration is kept in `sessionStorage` (`NARRATION_STORAGE_PREFIX` +
@@ -57,7 +57,7 @@ import {
   createMqttClient,
 } from "./mqtt-client";
 import { initialState, pruneUnconfirmed, reduceAll, restoreNarration, resync } from "./reducer";
-import type { ConfigPayload, DeskMessage, DeskState } from "./types";
+import type { DeskMessage, DeskState } from "./types";
 
 export const DEFAULT_BROKER_URL = "ws://localhost:9001";
 
@@ -97,16 +97,13 @@ const FLUSH_MS = 16;
 const SETTLE_MS = 3000;
 /** Offline spans kept (older ones are long past any `claim_after_s`). */
 const OFFLINE_KEEP = 50;
-/** The hooks' heartbeat interval when the retained config does not say (`heartbeat_interval_s`). */
-const DEFAULT_HEARTBEAT_INTERVAL_S = 15;
-
-/** The reconnect / resume grace window: two heartbeat intervals. */
-export function graceMsFor(config: ConfigPayload | null): number {
-  const s = config?.heartbeat_interval_s;
-  const interval =
-    typeof s === "number" && Number.isFinite(s) && s > 0 ? s : DEFAULT_HEARTBEAT_INTERVAL_S;
-  return 2 * interval * 1000;
-}
+/**
+ * The reconnect / resume grace window. A fixed span, not a tunable: the hooks
+ * heartbeat on each hook event (SPEC §4.3), not on an interval, so there is no
+ * heartbeat interval to derive it from. Long enough for a working session's
+ * next hook event or narration to arrive.
+ */
+export const SYNC_GRACE_MS = 30_000;
 
 /** sessionStorage key prefix for an agent's last narration (`{ text, at }`). */
 export const NARRATION_STORAGE_PREFIX = "volley-desk:narration:";
@@ -338,13 +335,11 @@ export function DeskStoreProvider({
   const [connection, setConnection] = useState<Connection>(demo ? "demo" : "connecting");
   const [settling, setSettling] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const graceMs = useRef(graceMsFor(state.config));
-  graceMs.current = graceMsFor(state.config);
   const graceTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const startGrace = useCallback(() => {
     setSyncing(true);
     clearTimeout(graceTimer.current);
-    graceTimer.current = setTimeout(() => setSyncing(false), graceMs.current);
+    graceTimer.current = setTimeout(() => setSyncing(false), SYNC_GRACE_MS);
   }, []);
   useEffect(() => () => clearTimeout(graceTimer.current), []);
   const clientRef = useRef<DeskMqttClient | null>(null);

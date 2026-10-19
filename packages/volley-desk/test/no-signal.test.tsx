@@ -108,10 +108,12 @@ describe("no-signal state", () => {
     expect(agentAttention(a, undefined, ctx())).toEqual({ tier: "info", reason: NO_SIGNAL_LABEL });
   });
 
-  it(`working but silent for more than ${DEFAULT_NO_SIGNAL_AFTER_S} s: no signal; a heartbeat clears it`, () => {
+  it(`working but silent for more than ${DEFAULT_NO_SIGNAL_AFTER_S} s: quiet; a heartbeat clears it`, () => {
     const msgs = [registry("loner", NOW - 200 * S), status("loner", "working", NOW - 121 * S)];
     expect(DEFAULT_NO_SIGNAL_AFTER_S).toBe(120);
-    expect(noSignalFor(agentFrom("loner", msgs), undefined, ctx())).not.toBeNull();
+    expect(noSignalFor(agentFrom("loner", msgs), undefined, ctx())).toMatchObject({
+      kind: "quiet",
+    });
     const fresh = agentFrom("loner", [
       ...msgs.slice(0, 1),
       status("loner", "working", NOW - 119 * S),
@@ -126,7 +128,7 @@ describe("no-signal state", () => {
     expect(noSignalFor(narr, undefined, ctx())).toBeNull();
   });
 
-  it("counts only connected time, and reads no_signal_after_s from the config", () => {
+  it("counts only connected time, and reads quiet_after_s (or the legacy no_signal_after_s)", () => {
     const a = agentFrom("loner", [
       registry("loner", NOW - 300 * S),
       status("loner", "working", NOW - 150 * S),
@@ -141,12 +143,22 @@ describe("no-signal state", () => {
       no_signal_after_s: 600,
     } as ConfigPayload;
     expect(noSignalFor(a, undefined, ctx({ config }))).toBeNull();
-    const w = wave({ effective_config: { no_signal_after_s: 30 } });
+    expect(
+      noSignalFor(
+        a,
+        undefined,
+        ctx({ config: { ...config, quiet_after_s: 600 } as ConfigPayload }),
+      ),
+    ).toBeNull();
     const b = agentFrom("loner", [
       registry("loner", NOW - 300 * S),
       status("loner", "working", NOW - 60 * S),
     ]);
-    expect(noSignalFor(b, w, ctx())).not.toBeNull();
+    const legacy = wave({ effective_config: { no_signal_after_s: 30 } });
+    expect(noSignalFor(b, legacy, ctx())).toMatchObject({ kind: "quiet" });
+    const quiet = wave({ effective_config: { quiet_after_s: 30 } });
+    expect(noSignalFor(b, quiet, ctx())).toMatchObject({ kind: "quiet" });
+    expect(noSignalFor(b, wave({ effective_config: { quiet_after_s: 90 } }), ctx())).toBeNull();
   });
 
   it("is never shown for a finished, blocked, waiting or idle agent", () => {
@@ -280,9 +292,10 @@ describe("no signal (MCP missing) vs quiet", () => {
 
   it("a hook-published status with an open mcp_not_registered decision → the MCP hint", () => {
     const w = wave();
+    // volleyd's id: `mcp_not_registered-` + the first 12 hex of sha256(agent id).
     w.decisions = {
-      "mcp_not_registered-impl-1": {
-        decision_id: "mcp_not_registered-impl-1",
+      "mcp_not_registered-5f1d3c2a9b7e": {
+        decision_id: "mcp_not_registered-5f1d3c2a9b7e",
         wave: "w1",
         task: "T1",
         kind: "mcp_not_registered",
@@ -296,6 +309,48 @@ describe("no signal (MCP missing) vs quiet", () => {
       w,
     );
     expect(noSignalFor(a, w, ctx())).toMatchObject({ kind: "mcp", label: NO_SIGNAL_LABEL });
+  });
+
+  it("an MCP-missing implementer escalates after escalate_after_min even while its hooks heartbeat", () => {
+    const w = wave();
+    const coordinators = { "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const } };
+    const at = (now: number) => {
+      // Registered (no status) at NOW - 5 s; the hooks heartbeat every few seconds since.
+      const impl = agentFrom(
+        "impl-1",
+        [registry("impl-1", NOW - 5 * S), progress("impl-1", "heartbeat", now - 2 * S)],
+        w,
+      );
+      return agentAttention(impl, w, ctx({ now, coordinators }));
+    };
+    expect(at(NOW).tier).toBe("coordinator");
+    expect(at(NOW + 14 * 60 * S).tier).toBe("coordinator");
+    expect(at(NOW + 15 * 60 * S).tier).toBe("you");
+  });
+
+  it("a quiet working implementer held for CI is not a stall: no coordinator or you tier", () => {
+    const why = "CI pending on abc1234 (2/5 checks)";
+    const w = wave({
+      tasks: [
+        {
+          id: "T1",
+          issue: 1,
+          stage: "implement",
+          agents: { implementer: "impl-1" },
+          why_waiting: why,
+        },
+      ],
+    });
+    const coordinators = { "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const } };
+    const impl = agentFrom(
+      "impl-1",
+      [registry("impl-1", NOW - 600 * S), status("impl-1", "working", NOW - 300 * S)],
+      w,
+    );
+    expect(noSignalFor(impl, w, ctx())).toMatchObject({ kind: "quiet" });
+    for (const now of [NOW, NOW + 20 * 60 * S]) {
+      expect(["info", "none"]).toContain(agentAttention(impl, w, ctx({ now, coordinators })).tier);
+    }
   });
 
   it("AgentWindow shows a quiet agent neutrally: its own status mark and the quiet chip", () => {

@@ -7,7 +7,10 @@
  *
  * A `stopped` or `complete` wave renders dimmed with a `Stopped` / `Complete`
  * chip, its stages as they were (struck through) and its clock frozen at the
- * last state update (`stopped 2.8h ago`). A task volleyd holds for CI (its
+ * last state update (`stopped 2.8h ago`). That is an approximation of the stop
+ * time: volleyd bumps `updated_at` for every journaled event, so one after
+ * `wave_stopped` (an agent reaped, a decision resolved) moves it on; the wave
+ * state carries no stop time of its own yet. A task volleyd holds for CI (its
  * `why_waiting` reads `CI pending on <sha> (n/m checks)`) shows `waiting for
  * CI` in the graph, a `waiting for CI` chip in the title and a row under the
  * graph with its pipeline (`implement ✓ · CI ⟳ · review`) and the reason; no
@@ -17,9 +20,10 @@
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
+import { ciPending } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
-import type { CoordinatorState, WaveStatePayload, WaveTask, WaveView } from "../../store/types";
+import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
 import { Dag, type DagNode } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
@@ -34,11 +38,6 @@ const BODY_PAD_X = 28;
 /** The graph's width inside a wave window capped at `maxWidth` (a phone). */
 export function dagWidthFor(maxWidth: number): number {
   return Math.min(WAVE_W, maxWidth) - BODY_PAD_X;
-}
-
-/** volleyd holds the task for CI (S7 sets `why_waiting: "CI pending on <sha> (n/m checks)"`). */
-export function ciPending(t: WaveTask): boolean {
-  return /^CI pending\b/i.test(t.why_waiting ?? "");
 }
 
 const ENDED_CHIP: Partial<Record<WaveStatePayload["status"], string>> = {

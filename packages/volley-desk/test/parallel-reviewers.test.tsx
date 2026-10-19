@@ -1,6 +1,7 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 import {
   agentsByWave,
@@ -81,6 +82,75 @@ describe("parallel reviewers — store", () => {
 describe("parallel reviewers — App", () => {
   afterEach(() => {
     vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  // The App's default heights: the wave window, and the coordinators window with one wave
+  // row plus the supervisor row (150 + 66 per row); agent windows are 470.
+  const HEIGHT: Record<string, number> = { w1: 440, "Wave coordinators": 150 + 66 * 2 };
+
+  /** Every window's canvas box (style left/top/width; jsdom has no layout, so the default height). */
+  function boxes() {
+    return screen
+      .getAllByRole("region")
+      .filter((r) => r.style.left !== "")
+      .map((r) => ({
+        name: r.getAttribute("aria-label") ?? "",
+        x: Number.parseFloat(r.style.left),
+        y: Number.parseFloat(r.style.top),
+        w: Number.parseFloat(r.style.width),
+        h: HEIGHT[r.getAttribute("aria-label") ?? ""] ?? 470,
+      }));
+  }
+
+  // The smoke's shape: the Desk was arranged while only the implementer ran (auto-arrange
+  // off, or before its relayout), then both reviewers arrived. A new window's default slot
+  // ignored the windows already placed, so one reviewer sat under the coordinators window.
+  it("reviewers that arrive after an arrange get a slot of their own: no window covers another", () => {
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ autoArrange: false }));
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const f = fakeClient();
+    const { container } = render(
+      <DeskStoreProvider demo={false} brokerUrl="ws://test.invalid" clientFactory={() => f.client}>
+        <App />
+      </DeskStoreProvider>,
+    );
+    const implOnly = waveState({
+      owner: "coord-1",
+      tasks: [{ id: "T1", issue: 1, stage: "implement", agents: { implementer: "impl-1" } }],
+    });
+    act(() => {
+      f.up();
+      f.emit(registry("coord-1", NOW - 600 * S));
+      f.emit(status("coord-1", "working", NOW - 600 * S));
+      f.emit(waveMsg(implOnly));
+      for (const m of live("impl-1")) f.emit(m);
+      vi.advanceTimersByTime(4000);
+    });
+    const canvas = container.querySelector<HTMLElement>("[aria-label^='Desk canvas']");
+    if (!canvas) throw new Error("no canvas");
+    canvas.focus();
+    fireEvent.keyDown(canvas, { key: "f" });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    act(() => {
+      f.emit(waveMsg(state()));
+      for (const id of ["spec-1", "qual-1"]) for (const m of live(id, "registered")) f.emit(m);
+      vi.advanceTimersByTime(1000);
+    });
+    const all = boxes();
+    expect(all.map((b) => b.name)).toEqual(
+      expect.arrayContaining(["w1 · T1 · spec review", "w1 · T1 · quality review"]),
+    );
+    for (const a of all) {
+      for (const b of all) {
+        if (a === b) continue;
+        const overlap = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+        expect(overlap, `${a.name} overlaps ${b.name}`).toBe(false);
+      }
+    }
   });
 
   it("two windows, top bar '2 agents working', the stage chip on both", () => {

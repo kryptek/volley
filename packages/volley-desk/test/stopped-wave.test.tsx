@@ -151,6 +151,12 @@ describe("stopped wave — App fold under Show finished", () => {
     expect(coords).toHaveTextContent(/1 ended wave/);
   });
 
+  it("leaves no gap where the folded wave would sit: the running wave listed after it is first", () => {
+    mount();
+    const w2 = screen.getByRole("region", { name: "w2" });
+    expect(w2.style.top).toBe("0px");
+  });
+
   it("shows it (without tethers) when Show finished is on", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ showFinished: true, tethers: true }));
     const { container } = mount();

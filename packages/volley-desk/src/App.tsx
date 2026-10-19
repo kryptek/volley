@@ -257,11 +257,50 @@ export default function App() {
   ];
   /** A window's rendered width: the prototype width, clamped on a phone. */
   const clampW = (w: number) => clampWindowWidth(w, vw);
-  const layout = placeholderLayout(waveIds, groups, clampW);
-  const pos = (id: string): Pos => moved[id] ?? layout[id] ?? { x: 0, y: 0 };
+  // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is
+  // on; a folded wave takes no slot in the layout, so it leaves no gap.
+  const ended = endedWaves(state);
+  const layout = placeholderLayout(
+    waveIds.filter((id) => look.showFinished || !ended.has(id)),
+    groups,
+    clampW,
+  );
+  // A window the owner or an arrange never placed takes its default slot, pushed down past
+  // every window already on the canvas: one that arrives later (a second reviewer while
+  // auto-arrange is off) must not land under one placed before it. Placed windows first,
+  // then the rest in layout order; resolved once per render.
+  let slots: Record<string, Pos> | null = null;
+  const slotOf = (id: string): Pos => {
+    if (slots === null) {
+      const out: Record<string, Pos> = {};
+      const shown = [
+        ...visible.flatMap((w) => [
+          { id: w, w: WAVE_W, h: WAVE_H },
+          ...(groups[w] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
+        ]),
+        ...(coordsShown ? [{ id: COORDS_ID, w: COORDS_W, h: coordsH(coordsRows) }] : []),
+      ];
+      const taken: Rect[] = [];
+      for (const b of [...shown.filter((x) => moved[x.id]), ...shown.filter((x) => !moved[x.id])]) {
+        const { w, h } = sizeOf(b.id, b.w, b.h);
+        const at = moved[b.id] ?? layout[b.id] ?? { x: 0, y: 0 };
+        let y = at.y;
+        if (!moved[b.id]) {
+          const hit = () =>
+            taken.find((r) => at.x < r.x + r.w && r.x < at.x + w && y < r.y + r.h && r.y < y + h);
+          for (let r = hit(); r; r = hit()) y = r.y + r.h + GAP;
+        }
+        out[b.id] = { x: at.x, y };
+        taken.push({ x: at.x, y, w, h });
+      }
+      slots = out;
+    }
+    return slots[id] ?? layout[id] ?? { x: 0, y: 0 };
+  };
+  const pos = (id: string): Pos => moved[id] ?? slotOf(id);
   const move = (id: string) => (dx: number, dy: number) =>
     setMoved((m) => {
-      const p = m[id] ?? layout[id] ?? { x: 0, y: 0 };
+      const p = m[id] ?? pos(id);
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
 
@@ -279,8 +318,6 @@ export default function App() {
     rectOf(id, WAVE_W, WAVE_H),
     ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
   ];
-  // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is on.
-  const ended = endedWaves(state);
   const endedHidden = look.showFinished ? 0 : ended.size;
   const visible = waveIds.filter((id) => !hidden.has(id) && (look.showFinished || !ended.has(id)));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);

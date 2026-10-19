@@ -7,9 +7,11 @@
  *
  * Given a `maxWidth` the graph cannot span (a phone: `columns × 172 px` wider
  * than the window), the columns wrap into bands stacked top to bottom, as many
- * columns per band as fit; an edge into a later band runs from the bottom of
- * its task to the top of the dependent. Without one (the desktop) it is one
- * band in a horizontally scrolling container.
+ * columns per band as fit; an edge into a later band leaves its task's side,
+ * runs down the gutter between columns to the gap above the dependent's band,
+ * and enters the dependent from the top (or, below the first row, from the
+ * side through its own gutter), so it never crosses another node. Without one
+ * (the desktop) it is one band in a horizontally scrolling container.
  */
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
@@ -78,9 +80,11 @@ export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayo
 
   const at = new Map<string, DagLayout["nodes"][number]>();
   const band = new Map<string, number>();
+  const bandTop: number[] = [];
   let top = 4;
   let maxRows = 0;
   bands.forEach((bandCols, b) => {
+    bandTop[b] = top;
     const rows = Math.max(0, ...bandCols.map((c) => c?.length ?? 0));
     maxRows = Math.max(maxRows, rows);
     bandCols.forEach((list, i) => {
@@ -96,23 +100,26 @@ export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayo
   // Keep wave-file order so the DOM follows the file.
   const nodes = tasks.flatMap((t) => at.get(t.id) ?? []);
 
+  /** The x of the free lane beside a node at band column `i`: a gutter, else the right margin. */
+  const gutter = (i: number, x: number) =>
+    i < fit - 1 ? x + W + GX / 2 : i > 0 ? x - GX / 2 : x + W + 2;
   const edges: DagLayout["edges"] = [];
   for (const e of nodes) {
     for (const a of e.after) {
       const s = at.get(a);
       if (!s) continue;
-      if (band.get(a) !== band.get(e.id)) {
-        // Into a later band: bottom of the task to the top of its dependent.
-        const x1 = s.x + W / 2;
-        const y1 = s.y + H;
-        const x2 = e.x + W / 2;
-        const y2 = e.y;
-        const dy = (y2 - y1) / 2;
-        edges.push({
-          from: a,
-          to: e.id,
-          d: `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`,
-        });
+      const bs = band.get(a) ?? 0;
+      const be = band.get(e.id) ?? 0;
+      if (bs !== be) {
+        // Into a later band, through the gutters and the gap between bands (see the header).
+        const gs = gutter(s.col - bs * fit, s.x);
+        const ge = gutter(e.col - be * fit, e.x);
+        const gap = (bandTop[be] ?? e.y) - GB / 2;
+        const exit = gs > s.x ? s.x + W : s.x;
+        let d = `M${exit},${s.y + H / 2} H${gs} V${gap}`;
+        if (e.row === 0) d += ` H${e.x + W / 2} V${e.y}`;
+        else d += ` H${ge} V${e.y + H / 2} H${ge > e.x ? e.x + W : e.x}`;
+        edges.push({ from: a, to: e.id, d });
         continue;
       }
       const x1 = s.x + W;

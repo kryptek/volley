@@ -5,11 +5,11 @@ import { SYNCING_LABEL } from "../src/attention";
 import {
   DeskStoreProvider,
   NARRATION_STORAGE_PREFIX,
-  graceMsFor,
+  SYNC_GRACE_MS,
   storeReducer,
 } from "../src/store/context";
 import { initialState } from "../src/store/reducer";
-import type { ConfigPayload, DeskMessage, DeskState } from "../src/store/types";
+import type { DeskMessage, DeskState } from "../src/store/types";
 import { NOW, S, fakeClient, progress, registry, status } from "./helpers/desk-msgs";
 
 const ID = "impl-1";
@@ -43,9 +43,8 @@ function mount() {
 }
 
 describe("grace window", () => {
-  it("is 2 × the heartbeat interval: 30 s by default, from the retained config when it has one", () => {
-    expect(graceMsFor(null)).toBe(30 * S);
-    expect(graceMsFor({ heartbeat_interval_s: 20 } as unknown as ConfigPayload)).toBe(40 * S);
+  it("is 30 s (the hooks heartbeat per event, so there is no interval to derive it from)", () => {
+    expect(SYNC_GRACE_MS).toBe(30 * S);
   });
 
   it("after a connect the agent shows 'syncing…' and no quiet / no-signal judgement until the grace ends", () => {
@@ -117,6 +116,14 @@ describe("reconnect keeps what the Desk already had", () => {
     expect(a?.feed).toHaveLength(before ?? -1);
     expect(a?.narration).toBe("writing the RED test");
     expect(a?.status?.type).toBe("working");
+  });
+
+  it("a live narration wins over a retained one from a sender whose clock runs ahead", () => {
+    // Retained: the sender's wall_time, 60 s ahead of this Desk. Live: local receipt.
+    const ahead = status(ID, "working", NOW + 60 * S, { msg: "old status msg" }, true);
+    let s = apply(initialState(), registry(ID, NOW - 900 * S, true), { ...ahead, receivedAt: NOW });
+    s = apply(s, progress(ID, "narration", NOW + 5 * S, { msg: "live narration" }));
+    expect(s.agents[ID]?.narration).toBe("live narration");
   });
 
   it("dedupes a replay by (topic, wall_time, seq): a different seq at the same time is news", () => {

@@ -102,6 +102,62 @@ describe("Needs-you suppression for an idle coordinator with a live background w
   });
 });
 
+// A cold load (new tab, discarded phone tab) never hears the live progress envelope: the
+// coordinator's attention comes only from volleyd's retained wave state, which does not
+// carry `background_wait`. The generic idle prompt with nothing pending for the owner is
+// still not Needs-you (design point ii); a real question, a decision or a gate is.
+describe("Needs-you suppression on a cold load (retained wave state only)", () => {
+  const coldWave = (question: string, over: Parameters<typeof waveState>[0] = {}) =>
+    waveMsg(
+      waveState({
+        owner: COORD,
+        coordinator: {
+          agent_id: COORD,
+          state: "awaiting_input",
+          question,
+          last_seen: new Date(NOW - 30 * S).toISOString(),
+        },
+        ...over,
+      }),
+    );
+  const cold = (question: string, over: Parameters<typeof waveState>[0] = {}) => [
+    { ...coldWave(question, over), retained: true },
+    registry(COORD, NOW - 600 * S, true),
+    status(COORD, "working", NOW - 600 * S, {}, true),
+  ];
+
+  it("the generic idle prompt with nothing pending is info, with no pill", () => {
+    const state = reduceAll(initialState(), cold("Claude is waiting for your input"));
+    expect(attn(state)).toEqual({ tier: "info", reason: IDLE_WAIT_REASON });
+    expect(needsYouTargets(state, opts)).toEqual([]);
+  });
+
+  it("stays info however long the idle coordinator stays quiet", () => {
+    const state = reduceAll(initialState(), cold("Claude is waiting for your input"));
+    const later = { now: NOW + 60 * 60 * S };
+    const w = state.waves.w1;
+    if (!w) throw new Error("no wave");
+    expect(waveAttention(w, ctxFrom(state, later))).toEqual({
+      tier: "info",
+      reason: IDLE_WAIT_REASON,
+    });
+  });
+
+  it("a real question from the coordinator still needs you", () => {
+    const state = reduceAll(initialState(), cold("Should I merge PR 12 now?"));
+    expect(attn(state)).toMatchObject({ tier: "you", reason: "Should I merge PR 12 now?" });
+  });
+
+  it("a merge-ready gate keeps the idle prompt on the coordinator's queue", () => {
+    const state = reduceAll(
+      initialState(),
+      cold("Claude is waiting for your input", { gates: ["T1"] }),
+    );
+    expect(attn(state).tier).not.toBe("info");
+    expect(attn(state).tier).not.toBe("none");
+  });
+});
+
 describe("Needs-you suppression — App", () => {
   afterEach(() => {
     vi.useRealTimers();
