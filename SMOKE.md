@@ -171,7 +171,10 @@ cleanly; on that tree volley-cli 386, volleyd 1433 and volley-desk 914 tests pas
     - `volley peer redeem` over ssh finds coordinator.json only through VOLLEY_AUTH_DIR or the
       default auth dir, not setup.json (a `--dir` / container setup needs it on the
       --remote-volley command, as above).
-  Fixed since run 1: in #133 the services' PATH and auth dir, and ~/.volley/bin scripts that
+  Fixed since run 1 (the three Open items above: #140): account_limit offers a signed-in
+  account with no usage yet, labelled so; `auth init` / `migrate` keep the WebSocket
+  listener's LAN bind and print the config diff first; `peer redeem` reads the auth dir from
+  setup.json. Also in #133 the services' PATH and auth dir, and ~/.volley/bin scripts that
   run bun by its full path; in #138 the --remote-volley hint, the container layout's "2
   pending", the admin token's links, `unknown@<host>` in `peer invite`, the config header
   naming its writer, SMOKE-v0.2's skill version; in #139 Settings' account row for a
@@ -301,9 +304,10 @@ on GitHub with one small open issue and a pushed release branch
    - **The threshold prompt.** `volleyd config set claude.warn_at_pct 1`, then
      `volleyd run smoke.yaml` (the primary account) and let the agent work for a minute.
      **Pass:** Settings › Claude accounts & usage shows an *account_limit* banner for the
-     primary account. It may say no other account has headroom (an account with no usage
-     sample yet, or one above 1 %, is not offered): that is a pass. **Nothing moves by itself:**
-     the agent stays on the primary. Answer **Not now**.
+     primary account. A signed-in account with no usage sample yet is offered, labelled
+     "no usage yet" (**Move to second**); one above 1 % is not, so after the wave on `second`
+     the banner may say no other account has headroom and offer only **Not now**: either is a
+     pass. **Nothing moves by itself:** the agent stays on the primary. Answer **Not now**.
    - **Moving an agent.** In the agent's window, pick `second` in the account picker in its
      title and confirm.
      **Pass:** the agent restarts under `second`, in the same worktree, and
