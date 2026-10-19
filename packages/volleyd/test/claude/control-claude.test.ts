@@ -181,8 +181,9 @@ describe("claude_* control ops", () => {
       await t.client.request("claude_account_add", { label: "work" });
       await t.signedIn();
       const r = await t.client.request("claude_signin", { acct: "work" });
-      // Asserts on the string, not toMatchObject with a matcher: bun's runner writes the matcher
-      // into the received object, so a later read of r.error would see the matcher.
+      // Rule under bun:test: never re-read a field you matched with an asymmetric matcher
+      // (toMatchObject + expect.stringMatching). bun writes the matcher into the received object,
+      // so a later read of r.error sees the matcher, not the string. Assert on the string instead.
       expect(r.ok).toBe(false);
       expect(r.error).toMatch(/already signed in/);
       expect(r.error).toContain("claude auth logout");

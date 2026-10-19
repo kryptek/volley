@@ -26,7 +26,14 @@ let client: ControlClient;
 let pub: VolleyBroker;
 
 async function agentStatus(agentId: string, type: string) {
-  const env = buildEnvelope({ agentId, parentId: null, channel: "status", type, payload: {} });
+  const env = buildEnvelope({
+    now: () => new Date(clock.now()),
+    agentId,
+    parentId: null,
+    channel: "status",
+    type,
+    payload: {},
+  });
   await pub.publish(`volley/${NS}/${agentId}/status`, JSON.stringify(env), {
     qos: 1,
     retain: true,
@@ -59,11 +66,12 @@ const TWO_HOURS = 2 * 3600_000;
 
 async function agentRegistry(agentId: string, cwd: string, wallTime?: string) {
   const env = buildEnvelope({
+    now: () => new Date(clock.now()),
     agentId,
     parentId: null,
     channel: "_system/registry",
     type: "registered",
-    payload: { capabilities: [], cwd, started_at: wallTime ?? new Date().toISOString() },
+    payload: { capabilities: [], cwd, started_at: wallTime ?? new Date(clock.now()).toISOString() },
   });
   await pub.publish(
     registryTopic(agentId),
@@ -153,7 +161,7 @@ describe("wave ownership", () => {
   it("a heartbeat counts from its envelope wall_time, not its (late) arrival", async () => {
     await agentRegistry("coord-a", "/work");
     await agentStatus("coord-a", "working");
-    const sent = new Date();
+    const sent = new Date(clock.now());
     advanceClock(TWO_HOURS);
     // A progress message queued while the daemon was down, delivered 2 h after it was sent.
     await heartbeat("coord-a", sent);
