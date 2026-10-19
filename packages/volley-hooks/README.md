@@ -155,7 +155,9 @@ it goes quiet while the session is idle). It publishes a retained `usage` envelo
 
 It publishes at most once per 15 s, unless the account, model or a reset time changed or a
 percentage moved by more than a point (`usage.json` in the state directory remembers the last
-publish). What the status line shows is printed first, before any connect: the output of the
+attempt, written before connecting, so a down broker is retried only on that schedule). The
+publisher exits within 3 s (or `VOLLEY_HOOKS_TIMEOUT_MS`, if lower), since Claude Code takes the
+status line when the command exits. What the status line shows is printed first, before any connect: the output of the
 `statusLine` command `install.sh` saved (`<state root>/statusline-chain.json`, run with the same
 input under a 2 s timeout), else a minimal `<model> · ctx 4% · 5h 11% · 7d 43%`. A `--settings`
 statusLine replaces the profile's own, so a spawned agent's status line is the chained command or

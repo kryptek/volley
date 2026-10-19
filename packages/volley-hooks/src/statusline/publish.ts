@@ -33,6 +33,11 @@ export const MIN_INTERVAL_MS = 15_000;
 export const MIN_DELTA_PT = 1;
 /** Bound on the user's own statusLine command. */
 const CHAIN_TIMEOUT_MS = 2_000;
+/**
+ * The publisher's own deadline (capped by the hook deadline): Claude Code takes the status line
+ * when the command exits, so a slow or unreachable broker must not hold it for the full 10 s.
+ */
+export const STATUSLINE_TIMEOUT_MS = 3_000;
 /** Where the install keeps the statusLine it replaced. */
 export const CHAIN_FILE = "statusline-chain.json";
 
@@ -223,6 +228,8 @@ export async function handle(ctx: HookContext, now: () => number = Date.now): Pr
   const payload = usageSample(ctx.input, accountOf(ctx), new Date(now()));
   const { stateDir } = ctx.identity;
   if (!shouldPublish(readLast(stateDir), payload, now())) return null;
+  // recorded before the attempt: with the broker down, the next update waits out the throttle
+  writeFileAtomic(lastPath(stateDir), `${JSON.stringify({ at: now(), payload })}\n`);
   const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
     await session.publish(session.topic("usage"), "usage", "usage", payload, {
@@ -232,7 +239,6 @@ export async function handle(ctx: HookContext, now: () => number = Date.now): Pr
   } finally {
     await session.close();
   }
-  writeFileAtomic(lastPath(stateDir), `${JSON.stringify({ at: now(), payload })}\n`);
   return null;
 }
 
@@ -243,7 +249,7 @@ export async function handle(ctx: HookContext, now: () => number = Date.now): Pr
  */
 async function main(): Promise<void> {
   const env = process.env;
-  setTimeout(() => process.exit(0), hookTimeoutMs(env)).unref();
+  setTimeout(() => process.exit(0), Math.min(hookTimeoutMs(env), STATUSLINE_TIMEOUT_MS)).unref();
   const raw = await readStdin();
   const out = statusOutput(raw, parseHookInput(raw), env);
   await new Promise<void>((resolve) => process.stdout.write(out, () => resolve()));

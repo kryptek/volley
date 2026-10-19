@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
 import {
+  STATUSLINE_TIMEOUT_MS,
   type UsagePayload,
   shouldPublish,
   statusText,
@@ -171,6 +172,20 @@ describe("statusLine publisher (Aedes)", () => {
     // the account is unknown here (no claude_account, no CLAUDE_CONFIG_DIR: the primary)
     const env = await retainedEnvelope(observer, USAGE_TOPIC);
     expect((env.payload as UsagePayload).account).toBe("primary");
+  }, 20_000);
+
+  it("bounds a publish to an unreachable broker and still throttles the next attempt", async () => {
+    const dead = await startTestBroker();
+    await dead.close();
+    const dir = makeWorkdir({ agent_id: AGENT, broker_url: dead.url });
+    const r = await run(dir, sample());
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("Haiku 5.5 · ctx 4% · 5h 11% · 7d 43%");
+    // well under the 10 s hook deadline: the status line is not held for a down broker
+    expect(r.ms).toBeLessThan(STATUSLINE_TIMEOUT_MS + 2_000);
+    // the attempt is recorded, so the next update within 15 s does not try again
+    const last = JSON.parse(readFileSync(join(dir, ".volley", "usage.json"), "utf-8"));
+    expect(last.payload.rate_limits.five_hour.pct).toBe(11);
   }, 20_000);
 
   it("prints the minimal line and publishes nothing without an identity", async () => {
