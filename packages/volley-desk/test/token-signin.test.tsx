@@ -136,7 +136,7 @@ describe("SignInGate #signin=<token>", () => {
       role: "steer",
       label: "Desk on iPhone",
     });
-    expect(readSessionRole()).toBe("steer");
+    expect(readSessionRole(`steer-${ID}`)).toBe("steer");
     expect(takeFirstRun()).toBe(false);
   });
 
@@ -151,7 +151,7 @@ describe("SignInGate #signin=<token>", () => {
     }));
     gate(factory(), redeem);
     await waitFor(() => expect(screen.getByTestId("desk")).toHaveTextContent(`admin-${ID}`));
-    expect(readSessionRole()).toBe("admin");
+    expect(readSessionRole(`admin-${ID}`)).toBe("admin");
     expect(takeFirstRun()).toBe(true);
     expect(takeFirstRun()).toBe(false);
   });

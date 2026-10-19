@@ -169,7 +169,11 @@ export function SignInGate({
         return;
       }
       const next = { username: r.username, password: r.password };
-      writeStored(storage, { ...next, role: r.role, label: r.label });
+      writeStored(storage, {
+        ...next,
+        ...(r.role !== null ? { role: r.role } : {}),
+        label: r.label,
+      });
       if (r.role === "admin") markFirstRun();
       setLastUsername(r.username);
       setError(null);

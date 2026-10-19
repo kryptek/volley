@@ -66,6 +66,10 @@ export interface SettingsWindowProps {
     /** This Desk's URL without a fragment (what a sign-in link opens). */
     deskUrl: string;
     onPreviewSignIn?: () => void;
+    /** Agents with a live status now (Broker accounts' Agents row). */
+    liveAgents?: number;
+    /** Setup & Security › Open setup…: Settings closes and the wizard opens in its own modal. */
+    onOpenSetup?: (repair: boolean) => void;
   };
 }
 
@@ -219,7 +223,13 @@ export function SettingsWindow(p: SettingsWindowProps) {
               />
             )}
             {sec === "accounts" && (
-              <BrokerAccounts ops={ops} admin={admin} identity={p.identity} role={role} />
+              <BrokerAccounts
+                ops={ops}
+                admin={admin}
+                identity={p.identity}
+                role={role}
+                liveAgents={p.onboarding?.liveAgents ?? null}
+              />
             )}
             {sec === "setup" && (
               <Setup
@@ -231,6 +241,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 {...(p.onboarding?.onPreviewSignIn
                   ? { onPreviewSignIn: p.onboarding.onPreviewSignIn }
                   : {})}
+                {...(p.onboarding?.onOpenSetup ? { onOpenSetup: p.onboarding.onOpenSetup } : {})}
               />
             )}
             {sec === "about" && <About />}

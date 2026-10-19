@@ -1,12 +1,14 @@
 /**
  * Settings › Setup & Security, ported from the prototype `settings.tsx`
  * (`setup`). **Broker**: the broker the Desk talks to and, for an admin, what
- * `setup_plan` found: whether accounts are required (Security has nothing
- * left to change), what each listener does with an anonymous client, when
- * setup last ran. **Admin** (admins only): Issue new token (`admin_token`:
- * volleyd prints a one-time admin token in its own terminal, never here; a
- * volleyd without it gets the `volley auth token` command instead), Preview
- * the sign-in screen, and Run setup again (the wizard, `SetupWizard`). A
+ * `setup_plan` found: whether accounts are required (what the listeners do
+ * with an anonymous client, from the detect step's probes; pending Security
+ * changes are shown apart), each listener, when setup last ran. **Admin**
+ * (admins only): Issue new token (`admin_token`: the one-time admin token comes
+ * back sealed to this browser and is shown once; a volleyd that prints it in
+ * its own terminal instead says so, and one without the op gets the `volley
+ * auth token` command), Preview the sign-in screen, and Run setup again (the
+ * wizard in its own modal, `SetupWizard`, as `volley setup --repair`). A
  * browser that is not an admin sees how to become one: a one-time admin
  * token from `volley auth token`, pasted here or opened as `#signin=<token>`.
  * The Desk never writes a broker password; admin comes only from a token.
@@ -15,14 +17,15 @@ import { type FormEvent, useEffect, useState } from "react";
 import {
   type AuthOps,
   type SetupPlan,
+  accountsRequired,
   isUnknownOp,
+  listenerProbes,
   parseSetupPlan,
   parseToken,
   readSessionRole,
   rememberRole,
 } from "../store/control";
-import { SetupWizard } from "./SetupWizard";
-import { CopyText } from "./onboardingParts";
+import { CopyText, Once } from "./onboardingParts";
 import { Group, Row } from "./primitives";
 
 /** The fixed identities `volley auth init` makes: none of them is an admin account. */
@@ -42,7 +45,7 @@ export function useAdminRole(
   identity: string | null,
   ask: boolean,
 ): { admin: boolean; role: string | null } {
-  const [role, setRole] = useState<string | null>(() => readSessionRole());
+  const [role, setRole] = useState<string | null>(() => readSessionRole(identity));
   const [probed, setProbed] = useState(false);
   useEffect(() => {
     if (!ask || probed || role !== null || ops === null || identity === null) return;
@@ -70,6 +73,8 @@ export interface SetupProps {
   onPreviewSignIn?: () => void;
   /** Sign in with a pasted admin token; default: reopen this Desk with `#signin=<token>`. */
   onUseToken?: (token: string) => void;
+  /** Opens the setup wizard in its own modal (Settings closes meanwhile); `repair` for Run setup again. */
+  onOpenSetup?: (repair: boolean) => void;
 }
 
 type PlanState =
@@ -82,6 +87,9 @@ type PlanState =
 type Issue =
   | { state: "idle" }
   | { state: "busy" }
+  /** volleyd sealed the token to this browser: shown once, here. */
+  | { state: "issued"; token: string; expiresAt: string | null }
+  /** volleyd printed it in its own terminal (an older volleyd). */
   | { state: "printed"; expiresAt: string | null }
   | { state: "unsupported" }
   | { state: "failed"; error: string };
@@ -102,14 +110,13 @@ function when(iso: string): string {
 }
 
 export function Setup(p: SetupProps) {
-  const [wizard, setWizard] = useState(false);
   const [plan, setPlan] = useState<PlanState>({ state: "none" });
   const [issue, setIssue] = useState<Issue>({ state: "idle" });
   const { ops, admin } = p;
 
-  // The broker's state comes from setup's own planners; only an admin may ask. Re-read after the wizard.
+  // The broker's state comes from setup's own planners; only an admin may ask.
   useEffect(() => {
-    if (!admin || ops === null || wizard) return;
+    if (!admin || ops === null) return;
     let live = true;
     setPlan({ state: "loading" });
     void ops.request("setup_plan").then((r) => {
@@ -125,15 +132,7 @@ export function Setup(p: SetupProps) {
     return () => {
       live = false;
     };
-  }, [admin, ops, wizard]);
-
-  if (wizard && admin && ops !== null) {
-    return (
-      <div className="s-embed">
-        <SetupWizard ops={ops} deskUrl={p.deskUrl} onClose={() => setWizard(false)} />
-      </div>
-    );
-  }
+  }, [admin, ops]);
 
   const issueToken = async () => {
     if (ops === null) return;
@@ -142,16 +141,20 @@ export function Setup(p: SetupProps) {
     if (isUnknownOp(r)) return setIssue({ state: "unsupported" });
     if (!r.ok) return setIssue({ state: "failed", error: r.error ?? "volleyd refused" });
     const exp = (r.result as { expires_at?: unknown } | undefined)?.expires_at;
-    setIssue({ state: "printed", expiresAt: typeof exp === "string" ? exp : null });
+    const expiresAt = typeof exp === "string" ? exp : null;
+    const token = r.secret?.token;
+    setIssue(
+      typeof token === "string"
+        ? { state: "issued", token, expiresAt }
+        : { state: "printed", expiresAt },
+    );
   };
 
   const ready = plan.state === "ready" ? plan.plan : null;
   const security = ready?.steps.find((s) => s.step === "security");
-  const listeners = (ready?.steps.find((s) => s.step === "detect")?.found ?? [])
-    .filter((f) => f.startsWith("Listener "))
-    .map((f) => f.replace(/^Listener /, ""));
-  const required =
-    security === undefined ? null : security.blocked === undefined && security.changes.length === 0;
+  const listeners = ready === null ? [] : listenerProbes(ready);
+  const required = ready === null ? null : accountsRequired(ready);
+  const pending = security?.changes.length ?? 0;
 
   return (
     <>
@@ -183,9 +186,21 @@ export function Setup(p: SetupProps) {
           <Row label="Listening" hint="What each listener does with a client that has no account">
             <span className="mono s-hint listeners">
               {listeners.map((l) => (
-                <span key={l}>{l}</span>
+                <span key={l.port}>
+                  {l.port}:{" "}
+                  {l.anonymous === "refused"
+                    ? "refuses anonymous clients"
+                    : l.anonymous === "accepted"
+                      ? "accepts anonymous clients"
+                      : "not listening"}
+                </span>
               ))}
             </span>
+          </Row>
+        )}
+        {pending > 0 && (
+          <Row label="Security" hint="Changes setup would make to the broker config">
+            <span className="pill-warn">{pending} pending</span>
           </Row>
         )}
         {ready?.last_setup !== undefined && (
@@ -198,7 +213,7 @@ export function Setup(p: SetupProps) {
         <Group title="Admin">
           <Row
             label="One-time admin token"
-            hint="Used once to sign in as admin on a new browser; volleyd prints it in its own terminal"
+            hint="Used once to sign in as admin on a new browser; shown here once"
           >
             <button
               type="button"
@@ -209,11 +224,22 @@ export function Setup(p: SetupProps) {
               {issue.state === "busy" ? "Asking volleyd…" : "Issue new token"}
             </button>
           </Row>
+          {issue.state === "issued" && (
+            <div className="s-note">
+              <Once label="One-time admin token (shown once)" secret={issue.token} qr={false}>
+                <p className="dim">
+                  Signs one browser in as admin, once
+                  {issue.expiresAt !== null ? `, until ${when(issue.expiresAt)}` : ""}: open the
+                  Desk there with <span className="mono">#signin=&lt;token&gt;</span> or paste it in
+                  Settings › Setup &amp; Security.
+                </p>
+              </Once>
+            </div>
+          )}
           {issue.state === "printed" && (
             <output className="s-note">
               A new token was printed in the terminal running volleyd
-              {issue.expiresAt !== null ? ` (valid until ${when(issue.expiresAt)})` : ""}. It is
-              never shown here.
+              {issue.expiresAt !== null ? ` (valid until ${when(issue.expiresAt)})` : ""}.
             </output>
           )}
           {issue.state === "unsupported" && (
@@ -238,7 +264,12 @@ export function Setup(p: SetupProps) {
             label="Run setup again"
             hint="Repairs services and accounts; asks before changing anything"
           >
-            <button type="button" className="btn btn--blue" onClick={() => setWizard(true)}>
+            <button
+              type="button"
+              className="btn btn--blue"
+              disabled={p.onOpenSetup === undefined}
+              onClick={() => p.onOpenSetup?.(true)}
+            >
               Open setup…
             </button>
           </Row>

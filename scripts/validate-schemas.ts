@@ -29,6 +29,8 @@
  *   - `usage-*.json` -> usage.schema.json
  *   - `claudeaccount-*.json` -> claude-account.schema.json
  *   - `machine-*.json` -> machine.schema.json
+ *   - `setupplan-*.json` -> setup-result.schema.json `$defs/plan` (a result, not an envelope)
+ *   - `setupapply-*.json` -> setup-result.schema.json `$defs/applied` (a result, not an envelope)
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -65,6 +67,8 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   usage: "usage.schema.json",
   claudeaccount: "claude-account.schema.json",
   machine: "machine.schema.json",
+  setupplan: "setup-result.schema.json#/$defs/plan",
+  setupapply: "setup-result.schema.json#/$defs/applied",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

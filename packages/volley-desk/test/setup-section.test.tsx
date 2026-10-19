@@ -11,7 +11,7 @@ const DESK = "http://desk.example:5199/";
 function section(
   ops: AuthOps | null,
   admin: boolean,
-  extra: { onPreviewSignIn?: () => void } = {},
+  extra: { onPreviewSignIn?: () => void; onOpenSetup?: (repair: boolean) => void } = {},
 ) {
   return render(
     <Setup
@@ -53,13 +53,49 @@ describe("Settings › Setup & Security", () => {
     expect(row("Last setup").getByText(/backups kept/i)).toBeInTheDocument();
   });
 
-  it("says accounts are off while Security still has changes", async () => {
+  it("reads accounts-required from the listeners, and shows pending Security changes apart", async () => {
+    // Both listeners refuse anonymous clients; Security still has a change (a LAN toggle).
     const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    section(ops, true);
+    expect(await screen.findByText("On")).toBeInTheDocument();
+    expect(row("Security").getByText("2 pending")).toBeInTheDocument();
+  });
+
+  it("says accounts are off while a listener takes anonymous clients", async () => {
+    const open = {
+      ...PLAN,
+      steps: PLAN.steps.map((s) =>
+        s.step === "detect"
+          ? {
+              ...s,
+              found: ["Listener 1883: accepts anonymous clients", "Listener 9001: not listening"],
+            }
+          : s,
+      ),
+    };
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: open }) });
     section(ops, true);
     expect(await screen.findByText("Off")).toBeInTheDocument();
   });
 
-  it("asks volleyd for a new admin token, which it prints in its terminal", async () => {
+  it("shows a new admin token once when volleyd seals it to this browser", async () => {
+    const token = "vly_admin_89abcdef_0123456789abcdef0123456789abcdef";
+    const { ops } = fakeOps({
+      setup_plan: () => ({ ok: true, result: PLAN }),
+      admin_token: () => ({
+        ok: true,
+        result: { token_id: "89abcdef", expires_at: "2026-10-19T12:10:00Z" },
+        secret: { token },
+      }),
+    });
+    section(ops, true);
+    fireEvent.click(screen.getByRole("button", { name: /Issue new token/ }));
+    expect(await screen.findByText(token)).toBeInTheDocument();
+    expect(screen.getByText(/shown once/i)).toBeInTheDocument();
+    expect(screen.queryByText(/printed in the terminal/i)).not.toBeInTheDocument();
+  });
+
+  it("says where the token went when volleyd printed it in its terminal", async () => {
     const { ops, calls } = fakeOps({
       setup_plan: () => ({ ok: true, result: PLAN }),
       admin_token: () => ({ ok: true, result: { expires_at: "2026-10-19T12:10:00Z" } }),
@@ -77,13 +113,12 @@ describe("Settings › Setup & Security", () => {
     expect(await screen.findByText("volley auth token")).toBeInTheDocument();
   });
 
-  it("opens the wizard from Run setup again", async () => {
+  it("opens the wizard (in its own modal) from Run setup again, as a repair", async () => {
     const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
-    section(ops, true);
+    const onOpenSetup = vi.fn();
+    section(ops, true, { onOpenSetup });
     fireEvent.click(screen.getByRole("button", { name: "Open setup…" }));
-    expect(await screen.findByText("mosquitto 2.1.2 (from mosquitto -h)")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Close setup" }));
-    expect(screen.getByRole("button", { name: "Open setup…" })).toBeInTheDocument();
+    expect(onOpenSetup).toHaveBeenCalledWith(true);
   });
 
   it("previews the sign-in screen", () => {

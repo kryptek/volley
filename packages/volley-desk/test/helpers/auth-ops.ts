@@ -1,18 +1,23 @@
 import { vi } from "vitest";
-import type { AuthAnswer, AuthOps } from "../../src/store/control";
+import type { AuthAnswer, AuthOps, AuthRequestOptions } from "../../src/store/control";
 
 /** A fake admin channel: each op answers from `handlers`, anything else is an unknown op. */
 export function fakeOps(
-  handlers: Record<string, (fields: Record<string, unknown>) => AuthAnswer | Promise<AuthAnswer>>,
+  handlers: Record<
+    string,
+    (fields: Record<string, unknown>, opts: AuthRequestOptions) => AuthAnswer | Promise<AuthAnswer>
+  >,
 ) {
-  const calls: { op: string; fields: Record<string, unknown> }[] = [];
+  const calls: { op: string; fields: Record<string, unknown>; opts?: AuthRequestOptions }[] = [];
   const ops: AuthOps = {
     identity: "admin-0123abcd",
-    request: vi.fn(async (op: string, fields: Record<string, unknown> = {}) => {
-      calls.push({ op, fields });
-      const h = handlers[op];
-      return h ? h(fields) : { ok: false, error: `unknown op '${op}'` };
-    }),
+    request: vi.fn(
+      async (op: string, fields: Record<string, unknown> = {}, opts: AuthRequestOptions = {}) => {
+        calls.push({ op, fields, ...(Object.keys(opts).length > 0 ? { opts } : {}) });
+        const h = handlers[op];
+        return h ? h(fields, opts) : { ok: false, error: `unknown op '${op}'` };
+      },
+    ),
   };
   return { ops, calls };
 }
@@ -29,6 +34,7 @@ export const PLAN = {
         "3 agents running on the broker",
       ],
       changes: [],
+      plan_id: "detect-1",
     },
     {
       step: "security",
@@ -41,6 +47,8 @@ export const PLAN = {
         },
         { summary: "Restart the broker (about 2 s; agents reconnect on their own)" },
       ],
+      plan_id: "security-1",
+      lan: { planned: true, current: false },
     },
     {
       step: "accounts",
@@ -52,18 +60,21 @@ export const PLAN = {
             "Issue a one-time admin token (10 minutes, single use) to sign in to the Desk as admin",
         },
       ],
+      plan_id: "accounts-1",
     },
     {
       step: "services",
       title: "Services",
       found: ["volleyd runs as a login service"],
       changes: [],
+      plan_id: "services-1",
     },
     {
       step: "phone",
       title: "Phone",
       found: [],
       changes: [{ summary: 'Issue a one-time steer sign-in link for "Desk on phone"' }],
+      plan_id: "phone-1",
     },
   ],
   last_setup: "2026-10-18T22:12:00Z",

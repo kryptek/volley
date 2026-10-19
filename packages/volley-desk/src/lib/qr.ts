@@ -2,9 +2,11 @@
  * A QR code encoder for the Desk (sign-in links, one-time passwords): byte mode, error
  * correction level M, versions 1..10 (up to 213 bytes, ample for a Desk sign-in link), mask
  * chosen by the standard penalty score (ISO/IEC 18004). A port of `volley setup`'s terminal
- * encoder (volley-cli `src/setup/qr.ts`, checked there by an independent decoder; the shared
- * fixture in `test/fixtures/qr-signin-link.txt` keeps the two identical). Pure: `encodeQr`
- * returns the module matrix, `qrPath` an SVG path of its dark modules.
+ * encoder (volley-cli `src/setup/qr.ts`); only the renderer differs (`qrPath` here, `renderQr`
+ * there). The Desk's `setup-wizard` test holds this copy to the CLI's own fixture
+ * (volley-cli `test/setup/fixtures/qr-signin-link.txt`) and runs the CLI's independent decoder
+ * over it, so a fix to one encoder that misses the other fails a test. Pure: `encodeQr` returns
+ * the module matrix, `qrPath` an SVG path of its dark modules.
  */
 
 /** `true` = a dark module. `matrix[y][x]`, square, `size = 17 + 4 * version`. */

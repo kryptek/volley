@@ -12,7 +12,8 @@
  * volleyd config), the Onboarding sections and About; a wave's ⚙ opens that wave's
  * effective config. Onboarding (O4): Broker accounts and Setup & Security talk to
  * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
- * opens Setup & Security once, and its Preview shows the sign-in screen.
+ * opens Setup & Security once, its Preview shows the sign-in screen, and Open setup…
+ * closes Settings and shows the setup wizard in its own modal (as the prototype).
  * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
@@ -57,6 +58,7 @@ import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
+import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
@@ -69,6 +71,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isSupervisorId,
   stageChip,
   supervisorList,
   supervisorNamespace,
@@ -194,6 +197,16 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
   return next;
 }
 
+/** Agents whose last status is not terminal (as `volley setup` counts "agents running"), supervisors aside. */
+function liveAgentCount(state: DeskState): number {
+  return Object.values(state.agents).filter(
+    (a) =>
+      !isSupervisorId(a.id) &&
+      a.status != null &&
+      !["done", "failed", "reaped"].includes(a.status.type),
+  ).length;
+}
+
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
@@ -252,6 +265,13 @@ export default function App() {
   );
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
+  /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
+  const [setupWizard, setSetupWizard] = useState<{ repair: boolean } | null>(null);
+  /** Closing the wizard goes back to where it was opened: Settings › Setup & Security. */
+  const closeSetupWizard = () => {
+    setSetupWizard(null);
+    setDeskSettings("setup");
+  };
 
   const allGroups = agentsByWave(state);
   // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
@@ -512,6 +532,7 @@ export default function App() {
     arrange,
     closeTop: () => {
       if (preview) setPreview(false);
+      else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
       else if (steerOpen !== null) setSteerOpen(null);
@@ -740,9 +761,23 @@ export default function App() {
               setDeskSettings(null);
               setPreview(true);
             },
+            liveAgents: liveAgentCount(state),
+            onOpenSetup: (repair) => {
+              setDeskSettings(null);
+              setSetupWizard({ repair });
+            },
           }}
           onArrange={arrange}
           onClose={() => setDeskSettings(null)}
+        />
+      )}
+
+      {setupWizard !== null && authOps !== null && (
+        <SetupWizard
+          ops={authOps}
+          deskUrl={deskUrl(window.location)}
+          repair={setupWizard.repair}
+          onClose={closeSetupWizard}
         />
       )}
 

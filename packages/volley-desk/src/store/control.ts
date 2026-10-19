@@ -22,15 +22,35 @@
  * `/reply`. `redeemToken` connects as that login, publishes `token_redeem`
  * and returns the account volleyd minted for this browser.
  *
- * **Setup ops.** The wizard mirrors `volley setup`'s five steps (broker →
- * security → accounts → services → phone): `setup_plan` returns each step's
- * plan as the terminal prints it (what it found, the changes it would make,
- * blocked / skipped), `setup_apply { step, lan? }` applies one step and
- * returns its report, with the one-time admin token, if the step issued one,
- * sealed. They are admin ops, so they travel the account-op topic. A volleyd
- * that does not run setup answers `unknown op` (`isUnknownOp`), and the
- * wizard points at `volley setup` in a terminal instead.
+ * **Setup ops** (SPEC §4.6.10, `setup-result.schema.json`). The wizard
+ * mirrors `volley setup`'s five steps (detect → security → accounts →
+ * services → phone) as volleyd runs O3's own planners for it. They are admin
+ * ops, so they travel the account-op topic:
+ * - `setup_plan { lan?, repair? }` plans every step fresh: what it found, the
+ *   changes it would make (a change only a terminal can make carries
+ *   `terminal: { reason, command }`), blocked / skipped, and a `plan_id` per
+ *   step. `lan` feeds the security plan the way `--lan` / `--no-lan` do, and
+ *   the security step reports the choice it planned for (`lan: { planned,
+ *   current }`), so the diff the Desk shows is the one it applies; `repair` is
+ *   `--repair` (no new admin token, no phone link). `broker` carries the
+ *   detect step's probes as data (`accounts_required`, `listeners`).
+ * - `setup_apply { step, plan_id, lan?, repair? }` applies exactly the plan the
+ *   person saw: volleyd plans the step again and refuses with `plan changed`
+ *   when its `plan_id` differs, so the Desk shows the new plan instead. Its
+ *   report is `{ lines, problems, terminal?, restarting? }`; the one-time admin
+ *   token the accounts step issues over the Desk is only in `sealed: { token }`.
+ *   Applying can take a minute (the Desk build, `volley auth`), hence
+ *   `SETUP_APPLY_TIMEOUT_MS`. A broker restart drops this browser's connection
+ *   too, and an answer published while it reconnects is lost (QoS 1, not
+ *   retained): the wizard keeps listening after the timeout (`onLate`), and
+ *   re-plans once it is back rather than assuming the step failed.
+ * - `admin_token` issues a one-time admin token: `{ token_id, expires_at }`,
+ *   the token sealed (a volleyd that prints it in its terminal instead answers
+ *   without `sealed`).
+ * A volleyd that does not run setup answers `unknown op` (`isUnknownOp`), and
+ * the wizard points at `volley setup` in a terminal instead.
  */
+import { newId as defaultNewId } from "../lib/id";
 import { generateRsaKey, oaepDecrypt, publicJwk } from "../lib/rsa";
 import type { SteerClient } from "../steer/transport";
 import { CREDENTIALS_STORAGE_KEY } from "./context";
@@ -47,6 +67,10 @@ export const AUTH_CHANNEL = "_system/auth";
 export const AUTH_TIMEOUT_MS = 10_000;
 /** A redemption runs `volley auth redeem` (a broker round trip or two) before it answers. */
 export const REDEEM_TIMEOUT_MS = 20_000;
+/** `setup_apply` runs a step's changes (a broker restart, `volley auth`, the Desk build) before it answers. */
+export const SETUP_APPLY_TIMEOUT_MS = 120_000;
+/** How long a request that timed out still listens for its answer (`onLate`). */
+export const LATE_ANSWER_MS = 10 * 60_000;
 
 export const authOpsTopic = (username: string) => `volley/_system/auth/ops/${username}`;
 export const authReplyTopic = (correlationId: string) =>
@@ -102,17 +126,23 @@ export function deviceLabel(ua: string): string {
 /**
  * What the stored sign-in may do: the account's role, kept next to the
  * credentials (`{ username, password, role?, label? }`) when the Desk learnt
- * it (a redeemed token, or an `account_list` volleyd answered). Admin-only
- * sections key off it; volleyd checks the role again on every op.
+ * it (a redeemed token, or an `account_list` volleyd answered). Only the role
+ * of `identity`, the account actually in use: credentials from the build
+ * (`VITE_VOLLEY_BROKER_*`) win over a stored sign-in, whose role is then not
+ * this session's. Admin-only sections key off it; volleyd checks the role
+ * again on every op.
  */
-export function readSessionRole(storage: Pick<Storage, "getItem"> | null = local()): string | null {
+export function readSessionRole(
+  identity: string | null,
+  storage: Pick<Storage, "getItem"> | null = local(),
+): string | null {
+  if (identity === null) return null;
   try {
-    const role = (
-      JSON.parse(storage?.getItem(CREDENTIALS_STORAGE_KEY) ?? "null") as {
-        role?: unknown;
-      } | null
-    )?.role;
-    return typeof role === "string" ? role : null;
+    const c = JSON.parse(storage?.getItem(CREDENTIALS_STORAGE_KEY) ?? "null") as {
+      username?: unknown;
+      role?: unknown;
+    } | null;
+    return c?.username === identity && typeof c.role === "string" ? c.role : null;
   } catch {
     return null;
   }
@@ -213,8 +243,8 @@ export async function newReplyKey(
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: "SHA-256",
     },
-    // Only the public half is ever exported.
-    true,
+    // The private half stays inside WebCrypto; a public key is always exportable.
+    false,
     ["encrypt", "decrypt"],
   );
   const pub = await subtle.exportKey("jwk", pair.publicKey);
@@ -289,23 +319,13 @@ function parseJson(text: string): Partial<Envelope> | null {
   }
 }
 
-/**
- * A fresh correlation id (32 hex digits, within the reply topic's `[A-Za-z0-9_-]{8,64}`).
- * `crypto.randomUUID` exists only in a secure context, which a phone on plain http is not;
- * `getRandomValues` exists on every page.
- */
-export function newCorrelationId(): string {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-}
-
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 // ---------------------------------------------------------- token redemption
 
 export type RedeemResult =
-  | { ok: true; username: string; password: string; role: string; label: string }
+  /** `role` is null when volleyd's answer did not say (a sign-in link may grant `steer` or `watch`). */
+  | { ok: true; username: string; password: string; role: string | null; label: string }
   | { ok: false; error: string };
 
 export interface RedeemRequest {
@@ -355,7 +375,7 @@ async function redeemOnce(
             : `could not reach the broker at ${req.url} (${message(err)})`,
       };
     }
-    const correlationId = (req.newId ?? newCorrelationId)();
+    const correlationId = (req.newId ?? defaultNewId)();
     const replies = tokenReplyTopic(parsed.id);
     let off = () => {};
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -420,7 +440,7 @@ async function redeemOnce(
       ok: true,
       username: secret.username,
       password: secret.password,
-      role: typeof role === "string" ? role : parsed.kind === "admin" ? "admin" : "steer",
+      role: typeof role === "string" ? role : parsed.kind === "admin" ? "admin" : null,
       label: req.label,
     };
   } finally {
@@ -443,31 +463,46 @@ export interface AuthAnswer {
   unsent?: true;
 }
 
+export interface AuthRequestOptions {
+  timeoutMs?: number;
+  /**
+   * Called with the answer if it arrives after the timeout (up to `LATE_ANSWER_MS`): a step
+   * that took longer, or an answer held up by a broker restart. Its sealed secret is opened
+   * as usual, so a single-use token is never dropped.
+   */
+  onLate?: (answer: AuthAnswer) => void;
+}
+
 export interface AuthOps {
   /** The admin's username: the request topic and the envelopes' sender. */
   identity: string;
   request(
     op: string,
     fields?: Record<string, unknown>,
-    opts?: { timeoutMs?: number },
+    opts?: AuthRequestOptions,
   ): Promise<AuthAnswer>;
 }
 
 /** volleyd refused the op as one it does not know (an older volleyd: setup ops, `admin_token`). */
 export const isUnknownOp = (a: AuthAnswer) => !a.ok && /^unknown op\b/.test(a.error ?? "");
 
+/** volleyd refused `setup_apply` because the step's plan is no longer the one shown. */
+export const isPlanChanged = (a: AuthAnswer) => !a.ok && /^plan changed\b/.test(a.error ?? "");
+
 export function createAuthOps(
   client: SteerClient,
   opts: {
     identity: string;
     timeoutMs?: number;
+    lateMs?: number;
     newId?: () => string;
     now?: () => Date;
     replyKey?: () => Promise<ReplyKey>;
   },
 ): AuthOps {
   const timeout = opts.timeoutMs ?? AUTH_TIMEOUT_MS;
-  const newId = opts.newId ?? newCorrelationId;
+  const lateMs = opts.lateMs ?? LATE_ANSWER_MS;
+  const newId = opts.newId ?? defaultNewId;
   const now = opts.now ?? (() => new Date());
   // One key pair per session, made on first use; its private half never leaves this object.
   let key: Promise<ReplyKey> | null = null;
@@ -476,9 +511,26 @@ export function createAuthOps(
     return key;
   };
 
+  /** volleyd's answer payload as an `AuthAnswer`, its sealed secret opened with `k`. */
+  const toAnswer = async (p: Record<string, unknown>, k: ReplyKey): Promise<AuthAnswer> => {
+    const answer: AuthAnswer = {
+      ok: p.ok === true,
+      ...(typeof p.error === "string" ? { error: p.error } : {}),
+      ...(p.result !== undefined ? { result: p.result } : {}),
+    };
+    if (answer.ok && typeof p.sealed === "string") {
+      try {
+        answer.secret = await k.open(p.sealed);
+      } catch {
+        return { ok: false, error: "volleyd's answer could not be opened with this browser's key" };
+      }
+    }
+    return answer;
+  };
+
   return {
     identity: opts.identity,
-    async request(op, fields = {}, { timeoutMs = timeout } = {}) {
+    async request(op, fields = {}, { timeoutMs = timeout, onLate } = {}) {
       let k: ReplyKey;
       try {
         k = await replyKey();
@@ -496,21 +548,31 @@ export function createAuthOps(
       const got = await new Promise<{ answer: Record<string, unknown> } | { failed: AuthAnswer }>(
         (resolve) => {
           let off = () => {};
-          const timer = setTimeout(
-            () =>
-              done({
-                failed: {
-                  ok: false,
-                  error: `volleyd did not answer within ${timeoutMs / 1000}s`,
-                  unanswered: true,
-                },
-              }),
-            timeoutMs,
-          );
+          let settled = false;
+          let late: ReturnType<typeof setTimeout> | undefined;
+          const timer = setTimeout(() => {
+            settled = true;
+            resolve({
+              failed: {
+                ok: false,
+                error: `volleyd did not answer within ${timeoutMs / 1000}s`,
+                unanswered: true,
+              },
+            });
+            // Keep listening for a late answer only when someone will take it.
+            if (onLate === undefined) off();
+            else late = setTimeout(() => off(), lateMs);
+          }, timeoutMs);
           function done(r: { answer: Record<string, unknown> } | { failed: AuthAnswer }) {
             clearTimeout(timer);
+            clearTimeout(late);
             off();
-            resolve(r);
+            if (!settled) {
+              settled = true;
+              resolve(r);
+            } else if ("answer" in r && onLate !== undefined) {
+              void toAnswer(r.answer, k).then(onLate);
+            }
           }
           // Listen before publishing so a fast answer is not missed.
           off = client.onMessage((m) => {
@@ -532,23 +594,7 @@ export function createAuthOps(
         },
       );
       if ("failed" in got) return got.failed;
-      const p = got.answer;
-      const answer: AuthAnswer = {
-        ok: p.ok === true,
-        ...(typeof p.error === "string" ? { error: p.error } : {}),
-        ...(p.result !== undefined ? { result: p.result } : {}),
-      };
-      if (answer.ok && typeof p.sealed === "string") {
-        try {
-          answer.secret = await k.open(p.sealed);
-        } catch {
-          return {
-            ok: false,
-            error: "volleyd's answer could not be opened with this browser's key",
-          };
-        }
-      }
-      return answer;
+      return toAnswer(got.answer, k);
     },
   };
 }
@@ -581,6 +627,19 @@ export function parseAccounts(result: unknown): BrokerAccount[] | null {
 export const SETUP_STEPS = ["detect", "security", "accounts", "services", "phone"] as const;
 export type SetupStepName = (typeof SETUP_STEPS)[number];
 
+/** A change volleyd will not make for the Desk, and the terminal command that makes it. */
+export interface TerminalOnly {
+  reason: string;
+  command: string;
+}
+
+export interface SetupChange {
+  summary: string;
+  detail?: string;
+  /** Only a terminal can make it (it needs `sudo`, or it would stop volleyd itself). */
+  terminal?: TerminalOnly;
+}
+
 /** One step's plan, as `volley setup` prints it before asking. */
 export interface SetupStepPlan {
   step: SetupStepName;
@@ -588,25 +647,60 @@ export interface SetupStepPlan {
   /** What the step found (always shown). */
   found: string[];
   /** What applying it changes; empty when it is already done. */
-  changes: { summary: string; detail?: string }[];
+  changes: SetupChange[];
   /** Why this step (and every later one) cannot run now. */
   blocked?: string;
   /** Why this step is left out (the later ones still run). */
   skipped?: string;
+  /** Names this plan; `setup_apply` sends it back so volleyd applies exactly this plan. */
+  plan_id?: string;
+  /**
+   * The security step's LAN reach: the choice this plan was made for (`planned`) and what
+   * the broker config has now (`current`, null when it is not Volley's config). Absent when
+   * the layout leaves no choice (a container binds every interface).
+   */
+  lan?: { planned: boolean; current: boolean | null };
 }
+
+export type AnonymousProbe = "refused" | "accepted" | "unreachable";
 
 export interface SetupPlan {
   steps: SetupStepPlan[];
   /** When setup last ran (its log's newest entry). */
   last_setup?: string;
+  /** The detect step's probes, as data: whether only accounts can connect, and each listener. */
+  broker?: {
+    accounts_required: boolean;
+    listeners: { port: number; anonymous: AnonymousProbe }[];
+  };
 }
 
 const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
+const PROBES: readonly unknown[] = ["refused", "accepted", "unreachable"];
+
+function parseTerminal(v: unknown): TerminalOnly | undefined {
+  const t = v as { reason?: unknown; command?: unknown } | undefined;
+  return typeof t?.reason === "string" && typeof t.command === "string"
+    ? { reason: t.reason, command: t.command }
+    : undefined;
+}
+
+function parseBroker(v: unknown): SetupPlan["broker"] | undefined {
+  const b = v as { accounts_required?: unknown; listeners?: unknown } | undefined;
+  if (typeof b?.accounts_required !== "boolean" || !Array.isArray(b.listeners)) return undefined;
+  return {
+    accounts_required: b.accounts_required,
+    listeners: (b.listeners as { port?: unknown; anonymous?: unknown }[])
+      .filter((l) => typeof l?.port === "number" && PROBES.includes(l.anonymous))
+      .map((l) => ({ port: l.port as number, anonymous: l.anonymous as AnonymousProbe })),
+  };
+}
+
 /** `setup_plan`'s result, the steps in setup's order; `null` when it is not one. */
 export function parseSetupPlan(result: unknown): SetupPlan | null {
-  const r = result as { steps?: unknown; last_setup?: unknown } | undefined;
+  const r = result as { steps?: unknown; last_setup?: unknown; broker?: unknown } | undefined;
   if (!Array.isArray(r?.steps)) return null;
   const steps: SetupStepPlan[] = [];
   for (const raw of r.steps as Record<string, unknown>[]) {
@@ -614,11 +708,16 @@ export function parseSetupPlan(result: unknown): SetupPlan | null {
     const changes = Array.isArray(raw.changes)
       ? (raw.changes as Record<string, unknown>[])
           .filter((c) => typeof c?.summary === "string")
-          .map((c) => ({
-            summary: c.summary as string,
-            ...(typeof c.detail === "string" && c.detail !== "" ? { detail: c.detail } : {}),
-          }))
+          .map((c) => {
+            const terminal = parseTerminal(c.terminal);
+            return {
+              summary: c.summary as string,
+              ...(typeof c.detail === "string" && c.detail !== "" ? { detail: c.detail } : {}),
+              ...(terminal !== undefined ? { terminal } : {}),
+            };
+          })
       : [];
+    const lan = raw.lan as { planned?: unknown; current?: unknown } | undefined;
     steps.push({
       step: raw.step as SetupStepName,
       title: typeof raw.title === "string" ? raw.title : String(raw.step),
@@ -626,12 +725,23 @@ export function parseSetupPlan(result: unknown): SetupPlan | null {
       changes,
       ...(typeof raw.blocked === "string" ? { blocked: raw.blocked } : {}),
       ...(typeof raw.skipped === "string" ? { skipped: raw.skipped } : {}),
+      ...(typeof raw.plan_id === "string" ? { plan_id: raw.plan_id } : {}),
+      ...(typeof lan?.planned === "boolean"
+        ? {
+            lan: {
+              planned: lan.planned,
+              current: typeof lan.current === "boolean" ? lan.current : null,
+            },
+          }
+        : {}),
     });
   }
   steps.sort((a, b) => SETUP_STEPS.indexOf(a.step) - SETUP_STEPS.indexOf(b.step));
+  const broker = parseBroker(r.broker);
   return {
     steps,
     ...(typeof r.last_setup === "string" ? { last_setup: r.last_setup } : {}),
+    ...(broker !== undefined ? { broker } : {}),
   };
 }
 
@@ -641,18 +751,60 @@ export interface SetupApplied {
   lines: string[];
   /** Checks that failed after the changes. */
   problems: string[];
+  /** The changes volleyd left for a terminal, with the command for each. */
+  terminal: (TerminalOnly & { summary: string })[];
+  /** The broker restarts after this answer: the Desk reconnects, then re-plans. */
+  restarting: boolean;
   /** The one-time admin token the step issued (the accounts step), opened from `sealed`. */
   token?: string;
 }
 
 export function parseSetupApplied(a: AuthAnswer): SetupApplied {
-  const r = a.result as { lines?: unknown; problems?: unknown } | undefined;
+  const r = a.result as
+    | { lines?: unknown; problems?: unknown; terminal?: unknown; restarting?: unknown }
+    | undefined;
   const token = a.secret?.token;
+  const terminal = Array.isArray(r?.terminal)
+    ? (r.terminal as { summary?: unknown }[]).flatMap((t) => {
+        const only = parseTerminal(t);
+        return only !== undefined && typeof t.summary === "string"
+          ? [{ summary: t.summary, ...only }]
+          : [];
+      })
+    : [];
   return {
     lines: strings(r?.lines),
     problems: strings(r?.problems),
+    terminal,
+    restarting: r?.restarting === true,
     ...(typeof token === "string" ? { token } : {}),
   };
+}
+
+/**
+ * Whether the broker refuses anonymous clients: `broker.accounts_required` when volleyd sent
+ * it, else every listener the detect step probed refuses them; `null` when it cannot tell.
+ */
+export function accountsRequired(plan: SetupPlan): boolean | null {
+  if (plan.broker !== undefined) return plan.broker.accounts_required;
+  const probes = listenerProbes(plan);
+  return probes.length === 0 ? null : probes.every((l) => l.anonymous === "refused");
+}
+
+/** Each listener and what it does with an anonymous client (`broker`, else the detect step's lines). */
+export function listenerProbes(plan: SetupPlan): { port: number; anonymous: AnonymousProbe }[] {
+  if (plan.broker !== undefined) return plan.broker.listeners;
+  const found = plan.steps.find((s) => s.step === "detect")?.found ?? [];
+  return found.flatMap((f): { port: number; anonymous: AnonymousProbe }[] => {
+    const m =
+      /^Listener (\d+): (refuses|accepts) anonymous clients$|^Listener (\d+): not listening$/.exec(
+        f,
+      );
+    if (m === null) return [];
+    return m[1] !== undefined
+      ? [{ port: Number(m[1]), anonymous: m[2] === "refuses" ? "refused" : "accepted" }]
+      : [{ port: Number(m[3]), anonymous: "unreachable" }];
+  });
 }
 
 /** The phone step's label (O3's `PHONE_LABEL`): the account a phone link mints is bound to it. */

@@ -9,6 +9,13 @@
  * 180-4 (SHA-256); key generation by random odd candidates, a small-prime
  * sieve and Miller–Rabin. Pure: no I/O, checked against Node's
  * `publicEncrypt` in the tests.
+ *
+ * Not constant-time: BigInt `modPow` is not, and there is no blinding. The
+ * padding check avoids early exits, but a timing oracle (Manger's attack)
+ * would still need chosen ciphertexts, and only volleyd can write the answer
+ * topics; the key lives for one browser session and every failure is the same
+ * "decryption error". Key generation runs on the main thread (about a second
+ * on a phone, once per session).
  */
 
 // ------------------------------------------------------------------ SHA-256
@@ -259,10 +266,20 @@ export function oaepDecrypt(key: RsaPrivateKey, ciphertext: Uint8Array): Uint8Ar
   const maskedDb = em.subarray(1 + hLen);
   const seed = mgf1(maskedDb, hLen).map((x, i) => x ^ (maskedSeed[i] as number));
   const db = mgf1(seed, k - hLen - 1).map((x, i) => x ^ (maskedDb[i] as number));
-  let bad = em[0] !== 0;
-  for (let i = 0; i < hLen; i++) bad ||= db[i] !== EMPTY_LABEL_HASH[i];
-  let i = hLen;
-  while (i < db.length && db[i] === 0) i++;
-  if (bad || db[i] !== 1) throw new Error("decryption error");
-  return db.slice(i + 1);
+  // The checks run over every byte without an early exit, and fail with one error at the end.
+  let bad = em[0] as number;
+  for (let j = 0; j < hLen; j++) bad |= (db[j] as number) ^ (EMPTY_LABEL_HASH[j] as number);
+  // The first non-zero byte after lHash must be the 0x01 separator.
+  let sep = 0;
+  let seen = 0;
+  for (let j = hLen; j < db.length; j++) {
+    const b = db[j] as number;
+    const first = seen === 0 && b !== 0 ? 1 : 0;
+    sep |= first * j;
+    bad |= first * (b ^ 1);
+    seen |= b;
+  }
+  bad |= seen === 0 ? 1 : 0;
+  if (bad !== 0) throw new Error("decryption error");
+  return db.slice(sep + 1);
 }

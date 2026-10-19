@@ -3,8 +3,9 @@
  * can connect to the broker and what they may do, managed through volleyd's
  * account ops (SPEC §4.6.10), never by the Desk writing a login itself. The
  * table lists `account_list` (name, role chip, where, last seen) and an
- * Agents row: agent logins are minted by the supervisor per spawn and removed
- * when the agent retires, so there is nothing to manage. **New account**
+ * Agents row (every machine; the Desk's live agent count): agent logins are
+ * minted by the supervisor per spawn and removed when the agent retires, so
+ * there is nothing to manage. **New account**
  * picks a kind (Desk → can steer, Coordinator → can steer, Viewer → watch
  * only) and a name (the agent-id grammar: the name is the login and the
  * sender id), then `account_create`; **Rotate** is `account_rotate`; either
@@ -14,7 +15,8 @@
  * channel, and revoking it would lock this browser out).
  *
  * A browser that is not an admin cannot list accounts (only an admin may send
- * account ops), so it sees its own row, read-only, and how to become one.
+ * account ops), so it sees only its own row and the Agents row, and how to
+ * become an admin.
  */
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { type AuthOps, type BrokerAccount, parseAccounts } from "../store/control";
@@ -76,6 +78,8 @@ export interface BrokerAccountsProps {
   identity: string | null;
   /** The session's role, when known (a non-admin's own row). */
   role?: string | null;
+  /** Agents with a live status on the broker now (the Agents row's "N live"); null when unknown. */
+  liveAgents?: number | null;
   /** Clock override (tests). */
   now?: number;
 }
@@ -156,9 +160,10 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
                 <td className="dim mono">now</td>
               </tr>
             )}
-            <AgentsRow cols={4} />
+            <AgentsRow cols={4} live={p.liveAgents ?? null} />
           </tbody>
         </table>
+        <p className="dim">Agents: {AGENTS_NOTE}</p>
       </div>
     );
   }
@@ -197,7 +202,9 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
               <th>Role</th>
               <th>Where</th>
               <th>Last seen</th>
-              <th aria-label="Actions" />
+              <th>
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -263,7 +270,7 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
                 </td>
               </tr>
             ))}
-            <AgentsRow cols={5} />
+            <AgentsRow cols={5} live={p.liveAgents ?? null} />
           </tbody>
         </table>
       )}
@@ -307,16 +314,20 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
   );
 }
 
-function AgentsRow({ cols }: { cols: 4 | 5 }) {
+const AGENTS_NOTE =
+  "Created by the supervisor for each agent and removed when it retires. Nothing to manage.";
+
+/** The prototype's Agents row: where they run, how many are live, and the note in the actions column. */
+function AgentsRow({ cols, live }: { cols: 4 | 5; live: number | null }) {
   return (
     <tr className="agents-row">
       <td>Agents</td>
       <td>
         <span className="role role--agent">own topics only</span>
       </td>
-      <td className="dim agents-note" colSpan={cols - 2}>
-        Created by the supervisor for each agent and removed when it retires. Nothing to manage.
-      </td>
+      <td className="dim">every machine</td>
+      <td className="dim mono">{live === null ? "—" : `${live} live`}</td>
+      {cols === 5 ? <td className="dim agents-note">{AGENTS_NOTE}</td> : null}
     </tr>
   );
 }

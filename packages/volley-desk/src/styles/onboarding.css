@@ -6,23 +6,40 @@
   flex-direction: column;
   gap: 14px;
 }
+/* The wizard's own modal, as the prototype's `Modal wide`. */
+.modal--wide {
+  width: min(860px, 100%);
+}
 .wiz-stepper {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 14px 16px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.02);
+  overflow: auto;
 }
 .wiz-stepper .stepper {
   background: transparent;
 }
-.wiz-head {
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 10px;
+  font-size: 13.5px;
+}
+.kv span {
+  color: var(--dim);
+}
+.wiz-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.wiz-reconnecting {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }
 .wiz-stepper h3 {
   font-family: var(--f-display);
@@ -292,4 +309,17 @@ output.s-note,
 }
 .s-embed output.s-note {
   padding: 0;
+}
+
+/* Read by screen readers, not drawn (a table's Actions header). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }

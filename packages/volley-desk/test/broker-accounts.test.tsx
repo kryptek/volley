@@ -56,6 +56,17 @@ const rowOf = (name: string) => {
 };
 
 describe("Settings › Broker accounts", () => {
+  it("the Agents row says where agents run and how many are live, as the prototype", async () => {
+    const { ops } = admin();
+    render(<BrokerAccounts ops={ops} admin identity={ME} now={NOW} liveAgents={7} />);
+    await screen.findByText("desk-ipad");
+    const agents = rowOf("Agents");
+    expect(agents.getByText("every machine")).toBeInTheDocument();
+    expect(agents.getByText("7 live")).toBeInTheDocument();
+    expect(agents.getByText(/Nothing to manage/)).toBeInTheDocument();
+    expect(screen.getByText("Agents").closest("tr")?.children).toHaveLength(5);
+  });
+
   it("lists the accounts with their role, where and when last seen", async () => {
     const { ops, calls } = admin();
     section(ops, true);

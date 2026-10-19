@@ -1,0 +1,87 @@
+{
+  "steps": [
+    {
+      "step": "detect",
+      "title": "Broker",
+      "found": [
+        "Install: brew (config /opt/homebrew/etc/mosquitto/mosquitto.conf)",
+        "mosquitto 2.1.2 (from $SYS/broker/version)",
+        "Listener 1883: refuses anonymous clients",
+        "Listener 9001: refuses anonymous clients",
+        "3 agents running on the broker"
+      ],
+      "changes": [],
+      "plan_id": "detect-0d41c2aa"
+    },
+    {
+      "step": "security",
+      "title": "Security",
+      "found": [
+        "LAN access: off. The WebSocket listener (port 9001) is on this machine only, so the Desk cannot work from a phone. `volley setup --lan` opens it."
+      ],
+      "changes": [
+        {
+          "summary": "Write /opt/homebrew/etc/mosquitto/mosquitto.conf (Dynamic Security, both listeners authenticated, WebSocket open to the LAN; the old one backed up)",
+          "detail": "--- mosquitto.conf\n+++ mosquitto.conf\n-listener 9001 127.0.0.1\n+listener 9001"
+        },
+        {
+          "summary": "Restart the broker (brew services restart mosquitto)",
+          "detail": "Clients reconnect on their own; agents' queued mailbox messages persist."
+        }
+      ],
+      "plan_id": "security-5f2c9a1e",
+      "lan": {
+        "planned": true,
+        "current": false
+      }
+    },
+    {
+      "step": "accounts",
+      "title": "Accounts",
+      "found": [
+        "Volley's shared roles are on the broker"
+      ],
+      "changes": [
+        {
+          "summary": "Store the coordinator's login in the keychain",
+          "terminal": {
+            "reason": "the keychain needs the logged-in session, which a background service may not have",
+            "command": "volley setup --step accounts"
+          }
+        }
+      ],
+      "plan_id": "accounts-91b07e3d"
+    },
+    {
+      "step": "services",
+      "title": "Services",
+      "found": [
+        "volleyd runs as a login service"
+      ],
+      "changes": [],
+      "plan_id": "services-77aa0f12"
+    },
+    {
+      "step": "phone",
+      "title": "Phone",
+      "found": [],
+      "changes": [],
+      "skipped": "a phone cannot reach the broker's WebSocket listener at ws://192.168.1.20:9001 (it is on this machine only)",
+      "plan_id": "phone-3c5e8d90"
+    }
+  ],
+  "last_setup": "2026-10-18T22:12:00Z",
+  "broker": {
+    "accounts_required": true,
+    "listeners": [
+      {
+        "port": 1883,
+        "anonymous": "refused"
+      },
+      {
+        "port": 9001,
+        "anonymous": "refused"
+      }
+    ]
+  }
+}

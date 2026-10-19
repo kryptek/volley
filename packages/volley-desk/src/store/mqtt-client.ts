@@ -301,10 +301,20 @@ export function createTokenClient(url: string, auth: BrokerCredentials): TokenCl
           for (const h of handlers) h(topic, text);
         });
         instance.once("connect", () => resolve());
-        instance.once("error", (err) => reject(asAuthFailure(err)));
+        // `on`, not `once`: mqtt.js emits every stream error, and an "error" with no listener
+        // throws. Only the first settles the connect; the rest are dropped (the client is ended).
+        let settled = false;
+        instance.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          reject(asAuthFailure(err));
+        });
         instance.once("close", () => {
           // A refused CONNACK also closes the socket: let its error (AUTH_FAILED) settle first.
-          setTimeout(() => reject(new Error(`could not reach the broker at ${url}`)), 0);
+          setTimeout(() => {
+            settled = true;
+            reject(new Error(`could not reach the broker at ${url}`));
+          }, 0);
         });
       });
     },
