@@ -4,7 +4,7 @@
  * accent and the role chip in the title; the task title from the wave `spec`;
  * the pipeline; the latest narration (`payload.msg`, with the look's
  * narration effect, D7); attention-line (D3) and steering-panel (D4) slots; the Volley
- * feed and Terminal tabs; and a footer with progress, heartbeat age and the
+ * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`. An agent with no
  * signal (`attention.ts` `noSignalFor`) gets a grey status mark and a one-line
@@ -12,9 +12,10 @@
  */
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import type { NoSignal } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
+import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
 import { UNASSIGNED } from "../../store/reducer";
 import type { AgentView, FeedEntry, Role, WaveView } from "../../store/types";
@@ -107,6 +108,11 @@ const Icon = ({ i, s = 15 }: { i: typeof BubbleChatIcon; s?: number }) => (
   <HugeiconsIcon icon={i} size={s} strokeWidth={1.8} />
 );
 
+const AGENT_TABS = [
+  { key: "feed", label: "Volley feed", icon: <Icon i={ListViewIcon} s={13} /> },
+  { key: "term", label: "Terminal", icon: <Icon i={TerminalIcon} s={13} /> },
+] as const;
+
 function useNow(fixed: number | undefined): number {
   const [now, setNow] = useState(() => fixed ?? Date.now());
   useEffect(() => {
@@ -132,6 +138,7 @@ export function AgentWindow({
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
+  const tabsId = useId();
   const accent = agent.wave === UNASSIGNED ? NEUTRAL_ACCENT : waveAccent;
   const ws = wave?.state ?? null;
   const task = agent.task ? ws?.tasks.find((t) => t.id === agent.task) : undefined;
@@ -239,34 +246,26 @@ export function AgentWindow({
         </div>
       )}
       {attention}
-      <div className="tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "feed"}
-          onClick={() => setTab("feed")}
-        >
-          <Icon i={ListViewIcon} s={13} /> Volley feed
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "term"}
-          onClick={() => setTab("term")}
-        >
-          <Icon i={TerminalIcon} s={13} /> Terminal
-        </button>
+      <GooeyTabs
+        id={tabsId}
+        label="Agent views"
+        tabs={AGENT_TABS}
+        value={tab}
+        onChange={setTab}
+        accent={accent}
+      />
+      <div className="tab-panel" {...tabPanelProps(tabsId, tab)}>
+        {tab === "feed" ? (
+          <Feed feed={agent.feed} noSignal={noSignal !== null} />
+        ) : (
+          // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
+          <Terminal
+            screen={agent.screen}
+            stale={task?.screen_stale === true}
+            noSignal={noSignal !== null}
+          />
+        )}
       </div>
-      {tab === "feed" ? (
-        <Feed feed={agent.feed} noSignal={noSignal !== null} />
-      ) : (
-        // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
-        <Terminal
-          screen={agent.screen}
-          stale={task?.screen_stale === true}
-          noSignal={noSignal !== null}
-        />
-      )}
       {steer}
     </Frame>
   );

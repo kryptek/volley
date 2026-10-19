@@ -42,6 +42,7 @@ import { Appearance } from "./look/Appearance";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
+import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
@@ -293,6 +294,8 @@ export default function App() {
   // ------------------------------------------------------- arrange & fit
   const autoArrange = look.autoArrange;
   const [animating, setAnimating] = useState(false);
+  // The window whose title bar is held: only its tethers sway (D10).
+  const [dragging, setDragging] = useState<string | null>(null);
   const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(animEnd.current), []);
   const arrange = () => {
@@ -345,6 +348,7 @@ export default function App() {
     attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
+    onDrag: (on: boolean) => setDragging((d) => (on ? id : d === id ? null : d)),
     // A window not laid out yet (0 × 0) keeps its fallback size.
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
@@ -419,10 +423,13 @@ export default function App() {
   const tethers: Tether[] = visible.flatMap((id) =>
     (groups[id] ?? []).map((a) => ({
       id: a.id,
+      waveId: id,
       // The rendered width: on a phone the wave window is clamped.
       wave: rectOf(id, WAVE_W, WAVE_H),
       agent: pos(a.id),
       accent: accentOf(id),
+      // A new `progress` envelope sends a pulse down the cable (D10).
+      beat: progressBeat(a.feed),
     })),
   );
   useDeskKeys({
@@ -464,7 +471,7 @@ export default function App() {
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
         <World view={view} animating={animating}>
-          <Tethers on={look.tethers} tethers={tethers} />
+          <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}

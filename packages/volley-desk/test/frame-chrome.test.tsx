@@ -1,11 +1,15 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { lazy } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
 import {
   type AttnStyle,
   type Chrome,
   Frame,
   type FrameProps,
+  TILT_MAX_DEG,
   hexA,
   hexToHsl,
 } from "../src/canvas/Frame";
@@ -17,6 +21,7 @@ import {
   isChunkLoadError,
   lazyBackground,
 } from "../src/look/backgrounds";
+import { CHROMES } from "../src/look/options";
 
 const base: Omit<FrameProps, "children"> = {
   id: "w",
@@ -59,6 +64,185 @@ describe("Frame chromes", () => {
     expect(hexA("#6ee7f9", 0.22)).toBe("rgba(110,231,249,0.22)");
     expect(hexToHsl("#ff0000")).toBe("0 100 50");
     expect(hexToHsl("#6ee7f9")).toBe("188 92 70");
+  });
+});
+
+describe("Frame depth (D10)", () => {
+  const css = ["desk.css", "look.css"]
+    .map((f) => readFileSync(join(__dirname, "../src/styles", f), "utf8"))
+    .join("\n")
+    .replace(/\s+/g, " ");
+  const setWidth = (w: number) =>
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: w });
+  const realMatchMedia = window.matchMedia;
+  const reduceMotion = () => {
+    window.matchMedia = (q: string) =>
+      ({ ...realMatchMedia(q), matches: q === REDUCED_MOTION_QUERY }) as MediaQueryList;
+  };
+  afterEach(() => {
+    setWidth(1024);
+    window.matchMedia = realMatchMedia;
+  });
+  const inner = () => win().querySelector(".win-inner") as HTMLElement;
+  const section = () => win() as HTMLElement;
+  /** A pointer move over the window at (fx, fy) of its box (jsdom has no layout: a 400 × 300 box). */
+  const hover = (fx: number, fy: number) => {
+    vi.spyOn(section(), "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 300,
+    } as DOMRect);
+    fireEvent.pointerMove(section(), { clientX: 400 * fx, clientY: 300 * fy });
+  };
+
+  it.each(CHROMES)("%s is a raised, lit object and keeps the accent bar", (chrome) => {
+    render(
+      <Frame {...base} chrome={chrome}>
+        body
+      </Frame>,
+    );
+    expect(inner()).toHaveClass("win-depth", `chrome-${chrome}`);
+    // The lit top edge, dark bottom edge and inner highlight ring sit over every chrome's content.
+    const edge = inner().querySelector(":scope > .win-edge");
+    expect(edge).not.toBeNull();
+    expect(edge).toHaveAttribute("aria-hidden", "true");
+    expect(inner().querySelector(".win-bar > .win-acc")).not.toBeNull();
+  });
+
+  it("the depth recipe matches the sign-in card: layered shadows, lit edges, gradient body, glass", () => {
+    const rule = (sel: string) => {
+      const at = css.indexOf(`${sel} {`);
+      expect(at, `${sel} rule`).toBeGreaterThanOrEqual(0);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    const depth = rule(".win-depth");
+    // Contact shadow + ambient + a wide soft drop.
+    expect(depth).toMatch(/box-shadow: var\(--win-shadow\)/);
+    const shadow = css.slice(
+      css.indexOf("--win-shadow:"),
+      css.indexOf(";", css.indexOf("--win-shadow:")),
+    );
+    expect(shadow).toMatch(/0 2px 4px rgba\(0, 0, 0, 0\.35\)/);
+    expect(shadow).toMatch(/0 12px 24px -6px/);
+    expect(shadow).toMatch(/0 40px 80px -20px/);
+    expect(depth).toMatch(/background-image: var\(--win-body\)/);
+    const edge = rule(".win-edge");
+    expect(edge).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
+    expect(edge).toMatch(/inset 0 -1px 0 rgba\(0, 0, 0, 0\.5\)/);
+    expect(edge).toMatch(/inset 0 0 0 1px/);
+    expect(edge).toMatch(/pointer-events: none/);
+    for (const chrome of CHROMES)
+      expect(rule(`.win-inner.chrome-${chrome}`)).toMatch(/--win-body:/);
+    // Liquid's glass is GlassSurface's own backdrop filter: a second one on the frame would hide it.
+    for (const glass of ["glass", "spotlight"]) {
+      expect(rule(`.win-inner.chrome-${glass}`)).toMatch(
+        /backdrop-filter: blur\(\d+px\) saturate\(/,
+      );
+    }
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[^@]*\.win\[data-tilt\] \.win-depth/,
+    );
+  });
+
+  it(`tilts toward the pointer by at most ${TILT_MAX_DEG}° and settles when it leaves`, () => {
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    hover(1, 0);
+    expect(section()).toHaveAttribute("data-tilt");
+    const rx = Number.parseFloat(section().style.getPropertyValue("--rx"));
+    const ry = Number.parseFloat(section().style.getPropertyValue("--ry"));
+    expect(rx).toBeCloseTo(TILT_MAX_DEG);
+    expect(ry).toBeCloseTo(TILT_MAX_DEG);
+    expect(TILT_MAX_DEG).toBeLessThanOrEqual(3);
+    fireEvent.pointerLeave(section());
+    expect(section()).not.toHaveAttribute("data-tilt");
+    expect(section().style.getPropertyValue("--rx")).toBe("");
+  });
+
+  it("never tilts under reduced motion", () => {
+    reduceMotion();
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    hover(1, 1);
+    expect(section().style.getPropertyValue("--rx")).toBe("");
+    expect(section().style.getPropertyValue("--ry")).toBe("");
+    expect(section()).not.toHaveAttribute("data-tilt");
+  });
+
+  it("never tilts at phone width (390 px)", () => {
+    setWidth(390);
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    hover(1, 1);
+    expect(section().style.getPropertyValue("--rx")).toBe("");
+    expect(section()).not.toHaveAttribute("data-tilt");
+  });
+
+  it("never tilts a window being dragged", () => {
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    hover(1, 1);
+    expect(section()).toHaveAttribute("data-tilt");
+    const bar = section().querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10, pointerId: 1 });
+    expect(section()).not.toHaveAttribute("data-tilt");
+    hover(0, 0);
+    expect(section().style.getPropertyValue("--rx")).toBe("");
+    fireEvent.pointerUp(bar, { pointerId: 1 });
+  });
+
+  it("reads the window's box once per hover, not on every pointer move", () => {
+    render(
+      <Frame {...base} chrome="glass">
+        body
+      </Frame>,
+    );
+    const box = vi.spyOn(section(), "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 300,
+    } as DOMRect);
+    fireEvent.pointerEnter(section());
+    for (let i = 0; i < 10; i++) {
+      fireEvent.pointerMove(section(), { clientX: 40 * i, clientY: 30 * i });
+    }
+    expect(section()).toHaveAttribute("data-tilt");
+    expect(box).toHaveBeenCalledTimes(1);
+    // After a drag the window has moved: the next move measures again.
+    const bar = section().querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(bar, { pointerId: 1 });
+    fireEvent.pointerMove(section(), { clientX: 200, clientY: 150 });
+    expect(box).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the Desk when its title bar is dragged (tethers sway only then)", () => {
+    const onDrag = vi.fn();
+    render(
+      <Frame {...base} chrome="glass" onDrag={onDrag}>
+        body
+      </Frame>,
+    );
+    const bar = section().querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10, pointerId: 1 });
+    expect(onDrag).toHaveBeenLastCalledWith(true);
+    fireEvent.pointerUp(bar, { pointerId: 1 });
+    expect(onDrag).toHaveBeenLastCalledWith(false);
+    expect(onDrag).toHaveBeenCalledTimes(2);
   });
 });
 

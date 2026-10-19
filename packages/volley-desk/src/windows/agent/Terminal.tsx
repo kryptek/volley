@@ -25,7 +25,7 @@ export function Terminal({
   const { ref, onScroll } = useFollow<HTMLDivElement>(screen);
 
   return (
-    <div className={`term${stale ? " term--stale" : ""}`} ref={ref} onScroll={onScroll}>
+    <div className={`term recessed${stale ? " term--stale" : ""}`} ref={ref} onScroll={onScroll}>
       {stale && (
         <span className="term-stale" title="The supervisor could not refresh this screen">
           stale

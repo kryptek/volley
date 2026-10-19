@@ -96,13 +96,13 @@ export function Feed({
 
   if (rows.length === 0) {
     return (
-      <div className="feed feed--empty dim">
+      <div className="feed feed--empty recessed dim">
         no envelopes yet{noSignal ? " · no signal from this agent on this broker" : ""}
       </div>
     );
   }
   return (
-    <div className="feed" ref={ref} onScroll={onScroll}>
+    <div className="feed recessed" ref={ref} onScroll={onScroll}>
       {rows.map(({ e, t }) => {
         const ch = feedChannel(e);
         const isOpen = open === e;
@@ -119,7 +119,9 @@ export function Feed({
               <span className="env-type">{e.envelope.type}</span>
               <span className="env-msg">{summary(e)}</span>
             </button>
-            {isOpen && <pre className="env-json">{JSON.stringify(e.envelope, null, 2)}</pre>}
+            {isOpen && (
+              <pre className="env-json recessed">{JSON.stringify(e.envelope, null, 2)}</pre>
+            )}
           </div>
         );
       })}
