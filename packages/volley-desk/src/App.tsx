@@ -51,6 +51,7 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
+import { sshHost } from "./settings/Machines";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
@@ -59,12 +60,14 @@ import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
+import { createPeerOps } from "./store/peerOps";
 import {
   UNASSIGNED,
   agentsByWave,
   endedWaves,
   finishedAgents,
   stageChip,
+  supervisorHealth,
   supervisorList,
   supervisorNamespace,
 } from "./store/reducer";
@@ -190,7 +193,8 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline, syncing, writer, identity } = useDesk();
+  const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
+    useDesk();
   const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
   const vw = useViewportWidth();
   const narrow = vw < NARROW_PX;
@@ -223,6 +227,11 @@ export default function App() {
         ? createConfigTransport(writer, { identity, namespace: daemonNs })
         : null,
     [writer, identity, demo, daemonNs],
+  );
+  // Settings › Machines: pairing ops go on the Desk's own account-op topic (admin accounts only).
+  const peerOps = useMemo(
+    () => (writer && identity && !demo ? createPeerOps(writer, { identity }) : null),
+    [writer, identity, demo],
   );
   // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
   const settingsWaveGone = settings !== null && !state.waves[settings];
@@ -715,6 +724,12 @@ export default function App() {
             waves: state.waves,
             control,
             onRegistry: setRegistry,
+          }}
+          machines={{
+            machines: state.machines ?? {},
+            hubUp: !supervisorHealth(state.supervisors[DAEMON_AGENT_ID]).down,
+            ops: peerOps,
+            host: sshHost(brokerUrl),
           }}
           onArrange={arrange}
           onClose={() => setDeskSettings(null)}

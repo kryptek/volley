@@ -25,6 +25,10 @@
  * kept in `usage` by agent id (never a feed row: it is a meter, not news), the
  * supervisor's per-account records in `claudeAccounts`, and sign-in events in
  * `signins` by account (live-only).
+ *
+ * Machines (SPEC §4.6.14): each paired machine's retained health record goes
+ * into `machines` by name, taken only from the machine itself or volleyd and
+ * only when it names its topic's machine.
  */
 import {
   type AgentAttention,
@@ -38,6 +42,7 @@ import {
   type DeskState,
   type Envelope,
   type LeasePoolPayload,
+  type MachinePayload,
   ROLES,
   type Receipts,
   type RegistryPayload,
@@ -88,7 +93,8 @@ export type Route =
   | { kind: "admission" }
   | { kind: "claudeAccount"; acct: string }
   | { kind: "signin"; acct: string }
-  | { kind: "usage"; agentId: string };
+  | { kind: "usage"; agentId: string }
+  | { kind: "machine"; name: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
@@ -101,6 +107,7 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 3 && b === "admission") return { kind: "admission" };
     if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
     if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
+    if (p.length === 4 && b === "machines" && c) return { kind: "machine", name: c };
     return null;
   }
   if (a === "_waves") {
@@ -191,7 +198,28 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       };
     case "signin":
       return reduceSignin(state, route.acct, m);
+    case "machine":
+      return reduceMachine(state, route.name, m);
   }
+}
+
+/**
+ * A machine record: kept when the machine itself or volleyd (its down record)
+ * published it for this topic's machine; a cleared topic (`peer_remove`)
+ * forgets the machine. Anything else leaves the slice as it was.
+ */
+function reduceMachine(state: DeskState, name: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, machines: keyed(state.machines, name, undefined) };
+  const p = env.payload as Partial<MachinePayload> | undefined;
+  if (
+    env.type !== "machine" ||
+    (env.agent_id !== name && env.agent_id !== "volleyd") ||
+    p?.name !== name
+  ) {
+    return state;
+  }
+  return { ...state, machines: keyed(state.machines, name, p as MachinePayload) };
 }
 
 /** `map` with `key` set to `value`, or removed when `value` is undefined (a cleared topic). */
@@ -233,7 +261,7 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
 /**
  * Forget everything that retained topics hold, ahead of the replay that
  * follows a reconnect: waves (with their decisions), config, leases,
- * admission, Claude account records and usage samples, each agent's
+ * admission, Claude account records and usage samples, machine records, each agent's
  * registry, status and screen, and each supervisor's registry and status.
  * Live-only parts — feed, narration, progress, heartbeat, attention, a
  * supervisor's namespace — are kept. Agents and supervisors that were
@@ -272,6 +300,7 @@ export function resync(state: DeskState): DeskState {
     admission: null,
     claudeAccounts: {},
     usage: {},
+    machines: {},
     unconfirmed: [...unconfirmed],
   };
 }

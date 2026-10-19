@@ -22,6 +22,7 @@ import { About } from "./About";
 import { Appearance } from "./Appearance";
 import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
+import { Machines, type MachinesProps } from "./Machines";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
 import { clearOnEscape } from "./primitives";
@@ -55,6 +56,8 @@ export interface SettingsWindowProps {
   initial?: SectionKey;
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
   claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
+  /** Settings › Machines: the machine records and the pairing ops. */
+  machines?: MachinesProps;
 }
 
 const Tile = ({ s, size }: { s: SectionDef; size: number }) => (
@@ -199,6 +202,9 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 config={p.config}
                 configTransport={p.transport}
               />
+            )}
+            {sec === "machines" && (
+              <Machines {...(p.machines ?? { machines: {}, hubUp: false, ops: null })} />
             )}
             {sec === "about" && <About />}
             {cur.placeholder && (

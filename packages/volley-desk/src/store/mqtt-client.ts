@@ -85,6 +85,8 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/+/+/usage",
   "volley/_system/claude-accounts/+",
   "volley/_system/claude/+/signin",
+  "volley/_system/machines/+",
+  "volley/_system/auth/replies/+",
 ] as const;
 
 /**

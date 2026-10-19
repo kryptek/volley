@@ -615,11 +615,47 @@ function claudeUsage(now: number): DeskMessage[] {
   ];
 }
 
+/** Two paired machines' health records (SPEC §4.6.14): one up, one whose heartbeat stopped. */
+function machines(now: number): DeskMessage[] {
+  const records = [
+    {
+      name: "box-a",
+      os: "linux",
+      arch: "x64",
+      cores: 32,
+      tunnel: "up",
+      load: [1.6, 1.2, 0.9],
+      agents: 2,
+      remote_port: 21883,
+      last_seen: iso(now - 12_000),
+    },
+    {
+      name: "box-b",
+      os: "darwin",
+      arch: "arm64",
+      cores: 10,
+      tunnel: "down",
+      reason: "heartbeat_timeout",
+      load: [0.4, 0.5, 0.6],
+      agents: 0,
+      remote_port: 21884,
+      last_seen: iso(now - 6 * 60_000),
+    },
+  ];
+  return records.map((r) => ({
+    topic: `volley/_system/machines/${r.name}`,
+    envelope: env(r.tunnel === "up" ? r.name : SUPERVISOR, "_system/machines", "machine", r, now),
+    receivedAt: now,
+    retained: true,
+  }));
+}
+
 /** Every retained/live message the demo starts from, oldest agent history first per agent. */
 export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[] {
   return [
     ...globals(now),
     ...claudeUsage(now),
+    ...machines(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
     ...AGENTS.flatMap((a) => agentMessages(a, now)),
     ...loadMessages(agents - AGENTS.length, now),

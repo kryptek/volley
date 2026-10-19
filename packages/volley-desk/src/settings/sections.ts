@@ -87,7 +87,6 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     tint: "#34c759",
     group: 1,
     keywords: "peer pair add machine tunnel host",
-    placeholder: true,
   },
   {
     key: "setup",
