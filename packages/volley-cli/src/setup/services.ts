@@ -221,8 +221,8 @@ export function servicePath(ctx: SetupContext): string {
   return stableServicePath({
     home: ctx.home,
     bun: ctx.deps.bun,
-    path: ctx.auth.env.PATH,
     tmpdir: ctx.auth.env.TMPDIR,
+    ...(ctx.deps.exists !== undefined ? { exists: ctx.deps.exists } : {}),
   });
 }
 
@@ -415,16 +415,23 @@ export function deskEnvLeaks(deskDir: string): string[] {
 
 /**
  * Why the Desk cannot have its port: another program listening on it (any address), or null.
- * The Desk's own service is no conflict; a probe that cannot tell is not one either.
+ * The Desk's own service is no conflict. A probe that cannot tell says so in `found`.
  */
 async function deskPortConflict(
   ctx: SetupContext,
   platform: NodeJS.Platform,
+  found: string[],
 ): Promise<string | null> {
   const listeners = await deskPortListeners(ctx.deps.exec, ctx.deskPort);
-  if (listeners === null || listeners.length === 0) return null;
+  if (!Array.isArray(listeners)) {
+    found.push(
+      `Desk port ${ctx.deskPort}: could not check who listens on it (${listeners.cannotTell}). If http://localhost:${ctx.deskPort} does not reach the Desk, run \`volley setup --repair\` in a terminal`,
+    );
+    return null;
+  }
+  if (listeners.length === 0) return null;
   const own = await deskServicePid(ctx, platform);
-  const others = listeners.filter((l) => l.pid !== own);
+  const others = listeners.filter((l) => l.pid === null || l.pid !== own);
   return others.length === 0 ? null : portConflict(ctx.deskPort, others);
 }
 
@@ -530,8 +537,9 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     );
   }
 
-  // cmux (macOS): volleyd's service must reach its socket to start local agents.
-  push(await planCmux(ctx, env, plan.found));
+  // cmux (macOS): volleyd's service must reach its socket to start local agents. Its change is
+  // applied last: one only a terminal can make fails after every other change is in place.
+  const cmux = await planCmux(ctx, env, plan.found);
 
   // The hooks, for coordinator sessions.
   const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
@@ -610,7 +618,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
-  const conflict = await deskPortConflict(ctx, platform);
+  const conflict = await deskPortConflict(ctx, platform, plan.found);
   if (conflict !== null) {
     plan.blocked = conflict;
     return plan;
@@ -634,6 +642,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
       ),
     );
   }
+  push(cmux);
   // After the changes every service must be in place: planning again must find nothing to do.
   plan.verify = async () => {
     const again = await planServices(ctx);

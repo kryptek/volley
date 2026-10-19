@@ -1,25 +1,36 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveAuth } from "../../src/args";
 import {
   type SavedLoginDeps,
+  agentContext,
+  fileSavedLoginDeps,
   isLocalBroker,
   keychainReadArgv,
+  readSavedCoordinatorFile,
   savedCoordinatorLogin,
+  savedLoginSource,
 } from "../../src/auth/coordinator-login";
 
 const LOCAL = "mqtt://localhost:1883";
 
 describe("the coordinator login on the supervisor machine", () => {
   let dir: string;
-  let calls: number;
+  let keychainCalls: number;
+  let fileCalls: number;
+  /** Fake sources: a keychain answer, and the auth dir's file read only from the test's temp dir. */
   const deps = (platform: NodeJS.Platform, keychain: string | null): SavedLoginDeps => ({
     platform,
     keychain: () => {
-      calls++;
+      keychainCalls++;
       return keychain;
+    },
+    coordinatorFile: (env) => {
+      fileCalls++;
+      expect(env.VOLLEY_AUTH_DIR ?? env.VOLLEYD_HOME ?? "").toContain(dir);
+      return readSavedCoordinatorFile(env);
     },
   });
   const writeLogin = (authDir: string, password: string, mode = 0o600) => {
@@ -30,7 +41,8 @@ describe("the coordinator login on the supervisor machine", () => {
   };
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "volley-coord-login-"));
-    calls = 0;
+    keychainCalls = 0;
+    fileCalls = 0;
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -49,11 +61,11 @@ describe("the coordinator login on the supervisor machine", () => {
   it("macOS: the keychain first, then the auth dir's coordinator.json", () => {
     const env = { VOLLEY_AUTH_DIR: join(dir, "auth") };
     writeLogin(env.VOLLEY_AUTH_DIR, "from-file");
-    expect(savedCoordinatorLogin(env, LOCAL, deps("darwin", "from-keychain"))).toEqual({
+    expect(savedCoordinatorLogin(env, LOCAL, dir, deps("darwin", "from-keychain"))).toEqual({
       username: "coordinator",
       password: "from-keychain",
     });
-    expect(savedCoordinatorLogin(env, LOCAL, deps("darwin", null))).toEqual({
+    expect(savedCoordinatorLogin(env, LOCAL, dir, deps("darwin", null))).toEqual({
       username: "coordinator",
       password: "from-file",
     });
@@ -62,11 +74,11 @@ describe("the coordinator login on the supervisor machine", () => {
   it("Linux: no keychain, the auth dir's coordinator.json", () => {
     const env = { VOLLEY_AUTH_DIR: join(dir, "auth") };
     writeLogin(env.VOLLEY_AUTH_DIR, "from-file");
-    expect(savedCoordinatorLogin(env, LOCAL, deps("linux", "unused"))).toEqual({
+    expect(savedCoordinatorLogin(env, LOCAL, dir, deps("linux", "unused"))).toEqual({
       username: "coordinator",
       password: "from-file",
     });
-    expect(calls).toBe(0);
+    expect(keychainCalls).toBe(0);
   });
 
   it("finds the auth dir setup recorded in $VOLLEYD_HOME/setup.json when VOLLEY_AUTH_DIR is unset", () => {
@@ -83,7 +95,7 @@ describe("the coordinator login on the supervisor machine", () => {
         auth_dir: authDir,
       }),
     );
-    expect(savedCoordinatorLogin({ VOLLEYD_HOME: home }, LOCAL, deps("linux", null))).toEqual({
+    expect(savedCoordinatorLogin({ VOLLEYD_HOME: home }, LOCAL, dir, deps("linux", null))).toEqual({
       username: "coordinator",
       password: "recorded",
     });
@@ -93,17 +105,17 @@ describe("the coordinator login on the supervisor machine", () => {
     const env = { VOLLEY_AUTH_DIR: join(dir, "auth") };
     writeLogin(env.VOLLEY_AUTH_DIR, "from-file");
     expect(
-      savedCoordinatorLogin(env, "mqtt://broker.example:1883", deps("darwin", "k")),
+      savedCoordinatorLogin(env, "mqtt://broker.example:1883", dir, deps("darwin", "k")),
     ).toBeNull();
-    expect(calls).toBe(0);
+    expect(keychainCalls + fileCalls).toBe(0);
   });
 
   it("is null when there is nothing saved, and skips a file it may not read", () => {
     const env = { VOLLEY_AUTH_DIR: join(dir, "auth"), VOLLEYD_HOME: join(dir, "none") };
-    expect(savedCoordinatorLogin(env, LOCAL, deps("darwin", null))).toBeNull();
+    expect(savedCoordinatorLogin(env, LOCAL, dir, deps("darwin", null))).toBeNull();
     if (process.getuid?.() !== 0) {
       writeLogin(env.VOLLEY_AUTH_DIR, "root-only", 0o000);
-      expect(savedCoordinatorLogin(env, LOCAL, deps("linux", null))).toBeNull();
+      expect(savedCoordinatorLogin(env, LOCAL, dir, deps("linux", null))).toBeNull();
     }
   });
 
@@ -119,6 +131,80 @@ describe("the coordinator login on the supervisor machine", () => {
     for (const u of ["mqtt://10.0.0.5:1883", "mqtt://broker.example", "not a url"]) {
       expect(isLocalBroker(u)).toBe(false);
     }
+  });
+
+  describe("an agent never becomes the coordinator", () => {
+    /** An agent's worktree as volleyd sets it up: its identity file with its own minted login. */
+    const worktree = () => {
+      const wt = join(dir, "wt");
+      mkdirSync(join(wt, ".volley"), { recursive: true });
+      mkdirSync(join(wt, "packages", "deep", "src"), { recursive: true });
+      writeFileSync(
+        join(wt, ".volley", "agent.json"),
+        JSON.stringify({ agent_id: "w1-t1-impl", namespace: "default" }),
+      );
+      return wt;
+    };
+
+    it("not from a subdirectory of its worktree (the identity file has no broker block there)", () => {
+      const authDir = join(dir, "auth");
+      writeLogin(authDir, "coordinator-pw");
+      const wt = worktree();
+      const sub = join(wt, "packages", "deep", "src");
+      const env = { VOLLEY_AUTH_DIR: authDir };
+      for (const cwd of [wt, sub]) {
+        expect(savedCoordinatorLogin(env, LOCAL, cwd, deps("darwin", "keychain-pw"))).toBeNull();
+        expect(resolveAuth({}, env, cwd, LOCAL, deps("darwin", "keychain-pw"))).toBeNull();
+      }
+      expect(keychainCalls + fileCalls).toBe(0);
+      expect(agentContext(env, sub)).toContain(join(wt, ".volley", "agent.json"));
+    });
+
+    it("not when volleyd launched it (VOLLEY_HOOKS_DIR) or it names an agent id, from any directory", () => {
+      const authDir = join(dir, "auth");
+      writeLogin(authDir, "coordinator-pw");
+      for (const marker of [
+        { VOLLEY_HOOKS_DIR: "/opt/volley/packages/volley-hooks" },
+        { VOLLEY_AGENT_ID: "w1-t1-impl" },
+      ]) {
+        const env = { VOLLEY_AUTH_DIR: authDir, ...marker };
+        expect(savedCoordinatorLogin(env, LOCAL, dir, deps("darwin", "keychain-pw"))).toBeNull();
+        expect(resolveAuth({}, env, dir, LOCAL, deps("linux", null))).toBeNull();
+      }
+      expect(keychainCalls + fileCalls).toBe(0);
+    });
+
+    it("an operator in a plain directory still gets it", () => {
+      expect(agentContext({}, dir)).toBeNull();
+    });
+  });
+
+  describe("never reads this machine's real login under a test", () => {
+    it("is off in a process no CLI entry point turned it on in", () => {
+      expect(savedLoginSource()).toBeNull();
+      // Default sources: nothing is asked, whatever this machine has saved.
+      expect(savedCoordinatorLogin({}, LOCAL, dir)).toBeNull();
+      expect(resolveAuth({}, {}, dir, LOCAL)).toBeNull();
+    });
+
+    it("is off in every CLI a test starts (vitest sets VOLLEY_NO_SAVED_LOGIN for children)", () => {
+      expect(process.env.VOLLEY_NO_SAVED_LOGIN).toBe("1");
+      const env = { VOLLEY_AUTH_DIR: join(dir, "auth"), VOLLEY_NO_SAVED_LOGIN: "1" };
+      writeLogin(env.VOLLEY_AUTH_DIR, "from-file");
+      expect(savedCoordinatorLogin(env, LOCAL, dir, deps("darwin", "k"))).toBeNull();
+      expect(keychainCalls + fileCalls).toBe(0);
+    });
+
+    it("only the two entry points turn it on, and volleyd's never asks the keychain", () => {
+      const root = join(import.meta.dirname, "..", "..", "..");
+      const cli = readFileSync(join(root, "volley-cli", "src", "cli.ts"), "utf-8");
+      const volleyd = readFileSync(join(root, "volleyd", "src", "cli.ts"), "utf-8");
+      const entry = (text: string) => text.slice(text.indexOf("if (import.meta.main) {"));
+      expect(entry(cli)).toContain("useSavedLogin(realSavedLoginDeps)");
+      expect(entry(volleyd)).toContain("useSavedLogin(fileSavedLoginDeps)");
+      expect(volleyd).not.toContain("realSavedLoginDeps");
+      expect(fileSavedLoginDeps.keychain()).toBeNull();
+    });
   });
 
   describe("resolveAuth (every volley CLI command)", () => {

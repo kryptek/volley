@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { classifyCmux, cmuxAdvice, cmuxEnv, readCmuxPassword } from "volley-cli/setup/cmux";
+import {
+  classifyCmux,
+  cmuxAdvice,
+  cmuxEnv,
+  cmuxSaid,
+  readCmuxPassword,
+} from "volley-cli/setup/cmux";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
@@ -70,7 +76,7 @@ export class LocalCmuxHost implements Host {
       throw new SpawnError(
         "LAUNCH_FAILED",
         access === "refused" || access === "not_running" || access === "missing"
-          ? `volleyd cannot open a cmux workspace. ${cmuxAdvice(access, hasPassword)}`
+          ? `volleyd cannot open a cmux workspace. ${cmuxAdvice(access, hasPassword)}${cmuxSaid(r.stderr || r.stdout)}`
           : `cmux new-workspace failed: ${r.stderr.trim()}`,
         { exit: r.code, stdout: r.stdout.trim(), cmux: r.stderr.trim() },
       );

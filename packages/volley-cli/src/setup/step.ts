@@ -77,6 +77,11 @@ export interface SetupDeps {
    * nobody is there to answer. Unset: setup never asks (volleyd planning for the Desk).
    */
   askSecret?: (prompt: string) => Promise<string | null>;
+  /**
+   * Whether a path exists, for what setup probes outside its own files (the services' PATH, the
+   * cmux app). Unset: the real filesystem. Tests fake the machine with it.
+   */
+  exists?: (p: string) => boolean;
 }
 
 export interface SetupContext {

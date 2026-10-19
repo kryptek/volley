@@ -19,6 +19,7 @@ import {
   cmuxAdvice,
   cmuxCheckArgv,
   cmuxEnv,
+  cmuxSaid,
   readCmuxPassword,
   writeCmuxPassword,
 } from "../../src/setup/cmux";
@@ -42,6 +43,30 @@ describe("setup: cmux", () => {
     );
     expect(classifyCmux(r(127, "sh: cmux: command not found"))).toBe("missing");
     expect(classifyCmux(r(2, "something new"))).toBe("unknown");
+    // Every denial cmux (or a future cmux) words differently is still a refusal.
+    for (const said of [
+      "ERROR: Invalid password",
+      "ERROR: Authentication required — send auth <password> first",
+      "Password mode is enabled but no socket password is configured in Settings.",
+      '{"error":{"code":"auth_failed"}}',
+      "Unable to verify client process",
+      "Error: forbidden",
+      "permission denied",
+      "not authorized",
+      "invalid credentials",
+    ]) {
+      expect(classifyCmux(r(1, said)), said).toBe("refused");
+    }
+    // A bad path in a cmux command is not "cmux is not running".
+    expect(classifyCmux(r(1, "Error: no such file or directory: /bad/worktree"))).toBe("unknown");
+    expect(classifyCmux(r(1, "connect ENOENT /Users/x/.cmux/cmux.sock"))).toBe("not_running");
+  });
+
+  it("quotes the first thing cmux said", () => {
+    expect(cmuxSaid("\n  ERROR: Invalid password\nmore")).toBe(
+      " (cmux said: ERROR: Invalid password)",
+    );
+    expect(cmuxSaid("")).toBe("");
   });
 
   it("says what to do in plain words, never the raw error alone", () => {
@@ -51,6 +76,9 @@ describe("setup: cmux", () => {
     expect(CMUX_PASSWORD_STEPS).toContain("Password mode");
     expect(cmuxAdvice("refused", true)).toContain("refused the socket password volleyd has");
     expect(cmuxAdvice("not_running", false)).toContain("open cmux");
+    // cmux open with its socket off answers like a stopped cmux: the advice covers both.
+    expect(cmuxAdvice("not_running", false)).toContain("Password mode");
+    expect(cmuxAdvice("unknown", false)).toContain(CMUX_PASSWORD_STEPS);
   });
 
   it("stores the password mode 0600 and gives cmux it in its environment, not on argv", () => {
@@ -94,6 +122,8 @@ describe("setup: cmux", () => {
     /** cmux's socket: null = the default (cmux's own processes only), else Password mode. */
     let cmuxPassword: string | null;
     let cmuxRunning: boolean;
+    /** What cmux answers a wrong password with. */
+    let wrongPassword: string;
     /** The env each service-like check ran with. */
     let checks: Record<string, string | undefined>[];
     const applyAll = async (plan: StepPlan) => {
@@ -109,6 +139,7 @@ describe("setup: cmux", () => {
       m = fakeMachine(fake, dir, { platform: "darwin" });
       cmuxPassword = null;
       cmuxRunning = true;
+      wrongPassword = "Access denied - invalid socket password";
       checks = [];
       // cmux installed in ~/Applications.
       const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
@@ -127,7 +158,7 @@ describe("setup: cmux", () => {
               ? [1, DENIED]
               : sent === cmuxPassword
                 ? [0, "PONG"]
-                : [1, "Access denied - invalid socket password"];
+                : [1, wrongPassword];
           writeFileSync(argv[4] as string, `${said}\nvolley-cmux-exit=${code}\n`);
           return { code: 0, stdout: "", stderr: "" } satisfies ExecResult;
         }
@@ -197,7 +228,9 @@ describe("setup: cmux", () => {
       cmuxPassword = "right";
       m.secrets = ["wrong"];
       const c = cmuxChange(await planServices(m.ctx));
-      await expect(c?.apply()).rejects.toThrow(/cmux refused that password; nothing was stored/);
+      await expect(c?.apply()).rejects.toThrow(
+        "cmux refused that password (cmux said: Access denied - invalid socket password); nothing was stored",
+      );
       expect(readCmuxPassword(m.ctx.volleydHome)).toBeNull();
       expect(m.keychain.has("volleyd")).toBe(false);
       m.secrets = [""];
@@ -229,20 +262,62 @@ describe("setup: cmux", () => {
       expect(statSync(join(m.ctx.volleydHome, "cmux.json")).mode & 0o777).toBe(0o600);
     });
 
-    it("without a terminal it asks nothing and says where to enter the password", async () => {
-      m.deps.interactive = false;
-      const p = await planServices(m.ctx);
-      expect(cmuxChange(p)).toBeUndefined();
-      expect(p.found.join("\n")).toContain(
-        "run `volley setup --step services` in a terminal to enter the socket password",
-      );
+    it("keeps a password's spaces: only the line ending goes", async () => {
+      cmuxPassword = " two words ";
+      m.secrets = [" two words \n"];
+      await applyAll(await planServices(m.ctx));
+      expect(readCmuxPassword(m.ctx.volleydHome)).toBe(" two words ");
     });
 
-    it("says to open cmux when it is not running, and offers nothing", async () => {
+    it("a refusal worded in a way setup does not know still offers the password, quoting cmux", async () => {
+      writeCmuxPassword(m.ctx.volleydHome, "old");
+      cmuxPassword = "new";
+      wrongPassword = "E_NOPE: go away";
+      const p = await planServices(m.ctx);
+      expect(p.found.join("\n")).toContain("(cmux said: E_NOPE: go away)");
+      expect(p.found.join("\n")).toContain(CMUX_PASSWORD_STEPS);
+      const c = cmuxChange(p);
+      expect(c).toBeDefined();
+      m.secrets = ["still-wrong"];
+      await expect(c?.apply()).rejects.toThrow("(cmux said: E_NOPE: go away)");
+      m.secrets = ["new"];
+      await c?.apply();
+      expect(readCmuxPassword(m.ctx.volleydHome)).toBe("new");
+    });
+
+    it("without a terminal it asks nothing, and the step is not done: its change says where to enter the password", async () => {
+      m.deps.interactive = false;
+      const p = await planServices(m.ctx);
+      expect(p.found.join("\n")).toContain(
+        "run `volley setup --step services` in a terminal on this machine to enter the socket password",
+      );
+      expect(p.found.join("\n")).toContain(`(cmux said: ${DENIED})`);
+      const c = cmuxChange(p);
+      expect(c?.summary).toContain("needs a terminal");
+      // Applied last, after every other service change.
+      expect(p.changes.at(-1)).toBe(c);
+      await expect(c?.apply()).rejects.toThrow(`(cmux said: ${DENIED})`);
+      expect(m.secretPrompts).toEqual([]);
+      // The Desk plans with no askSecret at all: the same.
+      m.deps.interactive = true;
+      const { askSecret: _a, ...noAsk } = m.deps;
+      m.ctx.deps = noAsk;
+      expect(cmuxChange(await planServices(m.ctx))?.summary).toContain("needs a terminal");
+    });
+
+    it("when cmux is not running, the step is not done: its change checks again", async () => {
       cmuxRunning = false;
       const p = await planServices(m.ctx);
-      expect(cmuxChange(p)).toBeUndefined();
-      expect(p.found.join("\n")).toContain("cmux is not running");
+      expect(p.found.join("\n")).toContain("open cmux");
+      expect(p.found.join("\n")).toContain("(cmux said: Failed to connect");
+      const c = p.changes.find((x) => x.summary.startsWith("Make volleyd's service reach cmux"));
+      expect(c).toBeDefined();
+      await expect(c?.apply()).rejects.toThrow("(cmux said: Failed to connect");
+      // Opened (and in Password mode with the stored password): the change passes.
+      cmuxRunning = true;
+      cmuxPassword = "pw";
+      writeCmuxPassword(m.ctx.volleydHome, "pw");
+      expect(await c?.apply()).toEqual(["volleyd's service reaches cmux now."]);
     });
 
     it("on a Mac without cmux, says so and changes nothing for it", async () => {

@@ -2,6 +2,12 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  type SavedLoginDeps,
+  readSavedCoordinatorFile,
+  savedLoginSource,
+  useSavedLogin,
+} from "volley-cli/auth/coordinator-login";
 import { VolleyBroker } from "volley-mcp/broker";
 import {
   ADMIN_FILE,
@@ -205,7 +211,11 @@ describe("volleyd against a broker that requires credentials", () => {
 });
 
 describe("control clients on the supervisor machine (volleyd config get, status, …)", () => {
-  const linux = { platform: "linux" as const, keychain: () => null };
+  const linux: SavedLoginDeps = {
+    platform: "linux",
+    keychain: () => null,
+    coordinatorFile: readSavedCoordinatorFile,
+  };
   let dirs = 0;
   /** An auth dir holding the coordinator.json `volley setup` writes. */
   const saved = () => {
@@ -227,6 +237,7 @@ describe("control clients on the supervisor machine (volleyd config get, status,
     // The macOS keychain item comes first.
     expect(
       controlAuth(saved(), home, "mqtt://127.0.0.1:1883", {
+        ...linux,
         platform: "darwin",
         keychain: () => "keychain-pw",
       }),
@@ -242,14 +253,21 @@ describe("control clients on the supervisor machine (volleyd config get, status,
     expect(controlAuth(saved(), home, "mqtt://broker.example:1883", linux)).toBeNull();
   });
 
-  it("resolveControlTarget passes the broker URL, so the fallback applies", () => {
+  it("resolveControlTarget passes the broker URL, so the fallback applies once cli.ts turns it on", () => {
     const env = { ...saved(), VOLLEY_BROKER_URL: "mqtt://localhost:1883" };
-    // On macOS the real keychain would be asked first; the file is what Linux CI can check.
-    if (process.platform !== "darwin") {
+    // Off by default: a test never reads this machine's keychain or auth dir.
+    expect(savedLoginSource()).toBeNull();
+    expect(resolveControlTarget({}, env, home).auth).toBeNull();
+    useSavedLogin(linux);
+    try {
       expect(resolveControlTarget({}, env, home).auth).toEqual({
         username: "coordinator",
         password: "saved-pw",
       });
+      // Never for an agent: volleyd launches every agent with VOLLEY_HOOKS_DIR set.
+      expect(resolveControlTarget({}, { ...env, VOLLEY_HOOKS_DIR: "/x" }, home).auth).toBeNull();
+    } finally {
+      useSavedLogin(null);
     }
   });
 });

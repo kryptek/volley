@@ -109,6 +109,9 @@ describe("LocalCmuxHost", () => {
       expect(err.message).toContain("Socket control mode");
       expect(err.message).toContain("Password mode");
       expect(err.message).toContain("volley setup --repair");
+      expect(err.message).toContain(
+        "(cmux said: Access denied - only processes started inside cmux can connect)",
+      );
       // The raw cmux text stays in the journaled detail.
       expect(err.detail.cmux).toContain("Access denied");
       // With a stored password, it says that one was refused.

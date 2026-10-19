@@ -132,8 +132,8 @@ export function resolveNamespace(
 /**
  * Broker credentials: `--username`/`--password` flags win, then the `broker` block of
  * `<cwd>/.volley/agent.json`, then `VOLLEY_AUTH_USERNAME`/`VOLLEY_AUTH_PASSWORD`, then (given
- * `brokerUrl`, a broker on this machine) the coordinator login `volley setup` saved; null means
- * anonymous. Flags pass straight through so the caller can override an identity file; a
+ * `brokerUrl`, a broker on this machine, an operator not an agent, and the fallback turned on by
+ * the entry point) the coordinator login `volley setup` saved; null means anonymous. Flags pass straight through so the caller can override an identity file; a
  * `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`.
  */
 export function resolveAuth(
@@ -153,6 +153,6 @@ export function resolveAuth(
   if (flags.password !== undefined) throw new Error("--password requires --username");
   return (
     resolveBrokerAuth(env, cwd) ??
-    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, saved) : null)
+    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
   );
 }

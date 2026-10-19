@@ -10,97 +10,75 @@ const fs = (...files: string[]) => {
 };
 
 describe("stableServicePath", () => {
-  it("is the fixed list when the shell has nothing else: no shell PATH entry is baked in", () => {
+  it("is the fixed list, each candidate kept only when it exists", () => {
     expect(
       stableServicePath({
         home: HOME,
         bun: "/opt/homebrew/bin/bun",
-        path: "/opt/homebrew/bin:/some/project/node_modules/.bin:/usr/bin:/bin",
-        exists: fs("/opt/homebrew/bin", "/opt/homebrew/bin/bun"),
+        exists: fs("/opt/homebrew/bin"),
       }),
     ).toBe(`${HOME}/.volley/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
   });
 
-  it("is the same from two shells with different PATHs (an ephemeral cmux shim dir included)", () => {
+  it("takes nothing from the invoking shell: it has no PATH input at all", () => {
+    const inputs = { home: HOME, bun: `${HOME}/.bun/bin/bun`, exists: fs() };
+    const withPath = { ...inputs, path: `${HOME}/tools/bin:/some/project/node_modules/.bin` };
+    expect(stableServicePath(withPath as typeof inputs)).toBe(stableServicePath(inputs));
+  });
+
+  it("on a Mac with Homebrew, cmux, claude's and bun's installers: every one, in a fixed order", () => {
     const exists = fs(
       "/opt/homebrew/bin",
-      `${HOME}/.bun/bin/bun`,
-      `${HOME}/.local/bin/claude`,
-      "/opt/homebrew/bin/gh",
-      "/var/folders/xy/abc/T/cmux-cli-shims/1234-5678/cmux",
+      "/opt/homebrew/sbin",
+      `${HOME}/.bun/bin`,
+      `${HOME}/.local/bin`,
+      `${HOME}/.claude/local`,
       "/Applications/cmux.app/Contents/Resources/bin",
-      "/Applications/cmux.app/Contents/Resources/bin/cmux",
     );
-    const inCmux = stableServicePath({
-      home: HOME,
-      bun: `${HOME}/.bun/bin/bun`,
-      path: `/var/folders/xy/abc/T/cmux-cli-shims/1234-5678:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin`,
-      tmpdir: "/var/folders/xy/abc/T/",
-      exists,
-    });
-    const otherTerminal = stableServicePath({
-      home: HOME,
-      bun: `${HOME}/.bun/bin/bun`,
-      path: `/usr/bin:/bin:/opt/homebrew/bin:${HOME}/.bun/bin:/var/folders/xy/abc/T/cmux-cli-shims/9999-0000:${HOME}/.local/bin:/usr/sbin`,
-      exists,
-    });
-    expect(inCmux).toBe(otherTerminal);
-    expect(inCmux).toBe(
+    expect(stableServicePath({ home: HOME, bun: `${HOME}/.bun/bin/bun`, exists })).toBe(
       [
         `${HOME}/.volley/bin`,
         `${HOME}/.bun/bin`,
         "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
         "/usr/local/bin",
         "/Applications/cmux.app/Contents/Resources/bin",
         `${HOME}/.local/bin`,
+        `${HOME}/.claude/local`,
         "/usr/bin",
         "/bin",
         "/usr/sbin",
         "/sbin",
       ].join(":"),
     );
-    expect(inCmux).not.toContain("cmux-cli-shims");
-    expect(inCmux).not.toContain("/var/folders");
   });
 
-  it("is idempotent: computed from its own output, it is unchanged", () => {
-    const exists = fs(
-      `${HOME}/.bun/bin/bun`,
-      `${HOME}/.local/bin/claude`,
-      `${HOME}/tools/bin/gh`,
-      `${HOME}/tools/bin/claude`,
-      "/usr/bin/git",
+  it("on Linux: Linuxbrew, nix and snap when present", () => {
+    const exists = fs("/home/linuxbrew/.linuxbrew/bin", "/snap/bin", `${HOME}/.nix-profile/bin`);
+    expect(stableServicePath({ home: HOME, bun: "/usr/bin/bun", exists })).toBe(
+      [
+        `${HOME}/.volley/bin`,
+        "/usr/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+        "/usr/local/bin",
+        `${HOME}/.nix-profile/bin`,
+        "/snap/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+      ].join(":"),
     );
-    const first = stableServicePath({
-      home: HOME,
-      bun: `${HOME}/.bun/bin/bun`,
-      // gh is only in tools/bin, claude in both: claude's first hit (.local/bin) is kept.
-      path: `${HOME}/.local/bin:${HOME}/tools/bin:/usr/bin:/bin`,
-      exists,
-    });
-    expect(first.split(":")).toContain(`${HOME}/.local/bin`);
-    expect(first.split(":")).toContain(`${HOME}/tools/bin`);
-    expect(
-      stableServicePath({ home: HOME, bun: `${HOME}/.bun/bin/bun`, path: first, exists }),
-    ).toBe(first);
-  });
-
-  it("adds no directory for a tool the fixed list already reaches", () => {
-    const p = stableServicePath({
-      home: HOME,
-      bun: "bun",
-      path: `${HOME}/.local/bin:/usr/bin:/bin`,
-      exists: fs(`${HOME}/.local/bin/git`, "/usr/bin/git"),
-    });
-    expect(p).toBe(`${HOME}/.volley/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
   });
 
   it("never takes a relative or temporary bun directory", () => {
     for (const bun of ["bun", "./bun", "/tmp/bun-123/bun", "/private/var/folders/a/b/T/bun"]) {
-      expect(stableServicePath({ home: HOME, bun, path: "", exists: fs() })).toBe(
+      expect(stableServicePath({ home: HOME, bun, exists: fs() })).toBe(
         `${HOME}/.volley/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
       );
     }
+    expect(
+      stableServicePath({ home: HOME, bun: "/scratch/t/bun", tmpdir: "/scratch/t/", exists: fs() }),
+    ).toBe(`${HOME}/.volley/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
   });
 });
 

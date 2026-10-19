@@ -24,6 +24,7 @@ import {
 } from "../auth/roles";
 import { accountVerb, readAccounts } from "../commands/auth-accounts";
 import { makeBufferIO } from "../io";
+import { type KeychainItem, keychainAddLine, storeInKeychain } from "./keychain";
 import { encodeQr, renderQr } from "./qr";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { lanWsUrl } from "./step";
@@ -40,24 +41,15 @@ export { KEYCHAIN_SERVICE };
 
 const list = (xs: readonly string[]) => xs.join(", ");
 
-/** A double-quoted word for `security -i`'s command line (`\` and `"` escaped). */
-const securityQuote = (s: string) => `"${s.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+/** The keychain item holding the coordinator's password. */
+const COORDINATOR_ITEM: KeychainItem = {
+  service: KEYCHAIN_SERVICE,
+  account: "coordinator",
+  label: "Volley broker login (coordinator)",
+};
 
 /** The `security -i` command that stores the coordinator's password (fed on stdin). */
-export function keychainAddCommand(password: string): string {
-  return [
-    "add-generic-password",
-    "-U",
-    "-s",
-    KEYCHAIN_SERVICE,
-    "-a",
-    "coordinator",
-    "-l",
-    securityQuote("Volley broker login (coordinator)"),
-    "-w",
-    securityQuote(password),
-  ].join(" ");
-}
+export const keychainAddCommand = (password: string) => keychainAddLine(COORDINATOR_ITEM, password);
 
 /** `volley auth init`'s flags for setup: no config (step 2 owns it), every credential file. */
 const initFlags = (ctx: SetupContext, extra: Partial<MigrateFlags> = {}): MigrateFlags => ({
@@ -276,25 +268,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
         apply: async () => {
           const c = readCredentials(coordinatorFile);
           if (c === null) throw new Error(`${coordinatorFile} does not exist`);
-          // `security -i` reads its commands from stdin: the password never reaches argv (`ps`).
-          const r = await ctx.deps.exec(["security", "-i"], {
-            input: `${keychainAddCommand(c.password)}\n`,
-          });
-          // -i reports a failed command on stderr, not always in its exit code: read it back.
-          const back = await ctx.deps.exec([
-            "security",
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            "coordinator",
-            "-w",
-          ]);
-          if (r.code !== 0 || back.code !== 0 || back.stdout.replace(/\n$/, "") !== c.password) {
-            throw new Error(
-              `security add-generic-password failed (exit ${r.code}): ${(r.stderr || back.stderr).trim()}`,
-            );
-          }
+          await storeInKeychain(ctx.deps.exec, COORDINATOR_ITEM, c.password);
           return [`Stored the coordinator's login in the keychain (service ${KEYCHAIN_SERVICE}).`];
         },
       });

@@ -2,6 +2,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeSecret } from "../auth/context";
+import {
+  type KeychainItem,
+  keychainAddLine,
+  keychainReadItemArgv,
+  storeInKeychain,
+} from "./keychain";
 import { CMUX_APP_BINS } from "./service-path";
 import type { Change, ExecResult, SetupContext } from "./step";
 
@@ -63,12 +69,18 @@ export function cmuxEnv(
 /** How a cmux command went, for a program outside cmux (volleyd's service). */
 export type CmuxAccess = "ok" | "refused" | "not_running" | "missing" | "unknown";
 
-/** Classify a cmux command's result. */
+/**
+ * Classify a cmux command's result. Any denial is `refused`: cmux's default mode ("only processes
+ * started inside cmux can connect"), a wrong or missing socket password ("Invalid password",
+ * "Authentication required", `auth_failed`), "Unable to verify client process", and the usual
+ * wording of a refusal ("forbidden", "permission denied", "not authorized", "credentials").
+ * `not_running` only for socket trouble, so a bad path in a cmux command never reads as "open cmux".
+ */
 export function classifyCmux(r: Pick<ExecResult, "code" | "stdout" | "stderr">): CmuxAccess {
   if (r.code === 0) return "ok";
   const text = `${r.stderr}\n${r.stdout}`;
   if (
-    /access denied|only processes started inside cmux|password|unauthori[sz]ed|authenticat/i.test(
+    /access denied|only processes started inside cmux|password|unauthori[sz]ed|not authori[sz]ed|authenticat|auth_failed|auth failed|credential|forbidden|permission denied|unable to verify client/i.test(
       text,
     )
   )
@@ -76,12 +88,21 @@ export function classifyCmux(r: Pick<ExecResult, "code" | "stdout" | "stderr">):
   if (r.code === 127 || /command not found|no such file or directory: cmux/i.test(text))
     return "missing";
   if (
-    /not running|connection refused|ECONNREFUSED|ENOENT|no such file|socket.*(not found|missing)|could not connect|failed to connect/i.test(
+    /not running|connection refused|ECONNREFUSED|cmux\.sock|socket|could not connect|failed to connect/i.test(
       text,
     )
   )
     return "not_running";
   return "unknown";
+}
+
+/** ` (cmux said: <its first line>)`, or nothing when it said nothing. */
+export function cmuxSaid(output: string): string {
+  const first = output
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l !== "");
+  return first === undefined ? "" : ` (cmux said: ${first})`;
 }
 
 /**
@@ -96,11 +117,11 @@ export function cmuxAdvice(access: CmuxAccess, hasPassword: boolean): string {
         ? `cmux refused the socket password volleyd has: it changed in cmux, or cmux is no longer in Password mode. ${CMUX_PASSWORD_STEPS} Then run \`volley setup --repair\` in a terminal and enter the same password.`
         : `cmux lets only programs started inside cmux use its socket, and volleyd runs as a background service, so it cannot open workspaces for agents. ${CMUX_PASSWORD_STEPS} Then run \`volley setup --repair\` in a terminal and enter the same password there.`;
     case "not_running":
-      return "cmux is not running, and volleyd starts local agents in cmux workspaces: open cmux, then retry.";
+      return `volleyd cannot reach cmux's socket, and it starts local agents in cmux workspaces: open cmux and retry. If cmux is open, its socket is off: ${CMUX_PASSWORD_STEPS} Then run \`volley setup --repair\` in a terminal and enter the same password.`;
     case "missing":
       return "volleyd cannot find the cmux command on its PATH: install cmux (or reinstall it in /Applications), then run `volley setup --repair`.";
     default:
-      return "cmux failed in a way volleyd does not recognise: check that cmux is running and up to date, then run `volley setup --repair`.";
+      return `cmux failed in a way volleyd does not recognise. If cmux refuses programs it did not start: ${CMUX_PASSWORD_STEPS} Then run \`volley setup --repair\` in a terminal and enter the same password.`;
   }
 }
 
@@ -123,10 +144,14 @@ const CHECK_WAIT_MS = 10_000;
 const CHECK_POLL_MS = 250;
 
 /** Whether cmux is installed: the app's command-line tool, or `cmux` on the services' PATH. */
-export function cmuxInstalled(home: string, servicePath: string): boolean {
+export function cmuxInstalled(
+  home: string,
+  servicePath: string,
+  exists: (p: string) => boolean = existsSync,
+): boolean {
   return [...CMUX_APP_BINS(home), ...servicePath.split(":")]
     .filter((d) => d !== "")
-    .some((d) => existsSync(join(d, "cmux")));
+    .some((d) => exists(join(d, "cmux")));
 }
 
 /**
@@ -177,47 +202,17 @@ async function runCheck(
   return null;
 }
 
-/** A double-quoted word for `security -i`'s command line (`\` and `"` escaped). */
-const securityQuote = (s: string) => `"${s.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+/** The keychain item holding the cmux socket password. */
+const CMUX_ITEM: KeychainItem = {
+  service: CMUX_KEYCHAIN_SERVICE,
+  account: "volleyd",
+  label: "Volley: cmux socket password (volleyd)",
+};
 
 /** The `security -i` command that stores the cmux socket password (fed on stdin). */
-export function cmuxKeychainAddCommand(password: string): string {
-  return [
-    "add-generic-password",
-    "-U",
-    "-s",
-    CMUX_KEYCHAIN_SERVICE,
-    "-a",
-    "volleyd",
-    "-l",
-    securityQuote("Volley: cmux socket password (volleyd)"),
-    "-w",
-    securityQuote(password),
-  ].join(" ");
-}
+export const cmuxKeychainAddCommand = (password: string) => keychainAddLine(CMUX_ITEM, password);
 
-const keychainRead = [
-  "security",
-  "find-generic-password",
-  "-s",
-  CMUX_KEYCHAIN_SERVICE,
-  "-a",
-  "volleyd",
-  "-w",
-];
-
-/** Store `password` in the keychain, reading it back (-i reports failures on stderr only). */
-async function storeInKeychain(ctx: SetupContext, password: string): Promise<void> {
-  const r = await ctx.deps.exec(["security", "-i"], {
-    input: `${cmuxKeychainAddCommand(password)}\n`,
-  });
-  const back = await ctx.deps.exec(keychainRead);
-  if (r.code !== 0 || back.code !== 0 || back.stdout.replace(/\n$/, "") !== password) {
-    throw new Error(
-      `security add-generic-password failed (exit ${r.code}): ${(r.stderr || back.stderr).trim()}`,
-    );
-  }
-}
+const keychainRead = keychainReadItemArgv(CMUX_ITEM);
 
 /**
  * The cmux part of the Services step (macOS): what it found, and the change that gives volleyd
@@ -229,7 +224,7 @@ export async function planCmux(
   found: string[],
 ): Promise<Change | null> {
   if (ctx.deps.platform !== "darwin") return null;
-  if (!cmuxInstalled(ctx.home, serviceEnv.PATH ?? "")) {
+  if (!cmuxInstalled(ctx.home, serviceEnv.PATH ?? "", ctx.deps.exists)) {
     found.push(
       "cmux: not installed. volleyd starts local agents in cmux workspaces: install cmux, then rerun `volley setup --step services`",
     );
@@ -260,30 +255,61 @@ export async function planCmux(
       detail: "security -i, fed on stdin (never on a command line)",
       apply: async () => {
         if (loose) writeCmuxPassword(ctx.volleydHome, stored);
-        if (missing) await storeInKeychain(ctx, stored);
+        if (missing) await storeInKeychain(ctx.deps.exec, CMUX_ITEM, stored);
         return ["Stored the cmux socket password."];
       },
     };
   }
-  if (check.access !== "refused") {
-    found.push(
-      `cmux: ${cmuxAdvice(check.access, stored !== null)}${check.output !== "" ? ` (cmux said: ${check.output.split("\n")[0]})` : ""}`,
-    );
-    return null;
+  // cmux does not let the service in. Never "already done": every case below is a change, whose
+  // apply checks again and fails with what cmux said and what to do, so a run that cannot fix it
+  // (`--yes` from a script, the Desk) does not report success.
+  const said = cmuxSaid(check.output);
+  if (check.access === "not_running" || check.access === "missing") {
+    const advice = cmuxAdvice(check.access, stored !== null);
+    found.push(`cmux: ${advice}${said}`);
+    return {
+      summary: `Make volleyd's service reach cmux (${check.access === "missing" ? "cmux is not on its PATH" : "cmux's socket is not answering"}): checked again when applied`,
+      detail: advice,
+      apply: async () => {
+        const now = readCmuxPassword(ctx.volleydHome);
+        const again = await checkCmuxAsService(ctx, serviceEnv, now);
+        if (again?.access === "ok") return ["volleyd's service reaches cmux now."];
+        throw new Error(
+          again === null
+            ? "setup could not check cmux again; run `volley setup --repair` in a terminal"
+            : `${cmuxAdvice(again.access, now !== null)}${cmuxSaid(again.output)}`,
+        );
+      },
+    };
   }
-  found.push(`cmux: ${cmuxAdvice("refused", stored !== null).replace(/ Then run .*$/, "")}`);
-  if (!ctx.deps.interactive || ctx.deps.askSecret === undefined) {
-    found.push(
-      "cmux: run `volley setup --step services` in a terminal to enter the socket password (it is asked for there, hidden)",
-    );
-    return null;
+  // Refused, or failed in a way setup does not recognise: a socket password is the fix setup has.
+  found.push(
+    `cmux: ${cmuxAdvice(check.access, stored !== null).replace(/ Then run .*$/, "")}${said}`,
+  );
+  const askSecret =
+    ctx.deps.interactive && ctx.deps.askSecret !== undefined ? ctx.deps.askSecret : null;
+  if (askSecret === null) {
+    const where =
+      "run `volley setup --step services` in a terminal on this machine to enter the socket password (it is asked for there, hidden)";
+    found.push(`cmux: ${where}`);
+    return {
+      summary:
+        "Give volleyd the cmux socket password (needs a terminal: `volley setup --step services`)",
+      detail: `${CMUX_PASSWORD_STEPS}\nThen ${where}.`,
+      apply: async () => {
+        throw new Error(
+          `cmux does not let volleyd's service in${said}, and nobody is here to enter its socket password. ${CMUX_PASSWORD_STEPS} Then ${where}`,
+        );
+      },
+    };
   }
-  const askSecret = ctx.deps.askSecret;
   return {
     summary: `Give volleyd the cmux socket password (asked for now, hidden; stored in the macOS keychain, service ${CMUX_KEYCHAIN_SERVICE}, and ${file}, mode 0600)`,
     detail: `${CMUX_PASSWORD_STEPS}\nThen enter the same password when asked. It is checked with \`cmux ping\` the way volleyd's service runs it before it is stored, and volleyd reads it from ${file} each time it runs cmux (never from its plist).`,
     apply: async () => {
-      const password = (await askSecret("cmux socket password (hidden): "))?.trim() ?? "";
+      // Only the line ending goes: a password may start or end with a space.
+      const password =
+        (await askSecret("cmux socket password (hidden): "))?.replace(/\r?\n$/, "") ?? "";
       if (password === "") {
         throw new Error(
           "no password entered: nothing was stored. Set one in cmux, then rerun `volley setup --step services`",
@@ -294,13 +320,13 @@ export async function planCmux(
         throw new Error(
           again === null
             ? "setup could not check the password with cmux; nothing was stored. Rerun `volley setup --step services`"
-            : again.access === "refused"
-              ? `cmux refused that password; nothing was stored. ${CMUX_PASSWORD_STEPS} Then rerun \`volley setup --step services\` and enter the same password`
-              : `${cmuxAdvice(again.access, true)} Nothing was stored`,
+            : again.access === "refused" || again.access === "unknown"
+              ? `cmux refused that password${cmuxSaid(again.output)}; nothing was stored. ${CMUX_PASSWORD_STEPS} Then rerun \`volley setup --step services\` and enter the same password`
+              : `${cmuxAdvice(again.access, true)}${cmuxSaid(again.output)} Nothing was stored`,
         );
       }
       const written = writeCmuxPassword(ctx.volleydHome, password);
-      await storeInKeychain(ctx, password);
+      await storeInKeychain(ctx.deps.exec, CMUX_ITEM, password);
       return [
         `Stored the cmux socket password in the macOS keychain (service ${CMUX_KEYCHAIN_SERVICE}) and ${written} (mode 0600).`,
         "volleyd's service reaches cmux now (`cmux ping`, run the way the service runs it).",

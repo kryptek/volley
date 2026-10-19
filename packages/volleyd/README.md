@@ -1710,10 +1710,11 @@ The plist (`launchd/systems.volley.volleyd.plist.tmpl`) runs `bun src/cli.ts dae
 `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` and, when set, `VOLLEY_AUTH_DIR` (the auth dir volleyd's
 `volley auth` calls use) at install time. Its `PATH` is a stable list, never your shell's whole
 `PATH` (a terminal's per-session entries, such as cmux's shim directory under the temp dir, would
-make every rerun from another terminal a change): `~/.volley/bin`, bun's directory, Homebrew's
-`bin`, `/usr/local/bin`, the cmux app's `bin`, the directories of `claude`, `gh`, `git`, `tmux`…
-found on your `PATH` when those do not reach them (never a temporary one), then
-`/usr/bin:/bin:/usr/sbin:/sbin`. Re-run `volleyd install` after changing any of them. `volley
+make every rerun from another terminal a change): a fixed list of candidates, each kept when it
+exists on this machine: `~/.volley/bin`, bun's directory, Homebrew's `bin` and `sbin`,
+`/usr/local/bin`, the cmux app's `bin`, `~/.local/bin`, `~/.bun/bin`, `~/.claude/local`,
+`~/.npm-global/bin`, `~/.volta/bin`, nix's and snap's `bin`, then `/usr/bin:/bin:/usr/sbin:/sbin`.
+Nothing comes from your shell's `PATH`. Re-run `volleyd install` after changing any of them. `volley
 setup` runs it for you on macOS, with `VOLLEY_AUTH_DIR` set to the auth dir it used (volleyd runs
 `volley auth` by name to redeem the Desk's sign-in links); on Linux it writes the systemd user
 unit `volleyd.service` instead, with the same PATH (`systemctl --user status volleyd.service`).
@@ -1726,8 +1727,8 @@ Automation → Socket control mode → Password mode), asks for it hidden and st
 file each time it runs cmux (spawns, screens, the `cmux ping` pressure sample) and passes it as
 `CMUX_SOCKET_PASSWORD`, so a new password needs no restart; it never goes in the plist. A
 `CMUX_SOCKET_PASSWORD` in volleyd's own environment wins. When cmux still refuses a spawn, the
-`spawn_failed` decision says what to do in those words (not the raw cmux error, which stays in
-the journal).
+`spawn_failed` decision says what to do in those words, then what cmux said (`(cmux said: …)`;
+its full text stays in the journal).
 
 ---
 

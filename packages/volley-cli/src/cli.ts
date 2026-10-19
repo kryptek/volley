@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import pkg from "../package.json";
 import { parseGlobal } from "./args";
+import { realSavedLoginDeps, useSavedLogin } from "./auth/coordinator-login";
 import { EXIT, type ExitCode } from "./exit-codes";
 import { type IO, realIO } from "./io";
 
@@ -114,6 +115,8 @@ export async function main(args: MainArgs): Promise<ExitCode> {
 
 // Real-process entry point. `import.meta.main` is Bun-only; under vitest it stays false.
 if (import.meta.main) {
+  // The operator's own commands may use the coordinator login setup saved (never under a test).
+  useSavedLogin(realSavedLoginDeps);
   main({ argv: process.argv.slice(2), env: process.env, io: realIO })
     .then((code) => {
       process.exit(code);

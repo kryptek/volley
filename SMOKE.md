@@ -243,7 +243,8 @@ on GitHub with one small open issue and a pushed release branch
    only its own programs in, gives the menu path (cmux → Settings… → Automation → Socket control
    mode → Password mode → Set) and offers *Give volleyd the cmux socket password*: set one in
    cmux, answer yes, type it at the hidden prompt; it says `volleyd's service reaches cmux now`.
-   A wrong password is refused and nothing is stored. Phone prints a QR code. Last line:
+   A wrong password is refused, quoting cmux (`(cmux said: …)`), and nothing is stored: note
+   cmux's exact wrong-password text, so the tests can carry it. Phone prints a QR code. Last line:
    `Setup complete.` Anything that asks you to read source or guess is a fail: note the step.
 2. **Phone sign-in, then stop the stopwatch.** Right away (the QR lasts 10 minutes), scan the QR
    with the phone camera and open the link.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { stableServicePath } from "volley-cli/setup/service-path";
 import pkg from "../package.json";
 import type { AdmissionSummary } from "../src/admission";
 import { admissionFor, formatAdmission } from "../src/commands/admission";
@@ -486,10 +487,11 @@ describe("volleyd install / uninstall", () => {
     expect(a.stdout).toBe(b.stdout);
     expect(a.stdout).not.toContain("cmux-cli-shims");
     expect(a.stdout).not.toContain("node_modules");
-    // The test's home is under the temp dir, so bun's directory there is not baked in either.
-    expect(a.stdout).toContain(
-      `<string>${join(home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>`,
-    );
+    // The fixed list, probed on this machine (Homebrew or the cmux app join it on a Mac); the
+    // test's home is under the temp dir, so bun's directory there is not baked in.
+    const want = stableServicePath({ home, bun: join(bunDir, "bun") });
+    expect(want).not.toContain(bunDir);
+    expect(a.stdout).toContain(`<string>${want}</string>`);
   });
 
   it("renders VOLLEY_AUTH_DIR only when an auth dir is given", () => {

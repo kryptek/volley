@@ -74,8 +74,9 @@ function readCredentialsFile(path: string): BrokerAuth {
 
 /**
  * A control client's credentials: the caller's own, resolved like every other Volley client (the
- * identity file's `broker` block in `cwd`, then `VOLLEY_AUTH_*`, then, for a broker on this
- * machine, the coordinator login `volley setup` saved: the keychain, then coordinator.json). The
+ * identity file's `broker` block in `cwd`, then `VOLLEY_AUTH_*`, then, for an operator (not an
+ * agent) and a broker on this machine, the coordinator login `volley setup` saved: its
+ * coordinator.json, which `cli.ts` turns on; volleyd never asks the keychain itself). The
  * shipped ACL lets only volleyd, the Desk and coordinators write the daemon's mailbox, so this is
  * normally the `coordinator` identity.
  */
@@ -87,7 +88,7 @@ export function controlAuth(
 ): BrokerAuth | null {
   return (
     resolveBrokerAuth(env, cwd) ??
-    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, saved) : null)
+    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
   );
 }
 

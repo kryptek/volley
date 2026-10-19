@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { fileSavedLoginDeps, useSavedLogin } from "volley-cli/auth/coordinator-login";
 import pkg from "../package.json";
 import { type Command, type CommandArgs, EXIT, type ExitCode, realIO } from "./io";
 
@@ -93,6 +94,9 @@ export async function main(args: CommandArgs): Promise<ExitCode> {
 
 // Real-process entry point. `import.meta.main` is Bun-only; under vitest it stays false.
 if (import.meta.main) {
+  // Control commands may use the coordinator login setup saved: its coordinator.json, never the
+  // keychain (that would start a child process outside exec.ts). Never under a test.
+  useSavedLogin(fileSavedLoginDeps);
   main({ argv: process.argv.slice(2), env: process.env, io: realIO })
     .then((code) => process.exit(code))
     .catch((e) => {

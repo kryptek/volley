@@ -97,30 +97,61 @@ function findBun(path: string): string {
   return process.execPath;
 }
 
+/** What the hidden prompt has read so far: the value, and an escape sequence being skipped. */
+export interface HiddenInput {
+  value: string;
+  /** Inside ESC (`esc`), ESC [ … (`csi`) or ESC O x (`ss3`): an arrow or function key. */
+  skip: "" | "esc" | "csi" | "ss3";
+}
+
 /**
- * Read one line from the terminal without echoing it (raw mode: Enter ends it, Backspace edits,
- * Ctrl-C or Ctrl-D gives up). Null when stdin is not a terminal.
+ * Feed typed text to the hidden prompt: Enter ends it, Backspace edits, Ctrl-C cancels, Ctrl-D
+ * gives up; an arrow or function key (an escape sequence) adds nothing. Null while it goes on.
+ */
+export function hiddenKeys(state: HiddenInput, text: string): "enter" | "cancel" | "eof" | null {
+  for (const ch of text) {
+    if (state.skip === "esc") {
+      state.skip = ch === "[" ? "csi" : ch === "O" ? "ss3" : "";
+      continue;
+    }
+    if (state.skip === "ss3") {
+      state.skip = "";
+      continue;
+    }
+    if (state.skip === "csi") {
+      // Parameters and intermediates until the final byte (@ to ~).
+      if (ch >= "@" && ch <= "~") state.skip = "";
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") return "enter";
+    if (ch === "\u0003") return "cancel";
+    if (ch === "\u0004") return "eof";
+    if (ch === "\u001b") state.skip = "esc";
+    else if (ch === "\u007f" || ch === "\b") state.value = state.value.slice(0, -1);
+    else if (ch >= " ") state.value += ch;
+  }
+  return null;
+}
+
+/**
+ * Read one line from the terminal without echoing it (raw mode; see `hiddenKeys`). Null when
+ * stdin is not a terminal or on Ctrl-D; Ctrl-C rejects ("cancelled").
  */
 function askHidden(prompt: string): Promise<string | null> {
   const stdin = process.stdin;
   if (stdin.isTTY !== true) return Promise.resolve(null);
   process.stdout.write(prompt);
-  return new Promise((resolve) => {
-    let value = "";
-    const done = (v: string | null) => {
+  return new Promise((resolve, reject) => {
+    const state: HiddenInput = { value: "", skip: "" };
+    const onData = (d: Buffer) => {
+      const end = hiddenKeys(state, d.toString("utf-8"));
+      if (end === null) return;
       stdin.off("data", onData);
       stdin.setRawMode(false);
       stdin.pause();
       process.stdout.write("\n");
-      resolve(v);
-    };
-    const onData = (d: Buffer) => {
-      for (const ch of d.toString("utf-8")) {
-        if (ch === "\r" || ch === "\n") return done(value);
-        if (ch === "\u0003" || ch === "\u0004") return done(null);
-        if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
-        else if (ch >= " ") value += ch;
-      }
+      if (end === "cancel") reject(new Error("cancelled (Ctrl-C): nothing was stored"));
+      else resolve(end === "enter" ? state.value : null);
     };
     stdin.setRawMode(true);
     stdin.resume();

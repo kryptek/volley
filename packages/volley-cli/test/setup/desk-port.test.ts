@@ -39,6 +39,10 @@ describe("setup: the Desk's port", () => {
       { pid: 4242, command: "node", address: "127.0.0.1:5199" },
       { pid: 77, command: "bun", address: "0.0.0.0:5199" },
     ]);
+    // Without root, another user's listener has no users: field. It still has the port.
+    expect(parseSs("LISTEN 0      511        127.0.0.1:5199      0.0.0.0:*\n")).toEqual([
+      { pid: null, command: "", address: "127.0.0.1:5199" },
+    ]);
   });
 
   it("asks lsof, then ss where there is no lsof, and says it cannot tell when neither runs", async () => {
@@ -65,13 +69,18 @@ describe("setup: the Desk's port", () => {
       ),
     ).toEqual([{ pid: 5, command: "x", address: "127.0.0.1:5199" }]);
     expect(calls[1]).toEqual(["ss", "-H", "-l", "-t", "-n", "-p", "sport", "=", ":5199"]);
-    expect(await deskPortListeners(exec({}), 5199)).toBeNull();
-    // A fenced exec that refuses (volleyd planning for the Desk) is "cannot tell", not a crash.
+    expect(await deskPortListeners(exec({}), 5199)).toEqual({
+      cannotTell: "no lsof here; no ss here",
+    });
+    // A fenced exec that refuses (volleyd planning for the Desk) is "cannot tell", with why.
     expect(
       await deskPortListeners(async () => {
         throw new Error("not a setup command volleyd runs for the Desk");
       }, 5199),
-    ).toBeNull();
+    ).toEqual({
+      cannotTell:
+        "lsof: not a setup command volleyd runs for the Desk; ss: not a setup command volleyd runs for the Desk",
+    });
   });
 
   it("the fence lets setup run exactly these probes", () => {
@@ -139,6 +148,33 @@ describe("setup: the Desk's port", () => {
         expect(p.blocked).toContain("node (PID 4242) on 127.0.0.1:5199");
         expect(p.blocked).toContain("kill 4242");
         expect(p.blocked).toContain("--desk-port");
+      });
+
+      it(`${platform}: says it could not check, and why, when no probe can tell`, async () => {
+        withPort(platform);
+        const inner = m.ctx.deps.exec;
+        m.ctx.deps.exec = async (argv, o) => {
+          if (argv[0] === "lsof" || argv[0] === "ss") throw new Error(`fence: ${argv[0]} refused`);
+          return inner(argv, o);
+        };
+        const p = await planServices(m.ctx);
+        expect(p.blocked).toBeUndefined();
+        expect(p.found.join("\n")).toContain(
+          "Desk port 5199: could not check who listens on it (lsof: fence: lsof refused; ss: fence: ss refused)",
+        );
+      });
+
+      it(`${platform}: another user's listener, PID hidden, still stops it`, async () => {
+        withPort(platform);
+        const inner = m.ctx.deps.exec;
+        m.ctx.deps.exec = async (argv, o) => {
+          if (argv[0] === "lsof") return { code: 127, stdout: "", stderr: "" };
+          if (argv[0] === "ss") return ok("LISTEN 0 5 127.0.0.1:5199 0.0.0.0:*\n");
+          return inner(argv, o);
+        };
+        const p = await planServices(m.ctx);
+        expect(p.blocked).toContain("a program of another user (PID not visible without root)");
+        expect(p.blocked).not.toContain("kill");
       });
 
       it(`${platform}: the Desk's own service on its port is no conflict`, async () => {

@@ -26,9 +26,9 @@ the plist instead. Restart the service with:
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
 The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE and, when set, VOLLEY_AUTH_DIR
 (the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in. Its PATH is
-a fixed list (~/.volley/bin, bun's directory, Homebrew's bin, /usr/local/bin, the cmux app's bin,
-/usr/bin:/bin:/usr/sbin:/sbin) plus the directories of claude, gh, git… found on your PATH, never
-a temporary one: the same from any terminal.
+a fixed list, never your shell's: ~/.volley/bin, bun's directory, Homebrew's, /usr/local/bin, the
+cmux app's bin, ~/.local/bin, ~/.bun/bin and the other install dirs that exist on this machine,
+/usr/bin:/bin:/usr/sbin:/sbin. The same from any terminal.
 The cmux socket password (\`volley setup\` stores it) never goes in the plist either: volleyd
 reads $VOLLEYD_HOME/cmux.json (mode 0600) each time it runs cmux.
 Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,
@@ -140,7 +140,7 @@ function servicePaths(
     uid: process.getuid?.() ?? 0,
     bun,
     // Never the shell's whole PATH (per-terminal entries would make every rerun a change).
-    path: stableServicePath({ home: userHome, bun, path: env.PATH, tmpdir: env.TMPDIR }),
+    path: stableServicePath({ home: userHome, bun, tmpdir: env.TMPDIR }),
     ...(env.VOLLEY_AUTH_DIR !== undefined && env.VOLLEY_AUTH_DIR !== ""
       ? { authDir: env.VOLLEY_AUTH_DIR }
       : {}),

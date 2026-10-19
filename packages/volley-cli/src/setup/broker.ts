@@ -306,7 +306,7 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
     const p = await ctx.deps.probeAnonymous(url);
     plan.found.push(
       url === lanUrl && url !== ctx.wsUrl
-        ? `Listener 9001 from the LAN (${url}): ${describeProbe(p)}`
+        ? `Listener ${port(url)} from the LAN (${url}): ${describeProbe(p)}`
         : `Listener ${port(url)}: ${describeProbe(p)}`,
     );
     if (p !== "refused") restart = true;
@@ -320,7 +320,7 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
       if (p === "refused") {
         plan.verified.push(
           url === lanUrl && url !== ctx.wsUrl
-            ? `Listener 9001 from the LAN (${url}): reachable, refuses anonymous clients`
+            ? `Listener ${port(url)} from the LAN (${url}): reachable, refuses anonymous clients`
             : `Listener ${port(url)}: refuses anonymous clients`,
         );
       }
