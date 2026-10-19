@@ -98,6 +98,8 @@ volley setup --step services   # only the named step(s)
 
 A rerun plans nothing for what is in place and reports each step as already done. The admin token and the phone's link count as in place while pending or once redeemed: after they expired unused (10 minutes), a rerun issues new ones. Every step is journaled to `$VOLLEYD_HOME/setup.log` (summaries only, never a password or token). Every external command (the broker restart, `launchctl` / `systemctl`, `security`, the hooks installer, the Desk build) runs without a shell, through a fence that allows exactly those commands and refuses any other. The Desk build is refused while `packages/volley-desk/.env*` sets `VITE_VOLLEY_BROKER_*` (Vite would build it into the page served to your network). `--broker-url` must be `mqtt://`: TLS is not supported by `volley setup` yet.
 
+**From the Desk.** Settings › Setup & Security runs the same five steps through volleyd (`setup_plan` / `setup_apply`, SPEC §4.6.10): volleyd runs these planners and steps itself, writes the same `setup.log` lines (with `by: "desk:<admin>"`), and seals the one-time admin token to the browser instead of printing it. It needs an admin already (an admin token redeemed, or a secured broker), so a brand-new anonymous broker's first run (broker + security) is this command. A change only a terminal can make (anything under `sudo`, volleyd's own service, the macOS keychain) is shown in the Desk with the exact command to run here.
+
 ---
 
 ## `volley desk serve`
