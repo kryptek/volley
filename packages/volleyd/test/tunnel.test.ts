@@ -425,10 +425,10 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       repo,
       host: "box",
       target: "dev@box",
-      decision_id: trustDecisionId(repo, "dev@box"),
+      decision_id: trustDecisionId("w1", repo, "dev@box"),
     });
     // The local and the remote clone at one path never share a decision.
-    expect(trustDecisionId(repo, "dev@box")).not.toBe(trustDecisionId(repo));
+    expect(trustDecisionId("w1", repo, "dev@box")).not.toBe(trustDecisionId("w1", repo));
     // The local file (which trusts nothing) neither resolves nor re-opens it.
     for (let i = 0; i < 3; i++) {
       await clock.advance(60_000);

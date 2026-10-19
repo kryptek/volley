@@ -1,7 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { addAccount, profileDir } from "../src/claude/profiles";
 import { FenceError, sealLaunchScript } from "../src/fence";
 import { LocalCmuxHost } from "../src/hosts/local-cmux";
 import {
@@ -15,6 +26,7 @@ import {
 } from "../src/launch";
 import { spawnAgent } from "../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { stubEnv } from "./helpers/with-env";
 
 describe("launch.sh", () => {
   const script = renderLaunchScript({
@@ -55,16 +67,30 @@ describe("launch.sh", () => {
   });
 
   it("under a Claude account profile: exports CLAUDE_CONFIG_DIR and strips credential env", () => {
+    // A registered profile in the profiles root: the only CLAUDE_CONFIG_DIR the fence seals.
+    const root = join(realpathSync(mkdtempSync(join(tmpdir(), "launch-profile-"))), "claude");
+    const restore = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(root, "..", "vd") });
+    try {
+      underProfile(
+        profileDir(root, addAccount(root, { label: "work" }, "2026-10-19T00:00:00Z").id),
+      );
+    } finally {
+      restore();
+      rmSync(join(root, ".."), { recursive: true, force: true });
+    }
+  });
+
+  function underProfile(claudeConfigDir: string) {
     const vars = {
       hooksDir: "/opt/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
       worktree: "/wt/w1/T1-implementer",
-      claudeConfigDir: "/srv/claude/work",
+      claudeConfigDir,
     };
     const s = renderLaunchScript(vars);
     const lines = s.split("\n");
-    expect(lines).toContain("export CLAUDE_CONFIG_DIR='/srv/claude/work'");
+    expect(lines).toContain(`export CLAUDE_CONFIG_DIR='${claudeConfigDir}'`);
     expect(lines).toContain(
       "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR",
     );
@@ -74,14 +100,14 @@ describe("launch.sh", () => {
     // The fence seals it like any other launch script; a tampered profile line is refused.
     expect(() => sealLaunchScript(vars.worktree, s)).not.toThrow();
     expect(() =>
-      sealLaunchScript(vars.worktree, s.replace("'/srv/claude/work'", "'relative/dir'")),
+      sealLaunchScript(vars.worktree, s.replace(`'${claudeConfigDir}'`, "'relative/dir'")),
     ).toThrow(FenceError);
     expect(() => sealLaunchScript(vars.worktree, s.replace(/^unset .*$/m, "unset PATH"))).toThrow(
       FenceError,
     );
     // The primary profile: no CLAUDE_CONFIG_DIR line at all.
     expect(script).not.toContain("CLAUDE_CONFIG_DIR");
-  });
+  }
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
     expect(JSON.parse(readFileSync(hooksSettingsPath(HOOKS_DIR), "utf-8")).hooks).toBeDefined();

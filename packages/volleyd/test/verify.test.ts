@@ -289,7 +289,7 @@ describe("verify through hook signals (Aedes)", () => {
     const d = env.events.find((e) => e.type === "decision_opened");
     expect(d?.data).toMatchObject({
       kind: "repo_untrusted",
-      decision_id: trustDecisionId(env.repo),
+      decision_id: trustDecisionId("w1", env.repo),
     });
     const pointer = (d?.data.pointers as { screen?: string }).screen as string;
     expect(existsSync(pointer)).toBe(true);

@@ -1,17 +1,26 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { addAccount, claudeRoot, profileDir } from "../../src/claude/profiles";
 import { spawnAgent } from "../../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "../helpers/fake-host";
+import { stubEnv, withEnv } from "../helpers/with-env";
 
 /** spawnAgent under a Claude account profile (the daemon resolves `account` with selectAccount). */
 
 let env: SpawnEnv;
-afterEach(() => env.cleanup());
+let restoreEnv: (() => void) | undefined;
+afterEach(() => {
+  restoreEnv?.();
+  restoreEnv = undefined;
+  env.cleanup();
+});
 
+/** Profile `work`, registered in a profiles root the launch fence reads ($VOLLEY_CLAUDE_DIR). */
 function profile(trusted: boolean) {
-  const dir = join(env.dir, "claude", "work");
-  mkdirSync(dir, { recursive: true });
+  const root = join(env.dir, "claude");
+  restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(env.dir, "volleyd") });
+  const dir = profileDir(root, addAccount(root, { label: "work" }, "2026-10-19T00:00:00.000Z").id);
   writeFileSync(
     join(dir, ".claude.json"),
     JSON.stringify({
@@ -121,5 +130,30 @@ describe("spawn under a Claude account", () => {
       detached: true,
       worktree: first,
     });
+  });
+
+  it("a profile in the DEFAULT root (~/.volley/claude/<acct>) passes the real fence", async () => {
+    // The owner's smoke: every spawn under a profile there was FENCE_DENIED (launch.sh), because
+    // the fence refused any CLAUDE_CONFIG_DIR with a `.volley` segment.
+    env = await makeSpawnEnv();
+    await withEnv(
+      { HOME: env.home, VOLLEY_CLAUDE_DIR: undefined, VOLLEYD_HOME: undefined },
+      async () => {
+        const dir = profileDir(
+          claudeRoot(),
+          addAccount(claudeRoot(), { label: "work" }, "2026-10-19T00:00:00.000Z").id,
+        );
+        expect(dir).toBe(join(env.home, ".volley", "claude", "work"));
+        writeFileSync(
+          join(dir, ".claude.json"),
+          JSON.stringify({ projects: { [env.repo]: { hasTrustDialogAccepted: true } } }),
+        );
+        const out = await spawnAgent(env.request({ account: { id: "work", dir } }), env.deps);
+        expect(out.kind).toBe("launched");
+        const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+        expect(script).toContain(`export CLAUDE_CONFIG_DIR='${dir}'`);
+        expect(env.events.some((e) => e.type === "agent_spawned")).toBe(true);
+      },
+    );
   });
 });

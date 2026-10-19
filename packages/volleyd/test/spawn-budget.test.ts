@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { waveDecisionId } from "../src/decisions";
 import { runCli } from "./helpers/run-cli";
 import { ARTIFACTS_OK, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -27,6 +28,7 @@ describe("spawn budget exhausted", () => {
     const d = await held();
     expect(d.task).toBe("T1");
     expect(d.data.options).toEqual(["raise by 1", "cancel"]);
+    expect(d.data.decision_id).toBe(waveDecisionId("spawn_budget_exhausted", "w1"));
     expect(String(d.data.question)).toContain("1/1");
     await s.settled();
     const t = s.daemon.snapshot("w1")?.tasks[0];
