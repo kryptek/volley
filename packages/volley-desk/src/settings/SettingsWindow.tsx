@@ -17,6 +17,7 @@ import { useFocusTrap } from "../a11y/keys";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import type { AuthOps } from "../store/control";
+import type { AdminStatus } from "../store/peerOps";
 import type { ConfigPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
@@ -100,7 +101,14 @@ export function SettingsWindow(p: SettingsWindowProps) {
   const cur = sectionDef(sec);
   const ops = p.onboarding?.ops ?? null;
   // Asked only once an admin-only section is open: a non-admin's ask is never answered.
-  const { admin, role } = useAdminRole(ops, p.identity, sec === "accounts" || sec === "setup");
+  const { admin: authAdmin, role } = useAdminRole(
+    ops,
+    p.identity,
+    sec === "accounts" || sec === "setup",
+  );
+  // Machines checks the same account with its pairing ops: an admin there is one here too.
+  const [peerAdmin, setPeerAdmin] = useState<AdminStatus | null>(null);
+  const admin = authAdmin || peerAdmin === "admin";
 
   useFocusTrap(dialog);
   // Focus moves into the window so Escape works at once; it goes back on close.
@@ -234,7 +242,10 @@ export function SettingsWindow(p: SettingsWindowProps) {
               />
             )}
             {sec === "machines" && (
-              <Machines {...(p.machines ?? { machines: {}, hubUp: false, ops: null })} />
+              <Machines
+                {...(p.machines ?? { machines: {}, hubUp: false, ops: null })}
+                onAdmin={setPeerAdmin}
+              />
             )}
             {sec === "setup" && (
               <Setup
