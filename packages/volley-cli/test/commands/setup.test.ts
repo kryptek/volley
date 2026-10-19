@@ -177,16 +177,37 @@ describe("volley setup", () => {
     }
   });
 
-  it("records the install it used (layout, config, state file, auth dir) for volleyd's Desk plans", async () => {
-    expect((await run(["--yes", "--lan"])).code).toBe(0);
+  it("records the install it used (layout, config, state file, auth dir, Desk) for volleyd's Desk plans", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
     const saved = JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8"));
     expect(saved).toEqual({
       layout: m.layout.name,
       config: m.layout.config,
       state_file: m.layout.stateFile,
       auth_dir: m.layout.authDir,
+      desk_host: "desk.example",
+      desk_port: 5288,
     });
     expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
+  });
+
+  it("a later run without the flags (`--step services` as the user) keeps and uses the record", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
+    const file = join(m.ctx.volleydHome, "setup.json");
+    // As if setup had run with --layout container --config … --dir …: what volleyd plans with.
+    const recorded = { ...JSON.parse(readFileSync(file, "utf-8")), layout: "brew-intel" };
+    writeFileSync(file, JSON.stringify(recorded));
+    const r = await run(["--yes", "--step", "services"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("brew-intel layout (from the last volley setup)");
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual(recorded);
+  });
+
+  it("records nothing for a run that stops before it finishes", async () => {
+    m.auth.mosquittoVersion = async () => null;
+    const r = await run(["--yes"]);
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
   });
 
   it("prints the admin token as a link to the Desk it serves (its --desk-port)", async () => {
@@ -194,6 +215,10 @@ describe("volley setup", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(
       /Open the Desk with it on this machine: http:\/\/localhost:5288\/#signin=vly_admin_[0-9a-f]+_[0-9a-f]+/,
+    );
+    // From another device: the address the phone's link uses.
+    expect(r.stdout).toMatch(
+      /From another device: http:\/\/desk\.example:5288\/#signin=vly_admin_/,
     );
   });
 

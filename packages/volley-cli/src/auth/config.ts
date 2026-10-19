@@ -244,7 +244,9 @@ export function writeConfig(
   now: Date,
 ): { written: boolean; backup: string | null } {
   const exists = existsSync(path);
-  if (exists && readFileSync(path, "utf-8") === text) return { written: false, backup: null };
+  // Only the header naming the writer differs: the config is in place (no rewrite, no restart).
+  if (exists && sameConfig(readFileSync(path, "utf-8"), text))
+    return { written: false, backup: null };
   let backup: string | null = null;
   const mode = exists ? statSync(path).mode & 0o777 : 0o644;
   if (exists) {

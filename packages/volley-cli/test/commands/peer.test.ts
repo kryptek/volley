@@ -455,21 +455,62 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stderr).toContain(
       "`volley` is not on dev@host's PATH for a non-interactive ssh command",
     );
-    expect(r.stderr).toContain("--remote-volley ~/.volley/bin/volley");
+    // Quoted, so the host's shell expands ~ (its home, not this machine's).
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
     expect(r.stderr).toContain("the code is still valid");
     expect(existsSync(peerFile(home))).toBe(false);
-    // A --remote-volley that is missing too names that command.
+  });
+
+  it("bun missing on the host's ssh PATH: names bun, never says volley is missing", async () => {
+    for (const stderr of [
+      "env: bun: No such file or directory\n",
+      "/usr/bin/env: 'bun': No such file or directory\n",
+    ]) {
+      const f = fakeExec(hostSsh({ code: 127, stderr }));
+      const r = await run(
+        ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+        deps(f.exec),
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain(
+        "`bun` is not on dev@host's PATH for a non-interactive ssh command",
+      );
+      expect(r.stderr).toContain("rerun `volley setup` on dev@host");
+      expect(r.stderr).toContain("--remote-volley '<full path of bun there> ~/.volley/bin/volley'");
+      expect(r.stderr).not.toContain("does not exist");
+      expect(r.stderr).toContain("the code is still valid");
+    }
+  });
+
+  it("a --remote-volley path that is missing names that path, without suggesting it again", async () => {
     const g = fakeExec(
       hostSsh({
         code: 127,
         stderr: "bash: line 6: /opt/volley/bin/volley: No such file or directory\n",
       }),
     );
-    const again = await run(
+    const r = await run(
       ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "/opt/volley/bin/volley"],
       deps(g.exec),
     );
-    expect(again.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
+    expect(r.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    // The suggested path itself missing: setup has not run there.
+    const h = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /home/dev/.volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const again = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+      deps(h.exec),
+    );
+    expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
+    expect(again.stderr).toContain(
+      "Run `volley setup` on dev@host (it installs ~/.volley/bin/volley)",
+    );
+    expect(again.stderr).not.toContain("--remote-volley '~/.volley/bin/volley'");
   });
 
   it("a refused code writes nothing and installs nothing", async () => {

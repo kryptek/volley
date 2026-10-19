@@ -132,6 +132,19 @@ describe("writeConfig", () => {
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 
+  it("leaves a config that differs only in the header naming its writer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const path = join(dir, "mosquitto.conf");
+    const byInit = generateConfig(LAYOUTS["brew-arm64"]);
+    writeFileSync(path, byInit);
+    const now = new Date("2026-10-18T12:00:00Z");
+    expect(
+      writeConfig(path, generateConfig({ ...LAYOUTS["brew-arm64"], by: "volley setup" }), now),
+    ).toEqual({ written: false, backup: null });
+    expect(readFileSync(path, "utf-8")).toBe(byInit);
+    expect(readdirSync(dir)).toEqual(["mosquitto.conf"]);
+  });
+
   it("a new file needs no backup", () => {
     const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
     const path = join(dir, "mosquitto.conf");

@@ -870,6 +870,63 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(detected.config).toBe(m.layout.config);
   });
 
+  it("setup_plan: nothing pending in Security for the container install setup recorded; without the record, detection plans changes", async () => {
+    // What `volley setup --layout container --config … --dir …` left behind: its config (header
+    // naming `volley setup`), the plugin's state file and admin login, and the record.
+    const c = join(root, "container");
+    mkdirSync(c, { recursive: true });
+    const install = {
+      layout: "container",
+      config: join(c, "mosquitto.conf"),
+      state_file: m.layout.stateFile,
+      auth_dir: m.layout.authDir,
+    };
+    writeFileSync(
+      install.config,
+      generateConfig({
+        ...LAYOUTS.container,
+        config: install.config,
+        stateFile: install.state_file,
+        authDir: install.auth_dir,
+        by: "volley setup",
+      }),
+    );
+    mkdirSync(m.volleydHome, { recursive: true });
+    writeFileSync(join(m.volleydHome, "setup.json"), JSON.stringify(install));
+    // The layout volleyd detects has no config of its own (as /etc/mosquitto on that box).
+    rmSync(m.layout.config);
+    const { authDir: _given, ...opts } = setupOptions();
+    const ops = new SetupOps({
+      exec: m.exec,
+      volleydHome: m.volleydHome,
+      brokerUrl: BROKER,
+      env: {},
+      now: () => new Date(),
+      sleep: async () => {},
+      liveAgents: async () => 2,
+      brokerVersion: () => null,
+      ...opts,
+      // The container's listeners (and its LAN address) refuse anonymous clients, as after setup.
+      deps: { ...opts.deps, probeAnonymous: async () => "refused" as const },
+    });
+    const plan = async () => {
+      const r = await ops.handle("admin-1", { op: "setup_plan" });
+      return (r.reply.result as { steps: WireStep[] }).steps;
+    };
+    const recorded = await plan();
+    expect(step(recorded, "detect").found.join("\n")).toContain(
+      `Install: container (config ${install.config})`,
+    );
+    expect(step(recorded, "security").blocked).toBeUndefined();
+    expect(step(recorded, "security").changes).toEqual([]);
+    rmSync(join(m.volleydHome, "setup.json"));
+    // Without the record volleyd plans the layout it detects: the "pending" the Desk showed.
+    const detected = step(await plan(), "security");
+    expect(detected.changes.map((c) => c.summary.split(" (")[0])).toContain(
+      `Write ${m.layout.config}`,
+    );
+  });
+
   it("a container broker's state file and restart are a terminal's (the fence runs neither)", () => {
     const ctx = {
       auth: { layout: { ...LAYOUTS.etc, name: "container", restart: "docker restart mosquitto" } },

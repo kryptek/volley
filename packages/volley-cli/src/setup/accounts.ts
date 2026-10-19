@@ -357,7 +357,11 @@ function adminTokenChange(ctx: SetupContext): Change {
           ctx.auth,
           "token",
           undefined,
-          { json: false, deskUrl: `http://localhost:${ctx.deskPort}/` },
+          {
+            json: false,
+            deskUrl: `http://localhost:${ctx.deskPort}/`,
+            deskHost: ctx.deskHost,
+          },
           (fn) => withAdmin(ctx.auth, fn),
         );
         if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");

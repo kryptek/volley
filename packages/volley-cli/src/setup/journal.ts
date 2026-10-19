@@ -63,16 +63,20 @@ export function lastSetup(volleydHome: string): string | undefined {
 }
 
 /**
- * `$VOLLEYD_HOME/setup.json`: the install the terminal's `volley setup` last ran against (its
- * layout and the config, state file and auth dir it used, flags included). volleyd plans the
- * Desk's setup with it instead of the layout it would detect, so a `--layout` / `--config` /
- * `--dir` setup is not planned against another install. Paths only, never a secret.
+ * `$VOLLEYD_HOME/setup.json`: the install the terminal's `volley setup` last finished against
+ * (its layout and the config, state file and auth dir it used, flags included, and the Desk it
+ * serves). volleyd plans the Desk's setup with it instead of the layout it would detect, a later
+ * `volley setup` without those flags defaults to it, and `volley auth token` links to its Desk.
+ * Paths only, never a secret.
  */
 export interface SetupInstall {
   layout: LayoutName;
   config: string;
   state_file: string;
   auth_dir: string;
+  /** The Desk setup serves: the address a phone reaches it at, and its port. */
+  desk_host?: string;
+  desk_port?: number;
 }
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
@@ -85,6 +89,8 @@ export function writeSetupInstall(ctx: SetupContext): void {
     config: ctx.config,
     state_file: ctx.stateFile,
     auth_dir: ctx.auth.dir,
+    desk_host: ctx.deskHost,
+    desk_port: ctx.deskPort,
   };
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
@@ -112,7 +118,17 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
     ];
     if (layout === null || !Object.hasOwn(LAYOUTS, layout)) return null;
     if (config === null || stateFile === null || authDir === null) return null;
-    return { layout: layout as LayoutName, config, state_file: stateFile, auth_dir: authDir };
+    const port = v.desk_port;
+    return {
+      layout: layout as LayoutName,
+      config,
+      state_file: stateFile,
+      auth_dir: authDir,
+      ...(str("desk_host") !== null ? { desk_host: str("desk_host") as string } : {}),
+      ...(typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536
+        ? { desk_port: port }
+        : {}),
+    };
   } catch {
     return null;
   }
