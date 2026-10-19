@@ -1,10 +1,15 @@
 import {
   type ArtifactReport,
   type CiRun,
+  type Landed,
+  type OperatorMergeCheck,
   type RebaseCheck,
   artifactOutcome,
   checkRebase,
+  landed,
+  probeLanded,
   verifyArtifacts,
+  verifyOperatorMerge,
 } from "./artifacts";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
@@ -127,6 +132,8 @@ export interface TaskPipeline {
   disagreement?: { round: number; answer: string; by?: string };
   /** Why the task is `blocked` (its stage_entered's `why`), while it is. */
   why?: string | undefined;
+  /** Alarms raised on the task that still hold, by alarm name (alarm_cleared drops one). */
+  alarms: Record<string, Record<string, unknown>>;
 }
 
 export type SteerReason = "artifacts" | "result";
@@ -149,7 +156,8 @@ export interface PipelineMarker {
     | "reviewers_disagree"
     | "merge_ready_invariant"
     | "relaunch"
-    | "spawn_failed";
+    | "spawn_failed"
+    | "pr_closed";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -184,6 +192,7 @@ export const emptyPipeline = (): TaskPipeline => ({
   rebases: [],
   moves: [],
   rereview: [],
+  alarms: {},
 });
 
 const isRole = (r: unknown): r is Role => typeof r === "string" && r in ROLE_STAGE;
@@ -301,7 +310,11 @@ export function reducePipeline(
       }
       break;
     }
+    case "alarm_cleared":
+      if (typeof d.alarm === "string" && p.alarms !== undefined) delete p.alarms[d.alarm];
+      break;
     case "alarm_raised": {
+      if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // The PR is no longer at the verified head: that role's acceptance no longer holds.
       const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
       if (run !== undefined) {
@@ -375,6 +388,10 @@ export type PipelineEvent =
   | { kind: "head_moved"; expected: string; actual: string }
   /** At the gate: the PR as `gh pr view` reports it. */
   | { kind: "merge_checked"; view: PrView }
+  /** At the gate, the PR closed unmerged: did `head` land on the release branch anyway? */
+  | { kind: "landed_checked"; head: string; landed: Landed | null }
+  /** `volleyd merged --sha`: the owner's merge outside GitHub, verified (verifyOperatorMerge). */
+  | { kind: "operator_merged"; sha: string; by: string; how: string }
   /** A pipeline git / gh check failed (`timed_out`: the hard timeout fired). */
   | {
       kind: "io_failed";
@@ -421,6 +438,8 @@ export type PipelineAction =
   | { kind: "check_rebase" }
   /** At the gate: has a human merged the PR? (volleyd only ever reads this.) */
   | { kind: "check_merged" }
+  /** The PR closed unmerged: look for its head on the release branch (read-only git). */
+  | { kind: "check_landed" }
   | { kind: "gate"; check: RebaseCheck; diffstats: Record<string, string> };
 
 /** Stages in which the pipeline does nothing for the task. */
@@ -449,6 +468,10 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onHeadMoved(v, ev);
     case "merge_checked":
       return onMergeChecked(v, ev.view);
+    case "landed_checked":
+      return onLandedChecked(v, ev);
+    case "operator_merged":
+      return onOperatorMerged(v, ev);
     case "io_failed":
       return onIoFailed(v, ev);
     case "decision_resolved":
@@ -634,20 +657,102 @@ function onMergeChecked(v: PipelineView, view: PrView): PipelineAction[] {
       },
     ];
   }
-  if (view.state === "CLOSED") {
-    return [
-      {
-        kind: "alarm",
-        key: `${v.task}/pr_closed_unmerged`,
-        event: {
-          type: "alarm_raised",
-          task: v.task,
-          data: { alarm: "pr_closed_unmerged", pr: pr.url },
+  // Closed unmerged on GitHub — but a local squash + push closes it that way too.
+  if (view.state === "CLOSED") return [{ kind: "check_landed" }];
+  return [];
+}
+
+/**
+ * The task is merged: its PR's head is on the release branch (`extra`: how it is known). Any
+ * alarm that said otherwise (`pr_closed_unmerged`) is cleared; dependents follow `done`.
+ */
+function mergedActions(v: PipelineView, extra: Record<string, unknown>): PipelineAction[] {
+  const { pr, head } = v.p;
+  if (pr === undefined) return [];
+  return [
+    ...(v.p.alarms?.pr_closed_unmerged !== undefined
+      ? [
+          {
+            kind: "journal" as const,
+            event: {
+              type: "alarm_cleared" as const,
+              task: v.task,
+              data: {
+                alarm: "pr_closed_unmerged",
+                why: "the PR's head landed on the release branch",
+              },
+            },
+          },
+        ]
+      : []),
+    {
+      kind: "journal",
+      event: {
+        type: "artifact_verified",
+        task: v.task,
+        data: {
+          role: "merged",
+          pr: { number: pr.number, url: pr.url, head_sha: head, ci: v.p.ci ?? "green" },
+          head_sha: head,
+          ...extra,
         },
       },
-    ];
-  }
-  return [];
+    },
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
+    },
+  ];
+}
+
+/** A closed PR's head found on the release branch → merged; not found → ask (pr_closed). */
+function onLandedChecked(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "landed_checked" }>,
+): PipelineAction[] {
+  const pr = v.p.pr;
+  if (v.stage !== "merge_ready" || pr === undefined || ev.head !== v.p.head) return [];
+  if (ev.landed !== null)
+    return mergedActions(v, { via: "outside_github", how: ev.landed.how, sha: ev.landed.sha });
+  const at = ev.head.slice(0, 12);
+  const why = `PR #${pr.number} was closed without a merge, and ${v.release_branch} does not contain ${at} (no ancestor, no equivalent patches, no commit naming #${pr.number})`;
+  return [
+    // A closed PR is no gate: the task leaves merge_ready until the owner says what happened.
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "blocked", why } },
+    },
+    {
+      kind: "decide",
+      marker: { on: "pr_closed", head: ev.head },
+      decision: {
+        kind: "pr_closed",
+        task: v.task,
+        question: `${why}. landed: it is merged some other way (\`volleyd merged\` with its sha verifies and records where); abandoned: cancel the task?`,
+        pointers: { pr: pr.url },
+        options: ["landed", "abandoned"],
+      },
+    },
+  ];
+}
+
+/** `volleyd merged`: verified by the driver before this event; journal it, then merged. */
+function onOperatorMerged(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "operator_merged" }>,
+): PipelineAction[] {
+  if (v.stage === "done" || v.stage === "cancelled" || v.p.pr === undefined) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "merged_by_operator",
+        task: v.task,
+        data: { by: ev.by, sha: ev.sha, head: v.p.head, how: ev.how },
+      },
+    },
+    ...mergedActions(v, { via: "operator", sha: ev.sha, how: ev.how, by: ev.by }),
+  ];
 }
 
 function onIoFailed(
@@ -987,6 +1092,22 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
       return isAnswer(answer, "respawn") ? [] : reask();
+    case "pr_closed":
+      if (v.stage === "done") return []; // `volleyd merged` got there first
+      if (isAnswer(answer, "landed"))
+        return mergedActions(v, { via: "owner_answer", by: d.resolved?.by });
+      if (isAnswer(answer, "abandoned"))
+        return [
+          {
+            kind: "journal",
+            event: {
+              type: "task_cancelled",
+              task: v.task,
+              data: { by: d.resolved?.by, decision_id: d.decision_id, why: "PR abandoned" },
+            },
+          },
+        ];
+      return reask();
     case "reviewers_disagree":
     case "spawn_failed":
       // spawn_failed: the daemon's resolveNow acts on it (retry now / stop task).
@@ -1551,6 +1672,13 @@ export class PipelineDriver {
           this.beside(task, key, { what: "check_merged" }, () => this.mergeCheck(v));
           break;
         }
+        case "check_landed": {
+          const v = this.view(task);
+          const key = `${task}/check_landed`;
+          if (v?.p.pr === undefined || v.p.head === undefined || this.inflight.has(key)) break;
+          this.beside(task, key, { what: "check_merged" }, () => this.landedCheck(v));
+          break;
+        }
         case "gate":
           await this.gate(task, a.check, a.diffstats);
           progressed = true;
@@ -1666,6 +1794,33 @@ export class PipelineDriver {
     );
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     return view === null ? null : { kind: "merge_checked", view };
+  }
+
+  /** Beside the queue: is the closed PR's head on the release branch anyway? */
+  private async landedCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const { pr, head } = v.p;
+    const cwd = this.headWorktree(v.p);
+    if (pr === undefined || head === undefined || cwd === undefined) return null;
+    const f = await probeLanded(this.io(v.task), { cwd, head, release_branch: v.release_branch });
+    return { kind: "landed_checked", head, landed: landed(f, head, f.release_sha, pr.number) };
+  }
+
+  /**
+   * `volleyd merged <wave> <task> --sha <sha>`: verify the owner's merge outside GitHub (read-only
+   * git, off the serial queue). An ok is folded in by handing `operator_merged` to `handle`.
+   */
+  async verifyMerge(task: TaskId, sha: string): Promise<OperatorMergeCheck> {
+    const v = this.view(task);
+    if (v === null) return { ok: false, error: `unknown task '${task}'` };
+    const { pr, head } = v.p;
+    if (v.stage === "done" || v.stage === "cancelled")
+      return { ok: false, error: `task '${task}' is ${v.stage}` };
+    if (pr === undefined || head === undefined)
+      return { ok: false, error: `task '${task}' has no verified PR head yet` };
+    const cwd = this.headWorktree(v.p);
+    if (cwd === undefined)
+      return { ok: false, error: `task '${task}' has no worktree at its head` };
+    return verifyOperatorMerge(this.io(task), { cwd, head, sha, release_branch: v.release_branch });
   }
 
   /** Write the evidence package and enter merge_ready. volleyd never merges. */

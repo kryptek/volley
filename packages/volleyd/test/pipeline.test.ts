@@ -276,15 +276,16 @@ describe("pipeline: after the gate", () => {
     );
   });
 
-  it("a PR closed without merging stays at the gate with one alarm", async () => {
+  it("a PR closed without merging (and not landed) asks once with pr_closed, no bare alarm", async () => {
     await implemented({ pipeline: "[implement, merge_ready]" });
     h.world.prState[7] = "CLOSED";
     for (let i = 0; i < 2; i++) {
       h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
       await h.tick();
     }
-    expect(stage()).toBe("merge_ready");
-    expect(h.events.filter((e) => e.data.alarm === "pr_closed_unmerged")).toHaveLength(1);
+    expect(stage()).toBe("awaiting_decision");
+    expect(h.openDecisions().map((d) => d.kind)).toEqual(["pr_closed"]);
+    expect(h.events.filter((e) => e.data.alarm === "pr_closed_unmerged")).toHaveLength(0);
   });
 });
 

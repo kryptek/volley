@@ -39,7 +39,9 @@
                 "remote_repo_missing",
                 "ci_failed",
                 "wave_complete",
-                "plan_change"
+                "plan_change",
+                "pr_closed",
+                "pr_head_moved"
               ]
             },
             "question": { "type": "string", "minLength": 1 },

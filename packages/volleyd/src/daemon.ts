@@ -3954,6 +3954,8 @@ export class Daemon {
         return this.waveControl(op, p, by);
       case "steer":
         return this.steer(p, by);
+      case "merged":
+        return this.mergedOp(p, by);
       case "status": {
         if (typeof p.wave === "string") {
           const state = this.snapshot(p.wave);
@@ -4324,6 +4326,44 @@ export class Daemon {
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
+  }
+
+  /**
+   * `merged`: the owner says a gated task landed outside GitHub's merge button. Verified off the
+   * queue (read-only git); then, on the queue, an open `pr_closed` decision is answered `landed`
+   * and the pipeline journals `merged_by_operator` and the merge.
+   */
+  private mergedOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const state = w.log.record.state as WaveState;
+    const task = p.task;
+    const sha = p.sha;
+    if (typeof task !== "string" || !state.tasks.some((t) => t.id === task))
+      return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
+    if (typeof sha !== "string" || !/^[0-9a-f]{7,40}$/.test(sha))
+      return { ok: false, error: "merged requires payload.sha (7 to 40 lowercase hex digits)" };
+    const refused = guardMutation(state, by, "merged");
+    if (refused !== null) return { ok: false, error: refused };
+    const driver = this.pipelineFor(w.wave);
+    const defer = (async (): Promise<Reply> => {
+      const r = await driver.verifyMerge(task, sha);
+      if (!r.ok) return { ok: false, error: r.error };
+      await this.serial(async () => {
+        for (const d of openDecisions(w.log.record)) {
+          const marker = (d as { pipeline?: { on?: string } }).pipeline;
+          if (d.task === task && marker?.on === "pr_closed")
+            await this.resolveNow(w.wave, d.decision_id, {
+              answer: "landed",
+              by,
+              rationale: `volleyd merged --sha ${sha}`,
+            });
+        }
+        await driver.handle(task, { kind: "operator_merged", sha, by, how: r.how });
+      });
+      return { ok: true, result: { wave: w.wave, task, sha, how: r.how } };
+    })();
+    return { ok: true, defer };
   }
 
   /** Carry out the owner's answer to a plan_change decision (plan-apply.ts `planAnswer`). */

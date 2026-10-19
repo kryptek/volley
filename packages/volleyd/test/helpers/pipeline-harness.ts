@@ -45,6 +45,16 @@ export interface World {
   prState: Record<number, "OPEN" | "MERGED" | "CLOSED">;
   /** `git diff --name-only a b` per `a..b`. */
   diffNames: Record<string, string[]>;
+  /** `git merge-base --is-ancestor a b` per `a..b` (default: not an ancestor). */
+  ancestor: Record<string, boolean>;
+  /** `git log --left-right --cherry-pick --format=%m%H <release>...<head>` per head. */
+  cherry: Record<string, string>;
+  /** `git log --format=%H %s <base>..<release>`: the release branch's new commits. */
+  releaseLog: string;
+  /** `git diff <a> <b>` / `git show --format= <sha>` text per `a..b` / sha. */
+  patches: Record<string, string>;
+  /** `gh pr view` overrides by PR number (e.g. a `headRefOid` GitHub reports after a merge). */
+  prView: Record<number, Record<string, unknown>>;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
   /** An argv this answers true for never returns (a hung network call). */
@@ -104,6 +114,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     mergeBase: {},
     prState: {},
     diffNames: {},
+    ancestor: {},
+    cherry: {},
+    releaseLog: "",
+    patches: {},
+    prView: {},
   };
   const calls: string[][] = [];
   /** The exec options of every call, parallel to `calls`. */
@@ -134,6 +149,23 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         return head !== undefined ? out(`${head}\n`) : out("", 1);
       }
       if (verb === "fetch") return out("");
+      const tipOf = (r: string) => (r === `origin/${wave.release_branch}` ? world.releaseTip : r);
+      if (verb === "merge-base" && rest[0] === "--is-ancestor")
+        return out(
+          "",
+          world.ancestor[`${tipOf(rest[1] as string)}..${tipOf(rest[2] as string)}`] ? 0 : 1,
+        );
+      if (verb === "log" && rest.includes("--cherry-pick")) {
+        const range = rest.at(-1) as string;
+        // Default: the head's own commit has no equivalent upstream.
+        const head = range.split("...")[1] as string;
+        return out(world.cherry[head] ?? `>${head}\n`);
+      }
+      if (verb === "log" && rest.includes("--format=%H %s")) return out(world.releaseLog);
+      if (verb === "show" && rest[0] === "--format=")
+        return out(world.patches[rest[1] as string] ?? "");
+      if (verb === "diff" && rest.length === 2 && !(rest[0] as string).startsWith("-"))
+        return out(world.patches[`${rest[0]}..${rest[1]}`] ?? "");
       if (verb === "merge-base")
         return out(`${world.mergeBase[rest[0] as string] ?? world.releaseTip}\n`);
       if (verb === "log") return out("c1 upstream change\nc2 upstream change\n");
@@ -157,6 +189,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
           mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
           mergeCommit: state === "MERGED" ? { oid: sha(0xa11) } : null,
           baseRefName: wave.release_branch,
+          ...world.prView[n],
         }),
       );
     }

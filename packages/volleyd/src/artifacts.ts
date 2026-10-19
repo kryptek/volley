@@ -328,3 +328,129 @@ export async function checkRebase(
   const behind = log.stdout.split("\n").filter((l) => l.trim() !== "").length;
   return { release_sha: tip, merge_base: base, behind: Math.max(behind, 1) };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Merges outside GitHub's merge button (a local squash + push closes the PR with mergedAt: null)
+// ---------------------------------------------------------------------------------------------
+
+/** What the release branch says about a closed PR's gated head (probeLanded). */
+export interface LandedFacts {
+  /** The head is an ancestor of the release branch. */
+  ancestor: boolean;
+  /** The head's commits with no equivalent patch on the release branch (cherry-pick marks). */
+  unmatched: string[];
+  /** The release branch's commits since it and the head forked, newest first. */
+  subjects: { sha: string; subject: string }[];
+}
+
+export interface Landed {
+  how: "ancestor" | "patch" | "subject";
+  /** The commit that carries it: the head itself, the release tip, or the commit naming the PR. */
+  sha: string;
+}
+
+/**
+ * Did `head` land on the release branch (at `releaseSha`) without GitHub's merge? It is an
+ * ancestor; or every one of its commits has an equivalent patch there; or a release commit's
+ * subject names the PR (`(#<pr>)`, a squash's default). Null: nothing says so. Pure.
+ */
+export function landed(
+  f: LandedFacts,
+  head: string,
+  releaseSha: string,
+  pr: number,
+): Landed | null {
+  if (f.ancestor) return { how: "ancestor", sha: head };
+  if (f.unmatched.length === 0) return { how: "patch", sha: releaseSha };
+  const ref = new RegExp(`\\(#${pr}\\)`);
+  const named = f.subjects.find((c) => ref.test(c.subject));
+  return named !== undefined ? { how: "subject", sha: named.sha } : null;
+}
+
+/** The head-side commits of `<base>...<head>` that have no equivalent patch on the base side. */
+async function unmatchedCommits(
+  git: (...a: string[]) => Promise<{ code: number; stdout: string }>,
+  base: string,
+  head: string,
+): Promise<string[]> {
+  const r = await git("log", "--left-right", "--cherry-pick", "--format=%m%H", `${base}...${head}`);
+  if (r.code !== 0) throw new Error(`git log ${base}...${head} exited ${r.code}`);
+  return r.stdout
+    .split("\n")
+    .filter((l) => l.startsWith(">"))
+    .map((l) => l.slice(1).trim());
+}
+
+/** Gather LandedFacts for `head` against `origin/<release_branch>` (read-only git). */
+export async function probeLanded(
+  exec: ExecFn,
+  o: { cwd: string; head: string; release_branch: string },
+): Promise<LandedFacts & { release_sha: string }> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const release = `origin/${o.release_branch}`;
+  await git("fetch", "origin", o.release_branch);
+  const tip = line(
+    (await git("rev-parse", "--verify", "--quiet", `refs/remotes/${release}`)).stdout,
+  );
+  if (tip === "") throw new Error(`${release} not found`);
+  const anc = await git("merge-base", "--is-ancestor", o.head, release);
+  if (anc.code === 0) return { ancestor: true, unmatched: [], subjects: [], release_sha: tip };
+  if (anc.code !== 1) throw new Error(`git merge-base --is-ancestor exited ${anc.code}`);
+  const unmatched = await unmatchedCommits(git, release, o.head);
+  const mb = line((await git("merge-base", o.head, release)).stdout);
+  const log = await git("log", "--format=%H %s", mb !== "" ? `${mb}..${release}` : release);
+  const subjects = log.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+    .map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) }));
+  return { ancestor: false, unmatched, subjects, release_sha: tip };
+}
+
+/**
+ * Two diffs carry the same change: equal once the blob ids (`index` lines) and hunk positions
+ * (`@@ -a,b +c,d @@`) are dropped — what `git patch-id` compares, without its stdin. Pure.
+ */
+export function samePatch(a: string, b: string): boolean {
+  const norm = (d: string) =>
+    d
+      .split("\n")
+      .filter((l) => !l.startsWith("index "))
+      .map((l) => (l.startsWith("@@") ? l.replace(/^@@ [^@]* @@/, "@@") : l))
+      .join("\n")
+      .trim();
+  const x = norm(a);
+  return x !== "" && x === norm(b);
+}
+
+export type OperatorMergeCheck =
+  | { ok: true; how: "ancestor" | "patch" | "squash" }
+  | { ok: false; error: string };
+
+/**
+ * `volleyd merged --sha <sha>`: is `sha` on the release branch, and does it carry the gated
+ * `head` — as an ancestor, as equivalent patches of every head commit, or as one squashed patch
+ * equal to the PR's whole diff? Read-only git through the fenced exec.
+ */
+export async function verifyOperatorMerge(
+  exec: ExecFn,
+  o: { cwd: string; head: string; sha: string; release_branch: string },
+): Promise<OperatorMergeCheck> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const release = `origin/${o.release_branch}`;
+  await git("fetch", "origin", o.release_branch);
+  const on = await git("merge-base", "--is-ancestor", o.sha, release);
+  if (on.code !== 0) return { ok: false, error: `${o.sha} is not on ${release}` };
+  if ((await git("merge-base", "--is-ancestor", o.head, o.sha)).code === 0)
+    return { ok: true, how: "ancestor" };
+  if ((await unmatchedCommits(git, o.sha, o.head)).length === 0) return { ok: true, how: "patch" };
+  const squash = await git("show", "--format=", o.sha);
+  const base = line((await git("merge-base", o.head, `${o.sha}~1`)).stdout);
+  const whole = base !== "" ? await git("diff", base, o.head) : null;
+  if (squash.code === 0 && whole?.code === 0 && samePatch(squash.stdout, whole.stdout))
+    return { ok: true, how: "squash" };
+  return {
+    ok: false,
+    error: `${o.sha} does not contain the gated head ${o.head}'s changes (not an ancestor, no equivalent patches, not its squash)`,
+  };
+}
