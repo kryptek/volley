@@ -3,7 +3,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readAccounts } from "../commands/auth-accounts";
 import { EXIT, type ExitCode } from "../exit-codes";
-import { configTraps, generateConfig, writeConfig } from "./config";
+import { readSetupInstall } from "../setup/journal";
+import { unifiedDiff } from "../setup/step";
+import {
+  configListeners,
+  configTraps,
+  generateConfig,
+  listenerChanges,
+  sameConfig,
+  writeConfig,
+} from "./config";
 import {
   ADMIN_FILE,
   type AdminLink,
@@ -150,15 +159,30 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       );
       return EXIT.ERROR;
     }
-    // A config `volley setup` wrote differs only in its header: writeConfig leaves it.
-    const w = writeConfig(
-      f.config,
-      generateConfig({ ...layout, stateFile: f.stateFile }),
-      io.now(),
-    );
+    // The WebSocket listener keeps its bind (`volley setup --lan` opened it to the LAN, or the
+    // config's own); with none to read, the LAN choice setup.json recorded.
+    const found = configListeners(current).find((l) => l.protocol === "websockets")?.bind;
+    const recorded = readSetupInstall(volleydHome(ctx.env, sudoUser?.home))?.lan;
+    const wsBind = found ?? (recorded === true ? "" : layout.bind);
+    const wanted = generateConfig({ ...layout, stateFile: f.stateFile, wsBind });
+    // Shown before it is written (a config `volley setup` wrote differs only in its header and
+    // is left as it is).
+    if (current !== "" && !sameConfig(current, wanted)) {
+      io.stdout(
+        `Changes to ${f.config}:\n${listenerChanges(current, wanted)
+          .map((c) => `${c}\n`)
+          .join("")}${unifiedDiff(f.config, current, wanted)}\n\n`,
+      );
+    }
+    const w = writeConfig(f.config, wanted, io.now());
     if (w.written) {
       restartNeeded = true;
       out.push(`Wrote ${f.config}.`);
+      if (wsBind !== layout.bind) {
+        out.push(
+          `Kept the WebSocket listener (9001) ${wsBind === "" ? "open to the LAN" : `on ${wsBind}`}, as ${found !== undefined ? "the previous config had it" : "`volley setup` recorded"} (\`volley setup --no-lan\` closes it).`,
+        );
+      }
       if (w.backup !== null) {
         out.push(`Backed the previous config up to ${w.backup} (rollback: copy it back, restart).`);
       }

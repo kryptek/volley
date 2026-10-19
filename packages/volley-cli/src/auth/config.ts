@@ -204,6 +204,60 @@ const directives = (text: string) =>
     .map((l) => l.trim())
     .filter((l) => l !== "" && !l.startsWith("#"));
 
+/** A listener a config declares: its port, its bind ("" = every interface) and its protocol. */
+export interface ConfigListener {
+  port: number;
+  bind: string;
+  protocol: string;
+}
+
+/** The listeners in `text`, in order (a `protocol` line applies to the listener above it). */
+export function configListeners(text: string): ConfigListener[] {
+  const out: ConfigListener[] = [];
+  for (const l of directives(text)) {
+    const m = /^listener\s+(\d+)(?:\s+(\S+))?/.exec(l);
+    if (m !== null) {
+      out.push({ port: Number(m[1]), bind: m[2] ?? "", protocol: "mqtt" });
+      continue;
+    }
+    const p = /^protocol\s+(\S+)/.exec(l);
+    const last = out[out.length - 1];
+    if (p !== null && last !== undefined) last.protocol = p[1] as string;
+  }
+  return out;
+}
+
+/**
+ * How the listeners change from `before` to `after`, one line each (none when they stay): what
+ * `volley auth init` / `migrate` name before they rewrite a config.
+ */
+export function listenerChanges(before: string, after: string): string[] {
+  const kind = (p: string) => (p === "mqtt" ? "TCP" : p === "websockets" ? "WebSocket" : p);
+  const where = (bind: string) => (bind === "" ? "every interface" : bind);
+  const a = configListeners(before);
+  const b = configListeners(after);
+  const out: string[] = [];
+  for (const protocol of new Set([...a, ...b].map((l) => l.protocol))) {
+    const was = a.filter((l) => l.protocol === protocol);
+    const now = b.filter((l) => l.protocol === protocol);
+    for (let i = 0; i < Math.max(was.length, now.length); i++) {
+      const x = was[i];
+      const y = now[i];
+      if (x !== undefined && y !== undefined && x.port === y.port && x.bind === y.bind) continue;
+      out.push(
+        `Listener change: ${kind(protocol)} ${
+          x === undefined
+            ? `${y?.port} on ${where(y?.bind ?? "")} (new)`
+            : y === undefined
+              ? `${x.port} on ${where(x.bind)} removed`
+              : `${x.port} on ${where(x.bind)} → ${y.port === x.port ? "" : `${y.port} on `}${where(y.bind)}`
+        }`,
+      );
+    }
+  }
+  return out;
+}
+
 /**
  * The settings in an existing config that break Dynamic Security, each named with why. `included`
  * are the files of its `include_dir`, which mosquitto reads as part of it.

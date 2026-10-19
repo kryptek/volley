@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LAYOUTS,
+  configListeners,
   configTraps,
   detectLayout,
   generateConfig,
+  listenerChanges,
   sameConfig,
   writeConfig,
 } from "../../src/auth/config";
@@ -70,6 +72,29 @@ describe("generateConfig", () => {
     expect(readFileSync(new URL("mosquitto-auth/mosquitto-dynsec.conf", repo), "utf-8")).toBe(
       generateConfig(LAYOUTS.container),
     );
+  });
+});
+
+describe("configListeners / listenerChanges", () => {
+  it("reads each listener's port, bind and protocol", () => {
+    expect(configListeners(generateConfig({ ...LAYOUTS.etc, wsBind: "" }))).toEqual([
+      { port: 1883, bind: "127.0.0.1", protocol: "mqtt" },
+      { port: 9001, bind: "", protocol: "websockets" },
+    ]);
+  });
+
+  it("names each listener that moves, appears or goes, and nothing when they stay", () => {
+    const local = generateConfig(LAYOUTS.etc);
+    expect(listenerChanges(local, local)).toEqual([]);
+    expect(listenerChanges(generateConfig({ ...LAYOUTS.etc, wsBind: "" }), local)).toEqual([
+      "Listener change: WebSocket 9001 on every interface → 127.0.0.1",
+    ]);
+    expect(listenerChanges("listener 1883 127.0.0.1\n", local)).toEqual([
+      "Listener change: WebSocket 9001 on 127.0.0.1 (new)",
+    ]);
+    expect(listenerChanges(`${local}listener 8883\n`, local)).toEqual([
+      "Listener change: TCP 8883 on every interface removed",
+    ]);
   });
 });
 

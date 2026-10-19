@@ -178,7 +178,7 @@ describe("volley setup", () => {
     }
   });
 
-  it("records the install it used (layout, config, state file, auth dir, Desk) for volleyd's Desk plans", async () => {
+  it("records the install it used (layout, config, state file, auth dir, Desk, LAN) for volleyd's Desk plans", async () => {
     expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
     const saved = JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8"));
     expect(saved).toEqual({
@@ -188,6 +188,7 @@ describe("volley setup", () => {
       auth_dir: m.layout.authDir,
       desk_host: "desk.example",
       desk_port: 5288,
+      lan: true,
     });
     expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
   });
