@@ -5,17 +5,25 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { usageAccountTopic } from "../../src/claude/usage";
+import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
+import { type FakeClock, fakeClock } from "../helpers/fake-clock";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 
-/** Usage metering through a real daemon: fold, publish, threshold decision, wave move. */
+/**
+ * Usage metering through a real daemon: fold, publish, threshold decision, wave move. The daemon
+ * runs on a fake clock: its reap grace fires only when the test moves time, and the samples carry
+ * stamps on that clock (each one newer than the last, so the newest-sample-wins fold takes it).
+ */
 
 let s: SupervisedEnv;
 afterEach(async () => {
   await s?.cleanup();
 });
 
-const RESETS = new Date(Date.now() + 3_600_000).toISOString();
+const T0 = Date.parse("2026-10-18T12:00:00.000Z");
+const RESETS = new Date(T0 + 3_600_000).toISOString();
+let samples = 0;
 
 function usage(account: string, pct: number) {
   return {
@@ -26,7 +34,7 @@ function usage(account: string, pct: number) {
       five_hour: { pct, resets_at: RESETS },
       weekly: { pct: 30, resets_at: RESETS },
     },
-    captured_at: new Date().toISOString(),
+    captured_at: new Date(T0 + ++samples * 1000).toISOString(),
   };
 }
 
@@ -54,11 +62,11 @@ async function recordWhen(
   pred: (r: Record<string, unknown>) => boolean,
 ): Promise<Record<string, unknown> | null> {
   let r: Record<string, unknown> | null = null;
-  for (let i = 0; i < 100; i++) {
+  // The record is the daemon's retained publish: no journal event marks it.
+  await eventually(async () => {
     r = await accountRecord(acct);
-    if (r !== null && pred(r)) return r;
-    await new Promise((res) => setTimeout(res, 25));
-  }
+    return r !== null && pred(r);
+  });
   return r;
 }
 
@@ -90,16 +98,18 @@ function spareProfile(base: string): { root: string; primary: string; spare: str
 /** Cross the threshold on the primary with the wave's agent; the account_limit decision id. */
 async function limitOnPrimary(): Promise<string> {
   await publishUsage(AGENT, usage("primary", 93));
-  const limit = () =>
-    s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "account_limit");
-  await s.until(() => limit().length === 1);
-  return limit()[0]?.data.decision_id as string;
+  const opened = await s.event(
+    (e) => e.type === "decision_opened" && e.data.kind === "account_limit",
+  );
+  return opened.data.decision_id as string;
 }
 
 describe("usage metering (daemon)", () => {
   it("folds samples per account, opens one account_limit decision, and moves the wave only on an answer", async () => {
     const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
-    s = await makeSupervisedEnv({ daemon: { claude: { root, primaryDir: primary } } });
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
 
     // An agent of another wave (not supervised here) reports the spare account, by profile dir.
     await publishUsage("other-agent", {
@@ -137,7 +147,7 @@ describe("usage metering (daemon)", () => {
     // Another sample while the decision is open: no second decision, and nothing moved.
     await publishUsage(AGENT, usage("primary", 95));
     await recordWhen("primary", (r) => (r.five_hour as { pct: number }).pct === 95);
-    await new Promise((r) => setTimeout(r, 200));
+    await s.consumed();
     expect(limit()).toHaveLength(1);
     expect(s.journal().some((e) => e.type === "wave_account_moved")).toBe(false);
 
@@ -165,9 +175,10 @@ describe("usage metering (daemon)", () => {
 
   it("after a wave move, the wave's next agent spawns under the target profile", async () => {
     const { root, primary, spare } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const clock: FakeClock = fakeClock(T0);
     s = await makeSupervisedEnv({
-      daemon: { claude: { root, primaryDir: primary } },
-      reapGraceMs: 200,
+      daemon: { claude: { root, primaryDir: primary }, clock },
+      reapGraceMs: 60_000,
     });
     writeFileSync(
       join(spare, ".claude.json"),
@@ -179,16 +190,20 @@ describe("usage metering (daemon)", () => {
     // The running agent is reaped; its respawn is a new agent of the wave.
     s.host.onLaunch = () => {};
     await s.status("reaped", { reason: "lwt" });
-    const blocked = () =>
-      s.journal().find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
-    await s.until(() => blocked() !== undefined);
-    await s.daemon.resolveDecision("w1", blocked()?.data.decision_id as string, {
+    // The LWT is held for the reap grace; past it, with no heartbeat, the reap is accepted.
+    await s.consumed();
+    await clock.advance(60_000);
+    await s.daemon.tick();
+    const blocked = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    await s.daemon.resolveDecision("w1", blocked.data.decision_id as string, {
       answer: "respawn",
       by: "o",
     });
-    const spawned = () => s.journal().filter((e) => e.type === "agent_spawned");
-    await s.until(() => spawned().length === 2);
-    expect(spawned().map((e) => e.data.claude_account)).toEqual(["primary", "spare"]);
+    await s.event("agent_spawned", 2);
+    const spawned = s.journal().filter((e) => e.type === "agent_spawned");
+    expect(spawned.map((e) => e.data.claude_account)).toEqual(["primary", "spare"]);
     const wt = join(s.env.home, "wt", "w1", "T1-implementer");
     expect(readFileSync(join(wt, ".volley", "launch.sh"), "utf-8")).toContain(
       `export CLAUDE_CONFIG_DIR='${spare}'`,

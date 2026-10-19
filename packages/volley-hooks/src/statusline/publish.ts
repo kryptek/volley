@@ -224,6 +224,7 @@ function accountOf(ctx: HookContext): { account: string | null; configDir?: stri
     : { account: null, configDir: dir };
 }
 
+// real clock: the default of `now`, a hooks process's own stamps (tests inject theirs)
 export async function handle(ctx: HookContext, now: () => number = Date.now): Promise<null> {
   const payload = usageSample(ctx.input, accountOf(ctx), new Date(now()));
   const { stateDir } = ctx.identity;
@@ -249,6 +250,7 @@ export async function handle(ctx: HookContext, now: () => number = Date.now): Pr
  */
 async function main(): Promise<void> {
   const env = process.env;
+  // real clock: the status-line process's own exit bound
   setTimeout(() => process.exit(0), Math.min(hookTimeoutMs(env), STATUSLINE_TIMEOUT_MS)).unref();
   const raw = await readStdin();
   const out = statusOutput(raw, parseHookInput(raw), env);
