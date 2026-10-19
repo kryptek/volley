@@ -143,6 +143,9 @@
   gap: 8px;
   align-items: baseline;
 }
+.checks li > svg {
+  flex-shrink: 0;
+}
 .checks li > span {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -336,7 +339,8 @@
   color: #ffb3b3;
 }
 @media (max-width: 699.98px) {
-  .modal--wide {
+  /* Outranks responsive.css's phone `.modal` max-height (a % of the scrim: no bound at all). */
+  .modal.modal--wide {
     max-width: calc(100vw - 16px);
     max-height: calc(100dvh - 16px);
   }
