@@ -191,7 +191,19 @@ describe("no-signal state", () => {
   });
 
   it("a coordinator-tier no-signal item escalates to you after escalate_after_min", () => {
-    const w = wave();
+    // A quiet agent reaches the stall tiers only through the supervisor's why_waiting.
+    const why = "no heartbeat for 2 min";
+    const w = wave({
+      tasks: [
+        {
+          id: "T1",
+          issue: 1,
+          stage: "implement",
+          agents: { implementer: "impl-1" },
+          why_waiting: why,
+        },
+      ],
+    });
     const coordinators = { "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const } };
     // Silent since NOW - 121 s: the silence began at NOW - 1 s (120 s after the last status).
     const impl = agentFrom(
@@ -204,7 +216,7 @@ describe("no-signal state", () => {
     expect(at(NOW + 14 * 60 * S).tier).toBe("coordinator");
     expect(at(NOW + 15 * 60 * S)).toEqual({
       tier: "you",
-      reason: `${NO_SIGNAL_LABEL} · unresolved for 15 min`,
+      reason: `${why} · unresolved for 15 min`,
     });
     // Never any signal: the silence began at its registration.
     const mute = agentFrom("impl-1", [registry("impl-1", NOW - 5 * S)], w);
@@ -246,6 +258,72 @@ describe("no-signal state", () => {
     const impl = agentFrom("impl-1", [registry("impl-1", NOW - 5 * S)], w);
     expect(noSignalFor(impl, w, ctx())).toMatchObject({ label: NO_SIGNAL_LABEL, reason: why });
     expect(agentAttention(impl, w, ctx()).reason).toBe(why);
+  });
+});
+
+describe("no signal (MCP missing) vs quiet", () => {
+  it("registry + working status + no heartbeat for 121 s → 'quiet for 2m', no MCP hint, neutral tier", () => {
+    const a = agentFrom("loner", [
+      registry("loner", NOW - 300 * S),
+      status("loner", "working", NOW - 121 * S),
+    ]);
+    const ns = noSignalFor(a, undefined, ctx());
+    expect(ns).toMatchObject({ kind: "quiet", label: "quiet for 2m" });
+    expect(ns?.title).not.toMatch(/MCP|broker/);
+    expect(agentAttention(a, undefined, ctx()).tier).toBe("none");
+  });
+
+  it("registry + no retained status → the MCP hint", () => {
+    const a = agentFrom("loner", [registry("loner", NOW - 5 * S)]);
+    expect(noSignalFor(a, undefined, ctx())).toMatchObject({ kind: "mcp", label: NO_SIGNAL_LABEL });
+  });
+
+  it("a hook-published status with an open mcp_not_registered decision → the MCP hint", () => {
+    const w = wave();
+    w.decisions = {
+      "mcp_not_registered-impl-1": {
+        decision_id: "mcp_not_registered-impl-1",
+        wave: "w1",
+        task: "T1",
+        kind: "mcp_not_registered",
+        question: "impl-1's MCP server is not on this broker",
+        opened_at: new Date(NOW - 10 * S).toISOString(),
+      },
+    };
+    const a = agentFrom(
+      "impl-1",
+      [registry("impl-1", NOW - 30 * S), status("impl-1", "working", NOW - 30 * S)],
+      w,
+    );
+    expect(noSignalFor(a, w, ctx())).toMatchObject({ kind: "mcp", label: NO_SIGNAL_LABEL });
+  });
+
+  it("AgentWindow shows a quiet agent neutrally: its own status mark and the quiet chip", () => {
+    const a = agentFrom("loner", [
+      registry("loner", NOW - 300 * S),
+      status("loner", "working", NOW - 121 * S),
+    ]);
+    const ns = noSignalFor(a, undefined, ctx());
+    const { container } = render(
+      <AgentWindow
+        agent={a}
+        wave={undefined}
+        accent="#fff"
+        frame={{
+          pos: { x: 0, y: 0 },
+          z: 1,
+          scale: 1,
+          chrome: "glass",
+          onMove: () => {},
+          onFocus: () => {},
+        }}
+        now={NOW}
+        noSignal={ns}
+      />,
+    );
+    expect(screen.getByText("quiet for 2m").closest(".a-nosignal")).toHaveClass("a-quiet");
+    expect(screen.queryByText(NO_SIGNAL_LABEL)).toBeNull();
+    expect(container.querySelector(".sm-nosignal")).toBeNull();
   });
 });
 
@@ -304,7 +382,7 @@ describe("App no-signal (fake timers)", () => {
     vi.useRealTimers();
   });
 
-  it("an agent silent for 121 s shows no signal; a heartbeat clears it", () => {
+  it("an agent silent for 121 s shows quiet; a heartbeat clears it", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const handlers = new Set<(m: DeskMessage) => void>();
@@ -342,14 +420,16 @@ describe("App no-signal (fake timers)", () => {
     expect(screen.getByRole("region", { name: "loner" })).toBeInTheDocument();
     expect(screen.queryByText(NO_SIGNAL_LABEL)).toBeNull();
     // 121 s of silence, plus one attention tick (App re-evaluates time-based attention every 15 s).
+    // It is registered with a status from this broker: quiet, not a missing MCP server.
     act(() => {
       vi.advanceTimersByTime(121 * S + 15 * S);
     });
-    expect(screen.getByText(NO_SIGNAL_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(/^quiet for \dm$/)).toBeInTheDocument();
+    expect(screen.queryByText(NO_SIGNAL_LABEL)).toBeNull();
     act(() => {
       emit(progress("loner", "heartbeat", Date.now()));
       vi.advanceTimersByTime(100); // the store coalesces deliveries
     });
-    expect(screen.queryByText(NO_SIGNAL_LABEL)).toBeNull();
+    expect(screen.queryByText(/^quiet for/)).toBeNull();
   });
 });

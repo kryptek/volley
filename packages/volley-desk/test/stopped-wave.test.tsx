@@ -1,0 +1,161 @@
+import { act, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../src/App";
+import { agentAttention, waveAttention } from "../src/attention";
+import { LOOK_STORAGE_KEY } from "../src/look/useLook";
+import { DeskStoreProvider } from "../src/store/context";
+import { endedWaves, initialState, reduceAll } from "../src/store/reducer";
+import { WaveWindow } from "../src/windows/wave/WaveWindow";
+import {
+  NOW,
+  S,
+  fakeClient,
+  progress,
+  registry,
+  status,
+  waveMsg,
+  waveState,
+  waveView,
+} from "./helpers/desk-msgs";
+
+const H = 3600 * S;
+const frame = {
+  pos: { x: 0, y: 0 },
+  z: 1,
+  scale: 1,
+  chrome: "glass" as const,
+  onMove: () => {},
+  onFocus: () => {},
+};
+
+const stopped = (status: "stopped" | "complete" = "stopped") =>
+  waveState({
+    status,
+    // The state was last published when the wave stopped, 2.8 h ago.
+    updated_at: new Date(NOW - 2.8 * H).toISOString(),
+    tasks: [
+      { id: "T1", issue: 1, stage: "implement", agents: { implementer: "impl-1" } },
+      { id: "T2", issue: 2, stage: "done", agents: {} },
+    ],
+    spec: {
+      version: 1,
+      tasks: { T1: { issue: 1, after: [] }, T2: { issue: 2, after: [] } },
+    },
+  });
+
+describe("stopped / complete wave — attention", () => {
+  it("gives the wave and its agents no attention, even a blocked agent or a gone coordinator", () => {
+    const state = reduceAll(initialState(), [
+      waveMsg(stopped()),
+      registry("impl-1", NOW - H),
+      status("impl-1", "blocked", NOW - H, { reason: "tests fail" }),
+    ]);
+    const w = state.waves.w1;
+    if (!w) throw new Error("no wave");
+    const ctx = { now: NOW, agents: state.agents, coordinators: state.coordinators };
+    expect(waveAttention(w, ctx)).toEqual({ tier: "none" });
+    const a = state.agents["impl-1"];
+    if (!a) throw new Error("no agent");
+    expect(agentAttention(a, w, ctx)).toEqual({ tier: "none" });
+    expect(endedWaves(state)).toEqual(new Set(["w1"]));
+  });
+});
+
+describe("stopped / complete wave — WaveWindow", () => {
+  it("renders dimmed with a Stopped chip and a frozen `stopped … ago` footer", () => {
+    const { container } = render(
+      <WaveWindow
+        wave={waveView(stopped())}
+        me={null}
+        now={NOW}
+        startedAt={NOW - 6 * H}
+        frame={frame}
+      />,
+    );
+    const win = screen.getByRole("region", { name: "w1" });
+    expect(within(win).getByText("Stopped")).toHaveClass("chip--ended");
+    expect(container.querySelector(".wave-ended")).not.toBeNull();
+    expect(win).toHaveTextContent("stopped 2.8h ago");
+    expect(win).not.toHaveTextContent(/running \d/);
+    // Task stages are shown as they were, struck through.
+    expect(container.querySelector(".dag.dag--ended")).not.toBeNull();
+  });
+
+  it("a complete wave reads Complete and `complete … ago`", () => {
+    render(
+      <WaveWindow
+        wave={waveView(stopped("complete"))}
+        me={null}
+        now={NOW}
+        startedAt={NOW - 6 * H}
+        frame={frame}
+      />,
+    );
+    const win = screen.getByRole("region", { name: "w1" });
+    expect(within(win).getByText("Complete")).toBeInTheDocument();
+    expect(win).toHaveTextContent("complete 2.8h ago");
+  });
+
+  it("a running wave keeps its running clock and no ended chip", () => {
+    const { container } = render(
+      <WaveWindow
+        wave={waveView(waveState())}
+        me={null}
+        now={NOW}
+        startedAt={NOW - H}
+        frame={frame}
+      />,
+    );
+    expect(screen.getByRole("region", { name: "w1" })).toHaveTextContent("running 1.0h");
+    expect(container.querySelector(".wave-ended")).toBeNull();
+  });
+});
+
+describe("stopped wave — App fold under Show finished", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  function mount() {
+    const f = fakeClient();
+    const view = render(
+      <DeskStoreProvider demo={false} brokerUrl="ws://test.invalid" clientFactory={() => f.client}>
+        <App />
+      </DeskStoreProvider>,
+    );
+    act(() => {
+      f.up();
+      f.emit(waveMsg(stopped()));
+      f.emit(waveMsg(waveState({ wave: "w2", tasks: [] })));
+      f.emit(registry("impl-1", NOW - H));
+      f.emit(status("impl-1", "working", NOW - H));
+      f.emit(progress("impl-1", "narration", NOW - 2 * S, { msg: "still here" }));
+      vi.advanceTimersByTime(100);
+    });
+    return view;
+  }
+
+  it("hides the stopped wave and its agents by default", () => {
+    mount();
+    expect(screen.queryByRole("region", { name: "w1" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "w1 · T1 · implementer" })).toBeNull();
+    expect(screen.getByRole("region", { name: "w2" })).toBeInTheDocument();
+    // The coordinators window still lists it, as Stopped, and offers the toggle.
+    const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    expect(within(coords).getByText("Stopped")).toBeInTheDocument();
+    expect(coords).toHaveTextContent(/1 ended wave/);
+  });
+
+  it("shows it (without tethers) when Show finished is on", () => {
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ showFinished: true, tethers: true }));
+    const { container } = mount();
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "w1 · T1 · implementer" })).toBeInTheDocument();
+    expect(container.querySelectorAll("svg.tethers path.tether-core")).toHaveLength(0);
+  });
+});

@@ -226,3 +226,32 @@
     transition: none;
   }
 }
+
+/* ------------------------------------------------------- liveness (S6) */
+/* Quiet and syncing are neutral: no grey mark, a dashed chip. */
+.a-quiet .chip,
+.a-syncing .chip {
+  border-style: dashed;
+  color: var(--mute);
+}
+.narr-asof {
+  margin-top: -6px;
+  font-size: 11px;
+}
+.chip--stage {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--acc) 35%, transparent);
+}
+.feed-beats {
+  align-self: flex-end;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11.5px;
+}
+.env--heartbeats .env-row {
+  cursor: default;
+}
+.env--heartbeats .env-type {
+  grid-column: 3 / -1;
+}

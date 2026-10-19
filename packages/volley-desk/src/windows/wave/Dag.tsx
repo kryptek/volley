@@ -4,6 +4,12 @@
  * tasks in wave-file order within a column, each column centred vertically,
  * and cubic edges from a task's right edge to its dependents' left edge. The
  * layout is split out as the pure `layoutDag`.
+ *
+ * Given a `maxWidth` the graph cannot span (a phone: `columns × 172 px` wider
+ * than the window), the columns wrap into bands stacked top to bottom, as many
+ * columns per band as fit; an edge into a later band runs from the bottom of
+ * its task to the top of the dependent. Without one (the desktop) it is one
+ * band in a horizontally scrolling container.
  */
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
@@ -29,8 +35,15 @@ const W = 132;
 const H = 44;
 const GX = 40;
 const GY = 14;
+/** Gap between wrapped bands. */
+const GB = 2 * GY;
+export const DAG_NODE_W = W;
+export const DAG_NODE_H = H;
 
-export function layoutDag(tasks: readonly DagNode[]): DagLayout {
+/** The width of `n` columns side by side. */
+const spanOf = (n: number) => (n ? n * W + (n - 1) * GX + 8 : 0);
+
+export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayout {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const depth = new Map<string, number>();
   const visiting = new Set<string>();
@@ -55,14 +68,30 @@ export function layoutDag(tasks: readonly DagNode[]): DagLayout {
     cols[c] = list;
   }
   const ncol = cols.length;
-  const maxRows = Math.max(0, ...cols.map((c) => c?.length ?? 0));
+  // Columns per band: all of them, unless they overflow maxWidth.
+  const fit =
+    maxWidth !== undefined && spanOf(ncol) > maxWidth
+      ? Math.max(1, Math.floor((maxWidth - 8 + GX) / (W + GX)))
+      : Math.max(1, ncol);
+  const bands: DagNode[][][] = [];
+  for (let b = 0; b * fit < ncol; b++) bands.push(cols.slice(b * fit, b * fit + fit));
 
   const at = new Map<string, DagLayout["nodes"][number]>();
-  cols.forEach((list, col) => {
-    const off = ((maxRows - list.length) * (H + GY)) / 2;
-    list.forEach((t, row) => {
-      at.set(t.id, { ...t, col, row, x: 4 + col * (W + GX), y: 4 + off + row * (H + GY) });
+  const band = new Map<string, number>();
+  let top = 4;
+  let maxRows = 0;
+  bands.forEach((bandCols, b) => {
+    const rows = Math.max(0, ...bandCols.map((c) => c?.length ?? 0));
+    maxRows = Math.max(maxRows, rows);
+    bandCols.forEach((list, i) => {
+      const col = b * fit + i;
+      const off = ((rows - list.length) * (H + GY)) / 2;
+      list.forEach((t, row) => {
+        band.set(t.id, b);
+        at.set(t.id, { ...t, col, row, x: 4 + i * (W + GX), y: top + off + row * (H + GY) });
+      });
     });
+    top += rows * (H + GY) - GY + GB;
   });
   // Keep wave-file order so the DOM follows the file.
   const nodes = tasks.flatMap((t) => at.get(t.id) ?? []);
@@ -72,6 +101,20 @@ export function layoutDag(tasks: readonly DagNode[]): DagLayout {
     for (const a of e.after) {
       const s = at.get(a);
       if (!s) continue;
+      if (band.get(a) !== band.get(e.id)) {
+        // Into a later band: bottom of the task to the top of its dependent.
+        const x1 = s.x + W / 2;
+        const y1 = s.y + H;
+        const x2 = e.x + W / 2;
+        const y2 = e.y;
+        const dy = (y2 - y1) / 2;
+        edges.push({
+          from: a,
+          to: e.id,
+          d: `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`,
+        });
+        continue;
+      }
       const x1 = s.x + W;
       const y1 = s.y + H / 2;
       const x2 = e.x;
@@ -88,17 +131,32 @@ export function layoutDag(tasks: readonly DagNode[]): DagLayout {
     cols: ncol,
     nodes,
     edges,
-    width: ncol ? ncol * W + (ncol - 1) * GX + 8 : 0,
-    height: maxRows ? maxRows * H + (maxRows - 1) * GY + 8 : 0,
+    width: spanOf(Math.min(ncol, fit)),
+    height: maxRows ? top - GB + 4 : 0,
   };
 }
 
-export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: string }) {
-  const l = layoutDag(tasks);
+export function Dag({
+  tasks,
+  accent,
+  maxWidth,
+  ended = false,
+  labels = {},
+}: {
+  tasks: readonly DagNode[];
+  accent: string;
+  /** Wrap into bands within this width (a phone); omitted: one band, scrolled. */
+  maxWidth?: number | undefined;
+  /** The wave stopped or completed: stages are shown as they were, struck through. */
+  ended?: boolean;
+  /** Stage text overrides by task id (e.g. `waiting for CI`). */
+  labels?: Readonly<Record<string, string>>;
+}) {
+  const l = layoutDag(tasks, maxWidth);
   return (
     <div className="dag-scroll">
       <svg
-        className="dag"
+        className={`dag${ended ? " dag--ended" : ""}`}
         width={l.width}
         height={l.height}
         viewBox={`0 0 ${l.width} ${l.height}`}
@@ -114,6 +172,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
             transform={`translate(${t.x},${t.y})`}
             className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}`}
             data-col={t.col}
+            data-id={t.id}
           >
             {t.title && <title>{`${t.id} · ${t.title}`}</title>}
             <rect width={W} height={H} rx="9" />
@@ -121,7 +180,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
               {t.id}
             </text>
             <text x="10" y="34" className="dag-stage">
-              {t.cancelled ? "cancelled" : STAGE_LABEL[t.stage]}
+              {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
             </text>
             <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
               #{t.issue}

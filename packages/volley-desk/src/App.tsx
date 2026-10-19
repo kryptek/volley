@@ -12,7 +12,10 @@
  * volleyd config) and About; a wave's ⚙ opens that wave's effective config.
  * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
- * focusable, labelled stage.
+ * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
+ * off the canvas with their agents under "Show finished" (and get no tethers
+ * when shown); the reconnect / resume grace (`syncing`) holds every liveness
+ * judgement; a task's parallel reviewers carry the `review (spec + quality)` chip.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDeskKeys } from "./a11y/keys";
@@ -57,7 +60,9 @@ import { useDesk } from "./store/context";
 import {
   UNASSIGNED,
   agentsByWave,
+  endedWaves,
   finishedAgents,
+  stageChip,
   supervisorList,
   supervisorNamespace,
 } from "./store/reducer";
@@ -183,7 +188,7 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline, writer, identity } = useDesk();
+  const { state, connection, demo, settling, offline, syncing, writer, identity } = useDesk();
   const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
   const vw = useViewportWidth();
   const narrow = vw < NARROW_PX;
@@ -199,7 +204,7 @@ export default function App() {
   const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
-  const ctxOpts = { now, me, identity, gateSince, offline };
+  const ctxOpts = { now, me, identity, gateSince, offline, syncing };
   const ctx = ctxFrom(state, ctxOpts);
   const [settings, setSettings] = useState<string | null>(null);
   // config_set goes to volleyd's mailbox in its own namespace and is answered on ours there.
@@ -274,7 +279,10 @@ export default function App() {
     rectOf(id, WAVE_W, WAVE_H),
     ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
   ];
-  const visible = waveIds.filter((id) => !hidden.has(id));
+  // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is on.
+  const ended = endedWaves(state);
+  const endedHidden = look.showFinished ? 0 : ended.size;
+  const visible = waveIds.filter((id) => !hidden.has(id) && (look.showFinished || !ended.has(id)));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
   // The coordinators window's supervisor row; the demo has no volleyd to report as absent.
   const supervisors = demo ? undefined : supervisorList(state);
@@ -423,18 +431,20 @@ export default function App() {
   useNotifyOnAttention(notify, items, { quiet: settling });
 
   // Tethers: wave window → each of its agents, for visible waves.
-  const tethers: Tether[] = visible.flatMap((id) =>
-    (groups[id] ?? []).map((a) => ({
-      id: a.id,
-      waveId: id,
-      // The rendered width: on a phone the wave window is clamped.
-      wave: rectOf(id, WAVE_W, WAVE_H),
-      agent: pos(a.id),
-      accent: accentOf(id),
-      // A new `progress` envelope sends a pulse down the cable (D10).
-      beat: progressBeat(a.feed),
-    })),
-  );
+  const tethers: Tether[] = visible
+    .filter((id) => !ended.has(id))
+    .flatMap((id) =>
+      (groups[id] ?? []).map((a) => ({
+        id: a.id,
+        waveId: id,
+        // The rendered width: on a phone the wave window is clamped.
+        wave: rectOf(id, WAVE_W, WAVE_H),
+        agent: pos(a.id),
+        accent: accentOf(id),
+        // A new `progress` envelope sends a pulse down the cable (D10).
+        beat: progressBeat(a.feed),
+      })),
+    );
   useDeskKeys({
     stageRef,
     panBy,
@@ -486,6 +496,7 @@ export default function App() {
               now={supNow}
               finished={{
                 hidden: finishedHidden,
+                waves: endedHidden,
                 shown: look.showFinished,
                 graceMin: look.finishedGraceMin,
                 onToggle: () => setLook({ showFinished: !look.showFinished }),
@@ -564,6 +575,8 @@ export default function App() {
                   narrationFx={look.narr}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
+                  syncing={syncing && !ended.has(a.wave)}
+                  stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
                   onChat={toggleSteer}
                   steerOpen={steerOpen === a.id}
                   steer={
@@ -610,6 +623,7 @@ export default function App() {
         setNotify={setNotify}
         compact={narrow}
         now={supNow}
+        syncing={syncing}
       />
 
       <DeskDock

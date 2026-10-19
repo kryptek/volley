@@ -323,9 +323,9 @@ describe("App attention (live store)", () => {
     const { container } = mount(c);
     await c.deliver(retained("done", "complete"));
     await settle();
-    const w1 = screen.getByRole("region", { name: "w1" });
-    expect(w1.querySelector(".needs-you")).toBeNull();
-    expect(w1).not.toHaveClass("win--attn-you");
+    // An ended wave folds off the canvas (under "Show finished"), banner and all.
+    expect(screen.queryByRole("region", { name: "w1" })).toBeNull();
+    expect(container.querySelector(".needs-you")).toBeNull();
     expect(container.querySelector(".topbar .ny-pill")).toBeNull();
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
     expect(within(coords).getByText("Complete")).toBeInTheDocument();

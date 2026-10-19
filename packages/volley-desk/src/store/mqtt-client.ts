@@ -9,6 +9,10 @@
  * credentials (T14, the `desk` identity) it can also `publish` (steering, D4).
  * A broker that refuses the credentials (or an anonymous client) surfaces as an
  * `AuthFailedError`, from `connect()` and from `onError` on a later reconnect.
+ * `reconnect()` probes the broker (a SUBSCRIBE round trip) and drops the socket
+ * if it does not answer, or connects again at once when already disconnected:
+ * the store calls it when the page comes back to the foreground, since a phone
+ * that suspended the tab leaves a dead socket the keepalive notices much later.
  */
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import type { DeskMessage, Envelope } from "./types";
@@ -56,6 +60,8 @@ export interface DeskMqttClient {
   disconnect(): Promise<void>;
   /** Publish at QoS 1, not retained; resolves on PUBACK, rejects when not connected. */
   publish(topic: string, payload: string): Promise<void>;
+  /** Drop the socket and connect again now (a resumed page probing for a dead socket). */
+  reconnect?(): void;
   onMessage(handler: MessageHandler): () => void;
   onConnect(handler: VoidHandler): () => void;
   onDisconnect(handler: VoidHandler): () => void;
@@ -75,6 +81,11 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_system/leases/+",
   "volley/_system/admission",
 ] as const;
+
+/** The filter `reconnect()` re-subscribes to as a probe: one small retained topic. */
+const PROBE_FILTER = "volley/_system/admission";
+/** How long the probe waits for the SUBACK before it drops the socket. */
+const PROBE_TIMEOUT_MS = 3000;
 
 const REQUIRED = ["schema_version", "agent_id", "channel", "type"] as const;
 
@@ -200,6 +211,24 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
           client = null;
           resolve();
         });
+      });
+    },
+    reconnect() {
+      const instance = client;
+      if (instance === null || instance.disconnecting) return;
+      if (!instance.connected) {
+        instance.reconnect();
+        return;
+      }
+      // Looks connected: probe with a SUBSCRIBE a live broker answers at once. A dead
+      // socket never does, so drop it and let mqtt.js reconnect (and the store resync).
+      let answered = false;
+      const timer = setTimeout(() => {
+        if (!answered) instance.stream?.destroy();
+      }, PROBE_TIMEOUT_MS);
+      instance.subscribe(PROBE_FILTER, { qos: 1 }, () => {
+        answered = true;
+        clearTimeout(timer);
       });
     },
     publish(topic, payload) {

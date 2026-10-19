@@ -1,7 +1,8 @@
 /**
  * The Desk's attention model (pure). Every wave and agent window gets a tier:
  *
- * - **you** — the wave's coordinator is `awaiting_input` or `gone` (reaped,
+ * - **you** — the wave's coordinator is `awaiting_input` (on a person: not idle
+ *   with a background wait armed, see below) or `gone` (reaped,
  *   or silent for longer than `claim_after_s`, the same rule `volleyd claim`
  *   uses); an open decision on a wave this browser owns; a stuck agent
  *   (`blocked`, or awaiting input) with no live coordinator. A wave the Desk
@@ -16,11 +17,26 @@
  *   `implement` under a live coordinator is that coordinator's: **coordinator**.
  * - **none** — nothing to see.
  *
- * **No signal**: a live (not finished, blocked or waiting) agent whose
- * registry entry is here but no status, progress or heartbeat is, or whose
- * last one is older than `no_signal_after_s` (default 120 s, read like
- * `claim_after_s`; not a SPEC §4.6.4 tunable yet). Typically its Volley MCP
- * server is connected to another broker, so it only looks idle.
+ * **No signal** (the MCP hint): a live (not finished, blocked or waiting)
+ * agent whose registry entry is here but no status is, or whose task has an
+ * open `mcp_not_registered` decision. Typically its Volley MCP server is
+ * connected to another broker, so it only looks idle. **Quiet**: a registered
+ * agent with a status whose last status, progress or heartbeat is older than
+ * `quiet_after_s` (default 120 s; `no_signal_after_s` is still read; neither is
+ * a SPEC §4.6.4 tunable yet) shows `quiet for Nm`, neutral: it reaches a stall
+ * tier only through the wave state's `why_waiting` for its task (volleyd owns
+ * stall detection).
+ *
+ * **Idle with a background wait**: an `awaiting_input` the hooks flagged
+ * `background_wait: true` (the session ended its turn with a background task
+ * armed) waits on the wave's events, not on a person: a coordinator in that
+ * state is `working` and the wave is info `idle — waiting on wave events`
+ * unless a decision or gate is open. A `permission_prompt` always needs you.
+ *
+ * **Ended waves** (`stopped`, `complete`) and their agents get no attention.
+ * **Syncing**: during the grace window after a (re)connect or the page coming
+ * back to the foreground (`AttentionCtx.syncing`), nothing is judged quiet or
+ * without signal: the retained replay alone says nothing about liveness.
  *
  * `claim_after_s` comes from the wave's `effective_config`, else the retained
  * global config, else volleyd's default. `escalate_after_min` is read the same
@@ -32,7 +48,7 @@
  * and settled: while the Desk is offline nothing can refresh `lastSeen`, so
  * offline spans (`AttentionCtx.offline`) do not count towards `claim_after_s`.
  */
-import { UNASSIGNED } from "./store/reducer";
+import { UNASSIGNED, isEndedWave, waitsOnPerson } from "./store/reducer";
 import type {
   AgentView,
   ConfigPayload,
@@ -53,9 +69,14 @@ export type Tier = "you" | "coordinator" | "info" | "none";
 export const DEFAULT_CLAIM_AFTER_S = 1800;
 /** The prototype's default `escalate_after_min`. */
 export const DEFAULT_ESCALATE_AFTER_MIN = 15;
-/** Silence after which a live agent has no signal (`no_signal_after_s`). */
-export const DEFAULT_NO_SIGNAL_AFTER_S = 120;
+/** Silence after which a live agent is quiet (`quiet_after_s`, formerly `no_signal_after_s`). */
+export const DEFAULT_QUIET_AFTER_S = 120;
+export const DEFAULT_NO_SIGNAL_AFTER_S = DEFAULT_QUIET_AFTER_S;
 export const NO_SIGNAL_LABEL = "no signal — MCP not on this broker?";
+/** The wave's reason while its coordinator idles with a background wait armed. */
+export const IDLE_WAIT_REASON = "idle — waiting on wave events";
+/** Shown instead of any liveness judgement during the reconnect / resume grace window. */
+export const SYNCING_LABEL = "syncing…";
 
 export interface AttentionCtx {
   now: number;
@@ -71,6 +92,8 @@ export interface AttentionCtx {
   gateSince?: Record<string, number>;
   /** Spans the Desk was offline or still settling after a reconnect; excluded from silence. */
   offline?: readonly OfflineSpan[];
+  /** The reconnect / resume grace window is open: nobody is judged quiet or without signal. */
+  syncing?: boolean;
 }
 
 /** A span (ms) the Desk could not hear the broker; `to: null` while it still can't. */
@@ -110,10 +133,11 @@ export interface EffectiveCoordinator {
   workspace?: string;
   /** ms of the coordinator's last sign of life, when known. */
   lastSeen?: number;
+  /** Idle with a background wait armed (`state` is `working`). */
+  waitingOnEvents?: boolean;
 }
 
 const NONE: Attn = { tier: "none" };
-const ENDED = new Set(["complete", "stopped"]);
 const STUCK_STATUS = new Set(["blocked"]);
 /** Terminal statuses (SPEC §5.2) other than `blocked`: a leftover awaiting_input no longer counts. */
 const ENDED_STATUS = new Set(["done", "failed", "reaped"]);
@@ -130,8 +154,13 @@ function tunables(w: WaveView | undefined, ctx: AttentionCtx) {
     escalateMs:
       (num(local.escalate_after_min, global.escalate_after_min) ?? DEFAULT_ESCALATE_AFTER_MIN) *
       60_000,
-    noSignalMs:
-      (num(local.no_signal_after_s, global.no_signal_after_s) ?? DEFAULT_NO_SIGNAL_AFTER_S) * 1000,
+    quietMs:
+      (num(
+        local.quiet_after_s,
+        local.no_signal_after_s,
+        global.quiet_after_s,
+        global.no_signal_after_s,
+      ) ?? DEFAULT_QUIET_AFTER_S) * 1000,
   };
 }
 
@@ -178,6 +207,7 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     ...(sessionUrl ? { sessionUrl } : {}),
     ...(workspace ? { workspace } : {}),
     ...(lastSeen !== undefined ? { lastSeen } : {}),
+    ...(state === "working" && view?.waitingOnEvents ? { waitingOnEvents: true } : {}),
   };
 }
 
@@ -224,7 +254,7 @@ function infoFor(tasks: readonly WaveTask[], agentIds: readonly string[], ctx: A
 
 export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   const s = w.state;
-  if (!s || ENDED.has(s.status)) return NONE;
+  if (!s || isEndedWave(w)) return NONE;
   const c = coordinatorFor(w, ctx);
   if (c.state === "awaiting_input") {
     return {
@@ -251,6 +281,7 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   ];
   const top = oldest(items);
   if (top) return handled(top.reason, top.since, w, ctx);
+  if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
   const agentIds = s.tasks.flatMap((t) => Object.values(t.agents)).filter((x): x is string => !!x);
   return infoFor(s.tasks, agentIds, ctx);
 }
@@ -261,6 +292,7 @@ function parseTime(t: string | undefined): number | undefined {
 }
 
 export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: AttentionCtx): Attn {
+  if (isEndedWave(w)) return NONE;
   // Nobody but the person here handles a wave the Desk claimed.
   const live =
     w?.state && a.wave !== UNASSIGNED && !claimedHere(w, ctx)
@@ -271,7 +303,7 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
   const stuck =
     a.status && STUCK_STATUS.has(a.status.type)
       ? { reason: blockReason(a.status.payload), since: a.status.at }
-      : a.attention && !ENDED_STATUS.has(a.status?.type ?? "")
+      : a.attention && waitsOnPerson(a.attention) && !ENDED_STATUS.has(a.status?.type ?? "")
         ? {
             reason: `Waiting for input${a.attention.question ? `: ${a.attention.question}` : ""}`,
             since: a.attention.at,
@@ -299,7 +331,8 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
     }
   }
   const ns = noSignalFor(a, w, ctx);
-  if (ns) {
+  // Quiet is neutral: only the supervisor's why_waiting makes it somebody's job.
+  if (ns && (ns.kind === "mcp" || ns.reason !== ns.label)) {
     const stage = s?.tasks.find((t) => t.id === task)?.stage;
     const theirs = live && a.role === "implementer" && stage === "implement";
     return theirs ? handled(ns.reason, ns.since, w, ctx) : { tier: "info", reason: ns.reason };
@@ -308,8 +341,10 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
   return infoFor(tasks, [a.id], ctx);
 }
 
-/** An agent's no-signal state: the window's label and tooltip, and its attention reason. */
+/** An agent's no-signal or quiet state: the window's label and tooltip, and its attention reason. */
 export interface NoSignal {
+  /** `mcp`: no MCP registration on this broker (the hint); `quiet`: registered, silent a while. */
+  kind: "mcp" | "quiet";
   label: string;
   /** The wave state's `why_waiting` for the agent's task when the supervisor set one, else the label. */
   reason: string;
@@ -319,12 +354,32 @@ export interface NoSignal {
   since: number;
 }
 
-/** The agent's no-signal state (see the module comment), or null while it has a signal. */
+/** `2m`, `1.5h`: how long an agent has been quiet. */
+function quietFor(ms: number): string {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  return m < 60 ? `${m}m` : `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+/** volleyd found the agent's hooks but not its MCP server: an open `mcp_not_registered` decision for its task. */
+function mcpNotRegistered(a: AgentView, w: WaveView | undefined): boolean {
+  return openDecisions(w).some(
+    (d) =>
+      d.kind === "mcp_not_registered" &&
+      ((a.task !== null && d.task === a.task) || d.decision_id.includes(a.id)),
+  );
+}
+
+/**
+ * The agent's no-signal (`mcp`) or `quiet` state (see the module comment), or
+ * null while it has a signal, has ended, waits on purpose, or the Desk is
+ * still syncing.
+ */
 export function noSignalFor(
   a: AgentView,
   w: WaveView | undefined,
   ctx: AttentionCtx,
 ): NoSignal | null {
+  if (ctx.syncing || isEndedWave(w)) return null;
   const type = a.status?.type;
   if (type !== undefined && (ENDED_STATUS.has(type) || STUCK_STATUS.has(type))) return null;
   // Quiet on purpose: waiting for a human, or its turn ended (the hooks said so, on this broker).
@@ -334,27 +389,37 @@ export function noSignalFor(
     (t): t is number => typeof t === "number" && Number.isFinite(t),
   );
   const reg: Partial<RegistryPayload> = a.registry ?? {};
-  let silent: number | null = null;
-  let since: number;
-  if (signals.length === 0) {
-    if (!a.registered) return null;
-    since = parseTime(reg.started_at) ?? a.lastSeen;
-  } else {
-    silent = connectedSilence(Math.max(...signals), ctx.now, ctx.offline);
-    const limit = tunables(w, ctx).noSignalMs;
-    if (silent <= limit) return null;
-    since = ctx.now - (silent - limit);
-  }
   const why = a.task ? w?.state?.tasks.find((t) => t.id === a.task)?.why_waiting : undefined;
-  const head =
-    silent === null
-      ? `${a.id} registered here but has published no status, progress or heartbeat.`
-      : `Nothing from ${a.id} for ${Math.round(silent / 1000)} s.`;
-  const where = [typeof reg.cwd === "string" && reg.cwd !== "" && `the session runs in ${reg.cwd}`]
-    .filter(Boolean)
-    .join("; ");
-  const title = `${head} Its Volley MCP server may be connected to another broker${where ? ` (${where})` : ""}.`;
-  return { label: NO_SIGNAL_LABEL, reason: why || NO_SIGNAL_LABEL, title, since };
+  const silent = signals.length
+    ? connectedSilence(Math.max(...signals), ctx.now, ctx.offline)
+    : null;
+  if (a.registered && (a.status === null || mcpNotRegistered(a, w))) {
+    const limit = tunables(w, ctx).quietMs;
+    // Never a signal: the silence began at its registration.
+    const since =
+      silent === null
+        ? (parseTime(reg.started_at) ?? a.lastSeen)
+        : ctx.now - Math.max(0, silent - limit);
+    const head =
+      a.status === null
+        ? `${a.id} registered here but has published no status.`
+        : `volleyd found ${a.id}'s hooks but not its Volley MCP server.`;
+    const where =
+      typeof reg.cwd === "string" && reg.cwd !== "" ? ` (the session runs in ${reg.cwd})` : "";
+    const title = `${head} Its Volley MCP server may be connected to another broker${where}.`;
+    return { kind: "mcp", label: NO_SIGNAL_LABEL, reason: why || NO_SIGNAL_LABEL, title, since };
+  }
+  if (silent === null) return null;
+  const limit = tunables(w, ctx).quietMs;
+  if (silent <= limit) return null;
+  const label = `quiet for ${quietFor(silent)}`;
+  return {
+    kind: "quiet",
+    label,
+    reason: why || label,
+    title: `Nothing from ${a.id} for ${Math.round(silent / 1000)} s: no status, progress or heartbeat.`,
+    since: ctx.now - (silent - limit),
+  };
 }
 
 /** `Blocked: <reason>` from the status payload, without doubling a leading "Blocked". */
@@ -383,6 +448,7 @@ export interface CtxOpts {
   identity?: string | null;
   gateSince?: Record<string, number>;
   offline?: readonly OfflineSpan[];
+  syncing?: boolean;
 }
 
 /** The store's parts of the attention context. */

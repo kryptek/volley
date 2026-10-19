@@ -7,13 +7,17 @@
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`. An agent with no
- * signal (`attention.ts` `noSignalFor`) gets a grey status mark and a one-line
- * label above the tabs.
+ * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a grey status mark and
+ * a one-line label above the tabs; a `quiet` one keeps its mark and gets a
+ * neutral `quiet for Nm` label; while the Desk is syncing after a (re)connect
+ * the label reads `syncing…` instead of any judgement. A narration restored
+ * from this browser's session carries an `as of HH:MM` marker. A task whose
+ * two reviewers run in parallel gets a `review (spec + quality)` stage chip.
  */
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
-import type { NoSignal } from "../../attention";
+import { type NoSignal, SYNCING_LABEL } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
@@ -65,8 +69,12 @@ export interface AgentWindowProps {
   steerOpen?: boolean;
   /** Steering panel, rendered at the bottom of the body (D4). */
   steer?: ReactNode;
-  /** Set while the agent has no signal: greys the status mark and shows the label. */
+  /** Set while the agent has no signal (greys the status mark) or is quiet: shows the label. */
   noSignal?: NoSignal | null;
+  /** The reconnect / resume grace window is open: `syncing…`, no judgement. */
+  syncing?: boolean;
+  /** The task's stage chip (`review (spec + quality)`), when it has one. */
+  stageChip?: string | null;
 }
 
 /** The mark for an outcome status: `blocked` (SPEC §5.2, terminal) needs the operator, like `failed`. */
@@ -135,6 +143,8 @@ export function AgentWindow({
   steerOpen = false,
   steer,
   noSignal = null,
+  syncing = false,
+  stageChip = null,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -149,10 +159,15 @@ export function AgentWindow({
   const hbAge = agent.heartbeat === null ? null : now - agent.heartbeat;
   const hbStale = hbAge === null || hbAge > HEARTBEAT_STALE_MS;
   const born = agent.bornAt !== null && now - agent.bornAt < BORN_MS;
+  const mcpMissing = noSignal?.kind === "mcp";
+  const asOf =
+    agent.narrationRestored && agent.narration !== null && agent.narrationAt !== undefined
+      ? new Date(agent.narrationAt).toTimeString().slice(0, 5)
+      : null;
 
   const title = (
     <>
-      {noSignal ? (
+      {mcpMissing ? (
         <StatusMark status="pending" color={NO_SIGNAL_GREY} size={18} className="sm-nosignal" />
       ) : (
         <StatusMark
@@ -171,6 +186,7 @@ export function AgentWindow({
         {agent.wave}
       </span>
       {agent.role && <span className="chip chip--role">{ROLE_LABEL[agent.role]}</span>}
+      {stageChip && <span className="chip chip--stage">{stageChip}</span>}
     </>
   );
 
@@ -238,12 +254,24 @@ export function AgentWindow({
       {spec?.title && <div className="a-title">{spec.title}</div>}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
       <Narration text={agent.narration} fx={narrationFx} />
-      {noSignal && (
-        <div className="a-nosignal" title={noSignal.title}>
-          <span className="chip">
-            <i style={{ background: NO_SIGNAL_GREY }} /> {noSignal.label}
-          </span>
+      {asOf && (
+        <div className="narr-asof dim" title="Restored from this browser's session">
+          as of {asOf}
         </div>
+      )}
+      {syncing ? (
+        <div className="a-nosignal a-syncing" title="Waiting for live messages after a reconnect">
+          <span className="chip">{SYNCING_LABEL}</span>
+        </div>
+      ) : (
+        noSignal && (
+          <div className={`a-nosignal${mcpMissing ? "" : " a-quiet"}`} title={noSignal.title}>
+            <span className="chip">
+              {mcpMissing && <i style={{ background: NO_SIGNAL_GREY }} />}
+              {noSignal.label}
+            </span>
+          </div>
+        )
       )}
       {attention}
       <GooeyTabs
@@ -256,13 +284,18 @@ export function AgentWindow({
       />
       <div className="tab-panel" {...tabPanelProps(tabsId, tab)}>
         {tab === "feed" ? (
-          <Feed feed={agent.feed} noSignal={noSignal !== null} />
+          <Feed
+            feed={agent.feed}
+            noSignal={mcpMissing}
+            heartbeats={{ count: agent.heartbeats ?? 0, last: agent.heartbeat }}
+            now={now}
+          />
         ) : (
           // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
           <Terminal
             screen={agent.screen}
             stale={task?.screen_stale === true}
-            noSignal={noSignal !== null}
+            noSignal={mcpMissing}
           />
         )}
       </div>
