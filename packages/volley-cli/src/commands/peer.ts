@@ -22,6 +22,7 @@ import { withSetupAuthDir } from "../auth/coordinator-login";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { authOpsTopic } from "./auth-roles";
 
 /**
@@ -812,13 +813,16 @@ async function installService(
     writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
     // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
     // user/<uid>. A service from an earlier join is replaced (bootout fails harmlessly).
+    // Each bootout is waited out (setup/launchd.ts): a bootstrap while launchd is still letting
+    // the old job go fails with EIO.
     const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
-    for (const d of domains) await deps.exec(["launchctl", "bootout", `${d}/${LAUNCHD_LABEL}`]);
+    const ld = { exec: (argv: string[]) => deps.exec(argv), sleep: (ms: number) => deps.sleep(ms) };
+    for (const d of domains) await unloadLaunchd(ld, d, LAUNCHD_LABEL);
     const errors: string[] = [];
     for (const domain of domains) {
-      const r = await deps.exec(["launchctl", "bootstrap", domain, plist]);
-      if (r.code === 0) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
-      errors.push(`${domain}: ${r.stderr.trim() || `exit ${r.code}`}`);
+      const r = await reloadLaunchd(ld, domain, LAUNCHD_LABEL, plist);
+      if (r.ok) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
+      errors.push(`${domain}: ${r.error}`);
     }
     return { ok: false, error: `launchctl bootstrap failed (${errors.join("; ")})` };
   }

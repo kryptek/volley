@@ -122,7 +122,9 @@ function fakeExec(reply: (c: Call) => Partial<{ code: number; stdout: string; st
       await new Promise<void>((r) => opts.signal?.addEventListener("abort", () => r()));
       return { code: 143, stdout: "", stderr: "" };
     }
-    return { code: 0, stdout: "", stderr: "", ...reply(c) };
+    // launchd has no job loaded unless a test says so.
+    const base = argv[0] === "launchctl" && argv[1] === "print" ? 113 : 0;
+    return { code: base, stdout: "", stderr: "", ...reply(c) };
   };
   return { exec, calls };
 }
@@ -330,15 +332,40 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<string>peer</string>");
     expect(text).toContain("<string>run</string>");
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
-    expect(f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv)).toEqual([
-      ["launchctl", "bootout", `gui/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootout", `user/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootstrap", "gui/501", plist],
-    ]);
+    // Nothing loaded yet: nothing to boot out.
+    expect(
+      f.calls.filter((c) => c.argv[0] === "launchctl" && c.argv[1] !== "print").map((c) => c.argv),
+    ).toEqual([["launchctl", "bootstrap", "gui/501", plist]]);
     expect(r.stdout).toContain("(domain gui/501)");
     expect(r.stdout).toContain(`Claude Code trusts ${repo} on this machine.`);
     const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
     expect(redeemRequest(ssh[1]?.input as string).volley).toBe("/opt/bin/volley");
+  });
+
+  it("a re-join replaces the loaded agent: boots it out, waits until launchd lets it go, then loads it", async () => {
+    let loaded = true;
+    let teardown = 0;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") {
+        if (gui && teardown > 0 && --teardown === 0) loaded = false;
+        return { code: gui && loaded ? 0 : 113 };
+      }
+      if (c.argv[1] === "bootout" && gui) teardown = 3;
+      if (c.argv[1] === "bootstrap" && loaded) {
+        return { code: 5, stderr: "Bootstrap failed: 5: Input/output error" };
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).toBe(0);
+    const sub = f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv[1]);
+    expect(sub.filter((s) => s !== "print")).toEqual(["bootout", "bootstrap"]);
+    expect(r.stdout).toContain("(domain gui/501)");
   });
 
   it("on a Mac with nobody at the console, falls back to the user/<uid> domain and says so", async () => {

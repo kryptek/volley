@@ -15,6 +15,7 @@ import { dirname, join, relative } from "node:path";
 import { backupPath, writeConfig } from "../auth/config";
 import { planCmux } from "./cmux";
 import { deskPortListeners, portConflict } from "./desk-port";
+import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { stableServicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
@@ -166,13 +167,33 @@ async function launchdChange(
         : unifiedDiff(path, current, text),
     apply: async () => {
       mkdirSync(spec.workdir, { recursive: true });
+      const before = read(path);
       const out = writeUnit(ctx, path, text);
-      await ctx.deps.exec(["launchctl", "bootout", target]); // not loaded is fine
-      await must(ctx, ["launchctl", "bootstrap", `gui/${ctx.deps.uid}`, path]);
-      return [...out, `Loaded ${spec.label} (logs: ${spec.log}).`];
+      const domain = `gui/${ctx.deps.uid}`;
+      const d = launchdDeps(ctx);
+      const r = await reloadLaunchd(d, domain, spec.label, path);
+      if (r.ok) return [...out, `Loaded ${spec.label} (logs: ${spec.log}).`];
+      // Never leave the service down: put the previous plist back and load that.
+      if (before !== "" && before !== text) {
+        writeFileSync(path, before);
+        const back = await reloadLaunchd(d, domain, spec.label, path);
+        throw new Error(
+          back.ok
+            ? `${r.error}. Restored the previous ${path} and loaded it again: ${spec.name} runs as before. Rerun \`volley setup --repair\`.`
+            : `${r.error}. Restored the previous ${path}, but it did not load either (${back.error}): ${spec.name} is down. Load it by hand: launchctl bootstrap ${domain} ${path}`,
+        );
+      }
+      throw new Error(
+        `${r.error}. ${spec.name} is not loaded: load it by hand (launchctl bootstrap ${domain} ${path}), then rerun \`volley setup --repair\`.`,
+      );
     },
   };
 }
+
+const launchdDeps = (ctx: SetupContext): LaunchdDeps => ({
+  exec: (argv) => ctx.deps.exec(argv),
+  sleep: (ms) => ctx.deps.sleep(ms),
+});
 
 /** A systemd user unit from `spec`: write it when it differs, enable and (re)start it. */
 async function systemdChange(

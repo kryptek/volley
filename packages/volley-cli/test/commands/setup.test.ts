@@ -282,6 +282,24 @@ describe("volley setup", () => {
     expect(again.stdout.match(/already done/g)?.length ?? 0).toBeLessThan(5);
   });
 
+  it("a rerun whose Desk plist launchd will not load exits non-zero, with the Desk still loaded", async () => {
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+    writeFileSync(plist, "<plist>older</plist>\n");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) =>
+      argv[1] === "bootstrap" && readFileSync(plist, "utf-8").includes("0.0.0.0")
+        ? { code: 1, stdout: "", stderr: "Bootstrap failed: 1: Operation not permitted" }
+        : inner(argv, o);
+    const r = await run(["--yes", "--step", "services"]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain(COMPLETE);
+    expect(r.stderr).toContain("Operation not permitted");
+    expect(r.stderr).toContain("loaded it again");
+    expect(m.loaded.has("systems.volley.desk")).toBe(true);
+    expect(journal().slice(-1)[0]).toMatchObject({ step: "services", event: "failed" });
+  });
+
   it("a second run reports every step as already done and changes nothing", async () => {
     expect((await run(["--yes", "--lan"])).code).toBe(0);
     const calls = m.execCalls.length;
