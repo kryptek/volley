@@ -2,9 +2,11 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
 import type { WorktreeResult, WorktreeSpec } from "./hosts/host";
 import { SpawnError } from "./spawn-error";
+import type { Wave } from "./types";
 
 /** `~` and `~/x` → the home directory; anything else resolved as given. */
 export function expandHome(p: string, home: string = homedir()): string {
@@ -22,6 +24,14 @@ export function worktreePath(root: string, wave: string, task: string, role: str
 export function branchName(wave: string, task: string, role: string, attempt: number): string {
   return `${wave}/${task}-${role}-${attempt}`;
 }
+
+/**
+ * The shape of every branch `branchName` mints: the wave-file id grammars for the wave and task,
+ * a role volleyd spawns (brief.ts ROLES — not imported: brief.ts imports the fence, which uses
+ * this), and an attempt from 1. The fence lets `worktree add -B` re-create only such a branch.
+ */
+export const AGENT_BRANCH =
+  /^[a-z0-9][a-z0-9_-]{0,62}\/[A-Za-z0-9][A-Za-z0-9_-]{0,62}-(implementer|spec_reviewer|quality_reviewer|fixup|rebase)-[1-9][0-9]*$/;
 
 /**
  * Lines volleyd keeps out of every agent's `git status` (and `git add -A`): the supervisor's
@@ -42,7 +52,20 @@ export const releaseBranchMissing = (repo: string, branch: string) =>
 /** The commit `ref` names in `repo`, or null when it does not resolve. */
 async function commitOf(exec: ExecFn, repo: string, ref: string): Promise<string | null> {
   const r = await exec(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref]);
-  return r.code === 0 ? r.stdout.trim() : null;
+  const sha = r.stdout.trim();
+  return r.code === 0 && sha !== "" ? sha : null;
+}
+
+/**
+ * `git fetch origin <branch>` in `repo`, through the fence: bounded by `git_fetch_timeout_ms` and
+ * never prompting for credentials. A failure (offline, no remote, a timeout) is ignored: the
+ * caller resolves what the repo has.
+ */
+export async function fetchRelease(exec: ExecFn, repo: string, branch: string): Promise<void> {
+  await exec(["git", "-C", repo, "fetch", "--quiet", REMOTE, branch], {
+    timeoutMs: DAEMON_DEFAULTS.git_fetch_timeout_ms,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
 }
 
 /** The local release branch's and origin's tracking ref's commits (null where absent). */
@@ -54,25 +77,38 @@ async function releaseRefs(exec: ExecFn, repo: string, branch: string) {
 }
 
 /**
+ * Whether volleyd spawns into the wave's `repo` on this machine (a task on the local host): only
+ * then do `validate` and `run` check its release branch (a remote host's clone is checked on
+ * the box).
+ */
+export const spawnsLocally = (wave: Pick<Wave, "tasks">): boolean =>
+  Object.values(wave.tasks).some((t) => t.host === "local");
+
+/**
  * `volleyd validate` / `run`: null when `repo` has the release branch locally or as
- * `origin/<branch>` (no fetch: what the repo knows now), else the RELEASE_BRANCH_MISSING text.
+ * `origin/<branch>` (no fetch here: what the repo knows now — `run` fetches first), else the
+ * RELEASE_BRANCH_MISSING text.
  */
 export async function checkReleaseBranch(
   exec: ExecFn,
   repo: string,
   branch: string,
 ): Promise<string | null> {
+  const git = await exec(["git", "-C", repo, "rev-parse", "--git-dir"]);
+  if (git.code !== 0) return `RELEASE_BRANCH_MISSING: ${repo} is not a git repository`;
   const refs = await releaseRefs(exec, repo, branch);
   return refs.local !== null || refs.remote !== null ? null : releaseBranchMissing(repo, branch);
 }
 
 /**
  * The ref an agent's branch is cut from for release branch `branch`, all through the fence:
- * `git fetch origin <branch>` (a failure — offline, no remote — leaves what the repo has), then
+ * `fetchRelease` (a failure leaves what the repo has), then
  *   - only `origin/<branch>`: create the tracking branch (`branch --track`) and use it, or use
  *     `origin/<branch>` itself if that fails;
- *   - both, the local one strictly behind origin's: `origin/<branch>`;
- *   - otherwise the local branch (level with or ahead of origin, or never pushed);
+ *   - both, the local one containing origin's commit (level or ahead): the local branch;
+ *   - both otherwise (behind, or diverged — origin has commits the local one lacks):
+ *     `origin/<branch>`;
+ *   - only the local branch (never pushed): the local branch;
  *   - neither: SpawnError RELEASE_BRANCH_MISSING.
  */
 export async function resolveReleaseBase(
@@ -80,7 +116,7 @@ export async function resolveReleaseBase(
   repo: string,
   branch: string,
 ): Promise<string> {
-  await exec(["git", "-C", repo, "fetch", "--quiet", REMOTE, branch]);
+  await fetchRelease(exec, repo, branch);
   const { local, remote } = await releaseRefs(exec, repo, branch);
   const tracking = `${REMOTE}/${branch}`;
   if (local === null && remote === null) {
@@ -92,8 +128,8 @@ export async function resolveReleaseBase(
     return r.code === 0 ? branch : tracking;
   }
   if (local === remote) return branch;
-  const behind = await exec(["git", "-C", repo, "merge-base", "--is-ancestor", local, remote]);
-  return behind.code === 0 ? tracking : branch;
+  const contains = await exec(["git", "-C", repo, "merge-base", "--is-ancestor", remote, local]);
+  return contains.code === 0 ? branch : tracking;
 }
 
 /**
@@ -147,8 +183,8 @@ export async function addWorktree(exec: ExecFn, spec: WorktreeSpec): Promise<Wor
 /**
  * Whether `branch` already exists with no commit of its own (its tip is in `base`): what a failed
  * `worktree add -b` leaves behind (git creates the branch before it fails on the path), which
- * would refuse every retry of the same attempt. Such a branch is re-created with `-B`; one with
- * commits of its own is never reset (the add then fails visibly). git itself refuses `-B` for a
+ * would refuse every retry of the same attempt. Such a branch is re-created with `-B` — only an
+ * `AGENT_BRANCH` one (the fence allows nothing else); one with commits of its own is never reset (the add then fails visibly). git itself refuses `-B` for a
  * branch checked out in another worktree.
  */
 async function leftoverBranch(
@@ -157,8 +193,9 @@ async function leftoverBranch(
   branch: string,
   base: string,
 ): Promise<boolean> {
+  if (!AGENT_BRANCH.test(branch)) return false;
   const tip = await commitOf(exec, repo, `refs/heads/${branch}`);
-  if (tip === null || tip === "") return false;
+  if (tip === null) return false;
   const r = await exec(["git", "-C", repo, "merge-base", "--is-ancestor", tip, base]);
   return r.code === 0;
 }

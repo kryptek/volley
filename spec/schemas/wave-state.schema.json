@@ -124,7 +124,7 @@
         "last_error": {
           "type": "object",
           "required": ["code", "message", "at"],
-          "description": "The task's latest spawn failure, present until a spawn of it succeeds (spawn_recovered) or it is cancelled.",
+          "description": "The most recent of the task's unrecovered spawn failures (counted per role): present while any role's spawn has failed and not spawned since; gone once each such role spawns, or the task is cancelled or done.",
           "properties": {
             "code": { "type": "string", "minLength": 1 },
             "message": { "type": "string" },

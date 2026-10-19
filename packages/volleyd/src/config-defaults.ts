@@ -109,6 +109,9 @@ export const DAEMON_DEFAULTS = {
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
    * `spawn_retry_max_s` tunable. */
   spawn_retry_base_ms: 30_000,
+  /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
+   * treated as failed (an ssh remote with no agent, a credential prompt). */
+  git_fetch_timeout_ms: 30_000,
   /** Read-modify-write attempts on `~/.claude.json` while Claude Code keeps rewriting it. */
   trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */

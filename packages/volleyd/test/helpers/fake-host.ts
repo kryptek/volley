@@ -182,6 +182,10 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
   );
   const fake = fakeExec()
     .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+    // the wave's release branch exists locally (spawn's base, run's RELEASE_BRANCH_MISSING check)
+    .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+      stdout: `${"1".repeat(40)}\n`,
+    })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, o.issueFixture ?? "gh-issue-42.json"), "utf-8"),
     })

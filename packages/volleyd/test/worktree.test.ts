@@ -45,12 +45,23 @@ describe("release base resolution", () => {
     const fake = fakeExec()
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, { stdout: `${SHA_B}\n` })
-      .on(["git", "-C", REPO, "merge-base", "--is-ancestor"], { code: 0 });
+      .on(["git", "-C", REPO, "merge-base", "--is-ancestor"], { code: 1 });
     expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(`origin/${B}`);
+    // the question asked: does the local branch contain origin's commit?
     expect(fake.argvs(["git", "-C", REPO, "merge-base"])).toEqual([
-      ["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_A, SHA_B],
+      ["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A],
     ]);
     expect(fake.argvs(["git", "-C", REPO, "branch"])).toEqual([]);
+  });
+
+  it("a local branch diverged from origin (a stray local commit, origin's newer ones missing): origin's ref", async () => {
+    // neither commit contains the other
+    const fake = fakeExec()
+      .on(LOCAL, { stdout: `${SHA_A}\n` })
+      .on(ORIGIN, { stdout: `${SHA_B}\n` })
+      .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_A, SHA_B], { code: 1 })
+      .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A], { code: 1 });
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(`origin/${B}`);
   });
 
   it("a local branch level with (or ahead of) origin is used as it is", async () => {
@@ -61,8 +72,26 @@ describe("release base resolution", () => {
     const ahead = fakeExec()
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, { stdout: `${SHA_B}\n` })
-      .on(["git", "-C", REPO, "merge-base", "--is-ancestor"], { code: 1 });
+      .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A], { code: 0 });
     expect(await resolveReleaseBase(ahead.exec, REPO, B)).toBe(B);
+  });
+
+  it("the fetch is bounded and never prompts (a timeout counts as a failed fetch)", async () => {
+    const fake = fakeExec()
+      .on(["git", "-C", REPO, "fetch"], { code: -1, timedOut: true })
+      .on(LOCAL, { stdout: `${SHA_A}\n` })
+      .on(ORIGIN, MISSING);
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(B);
+    const fetch = fake.calls.find((c) => c.argv[3] === "fetch");
+    expect(fetch?.opts.timeoutMs).toBeGreaterThan(0);
+    expect(fetch?.opts.env?.GIT_TERMINAL_PROMPT).toBe("0");
+  });
+
+  it("an empty rev-parse answer is not a commit", async () => {
+    const fake = fakeExec().on(LOCAL, { stdout: "" }).on(ORIGIN, { stdout: "\n" });
+    expect(await checkReleaseBranch(fake.exec, REPO, B)).toBe(
+      `RELEASE_BRANCH_MISSING: ${REPO} has neither ${B} nor origin/${B} — push it first`,
+    );
   });
 
   it("a failed fetch (offline, no remote) still resolves what the repo has", async () => {

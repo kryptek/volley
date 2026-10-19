@@ -482,13 +482,16 @@ volleyd runs `git -C <repo> fetch origin <release_branch>` (a failed fetch — o
 | The repo has | Base |
 |---|---|
 | only `origin/<b>` | `git branch --track <b> origin/<b>`, then `<b>` (`origin/<b>` if that fails) |
-| both, the local `<b>` strictly behind `origin/<b>` | `origin/<b>` |
+| both, the local `<b>` behind `origin/<b>`, or diverged from it (origin has commits the local one lacks) | `origin/<b>` |
 | the local `<b>`, level with or ahead of origin's (or never pushed) | `<b>` |
 | neither | refused: `RELEASE_BRANCH_MISSING: <repo> has neither <b> nor origin/<b> — push it first` |
 
-`volleyd validate` checks the same (locally or `origin/<b>`, no fetch) when the wave's repo is
-on its machine, and the daemon refuses `run` with `RELEASE_BRANCH_MISSING` before any task is
-admitted when a task of the wave runs on the local host. A pipeline role cut from a start commit
+`git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
+fetch. When a task of the wave runs on the local host, `volleyd validate` checks the same
+(locally or `origin/<b>`, offline — it says to fetch a branch pushed from another clone) when
+the wave's repo is on its machine, and the daemon fetches, then refuses `run` with
+`RELEASE_BRANCH_MISSING` before any task is admitted (`<repo> is not a git repository` for a
+directory that is not one). A pipeline role cut from a start commit
 (reviewers, fixups) uses that commit as given. A remote host fetches and cuts from
 `origin/<b>` on the box.
 
@@ -516,8 +519,10 @@ at the next tick whatever the backoff said; `stop task` cancels the task.
 A spawn that launches after failures journals `spawn_recovered { role, agent_id,
 after_failures, attempt }`, clears `last_error` / `why_waiting`, resolves the open decision
 (`recovered`, by `volleyd`), and the log prints `spawned <agent_id> (<wave>/<task>/<role>)`.
-The backoff itself lives in the daemon's memory: after a restart a failed spawn is retried at
-once (its failure count, from the journal, carries on).
+Failures are counted per role (two reviewers of one step fail and back off independently) and
+per agent attempt; the task shows its most recent one, and its decision resolves once no role
+is still failing. The backoff carries over a restart: the retry runs when the journal's
+`next_retry_at` says, and stopped retries stay stopped until someone answers "retry now".
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
@@ -713,10 +718,9 @@ tasks:
 ```
 
 **Prerequisites on the box** (volleyd does not provision it): `bash`, `bun`, `claude` (logged
-in, with the volley MCP server registered at user scope), `gh` (authenticated, for `gh issue
-view`), `git`, `tmux`, `nc`, `base64`, `cmp`, a clone of the wave repo at `repo` (its `origin` must
-have the release branch) and a volley checkout at `volley_dir` with `bun install` run. Two
-that are easy to miss:
+in), `gh` (authenticated, for `gh issue view`), `git`, `tmux`, `nc`, `base64`, `cmp`, a clone of
+the wave repo at `repo` (its `origin` must have the release branch) and a volley checkout at
+`volley_dir` with `bun install` run. Two that are easy to miss:
 
 - `claude` must be on the `PATH` of a non-interactive ssh session (`ssh <target> bash -s` reads
   no `~/.bashrc` or `~/.zshrc`), because the tmux session that runs `launch.sh` takes the
@@ -724,10 +728,10 @@ that are easy to miss:
   `~/.local/bin`, which sshd's default `PATH` lacks: link it into `/usr/local/bin`, or set
   `PATH` for ssh sessions (`SetEnv` in sshd_config, or `~/.ssh/environment` with
   `PermitUserEnvironment`).
-- The user-scope volley MCP server on the box must be one that takes its identity from
-  `.volley/agent.json`. An older one falls back to `VOLLEY_AGENT_ID` from the environment as a
-  prefix and registers under a suffixed id, so the agent's own status never reaches the daemon
-  under its assigned id. The
+- The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
+  `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
+  `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
+  servers on the box are not loaded (`--strict-mcp-config`). The
 daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
 or host-key prompt fails the command). `remote_port` (default 21883) must be free on the box's
 loopback: a box that runs its own MQTT broker usually has 1883 taken, and a forward that cannot
@@ -1042,8 +1046,10 @@ CONSENT (denied unless a ConsentToken from `volleyd cleanup --yes` is passed):
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
     branch --list | branch --track <b> <remote>/<b> | merge-base | show
-    worktree add needs -b|-B <branch> or --detach (never checks out an existing branch), and
-    the new branch is never main/master (in any case); fetch takes a remote name or a
+    worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
+    -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
+    AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
+    (in any case); fetch takes a remote name or a
     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
     write refs/remotes/…
   gh issue view · gh pr view | list | checks · gh run list | view | watch ·

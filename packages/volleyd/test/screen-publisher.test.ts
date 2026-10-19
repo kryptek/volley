@@ -397,6 +397,9 @@ describe("daemon screen tails", () => {
     await agent.connect({ url: env.broker.url, agentId: "agent-sim" });
     const fake = fakeExec()
       .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+        stdout: `${"1".repeat(40)}\n`,
+      })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
       });

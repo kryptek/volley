@@ -19,6 +19,7 @@ import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
 import type { NewEvent } from "../src/types";
+import { makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -225,6 +226,35 @@ describe("volleyd admission [wave]", () => {
     expect(r.exitCode).not.toBe(2);
     expect(r.stderr).not.toContain("Unexpected argument");
     expect((await runCli(["admission", "w1", "w2"])).exitCode).toBe(2);
+  });
+
+  it("against a running daemon: only that wave's verdict; an unknown wave is an error", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      const daemon = await env.start();
+      for (const w of ["w1", "w2"]) {
+        const file = join(env.home, `${w}.yaml`);
+        writeFileSync(
+          file,
+          `wave: ${w}\nrepo: /tmp/r\nrelease_branch: release/${w}\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`,
+        );
+        expect((await runCli(["run", file], env.env)).exitCode).toBe(0);
+      }
+      await daemon.tick();
+      const all = await runCli(["admission", "--json"], env.env);
+      expect(Object.keys(JSON.parse(all.stdout).waves).sort()).toEqual(["w1", "w2"]);
+      const one = await runCli(["admission", "w1", "--json"], env.env);
+      expect(one.exitCode).toBe(0);
+      expect(Object.keys(JSON.parse(one.stdout).waves)).toEqual(["w1"]);
+      const text = await runCli(["admission", "w1"], env.env);
+      expect(text.stdout).toContain("  w1  ");
+      expect(text.stdout).not.toContain("  w2  ");
+      const unknown = await runCli(["admission", "nope"], env.env);
+      expect(unknown.exitCode).toBe(1);
+      expect(unknown.stderr).toContain("unknown wave 'nope'");
+    } finally {
+      await env.cleanup();
+    }
   });
 
   it("with a wave, shows only that wave's verdict", () => {

@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import { AGENT_BRANCH } from "./worktree";
 
 /**
  * The authority fence: a code-level policy over every external command volleyd runs.
@@ -24,8 +25,10 @@ import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
  *     branch --list | branch --track <b> <remote>/<b> | merge-base | show
- *     worktree add needs -b|-B <branch> or --detach (never checks out an existing branch), and
- *     the new branch is never main/master (in any case); fetch takes a remote name or a
+ *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
+ *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
+ *     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
+ *     (in any case); fetch takes a remote name or a
  *     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
  *     write refs/remotes/…
  *   gh issue view · gh pr view | list | checks · gh run list | view | watch ·
@@ -344,22 +347,31 @@ function trackingBranch(args: readonly string[]): Verdict {
 }
 
 /**
- * `git worktree add` must create its own branch (`-b <new>`, or `-B` re-creating a leftover one;
- * never main/master) or detach:
+ * `git worktree add` must create its own branch (`-b <new>`, never main/master) or detach:
  * without either, git checks out an existing branch (`add /w main`, or `add /w/main`, which
- * DWIMs to the branch named like the directory), and commits would land on it.
+ * DWIMs to the branch named like the directory), and commits would land on it. `-B` resets an
+ * existing branch to the base and checks it out, so it is allowed only for a branch volleyd mints
+ * (`AGENT_BRANCH`: a leftover of a failed add, re-created on the retry) — never a release branch.
  */
 function worktreeAddBranch(args: readonly string[]): Verdict {
   let branch: string | undefined;
+  let reset = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
-    if (a === "-b" || a === "-B") branch = args[++i];
-    else if ((a.startsWith("-b") || a.startsWith("-B")) && a.length > 2) branch = a.slice(2);
+    if (a === "-b" || a === "-B") {
+      branch = args[++i];
+      reset = a === "-B";
+    } else if ((a.startsWith("-b") || a.startsWith("-B")) && a.length > 2) {
+      branch = a.slice(2);
+      reset = a.startsWith("-B");
+    }
   }
   if (branch === undefined && !args.includes("--detach"))
     return deny("git worktree add (without -b|-B <branch> or --detach)");
   if (branch !== undefined && PROTECTED_BRANCHES.has(branch.toLowerCase()))
     return deny(`git worktree add -b ${branch}`);
+  if (reset && !AGENT_BRANCH.test(branch ?? ""))
+    return deny(`git worktree add -B ${branch} (only an agent branch <wave>/<task>-<role>-<n>)`);
   return ALLOW;
 }
 

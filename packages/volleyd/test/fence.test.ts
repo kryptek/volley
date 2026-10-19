@@ -36,6 +36,17 @@ const DENIED: string[][] = [
   // -B resets a branch: never main/master either
   ["git", "worktree", "add", "-B", "main", "/tmp/wt", "release/w1"],
   ["git", "worktree", "add", "-B", "Master", "/tmp/wt", "release/w1"],
+  // -B only re-creates an agent branch (`<wave>/<task>-<role>-<n>`): never a release branch or
+  // any other existing branch, which it would reset to the base
+  ["git", "-C", "/tmp/repo", "worktree", "add", "/tmp/wt", "-B", "release/w1", "origin/release/w1"],
+  ["git", "-C", "/tmp/repo", "worktree", "add", "/tmp/wt", "-Brelease/w1", "origin/release/w1"],
+  ["git", "-C", "/tmp/repo", "worktree", "add", "/tmp/wt", "-B", "develop", "HEAD~5"],
+  ["git", "-C", "/tmp/repo", "worktree", "add", "/tmp/wt", "-Bfeature", "HEAD"],
+  ["git", "worktree", "add", "-B", "feature/someone-else", "/tmp/wt", "HEAD~5"],
+  ["git", "worktree", "add", "-B", "w1/T1-reviewer-1", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/T1-implementer-0", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/T1-implementer-1/x", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "W1/T1-implementer-1", "/tmp/wt", "release/w1"],
   // a tracking branch only as `branch --track <b> origin/<b>` (spawn's release base)
   ["git", "branch", "--track", "release/x", "origin/release/y"],
   ["git", "branch", "--track", "release/x", "release/x"],
@@ -295,6 +306,7 @@ const ALLOWED: string[][] = [
     "/tmp/wt",
     "release/w1",
   ],
+  ["git", "worktree", "add", "-Bw1/T-1_x-spec_reviewer-12", "/tmp/wt", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "branch", "--track", "release/w1", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
   ["git", "-C", "/tmp/repo", "merge-base", "--is-ancestor", "a1b2c3", "d4e5f6"],

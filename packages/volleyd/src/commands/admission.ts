@@ -32,7 +32,7 @@ export async function admission({ argv, env, io }: CommandArgs): Promise<ExitCod
   }
   const wave = parsed.positionals[0];
   return withClient(target, io, "volleyd admission", async (client) => {
-    const res = await client.request("admission", {});
+    const res = await client.request("admission", wave !== undefined ? { wave } : {});
     if (!res.ok) {
       io.stderr(`volleyd admission: ${res.error ?? "failed"}\n`);
       return EXIT.ERROR;

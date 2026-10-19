@@ -103,7 +103,7 @@ import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
-import type { SpawnFailure, WaveRecord } from "./reducer";
+import { type SpawnFailure, type WaveRecord, latestSpawnFailure } from "./reducer";
 import { type Admission, activeTasks, admit, spawnBudget, spawnsUsed } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
 import type {
@@ -189,7 +189,13 @@ import {
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
-import { checkReleaseBranch, expandHome, worktreePath } from "./worktree";
+import {
+  checkReleaseBranch,
+  expandHome,
+  fetchRelease,
+  spawnsLocally,
+  worktreePath,
+} from "./worktree";
 
 export interface DaemonOptions {
   brokerUrl: string;
@@ -664,6 +670,15 @@ export class Daemon {
       this.waves.set(wave, log);
       this.config.setWaveOverrides(wave, log.record.overrides);
       this.issueFiles.set(wave, journaledIssueFiles(log.journal.readAll()));
+      // The backoff carries over a restart: a retry is due when the journal said it was, and
+      // stopped retries stay stopped.
+      for (const [task, roles] of Object.entries(log.record.spawnFailures)) {
+        for (const f of Object.values(roles)) {
+          const until =
+            f.next_retry_at === null ? Number.POSITIVE_INFINITY : Date.parse(f.next_retry_at);
+          this.refused.set(`${wave}/${task}/${f.role}`, { n: f.attempt, until });
+        }
+      }
     }
   }
 
@@ -1448,11 +1463,9 @@ export class Daemon {
     }
     this.spawning.add(key);
     try {
-      const attempt =
-        log.journal
-          .readAll()
-          .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
-          .length + 1;
+      const attempt = this.agentAttempt(wave, task, role);
+      // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
+      const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
       let req = { wave: w, task, role, attempt, ...pipeline };
       if (remote !== undefined) {
@@ -1466,7 +1479,6 @@ export class Daemon {
       const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
       if (res.kind === "launched") {
         this.refused.delete(key);
-        await this.spawnRecovered(wave, task, role, res.agentId);
         void res.verified.then(
           (outcome) => {
             this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
@@ -1479,6 +1491,10 @@ export class Daemon {
             }
           },
           (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+        // Best effort, after supervision is attached: the agent is launched whatever it says.
+        void this.spawnRecovered(wave, task, role, res.agentId, prior).catch((e: unknown) =>
+          this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`),
         );
       }
       return res;
@@ -1501,14 +1517,21 @@ export class Daemon {
     const key = `${wave}/${task}/${role}`;
     const rec = this.waves.get(wave)?.record;
     if (rec === undefined) return;
-    // A live agent already holds the role (an extra `volleyd spawn` was refused): the task
-    // itself is fine, so nothing is recorded against it beyond the step's alarm.
+    // A live agent already holds the role (an extra `volleyd spawn` was refused — SPAWN_LOCKED
+    // is exactly that, even while the agent is still being verified): the task itself is fine,
+    // so nothing is recorded against it beyond the step's alarm.
+    if (e instanceof SpawnError && e.code === "SPAWN_LOCKED") return;
     for (const a of this.supervised.values()) {
       if (a.wave === wave && a.task === task && a.role === role) return;
     }
     const eff = this.config.effective(wave);
-    const prev = rec.spawnFailures[task];
-    const n = prev?.role === role ? prev.attempt + 1 : 1;
+    // Failures count per spawn: this role's, for the agent attempt it is trying to launch.
+    const spawnAttempt = this.agentAttempt(wave, task, role);
+    const prev = rec.spawnFailures[task]?.[role];
+    const n =
+      prev !== undefined && (prev.spawn_attempt ?? spawnAttempt) === spawnAttempt
+        ? prev.attempt + 1
+        : 1;
     const stopped = n >= eff.spawn_retry_max;
     const wait = Math.min(
       DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
@@ -1517,12 +1540,21 @@ export class Daemon {
     const until = stopped ? Number.POSITIVE_INFINITY : this.now() + wait;
     this.refused.set(key, { n, until });
     const code = e instanceof SpawnError ? e.code : "SPAWN_FAILED";
-    const message = e instanceof Error ? e.message : String(e);
+    const full = e instanceof Error ? e.message : String(e);
+    // A SpawnError's message starts with its code, which is journaled beside it.
+    const message = full.startsWith(`${code}: `) ? full.slice(code.length + 2) : full;
     const nextRetryAt = stopped ? null : new Date(until).toISOString();
     await this.append(wave, {
       type: "spawn_failed",
       task,
-      data: { code, message, role, attempt: n, next_retry_at: nextRetryAt },
+      data: {
+        code,
+        message,
+        role,
+        attempt: n,
+        spawn_attempt: spawnAttempt,
+        next_retry_at: nextRetryAt,
+      },
     });
     this.log(
       `spawn ${key} failed (${code}), attempt ${n}: ${stopped ? "retries stopped" : `retry in ${wait / 1000}s`}`,
@@ -1532,8 +1564,8 @@ export class Daemon {
     try {
       if (open !== undefined) await this.resolveNow(wave, open.decision_id, SPAWN_RETRIES_STOPPED);
       const question = stopped
-        ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
-        : `Needs you: ${task}'s ${role} could not be spawned (${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
+        ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
+        : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
       const base = `spawn_failed-${createHash("sha256").update(`${task}/${role}`).digest("hex").slice(0, 12)}`;
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
@@ -1560,28 +1592,46 @@ export class Daemon {
   }
 
   /**
-   * A spawn launched after failures: journal `spawn_recovered`, resolve the open `spawn_failed`
-   * decision, and say so in the log (the failures were in it).
+   * A spawn launched after failures (`prior`, the role's failure before the launch): journal
+   * `spawn_recovered`, resolve the open `spawn_failed` decision once no role of the task is
+   * still failing, and say so in the log (the failures were in it).
    */
   private async spawnRecovered(
     wave: WaveId,
     task: TaskId,
     role: Role,
     agentId: string,
+    prior: SpawnFailure | undefined,
   ): Promise<void> {
-    const f = this.waves.get(wave)?.record.spawnFailures[task];
-    if (f !== undefined && f.role === role) {
-      await this.append(wave, {
-        type: "spawn_recovered",
-        task,
-        data: { role, agent_id: agentId, after_failures: f.attempt, attempt: f.attempt + 1 },
-      });
-      const open = this.openSpawnFailedDecision(wave, task);
-      if (open !== undefined) {
-        await this.resolveNow(wave, open.decision_id, { answer: "recovered", by: DAEMON_AGENT_ID });
-      }
-    }
     this.log(`spawned ${agentId} (${wave}/${task}/${role})`);
+    if (prior === undefined) return;
+    await this.append(wave, {
+      type: "spawn_recovered",
+      task,
+      data: {
+        role,
+        agent_id: agentId,
+        after_failures: prior.attempt,
+        attempt: prior.attempt + 1,
+      },
+    });
+    if (this.waves.get(wave)?.record.spawnFailures[task] !== undefined) return;
+    const open = this.openSpawnFailedDecision(wave, task);
+    if (open !== undefined) {
+      await this.resolveNow(wave, open.decision_id, { answer: "recovered", by: DAEMON_AGENT_ID });
+    }
+  }
+
+  /** The attempt number the next agent spawned for a task's role gets (its branch's `-<n>`). */
+  private agentAttempt(wave: WaveId, task: TaskId, role: Role): number {
+    const journal = this.waves.get(wave)?.journal;
+    if (journal === undefined) return 1;
+    return (
+      journal
+        .readAll()
+        .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
+        .length + 1
+    );
   }
 
   /** The `local` host agents run on. */
@@ -3132,8 +3182,9 @@ export class Daemon {
     }
     // A failed spawn says so, with its countdown, ahead of anything a queued task waits on.
     for (const t of state.tasks) {
-      const f = rec.spawnFailures[t.id];
-      if (f === undefined || (t.stage !== "queued" && t.why_waiting !== undefined)) continue;
+      const f = latestSpawnFailure(rec, t.id);
+      if (f === undefined || t.stage === "done" || t.stage === "cancelled") continue;
+      if (t.stage !== "queued" && t.why_waiting !== undefined) continue;
       t.why_waiting = spawnFailedWhy(f, this.now());
     }
     for (const t of state.tasks) {
@@ -3446,6 +3497,8 @@ export class Daemon {
       case "diff":
         return this.planDiff(p);
       case "admission":
+        if (typeof p.wave === "string" && !this.waves.has(p.wave))
+          return { ok: false, error: `unknown wave '${p.wave}'` };
         return { ok: true, result: this.summary };
       case "spawn":
         return this.manualSpawn(p);
@@ -3524,14 +3577,16 @@ export class Daemon {
 
   /**
    * RELEASE_BRANCH_MISSING when the wave's repo has its release branch neither locally nor as
-   * `origin/<branch>`, so a wave whose every spawn would fail is refused before any task is
-   * admitted. Checked only where volleyd spawns into that repo: with a spawner, and a task on the
-   * local host (a remote host's clone is fetched and checked on the box).
+   * `origin/<branch>` once it is fetched (a branch pushed from another clone counts), so a wave
+   * whose every spawn would fail is refused before any task is admitted. Checked only where
+   * volleyd spawns into that repo: with a spawner, and a task on the local host (a remote host's
+   * clone is fetched and checked on the box).
    */
   private async releaseBranchMissing(wave: Wave): Promise<string | null> {
-    if (this.opts.spawner === undefined) return null;
-    if (!Object.values(wave.tasks).some((t) => t.host === "local")) return null;
-    return checkReleaseBranch(this.host.exec, expandHome(wave.repo), wave.release_branch);
+    if (this.opts.spawner === undefined || !spawnsLocally(wave)) return null;
+    const repo = expandHome(wave.repo);
+    await fetchRelease(this.host.exec, repo, wave.release_branch);
+    return checkReleaseBranch(this.host.exec, repo, wave.release_branch);
   }
 
   /**

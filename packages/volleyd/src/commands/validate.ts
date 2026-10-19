@@ -4,7 +4,7 @@ import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { criticalPaths } from "../scheduler";
 import { loadWaveFile } from "../wave-file";
-import { checkReleaseBranch, expandHome } from "../worktree";
+import { checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
 const HELP = `Usage: volleyd validate <wave.yaml>
 
@@ -39,12 +39,18 @@ export async function validate({ argv, io }: CommandArgs): Promise<ExitCode> {
     const wave = await loadWaveFile(file);
     const repo = expandHome(wave.repo);
     let note = "";
-    if (!existsSync(repo)) {
+    if (!spawnsLocally(wave)) {
+      // as `run`: every task runs on a remote host, whose clone is checked on the box
+    } else if (!existsSync(repo)) {
       note = `note: ${repo} is not on this machine; release branch not checked\n`;
     } else {
       const missing = await checkReleaseBranch(exec, repo, wave.release_branch);
       if (missing !== null) {
-        io.stderr(`volleyd validate: ${missing}\n`);
+        // validate stays offline; `run` fetches the branch first
+        const hint = missing.includes(" has neither ")
+          ? `\n  (pushed from another clone? \`git -C ${repo} fetch origin\` — \`volleyd run\` fetches it)`
+          : "";
+        io.stderr(`volleyd validate: ${missing}${hint}\n`);
         return EXIT.ERROR;
       }
     }

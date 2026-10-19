@@ -31,11 +31,11 @@ describe("volleyd validate: the release branch", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  const waveFile = (repoPath: string) => {
+  const waveFile = (repoPath: string, task = "{ issue: 1 }") => {
     const file = join(dir, "w.yaml");
     writeFileSync(
       file,
-      `wave: w1\nrepo: ${repoPath}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`,
+      `wave: w1\nrepo: ${repoPath}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: ${task}\n`,
     );
     return file;
   };
@@ -46,6 +46,22 @@ describe("volleyd validate: the release branch", () => {
     expect(r.stderr).toContain(
       `RELEASE_BRANCH_MISSING: ${repo} has neither release/x nor origin/release/x — push it first`,
     );
+    // validate stays offline: a branch pushed from another clone may just need a fetch
+    expect(r.stderr).toContain(`git -C ${repo} fetch origin`);
+  });
+
+  it("a repo directory that is not a git repository says so", async () => {
+    const plain = join(dir, "plain");
+    mkdirSync(plain);
+    const r = await runCli(["validate", waveFile(plain)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(`RELEASE_BRANCH_MISSING: ${plain} is not a git repository`);
+  });
+
+  it("a wave whose every task runs on a remote host is not checked here (as run does)", async () => {
+    const r = await runCli(["validate", waveFile(repo, "{ issue: 1, host: build-box.lan }")]);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
   });
 
   it("only origin/release/x (pushed from another clone) is enough", async () => {
