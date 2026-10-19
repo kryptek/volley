@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { constants, type JsonWebKeyInput, createPublicKey, publicEncrypt } from "node:crypto";
 import {
   existsSync,
@@ -8,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -22,8 +24,11 @@ import {
   SYSTEMD_UNIT,
   currentUser,
   defaultName,
+  hostKeyHint,
+  localNotAdmin,
   machineTopic,
   peerFile,
+  redeemScript,
   runPeer,
   runService,
   tunnelArgv,
@@ -439,6 +444,99 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(f.calls.some((c) => c.argv[0] === "systemctl")).toBe(false);
   });
 
+  it("checks claude, bun and tmux on this machine's non-interactive ssh PATH before redeeming", () => {
+    // Run the real script under bash: a stub `ssh` runs its command with a PATH that has bun
+    // and tmux but no claude, as a zsh login shell without ~/.zshenv would.
+    const box = mkdtempSync(join(tmpdir(), "volley-peer-redeem-"));
+    try {
+      const write = (p: string, text: string) => {
+        writeFileSync(p, text);
+        chmodSync(p, 0o755);
+      };
+      mkdirSync(join(box, "bin"));
+      mkdirSync(join(box, "tools"));
+      write(
+        join(box, "bin", "ssh"),
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/bin/zsh /bin/sh -c "$*"\n',
+      );
+      write(join(box, "tools", "bun"), "#!/bin/sh\n");
+      write(join(box, "tools", "tmux"), "#!/bin/sh\n");
+      write(join(box, "volley"), `#!/bin/sh\ntouch ${join(box, "redeemed")}\n`);
+      const script = redeemScript(
+        { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+        join(box, "volley"),
+      );
+      const r = spawnSync("bash", ["-s"], {
+        input: script,
+        encoding: "utf-8",
+        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+      });
+      expect(r.status).toBe(4);
+      expect(r.stderr).toContain("volley-peer-missing: claude");
+      expect(r.stderr).toContain("volley-peer-shell: zsh");
+      expect(existsSync(join(box, "redeemed"))).toBe(false);
+      // With claude there too, the code is redeemed.
+      write(join(box, "tools", "claude"), "#!/bin/sh\n");
+      const ok = spawnSync("bash", ["-s"], {
+        input: script,
+        encoding: "utf-8",
+        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+      });
+      expect(ok.status, ok.stderr).toBe(0);
+      expect(existsSync(join(box, "redeemed"))).toBe(true);
+    } finally {
+      rmSync(box, { recursive: true, force: true });
+    }
+  });
+
+  it("names the missing tools and the exact line for the login shell's file", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude bun\nvolley-peer-shell: zsh\n" }),
+    );
+    const which = (c: string) =>
+      c === "claude"
+        ? "/Users/dev/.local/bin/claude"
+        : c === "bun"
+          ? "/opt/homebrew/bin/bun"
+          : null;
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec, { which }));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
+    expect(r.stderr).toContain("~/.zshenv");
+    expect(r.stderr).toContain('export PATH="/Users/dev/.local/bin:/opt/homebrew/bin:$PATH"');
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+    // bash: the top of ~/.bashrc; a tool this shell cannot find either: install it.
+    const b = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude\nvolley-peer-shell: bash\n" }),
+    );
+    const rb = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host"],
+      deps(b.exec, { which: () => null }),
+    );
+    expect(rb.stderr).toContain("the top of ~/.bashrc");
+    expect(rb.stderr).toContain("Install claude on this machine");
+  });
+
+  it("an untrusted host key says so, with the one-time command, not 'set up key-based ssh'", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "ssh" ? { code: 255, stderr: "Host key verification failed.\n" } : {},
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("does not trust dev@host's host key yet");
+    expect(r.stderr).toContain("ssh dev@host true");
+    expect(r.stderr).not.toContain("key-based");
+    // The host's ssh back here, refused for the same reason: the command runs there.
+    expect(hostKeyHint("Host key verification failed.", "dev@box-a", "dev@host")).toContain(
+      "On dev@host, run once: ssh dev@box-a true",
+    );
+    expect(
+      hostKeyHint("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", "dev@host"),
+    ).toContain("ssh-keygen -R dev@host");
+    expect(hostKeyHint("Permission denied (publickey).", "dev@host")).toBeNull();
+  });
+
   it("a repo trusted through a parent folder counts as trusted (T4's rule)", async () => {
     writeFileSync(
       join(home, ".claude.json"),
@@ -742,6 +840,32 @@ describe("volley peer on the supervisor's machine", () => {
       expect(r.stderr).toContain("admin");
       expect(r.stderr).toContain("VOLLEY_AUTH_USERNAME");
     }
+  });
+
+  it("invite with a login this machine knows is not an admin refuses at once, without asking volleyd", async () => {
+    writeFileSync(
+      join(home, "accounts.json"),
+      JSON.stringify({
+        accounts: [
+          { name: "steer-1", role: "steer", kind: "device", created: "2026-10-19T00:00:00.000Z" },
+          { name: "boss", role: "admin", kind: "human", created: "2026-10-19T00:00:00.000Z" },
+        ],
+      }),
+    );
+    const started = Date.now();
+    const r = await run(["invite"], deps(fakeExec(() => ({})).exec), {
+      VOLLEY_AUTH_USERNAME: "steer-1",
+      VOLLEY_AUTH_PASSWORD: "s-pw",
+    });
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("steer-1 is a steer account, not an admin one");
+    expect(r.stderr).not.toContain("did not answer");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const env = { VOLLEY_AUTH_DIR: home };
+    expect(localNotAdmin("coordinator", env)).toContain("fixed identity");
+    expect(localNotAdmin("boss", env)).toBeNull();
+    // Not in this machine's registry (another install's admin): volleyd decides.
+    expect(localNotAdmin("someone-else", env)).toBeNull();
   });
 
   it("an unanswered admin op (the broker drops a non-admin's request) says it needs an admin", async () => {
