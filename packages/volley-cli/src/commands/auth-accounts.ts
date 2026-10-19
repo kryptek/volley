@@ -220,9 +220,7 @@ function deskOf(ctx: AuthContext): { url: string; host?: string } {
 function signinLines(desk: { url: string; host?: string }, token: string): string[] {
   const port = new URL(desk.url).port || "80";
   const host =
-    desk.host !== undefined && desk.host.includes(":") && !desk.host.startsWith("[")
-      ? `[${desk.host}]`
-      : desk.host;
+    desk.host?.includes(":") && !desk.host.startsWith("[") ? `[${desk.host}]` : desk.host;
   const url =
     host !== undefined ? `http://${host}:${port}/#signin=${token}` : `${desk.url}#signin=${token}`;
   return [

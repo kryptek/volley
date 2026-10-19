@@ -239,13 +239,18 @@ on GitHub with one small open issue and a pushed release branch
    http://<LAN address>:5199/#signin=vly_admin_…` (keep the terminal open: you use them in step
    5). Services says `Installed volley and volleyd in ~/.volley/bin (scripts that run this
    checkout with <your bun>)` and loads volleyd and the Desk; its hooks change says your status
-   line keeps working. With cmux on its default socket mode, Services explains that cmux lets
-   only its own programs in, gives the menu path (cmux → Settings… → Automation → Socket control
-   mode → Password mode → Set) and offers *Give volleyd the cmux socket password*: set one in
-   cmux, answer yes, type it at the hidden prompt; it says `volleyd's service reaches cmux now`.
-   A wrong password is refused, quoting cmux (`(cmux said: …)`), and nothing is stored: note
-   cmux's exact wrong-password text, so the tests can carry it. Phone prints a QR code. Last line:
-   `Setup complete.` Anything that asks you to read source or guess is a fail: note the step.
+   line keeps working. Setup checks cmux the way volleyd's service uses it (`cmux capabilities`
+   and `cmux list-workspaces`, from outside cmux), not with `cmux ping`. With cmux on its default
+   socket mode, Services says cmux lets only its own programs in (`cmux's socket control mode:
+   cmux processes only`), recommends **Automation mode** with the menu path (cmux → Settings… →
+   Automation → Socket control mode → Automation mode) and offers *Make volleyd's service reach
+   cmux (choose Automation mode …)*; Password mode is named as the alternative. Choose Automation
+   mode in cmux, answer yes: it says `volleyd's service reaches cmux now (cmux's socket control
+   mode: Automation mode)`, asks no password, and `~/.volley/volleyd/setup.json` records
+   `"cmux_socket_mode": "automation"`. (Password mode instead: the same change asks for the
+   password at a hidden prompt, checks it and stores it; a wrong one is refused quoting cmux,
+   storing nothing.) Phone prints a QR code. Last line: `Setup complete.` Anything that asks you
+   to read source or guess is a fail: note the step.
 2. **Phone sign-in, then stop the stopwatch.** Right away (the QR lasts 10 minutes), scan the QR
    with the phone camera and open the link.
    **Pass:** within about 10 s the Desk loads signed in (Settings › account row: a `steer`
@@ -257,20 +262,32 @@ on GitHub with one small open issue and a pushed release branch
    `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc && exec zsh`, then
    `volley --version` → `0.3.0`, and `volley setup --repair` → every step `✓ already done`, also
    from a terminal outside cmux (Terminal.app). Services' found lines include `cmux: volleyd's
-   service reaches it`. With no VOLLEY_AUTH_* exported, `volleyd config get` and `volley list`
+   service reaches it (cmux's socket control mode: Automation mode)`, and the Desk's Setup &
+   Security › Services shows the same line. **A rerun that changes the Desk's service while it
+   is loaded** (the smoke's `Bootstrap failed: 5: Input/output error`): edit one character in
+   `~/Library/LaunchAgents/systems.volley.desk.plist`, run `volley setup --step services --yes`.
+   **Pass:** it rewrites the plist, waits for launchd to let the old Desk go and loads the new
+   one: exit 0, `launchctl print gui/$UID/systems.volley.desk` succeeds, the Desk answers on
+   :5199. Run `volleyd install` twice in a row: both exit 0 and volleyd stays loaded. (Should a
+   load ever fail, the run exits non-zero and says it restored the previous plist and loaded it
+   again: the service is never left down.) With no VOLLEY_AUTH_* exported, `volleyd config get` and `volley list`
    work (the saved coordinator login). Start any server on 127.0.0.1:5199 beside the Desk
    (`python3 -m http.server 5199 --bind 127.0.0.1`): `volley setup --repair` stops at Services
    naming `python3 (PID …)` and `kill …`; stop it and the rerun passes again.
-4. **Expiry.** `volley auth signin-link --role steer --label expiry-check --ttl 5` prints a
-   token. Wait 10 s, then on the phone open `http://<the Mac's LAN IP>:5199/#signin=<token>` in a
-   **new tab** (`ipconfig getifaddr en0` gives the IP).
+4. **Expiry.** `volley auth signin-link --role steer --label expiry-check --ttl 5` prints the
+   ready-to-open link `http://<the Mac's LAN IP>:5199/#signin=<token>` (the address setup
+   recorded) and its QR code, like setup's phone step. Wait 10 s, then scan the QR with the phone
+   (or open the link in a **new tab**).
    **Pass:** the card says the link was used already or has expired, and what to do next.
 5. **Admin sign-in, laptop.** Open the `Open the Desk with it on this machine:` link from step 1
    in a private browser window. If 10 minutes have passed since setup, run `volley auth token`
    first: it prints a new link.
    **Pass:** the Desk opens signed in, the sidebar says *Admin · manages accounts and setup*, and
    Setup & Security shows both listeners refusing anonymous clients and no pending Security
-   change. Paste the same link into another private window: *already used*.
+   change. Paste the same link into another private window: *already used*. Settings › Broker
+   accounts lists every `admin-<id>` device sign-in; one not seen for over a day is flagged
+   **stale**, and *Revoke the N stale sign-ins…* (after a confirm) removes them all at once
+   (the next day, the ones a headless browser left are flagged).
 6. **Keychain** (never tested on a real Mac before). `security find-generic-password -s
    volley-broker -a coordinator -w` prints the same password as `coordinator.json` in the auth
    dir that setup named (`/opt/homebrew/etc/mosquitto/volley/` on Apple Silicon).
@@ -337,11 +354,20 @@ on GitHub with one small open issue and a pushed release branch
     `--remote-volley '~/.volley/bin/volley'` (quoted, so the Mac's shell expands `~`) when
     `volley` is not on the Mac's non-interactive ssh PATH: without it the join says exactly that,
     and that the code is still valid. The script runs bun by its full path, so bun need not be on
-    that PATH either. Before **Remove**, copy
+    that PATH either. Before redeeming, join checks that `claude`, `bun` and `tmux` are on the
+    second machine's **non-interactive ssh PATH** (how volleyd starts agents there). To see it,
+    try once without them there (e.g. `claude` only in `~/.zshrc`'s PATH): join stops, names
+    what is missing and prints the exact line for the login shell's file (zsh: `~/.zshenv`;
+    bash: the top of `~/.bashrc`), and the code stays valid. With an unknown host key, join
+    says the host key is not trusted yet and gives `ssh <host> true`, not "set up key-based ssh".
+    `volley peer invite` with a non-admin login (e.g. `--username` of a steer account) refuses
+    at once, not after 30 s. Before **Remove**, copy
     `smoke.yaml` to `peer.yaml` with a new `wave:` id and `T1: { issue: <n>, host: <the
     machine's name> }`, then `volleyd validate peer.yaml && volleyd run peer.yaml`.
     **Pass:** the task's agent starts on that machine, registers, and shows in the Desk under
-    the wave. After **Remove**: `volley auth list` no longer has the machine, and its service has
+    the wave. (Were `claude` missing from the session's PATH, its tmux session would show
+    `volleyd: cannot start the agent: claude is not on this session's PATH …` and the Desk's
+    decision would quote it, never just "did not start (screen: empty)".) After **Remove**: `volley auth list` no longer has the machine, and its service has
     stopped itself.
 11. **Credential audit (e), macOS.** Claude Code keeps its login in the keychain (item *Claude
     Code-credentials*) and sometimes in `.credentials.json` files; Volley must touch neither.
@@ -367,16 +393,16 @@ on GitHub with one small open issue and a pushed release branch
 
 ```
 OWNER RESULTS (<date>, release head <sha>):
-  1. setup (each step explained before changing? admin link printed?):
+  1. setup (each step explained before changing? admin link printed? cmux: Automation mode recommended, mode recorded?):
   2. phone QR (time from clone: __ min; reuse refused):
-  3. PATH / --version / --repair:
-  4. expired link refused:
-  5. admin link (fresh window / reuse refused / nothing pending):
+  3. PATH / --version / --repair / rerun with the Desk loaded (exit 0, Desk up):
+  4. signin-link prints link + QR / expired link refused:
+  5. admin link (fresh window / reuse refused / nothing pending / stale sign-ins flagged + revoked):
   6. keychain:
   7. Desk wizard on the phone (paste box):
   8. Settings search / tunable from the phone:
   9. second account / wave on second / account_limit prompt, nothing switched / move + resume note:
-  10. paired machine: invite / join / up / wave task on it / remove + revoked:
+  10. paired machine: invite / join (PATH check, host-key wording, non-admin invite refused fast) / up / wave task on it / remove + revoked:
   11. credential audit (positive control seen? any hit?):
   Issues found:
 ```
