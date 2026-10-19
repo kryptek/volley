@@ -11,9 +11,17 @@ import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
-import { planDetect, planSecurity, probeAnonymous } from "../setup/broker";
+import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
 import { planServices } from "../setup/services";
-import type { Planner, SetupContext, SetupDeps, StepName, StepPlan } from "../setup/step";
+import {
+  type Planner,
+  type SetupContext,
+  type SetupDeps,
+  type StepName,
+  type StepPlan,
+  fencedExec,
+  setupFence,
+} from "../setup/step";
 import { defaultAuthDir } from "./auth";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
@@ -22,7 +30,7 @@ import { DESK_PORT } from "./desk-serve";
  * `volley setup`: the first-run (and repair) wizard. Five steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
- *   1. Broker    find mosquitto (install, version, what the listeners do, registered agents)
+ *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
  *   2. Security  the Dynamic Security config (diff shown, old one backed up), the plugin's
  *                state file with its admin login, a restart; both listeners must refuse
  *                anonymous clients
@@ -55,12 +63,23 @@ const indent = (text: string, by = "      ") =>
     .map((l) => (l === "" ? l : `${by}${l}`))
     .join("\n");
 
-/** The first non-internal IPv4 address (what a phone on the LAN reaches), else the hostname. */
-function lanAddress(): string {
-  for (const addrs of Object.values(networkInterfaces())) {
-    for (const a of addrs ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
-  }
-  return hostname();
+/** Interfaces a phone on the LAN does not reach this machine through (containers, VMs, VPNs). */
+const VIRTUAL_IFACE =
+  /^(docker|br-|veth|virbr|vmnet|vboxnet|utun|tun|tap|tailscale|wg|zt|lxc|lxd|cni|flannel|podman)/;
+
+/**
+ * The first non-internal IPv4 address on a physical-looking interface (what a phone on the LAN
+ * reaches), else any non-internal one, else the hostname. `--desk-host` overrides it.
+ */
+export function lanAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string {
+  const v4 = Object.entries(interfaces).flatMap(([name, addrs]) =>
+    (addrs ?? [])
+      .filter((a) => a.family === "IPv4" && !a.internal)
+      .map((a) => ({ name, address: a.address })),
+  );
+  return (v4.find((a) => !VIRTUAL_IFACE.test(a.name)) ?? v4[0])?.address ?? hostname();
 }
 
 function findBun(path: string): string {
@@ -75,9 +94,9 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
   exec: (argv, opts) =>
     new Promise((resolve) => {
       const [bin, ...args] = argv;
-      // stdin stays the terminal's: sudo or a service manager may prompt.
+      // Without input, stdin stays the terminal's: sudo or a service manager may prompt.
       const child = spawn(bin as string, args, {
-        stdio: ["inherit", "pipe", "pipe"],
+        stdio: [opts?.input !== undefined ? "pipe" : "inherit", "pipe", "pipe"],
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
         ...(opts?.env !== undefined ? { env: opts.env as NodeJS.ProcessEnv } : {}),
       });
@@ -91,26 +110,31 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
       });
       child.on("error", (e) => resolve({ code: 127, stdout, stderr: e.message }));
       child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      if (opts?.input !== undefined) {
+        child.stdin?.on("error", () => {}); // the command exited early: its code says why
+        child.stdin?.end(opts.input);
+      }
     }),
   probeAnonymous: (url) => probeAnonymous(url),
   liveAgents: async (url, creds) => {
     const b = await openClient(url, creds);
     try {
-      const entries = await b.subscribeCollect("volley/_system/registry/+", 10_000, 1_000);
-      return entries.filter((e) => e.payload !== "").length;
+      return countLiveAgents(await b.subscribeCollect("volley/+/+/status", 10_000, 1_000));
     } finally {
       await b.disconnect().catch(() => {});
     }
   },
-  confirm: async (question) => {
+  confirm: async (question, defaultYes = false) => {
     if (process.stdin.isTTY !== true) return false;
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      return /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim());
+      const answer = (await rl.question(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `)).trim();
+      return answer === "" ? defaultYes : /^y(es)?$/i.test(answer);
     } finally {
       rl.close();
     }
   },
+  interactive: process.stdin.isTTY === true,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   platform: process.platform,
   uid: process.getuid?.() ?? 0,
@@ -127,6 +151,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       options: {
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
+        lan: { type: "boolean" },
+        "no-lan": { type: "boolean" },
         step: { type: "string", multiple: true },
         dir: { type: "string" },
         layout: { type: "string" },
@@ -149,8 +175,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.OK;
   }
   const str = (k: string) => values[k] as string | undefined;
-  const deps = injected ?? realSetupDeps(env);
-  let layout: Layout = deps.auth.layout();
+  const given = injected ?? realSetupDeps(env);
+  let layout: Layout = given.auth.layout();
   const layoutFlag = str("layout");
   if (layoutFlag !== undefined) {
     if (!Object.hasOwn(LAYOUTS, layoutFlag)) {
@@ -174,8 +200,28 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.USAGE;
   }
 
+  if (values.lan === true && values["no-lan"] === true) {
+    io.stderr("volley setup: --lan and --no-lan contradict each other\n");
+    return EXIT.USAGE;
+  }
+
   const url = resolveBrokerUrl(str("broker-url"), env);
-  const broker = new URL(url);
+  let broker: URL;
+  try {
+    broker = new URL(url);
+  } catch {
+    io.stderr(`volley setup: not a broker URL: ${url}\n`);
+    return EXIT.USAGE;
+  }
+  if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
+    io.stderr(
+      `volley setup: ${broker.protocol === "mqtts:" || broker.protocol === "wss:" ? "TLS is not supported by `volley setup` yet" : "the broker URL must be mqtt://"} (got ${url})\n`,
+    );
+    return EXIT.USAGE;
+  }
+  // Every command goes through the fence: the exact commands the steps run, nothing else.
+  const fence = setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun });
+  const deps: SetupDeps = { ...given, exec: fencedExec(given.exec, fence) };
   const invoker = deps.auth.invokingUser(env);
   const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const auth: AuthContext = {
@@ -196,6 +242,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     home: sudoHome ?? env.HOME ?? homedir(),
     volleydHome: volleydHome(env, sudoHome),
     repair: values.repair === true,
+    yes: values.yes === true,
+    ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
     deskHost: str("desk-host") ?? deps.lanHost(),
     deskPort: Number(portText),
   };
@@ -220,7 +268,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   io.stdout(
     `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
   );
-  const yes = values.yes === true;
+  const yes = ctx.yes;
+  const skipped: string[] = [];
   for (const [i, [name, planner]] of STEPS.entries()) {
     if (only.length > 0 && !only.includes(name)) continue;
     let plan: StepPlan;
@@ -241,6 +290,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     if (plan.skipped !== undefined) {
       journal(name, "skipped", plan.skipped);
       io.stdout(`  – skipped: ${plan.skipped}\n`);
+      skipped.push(plan.title);
       continue;
     }
     if (plan.changes.length === 0) {
@@ -259,7 +309,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     if (!yes && !(await deps.confirm(question))) {
       journal(name, "declined");
       io.stdout(
-        `  Nothing was changed. Rerun \`volley setup\` to continue${process.stdin.isTTY === true ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
+        `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
       );
       return EXIT.ERROR;
     }
@@ -289,7 +339,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   io.stdout(
     [
       "",
-      "Setup complete. Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
+      skipped.length === 0
+        ? "Setup complete."
+        : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
+      "Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
       `${join(auth.dir, "coordinator.json")} (in the MCP server env and your shell profile).`,
       `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
       "",
@@ -303,30 +356,37 @@ export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
 First-run (and repair) wizard: five steps, each showing what it found and what it will change
 before changing anything.
 
-  1. Broker    find mosquitto (>= 2.1), its listeners, the registered agents
+  1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
   2. Security  write the Dynamic Security broker config (the diff is shown; the old file is
                backed up), create the plugin's state file and admin login, restart the broker,
-               then check both listeners refuse anonymous clients
+               then check both listeners refuse anonymous clients. Asks whether devices on
+               your network may reach the WebSocket listener (port 9001: needed for the Desk on
+               a phone; logins required, not encrypted until TLS is set up), unless --lan or
+               --no-lan says; TCP (1883) stays on this machine either way
   3. Accounts  Volley's shared roles and the fixed identities volleyd, desk, coordinator
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
-               their credential files, the coordinator's login in the macOS keychain, and a
-               one-time admin token for the Desk (printed here only)
+               their credential files, a copy of the coordinator's login in the macOS
+               keychain, and a one-time admin token for the Desk (printed here only)
   4. Services  volleyd (launchd / systemd --user), the Volley hooks for coordinator sessions,
                the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
-  5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code
+  5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+               when a phone cannot reach the WebSocket listener (LAN access off)
 
-Rerunning changes nothing that is in place. Every step is journaled to
-$VOLLEYD_HOME/setup.log.
+Rerunning changes nothing that is in place. The one-time admin token and the phone's link
+count as in place while they are pending or once redeemed: a rerun after they expired unused
+issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log.
 
 Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
+  --lan                Open the WebSocket listener (9001) to your network (for the phone)
+  --no-lan             Keep it on this machine only (the default under --yes)
   --step <name>        Only this step (repeatable): detect, security, accounts, services, phone
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)
   --state-file <path>  The Dynamic Security state file (default: the layout's)
-  --broker-url <url>   The broker (env: VOLLEY_BROKER_URL; default mqtt://localhost:1883)
+  --broker-url <url>   The broker, mqtt:// (env: VOLLEY_BROKER_URL; default mqtt://localhost:1883)
   --desk-host <host>   The address in the phone's link (default: this machine's LAN address)
   --desk-port <n>      The Desk's port (default ${DESK_PORT})
   -h, --help           Show this help and exit

@@ -24,6 +24,7 @@ import { accountVerb, readAccounts } from "../commands/auth-accounts";
 import { makeBufferIO } from "../io";
 import { encodeQr, renderQr } from "./qr";
 import type { Change, SetupContext, StepPlan } from "./step";
+import { lanWsUrl } from "./step";
 
 /**
  * Step 3 of `volley setup`: Volley's shared roles and the fixed identities on the broker (the
@@ -37,6 +38,25 @@ import type { Change, SetupContext, StepPlan } from "./step";
 export const KEYCHAIN_SERVICE = "volley-broker";
 
 const list = (xs: readonly string[]) => xs.join(", ");
+
+/** A double-quoted word for `security -i`'s command line (`\` and `"` escaped). */
+const securityQuote = (s: string) => `"${s.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+
+/** The `security -i` command that stores the coordinator's password (fed on stdin). */
+export function keychainAddCommand(password: string): string {
+  return [
+    "add-generic-password",
+    "-U",
+    "-s",
+    KEYCHAIN_SERVICE,
+    "-a",
+    "coordinator",
+    "-l",
+    securityQuote("Volley broker login (coordinator)"),
+    "-w",
+    securityQuote(password),
+  ].join(" ");
+}
 
 /** `volley auth init`'s flags for setup: no config (step 2 owns it), every credential file. */
 const initFlags = (ctx: SetupContext, extra: Partial<MigrateFlags> = {}): MigrateFlags => ({
@@ -244,27 +264,27 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
     else {
       plan.changes.push({
         summary: `Store the coordinator's broker login in the macOS keychain (service ${KEYCHAIN_SERVICE})`,
-        detail: `security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a coordinator -w <password>`,
+        detail: `security -i, fed on stdin: add-generic-password -U -s ${KEYCHAIN_SERVICE} -a coordinator -w <password> (never on a command line)`,
         apply: async () => {
           const c = readCredentials(coordinatorFile);
           if (c === null) throw new Error(`${coordinatorFile} does not exist`);
-          // The password is on security's command line for a moment (visible in `ps`).
-          const r = await ctx.deps.exec([
+          // `security -i` reads its commands from stdin: the password never reaches argv (`ps`).
+          const r = await ctx.deps.exec(["security", "-i"], {
+            input: `${keychainAddCommand(c.password)}\n`,
+          });
+          // -i reports a failed command on stderr, not always in its exit code: read it back.
+          const back = await ctx.deps.exec([
             "security",
-            "add-generic-password",
-            "-U",
+            "find-generic-password",
             "-s",
             KEYCHAIN_SERVICE,
             "-a",
             "coordinator",
-            "-l",
-            "Volley broker login (coordinator)",
             "-w",
-            c.password,
           ]);
-          if (r.code !== 0) {
+          if (r.code !== 0 || back.code !== 0 || back.stdout.replace(/\n$/, "") !== c.password) {
             throw new Error(
-              `security add-generic-password failed (exit ${r.code}): ${r.stderr.trim()}`,
+              `security add-generic-password failed (exit ${r.code}): ${(r.stderr || back.stderr).trim()}`,
             );
           }
           return [`Stored the coordinator's login in the keychain (service ${KEYCHAIN_SERVICE}).`];
@@ -338,7 +358,8 @@ export function signinUrl(host: string, port: number, token: string): string {
 /**
  * Step 5 of `volley setup`: a one-time `steer` sign-in link for the phone, as a QR code and a URL
  * in the terminal (10 minutes, single use; only its hash is stored). Done while one is pending
- * or once the phone has redeemed one.
+ * or once the phone has redeemed one; skipped while a phone cannot reach the broker's WebSocket
+ * listener (LAN access off), so no link is spent on a page that could not sign in.
  */
 export async function planPhone(ctx: SetupContext): Promise<StepPlan> {
   const plan: StepPlan = { step: "phone", title: "Phone", found: [], changes: [] };
@@ -347,12 +368,6 @@ export async function planPhone(ctx: SetupContext): Promise<StepPlan> {
       `Skipped under --repair (\`volley auth signin-link --role steer --label "${PHONE_LABEL}"\` issues a link any time)`,
     );
     return plan;
-  }
-  const { layout } = ctx.auth;
-  if (layout.bind === "127.0.0.1") {
-    plan.found.push(
-      `Note: the broker's WebSocket listener (9001) listens on 127.0.0.1 only, so a phone that loads the Desk from ${ctx.deskHost}:${ctx.deskPort} cannot reach the broker yet; it can over a tunnel or port forward to this machine (a LAN listener needs TLS, not part of this setup)`,
-    );
   }
   const signedIn = readAccounts(ctx.auth.dir).find((a) => a.label === PHONE_LABEL);
   const pending = pendingTokens(ctx, (t) => t.kind === "signin" && t.label === PHONE_LABEL)[0];
@@ -364,6 +379,13 @@ export async function planPhone(ctx: SetupContext): Promise<StepPlan> {
     plan.found.push(
       `A phone sign-in link is pending until ${pending.expires_at} (it cannot be shown again; once it expires, rerun \`volley setup\` for a new one)`,
     );
+    return plan;
+  }
+  // The page a phone loads connects to port 9001 on the host it came from: without that reach a
+  // sign-in link (single use) would be wasted.
+  const ws = lanWsUrl(ctx);
+  if ((await ctx.deps.probeAnonymous(ws)) === "unreachable") {
+    plan.skipped = `a phone cannot reach the broker's WebSocket listener at ${ws} (it is on this machine only). Rerun \`volley setup --lan\` to open it to your network, or reach this machine over a tunnel; then \`volley auth signin-link --role steer --label "${PHONE_LABEL}"\` issues the link`;
     return plan;
   }
   plan.changes.push({

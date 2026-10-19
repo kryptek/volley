@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { writeConfig } from "../auth/config";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
@@ -202,6 +203,54 @@ function serviceEnv(ctx: SetupContext): Record<string, string> {
   };
 }
 
+/** Where a Desk build records what it was built from (`deskStamp` of its checkout). */
+export const DESK_STAMP = ".volley-build";
+
+/** The Desk's sources a build depends on, besides bun.lock at the repo root. */
+const DESK_INPUTS = [
+  "src",
+  "public",
+  "index.html",
+  "package.json",
+  "vite.config.ts",
+  "tsconfig.json",
+];
+
+/**
+ * A hash of the Desk's sources and the lockfile: a build whose recorded stamp differs is stale
+ * (an update since, or a build made outside setup).
+ */
+export function deskStamp(repo: string): string {
+  const desk = join(repo, "packages", "volley-desk");
+  const files: string[] = [];
+  const walk = (p: string) => {
+    if (!existsSync(p)) return;
+    if (statSync(p).isDirectory()) {
+      for (const e of readdirSync(p).sort()) walk(join(p, e));
+    } else files.push(p);
+  };
+  for (const i of DESK_INPUTS) walk(join(desk, i));
+  files.push(join(repo, "bun.lock"));
+  const h = createHash("sha256");
+  for (const f of files) {
+    h.update(`${relative(repo, f)}\0`);
+    h.update(existsSync(f) ? readFileSync(f) : "");
+    h.update("\0");
+  }
+  return h.digest("hex").slice(0, 16);
+}
+
+/** Vite's env files for a production build (gitignored: a developer's own). */
+const VITE_ENV_FILES = [".env", ".env.local", ".env.production", ".env.production.local"];
+
+/** The Desk's env files that set a broker URL or login, which Vite would inline into the page. */
+export function deskEnvLeaks(deskDir: string): string[] {
+  return VITE_ENV_FILES.filter((f) => {
+    const text = read(join(deskDir, f));
+    return /^\s*(export\s+)?VITE_VOLLEY_BROKER_\w*\s*=/m.test(text);
+  });
+}
+
 export async function planServices(ctx: SetupContext): Promise<StepPlan> {
   const plan: StepPlan = { step: "services", title: "Services", found: [], changes: [] };
   const repo = ctx.deps.repoRoot;
@@ -293,13 +342,26 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     });
   }
 
-  // The Desk: built once, then served.
+  // The Desk: built, rebuilt when its sources changed since, then served.
   const deskDir = join(repo, "packages", "volley-desk");
-  if (existsSync(join(deskDir, "dist", "index.html"))) {
-    plan.found.push(`The Desk is built (${join(deskDir, "dist")})`);
+  const dist = join(deskDir, "dist");
+  const stamp = deskStamp(repo);
+  const built = existsSync(join(dist, "index.html"));
+  const builtFrom = read(join(dist, DESK_STAMP)).trim();
+  if (built && builtFrom === stamp) {
+    plan.found.push(`The Desk is built from this checkout (${dist})`);
   } else {
+    const leaks = deskEnvLeaks(deskDir);
+    if (leaks.length > 0) {
+      plan.blocked = `${leaks.map((f) => join(deskDir, f)).join(", ")} set${leaks.length === 1 ? "s" : ""} VITE_VOLLEY_BROKER_*: Vite would build that broker URL or login into the page served to your network. Remove those lines (or move the file aside) and rerun`;
+      return plan;
+    }
     plan.changes.push({
-      summary: "Build the Desk (vite build in packages/volley-desk)",
+      summary: !built
+        ? "Build the Desk (vite build in packages/volley-desk)"
+        : builtFrom === ""
+          ? "Rebuild the Desk (the build in packages/volley-desk/dist was not made by setup)"
+          : `Rebuild the Desk (built from ${builtFrom}, the checkout is now ${stamp})`,
       detail: `cd ${deskDir} && ${bun} run build (no VITE_VOLLEY_BROKER_URL: the page uses port 9001 on the host it came from)`,
       apply: async () => {
         // Vite inlines VITE_* into the bundle: never a broker URL or a dev login.
@@ -310,7 +372,8 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
           ...buildEnv
         } = ctx.auth.env;
         await must(ctx, [bun, "run", "build"], { cwd: deskDir, env: buildEnv });
-        return [`Built the Desk into ${join(deskDir, "dist")}.`];
+        writeFileSync(join(dist, DESK_STAMP), `${stamp}\n`);
+        return [`Built the Desk into ${dist} (${stamp}).`];
       },
     });
   }

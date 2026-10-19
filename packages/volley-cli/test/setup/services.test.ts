@@ -1,8 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { planServices, renderLaunchd, renderSystemd } from "../../src/setup/services";
+import {
+  DESK_STAMP,
+  deskStamp,
+  planServices,
+  renderLaunchd,
+  renderSystemd,
+} from "../../src/setup/services";
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HOOKED_SETTINGS, fakeMachine } from "../helpers/setup-machine";
@@ -63,6 +69,43 @@ describe("setup: services", () => {
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain("volleyd: installed and loaded");
       expect(await again.verify?.()).toEqual([]);
+    });
+
+    it("records what the Desk was built from, and rebuilds it once the checkout changed", async () => {
+      await applyAll(await planServices(m.ctx));
+      const repo = m.deps.repoRoot as string;
+      expect(readFileSync(join(m.deskDist, DESK_STAMP), "utf-8")).toBe(`${deskStamp(repo)}\n`);
+      // An update (git pull) changes the Desk's sources: the old build is stale.
+      const old = deskStamp(repo);
+      mkdirSync(join(repo, "packages", "volley-desk", "src"), { recursive: true });
+      writeFileSync(join(repo, "packages", "volley-desk", "src", "main.tsx"), "export {};\n");
+      const p = await planServices(m.ctx);
+      expect(p.changes.map((c) => c.summary)).toEqual([
+        `Rebuild the Desk (built from ${old}, the checkout is now ${deskStamp(repo)})`,
+      ]);
+      await applyAll(p);
+      expect((await planServices(m.ctx)).changes).toEqual([]);
+    });
+
+    it("rebuilds a Desk build that setup did not make", async () => {
+      mkdirSync(m.deskDist, { recursive: true });
+      writeFileSync(join(m.deskDist, "index.html"), "<!doctype html><!-- a dev build -->");
+      const p = await planServices(m.ctx);
+      expect(p.changes.map((c) => c.summary)).toContain(
+        "Rebuild the Desk (the build in packages/volley-desk/dist was not made by setup)",
+      );
+    });
+
+    it("refuses to build a Desk whose .env files set a broker URL or login", async () => {
+      const deskDir = join(m.deps.repoRoot as string, "packages", "volley-desk");
+      writeFileSync(join(deskDir, ".env.local"), "VITE_VOLLEY_BROKER_PASSWORD=hunter2\n");
+      writeFileSync(join(deskDir, ".env"), "VITE_SOMETHING_ELSE=1\n");
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toContain(join(deskDir, ".env.local"));
+      expect(p.blocked).not.toContain(join(deskDir, ".env,"));
+      expect(p.blocked).toContain("VITE_VOLLEY_BROKER_");
+      expect(p.blocked).not.toContain("hunter2");
+      expect(m.execCalls.some((a) => a[1] === "run" && a[2] === "build")).toBe(false);
     });
 
     it("reloads a unit that is installed but not loaded", async () => {

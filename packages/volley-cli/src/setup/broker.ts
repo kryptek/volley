@@ -15,7 +15,7 @@ import { includedFiles } from "../auth/migrate";
 import { DYNSEC_ADMIN_USER } from "../auth/roles";
 import { INSTALL_INSTRUCTIONS, checkBrokerVersion, detectBrokerVersion } from "../auth/version";
 import type { AnonymousProbe, Change, SetupContext, StepPlan } from "./step";
-import { unifiedDiff } from "./step";
+import { lanWsUrl, unifiedDiff } from "./step";
 
 /**
  * Steps 1 and 2 of `volley setup`: find the broker, then secure it the way `volley auth init`
@@ -105,6 +105,29 @@ export function probeAnonymous(url: string, timeoutMs = 3_000): Promise<Anonymou
 
 const port = (url: string) => new URL(url).port || (url.startsWith("ws") ? "80" : "1883");
 
+/** Statuses after which an agent is no longer running (SPEC §5.3). */
+const ENDED = new Set(["done", "failed", "reaped"]);
+
+/**
+ * How many agents are running, from the retained `volley/+/+/status` messages: an LWT leaves the
+ * registry entry behind (SPEC §5), so the registry alone counts dead agents too.
+ */
+export function countLiveAgents(statuses: readonly { payload: string }[]): number {
+  return statuses.filter((s) => {
+    if (s.payload === "") return false;
+    try {
+      const type = (JSON.parse(s.payload) as { type?: unknown }).type;
+      return typeof type === "string" && !ENDED.has(type);
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+/** The question the security step asks when neither `--lan` nor `--no-lan` decides. */
+export const LAN_QUESTION =
+  "Let your phone and other devices on this network reach the broker's WebSocket listener (port 9001), so the Desk works from your phone? Every device still has to sign in, but the traffic is not encrypted until TLS is set up, so say yes only on a network you trust (home, not a café).";
+
 const describeProbe = (p: AnonymousProbe) =>
   p === "refused"
     ? "refuses anonymous clients"
@@ -178,7 +201,7 @@ export async function planDetect(ctx: SetupContext): Promise<StepPlan> {
   const coord = coordinatorCreds(ctx);
   if (coord !== null) {
     const n = await ctx.deps.liveAgents(ctx.auth.url, coord).catch(() => null);
-    if (n !== null) plan.found.push(`${n} agent${n === 1 ? "" : "s"} registered on the broker`);
+    if (n !== null) plan.found.push(`${n} agent${n === 1 ? "" : "s"} running on the broker`);
   }
   return plan;
 }
@@ -194,12 +217,29 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
     return plan;
   }
   let restart = false;
-  const wanted = generateConfig({ ...layout, stateFile: ctx.stateFile });
+  const local = generateConfig({ ...layout, stateFile: ctx.stateFile });
+  const open = generateConfig({ ...layout, stateFile: ctx.stateFile, wsBind: "" });
+  // LAN reach: the flag decides; else what the config has; else ask (no question under --yes).
+  let lan: boolean;
+  if (local === open)
+    lan = true; // the layout binds every interface already (a container)
+  else if (ctx.lan !== undefined) lan = ctx.lan;
+  else if (current === open || current === local) lan = current === open;
+  else lan = ctx.yes ? false : await ctx.deps.confirm(LAN_QUESTION, true);
+  ctx.lan = lan;
+  if (local !== open) {
+    plan.found.push(
+      lan
+        ? "LAN access: on. Devices on this network reach the WebSocket listener (port 9001) and must sign in; not encrypted (no TLS). `volley setup --no-lan` closes it."
+        : "LAN access: off. The WebSocket listener (port 9001) is on this machine only, so the Desk cannot work from a phone. `volley setup --lan` opens it.",
+    );
+  }
+  const wanted = lan ? open : local;
   if (current === wanted) plan.found.push(`${ctx.config} is Volley's Dynamic Security config`);
   else {
     restart = true;
     plan.changes.push({
-      summary: `Write ${ctx.config} (Dynamic Security, both listeners authenticated; the old one backed up)`,
+      summary: `Write ${ctx.config} (Dynamic Security, both listeners authenticated${lan && local !== open ? ", WebSocket open to the LAN" : ""}; the old one backed up)`,
       detail: unifiedDiff(ctx.config, current, wanted),
       apply: async () => {
         const w = writeConfig(ctx.config, wanted, io.now());
@@ -252,18 +292,31 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
     plan.found.push("The broker refuses the admin login: it does not run the plugin yet");
   }
 
-  for (const url of [ctx.tcpUrl, ctx.wsUrl]) {
+  // With LAN on, a phone's reach is checked too: it must get a refusal (reachable, logging in).
+  const lanUrl = lanWsUrl(ctx);
+  const probed = [ctx.tcpUrl, ctx.wsUrl, ...(lan && lanUrl !== ctx.wsUrl ? [lanUrl] : [])];
+  for (const url of probed) {
     const p = await ctx.deps.probeAnonymous(url);
-    plan.found.push(`Listener ${port(url)}: ${describeProbe(p)}`);
+    plan.found.push(
+      url === lanUrl && url !== ctx.wsUrl
+        ? `Listener 9001 from the LAN (${url}): ${describeProbe(p)}`
+        : `Listener ${port(url)}: ${describeProbe(p)}`,
+    );
     if (p !== "refused") restart = true;
   }
   if (restart) plan.changes.push(restartChange(ctx));
   plan.verify = async () => {
     const problems: string[] = [];
-    for (const url of [ctx.tcpUrl, ctx.wsUrl]) {
+    for (const url of probed) {
       const p = await ctx.deps.probeAnonymous(url);
       if (p === "accepted") problems.push(`${url} still accepts anonymous clients`);
-      if (p === "unreachable") problems.push(`${url} is not listening`);
+      if (p === "unreachable") {
+        problems.push(
+          url === lanUrl && url !== ctx.wsUrl
+            ? `${url} is not reachable from the LAN (a firewall? the wrong address? pass --desk-host)`
+            : `${url} is not listening`,
+        );
+      }
     }
     return problems;
   };

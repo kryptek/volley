@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
 
 /**
@@ -14,11 +15,13 @@ export interface ExecResult {
 
 /**
  * Every external command `volley setup` runs (broker restart, service managers, the keychain,
- * the hooks installer, the Desk build) goes through this one seam: argv only, never a shell.
+ * the hooks installer, the Desk build) goes through this one seam: argv only, never a shell,
+ * and only what `setupFence` allows. `input` is written to the command's stdin (a secret goes
+ * there, never on argv, where `ps` shows it); without it stdin stays the terminal's.
  */
 export type SetupExec = (
   argv: readonly string[],
-  opts?: { cwd?: string; env?: Record<string, string | undefined> },
+  opts?: { cwd?: string; env?: Record<string, string | undefined>; input?: string },
 ) => Promise<ExecResult>;
 
 /** What an anonymous MQTT CONNECT to a listener got. */
@@ -29,10 +32,15 @@ export interface SetupDeps {
   exec: SetupExec;
   /** Try an anonymous CONNECT to `url` (mqtt:// or ws://). */
   probeAnonymous: (url: string) => Promise<AnonymousProbe>;
-  /** Agents in the broker's registry, read with `creds`; null when it cannot tell. */
+  /** Agents with a live (non-terminal) retained status, read with `creds`; null when it cannot tell. */
   liveAgents: (url: string, creds: AdminCredentials) => Promise<number | null>;
-  /** Ask a yes/no question; false when there is nobody to answer. */
-  confirm: (question: string) => Promise<boolean>;
+  /**
+   * Ask a yes/no question (Enter takes `defaultYes`, false unless given); false when there is
+   * nobody to answer (not `interactive`).
+   */
+  confirm: (question: string, defaultYes?: boolean) => Promise<boolean>;
+  /** Whether a person is at the terminal to answer `confirm`. */
+  interactive: boolean;
   sleep: (ms: number) => Promise<void>;
   platform: NodeJS.Platform;
   uid: number;
@@ -58,6 +66,13 @@ export interface SetupContext {
   volleydHome: string;
   /** Re-check and fix only: no new one-time admin token, no phone link. */
   repair: boolean;
+  /** `--yes`: apply without asking (and so ask nothing else either). */
+  yes: boolean;
+  /**
+   * `--lan` (true) / `--no-lan` (false): whether devices on the LAN may reach the broker's
+   * WebSocket listener. Unset: keep what the config has, else ask (no under `--yes`).
+   */
+  lan?: boolean;
   deskHost: string;
   deskPort: number;
 }
@@ -88,6 +103,65 @@ export interface StepPlan {
 }
 
 export type Planner = (ctx: SetupContext) => Promise<StepPlan>;
+
+/** The broker's WebSocket listener as a phone on the LAN reaches it (the Desk's host). */
+export function lanWsUrl(ctx: SetupContext): string {
+  const host =
+    ctx.deskHost.includes(":") && !ctx.deskHost.startsWith("[")
+      ? `[${ctx.deskHost}]`
+      : ctx.deskHost;
+  return `ws://${host}:${new URL(ctx.wsUrl).port || "9001"}`;
+}
+
+/** What setup's exec may run besides the layout's restart: the fence's inputs. */
+export interface FenceInputs {
+  restart: string;
+  repoRoot: string | null;
+  bun: string;
+}
+
+/**
+ * The authority fence over `volley setup`'s exec: the exact commands its steps run, nothing
+ * else. Throws on any other argv. Read-only probes and the changes alike go through it.
+ */
+export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
+  const repo = (...p: string[]) => (repoRoot === null ? null : join(repoRoot, ...p));
+  const hooks = repo("packages", "volley-hooks", "scripts", "install.sh");
+  const volleyd = repo("packages", "volleyd", "src", "cli.ts");
+  const desk = repo("packages", "volley-desk");
+  return (argv: readonly string[], opts?: { cwd?: string }): void => {
+    const [a0, a1, a2] = argv;
+    const line = argv.join(" ");
+    const ok =
+      line === restart ||
+      (a0 === "launchctl" && ["print", "bootout", "bootstrap"].includes(a1 ?? "")) ||
+      (a0 === "systemctl" &&
+        a1 === "--user" &&
+        ["daemon-reload", "enable", "restart", "is-active"].includes(a2 ?? "")) ||
+      (a0 === "security" &&
+        (a1 === "find-generic-password" || (a1 === "-i" && argv.length === 2))) ||
+      (a0 === "bash" &&
+        hooks !== null &&
+        a1 === hooks &&
+        (argv.length === 2 || (argv.length === 3 && a2 === "--dry-run"))) ||
+      (a0 === bun && volleyd !== null && a1 === volleyd && a2 === "install") ||
+      (a0 === bun &&
+        a1 === "run" &&
+        a2 === "build" &&
+        argv.length === 3 &&
+        desk !== null &&
+        opts?.cwd === desk);
+    if (!ok) throw new Error(`volley setup does not run \`${line}\``);
+  };
+}
+
+/** `exec` behind `fence`: a refused command throws before anything is spawned. */
+export function fencedExec(exec: SetupExec, fence: ReturnType<typeof setupFence>): SetupExec {
+  return async (argv, opts) => {
+    fence(argv, opts);
+    return exec(argv, opts);
+  };
+}
 
 /**
  * A unified diff of `before` → `after` with three lines of context (`---`/`+++` headers named

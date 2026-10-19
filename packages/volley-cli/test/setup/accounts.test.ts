@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
 import { type DynsecCommand, cmd } from "../../src/auth/dynsec";
 import { ROLE_ACLS, VOLLEY_ROLES, roleName } from "../../src/auth/roles";
-import { PHONE_LABEL, planAccounts, planPhone } from "../../src/setup/accounts";
+import { PHONE_LABEL, keychainAddCommand, planAccounts, planPhone } from "../../src/setup/accounts";
 import { planSecurity } from "../../src/setup/broker";
 import { encodeQr, renderQr } from "../../src/setup/qr";
 import type { StepPlan } from "../../src/setup/step";
@@ -84,10 +84,11 @@ describe("setup: accounts", () => {
     expect(creds(volleydFile("broker.json")).username).toBe("volleyd");
     expect(creds(volleydFile("dynsec-admin.json")).username).toBe("dynsec-admin");
     expect(m.keychain.get("coordinator")).toBe(coordinator.password);
-    // The keychain write runs `security`; the password is never printed in the plan.
-    expect(m.execCalls.some((a) => a[0] === "security" && a[1] === "add-generic-password")).toBe(
-      true,
-    );
+    // The keychain write feeds `security -i` on stdin: the password is never on any argv (`ps`).
+    const at = m.execCalls.findIndex((a) => a.join(" ") === "security -i");
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(m.execInputs[at]).toContain(`-w "${coordinator.password}"`);
+    expect(m.execCalls.some((a) => a.some((w) => w.includes(coordinator.password)))).toBe(false);
 
     const out = m.io.readStdout();
     expect(out).toContain("New passwords (shown ONCE");
@@ -168,6 +169,24 @@ describe("setup: accounts", () => {
     expect((await planAccounts(m.ctx)).changes).toEqual([]);
   });
 
+  it("fails the keychain change when the stored password does not read back", async () => {
+    await setUp();
+    const exec = m.deps.exec;
+    m.deps.exec = async (argv, o) =>
+      argv[1] === "-i"
+        ? { code: 0, stdout: "", stderr: "User interaction is not allowed." }
+        : exec(argv, o);
+    await expect(applyAll(await planAccounts(m.ctx))).rejects.toThrow(
+      /security add-generic-password failed.*User interaction is not allowed/,
+    );
+  });
+
+  it("quotes the keychain command for `security -i`", () => {
+    expect(keychainAddCommand('a"b\\c')).toBe(
+      'add-generic-password -U -s volley-broker -a coordinator -l "Volley broker login (coordinator)" -w "a\\"b\\\\c"',
+    );
+  });
+
   it("keeps the credentials in the auth dir (0600) where there is no keychain", async () => {
     await setUp({ platform: "linux" });
     const p = await planAccounts(m.ctx);
@@ -219,7 +238,7 @@ describe("setup: phone", () => {
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), "volley-setup-phone-"));
     fake = await startFakeDynsec();
-    m = fakeMachine(fake, dir);
+    m = fakeMachine(fake, dir, { lan: true });
     await applyAll(await planSecurity(m.ctx));
     await applyAll(await planAccounts(m.ctx));
     m.freshIO();
@@ -275,9 +294,25 @@ describe("setup: phone", () => {
     expect(p.found.join("\n")).toContain("steer-0000beef");
   });
 
-  it("says when the broker's WebSocket listener is out of the phone's reach", async () => {
+  it("with LAN access off, is skipped, saying how to fix it, and issues no link", async () => {
+    // The broker restarted on the loopback-only config: a phone cannot reach port 9001.
+    m.ctx.lan = false;
+    await applyAll(await planSecurity(m.ctx));
+    expect(m.lanWs).toBe(false);
+    const tokens = readFileSync(join(m.layout.authDir, "tokens.json"), "utf-8");
     const p = await planPhone(m.ctx);
-    expect(p.found.join("\n")).toContain("127.0.0.1");
+    expect(p.changes).toEqual([]);
+    expect(p.skipped).toContain("ws://desk.example:9001");
+    expect(p.skipped).toContain("volley setup --lan");
+    expect(p.skipped).toContain('volley auth signin-link --role steer --label "Desk on phone"');
+    expect(readFileSync(join(m.layout.authDir, "tokens.json"), "utf-8")).toBe(tokens);
+  });
+
+  it("with LAN access on, the phone reaches the listener and gets its link", async () => {
+    expect(m.lanWs).toBe(true);
+    const p = await planPhone(m.ctx);
+    expect(p.skipped).toBeUndefined();
+    expect(p.changes).toHaveLength(1);
   });
 
   it("issues nothing under --repair", async () => {

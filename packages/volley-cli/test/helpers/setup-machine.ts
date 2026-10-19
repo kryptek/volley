@@ -40,7 +40,11 @@ export interface FakeMachine {
   io: BufferIO;
   layout: Layout;
   execCalls: string[][];
+  /** What each exec call got on stdin (undefined: the terminal's), by call index. */
+  execInputs: (string | undefined)[];
   anonymous: { tcp: AnonymousProbe; ws: AnonymousProbe };
+  /** Whether the running broker's WebSocket listener is open to the LAN (set at restart). */
+  lanWs: boolean;
   /** Answers `confirm` gives, in order (then false); and the questions it was asked. */
   answers: boolean[];
   questions: string[];
@@ -56,7 +60,7 @@ export interface FakeMachine {
 export function fakeMachine(
   fake: FakeDynsec,
   dir: string,
-  opts: { platform?: NodeJS.Platform; repair?: boolean } = {},
+  opts: { platform?: NodeJS.Platform; repair?: boolean; lan?: boolean } = {},
 ): FakeMachine {
   const layout: Layout = {
     ...LAYOUTS["brew-arm64"],
@@ -75,6 +79,8 @@ export function fakeMachine(
   const deskDist = join(repo, "packages", "volley-desk", "dist");
   const m: FakeMachine = {
     execCalls: [],
+    execInputs: [],
+    lanWs: false,
     anonymous: { tcp: "accepted", ws: "unreachable" },
     answers: [],
     questions: [],
@@ -95,10 +101,13 @@ export function fakeMachine(
   const exec: SetupExec = async (argv, o) => {
     const a = [...argv];
     m.execCalls.push(a);
+    m.execInputs.push(o?.input);
     const line = a.join(" ");
     if (line === layout.restart) {
       auth.adminUp = true;
       m.anonymous = { tcp: "refused", ws: "refused" };
+      // The broker now listens as its config says: `listener 9001` alone is every interface.
+      m.lanWs = /^listener 9001$/m.test(readText(layout.config) ?? "");
       return ok();
     }
     if (a[0] === "bun" && a[1] === volleydCli && a[2] === "install") {
@@ -150,8 +159,20 @@ export function fakeMachine(
         const pw = m.keychain.get(account);
         return pw === undefined ? { code: 44, stdout: "", stderr: "not found" } : ok(`${pw}\n`);
       }
-      if (a[1] === "add-generic-password") {
-        m.keychain.set(account, a[a.indexOf("-w") + 1] ?? "");
+      if (a[1] === "-i") {
+        // Interactive mode: one command per stdin line, double-quoted words with \-escapes.
+        for (const cmdLine of (o?.input ?? "").split("\n").filter((l) => l !== "")) {
+          const words = [...cmdLine.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((w) =>
+            w[1] !== undefined ? w[1].replace(/\\(.)/g, "$1") : (w[2] as string),
+          );
+          if (words[0] !== "add-generic-password") {
+            return { code: 1, stdout: "", stderr: `unknown command ${words[0]}` };
+          }
+          m.keychain.set(
+            words[words.indexOf("-a") + 1] ?? "",
+            words[words.indexOf("-w") + 1] ?? "",
+          );
+        }
         return ok();
       }
     }
@@ -161,12 +182,18 @@ export function fakeMachine(
   const deps: SetupDeps = {
     auth,
     exec,
-    probeAnonymous: async (url) => (url.startsWith("ws:") ? m.anonymous.ws : m.anonymous.tcp),
+    probeAnonymous: async (url) => {
+      if (!url.startsWith("ws:")) return m.anonymous.tcp;
+      // From the LAN (the Desk's host) the WebSocket listener answers only when it is open to it.
+      if (new URL(url).hostname === "desk.example" && !m.lanWs) return "unreachable";
+      return m.anonymous.ws;
+    },
     liveAgents: async () => 2,
     confirm: async (q) => {
       m.questions.push(q);
       return m.answers.shift() ?? false;
     },
+    interactive: true,
     sleep: async () => {},
     platform: opts.platform ?? "darwin",
     uid: 501,
@@ -192,6 +219,8 @@ export function fakeMachine(
     home,
     volleydHome: join(home, ".volley", "volleyd"),
     repair: opts.repair ?? false,
+    yes: false,
+    ...(opts.lan !== undefined ? { lan: opts.lan } : {}),
     deskHost: "desk.example",
     deskPort: 5199,
   };

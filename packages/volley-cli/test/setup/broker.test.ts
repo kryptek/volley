@@ -9,14 +9,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateConfig } from "../../src/auth/config";
 import {
+  LAN_QUESTION,
   anonymousConnectPacket,
   connackOutcome,
+  countLiveAgents,
   planDetect,
   planSecurity,
   probeAnonymous,
@@ -71,9 +73,9 @@ describe("setup: broker", () => {
       expect(p.blocked).toContain("sudo snap install mosquitto");
     });
 
-    it("counts registered agents once the coordinator's credentials exist", async () => {
+    it("counts running agents once the coordinator's credentials exist", async () => {
       // Before setup there is no coordinator.json: nothing to log in with.
-      expect((await planDetect(m.ctx)).found.join("\n")).not.toContain("registered on the broker");
+      expect((await planDetect(m.ctx)).found.join("\n")).not.toContain("running on the broker");
       const { mkdirSync } = await import("node:fs");
       mkdirSync(m.layout.authDir, { recursive: true });
       writeFileSync(
@@ -81,8 +83,24 @@ describe("setup: broker", () => {
         JSON.stringify({ username: "coordinator", password: "x" }),
       );
       expect((await planDetect(m.ctx)).found.join("\n")).toContain(
-        "2 agents registered on the broker",
+        "2 agents running on the broker",
       );
+    });
+
+    it("counts only agents whose retained status has not ended", () => {
+      const st = (type: string) => ({ payload: JSON.stringify({ type }) });
+      expect(
+        countLiveAgents([
+          st("working"),
+          st("registered"),
+          st("blocked"),
+          st("done"),
+          st("failed"),
+          st("reaped"),
+          { payload: "" },
+          { payload: "not json" },
+        ]),
+      ).toBe(3);
     });
   });
 
@@ -126,6 +144,66 @@ describe("setup: broker", () => {
       const again = await planSecurity(m.ctx);
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain("1883: refuses anonymous clients");
+    });
+
+    it("asks about LAN access (yes by default) when no flag decides, and keeps 1883 on loopback", async () => {
+      m.answers = [true];
+      const p = await planSecurity(m.ctx);
+      expect(m.questions).toEqual([LAN_QUESTION]);
+      expect(LAN_QUESTION).toContain("not encrypted until TLS");
+      expect(p.found.join("\n")).toContain("LAN access: on");
+      const diff = p.changes[0]?.detail ?? "";
+      expect(diff).toContain("+listener 1883 127.0.0.1");
+      expect(diff).toMatch(/^\+listener 9001$/m);
+      expect(diff).not.toContain("+listener 9001 127.0.0.1");
+      expect(p.changes[0]?.summary).toContain("WebSocket open to the LAN");
+    });
+
+    it("asks nothing under --yes and keeps the listener local; --lan opens it without asking", async () => {
+      m.ctx.yes = true;
+      let p = await planSecurity(m.ctx);
+      expect(m.questions).toEqual([]);
+      expect(p.found.join("\n")).toContain("LAN access: off");
+      expect(p.changes[0]?.detail).toContain("+listener 9001 127.0.0.1");
+      m.ctx.lan = true;
+      p = await planSecurity(m.ctx);
+      expect(m.questions).toEqual([]);
+      expect(p.changes[0]?.detail).toMatch(/^\+listener 9001$/m);
+    });
+
+    it("with LAN on: writes the open listener, restarts, and checks the LAN listener refuses anonymous", async () => {
+      m.ctx.lan = true;
+      const probed: string[] = [];
+      const probe = m.deps.probeAnonymous;
+      m.deps.probeAnonymous = async (url) => {
+        probed.push(url);
+        return probe(url);
+      };
+      const p = await planSecurity(m.ctx);
+      await applyAll(p);
+      expect(readFileSync(m.layout.config, "utf-8")).toBe(
+        generateConfig({ ...m.layout, stateFile: m.layout.stateFile, wsBind: "" }),
+      );
+      expect(readFileSync(m.layout.config, "utf-8")).toContain("not encrypted (no TLS)");
+      expect(m.lanWs).toBe(true);
+      expect(await p.verify?.()).toEqual([]);
+      expect(probed).toContain("ws://desk.example:9001");
+      // A LAN listener the phone cannot reach (a firewall) fails the step.
+      m.lanWs = false;
+      expect(await p.verify?.()).toEqual([
+        "ws://desk.example:9001 is not reachable from the LAN (a firewall? the wrong address? pass --desk-host)",
+      ]);
+      // A rerun without a flag keeps LAN access on, asking nothing.
+      m.lanWs = true;
+      Reflect.deleteProperty(m.ctx, "lan");
+      const again = await planSecurity(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(m.questions).toEqual([]);
+      expect(again.found.join("\n")).toContain("LAN access: on");
+      // --no-lan closes it again.
+      m.ctx.lan = false;
+      const close = await planSecurity(m.ctx);
+      expect(close.changes[0]?.detail).toContain("+listener 9001 127.0.0.1");
     });
 
     it("plans only a restart when the config is right but a listener still takes anonymous clients", async () => {
@@ -228,10 +306,18 @@ describe("unifiedDiff", () => {
 /** A WebSocket endpoint that answers the first binary frame with a CONNACK carrying `rc`. */
 async function wsConnackServer(rc: number, opts: { subprotocol?: boolean } = {}) {
   const frames: Buffer[] = [];
+  const offered: (string | undefined)[] = [];
   const sockets = new Set<import("node:stream").Duplex>();
   const server = createHttpServer();
   server.on("upgrade", (req, socket) => {
     sockets.add(socket);
+    // Like mosquitto: no `mqtt` subprotocol offered, no upgrade.
+    const protocols = req.headers["sec-websocket-protocol"] as string | undefined;
+    offered.push(protocols);
+    if (!(protocols ?? "").split(/\s*,\s*/).includes("mqtt")) {
+      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+      return;
+    }
     const key = req.headers["sec-websocket-key"] as string;
     const accept = createHash("sha1")
       .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
@@ -265,6 +351,25 @@ async function wsConnackServer(rc: number, opts: { subprotocol?: boolean } = {})
   return {
     url: `ws://127.0.0.1:${port}`,
     frames,
+    offered,
+    close: () =>
+      new Promise<void>((r) => {
+        for (const s of sockets) s.destroy();
+        server.close(() => r());
+      }),
+  };
+}
+
+/** A TCP server that accepts connections and never replies. */
+async function silentServer() {
+  const sockets = new Set<import("node:net").Socket>();
+  const server = createNetServer((s) => {
+    sockets.add(s);
+    s.on("error", () => {});
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    port: (server.address() as AddressInfo).port,
     close: () =>
       new Promise<void>((r) => {
         for (const s of sockets) s.destroy();
@@ -283,7 +388,7 @@ describe("probeAnonymous", () => {
     expect(connackOutcome(Uint8Array.from([0x20, 2, 0]))).toBeNull();
   });
 
-  it("over TCP: refused by an authenticating broker, accepted by an open one, unreachable when closed", async () => {
+  it("over TCP: refused by an authenticating broker, accepted by an open one", async () => {
     const authed = await startFakeDynsec();
     const open = await startTestBroker();
     try {
@@ -293,7 +398,6 @@ describe("probeAnonymous", () => {
       await authed.close();
       await open.close();
     }
-    expect(await probeAnonymous(open.url, 1_000)).toBe("unreachable");
   });
 
   it("over a WebSocket with the mqtt subprotocol", async () => {
@@ -303,10 +407,21 @@ describe("probeAnonymous", () => {
       expect(await probeAnonymous(refusing.url)).toBe("refused");
       expect(await probeAnonymous(accepting.url)).toBe("accepted");
       expect(refusing.frames[0]?.[0]).toBe(0x10);
+      expect(refusing.offered).toEqual(["mqtt"]);
     } finally {
       await refusing.close();
       await accepting.close();
     }
-    expect(await probeAnonymous(refusing.url, 1_000)).toBe("unreachable");
+  });
+
+  it("unreachable: a listener that never answers (over TCP and a WebSocket)", async () => {
+    // A server that stays bound for the whole test, so no other test can take its port.
+    const quiet = await silentServer();
+    try {
+      expect(await probeAnonymous(`ws://127.0.0.1:${quiet.port}`, 500)).toBe("unreachable");
+      expect(await probeAnonymous(`mqtt://127.0.0.1:${quiet.port}`, 500)).toBe("unreachable");
+    } finally {
+      await quiet.close();
+    }
   });
 });
