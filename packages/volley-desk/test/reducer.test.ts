@@ -446,3 +446,25 @@ describe("reducer — review fixups", () => {
     ]);
   });
 });
+
+describe("reducer — signs of life", () => {
+  it("keeps the last progress envelope's type and time (any type), live only", () => {
+    const s = apply(
+      registryFor("impl-x"),
+      progress("impl-x", "narration", { msg: "a" }),
+      msg(
+        "volley/default/impl-x/progress",
+        {
+          schema_version: "0.1",
+          agent_id: "impl-x",
+          channel: "progress",
+          type: "idle",
+          payload: { text: "turn ended" },
+        },
+        2_000,
+      ),
+    );
+    expect(s.agents["impl-x"]?.lastProgress).toEqual({ type: "idle", at: 2_000 });
+    expect(apply(registryFor("impl-y")).agents["impl-y"]?.lastProgress).toBeUndefined();
+  });
+});

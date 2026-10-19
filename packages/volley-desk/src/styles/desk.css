@@ -375,3 +375,20 @@ code {
     transition: none;
   }
 }
+
+/* supervisor health (top-bar pill, coordinators row), no-signal agent label */
+.sup-pill {
+  font-family: var(--f-mono);
+  white-space: nowrap;
+}
+.sup-pill i,
+.coord--sup .coord-dot {
+  background: var(--ok);
+}
+.sup-pill.chip--hot i,
+.coord--sup.st-gone .coord-dot {
+  background: var(--hot);
+}
+.a-nosignal {
+  margin: 6px 0;
+}

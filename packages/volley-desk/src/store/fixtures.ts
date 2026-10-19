@@ -528,6 +528,12 @@ export const NARRATION_POOL: Record<string, string[]> = {
     "Shard 1/4 green (2m12s)",
     "Shard 2/4 green (2m40s)",
   ],
+  // The reviewer `demoReviewer` spawns mid-demo keeps a signal too (else it shows "no signal").
+  "status-chip-t1-spec_reviewer-1": [
+    "Checking the alias table against the plan",
+    "Fixup diff matches section T1",
+    "Re-reading the light-mode guard change",
+  ],
 };
 
 const SCREEN_POOL: Record<string, string[]> = {
