@@ -84,6 +84,20 @@ function trackedFiles(): string[] {
     .filter((f) => /\.(ts|tsx|md|json|yaml|yml|conf|sh)$/.test(f) && f !== "bun.lock");
 }
 
+/** The problems in tracked file `f` (repo-relative path) with contents `text`. */
+export function fileProblems(f: string, text: string, known: Set<string>): string[] {
+  const problems: string[] = [];
+  for (const { ref, line } of citedSections(text, f === SPEC)) {
+    if (!known.has(ref)) problems.push(`${f}:${line}: cites SPEC §${ref}, which does not exist`);
+  }
+  text.split("\n").forEach((l, i) => {
+    if (citesDesignDoc(l)) {
+      problems.push(`${f}:${i + 1}: cites the local-only design doc by section`);
+    }
+  });
+  return problems;
+}
+
 export function check(): string[] {
   const spec = readFileSync(join(ROOT, SPEC), "utf-8");
   const sections = specSections(spec);
@@ -97,14 +111,7 @@ export function check(): string[] {
     } catch {
       continue; // deleted in the working tree
     }
-    for (const { ref, line } of citedSections(text, f === SPEC)) {
-      if (!known.has(ref)) problems.push(`${f}:${line}: cites SPEC §${ref}, which does not exist`);
-    }
-    text.split("\n").forEach((l, i) => {
-      if (citesDesignDoc(l)) {
-        problems.push(`${f}:${i + 1}: cites the local-only design doc by section`);
-      }
-    });
+    problems.push(...fileProblems(f, text, known));
   }
   return problems;
 }
