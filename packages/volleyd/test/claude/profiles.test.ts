@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -109,6 +109,15 @@ describe("selectAccount: task > wave > config default > primary", () => {
   it("refuses an unknown account and one that never finished signing in", () => {
     expect(() => selectAccount(r, reg, { wave: "nope" })).toThrow(/unknown Claude account 'nope'/);
     expect(() => selectAccount(r, reg, { task: "fresh" })).toThrow(/not signed in/);
+  });
+
+  it("a corrupt registry: the primary is still selectable; a profile pick is a ClaudeAccountError", () => {
+    const r3 = root();
+    mkdirSync(r3, { recursive: true });
+    writeFileSync(join(r3, "accounts.json"), "{ not json");
+    const read = () => readRegistry(r3);
+    expect(selectAccount(r3, read, {}).id).toBe(PRIMARY_ACCOUNT);
+    expect(() => selectAccount(r3, read, { task: "work" })).toThrow(ClaudeAccountError);
   });
 
   it("refuses a profile kept on another machine", () => {

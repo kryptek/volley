@@ -83,6 +83,11 @@ export interface SpawnRequest {
   account?: { id: string; dir: string | null };
   /** Appended to the brief: an account move's resume note (claude/move.ts). */
   resumeNote?: string;
+  /**
+   * The earlier attempt whose per-attempt worktree (`start` set) this spawn continues in, not a
+   * fresh one: an account move of a pipeline role (claude/move.ts moveRespawn).
+   */
+  worktreeAttempt?: number;
 }
 
 export interface SpawnDeps {
@@ -240,7 +245,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
       deps.tunables.worktree_root,
       req.wave.wave,
       req.task,
-      req.start !== undefined ? `${req.role}-${req.attempt}` : req.role,
+      req.start !== undefined ? `${req.role}-${req.worktreeAttempt ?? req.attempt}` : req.role,
     ),
   };
   try {
@@ -476,6 +481,7 @@ async function launchAttempt(
         branch: wt.branch,
         worktree_reused: wt.reused,
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
+        ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),

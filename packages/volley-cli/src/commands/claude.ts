@@ -37,7 +37,8 @@ never anywhere else. --wait blocks until the sign-in finishes.
 
 Options:
   --machine <name>       The machine the profile lives on (default: the supervisor's own)
-  --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails)
+  --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
+                         124 if it has not ended within --timeout, default 960)
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
   --json                 list: print the raw result
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -61,6 +62,8 @@ const OPTIONS = {
 /** The wait for an answer; a move waits for the agent to stop first. */
 const DEFAULT_TIMEOUT_S = 60;
 const MOVE_TIMEOUT_S = 180;
+/** --wait without --timeout: volleyd's own sign-in timeout (15 min), and a minute more. */
+const SIGNIN_WAIT_S = 960;
 /** How long volleyd's retained status may take to arrive. */
 const PROBE_MS = 1_000;
 const LIVE = new Set(["spawning", "registered", "working"]);
@@ -175,7 +178,17 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     if (verb === "add" || verb === "signin") {
       const r = answer.result as SigninResult;
       printSignin(io, r);
-      if (ends !== null && r.signed_in !== true) return reportEnd(io, r.acct, await ends(r.acct));
+      if (ends !== null && r.signed_in !== true) {
+        const waitMs = v.timeout !== undefined ? timeoutMs : SIGNIN_WAIT_S * 1000;
+        const end = await ends(r.acct, waitMs);
+        if (end === null) {
+          io.stderr(
+            `volley claude: sign-in of ${r.acct} did not finish within ${waitMs / 1000} s; \`volley claude list\` shows its state\n`,
+          );
+          return EXIT.TIMEOUT;
+        }
+        return reportEnd(io, r.acct, end);
+      }
       return EXIT.OK;
     }
     if (verb === "list") {
@@ -273,11 +286,11 @@ interface SigninEnd {
 
 /**
  * Collect every sign-in's end (`claude_signin_done` / `_failed`, non-retained) from now on;
- * the returned function waits for one account's.
+ * the returned function waits for one account's, up to `ms` (null: no end in time).
  */
 async function watchSigninEnds(
   broker: VolleyBroker,
-): Promise<(acct: string) => Promise<SigninEnd>> {
+): Promise<(acct: string, ms: number) => Promise<SigninEnd | null>> {
   const ended = new Map<string, SigninEnd>();
   const waiters = new Map<string, (e: SigninEnd) => void>();
   await broker.subscribeStream(SIGNIN_FILTER, ({ topic, payload }) => {
@@ -288,11 +301,15 @@ async function watchSigninEnds(
     ended.set(acct, end);
     waiters.get(acct)?.(end);
   });
-  return (acct) =>
+  return (acct, ms) =>
     new Promise((resolve) => {
       const seen = ended.get(acct);
-      if (seen !== undefined) resolve(seen);
-      else waiters.set(acct, resolve);
+      if (seen !== undefined) return resolve(seen);
+      const t = setTimeout(() => resolve(null), ms);
+      waiters.set(acct, (e) => {
+        clearTimeout(t);
+        resolve(e);
+      });
     });
 }
 

@@ -7,6 +7,7 @@ import {
   readlinkSync,
   renameSync,
   rmdirSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -170,51 +171,95 @@ export function applySharing(steps: readonly ShareStep[]): ShareResult[] {
 /** Synchronous wait (Claude Code's `.claude.json.lock` is held for milliseconds). */
 const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/** A JSON file's object, or null (absent or unreadable). */
+const readJson = (path: string): Record<string, unknown> | null => {
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+};
+
 /**
- * Copy the primary's `mcpServers` into a profile's `.claude.json`, keeping every other key of the
- * profile's own. Read → modify only `mcpServers` → write a temp file (0600) → rename, under the
- * same mkdir lock Claude Code takes (`<file>.lock/`). The result names the servers only: their
- * entries (`env`, `headers`) can hold third-party secrets, so they are never logged or published.
+ * Edit a profile's `.claude.json` under the same mkdir lock Claude Code takes (`<file>.lock/`):
+ * read → `edit` (null: nothing to change) → write a temp file (0600) → rename. A lock older than
+ * `claude_json_lock_stale_ms` was left by a process that died holding it, and is taken over.
  */
-export function syncMcp(
-  primaryJson: string,
+function editClaudeJson(
   profileJson: string,
-  opts: { lockAttempts?: number; lockWaitMs?: number } = {},
-): { servers: string[]; changed: boolean } {
-  const read = (path: string): Record<string, unknown> | null => {
-    try {
-      return JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  };
+  edit: (cur: Record<string, unknown>) => Record<string, unknown> | null,
+  opts: { lockAttempts?: number; lockWaitMs?: number; lockStaleMs?: number } = {},
+): boolean {
   if (present(profileJson) && lstatSync(profileJson).isSymbolicLink())
     throw new SharingError(`${profileJson} is a symlink: a profile's .claude.json is never linked`);
-  const servers = (read(primaryJson)?.mcpServers ?? {}) as Record<string, unknown>;
   const lock = `${profileJson}.lock`;
   const attempts = opts.lockAttempts ?? DAEMON_DEFAULTS.claude_json_lock_attempts;
+  const staleMs = opts.lockStaleMs ?? DAEMON_DEFAULTS.claude_json_lock_stale_ms;
   for (let i = 0; ; i++) {
     try {
       mkdirSync(lock);
       break;
     } catch {
-      if (i + 1 >= attempts) throw new SharingError(`${lock} is held; MCP servers not synced`);
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+          rmdirSync(lock);
+          continue;
+        }
+      } catch {}
+      if (i + 1 >= attempts)
+        throw new SharingError(
+          `${lock} is held; if no Claude Code session of this profile is running, remove it`,
+        );
       pause(opts.lockWaitMs ?? DAEMON_DEFAULTS.claude_json_lock_wait_ms);
     }
   }
   try {
-    const cur = read(profileJson) ?? {};
-    const changed = JSON.stringify(cur.mcpServers ?? null) !== JSON.stringify(servers);
-    if (changed) {
-      mkdirSync(dirname(profileJson), { recursive: true });
-      const tmp = `${profileJson}.volleyd.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ ...cur, mcpServers: servers }, null, 2)}\n`, {
-        mode: 0o600,
-      });
-      renameSync(tmp, profileJson);
-    }
-    return { servers: Object.keys(servers), changed };
+    const next = edit(readJson(profileJson) ?? {});
+    if (next === null) return false;
+    mkdirSync(dirname(profileJson), { recursive: true });
+    const tmp = `${profileJson}.volleyd.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, profileJson);
+    return true;
   } finally {
     rmdirSync(lock);
   }
+}
+
+/**
+ * Copy the primary's `mcpServers` into a profile's `.claude.json`, keeping every other key of the
+ * profile's own (editClaudeJson). The result names the servers only: their entries (`env`,
+ * `headers`) can hold third-party secrets, so they are never logged or published.
+ */
+export function syncMcp(
+  primaryJson: string,
+  profileJson: string,
+  opts: { lockAttempts?: number; lockWaitMs?: number; lockStaleMs?: number } = {},
+): { servers: string[]; changed: boolean } {
+  const servers = (readJson(primaryJson)?.mcpServers ?? {}) as Record<string, unknown>;
+  const changed = editClaudeJson(
+    profileJson,
+    (cur) =>
+      JSON.stringify(cur.mcpServers ?? null) !== JSON.stringify(servers)
+        ? { ...cur, mcpServers: servers }
+        : null,
+    opts,
+  );
+  return { servers: Object.keys(servers), changed };
+}
+
+/**
+ * Mark a profile's onboarding done (`hasCompletedOnboarding: true`) unless it already is: a fresh
+ * profile has a sign-in but not this, and an agent's first session would stop at onboarding.
+ */
+export function seedOnboarding(
+  profileJson: string,
+  opts: { lockAttempts?: number; lockWaitMs?: number; lockStaleMs?: number } = {},
+): boolean {
+  return editClaudeJson(
+    profileJson,
+    (cur) =>
+      cur.hasCompletedOnboarding === true ? null : { ...cur, hasCompletedOnboarding: true },
+    opts,
+  );
 }

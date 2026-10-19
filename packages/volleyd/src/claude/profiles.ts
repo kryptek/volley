@@ -80,7 +80,14 @@ export function readRegistry(root: string): ClaudeRegistry {
   } catch {
     return { version: 1, accounts: [] };
   }
-  const raw = JSON.parse(text) as Partial<ClaudeRegistry>;
+  let raw: Partial<ClaudeRegistry>;
+  try {
+    raw = JSON.parse(text) as Partial<ClaudeRegistry>;
+  } catch (e) {
+    throw new ClaudeAccountError(
+      `${registryPath(root)} is not valid JSON (${e instanceof Error ? e.message : String(e)})`,
+    );
+  }
   return { version: 1, accounts: Array.isArray(raw.accounts) ? raw.accounts : [] };
 }
 
@@ -156,7 +163,8 @@ export interface SelectedAccount {
  */
 export function selectAccount(
   root: string,
-  reg: ClaudeRegistry,
+  /** The registry, or how to read it: only read when a profile (not the primary) is picked. */
+  registry: ClaudeRegistry | (() => ClaudeRegistry),
   want: { task?: string; wave?: string; configDefault?: string | null },
 ): SelectedAccount {
   const pick: [AccountSource, string | null | undefined][] = [
@@ -168,6 +176,7 @@ export function selectAccount(
   if (id === null || id === undefined || id === PRIMARY_ACCOUNT)
     return { id: PRIMARY_ACCOUNT, dir: null, source };
   if (id === MOST_HEADROOM) return { id: PRIMARY_ACCOUNT, dir: null, source, fallback: id };
+  const reg = typeof registry === "function" ? registry() : registry;
   const acct = reg.accounts.find((a) => a.id === id);
   if (acct === undefined) throw new ClaudeAccountError(`unknown Claude account '${id}'`);
   if (acct.machine !== LOCAL_MACHINE)

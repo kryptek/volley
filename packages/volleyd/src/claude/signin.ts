@@ -32,6 +32,12 @@ import {
  * volleyd sees an authorize URL and the plan label, never a code, a token or a Keychain item.
  */
 
+/**
+ * The abort reason of a sign-in replaced by a newer one for the same account: it ends without
+ * touching the shared tmux session or URL file and publishes nothing (both are the new one's).
+ */
+export const SUPERSEDED = "superseded";
+
 export const signinSession = (acct: string) => `volley-signin-${acct}`;
 export const signinDir = (root: string, acct: string) => join(root, ".signin", acct);
 
@@ -160,7 +166,10 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
   const deadline = d.now() + d.timeoutMs;
   let published = false;
   for (let poll = 1; ; poll++) {
-    if (d.signal?.aborted === true) return fail("the supervisor stopped");
+    if (d.signal?.aborted === true)
+      return d.signal.reason === SUPERSEDED
+        ? { type: "claude_signin_failed", acct: d.acct, reason: "superseded by a newer sign-in" }
+        : fail("the supervisor stopped");
     if (!published) {
       let file: string | null = null;
       try {

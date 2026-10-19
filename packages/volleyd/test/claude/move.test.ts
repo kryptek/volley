@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountMoves, moveAgentAccount, resumeNote } from "../../src/claude/move";
+import { accountMoves, moveAgentAccount, moveRespawn, resumeNote } from "../../src/claude/move";
 import type { JournalEvent, NewEvent } from "../../src/types";
 
 const MOVE = {
@@ -120,5 +120,30 @@ describe("accountMoves (replayed from the journal)", () => {
         ev(3, "T2", "fixup", "work"),
       ]),
     ).toEqual({ "T1/implementer": "personal", "T2/fixup": "work" });
+  });
+});
+
+describe("moveRespawn (what a moved agent's respawn carries over)", () => {
+  it("a reviewer keeps its start point and its own attempt's worktree", () => {
+    expect(
+      moveRespawn({ role: "spec_reviewer", attempt: 2, start: "abc123", detached: true }),
+    ).toEqual({ start: { ref: "abc123", detach: true }, worktreeAttempt: 2 });
+  });
+
+  it("an agent moved again stays in the first attempt's worktree", () => {
+    expect(
+      moveRespawn({
+        role: "fixup",
+        attempt: 3,
+        worktree_attempt: 1,
+        start: "abc123",
+        detached: false,
+      }),
+    ).toEqual({ start: { ref: "abc123", detach: false }, worktreeAttempt: 1 });
+  });
+
+  it("an implementer (per-role worktree) needs neither", () => {
+    expect(moveRespawn({ role: "implementer", attempt: 1 })).toEqual({});
+    expect(moveRespawn(undefined)).toEqual({});
   });
 });

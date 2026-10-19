@@ -163,6 +163,33 @@ describe("claude_* control ops", () => {
     }
   });
 
+  it("claude_signin refuses a profile that is already signed in, with the logout remedy", async () => {
+    const t = await setup({ signInAfter: 1 });
+    try {
+      await t.client.request("claude_account_add", { label: "work" });
+      await until(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      const r = await t.client.request("claude_signin", { acct: "work" });
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/already signed in/) });
+      expect(r.error).toContain("claude auth logout");
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
+  it("a corrupt accounts.json: claude_accounts answers with the error, not a crash", async () => {
+    const t = await setup();
+    try {
+      mkdirSync(t.root, { recursive: true });
+      writeFileSync(join(t.root, "accounts.json"), "{ not json");
+      const r = await t.client.request("claude_accounts", {});
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/not valid JSON/) });
+    } finally {
+      await t.client.close();
+      await t.watcher.disconnect();
+    }
+  });
+
   it("agent_move_account refuses an agent volleyd does not supervise", async () => {
     const t = await setup();
     try {

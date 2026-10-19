@@ -98,6 +98,28 @@ export async function moveAgentAccount(m: MoveRequest, d: MoveDeps): Promise<Mov
   };
 }
 
+/**
+ * What a moved agent's respawn carries over from its `agent_spawned` record: a pipeline role
+ * (reviewer, fixup, rebase) keeps its start point and continues in its own per-attempt worktree,
+ * where its `.volley/` inputs (review.md, findings.md, …) still are. An implementer's worktree
+ * is per role, so it needs neither.
+ */
+export function moveRespawn(spawned: Record<string, unknown> | undefined): {
+  start?: { ref: string; detach: boolean };
+  worktreeAttempt?: number;
+} {
+  if (typeof spawned?.start !== "string") return {};
+  return {
+    start: { ref: spawned.start, detach: spawned.detached === true },
+    // A moved agent moved again: its worktree is still the first attempt's.
+    ...(typeof spawned.worktree_attempt === "number"
+      ? { worktreeAttempt: spawned.worktree_attempt }
+      : typeof spawned.attempt === "number"
+        ? { worktreeAttempt: spawned.attempt }
+        : {}),
+  };
+}
+
 /** Each task role's latest move (`<task>/<role>` → account id), replayed from a wave journal. */
 export function accountMoves(events: readonly JournalEvent[]): Record<string, string> {
   const out: Record<string, string> = {};

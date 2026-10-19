@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { addAccount, profileDir, readRegistry } from "../../src/claude/profiles";
 import {
+  SUPERSEDED,
   type SigninEvent,
   parseAuthStatus,
   parseSigninUrl,
@@ -135,8 +136,9 @@ function world(opts: { browser?: boolean; signInAfter?: number; exitAfter?: numb
     });
   const events: SigninEvent[] = [];
   let clock = 0;
-  const run = () =>
+  const run = (signal?: AbortSignal) =>
     runSignin({
+      ...(signal !== undefined ? { signal } : {}),
       exec: fx.exec,
       root,
       acct: "work",
@@ -228,6 +230,22 @@ describe("runSignin", () => {
       reason: expect.stringMatching(/timed out/),
     });
     expect(w.fx.argvs(["tmux", "kill-session"]).length).toBeGreaterThan(0);
+  });
+
+  it("superseded by a newer sign-in: ends without touching its session or publishing", async () => {
+    const w = world();
+    const abort = new AbortController();
+    // The newer sign-in replaces this one while it is inside `claude auth status`.
+    w.fx.on(["claude", "auth", "status"], () => {
+      abort.abort(SUPERSEDED);
+      return { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
+    });
+    const last = await w.run(abort.signal);
+    expect(last).toMatchObject({ type: "claude_signin_failed", reason: /superseded/ });
+    // Only the start's own replace-the-old-session kill; none after the abort.
+    expect(w.fx.argvs(["tmux", "kill-session"])).toHaveLength(1);
+    expect(existsSync(join(signinDir(w.root, "work"), "url"))).toBe(true);
+    expect(w.events.map((e) => e.type)).toEqual(["claude_signin_url"]);
   });
 
   it("no tmux → fails with the run-it-yourself command", async () => {

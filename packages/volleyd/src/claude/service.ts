@@ -13,8 +13,16 @@ import {
   readRegistry,
   selectAccount,
 } from "./profiles";
-import { type ShareResult, applySharing, planSharing, readSharing, syncMcp } from "./sharing";
-import { type SigninEvent, runSignin } from "./signin";
+import {
+  type ShareResult,
+  SharingError,
+  applySharing,
+  planSharing,
+  readSharing,
+  seedOnboarding,
+  syncMcp,
+} from "./sharing";
+import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } from "./signin";
 
 /**
  * The daemon's Claude account profiles: the control ops (`claude_accounts`,
@@ -66,13 +74,17 @@ export class ClaudeService {
 
   /** The account a spawn runs under (profiles.ts selectAccount over the current registry). */
   select(want: { task?: string; wave?: string; configDefault?: string | null }): SelectedAccount {
-    return selectAccount(this.d.root, readRegistry(this.d.root), want);
+    return selectAccount(this.d.root, () => readRegistry(this.d.root), want);
   }
 
-  /** Sharing (sharing.yaml) and, for `mcp: copy`, the MCP servers sync: before every spawn. */
+  /**
+   * Sharing (sharing.yaml), the onboarding seed and, for `mcp: copy`, the MCP servers sync:
+   * before every spawn.
+   */
   prepare(acct: { id: string; dir: string }): { shared: ShareResult[]; mcp_servers?: number } {
     const sharing = readSharing(this.d.root);
     const shared = applySharing(planSharing(sharing, this.primaryDir, acct.dir));
+    seedOnboarding(join(acct.dir, ".claude.json"));
     if (sharing.mcp !== "copy") return { shared };
     const mcp = syncMcp(this.d.primaryJson, join(acct.dir, ".claude.json"));
     return { shared, mcp_servers: mcp.servers.length };
@@ -80,8 +92,17 @@ export class ClaudeService {
 
   /** `claude_accounts`: the registry, each account's running sign-in, and the sharing modes. */
   list(): Reply {
-    const accounts = readRegistry(this.d.root).accounts.map((a) => this.withSignin(a));
-    return { ok: true, result: { root: this.d.root, accounts, sharing: readSharing(this.d.root) } };
+    try {
+      const accounts = readRegistry(this.d.root).accounts.map((a) => this.withSignin(a));
+      return {
+        ok: true,
+        result: { root: this.d.root, accounts, sharing: readSharing(this.d.root) },
+      };
+    } catch (e) {
+      if (e instanceof ClaudeAccountError || e instanceof SharingError)
+        return { ok: false, error: e.message };
+      throw e;
+    }
   }
 
   private withSignin(a: ClaudeAccount) {
@@ -132,6 +153,17 @@ export class ClaudeService {
     const acct = typeof p.acct === "string" ? p.acct : "";
     if (!readRegistry(this.d.root).accounts.some((a) => a.id === acct))
       return { ok: false, error: `unknown Claude account '${acct}'` };
+    // A signed-in profile would end the new sign-in at its first poll, before any login.
+    const dir = profileDir(this.d.root, acct);
+    const status = await this.d.exec(["claude", "auth", "status"], {
+      env: profileEnv(process.env, dir),
+      timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+    });
+    if (parseAuthStatus(status.stdout)?.loggedIn === true)
+      return {
+        ok: false,
+        error: `Claude account '${acct}' is already signed in; to sign it in as another Claude account, run \`CLAUDE_CONFIG_DIR=${dir} claude auth logout\` first`,
+      };
     return this.answerSignin(acct, by, {});
   }
 
@@ -152,7 +184,7 @@ export class ClaudeService {
   }
 
   private startSignin(acct: string, by: string): Pending {
-    this.signins.get(acct)?.abort.abort();
+    this.signins.get(acct)?.abort.abort(SUPERSEDED);
     const abort = new AbortController();
     let first!: (e: SigninEvent) => void;
     const pending: Pending = {
@@ -163,7 +195,11 @@ export class ClaudeService {
       done: Promise.resolve() as unknown as Promise<SigninEvent>,
     };
     this.signins.set(acct, pending);
-    void this.d.journal({ type: "claude_signin_started", data: { acct, by } });
+    this.d
+      .journal({ type: "claude_signin_started", data: { acct, by } })
+      .catch((e: unknown) =>
+        this.d.log(`claude sign-in ${acct}: ${e instanceof Error ? e.message : String(e)}`),
+      );
     pending.done = runSignin({
       exec: this.d.exec,
       root: this.d.root,
@@ -175,11 +211,15 @@ export class ClaudeService {
         this.d.sleep ??
         ((ms) =>
           new Promise<void>((r) => {
-            const t = setTimeout(r, ms);
+            if (abort.signal.aborted) return r();
             const wake = () => {
               clearTimeout(t);
               r();
             };
+            const t = setTimeout(() => {
+              abort.signal.removeEventListener("abort", wake);
+              r();
+            }, ms);
             abort.signal.addEventListener("abort", wake, { once: true });
           })),
       pollMs: this.d.signinPollMs ?? DAEMON_DEFAULTS.claude_signin_poll_ms,

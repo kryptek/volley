@@ -7,6 +7,7 @@ import {
   readlinkSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,7 @@ import {
   parseSharing,
   planSharing,
   readSharing,
+  seedOnboarding,
   sharingPath,
   syncMcp,
 } from "../../src/claude/sharing";
@@ -183,5 +185,36 @@ describe("syncMcp: .claude.json is copied per section, never linked", () => {
     const dst = join(s.profile, ".claude.json");
     mkdirSync(`${dst}.lock`);
     expect(() => syncMcp(s.primaryJson, dst, { lockAttempts: 2, lockWaitMs: 1 })).toThrow(/lock/);
+  });
+
+  it("takes over a stale lock a crashed process left behind", () => {
+    const s = setup();
+    const dst = join(s.profile, ".claude.json");
+    mkdirSync(`${dst}.lock`);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${dst}.lock`, old, old);
+    expect(syncMcp(s.primaryJson, dst, { lockAttempts: 2, lockWaitMs: 1 }).changed).toBe(true);
+    expect(existsSync(`${dst}.lock`)).toBe(false);
+  });
+});
+
+describe("seedOnboarding", () => {
+  it("marks a fresh profile's onboarding done, keeping its own keys; once", () => {
+    const s = setup();
+    const dst = join(s.profile, ".claude.json");
+    writeFileSync(dst, JSON.stringify({ userID: "u-work" }));
+    expect(seedOnboarding(dst)).toBe(true);
+    expect(JSON.parse(readFileSync(dst, "utf-8"))).toEqual({
+      userID: "u-work",
+      hasCompletedOnboarding: true,
+    });
+    expect(seedOnboarding(dst)).toBe(false);
+  });
+
+  it("refuses a symlinked .claude.json too", () => {
+    const s = setup();
+    const dst = join(s.profile, ".claude.json");
+    symlinkSync(s.primaryJson, dst);
+    expect(() => seedOnboarding(dst)).toThrow(/symlink/);
   });
 });

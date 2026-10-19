@@ -395,7 +395,9 @@ set to a helper that only writes down the URL Claude Code asks it to open. That 
 Claude Code's own listener on this machine, so open it in a browser **here**; the browser hands
 the code straight back to the `claude` process. volleyd answers the op with the URL and publishes
 `claude_signin_url { acct, url, flow, attach }` on `volley/_system/claude/<acct>/signin` (not
-retained: whoever opens it first picks the account), then polls `claude auth status` until
+retained: whoever opens it first picks the account; not retained is not private — under the
+example broker ACL every client, agents included, may read `volley/#` and so the URL while the
+sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
 `loggedIn` → `claude_signin_done { acct, plan }`, or `claude_signin_failed { acct, reason }`
 (the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
 run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
@@ -432,8 +434,10 @@ primary. Applied before every spawn under a profile and by `volley claude sync`.
 `copy` is copied once, when the profile has none, and is the profile's own from then on; `own` is
 never touched (a link volleyd made is removed). A real file or directory of the profile's own is
 never replaced. `.claude.json` holds the profile's own account and is never linked or copied
-whole: only `mcpServers` is rewritten (read → replace that key → temp file `0600` → rename, under
-Claude Code's own `.claude.json.lock/`). MCP entries can carry third-party secrets (`env`,
+whole: only `mcpServers` is rewritten, and `hasCompletedOnboarding: true` seeded once so a fresh
+profile's first agent does not stop at onboarding (read → set that key → temp file `0600` →
+rename, under Claude Code's own `.claude.json.lock/`; a lock older than
+`claude_json_lock_stale_ms` was left by a crashed process and is taken over). MCP entries can carry third-party secrets (`env`,
 `headers`), so volleyd never publishes or journals them (`claude_profile_synced` carries counts).
 `.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched;
 `test/no-credentials.test.ts` keeps every credential location out of `src/`.
@@ -442,7 +446,8 @@ Claude Code's own `.claude.json.lock/`). MCP entries can carry third-party secre
 { agent_id, role, from, to, by }` first, cancels the agent (mailbox `cancel` + Escape) and waits
 up to `account_move_stop_ms` for its terminal status. Then it retires it (`moved`) and respawns
 the role under the other account: a new attempt in the same worktree, with a resume note at the
-end of its brief. The move is replayed from the journal, so later spawns of that task role keep
+end of its brief. A reviewer, fixup or rebase keeps its start point and its own attempt's worktree,
+with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
 the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
 alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
 

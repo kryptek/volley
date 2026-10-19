@@ -89,4 +89,37 @@ describe("spawn under a Claude account", () => {
       "CLAUDE_ACCOUNT_PREPARE_FAILED",
     );
   });
+
+  it("an account move of a reviewer continues in its earlier attempt's worktree and inputs", async () => {
+    env = await makeSpawnEnv();
+    const dir = profile(true);
+    const first = join(env.dir, "wt", "w1", "T1-spec_reviewer-1");
+    mkdirSync(join(first, ".volley"), { recursive: true });
+    writeFileSync(join(first, ".volley", "review.md"), "# review the head\n");
+    const out = await spawnAgent(
+      env.request({
+        role: "spec_reviewer",
+        attempt: 2,
+        start: { ref: "abc123", detach: true },
+        worktreeAttempt: 1,
+        account: { id: "work", dir },
+        resumeNote: "## Resume",
+      }),
+      env.deps,
+    );
+    expect(out.kind).toBe("launched");
+    expect(env.host.worktrees.at(-1)).toMatchObject({ path: first, base: "abc123", detach: true });
+    expect(readFileSync(join(first, ".volley", "review.md"), "utf-8")).toBe("# review the head\n");
+    expect(readFileSync(join(first, ".volley", "launch.sh"), "utf-8")).toContain(
+      `export CLAUDE_CONFIG_DIR='${dir}'`,
+    );
+    const spawned = env.events.find((e) => e.type === "agent_spawned");
+    expect(spawned?.data).toMatchObject({
+      attempt: 2,
+      worktree_attempt: 1,
+      start: "abc123",
+      detached: true,
+      worktree: first,
+    });
+  });
 });

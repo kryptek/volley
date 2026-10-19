@@ -40,7 +40,7 @@ import {
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
-import { accountMoves, moveAgentAccount } from "./claude/move";
+import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { DAEMON_DEFAULTS } from "./config-defaults";
@@ -1519,6 +1519,8 @@ export class Daemon {
       files?: Record<string, string>;
       /** An account move's resume note, appended to the brief. */
       resumeNote?: string;
+      /** An account move of a pipeline role: the attempt whose worktree it continues in. */
+      worktreeAttempt?: number;
     } = {},
   ): Promise<SpawnResult> {
     const log = this.waves.get(wave);
@@ -3328,7 +3330,10 @@ export class Daemon {
           retire: () => this.serial(() => this.retire(agentId, "moved")),
           respawn: async (r) => {
             const res = await this.serial(() =>
-              this.startSpawn(a.wave, a.task, a.role, { resumeNote: r.resumeNote }),
+              this.startSpawn(a.wave, a.task, a.role, {
+                ...moveRespawn(spawned),
+                resumeNote: r.resumeNote,
+              }),
             );
             return res.kind === "launched"
               ? { agentId: res.agentId }

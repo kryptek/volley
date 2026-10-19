@@ -128,6 +128,17 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
+  it("add --wait is bounded by --timeout when the sign-in never ends", async () => {
+    const v = await fakeVolleyd(tb.url, () => ({
+      ok: true,
+      result: { acct: "work", url: URL_CB, flow: "browser_callback" },
+    }));
+    const r = await run(["add", "work", "--wait", "--timeout", "1"]);
+    expect(r.exitCode).toBe(124);
+    expect(r.stderr).toMatch(/sign-in of work did not finish within 1 s/);
+    await v.b.disconnect();
+  });
+
   it("list prints each profile's sign-in state and the sharing modes", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,

@@ -207,6 +207,8 @@ export const DAEMON_DEFAULTS = {
   /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
   claude_json_lock_attempts: 50,
   claude_json_lock_wait_ms: 20,
+  /** A `.claude.json.lock` older than this was left by a process that died holding it. */
+  claude_json_lock_stale_ms: 10_000,
   /** How long an account move waits for the agent to stop before it respawns it. */
   account_move_stop_ms: 60_000,
 } as const;
