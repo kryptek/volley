@@ -111,10 +111,33 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
     expect(seen).not.toContain(steerRedeem);
   });
 
-  it("nobody but the supervisor writes an answer on the reply topic", async () => {
+  it("a supervisor account writes the tree but cannot impersonate an admin", async () => {
+    const own = probe("supervisor-own");
+    const asAdmin = probe("supervisor-as-admin");
+    await attempt("supervisor-test", `volley/${NS}/some-agent/mailbox`, own);
+    await attempt("supervisor-test", authOpsTopic("admin-test"), asAdmin);
+    expect(await delivered(own)).toBe(true);
+    expect(seen).not.toContain(asAdmin);
+  });
+
+  it("a token login can read the tree (the shared read pattern) until it is pruned", async () => {
+    const c = await connectAs("redeem-0000abcd");
+    clients.push(c);
+    const got: string[] = [];
+    await c.subscribeStream(`volley/${NS}/+/status`, (m) => got.push(m.payload));
+    const status = probe("status-seen-by-token");
+    await attempt("admin-test", `volley/${NS}/some-agent/status`, status);
+    for (let i = 0; i < 20 && !got.includes(status); i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(got).toContain(status);
+  });
+
+  it("only the fixed volleyd identity writes an answer on the reply topic", async () => {
     const forged = probe("forged-reply");
     await attempt("admin-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
     await attempt("steer-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
+    await attempt("supervisor-test", "volley/_system/auth/replies/0a4f3e7c-8b21", forged);
     await new Promise((r) => setTimeout(r, 300));
     expect(seen).not.toContain(forged);
   });

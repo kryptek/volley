@@ -98,7 +98,7 @@ is a template `volley auth` appends to `acl.conf` as a managed `# >>> volley acc
 | `admin` | everything `coordinator` may, plus `volley/_system/auth/ops/<name>` (account ops through volleyd) |
 | `steer` | any agent's `mailbox` (steering, control requests to volleyd) |
 | `watch` | nothing |
-| `supervisor` | `volley/#` (a volleyd) |
+| `supervisor` | `volley/#` (a volleyd), except the account-op and answer topics: its block denies `volley/_system/auth/ops/#` and `volley/_system/auth/replies/#`, so it cannot impersonate an admin or forge volleyd's answers |
 | `peer` | `volley/_system/machines/<name>` and below (a paired machine) |
 
 The shared `pattern` lines still apply to every account: read `volley/#`, write the account's own
@@ -113,9 +113,14 @@ managed `# >>> volley token <id>` block that allows exactly one write,
 `volley/_system/auth/redeem`. That is how a browser with nothing but the token reaches volleyd
 without the broker accepting anonymous clients: mosquitto applies `pattern` lines (including
 `pattern read volley/#`) to anonymous clients too, and a `deny` would also block the redeem topic,
-so an anonymous redeem topic would expose the whole tree to every web page. Redeeming burns the
-token and removes its login; an expired token's login is removed by the next `volley auth` account
-command (`volley auth list` will do).
+so an anonymous redeem topic would expose the whole tree to every web page. The token login keeps
+those shared patterns too: until it is removed it can **read** the whole tree (never a secret,
+which volleyd seals to the requester's key). Redeeming burns the token but keeps its login for
+about a minute, because mosquitto disconnects a client whose user leaves the password file when it
+reloads, and the redeeming client is still connected as that login, waiting for its answer. The
+next `volley auth` account command after that (or after the token expires) removes the login;
+volleyd runs `volley auth list` every minute (`token_prune_ms`), so an unused token stops being a
+login soon after it expires.
 
 ## Giving clients their credentials
 

@@ -285,7 +285,7 @@ const ALLOWED: string[][] = [
     "--role",
     "watch",
     "--label",
-    "Alfred's phone",
+    "Owner's phone",
     "--ttl",
     "300",
     "--json",

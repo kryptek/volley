@@ -11,7 +11,7 @@ cp "$acl" "$dir/acl.conf"
 : > "$dir/passwd"
 chmod 0600 "$dir/passwd" "$dir/acl.conf"
 for user in volleyd desk coordinator w1-t1-implementer-1 w1-t2-implementer-1 \
-  admin-test steer-test watch-test peer-test redeem-0000abcd; do
+  admin-test steer-test watch-test peer-test supervisor-test redeem-0000abcd; do
   mosquitto_passwd -b "$dir/passwd" "$user" "$user-test-pw"
 done
 # What `volley auth add-agent w1-t1-implementer-1 --ack-to coordinator-ab12`
@@ -59,6 +59,14 @@ user peer-test
 topic write volley/_system/machines/peer-test
 topic write volley/_system/machines/peer-test/#
 # <<< volley account peer-test
+
+# >>> volley account supervisor-test (managed by `volley auth`; do not edit)
+# role: supervisor
+user supervisor-test
+topic deny volley/_system/auth/ops/#
+topic deny volley/_system/auth/replies/#
+topic readwrite volley/#
+# <<< volley account supervisor-test
 
 # >>> volley token 0000abcd (managed by `volley auth`; removed when redeemed or expired)
 user redeem-0000abcd

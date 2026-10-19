@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -589,10 +597,13 @@ describe("volley auth", () => {
       expect(aclBlock("s1", "steer")).toContain("topic write volley/+/+/mailbox");
       expect(aclBlock("s1", "steer")).not.toContain("volley/+/+/status");
       expect(aclBlock("v1", "supervisor")).toContain("topic readwrite volley/#");
+      // ...but never an admin's ops topic (the topic names the sender) or the daemon's answers.
+      expect(aclBlock("v1", "supervisor")).toContain("topic deny volley/_system/auth/ops/#");
+      expect(aclBlock("v1", "supervisor")).toContain("topic deny volley/_system/auth/replies/#");
       expect(aclBlock("m1", "peer")).toContain("topic write volley/_system/machines/m1\n");
       expect(aclBlock("m1", "peer")).toContain("topic write volley/_system/machines/m1/#");
       expect(aclBlock("m1", "peer")).not.toContain("mailbox");
-      for (const role of ["steer", "watch", "supervisor", "peer"] as const) {
+      for (const role of ["steer", "watch", "peer"] as const) {
         expect(aclBlock("x", role)).not.toContain("_system/auth/ops");
       }
     });
@@ -754,15 +765,85 @@ describe("volley auth", () => {
           },
         ]);
         expect(acl()).toContain(aclBlock("admin-00000001", "admin"));
-        // Burned: the login is gone and the entry records the redemption.
-        expect(passwdText()).not.toContain("redeem-00000001");
-        expect(acl()).not.toContain("redeem-00000001");
+        // Burned: the entry records the redemption. The token's login stays: mosquitto drops a
+        // connected client whose user leaves the password file on reload, and the client that
+        // redeemed is still connected as it, waiting for its answer.
         expect(tokens().tokens[0]).toMatchObject({ used_at: "2026-10-18T12:00:00.000Z" });
+        expect(passwdText()).toContain(`redeem-00000001:hashed(${TOKEN})`);
+        expect(acl()).toContain(tokenAclBlock("00000001"));
+        expect(deps.calls.some((c) => c[0] === "-D")).toBe(false);
 
         const again = await run(["redeem", "--label", "x", "--json", "--dir", dir], deps);
         expect(again.code).toBe(1);
         expect(again.stderr).toContain("already used");
         expect(again.stdout).toBe("");
+      });
+
+      it("a redeemed token's login is pruned once its short grace has passed", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        deps.stdin = TOKEN;
+        await run(["redeem", "--label", "Desk on mac", "--dir", dir], deps);
+        await run(["list", "--dir", dir], deps, () => new Date(NOW + 30_000));
+        expect(passwdText()).toContain("redeem-00000001");
+        await run(["list", "--dir", dir], deps, () => new Date(NOW + 61_000));
+        expect(passwdText()).not.toContain("redeem-00000001");
+        expect(acl()).not.toContain("redeem-00000001");
+        expect(accounts().accounts.map((a) => a.name)).toEqual(["admin-00000001"]);
+      });
+
+      it("redeem refuses, without burning the token, when the account name is taken", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        // An account of that name from before the shape was reserved (or a hand-edited file).
+        await deps.passwd(["-b", join(dir, "passwd"), "admin-00000001", "theirs"]);
+        deps.stdin = TOKEN;
+        const r = await run(["redeem", "--label", "x", "--json", "--dir", dir], deps);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("admin-00000001");
+        expect(r.stdout).toBe("");
+        expect(passwdText()).toContain("admin-00000001:hashed(theirs)");
+        expect(tokens().tokens[0]?.used_at).toBeUndefined();
+      });
+
+      it("add refuses a name of the shape a redeemed token mints", async () => {
+        const deps = await initDeps();
+        for (const n of ["admin-1a2b3c4d", "steer-00000001", "watch-deadbeef"]) {
+          const r = await run(["add", n, "--role", "watch", "--dir", dir], deps);
+          expect(r.code, n).toBe(2);
+        }
+        expect(
+          (await run(["add", "admin-laptop", "--role", "watch", "--dir", dir], deps)).code,
+        ).toBe(0);
+      });
+
+      it("token draws a fresh id when the drawn one is already taken", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps); // id 00000001, secret …02
+        let h = 0;
+        deps.randomHex = (bytes) => {
+          h++;
+          return (h === 1 ? 1 : h + 10).toString(16).padStart(bytes * 2, "0");
+        };
+        const r = await run(["token", "--json", "--dir", dir], deps);
+        expect(JSON.parse(r.stdout).username).not.toBe("redeem-00000001");
+        expect(new Set(tokens().tokens.map((t) => t.id)).size).toBe(2);
+      });
+
+      it("rewrites tokens.json and accounts.json by rename, never in place", async () => {
+        const deps = await initDeps();
+        await run(["token", "--dir", dir], deps);
+        await run(["add", "bob", "--role", "steer", "--dir", dir], deps);
+        const before = [
+          statSync(join(dir, "tokens.json")).ino,
+          statSync(join(dir, "accounts.json")).ino,
+        ];
+        await run(["token", "--dir", dir], deps);
+        await run(["add", "eve", "--role", "steer", "--dir", dir], deps);
+        expect(statSync(join(dir, "tokens.json")).ino).not.toBe(before[0]);
+        expect(statSync(join(dir, "accounts.json")).ino).not.toBe(before[1]);
+        expect(statSync(join(dir, "accounts.json")).mode & 0o777).toBe(0o600);
+        expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
       });
 
       it("refuses an expired, unknown or forged token; an expired login is pruned", async () => {
@@ -773,6 +854,10 @@ describe("volley auth", () => {
         const expired = await run(["redeem", "--label", "x", "--dir", dir], deps, later);
         expect(expired.code).toBe(1);
         expect(expired.stderr).toContain("expired");
+        // redeem never drops a login (or reloads): the client must still get the refusal.
+        expect(passwdText()).toContain("redeem-00000001");
+        expect(deps.reloads).toBe(1);
+        await run(["list", "--dir", dir], deps, later);
         expect(passwdText()).not.toContain("redeem-00000001");
         expect(acl()).not.toContain("redeem-00000001");
 
@@ -837,6 +922,8 @@ describe("volley auth", () => {
           ["signin-link", "--role", "admin", "--label", "x"],
           ["signin-link", "--role", "supervisor", "--label", "x"],
           ["signin-link", "--role", "steer"],
+          // A label the daemon, the fence and account.schema.json all refuse.
+          ["signin-link", "--role", "steer", "--label=-x"],
         ]) {
           const r = await run([...argv, "--dir", dir], deps);
           expect(r.code, argv.join(" ")).toBe(2);
@@ -853,6 +940,7 @@ describe("volley auth", () => {
       expect(fixture).toContain(aclBlock("steer-test", "steer"));
       expect(fixture).toContain(aclBlock("watch-test", "watch"));
       expect(fixture).toContain(aclBlock("peer-test", "peer"));
+      expect(fixture).toContain(aclBlock("supervisor-test", "supervisor"));
       expect(fixture).toContain(tokenAclBlock("0000abcd"));
     });
   });

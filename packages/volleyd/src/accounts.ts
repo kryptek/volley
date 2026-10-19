@@ -229,6 +229,15 @@ export async function accountOp(
     args.push("add", name, "--role", p.role as string);
     if (p.kind !== undefined) args.push("--kind", p.kind as string);
   } else {
+    // mosquitto disconnects a client whose password changed when it reloads, which happens
+    // before the answer is published: rotating your own account would lose the new password.
+    if (name === sender) {
+      return refuse(
+        op,
+        "cannot rotate your own account over the control channel (its reload disconnects you " +
+          "before the answer); run `volley auth rotate` in a terminal or ask another admin",
+      );
+    }
     args.push("rotate", name);
   }
   const key = replyKey(p.reply_key);
@@ -265,7 +274,11 @@ function credentials(out: Fields | null): { username: string; password: string }
     : null;
 }
 
-/** `signin_link {role, label, ttl_s?, desk_url?}` → a single-use token (and link), sealed. */
+/**
+ * `signin_link {role, label, ttl_s?, desk_url?}` → a single-use token, sealed. Only `{token}` is
+ * sealed: RSA-OAEP with SHA-256 fits at most 190 bytes under a 2048-bit key, which a token plus a
+ * real Desk URL overflows. The client builds the link, `<result.link_base>#signin=<token>`.
+ */
 async function signinLink(exec: ExecFn, sender: string, p: Fields): Promise<AuthOutcome> {
   const op = "signin_link";
   if (!(SIGNIN_ROLES as readonly unknown[]).includes(p.role)) {
@@ -309,8 +322,13 @@ async function signinLink(exec: ExecFn, sender: string, p: Fields): Promise<Auth
   return {
     reply: reply(op, {
       ok: true,
-      result: { role: p.role, label: p.label, expires_at: expiresAt },
-      sealed: seal(key, { token, ...(base !== null ? { link: `${base}#signin=${token}` } : {}) }),
+      result: {
+        role: p.role,
+        label: p.label,
+        expires_at: expiresAt,
+        ...(base !== null ? { link_base: base } : {}),
+      },
+      sealed: seal(key, { token }),
     }),
     event: {
       type: "signin_link_issued",
@@ -319,7 +337,8 @@ async function signinLink(exec: ExecFn, sender: string, p: Fields): Promise<Auth
   };
 }
 
-function deskBase(raw: unknown): string | null {
+/** `desk_url` without a fragment (the link's base), or null when it is not an http(s) URL. */
+export function deskBase(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   let u: URL;
   try {

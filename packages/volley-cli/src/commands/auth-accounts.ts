@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isValidAgentId } from "volley-mcp/topics";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -80,11 +80,22 @@ const DEFAULT_TOKEN_TTL_S = 600;
 const MAX_TOKEN_TTL_S = 86_400;
 const TOKEN_ID_BYTES = 4;
 const TOKEN_SECRET_BYTES = 16;
+/**
+ * How long a redeemed token's login outlives its redemption: the client that redeemed is still
+ * connected as it until it has the answer, and a reload that drops the login disconnects it.
+ */
+const REDEEMED_LOGIN_GRACE_S = 60;
 const TOKEN_RE = /^vly_(admin|signin)_([0-9a-f]{8})_([0-9a-f]{32})$/;
-/** Printable, single-line, at most 64 characters: it lands in JSON files and the Desk. */
+/** The account name a redeemed token mints: `<role>-<token id>`. */
+const REDEEMED_NAME_RE = /^(admin|steer|watch)-[0-9a-f]{8}$/;
+/**
+ * Printable, single-line, at most 64 characters, and never mistaken for a flag: it lands in
+ * JSON files and the Desk (volleyd's `isValidLabel` and account.schema.json say the same).
+ */
 const validLabel = (l: string) =>
   l.length >= 1 &&
   l.length <= 64 &&
+  !l.startsWith("-") &&
   [...l].every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f);
 
 export const ACCOUNT_VERBS = [
@@ -108,9 +119,12 @@ function readJson<T>(path: string, key: string): T[] {
   return list as T[];
 }
 
+/** Write to a temp file and rename it into place: a crash never leaves half a registry. */
 function writeJson(path: string, key: string, list: unknown[]): void {
-  writeFileSync(path, `${JSON.stringify({ [key]: list }, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ [key]: list }, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
 }
 
 const accountsFile = (dir: string) => join(dir, "accounts.json");
@@ -140,14 +154,19 @@ function parseTtl(flag: string | undefined): number | string {
 }
 
 /**
- * Remove expired, unredeemed tokens' broker logins (and their ACL blocks). Redeemed and expired
- * entries stay in tokens.json as a record. True when anything changed (the caller reloads).
+ * Remove the broker logins (and ACL blocks) of expired tokens, and of redeemed ones once their
+ * grace has passed. The entries stay in tokens.json as a record. True when anything changed (the
+ * caller reloads). volleyd runs this on a timer (`volley auth list`), so a token nobody redeems
+ * stops being a login soon after it expires.
  */
 async function pruneTokens(ctx: AccountContext, now: Date): Promise<boolean> {
   const list = readJson<TokenEntry>(tokensFile(ctx.dir), "tokens");
   let changed = false;
   for (const t of list) {
-    if (t.used_at !== undefined || Date.parse(t.expires_at) > now.getTime()) continue;
+    const graceOver =
+      t.used_at !== undefined &&
+      Date.parse(t.used_at) + REDEEMED_LOGIN_GRACE_S * 1000 <= now.getTime();
+    if (!graceOver && Date.parse(t.expires_at) > now.getTime()) continue;
     if (!(await dropTokenLogin(ctx, t.id))) continue;
     changed = true;
   }
@@ -170,6 +189,9 @@ function badName(name: string, reserved: readonly string[]): string | null {
   if (!isValidAgentId(name)) return `"${name}" does not match [a-z0-9][a-z0-9_-]{0,62}`;
   if (reserved.includes(name)) return `"${name}" is reserved`;
   if (name.startsWith("redeem-")) return `"${name}": the redeem- prefix is reserved for tokens`;
+  if (REDEEMED_NAME_RE.test(name)) {
+    return `"${name}": <role>-<8 hex digits> is reserved for redeemed tokens`;
+  }
   return null;
 }
 
@@ -203,7 +225,9 @@ async function issueToken(
   label: string | undefined,
   json: boolean,
 ): Promise<ExitCode> {
-  const id = ctx.randomHex(TOKEN_ID_BYTES);
+  const taken = new Set(readJson<TokenEntry>(tokensFile(ctx.dir), "tokens").map((t) => t.id));
+  let id = ctx.randomHex(TOKEN_ID_BYTES);
+  while (taken.has(id)) id = ctx.randomHex(TOKEN_ID_BYTES);
   const token = `vly_${kind}_${id}_${ctx.randomHex(TOKEN_SECRET_BYTES)}`;
   const expiresAt = new Date(now.getTime() + ttlS * 1000).toISOString();
   if (!(await ctx.passwd(["-b", ctx.passwdFile, tokenUser(id), token]))) return EXIT.ERROR;
@@ -267,16 +291,21 @@ async function redeem(
     ctx.io.stderr(`volley auth: token ${entry.id} was already used at ${entry.used_at}\n`);
     return EXIT.ERROR;
   }
+  // Never drop the token's login (nor reload for it) here: the client asking is connected as
+  // that login, and mosquitto disconnects it on the reload before it hears the answer. The
+  // login can only ask to be redeemed; pruneTokens removes it after REDEEMED_LOGIN_GRACE_S.
   if (Date.parse(entry.expires_at) <= now.getTime()) {
-    if (await dropTokenLogin(ctx, entry.id)) await ctx.reload();
     ctx.io.stderr(`volley auth: token ${entry.id} expired at ${entry.expires_at}\n`);
+    return EXIT.ERROR;
+  }
+  const name = `${entry.role}-${entry.id}`;
+  if (readAccounts(ctx.dir).some((a) => a.name === name) || hasUser(ctx.passwdFile, name)) {
+    ctx.io.stderr(`volley auth: "${name}" already exists; token ${entry.id} was not used\n`);
     return EXIT.ERROR;
   }
   // Burn first: a crash after this leaves an unusable token, never a reusable one.
   entry.used_at = now.toISOString();
   writeJson(tokensFile(ctx.dir), "tokens", list);
-  await dropTokenLogin(ctx, entry.id);
-  const name = `${entry.role}-${entry.id}`;
   return createAccount(
     ctx,
     { name, role: entry.role, kind: "device", created: now.toISOString(), label },
@@ -312,14 +341,15 @@ export async function accountVerb(
     return usage("--label only applies to signin-link and redeem");
   }
   if (flags.label !== undefined && !validLabel(flags.label)) {
-    return usage("--label must be 1..64 printable characters");
+    return usage("--label must be 1..64 printable characters, not starting with -");
   }
   if (!existsSync(ctx.passwdFile)) {
     io.stderr(`volley auth: ${ctx.passwdFile} does not exist; run \`volley auth init\` first\n`);
     return EXIT.ERROR;
   }
   const now = io.now();
-  if (await pruneTokens(ctx, now)) await ctx.reload();
+  // Not before a redemption: a reload could disconnect the client waiting for its answer.
+  if (verb !== "redeem" && (await pruneTokens(ctx, now))) await ctx.reload();
 
   switch (verb) {
     case "add": {

@@ -8,7 +8,7 @@
   "payload": {
     "op": "signin_link",
     "role": "steer",
-    "label": "Alfred's phone",
+    "label": "Owner's phone",
     "ttl_s": 600,
     "desk_url": "https://desk.example/",
     "reply_key": {

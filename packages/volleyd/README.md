@@ -312,8 +312,12 @@ publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "
 `correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker ACL grants that topic only
 to admin accounts and only for their own username, so the topic names the sender; the daemon
 then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
-`account_list`'s `last_seen` is the later of the account's last auth request and the `wall_time`
-of a retained registry entry under its name.
+`account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
+process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
+under its name. Requests are never retained: the daemon clears a request topic's retained message
+after each request, so a restart cannot replay one. `account_rotate` of the sender's own account is
+refused: the reload that applies the new password disconnects the client holding the old one
+before the answer arrives (rotate yourself with `volley auth rotate` or through another admin).
 
 | `op` | Fields | `result` | `sealed` (decrypts to) | Journal (`_system`) |
 |---|---|---|---|---|
@@ -321,7 +325,7 @@ of a retained registry entry under its name.
 | `account_create` | `name`, `role` (`admin` \| `steer` \| `watch` \| `supervisor` \| `peer`), `kind?` | `{ name, role }` | `{ username, password }` | `account_created { by, name, role, kind? }` |
 | `account_rotate` | `name` | `{ name, role }` | `{ username, password }` | `account_rotated { by, name }` |
 | `account_revoke` | `name` | `{ name }` | — | `account_revoked { by, name }` |
-| `signin_link` | `role` (`steer` \| `watch`), `label`, `ttl_s?` (default 600), `desk_url?` | `{ role, label, expires_at }` | `{ token, link? }` (`<desk_url>#signin=<token>`) | `signin_link_issued { by, role, label, token_id, expires_at }` |
+| `signin_link` | `role` (`steer` \| `watch`), `label`, `ttl_s?` (default 600), `desk_url?` | `{ role, label, expires_at, link_base? }` | `{ token }`; the link is `<link_base>#signin=<token>` (sealing the link too could exceed what RSA-OAEP fits) | `signin_link_issued { by, role, label, token_id, expires_at }` |
 
 **Token redemption.** `volley auth token` prints a one-time admin token in the operator's
 terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
@@ -329,9 +333,13 @@ broker login `redeem-<id>` whose only write is `volley/_system/auth/redeem`, so 
 `allow_anonymous false` (an anonymous client would inherit the ACL's read of the whole tree). The
 client connects as that login and publishes `{ op: "token_redeem", token, label, reply_key }`; the
 daemon pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
-which burns it, removes the login, and creates an account with the token's role
-(`admin-<id>` / `steer-<id>`), journaled as `token_redeemed { by, name, role, label }`. A used,
-expired or unknown token is refused.
+which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
+journaled as `token_redeemed { by, name, role, label }`. A used, expired or unknown token is
+refused. The token's login is not removed during redemption (mosquitto would disconnect the client
+on the reload before it hears the answer): `volley auth` drops it about a minute after redemption
+or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
+(when it uses broker auth) so that happens without anyone running a command. Until then the login
+can read the whole tree, like any authenticated client.
 
 **Answers** go to `volley/_system/auth/replies/<correlation_id>` as an `ack` from `volleyd` with
 `{ text: "ACKED", acked_type: "query", op, ok, error?, result?, sealed? }`. Every authenticated

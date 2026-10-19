@@ -130,14 +130,8 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       ).toString("utf-8"),
     );
 
-  beforeEach(async () => {
-    broker = await startTestBroker({
-      users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
-      canPublish,
-    });
-    home = mkdtempSync(join(tmpdir(), "volleyd-accounts-"));
-    auth = fakeAuth();
-    daemon = await DaemonClass.start({
+  const startDaemon = (extra: { tokenPruneMs?: number } = {}) =>
+    DaemonClass.start({
       brokerUrl: broker.url,
       namespace: NS,
       home,
@@ -146,7 +140,16 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       pressure: NO_PRESSURE,
       auth: { username: "volleyd", password: pw("volleyd") },
       authExec: auth.exec,
+      ...extra,
     });
+  beforeEach(async () => {
+    broker = await startTestBroker({
+      users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
+      canPublish,
+    });
+    home = mkdtempSync(join(tmpdir(), "volleyd-accounts-"));
+    auth = fakeAuth();
+    daemon = await startDaemon();
   });
   afterEach(async () => {
     for (const c of clients.splice(0)) {
@@ -165,12 +168,12 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     topic: string,
     payload: Record<string, unknown>,
     timeoutMs = 3000,
+    { cid = randomUUID(), retain = false }: { cid?: string; retain?: boolean } = {},
   ): Promise<Record<string, unknown> | null> {
     const c = new VolleyBroker();
     const agentId = `desk-${randomUUID().slice(0, 6)}`;
     await c.connect({ url: broker.url, agentId, username: user, password: pw(user) });
     clients.push(c);
-    const cid = randomUUID();
     let resolve!: (p: Record<string, unknown> | null) => void;
     const reply = new Promise<Record<string, unknown> | null>((r) => {
       resolve = r;
@@ -190,7 +193,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       payload,
     });
     // Not awaited: a publish the broker ACL refuses is never PUBACKed by Aedes.
-    void c.publish(topic, JSON.stringify(env), { qos: 1, retain: false }).catch(() => {});
+    void c.publish(topic, JSON.stringify(env), { qos: 1, retain }).catch(() => {});
     const timer = setTimeout(() => resolve(null), timeoutMs);
     const r = await reply;
     clearTimeout(timer);
@@ -277,6 +280,120 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(typeof accounts.find((a) => a.name === "admin-1")?.last_seen).toBe("string");
   });
 
+  it("account_list's last_seen also takes the account's newer retained status", async () => {
+    const w = new VolleyBroker();
+    await w.connect({
+      url: broker.url,
+      agentId: "w",
+      username: "volleyd",
+      password: pw("volleyd"),
+    });
+    clients.push(w);
+    const at = (t: string) => () => new Date(t);
+    const reg = buildEnvelope({
+      agentId: "steer-1",
+      parentId: null,
+      channel: "_system/registry",
+      type: "registered",
+      payload: { capabilities: [], started_at: "2026-10-18T11:00:00.000Z" },
+      now: at("2026-10-18T11:00:00.000Z"),
+    });
+    const status = buildEnvelope({
+      agentId: "steer-1",
+      parentId: null,
+      channel: "status",
+      type: "working",
+      payload: {},
+      now: at("2026-10-18T11:45:00.000Z"),
+    });
+    await w.publish("volley/_system/registry/steer-1", JSON.stringify(reg), {
+      qos: 1,
+      retain: true,
+    });
+    await w.publish(`volley/${NS}/steer-1/status`, JSON.stringify(status), {
+      qos: 1,
+      retain: true,
+    });
+    const list = await op("admin-1", { op: "account_list" });
+    const accounts = (list?.result as { accounts: { name: string; last_seen?: string }[] })
+      .accounts;
+    expect(accounts.find((a) => a.name === "steer-1")?.last_seen).toBe("2026-10-18T11:45:00.000Z");
+  });
+
+  it("a redelivered request (same topic and correlation_id) gets the first answer, run once", async () => {
+    const cid = randomUUID();
+    const p = { op: "account_create", name: "phone", role: "steer", reply_key: replyKey };
+    const first = await request("admin-1", authOpsTopic("admin-1"), p, 3000, { cid });
+    const again = await request("admin-1", authOpsTopic("admin-1"), p, 3000, { cid });
+    expect(first).toMatchObject({ ok: true });
+    expect(again).toEqual(first);
+    expect(auth.argvs(["volley", "auth", "add"])).toHaveLength(1);
+  });
+
+  it("a retained auth request is not replayed when the daemon restarts", async () => {
+    const r = await request(
+      "admin-1",
+      authOpsTopic("admin-1"),
+      { op: "account_rotate", name: "steer-1", reply_key: replyKey },
+      3000,
+      { retain: true },
+    );
+    expect(r).toMatchObject({ ok: true });
+    await daemon.stop();
+    daemon = await startDaemon();
+    // A later request is answered, so the daemon has drained whatever the broker had for it.
+    expect(await op("admin-1", { op: "account_list" })).toMatchObject({ ok: true });
+    expect(auth.argvs(["volley", "auth", "rotate"])).toHaveLength(1);
+  });
+
+  it("account ops sent to the daemon mailbox are refused, pointing at the ops topic", async () => {
+    const c = new VolleyBroker();
+    const agentId = "steer-desk";
+    await c.connect({ url: broker.url, agentId, username: "steer-1", password: pw("steer-1") });
+    clients.push(c);
+    const cid = randomUUID();
+    const answer = new Promise<Record<string, unknown>>((resolve) => {
+      void c.subscribeStream(`volley/${NS}/${agentId}/mailbox`, ({ payload: raw }) => {
+        const env = parseEnvelope(raw);
+        if (env?.type === "ack" && env.correlation_id === cid) {
+          resolve(env.payload as Record<string, unknown>);
+        }
+      });
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const env = buildEnvelope({
+      agentId,
+      parentId: null,
+      channel: "mailbox",
+      type: "query",
+      correlationId: cid,
+      payload: { op: "account_create", name: "phone", role: "admin", reply_key: replyKey },
+    });
+    await c.publish(`volley/${NS}/volleyd/mailbox`, JSON.stringify(env), {
+      qos: 1,
+      retain: false,
+    });
+    const r = await answer;
+    expect(r).toMatchObject({ ok: false, op: "account_create" });
+    expect(r.error).toContain("volley/_system/auth/ops/");
+    expect(auth.calls.filter((c) => c.argv[1] === "auth")).toEqual([]);
+  });
+
+  it("prunes expired token logins on a timer, with no request needed", async () => {
+    await daemon.stop();
+    daemon = await startDaemon({ tokenPruneMs: 50 });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(auth.argvs(["volley", "auth", "list"]).length).toBeGreaterThanOrEqual(2);
+    expect(auth.argvs(["volley", "auth", "list"])[0]).toEqual(["volley", "auth", "list", "--json"]);
+  });
+
+  it("account_rotate of the sender's own account is refused", async () => {
+    const r = await op("admin-1", { op: "account_rotate", name: "admin-1" });
+    expect(r).toMatchObject({ ok: false });
+    expect(r?.error).toContain("own account");
+    expect(auth.argvs(["volley", "auth", "rotate"])).toEqual([]);
+  });
+
   it("account_list, account_rotate and account_revoke (journaled)", async () => {
     const list = await op("admin-1", { op: "account_list" });
     expect(list).toMatchObject({ ok: true });
@@ -304,7 +421,10 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
   });
 
   it("refuses an op that returns a secret without a usable reply_key, before running anything", async () => {
-    for (const reply_key of [undefined, { kty: "oct", k: "abc" }, "not-a-key"]) {
+    const small = generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey.export({
+      format: "jwk",
+    });
+    for (const reply_key of [undefined, { kty: "oct", k: "abc" }, "not-a-key", small]) {
       const r = await request("admin-1", authOpsTopic("admin-1"), {
         op: "account_create",
         name: "phone",
@@ -389,13 +509,17 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     const r = await op("admin-1", {
       op: "signin_link",
       role: "steer",
-      label: "Alfred's phone",
+      label: "Owner's phone",
       ttl_s: 300,
       desk_url: "https://desk.example/",
     });
-    expect(r).toMatchObject({ ok: true, result: { role: "steer", label: "Alfred's phone" } });
-    const secret = unseal(r?.sealed) as { token: string; link: string };
-    expect(secret.link).toBe(`https://desk.example/#signin=${secret.token}`);
+    expect(r).toMatchObject({
+      ok: true,
+      result: { role: "steer", label: "Owner's phone", link_base: "https://desk.example/" },
+    });
+    // Only the token is sealed (RSA-OAEP fits ~190 bytes); the client appends `#signin=<token>`.
+    const secret = unseal(r?.sealed) as { token: string };
+    expect(Object.keys(secret)).toEqual(["token"]);
     expect(auth.argvs(["volley", "auth", "signin-link"])).toEqual([
       [
         "volley",
@@ -404,7 +528,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
         "--role",
         "steer",
         "--label",
-        "Alfred's phone",
+        "Owner's phone",
         "--ttl",
         "300",
         "--json",
@@ -413,7 +537,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(systemEvents().find((e) => e.type === "signin_link_issued")?.data).toMatchObject({
       by: "admin-1",
       role: "steer",
-      label: "Alfred's phone",
+      label: "Owner's phone",
     });
 
     // Who publishes the redeem request does not matter to the daemon, only the token: the

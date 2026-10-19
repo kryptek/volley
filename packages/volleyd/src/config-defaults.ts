@@ -111,6 +111,11 @@ export const DAEMON_DEFAULTS = {
   signin_link_ttl_s: 600,
   /** The longest a sign-in link may live (`volley auth` enforces the same bound). */
   token_max_ttl_s: 86_400,
+  /**
+   * How often volleyd runs `volley auth list --json`, which drops the broker logins of expired
+   * (and redeemed) one-time tokens, when the daemon uses broker auth.
+   */
+  token_prune_ms: 60_000,
   /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
   reply_key_min_bits: 2048,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */

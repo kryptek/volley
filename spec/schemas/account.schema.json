@@ -45,7 +45,7 @@
         "last_seen": {
           "type": "string",
           "format": "date-time",
-          "description": "account_list only: when the supervisor last saw the account."
+          "description": "account_list only: the newest wall_time of the account's retained registry entry, its retained status (where its LWT lands), and its last auth request to the running supervisor."
         }
       }
     }

@@ -25,6 +25,7 @@ import {
   accountOp,
   authReplyTopic,
   isValidCorrelationId,
+  listAccounts,
   redeemToken,
 } from "./accounts";
 import {
@@ -261,6 +262,11 @@ export interface DaemonOptions {
   recoveryTimeouts?: { modelSwitchVerifyMs?: number };
   /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
   authExec?: ExecFn;
+  /**
+   * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
+   * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
+   */
+  tokenPruneMs?: number;
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
 }
@@ -583,6 +589,9 @@ export class Daemon {
   private readonly authAnswered = new Map<string, AuthReply>();
   /** When each account last sent an auth request (account_list's `last_seen`). */
   private readonly authSeen = new Map<string, string>();
+  private pruneTimer: ReturnType<typeof setInterval> | undefined;
+  /** The last token-prune failure logged, so a broker without `volley auth` logs it once. */
+  private pruneError: string | null = null;
   /** Screen tails of supervised agents (T13); reads run beside the serial queue. */
   private readonly screens: ScreenPublisher;
   /** Remote hosts (T15) by resolved spec, their reverse tunnels and tunnel checks. */
@@ -832,6 +841,11 @@ export class Daemon {
     this.watchdog = setInterval(() => {
       if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
     }, DAEMON_DEFAULTS.watchdog_ms);
+    const pruneMs =
+      this.opts.tokenPruneMs ?? (this.opts.auth !== undefined ? DAEMON_DEFAULTS.token_prune_ms : 0);
+    if (pruneMs > 0) {
+      this.pruneTimer = setInterval(() => void this.enqueue(() => this.pruneTokens()), pruneMs);
+    }
     this.log(`volleyd up: ${this.waves.size} wave(s), broker ${this.opts.brokerUrl}`);
   }
 
@@ -993,6 +1007,7 @@ export class Daemon {
     clearInterval(this.timer);
     clearInterval(this.watchdog);
     clearInterval(this.screenTimer);
+    clearInterval(this.pruneTimer);
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -3284,19 +3299,40 @@ export class Daemon {
       .catch((e: unknown) => this.log(`error: ${String(e)}`));
   }
 
-  /** `wall_time` of every retained registry entry, by agent id (account_list's `last_seen`). */
+  /**
+   * The newest `wall_time` of every agent id's retained registry entry and retained status (where
+   * its LWT lands), by agent id: account_list's `last_seen`.
+   */
   private async registrySeen(): Promise<Map<string, string>> {
-    const msgs = await this.broker.subscribeCollect(
-      "volley/_system/registry/+",
-      Number.POSITIVE_INFINITY,
-      DAEMON_DEFAULTS.registry_scan_ms,
-    );
+    const scan = (filter: string) =>
+      this.broker.subscribeCollect(
+        filter,
+        Number.POSITIVE_INFINITY,
+        DAEMON_DEFAULTS.registry_scan_ms,
+      );
+    const msgs = (
+      await Promise.all([scan("volley/_system/registry/+"), scan("volley/+/+/status")])
+    ).flat();
     const seen = new Map<string, string>();
     for (const m of msgs) {
       const env = m.payload === "" ? null : parseEnvelope(m.payload);
-      if (env !== null) seen.set(env.agent_id, env.wall_time);
+      if (env === null) continue;
+      const prior = seen.get(env.agent_id);
+      if (prior === undefined || env.wall_time > prior) seen.set(env.agent_id, env.wall_time);
     }
     return seen;
+  }
+
+  /**
+   * Drop expired one-time token logins: `volley auth list` prunes them before it lists. Runs on a
+   * timer because a token nobody redeems would otherwise stay a broker login (that can read the
+   * whole tree) until the next `volley auth` command.
+   */
+  private async pruneTokens(): Promise<void> {
+    const r = await listAccounts(this.opts.authExec ?? realExec);
+    const error = typeof r === "string" ? r : null;
+    if (error !== null && error !== this.pruneError) this.log(`token prune: ${error}`);
+    this.pruneError = error;
   }
 
   /**
@@ -3306,6 +3342,11 @@ export class Daemon {
    * sender; accounts.ts checks that account's role again.
    */
   private async onAuthRequest(topic: string, raw: string): Promise<void> {
+    if (raw === "") return; // our own clear (below), or anyone's
+    // Requests are never retained: clear the topic after each one (auth ops are rare), or a
+    // request published retained would be replayed at every daemon start (an `account_rotate`
+    // would rotate that password again each time). Anything live on it was delivered already.
+    await this.broker.publish(topic, "", { qos: 1, retain: true });
     const req = parseEnvelope(raw);
     if (req === null || req.type !== "query") return;
     const cid = req.correlation_id;

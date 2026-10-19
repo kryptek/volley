@@ -51,9 +51,15 @@ function roleLines(name: string, role: Role): string[] {
     // Observe only: nothing beyond the shared patterns.
     case "watch":
       return [];
-    // A volleyd: like the fixed `volleyd` identity.
+    // A volleyd: like the fixed `volleyd` identity, except for the account-op topics. The
+    // daemon takes an op's sender from its ops topic and trusts only `volleyd`'s answers, so a
+    // supervisor must write neither (mosquitto applies `deny` before any grant).
     case "supervisor":
-      return ["topic readwrite volley/#"];
+      return [
+        "topic deny volley/_system/auth/ops/#",
+        "topic deny volley/_system/auth/replies/#",
+        "topic readwrite volley/#",
+      ];
     // A paired machine: its own `%u` channels (patterns) and its machine topic.
     case "peer":
       return [

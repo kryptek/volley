@@ -5,14 +5,14 @@
       "role": "admin",
       "kind": "device",
       "created": "2026-10-18T12:01:00.000Z",
-      "label": "Desk on studio-mac"
+      "label": "Desk on laptop"
     },
     {
       "name": "steer-7b01e4d2",
       "role": "steer",
       "kind": "device",
       "created": "2026-10-18T12:06:00.000Z",
-      "label": "Alfred's phone",
+      "label": "Owner's phone",
       "last_seen": "2026-10-18T12:30:00.000Z"
     },
     {
