@@ -56,7 +56,7 @@ both the TCP and the WebSocket listener.
 |---|---|---|---|
 | `volleyd` | the supervisor daemon | `volley/#` | `volley/#`, including `volley/_waves/*` and `_waves/_config` |
 | `desk` | browser clients (`volley dash`, the Desk) | `volley/#` | any agent's `mailbox` (steering; `config_set` goes to the daemon's mailbox), lease requests |
-| `coordinator` | coordinator Claude sessions | `volley/#` | any agent's `mailbox`; the standard channels (`status`, `progress`, `result`, `capability`, `control`, `_user/*`) and registry entry of **any** agent id; lease requests |
+| `coordinator` | coordinator Claude sessions | `volley/#` | any agent's `mailbox`; the standard channels (`status`, `progress`, `result`, `capability`, `usage`, `control`, `_user/*`) and registry entry of **any** agent id; lease requests |
 | `<agent_id>` | one dispatched agent, minted by `volley auth add-agent` | `volley/#` | its own standard channels and registry entry, lease requests, and the mailboxes of the senders given with `--ack-to` |
 
 Nobody but `volleyd` writes the supervisor topics SPEC §4.6 defines under `volley/_waves/*`.
