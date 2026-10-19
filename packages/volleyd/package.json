@@ -6,6 +6,9 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "volleyd": "./src/cli.ts" },
+  "exports": {
+    "./claude/sharing": "./src/claude/sharing.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

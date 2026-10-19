@@ -5,10 +5,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PACKAGE_ROOT, hookEnv } from "./helpers/hooks";
 
-const install = (settings: string, ...args: string[]) =>
+const install = (settings: string, ...args: string[]) => installWith({}, settings, ...args);
+const installWith = (extra: Record<string, string>, settings: string, ...args: string[]) =>
   execFileSync(join(PACKAGE_ROOT, "scripts", "install.sh"), args, {
-    env: hookEnv({ CLAUDE_SETTINGS: settings, VOLLEY_HOOKS_STATE_DIR: join(settings, "..", "st") }),
+    env: hookEnv({
+      CLAUDE_SETTINGS: settings,
+      VOLLEY_HOOKS_STATE_DIR: join(settings, "..", "st"),
+      ...extra,
+    }),
     encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
   });
 
 type Settings = { hooks: Record<string, { matcher?: string; hooks: { command: string }[] }[]> };
@@ -81,6 +87,41 @@ describe("scripts/install.sh", () => {
     install(settings, "--uninstall");
     expect((read(settings) as unknown as { statusLine: unknown }).statusLine).toEqual(own);
     expect(existsSync(chain)).toBe(false);
+  });
+
+  it("VOLLEY_BROKER_URL is carried in every hook's and the statusLine's prefix", () => {
+    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    const url = "mqtt://127.0.0.1:21883";
+    const dry = JSON.parse(installWith({ VOLLEY_BROKER_URL: url }, settings, "--dry-run")) as {
+      hooks: Settings["hooks"];
+      statusLine: { command: string };
+    };
+    expect(existsSync(settings)).toBe(false);
+    const prefix = `VOLLEY_HOOKS_COORDINATOR=1 VOLLEY_BROKER_URL=${url} bun run "${PACKAGE_ROOT}/src/`;
+    expect(dry.statusLine.command.startsWith(prefix)).toBe(true);
+    const commands = Object.values(dry.hooks).flatMap((gs) =>
+      gs.flatMap((g) => g.hooks.map((h) => h.command)),
+    );
+    expect(commands.length).toBeGreaterThan(0);
+    for (const c of commands) expect(c.startsWith(prefix)).toBe(true);
+
+    // Installed for another URL, a re-install replaces it (never two prefixes).
+    installWith({ VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21999" }, settings);
+    installWith({ VOLLEY_BROKER_URL: url }, settings);
+    const again = read(settings);
+    expect(again.hooks.Stop).toHaveLength(1);
+    expect(again.hooks.Stop?.[0]?.hooks[0]?.command.startsWith(prefix)).toBe(true);
+    // Without it, no prefix.
+    install(settings);
+    expect(read(settings).hooks.Stop?.[0]?.hooks[0]?.command).not.toContain("VOLLEY_BROKER_URL");
+  });
+
+  it("refuses a VOLLEY_BROKER_URL with a login in it, or one that is not a plain URL", () => {
+    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    for (const url of ["mqtt://user:pw@127.0.0.1:1883", "mqtt://h:1883; rm -rf ~", "http://h"]) {
+      expect(() => installWith({ VOLLEY_BROKER_URL: url }, settings)).toThrow(/VOLLEY_BROKER_URL/);
+      expect(existsSync(settings)).toBe(false);
+    }
   });
 
   it("removes its statusLine on uninstall when the user had none", () => {

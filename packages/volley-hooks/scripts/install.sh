@@ -12,6 +12,9 @@
 #   scripts/install.sh --dry-run     print the merged settings instead of writing them
 #
 # CLAUDE_SETTINGS overrides the target file. A timestamped backup is written before changes.
+# VOLLEY_BROKER_URL, when set, is carried in every command's prefix (after
+# VOLLEY_HOOKS_COORDINATOR=1), so the hooks reach that broker from any session: a paired
+# machine's profile gets its tunnel's URL. It must be a plain URL without a login.
 set -euo pipefail
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,10 +31,18 @@ command -v bun >/dev/null || { echo "install.sh: bun is required" >&2; exit 1; }
 
 STATE_ROOT="${VOLLEY_HOOKS_STATE_DIR:-$HOME/.volley/hooks}"
 
-HOOKS_DIR="$HOOKS_DIR" SETTINGS="$SETTINGS" MODE="$MODE" STATE_ROOT="$STATE_ROOT" bun -e '
+# The URL lands in settings.json and in a shell command line: never a login, nothing to quote.
+BROKER_URL="${VOLLEY_BROKER_URL:-}"
+URL_RE='^(mqtt|mqtts|ws|wss)://[]A-Za-z0-9._~:/[-]+$'
+if [[ "$MODE" != uninstall && -n "$BROKER_URL" && ! "$BROKER_URL" =~ $URL_RE ]]; then
+  echo "install.sh: VOLLEY_BROKER_URL must be a plain mqtt(s):// or ws(s):// URL without a login" >&2
+  exit 2
+fi
+
+HOOKS_DIR="$HOOKS_DIR" SETTINGS="$SETTINGS" MODE="$MODE" STATE_ROOT="$STATE_ROOT" BROKER_URL="$BROKER_URL" bun -e '
 const fs = require("node:fs");
 const path = require("node:path");
-const { HOOKS_DIR, SETTINGS, MODE, STATE_ROOT } = process.env;
+const { HOOKS_DIR, SETTINGS, MODE, STATE_ROOT, BROKER_URL } = process.env;
 const MARK = "/volley-hooks/src/hooks/";
 const STATUS_MARK = "/volley-hooks/src/statusline/";
 const CHAIN = path.join(STATE_ROOT, "statusline-chain.json");
@@ -67,16 +78,17 @@ if (MODE === "uninstall") {
 
 if (MODE !== "uninstall") {
   const quoted = JSON.stringify(HOOKS_DIR).slice(1, -1);
+  const prefix = "VOLLEY_HOOKS_COORDINATOR=1 " + (BROKER_URL ? "VOLLEY_BROKER_URL=" + BROKER_URL + " " : "");
   settings.statusLine = {
     ...template.statusLine,
-    command: "VOLLEY_HOOKS_COORDINATOR=1 " + template.statusLine.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
+    command: prefix + template.statusLine.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
   };
   for (const [event, groups] of Object.entries(template.hooks)) {
     const resolved = groups.map((g) => ({
       ...g,
       hooks: g.hooks.map((h) => ({
         ...h,
-        command: "VOLLEY_HOOKS_COORDINATOR=1 " + h.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
+        command: prefix + h.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),
       })),
     }));
     hooks[event] = [...(hooks[event] ?? []), ...resolved];

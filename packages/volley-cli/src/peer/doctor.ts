@@ -9,6 +9,14 @@ import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import { diskOf, machineChecks, memoryOf, pressurePct, worktreeRoot } from "./checks/machine";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
 import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
+import {
+  PROFILE_CHECKS,
+  type ProfileFacts,
+  type ProfileTarget,
+  defaultTarget,
+  gatherProfile,
+  profileChecks,
+} from "./provision";
 
 export { normalizeOrigin } from "./checks/repo";
 export { binOf } from "./checks/tools";
@@ -52,7 +60,7 @@ export const DOCTOR_DEFAULTS = {
 } as const;
 
 /** The checks a `--fix` can make pass by itself: each reports "already done" when it passes. */
-const FIXABLE = ["volley.installed", "volley.version", "repo.clone"];
+const FIXABLE: string[] = ["volley.installed", "volley.version", "repo.clone", ...PROFILE_CHECKS];
 
 /**
  * Warn checks that do not hold up a join but that the supervisor's readiness still needs (SPEC
@@ -157,6 +165,8 @@ export interface Facts {
     disk: Disk | null;
     limits: { mem_low_pct: number; disk_low_gb: number };
   };
+  /** The machine's own Claude profile (provision.ts). */
+  profile: ProfileFacts;
 }
 
 /** sha256 of `<dir>/bun.lock`; null without one. */
@@ -213,6 +223,8 @@ export interface DoctorOptions {
   fix?: boolean;
   yes?: boolean;
   clone?: boolean;
+  /** What the Claude profile is checked against (default: the default modes, no broker URL). */
+  profile?: ProfileTarget;
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */
@@ -429,6 +441,12 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   const root = worktreeRoot(path, deps.home);
   const st = deps.statfs(nearestExisting(root));
 
+  const profile = await gatherProfile(
+    sh,
+    { home: deps.home, volleyDir: dir, bun, claude: claudeBin },
+    opts.profile ?? defaultTarget(),
+  );
+
   return {
     platform: deps.platform,
     shell,
@@ -467,6 +485,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
         disk_low_gb: DOCTOR_DEFAULTS.disk_low_gb,
       },
     },
+    profile,
   };
 }
 
@@ -480,6 +499,7 @@ export function checksOf(f: Facts): Check[] {
     ...repoChecks(f),
     ...githubChecks(f),
     ...claudeChecks(f),
+    ...profileChecks(f.profile),
     ...machineChecks(f),
   ].map((c) => ({ ...c, detail: c.detail.slice(0, 200) }));
 }
