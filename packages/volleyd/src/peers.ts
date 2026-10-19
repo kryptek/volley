@@ -14,23 +14,27 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  * Machines + pairing (SPEC §4.6.14): the control ops behind `volley peer`.
  *
  *   - `peer_invite {reply_key, ttl_s?}` → a one-time pairing code `XXXX-XXXX`, sealed to the
- *     request's `reply_key` (every account may read the mailbox answers). Only a salted scrypt
+ *     request's `reply_key` (every account may read the answers). Only a salted scrypt
  *     hash of it is kept, in `$VOLLEYD_HOME/peer-codes.json` (mode 0600), so it survives a restart.
  *   - `peer_join {code, name, target, volley_dir, repo?, worktree_root?, port?, os?, cores?,
  *     reply_key}` → burns the code, creates a `peer` account named `name` (`volley auth add`),
  *     adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps its own tunnel as a
- *     service), and answers with the broker's address and the sealed `{username, password}`.
+ *     service), records the name in `$VOLLEYD_HOME/peers.json`, and answers with the broker's
+ *     address and the sealed `{username, password}`.
  *   - `peer_remove {name}` → revokes the peer account, removes `hosts.<name>` and clears the
- *     machine's retained record; the machine's tunnel service stops at its next check.
- *   - `peers` → the machine records and which hosts are peers.
+ *     machine's retained record; the machine's tunnel service stops at its next check. Only a
+ *     paired machine (or a `peer` account): a host configured by hand is never removed.
+ *   - `peers` → the paired machines' records and names.
  *
- * The code is the credential for a join: anyone may send one, but a wrong code counts, and
+ * `peer_invite` and `peer_remove` are admin ops: the daemon answers them only on the account-op
+ * topic, after the same admin check as the account ops (accounts.ts `adminRefusal`). The code is
+ * the credential for a join: anyone may send one, but a wrong code counts, and
  * `peer_join_max_failures` wrong codes revoke every outstanding code.
  */
 
 /** Unambiguous upper-case letters and digits (no I, L, O, 0, 1). */
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-const CODE_RE = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+const CODE_RE = new RegExp(`^[${ALPHABET}]{4}-[${ALPHABET}]{4}$`);
 /** Names a peer may not take: the daemon's own host and the fixed broker identities. */
 const RESERVED_NAMES = new Set(["local", "volleyd", "desk", "coordinator"]);
 
@@ -70,6 +74,8 @@ export interface PeerDeps {
   now: () => number;
   /** The pairing-code store (`$VOLLEYD_HOME/peer-codes.json`). */
   file: string;
+  /** The paired machines' names (`$VOLLEYD_HOME/peers.json`): what `remove` and `list` trust. */
+  pairedFile: string;
   /** volleyd's namespace: the peer's agents and its service publish there. */
   namespace: string;
   /** The broker as the supervisor's machine reaches it (the peer's tunnel forwards to it). */
@@ -127,7 +133,7 @@ export class PeerService {
     return { ok: true, result: { expires_at: expiresAt, ttl_s: ttl }, sealed: seal(key, { code }) };
   }
 
-  async join(p: Fields, _by: string): Promise<PeerReply> {
+  async join(p: Fields, by: string): Promise<PeerReply> {
     const name = p.name;
     if (typeof name !== "string" || !isValidAgentId(name) || RESERVED_NAMES.has(name)) {
       return refuse(
@@ -176,16 +182,20 @@ export class PeerService {
       volley_dir: p.volley_dir,
       tunnel: { remote_port: port, supervise: false },
     };
-    const applied = this.deps.setHost(name, host, name);
+    const applied = this.deps.setHost(name, host, by);
     if (!applied.applied) {
       await volleyAuth(this.deps.exec, ["revoke", name]);
       const why = applied.rejected.map((r) => `${r.path}: ${r.reason}`).join("; ");
       return { ...refuse(`hosts.${name} rejected: ${why}`), rejected: applied.rejected };
     }
+    this.writePaired({
+      ...this.paired(),
+      [name]: { target: p.target, joined_at: new Date(this.deps.now()).toISOString() },
+    });
     this.deps.journal({
       type: "peer_joined",
       data: {
-        by: name,
+        by,
         name,
         target: p.target,
         ...(typeof p.os === "string" ? { os: p.os } : {}),
@@ -215,8 +225,18 @@ export class PeerService {
     if (account !== undefined && account.role !== "peer") {
       return refuse(`"${name}" is a ${account.role} account, not a peer: not revoked`);
     }
-    const isHost = Object.hasOwn(this.deps.hosts(), name);
-    if (account === undefined && !isHost) return refuse(`no peer named "${name}"`);
+    const paired = this.paired();
+    const wasPaired = Object.hasOwn(paired, name);
+    const configured = Object.hasOwn(this.deps.hosts(), name);
+    if (account === undefined && !wasPaired) {
+      return refuse(
+        configured
+          ? `"${name}" is a configured host, not a paired machine: not removed`
+          : `no peer named "${name}"`,
+      );
+    }
+    // A peer account's or a paired machine's host entry; never one configured by hand alone.
+    const isHost = configured;
     if (account !== undefined) {
       const r = await volleyAuth(this.deps.exec, ["revoke", name]);
       if (!r.ok) return refuse(r.error);
@@ -227,6 +247,10 @@ export class PeerService {
         return refuse(`hosts.${name} not removed: ${r.rejected.map((e) => e.reason).join("; ")}`);
       }
     }
+    if (wasPaired) {
+      const { [name]: _gone, ...rest } = paired;
+      this.writePaired(rest);
+    }
     await this.deps.clearMachine(name);
     const data = { by, name, revoked: account !== undefined, host_removed: isHost };
     this.deps.journal({ type: "peer_removed", data });
@@ -234,21 +258,39 @@ export class PeerService {
   }
 
   list(): PeerReply {
-    const hosts = this.deps.hosts();
+    const paired = Object.keys(this.paired());
     return {
       ok: true,
       result: {
-        machines: this.deps.machines(),
-        hosts: Object.keys(hosts).filter((h) => hosts[h]?.tunnel?.supervise === false),
+        machines: this.deps.machines().filter((m) => paired.includes(m.name)),
+        hosts: paired,
       },
     };
+  }
+
+  /** Names this daemon paired (`peer_join`), with when and how it reaches them. */
+  paired(): Record<string, PairedMachine> {
+    if (!existsSync(this.deps.pairedFile)) return {};
+    try {
+      const peers = (JSON.parse(readFileSync(this.deps.pairedFile, "utf-8")) as { peers?: unknown })
+        .peers;
+      return typeof peers === "object" && peers !== null && !Array.isArray(peers)
+        ? (peers as Record<string, PairedMachine>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private writePaired(peers: Record<string, PairedMachine>): void {
+    writeJson(this.deps.pairedFile, { peers });
   }
 
   /** Burn the code if it is outstanding; a wrong one counts towards revoking them all. */
   private burn(code: string): boolean {
     const codes = this.live();
     const n = normalizeCode(code);
-    const idx = /^[A-Z0-9]{8}$/.test(n)
+    const idx = isPairingCode(`${n.slice(0, 4)}-${n.slice(4)}`)
       ? codes.findIndex((c) =>
           timingSafeEqual(
             hashCode(n, Buffer.from(c.salt, "base64url")),
@@ -285,9 +327,20 @@ export class PeerService {
   }
 
   private write(codes: StoredCode[]): void {
-    mkdirSync(dirname(this.deps.file), { recursive: true });
-    const tmp = `${this.deps.file}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify({ codes }, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tmp, this.deps.file);
+    writeJson(this.deps.file, { codes });
   }
+}
+
+/** One `peers.json` entry. */
+export interface PairedMachine {
+  target: string;
+  joined_at: string;
+}
+
+/** Atomically, mode 0600. */
+function writeJson(file: string, value: unknown): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, file);
 }

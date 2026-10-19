@@ -233,7 +233,7 @@ export const DAEMON_DEFAULTS = {
   peer_code_ttl_s: 600,
   /** Wrong codes tried before every outstanding pairing code is revoked (guessing). */
   peer_join_max_failures: 10,
-  /** A paired machine's heartbeat interval (it publishes its machine record this often). */
+  /** A paired machine's heartbeat interval: volley-cli's `volley peer run` mirrors it (a test checks). */
   machine_heartbeat_ms: 30_000,
   /** A machine whose record is older than this is down: its tunnel is marked down, spawns park. */
   machine_down_after_ms: 90_000,

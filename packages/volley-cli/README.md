@@ -57,7 +57,7 @@ volley --help
 | `volley notify` | Long-lived subscriber that fires terminal bell, macOS desktop banners, and/or HTTP webhooks on matching agent transitions. See [`volley notify`](#volley-notify) below. |
 | `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
-| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `list` / `remove` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
+| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
 
 Each has its own `--help`:
 

@@ -21,13 +21,16 @@ import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } fro
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { authOpsTopic } from "./auth-roles";
 
 /**
  * `volley peer`: pair a second machine with the supervisor's (SPEC §4.6.14).
  *
  * On the supervisor's machine (the host): `invite` asks volleyd for a one-time pairing code,
- * `remove` unpairs a machine, `list` shows the paired machines' health. `redeem` is what `join`
- * runs on the host over ssh: it hands the code to volleyd and prints the new peer account.
+ * `remove` unpairs a machine (both admin ops: sent on the admin's account-op topic, SPEC
+ * §4.6.10), `list` shows the paired machines' health. `redeem` is what `join` runs on the host
+ * over ssh: it checks the host can ssh back, hands the code to volleyd and prints the new peer
+ * account.
  *
  * On the new machine: `join <code> --to <host>` checks ssh to the host, redeems the code there
  * (every remote step is a script on stdin to `ssh <host> bash -s`), writes `~/.volley/peer.json`,
@@ -64,7 +67,8 @@ join options:
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
-  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; else coordinator.json)
+  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; list and redeem: else
+                       coordinator.json). invite and remove need an admin account.
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
   --timeout <seconds>  How long to wait for volleyd's answer (default 30)
 `;
@@ -254,9 +258,14 @@ function unseal(key: KeyObject, sealed: string | undefined): Record<string, unkn
   }
 }
 
+/** Where volleyd answers an account-op request (accounts.ts in volleyd). */
+const authReplyTopic = (correlationId: string) => `volley/_system/auth/replies/${correlationId}`;
+
 /**
  * One control query to volleyd: connect (the caller's credentials, else the coordinator's file),
  * check volleyd is live, send, wait. Prints its own errors; null when there is no answer.
+ * `admin`: an admin op, sent on the caller's own account-op topic (only an admin login may
+ * publish there, so the coordinator's file never serves).
  */
 async function ask(
   verb: string,
@@ -265,6 +274,7 @@ async function ask(
   v: Values,
   env: Record<string, string | undefined>,
   io: IO,
+  admin = false,
 ): Promise<Answer | ExitCode> {
   let timeoutMs: number;
   let namespace: string;
@@ -279,11 +289,17 @@ async function ask(
   }
   try {
     // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves.
-    auth =
-      resolveAuth({ username: v.username, password: v.password }, env) ?? readCoordinatorAuth(env);
+    auth = resolveAuth({ username: v.username, password: v.password }, env);
+    if (!admin) auth ??= readCoordinatorAuth(env);
   } catch (e) {
     io.stderr(`volley peer ${verb}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
+  }
+  if (admin && auth === null) {
+    io.stderr(
+      `volley peer ${verb}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+    );
+    return EXIT.USAGE;
   }
   let broker: VolleyBroker;
   try {
@@ -298,9 +314,14 @@ async function ask(
       io.stderr(`volley peer ${verb}: volleyd is not running in namespace '${namespace}'\n`);
       return EXIT.ERROR;
     }
-    const answer = await request(broker, namespace, op, fields, timeoutMs);
+    const answer =
+      admin && auth !== null
+        ? await adminRequest(broker, auth.username, op, fields, timeoutMs)
+        : await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
-      io.stderr(`volley peer ${verb}: volleyd did not answer within ${timeoutMs / 1000} s\n`);
+      // The broker drops an account-op request from any login but an admin's, silently.
+      const why = admin ? ` (${ADMIN_ONLY}; is ${auth?.username} one?)` : "";
+      io.stderr(`volley peer ${verb}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
       return EXIT.TIMEOUT;
     }
     if (!answer.ok) {
@@ -356,6 +377,48 @@ async function request(
   }
 }
 
+const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+
+/** An admin op on `username`'s account-op topic, answered on its correlation id's reply topic. */
+async function adminRequest(
+  broker: VolleyBroker,
+  username: string,
+  op: string,
+  fields: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<Answer | null> {
+  const correlationId = randomUUID();
+  let done!: (a: Answer | null) => void;
+  const answered = new Promise<Answer | null>((r) => {
+    done = r;
+  });
+  const unsubscribe = await broker.subscribeStream(authReplyTopic(correlationId), ({ payload }) => {
+    const e = parseEnvelope(payload);
+    // Only volleyd may answer (SPEC §4.6.10).
+    if (e?.type === "ack" && e.correlation_id === correlationId && e.agent_id === "volleyd")
+      done(e.payload as Answer);
+  });
+  const timer = setTimeout(() => done(null), timeoutMs);
+  try {
+    const query = buildEnvelope({
+      agentId: `volley-cli-${randomSuffix(6)}`,
+      parentId: null,
+      channel: "_system/auth",
+      type: "query",
+      correlationId,
+      payload: { op, ...fields },
+    });
+    // Not awaited: a broker that refuses the publish (not an admin) never acknowledges it.
+    void broker
+      .publish(authOpsTopic(username), JSON.stringify(query), { qos: 1, retain: false })
+      .catch(() => {});
+    return await answered;
+  } finally {
+    clearTimeout(timer);
+    await unsubscribe();
+  }
+}
+
 async function invite(
   v: Values,
   env: Record<string, string | undefined>,
@@ -372,7 +435,7 @@ async function invite(
     }
   }
   const key = replyKeyPair();
-  const a = await ask("invite", "peer_invite", { ...fields, reply_key: key.jwk }, v, env, io);
+  const a = await ask("invite", "peer_invite", { ...fields, reply_key: key.jwk }, v, env, io, true);
   if (typeof a === "number") return a;
   const code = unseal(key.privateKey, a.sealed)?.code;
   if (typeof code !== "string") {
@@ -392,7 +455,7 @@ async function remove(
   env: Record<string, string | undefined>,
   io: IO,
 ): Promise<ExitCode> {
-  const a = await ask("remove", "peer_remove", { name }, v, env, io);
+  const a = await ask("remove", "peer_remove", { name }, v, env, io, true);
   if (typeof a === "number") return a;
   const r = (a.result ?? {}) as { revoked?: boolean; host_removed?: boolean };
   io.stdout(
@@ -521,6 +584,9 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   const volleyDir = resolve(v["volley-dir"] ?? deps.volleyDir);
   const repo = v.repo !== undefined ? resolve(v.repo) : undefined;
   const target = v.target ?? `${deps.user()}@${deps.hostname()}`;
+  if (target === "" || target.startsWith("-") || /\s/.test(target)) {
+    return fail("--target must be an ssh destination (user@host)", EXIT.USAGE);
+  }
 
   // 1. ssh reachability.
   io.stdout(`Checking ssh to ${host}...\n`);
@@ -531,7 +597,8 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     );
   }
 
-  // 2. Redeem the code on the host (its volleyd creates the peer account and hosts.<name>).
+  // 2. On the host: check it can ssh back here (every spawn on this machine needs it), then
+  // redeem the code (its volleyd creates the peer account and hosts.<name>).
   const request: RedeemRequest = {
     code,
     name,
@@ -543,11 +610,12 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     cores: deps.cpus(),
   };
   const remoteVolley = v["remote-volley"] ?? "volley";
-  const redeemed = await remote(
-    deps,
-    host,
-    `set -o pipefail\nprintf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${remoteVolley} peer redeem\n`,
-  );
+  const redeemed = await remote(deps, host, redeemScript(request, remoteVolley));
+  if (redeemed.code === NO_SSH_BACK) {
+    return fail(
+      `${host} cannot ssh to ${target}: authorise its key here, or pass --target with an address it can reach. Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`,
+    );
+  }
   if (redeemed.code !== 0) {
     return fail(`pairing refused on ${host}: ${redeemed.stderr.trim() || `exit ${redeemed.code}`}`);
   }
@@ -586,18 +654,29 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   io.stdout(`Wrote ${file}.\n`);
 
   // 4. The tunnel + heartbeat service.
+  let serviceError: string | undefined;
   if (v["no-service"] === true) {
     io.stdout(
       "Service not installed (--no-service): run `volley peer run` to keep the tunnel up.\n",
     );
   } else {
     const installed = await installService(deps);
-    if (!installed.ok) return fail(installed.error);
-    io.stdout(`Installed the tunnel service: ${installed.what}.\n`);
+    if (!installed.ok) serviceError = installed.error;
+    else if (installed.warning !== undefined) {
+      io.stdout(`Installed the tunnel service: ${installed.what}, but:\n`);
+      io.stderr(`volley peer join: ${installed.warning}\n`);
+    } else io.stdout(`Installed the tunnel service: ${installed.what}.\n`);
   }
 
   // 5. Claude Code's folder trust for the repo (T4: an untrusted repo opens repo_untrusted).
   printTrust(io, deps, repo, cfg.name);
+
+  // The pairing is done on the host either way: say how to finish, or how to start over.
+  if (serviceError !== undefined) {
+    return fail(
+      `the tunnel service was not installed: ${serviceError}\nThis machine is paired as ${cfg.name} (${file}). Keep the tunnel up with \`volley peer run\` (or fix the error and install it yourself), or start over: \`volley peer remove ${cfg.name}\` on ${host}, then join again with a new code.`,
+    );
+  }
 
   // 6. Register the machine (the service re-publishes every heartbeat).
   const registered = await register(deps, cfg);
@@ -618,6 +697,48 @@ export function defaultName(hostname: string): string {
     .slice(0, 63);
 }
 
+/** Exit status of the redeem script when the host cannot ssh to this machine. */
+const NO_SSH_BACK = 3;
+
+/**
+ * The script `join` runs on the host: check that the host reaches this machine over ssh, as
+ * volleyd will for every spawn here (before the code is used up), then redeem the code.
+ * `ssh -n`: the inner ssh must not read the rest of this script from bash's stdin.
+ */
+export function redeemScript(request: RedeemRequest, remoteVolley: string): string {
+  const t = sq(request.target);
+  return [
+    "set -o pipefail",
+    `if ! ssh -n -o BatchMode=yes -o ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s} ${t} true; then`,
+    `  echo "the supervisor's machine cannot ssh to "${t} >&2`,
+    `  exit ${NO_SSH_BACK}`,
+    "fi",
+    `printf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${remoteVolley} peer redeem`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * True when `repo` or one of its parent directories has an accepted trust dialog: T4's rule
+ * (volleyd's trust.ts `isRepoTrusted`, which this package cannot import).
+ */
+export function isRepoTrusted(claudeJson: unknown, repo: string): boolean {
+  const projects = (claudeJson as { projects?: unknown } | null)?.projects;
+  if (typeof projects !== "object" || projects === null) return false;
+  const table = projects as Record<string, unknown>;
+  for (let dir = resolve(repo); ; dir = dirname(dir)) {
+    const entry = Object.hasOwn(table, dir) ? table[dir] : undefined;
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      (entry as Record<string, unknown>).hasTrustDialogAccepted === true
+    ) {
+      return true;
+    }
+    if (dirname(dir) === dir) return false;
+  }
+}
+
 function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: string): void {
   if (repo === undefined) {
     io.stdout(
@@ -627,10 +748,10 @@ function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: stri
   }
   let trusted = false;
   try {
-    const cfg = JSON.parse(readFileSync(join(deps.home, ".claude.json"), "utf-8")) as {
-      projects?: Record<string, { hasTrustDialogAccepted?: unknown }>;
-    };
-    trusted = cfg.projects?.[repo]?.hasTrustDialogAccepted === true;
+    trusted = isRepoTrusted(
+      JSON.parse(readFileSync(join(deps.home, ".claude.json"), "utf-8")),
+      repo,
+    );
   } catch {}
   io.stdout(
     trusted
@@ -639,18 +760,28 @@ function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: stri
   );
 }
 
-/** Install and start the service: what was installed, or why it could not be. */
+/** Install and (re)start the service: what was installed, or why it could not be. */
 async function installService(
   deps: PeerDeps,
-): Promise<{ ok: true; what: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; what: string; warning?: string } | { ok: false; error: string }> {
   const argv = [...deps.volleyArgv, "peer", "run"];
   if (deps.platform === "linux") {
     const unit = join(deps.home, ".config", "systemd", "user", SYSTEMD_UNIT);
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, systemdUnit(argv));
+    // Without lingering, systemd stops a user's services when their last session ends (the ssh
+    // session this join runs in) and starts them only at their next login.
+    const user = deps.user();
+    const linger = await deps.exec(["loginctl", "enable-linger", user]);
+    const warning =
+      linger.code === 0
+        ? undefined
+        : `lingering is off for ${user} (${linger.stderr.trim() || `loginctl exit ${linger.code}`}): the service stops when you log out and starts only at your next login. Run \`sudo loginctl enable-linger ${user}\`.`;
+    // restart, not enable --now: a re-join must replace a running service's old peer.json.
     for (const step of [
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT],
+      ["systemctl", "--user", "enable", SYSTEMD_UNIT],
+      ["systemctl", "--user", "restart", SYSTEMD_UNIT],
     ]) {
       const r = await deps.exec(step);
       if (r.code !== 0) {
@@ -660,23 +791,27 @@ async function installService(
         };
       }
     }
-    return { ok: true, what: `systemd user unit ${unit}` };
+    return {
+      ok: true,
+      what: `systemd user unit ${unit}`,
+      ...(warning !== undefined ? { warning } : {}),
+    };
   }
   if (deps.platform === "darwin") {
     const plist = join(deps.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     mkdirSync(dirname(plist), { recursive: true });
     writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
-    const domain = `gui/${deps.uid()}`;
-    // A service from an earlier join is replaced (bootout fails harmlessly when there is none).
-    await deps.exec(["launchctl", "bootout", `${domain}/${LAUNCHD_LABEL}`]);
-    const r = await deps.exec(["launchctl", "bootstrap", domain, plist]);
-    if (r.code !== 0) {
-      return {
-        ok: false,
-        error: `launchctl bootstrap failed: ${r.stderr.trim() || `exit ${r.code}`}`,
-      };
+    // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
+    // user/<uid>. A service from an earlier join is replaced (bootout fails harmlessly).
+    const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
+    for (const d of domains) await deps.exec(["launchctl", "bootout", `${d}/${LAUNCHD_LABEL}`]);
+    const errors: string[] = [];
+    for (const domain of domains) {
+      const r = await deps.exec(["launchctl", "bootstrap", domain, plist]);
+      if (r.code === 0) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
+      errors.push(`${domain}: ${r.stderr.trim() || `exit ${r.code}`}`);
     }
-    return { ok: true, what: `launchd agent ${plist}` };
+    return { ok: false, error: `launchctl bootstrap failed (${errors.join("; ")})` };
   }
   return {
     ok: false,
@@ -689,8 +824,6 @@ export function systemdUnit(argv: string[]): string {
     /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `"${a.replace(/(["\\])/g, "\\$1")}"`;
   return `[Unit]
 Description=Volley peer: broker tunnel and machine heartbeat (volley peer run)
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 ExecStart=${argv.map(quote).join(" ")}

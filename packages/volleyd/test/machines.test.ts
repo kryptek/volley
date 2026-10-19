@@ -109,6 +109,30 @@ describe("MachineHealth", () => {
     expect(changes.map(([, s]) => s)).toEqual(["up", "down", "up"]);
   });
 
+  it("an LWT after a heartbeat keeps the heartbeat's values (the LWT was built at connect time)", () => {
+    health.observe(record({ load: [2, 1, 0.5], agents: 3, last_seen: "2026-10-19T12:00:00.000Z" }));
+    // The LWT: what the machine looked like when it connected, hours earlier.
+    health.observe(record({ tunnel: "down", reason: "disconnect" }));
+    expect(health.record("box")).toEqual(
+      record({
+        tunnel: "down",
+        reason: "disconnect",
+        load: [2, 1, 0.5],
+        agents: 3,
+        last_seen: "2026-10-19T12:00:00.000Z",
+      }),
+    );
+  });
+
+  it("says why with its own heartbeat timeout", () => {
+    health = new MachineHealth({ now: () => now, onChange: () => {}, downAfterMs: 30_000 });
+    health.observe(record());
+    now += 30_000;
+    const [down] = health.sweep();
+    expect(down !== undefined && health.whyDown(down)).toBe("no heartbeat for 30 s");
+    expect(health.whyDown(record({ tunnel: "down", reason: "disconnect" }))).toBe("disconnected");
+  });
+
   it("uses its own clock, not the machine's last_seen (a skewed clock never marks it down)", () => {
     health.observe(record({ last_seen: "2001-01-01T00:00:00.000Z" }));
     expect(health.sweep()).toEqual([]);
@@ -163,7 +187,15 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
   const task = async (wave: string, id: string) => {
     await waits.settled();
     const s = (await env.retained(`volley/_waves/${wave}/state`)) as {
-      payload: { tasks: { id: string; stage: string; why_waiting?: string; host?: string }[] };
+      payload: {
+        tasks: {
+          id: string;
+          stage: string;
+          why_waiting?: string;
+          host?: string;
+          host_down?: string;
+        }[];
+      };
     };
     return s.payload.tasks.find((t) => t.id === id);
   };
@@ -211,6 +243,11 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     writeFileSync(
       join(env.home, "config.yaml"),
       `hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n`,
+    );
+    // Paired with `volley peer join` (peers.ts): `peers` lists it.
+    writeFileSync(
+      join(env.home, "peers.json"),
+      `${JSON.stringify({ peers: { box: { target: "dev@box", joined_at: "2026-10-19T09:00:00.000Z" } } })}\n`,
     );
     clock = fakeClock(1_000_000);
     daemon = await env.start({
@@ -291,5 +328,35 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     expect(alarm?.data).toMatchObject({ host: "box", reason: "disconnect", tasks: ["T1"] });
     expect(box?.closed).toEqual([]);
     expect(box?.launches).toHaveLength(1);
+  });
+
+  it("a down machine labels its running tasks in the wave state (host_down) until it is back", async () => {
+    await heartbeat();
+    await submit("w1");
+    await tick();
+    expect(box?.launches).toHaveLength(1);
+    const running = await task("w1", "T1");
+    expect(running?.stage).not.toBe("queued");
+    expect(running?.host_down).toBeUndefined();
+
+    await tick(DAEMON_DEFAULTS.machine_down_after_ms);
+    expect(await task("w1", "T1")).toMatchObject({
+      host: "box",
+      host_down: "no heartbeat for 90 s",
+    });
+    expect(box?.closed).toEqual([]);
+
+    await heartbeat();
+    await tick();
+    expect((await task("w1", "T1"))?.host_down).toBeUndefined();
+  });
+
+  it("a cleared record (peer_remove) forgets the machine", async () => {
+    await heartbeat();
+    await peer.publish(machineTopic("box"), "", { qos: 1, retain: true });
+    await eventually(async () => {
+      const a = await client.request("peers", {});
+      return (a.result as { machines: MachineRecord[] }).machines.length === 0;
+    });
   });
 });

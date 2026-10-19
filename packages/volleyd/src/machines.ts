@@ -52,10 +52,13 @@ export function parseMachine(topic: string, raw: string): MachineRecord | null {
   return e.payload;
 }
 
-/** Why a machine is down, as a task's why_waiting reads it. */
-export function downReason(r: MachineRecord): string {
+/** Why a machine is down, as a task's why_waiting reads it (`limitMs`: the heartbeat timeout). */
+export function downReason(
+  r: MachineRecord,
+  limitMs: number = DAEMON_DEFAULTS.machine_down_after_ms,
+): string {
   return r.reason === "heartbeat_timeout"
-    ? `no heartbeat for ${Math.round(DAEMON_DEFAULTS.machine_down_after_ms / 1000)} s`
+    ? `no heartbeat for ${Math.round(limitMs / 1000)} s`
     : "disconnected";
 }
 
@@ -78,10 +81,26 @@ export class MachineHealth {
   private readonly machines = new Map<string, Entry>();
   constructor(private readonly deps: MachineHealthDeps) {}
 
-  /** Fold in a record from the broker. */
-  observe(record: MachineRecord): void {
-    const prior = this.machines.get(record.name);
-    const status: MachineStatus = record.tunnel;
+  /**
+   * Fold in a record from the broker. A down record after an up one keeps the last heartbeat's
+   * values: the machine's LWT was built when it connected, so its `last_seen`, `load` and
+   * `agents` may be hours old.
+   */
+  observe(incoming: MachineRecord): void {
+    const prior = this.machines.get(incoming.name);
+    const status: MachineStatus = incoming.tunnel;
+    const record: MachineRecord =
+      status === "down" && prior !== undefined
+        ? {
+            ...prior.record,
+            tunnel: "down",
+            reason: incoming.reason ?? "disconnect",
+            last_seen:
+              incoming.last_seen > prior.record.last_seen
+                ? incoming.last_seen
+                : prior.record.last_seen,
+          }
+        : incoming;
     const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
     this.machines.set(record.name, { record, status, heardAt });
     if (prior?.status !== status) this.deps.onChange(record.name, status, record);
@@ -92,7 +111,7 @@ export class MachineHealth {
    * (`reason: heartbeat_timeout`). Returns those records, for the supervisor to republish.
    */
   sweep(): MachineRecord[] {
-    const limit = this.deps.downAfterMs ?? DAEMON_DEFAULTS.machine_down_after_ms;
+    const limit = this.limitMs();
     const now = this.deps.now();
     const down: MachineRecord[] = [];
     for (const [name, e] of this.machines) {
@@ -103,6 +122,15 @@ export class MachineHealth {
       this.deps.onChange(name, "down", record);
     }
     return down;
+  }
+
+  /** Why `r`'s machine is down, with this monitor's heartbeat timeout. */
+  whyDown(r: MachineRecord): string {
+    return downReason(r, this.limitMs());
+  }
+
+  private limitMs(): number {
+    return this.deps.downAfterMs ?? DAEMON_DEFAULTS.machine_down_after_ms;
   }
 
   /** The machine's status; undefined for a host that never published a record. */

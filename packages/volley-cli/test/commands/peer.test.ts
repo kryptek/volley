@@ -27,6 +27,7 @@ import {
   runService,
   tunnelArgv,
 } from "../../src/commands/peer";
+import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 
@@ -65,6 +66,26 @@ async function fakeVolleyd(
     retain: true,
   });
   const seen: Record<string, unknown>[] = [];
+  /** The account-op topics each admin op arrived on. */
+  const adminTopics: string[] = [];
+  // Admin ops: the sender's own account-op topic, answered on the correlation id's reply topic.
+  await b.subscribeStream("volley/_system/auth/ops/+", ({ topic, payload }) => {
+    const q = parseEnvelope(payload);
+    if (q?.type !== "query" || q.correlation_id === null) return;
+    const p = q.payload as Record<string, unknown>;
+    seen.push(p);
+    adminTopics.push(topic);
+    void b.publish(
+      `volley/_system/auth/replies/${q.correlation_id}`,
+      env(
+        "_system/auth",
+        "ack",
+        { text: "ACKED", acked_type: "query", op: p.op, ...(answer(p.op as string, p) as object) },
+        q.correlation_id,
+      ),
+      { qos: 1, retain: false },
+    );
+  });
   await b.subscribeStream(`volley/${NS}/volleyd/mailbox`, ({ payload }) => {
     const q = parseEnvelope(payload);
     if (q?.type !== "query" || q.correlation_id === null) return;
@@ -81,7 +102,7 @@ async function fakeVolleyd(
       { qos: 1, retain: false },
     );
   });
-  return { b, seen };
+  return { b, seen, adminTopics };
 }
 
 interface Call {
@@ -208,7 +229,15 @@ describe("volley peer join (on the machine to pair)", () => {
       expect(c.input).toBeDefined();
     }
     expect(ssh[0]?.input).toContain("echo volley-peer-ok");
-    const { request, volley } = redeemRequest(ssh[1]?.input as string);
+    // The host checks it can ssh back here before the code is used up; -n keeps that ssh off
+    // the script's own stdin.
+    const script = ssh[1]?.input as string;
+    const probe = script.indexOf(
+      "ssh -n -o BatchMode=yes -o ConnectTimeout=10 'dev@Box-A.lan' true",
+    );
+    expect(probe).toBeGreaterThan(-1);
+    expect(probe).toBeLessThan(script.indexOf("peer redeem"));
+    const { request, volley } = redeemRequest(script);
     expect(volley).toBe("volley");
     expect(request).toEqual({
       code: "abcd-efgh",
@@ -244,9 +273,18 @@ describe("volley peer join (on the machine to pair)", () => {
       "ExecStart=/usr/local/bin/bun /opt/volley/packages/volley-cli/src/cli.ts peer run",
     );
     expect(unit).toContain("Restart=on-failure");
-    expect(f.calls.filter((c) => c.argv[0] === "systemctl").map((c) => c.argv)).toEqual([
+    expect(unit).not.toContain("network-online.target");
+    // Lingering first (the service must outlive this ssh session), then enable + restart (a
+    // re-join replaces a running service).
+    expect(
+      f.calls
+        .filter((c) => ["systemctl", "loginctl"].includes(c.argv[0] as string))
+        .map((c) => c.argv),
+    ).toEqual([
+      ["loginctl", "enable-linger", "dev"],
       ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT],
+      ["systemctl", "--user", "enable", SYSTEMD_UNIT],
+      ["systemctl", "--user", "restart", SYSTEMD_UNIT],
     ]);
 
     // Trust: the repo is not trusted yet; the join says what to accept.
@@ -293,11 +331,108 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
     expect(f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv)).toEqual([
       ["launchctl", "bootout", `gui/501/${LAUNCHD_LABEL}`],
+      ["launchctl", "bootout", `user/501/${LAUNCHD_LABEL}`],
       ["launchctl", "bootstrap", "gui/501", plist],
     ]);
+    expect(r.stdout).toContain("(domain gui/501)");
     expect(r.stdout).toContain(`Claude Code trusts ${repo} on this machine.`);
     const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
     expect(redeemRequest(ssh[1]?.input as string).volley).toBe("/opt/bin/volley");
+  });
+
+  it("on a Mac with nobody at the console, falls back to the user/<uid> domain and says so", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "launchctl" && c.argv[1] === "bootstrap" && c.argv[2] === "gui/501"
+        ? { code: 125, stderr: "Domain does not support specified action" }
+        : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
+    );
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).toBe(0);
+    const plist = join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+    expect(f.calls.filter((c) => c.argv[1] === "bootstrap").map((c) => c.argv)).toEqual([
+      ["launchctl", "bootstrap", "gui/501", plist],
+      ["launchctl", "bootstrap", "user/501", plist],
+    ]);
+    expect(r.stdout).toContain("(domain user/501)");
+  });
+
+  it("without lingering the service is installed, with a loud warning naming the fix", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "loginctl"
+        ? { code: 1, stderr: "Could not enable linger: Access denied" }
+        : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "host"], deps(f.exec));
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toContain(
+      `Installed the tunnel service: systemd user unit ${join(home, ".config", "systemd", "user", SYSTEMD_UNIT)}.`,
+    );
+    expect(r.stderr).toContain("lingering is off for dev");
+    expect(r.stderr).toContain("sudo loginctl enable-linger dev");
+    expect(r.stderr).toContain("stops when you log out");
+  });
+
+  it("a failed service install after the pairing says how to finish or start over", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "systemctl" && c.argv[2] === "restart"
+        ? { code: 1, stderr: "Failed to connect to bus: No medium found" }
+        : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
+    );
+    const repo = join(home, "repo");
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host", "--repo", repo], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("No medium found");
+    expect(r.stderr).toContain("paired as box-a");
+    expect(r.stderr).toContain("`volley peer run`");
+    expect(r.stderr).toContain("`volley peer remove box-a` on dev@host");
+    // The pairing stands: peer.json is there, and the trust check still ran.
+    expect(existsSync(peerFile(home))).toBe(true);
+    expect(r.stdout).toContain(`Claude Code does not trust ${repo}`);
+  });
+
+  it("a host that cannot ssh back here stops before the code is used", async () => {
+    const f = fakeExec(
+      hostSsh({
+        code: 3,
+        stderr:
+          "dev@Box-A.lan: Permission denied (publickey).\nthe supervisor's machine cannot ssh to dev@Box-A.lan\n",
+      }),
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("dev@host cannot ssh to dev@Box-A.lan");
+    expect(r.stderr).toContain("--target");
+    expect(r.stderr).toContain("the code is still valid");
+    expect(r.stderr).toContain("Permission denied (publickey)");
+    expect(existsSync(peerFile(home))).toBe(false);
+    expect(f.calls.some((c) => c.argv[0] === "systemctl")).toBe(false);
+  });
+
+  it("a repo trusted through a parent folder counts as trusted (T4's rule)", async () => {
+    writeFileSync(
+      join(home, ".claude.json"),
+      JSON.stringify({ projects: { "/srv/src": { hasTrustDialogAccepted: true } } }),
+    );
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", "/srv/src/repo"],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Claude Code trusts /srv/src/repo on this machine.");
+  });
+
+  it("refuses a --target that is not an ssh destination", async () => {
+    const f = fakeExec(() => ({}));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--target=-oProxyCommand=x"],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(2);
+    expect(f.calls).toHaveLength(0);
   });
 
   it("an unreachable host stops before anything is redeemed or written", async () => {
@@ -339,15 +474,18 @@ describe("volley peer join (on the machine to pair)", () => {
 });
 
 describe("volley peer on the supervisor's machine", () => {
-  it("invite prints the sealed code and the join command", async () => {
+  const ADMIN = { VOLLEY_AUTH_USERNAME: "admin-1", VOLLEY_AUTH_PASSWORD: "a-pw" };
+
+  it("invite is an admin op on the admin's account-op topic; prints the sealed code and the join command", async () => {
     const v = await fakeVolleyd(tb.url, (_op, p) => ({
       ok: true,
       result: { expires_at: "2026-10-19T09:10:00.000Z", ttl_s: 600 },
       sealed: sealTo(p.reply_key, { code: "ABCD-EFGH" }),
     }));
-    const r = await run(["invite"], deps(fakeExec(() => ({})).exec));
+    const r = await run(["invite"], deps(fakeExec(() => ({})).exec), ADMIN);
     await v.b.disconnect();
     expect(r.exitCode).toBe(0);
+    expect(v.adminTopics).toEqual(["volley/_system/auth/ops/admin-1"]);
     expect(v.seen[0]).toMatchObject({ op: "peer_invite", reply_key: { kty: "RSA" } });
     expect(r.stdout).toContain("Pairing code: ABCD-EFGH");
     expect(r.stdout).toContain("volley peer join ABCD-EFGH --to dev@Box-A.lan");
@@ -402,9 +540,10 @@ describe("volley peer on the supervisor's machine", () => {
       ok: true,
       result: { name: p.name, revoked: true, host_removed: true },
     }));
-    const r = await run(["remove", "box-a"], deps(fakeExec(() => ({})).exec));
+    const r = await run(["remove", "box-a"], deps(fakeExec(() => ({})).exec), ADMIN);
     await v.b.disconnect();
     expect(r.exitCode).toBe(0);
+    expect(v.adminTopics).toEqual(["volley/_system/auth/ops/admin-1"]);
     expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a" });
     expect(r.stdout).toContain("removed box-a: account revoked, hosts.box-a removed");
   });
@@ -456,8 +595,49 @@ describe("volley peer on the supervisor's machine", () => {
     }
   });
 
+  it("invite and remove never sign in with the coordinator's file: they need an admin login", async () => {
+    writeFileSync(
+      join(home, "coordinator.json"),
+      JSON.stringify({ username: "coordinator", password: "c-pw" }),
+      { mode: 0o600 },
+    );
+    for (const argv of [["invite"], ["remove", "box-a"]]) {
+      const r = await run(argv, deps(fakeExec(() => ({})).exec));
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain("admin");
+      expect(r.stderr).toContain("VOLLEY_AUTH_USERNAME");
+    }
+  });
+
+  it("an unanswered admin op (the broker drops a non-admin's request) says it needs an admin", async () => {
+    // A volleyd that answers only its mailbox: as if the broker dropped the ops-topic publish.
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "volleyd" });
+    await b.publish(
+      `volley/${NS}/volleyd/status`,
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "volleyd",
+          parentId: null,
+          channel: "status",
+          type: "working",
+          payload: {},
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    const r = await run(["invite", "--timeout", "1"], deps(fakeExec(() => ({})).exec), {
+      VOLLEY_AUTH_USERNAME: "steer-1",
+      VOLLEY_AUTH_PASSWORD: "s-pw",
+    });
+    await b.disconnect();
+    expect(r.exitCode).toBe(EXIT.TIMEOUT);
+    expect(r.stderr).toContain("admin ops");
+    expect(r.stderr).toContain("is steer-1 one?");
+  });
+
   it("a host command with volleyd down says so", async () => {
-    const r = await run(["remove", "box-a"], deps(fakeExec(() => ({})).exec));
+    const r = await run(["list"], deps(fakeExec(() => ({})).exec));
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("volleyd is not running");
   });

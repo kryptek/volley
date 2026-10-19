@@ -24,6 +24,8 @@ import {
   type AuthReply,
   TOKEN_REDEEM_FILTER,
   accountOp,
+  adminRefusal,
+  authReply,
   authReplyTopic,
   isValidCorrelationId,
   listAccounts,
@@ -139,7 +141,6 @@ import {
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
-  downReason,
   machineTopic,
   parseMachine,
 } from "./machines";
@@ -448,6 +449,8 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+/** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
+const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove"]);
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
@@ -869,6 +872,7 @@ export class Daemon {
       exec: opts.authExec ?? realExec,
       now: this.now,
       file: join(opts.home, "peer-codes.json"),
+      pairedFile: join(opts.home, "peers.json"),
       namespace: opts.namespace,
       broker: () => brokerAddress(opts.brokerUrl),
       hosts: () => this.config.effective().hosts,
@@ -1063,8 +1067,18 @@ export class Daemon {
     // Paired machines' retained health records (SPEC §4.6.14).
     this.unsubscribers.push(
       await this.broker.subscribeStream(MACHINES_FILTER, (m) => {
+        const name = m.topic.split("/")[3] ?? "";
+        // A cleared record (peer_remove) forgets the machine, so a late `down` cannot revive it.
+        if (m.payload === "") {
+          void this.enqueue(async () => this.machines.forget(name));
+          return;
+        }
         const record = parseMachine(m.topic, m.payload);
-        if (record !== null) void this.enqueue(async () => this.machines.observe(record));
+        // Every account may publish its own record: only a configured host's is a machine.
+        if (record === null) return;
+        void this.enqueue(async () => {
+          if (Object.hasOwn(this.config.effective().hosts, name)) this.machines.observe(record);
+        });
       }),
     );
 
@@ -2470,7 +2484,7 @@ export class Daemon {
     const machine = def !== undefined ? this.machines.record(def.host) : undefined;
     const reason =
       machine?.tunnel === "down"
-        ? `tunnel down to ${machine.name}: ${downReason(machine)}`
+        ? `tunnel down to ${machine.name}: ${this.machines.whyDown(machine)}`
         : status === "up"
           ? undefined
           : status === "down"
@@ -2563,7 +2577,7 @@ export class Daemon {
           type: "alarm_raised",
           data: {
             code: "MACHINE_DOWN",
-            message: `machine ${name} is down (${downReason(record)}): spawns on it wait; running agents are left alone`,
+            message: `machine ${name} is down (${this.machines.whyDown(record)}): spawns on it wait; running agents are left alone`,
             host: name,
             reason: record.reason ?? "disconnect",
             last_seen: record.last_seen,
@@ -4045,6 +4059,11 @@ export class Daemon {
     for (const t of state.tasks) {
       const host = rec.wave?.tasks[t.id]?.host;
       if (host !== undefined && host !== "local") t.host = host;
+      // A paired machine that is down: its running agents too (SPEC §4.6.14).
+      const machine = t.host !== undefined ? this.machines.record(t.host) : undefined;
+      if (machine?.tunnel === "down" && t.stage !== "done" && t.stage !== "cancelled") {
+        t.host_down = this.machines.whyDown(machine);
+      }
     }
     // A failed spawn says so, with its countdown, ahead of anything a queued task waits on.
     for (const t of state.tasks) {
@@ -4509,7 +4528,9 @@ export class Daemon {
             .filter((t): t is string => t !== undefined)
             .sort()
             .pop();
-        out = await accountOp(exec, sender, payload, lastSeen);
+        out = PEER_ADMIN_OPS.has(payload.op as string)
+          ? await this.peerAdminOp(exec, sender, payload)
+          : await accountOp(exec, sender, payload, lastSeen);
       }
     } catch (e) {
       const op = typeof payload.op === "string" ? payload.op : "";
@@ -4530,6 +4551,23 @@ export class Daemon {
       this.authAnswered.delete(this.authAnswered.keys().next().value as string);
     }
     await send(out.reply);
+  }
+
+  /**
+   * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
+   * names: the account ops' admin check, then peers.ts (which journals them itself).
+   */
+  private async peerAdminOp(exec: ExecFn, sender: string, p: Record<string, unknown>) {
+    const op = p.op as string;
+    const accounts = await listAccounts(exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    const r =
+      op === "peer_invite"
+        ? await this.peers.invite(p, sender)
+        : await this.peers.remove(p, sender);
+    const { rejected: _r, ...answer } = r;
+    return { reply: authReply(op, answer) };
   }
 
   private async handle(
@@ -4603,13 +4641,10 @@ export class Daemon {
         return this.claude.sync(p, by);
       case "agent_move_account":
         return { ok: true, defer: this.moveAccount(p, by) };
-      // Machines + pairing (peers.ts): the code (join) or the reply_key's holder gets the secret.
-      case "peer_invite":
-        return this.peers.invite(p, by);
+      // Machines + pairing (peers.ts): the code is a join's credential; the reply_key's holder
+      // gets the secret. Invite and remove are admin ops, answered only on the account-op topic.
       case "peer_join":
         return this.peers.join(p, by);
-      case "peer_remove":
-        return this.peers.remove(p, by);
       case "peers":
         return this.peers.list();
       case "config_get": {
@@ -4653,6 +4688,8 @@ export class Daemon {
       case "account_revoke":
       case "signin_link":
       case "token_redeem":
+      case "peer_invite":
+      case "peer_remove":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,

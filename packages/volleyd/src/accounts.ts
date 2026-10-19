@@ -178,6 +178,21 @@ export async function listAccounts(exec: ExecFn): Promise<Account[] | string> {
 }
 
 /**
+ * Why `sender` (the username an ops topic names) may not run an admin op, or undefined when its
+ * account has the admin role. Account ops and the admin-only peer ops (peers.ts) share it.
+ */
+export function adminRefusal(accounts: Account[], sender: string): string | undefined {
+  const me = accounts.find((a) => a.name === sender);
+  if (me === undefined) return `"${sender}" has no account; account ops need the admin role`;
+  if (me.role !== "admin")
+    return `"${sender}" has role ${me.role}; account ops need the admin role`;
+  return undefined;
+}
+
+/** An answer on the account-op reply topic. */
+export const authReply = reply;
+
+/**
  * Answer one account op from `sender` (the username the ops topic names). Refused unless the
  * sender's account has the admin role.
  */
@@ -190,12 +205,8 @@ export async function accountOp(
   const op = typeof p.op === "string" ? p.op : "";
   const accounts = await listAccounts(exec);
   if (typeof accounts === "string") return refuse(op, accounts);
-  const me = accounts.find((a) => a.name === sender);
-  if (me === undefined)
-    return refuse(op, `"${sender}" has no account; account ops need the admin role`);
-  if (me.role !== "admin") {
-    return refuse(op, `"${sender}" has role ${me.role}; account ops need the admin role`);
-  }
+  const notAdmin = adminRefusal(accounts, sender);
+  if (notAdmin !== undefined) return refuse(op, notAdmin);
   if (op === "token_redeem") {
     return refuse(op, "token_redeem is answered only on volley-auth/redeem/<token id>");
   }
