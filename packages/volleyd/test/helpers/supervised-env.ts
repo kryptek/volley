@@ -70,6 +70,10 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   await agent.connect({ url: env.broker.url, agentId: "agent-sim" });
   const fake = fakeExec()
     .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+    // the wave's release branch exists locally (spawn's base, run's RELEASE_BRANCH_MISSING check)
+    .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+      stdout: `${"1".repeat(40)}\n`,
+    })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
     })
@@ -108,6 +112,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   host.onLaunch = () => {
     o.onLaunch?.(daemon);
     setTimeout(async () => {
+      await status("spawning"); // the MCP server's lifecycle, before its registration
       await pub(registryTopic(AGENT), "registered", "_system/registry", {
         capabilities: [],
         cwd: "/wt",

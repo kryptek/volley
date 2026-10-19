@@ -17,6 +17,7 @@ const sealed = (cwd: string) =>
       hooksDir: "/opt/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
+      worktree: cwd,
     }),
   );
 

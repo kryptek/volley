@@ -25,6 +25,7 @@ const sealed = (cwd: string) =>
       hooksDir: "/opt/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
+      worktree: cwd,
     }),
   );
 const SSH = [
@@ -164,17 +165,21 @@ describe("SshTmuxHost", () => {
     expect((err as Error).message).toContain("tmux: command not found");
   });
 
-  it("launch.sh for a remote host: no --mcp-config, the remote hooks dir, env exports for tooling", () => {
+  it("launch.sh for a remote host: the box's mcp.json, the remote hooks dir, env exports for tooling", () => {
+    const host = new SshTmuxHost(SPEC, fakeExec().exec);
+    // The box's own volley checkout runs the agent's MCP server.
+    expect(host.mcpEntry).toBe("/home/dev/src/volley/packages/volley-mcp/src/index.ts");
     const script = renderLaunchScript({
       hooksDir: new SshTmuxHost(SPEC, fakeExec().exec).hooksDir,
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
+      worktree: "/wt/x",
       env: new SshTmuxHost(SPEC, fakeExec().exec).launchEnv({
         agent_id: "w1-t1-implementer-1",
         namespace: "default",
       }),
     });
-    expect(script).not.toContain("--mcp-config");
+    expect(script).toContain("--strict-mcp-config --mcp-config='/wt/x/.volley/mcp.json'");
     expect(script.startsWith("#!/usr/bin/env bash\n")).toBe(true);
     expect(script).toContain(
       "export VOLLEY_HOOKS_DIR='/home/dev/src/volley/packages/volley-hooks'",

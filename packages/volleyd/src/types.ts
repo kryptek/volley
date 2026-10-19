@@ -75,6 +75,10 @@ export interface Tunables {
   mailbox: { session_expiry_s: number };
   worktree_root: string;
   spawn_timeout_s: number;
+  /** Cap on the automatic retry delay of a failed spawn (it doubles from 30 s). */
+  spawn_retry_max_s: number;
+  /** Failed spawn attempts in a row after which automatic retries stop. */
+  spawn_retry_max: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
   hosts: Record<string, RemoteHostConfig>;
@@ -163,6 +167,12 @@ export interface TaskState {
     ci?: "green" | "red" | "running" | "none";
   };
   evidence_path?: string;
+  /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
+  last_error?: { code: string; message: string; at: string };
+  /** How many spawn attempts in a row have failed (with `last_error`). */
+  attempt?: number;
+  /** When the next automatic retry runs; null once `spawn_retry_max` stopped them. */
+  next_retry_at?: string | null;
 }
 
 export interface WaveSpec {
@@ -219,6 +229,9 @@ export const WAVE_EVENT_TYPES = [
   "agent_spawned",
   "agent_registered",
   "agent_retired",
+  "spawn_failed",
+  "spawn_recovered",
+  "verify_failed",
   "stage_entered",
   "artifact_verified",
   "steering_sent",

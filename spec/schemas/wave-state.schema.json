@@ -120,7 +120,26 @@
             "ci": { "enum": ["green", "red", "running", "none"] }
           }
         },
-        "evidence_path": { "type": "string", "minLength": 1 }
+        "evidence_path": { "type": "string", "minLength": 1 },
+        "last_error": {
+          "type": "object",
+          "required": ["code", "message", "at"],
+          "description": "The most recent of the task's unrecovered spawn failures (counted per role): present while any role's spawn has failed and not spawned since; gone once each such role spawns, or the task is cancelled or done.",
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Spawn attempts in a row that failed (with last_error)."
+        },
+        "next_retry_at": {
+          "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+          "description": "When the supervisor retries the failed spawn on its own; null once it stopped retrying (with last_error)."
+        }
       }
     },
     "pipelineStep": {

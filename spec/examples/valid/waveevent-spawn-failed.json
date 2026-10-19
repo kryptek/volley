@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/events",
+  "type": "spawn_failed",
+  "payload": {
+    "wave": "w1",
+    "seq": 9,
+    "at": "2026-10-18T14:02:11.000Z",
+    "task": "T1",
+    "data": {
+      "code": "WORKTREE_FAILED",
+      "message": "git worktree add failed: fatal: invalid reference: release/w1",
+      "role": "implementer",
+      "attempt": 1,
+      "spawn_attempt": 1,
+      "next_retry_at": "2026-10-18T14:02:41.000Z"
+    }
+  }
+}

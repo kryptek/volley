@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "spawn_failed-5d1c0e9a7b2f",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "spawn_failed",
+    "question": "Needs you: T1's implementer could not be spawned (WORKTREE_FAILED: git worktree add failed: fatal: invalid reference: release/w1). volleyd retries on its own (next in 30s, attempt 1 of 8). Retry now, or stop the task?",
+    "options": ["retry now", "stop task"],
+    "pointers": {},
+    "opened_at": "2026-10-18T14:02:11.000Z"
+  }
+}

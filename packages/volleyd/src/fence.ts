@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
+import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import { AGENT_BRANCH } from "./worktree";
 
 /**
  * The authority fence: a code-level policy over every external command volleyd runs.
@@ -23,11 +24,13 @@ import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
  *
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
- *     branch --list | merge-base | show
- *     worktree add needs -b <branch> or --detach (never checks out an existing branch), and the
- *     new branch is never main/master (in any case); fetch takes a remote name or a network URL
- *     (https, ssh, git, user@host:path — never a local path) and its refspecs only write
- *     refs/remotes/…
+ *     branch --list | branch --track <b> <remote>/<b> | merge-base | show
+ *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
+ *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
+ *     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
+ *     (in any case); fetch takes a remote name or a
+ *     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
+ *     write refs/remotes/…
  *   gh issue view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
@@ -38,7 +41,8 @@ import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
  *     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
  *     list-workspaces · ping
  *   claude — never: volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript),
- *     which the launch commands above run
+ *     which the launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS),
+ *     including `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>`
  *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
  *   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
  *   volley auth rm-agent <agent_id> [--no-reload]
@@ -86,12 +90,14 @@ import { LAUNCH_COMMAND, renderLaunchScript, shq } from "./launch";
  *     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
- *     (agent.json, brief.md, launch.sh, review.md, findings.md, findings.json, rebase.md —
- *     spelled exactly, directly inside `.volley/`, so no write there is a git config, HEAD,
- *     gitfile or hook, or a case variant of launch.sh), an absolute path ending in `/ISSUE.md`
- *     or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh` (what the
- *     tmux session runs) is written whole, never appended, and its content must be exactly
- *     `renderLaunchScript` of valid values (LAUNCH_SCRIPT_VARS)
+ *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
+ *     rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
+ *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
+ *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
+ *     (what the tmux session runs) is written whole, never appended, and its content must be
+ *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
+ *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
+ *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json
@@ -184,13 +190,14 @@ export interface LaunchToken {
 /**
  * Seal the launch script volleyd is about to write to `<worktree>/.volley/launch.sh`: throws
  * `FenceError` unless `worktree` is a clean absolute path and `content` is exactly what
- * `renderLaunchScript` renders (LAUNCH_SCRIPT_VARS). Callers: spawn, before the write.
+ * `renderLaunchScript` renders for that worktree (LAUNCH_SCRIPT_VARS: its `--mcp-config=` is
+ * `<worktree>/.volley/mcp.json`). Callers: spawn, before the write.
  */
 export function sealLaunchScript(worktree: string, content: string): LaunchToken {
   if (!absPath(worktree))
     throw new FenceError("launch.sh", "the worktree is not a clean absolute path");
-  if (!isLaunchScript(content))
-    throw new FenceError("launch.sh", "only a script renderLaunchScript renders");
+  if (!isLaunchScript(content, worktree))
+    throw new FenceError("launch.sh", "only a script renderLaunchScript renders for this worktree");
   const token = Object.freeze({ cwd: worktree });
   launches.add(token);
   return token;
@@ -327,28 +334,57 @@ function fetchPositionals(args: readonly string[]): Verdict {
 const PROTECTED_BRANCHES = new Set(["main", "master"]);
 
 /**
+ * `git branch --track <b> <remote>/<b>`: the local tracking branch for a release branch that
+ * exists only on the remote (worktree.ts resolveReleaseBase). Exactly that shape: a new branch
+ * (git refuses to overwrite one without `-f`), never main/master, named like its upstream.
+ */
+function trackingBranch(args: readonly string[]): Verdict {
+  const [branch, upstream] = args;
+  if (args.length !== 2 || branch === undefined || upstream === undefined)
+    return deny("git branch --track (only <branch> <remote>/<branch>)");
+  const slash = upstream.indexOf("/");
+  const ok =
+    !branch.startsWith("-") &&
+    !PROTECTED_BRANCHES.has(branch.toLowerCase()) &&
+    slash > 0 &&
+    REMOTE_NAME.test(upstream.slice(0, slash)) &&
+    upstream.slice(slash + 1) === branch;
+  return ok ? ALLOW : deny(`git branch --track ${branch} ${upstream}`);
+}
+
+/**
  * `git worktree add` must create its own branch (`-b <new>`, never main/master) or detach:
  * without either, git checks out an existing branch (`add /w main`, or `add /w/main`, which
- * DWIMs to the branch named like the directory), and commits would land on it.
+ * DWIMs to the branch named like the directory), and commits would land on it. `-B` resets an
+ * existing branch to the base and checks it out, so it is allowed only for a branch volleyd mints
+ * (`AGENT_BRANCH`: a leftover of a failed add, re-created on the retry) — never a release branch.
  */
 function worktreeAddBranch(args: readonly string[]): Verdict {
   let branch: string | undefined;
+  let reset = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
-    if (a === "-b") branch = args[++i];
-    else if (a.startsWith("-b") && a.length > 2) branch = a.slice(2);
+    if (a === "-b" || a === "-B") {
+      branch = args[++i];
+      reset = a === "-B";
+    } else if ((a.startsWith("-b") || a.startsWith("-B")) && a.length > 2) {
+      branch = a.slice(2);
+      reset = a.startsWith("-B");
+    }
   }
   if (branch === undefined && !args.includes("--detach"))
-    return deny("git worktree add (without -b <branch> or --detach)");
+    return deny("git worktree add (without -b|-B <branch> or --detach)");
   if (branch !== undefined && PROTECTED_BRANCHES.has(branch.toLowerCase()))
     return deny(`git worktree add -b ${branch}`);
+  if (reset && !AGENT_BRANCH.test(branch ?? ""))
+    return deny(`git worktree add -B ${branch} (only an agent branch <wave>/<task>-<role>-<n>)`);
   return ALLOW;
 }
 
 const GIT_SPECS: Record<string, OptSpec> = {
   "worktree add": {
     flags: ["--detach", "--quiet", "-q", "--lock", "--track", "--no-track", "--checkout"],
-    valued: ["-b", "--reason"],
+    valued: ["-b", "-B", "--reason"],
   },
   fetch: {
     flags: ["--prune", "-p", "--prune-tags", "--tags", "--no-tags", "--quiet", "-q", "--all"],
@@ -721,6 +757,7 @@ function git(args: string[]): Verdict {
     const v = checkArgs("git worktree add", rest.slice(1), spec);
     return v.kind === "allow" ? worktreeAddBranch(rest.slice(1)) : v;
   }
+  if (sub === "branch" && rest[0] === "--track") return trackingBranch(rest.slice(1));
   if (sub === "branch" && !rest.includes("--list") && !rest.includes("-l")) {
     return deny("git branch (without --list)");
   }
@@ -1006,6 +1043,7 @@ const VOLLEY_WRITES = new Set([
   "agent.json",
   "brief.md",
   "launch.sh",
+  "mcp.json",
   "review.md",
   "findings.md",
   "findings.json",
@@ -1046,8 +1084,10 @@ const unshq = (q: string) => q.slice(1, -1).replace(/'\\''/g, "'");
 const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
 const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
 const LAUNCH_EXEC = new RegExp(
-  `^exec claude .* --model (${SHQ}) --settings ${SHQ} --name (${SHQ}) `,
+  `^exec claude .* --model (${SHQ}) --settings ${SHQ} --strict-mcp-config --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
+/** What a `.volley/mcp.json` may run: some checkout's volley-mcp entry point. */
+const MCP_ENTRY_SUFFIX = "/packages/volley-mcp/src/index.ts";
 /** A remote host's launch.sh exports, in order: exactly what SshTmuxHost.launchEnv emits. */
 const LAUNCH_ENV_KEYS = ["VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE", "VOLLEY_AGENT_ID"];
 /** The broker as a remote agent sees it: the reverse tunnel's end on the box's loopback. */
@@ -1066,18 +1106,24 @@ function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean
   );
 }
 
+/** An absolute, clean path no segment of which is `.volley` (in any case): never volleyd's. */
+const outsideVolley = (p: string) =>
+  absPath(p) && !p.split("/").some((seg) => seg.toLowerCase() === ".volley");
+
 /**
  * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
- * volleyd writes) and env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win
- * in bash and point every hook at other code). Parsed back into its values and re-rendered, so
- * not one byte can differ from a script volleyd writes.
+ * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
+ * bash and point every hook at other code) and `worktree` — so `--mcp-config=` names exactly
+ * `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and `--` before the prompt). Parsed
+ * back into its values and re-rendered, so not one byte can differ from a script volleyd writes.
  */
-function isLaunchScript(content: string): boolean {
+function isLaunchScript(content: string, worktree: string): boolean {
   const lines = content.split("\n");
   const hooks = LAUNCH_HOOKS.exec(lines[4] ?? "");
   const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
   if (hooks === null || run === null) return false;
+  if (!absPath(worktree) || unshq(run[2] as string) !== mcpConfigPath(worktree)) return false;
   const env: Record<string, string> = {};
   for (const line of lines.slice(5, -2)) {
     const m = LAUNCH_EXPORT.exec(line);
@@ -1087,12 +1133,12 @@ function isLaunchScript(content: string): boolean {
   const vars = {
     hooksDir: unshq(hooks[1] as string),
     model: unshq(run[1] as string),
-    agentId: unshq(run[2] as string),
+    agentId: unshq(run[3] as string),
+    worktree,
     env,
   };
   return (
-    absPath(vars.hooksDir) &&
-    !vars.hooksDir.split("/").some((s) => s.toLowerCase() === ".volley") &&
+    outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
     launchEnvAllowed(env, vars.agentId) &&
@@ -1100,8 +1146,29 @@ function isLaunchScript(content: string): boolean {
   );
 }
 
+/**
+ * MCP_CONFIG: whether `content` is exactly `renderMcpConfig` of an absolute, clean volley-mcp
+ * entry point outside any `.volley/` (claude runs that server for the agent).
+ */
+function isMcpConfig(content: string): boolean {
+  let entry: unknown;
+  try {
+    entry = JSON.parse(content)?.mcpServers?.volley?.args?.[1];
+  } catch {
+    return false;
+  }
+  return (
+    typeof entry === "string" &&
+    entry.endsWith(MCP_ENTRY_SUFFIX) &&
+    outsideVolley(entry) &&
+    renderMcpConfig(entry) === content
+  );
+}
+
 /** A write to a `.volley/launch.sh`: the file a tmux session's TMUX_LAUNCH_COMMAND runs. */
 const isLaunchScriptPath = (path: string) => path.endsWith("/.volley/launch.sh");
+/** A write to a `.volley/mcp.json`: the MCP servers claude starts for the agent. */
+const isMcpConfigPath = (path: string) => path.endsWith("/.volley/mcp.json");
 
 function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
   if (step.cwd !== undefined && !REMOTE_PATH.test(step.cwd))
@@ -1122,11 +1189,15 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
       (step.append !== true || step.stdout !== REMOTE_CLAUDE_JSON_TMP);
     if (!write)
       return deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
-    if (isLaunchScriptPath(step.stdout ?? "")) {
-      const content = Buffer.from(step.stdin ?? "", "base64").toString("utf-8");
-      if (step.append === true || !isLaunchScript(content))
+    const path = step.stdout ?? "";
+    const content = () => Buffer.from(step.stdin ?? "", "base64").toString("utf-8");
+    if (isLaunchScriptPath(path)) {
+      const worktree = path.slice(0, -"/.volley/launch.sh".length);
+      if (step.append === true || !isLaunchScript(content(), worktree))
         return deny("remote launch.sh write (only a script renderLaunchScript renders)");
     }
+    if (isMcpConfigPath(path) && (step.append === true || !isMcpConfig(content())))
+      return deny("remote mcp.json write (only an mcp.json renderMcpConfig renders)");
     return ALLOW;
   }
   if (sameArgv(step.argv, TRUST_SWAP)) return ALLOW;

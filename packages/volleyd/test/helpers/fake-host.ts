@@ -87,6 +87,8 @@ export interface FakeWatchOptions {
   /** Hook registry entry the watch already holds (null: none yet). */
   registry?: Record<string, unknown> | null;
   sessionStart?: boolean;
+  /** Whether the agent's own MCP server published its spawning/registered status (default true). */
+  mcp?: boolean;
 }
 
 /** A watch whose signals are fixed up front (no broker). */
@@ -102,6 +104,7 @@ export function fakeWatch(
         : o.registry,
     hookRegistryAt: o.registry === null ? null : "2026-10-18T12:00:00.000Z",
     sessionStart: o.sessionStart ?? true,
+    mcpStatus: o.mcp ?? true,
     status: null,
     lastHeartbeatAt: null,
   };
@@ -179,6 +182,10 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
   );
   const fake = fakeExec()
     .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+    // the wave's release branch exists locally (spawn's base, run's RELEASE_BRANCH_MISSING check)
+    .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+      stdout: `${"1".repeat(40)}\n`,
+    })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, o.issueFixture ?? "gh-issue-42.json"), "utf-8"),
     })
@@ -196,6 +203,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     brokerUrl: "mqtt://127.0.0.1:1",
     claudeJsonPath: claudeJson,
     hooksDir: "/opt/volley/packages/volley-hooks",
+    mcpEntry: "/opt/volley/packages/volley-mcp/src/index.ts",
     mintCredentials: o.mint ?? true,
     tunables: {
       worktree_root: join(dir, "wt"),

@@ -62,6 +62,9 @@ describe("daemon spawn loop", () => {
     await agent.connect({ url: env.broker.url, agentId: "agent-sim" });
     const fake = fakeExec()
       .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+        stdout: `${"1".repeat(40)}\n`,
+      })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
       })
@@ -103,6 +106,7 @@ describe("daemon spawn loop", () => {
     // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
     host.onLaunch = () => {
       setTimeout(async () => {
+        await pub(buildTopic(NS, ID, "status"), "spawning", "status", {});
         await pub(registryTopic(ID), "registered", "_system/registry", {
           capabilities: [],
           cwd: "/wt",
@@ -175,6 +179,10 @@ describe("daemon spawn loop", () => {
     ).toMatchObject({
       code: "SPAWN_LOCKED",
     });
+    // A refused extra spawn says nothing about the running task: no spawn failure, no alarm.
+    expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
+    expect(daemon.snapshot("w1")?.tasks[0]?.last_error).toBeUndefined();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
 
     // done → retire: credentials revoked, retained records cleared, lock released.
     await pub(buildTopic(NS, ID, "result"), "result", "result", { summary: "ok" });

@@ -96,6 +96,14 @@ describe("session-start", () => {
     expect((await retainedEnvelope(client, statusTopic)).type).toBe("done");
   });
 
+  it("publishes working when no status is retained (a hook-only registration is never unknown)", async () => {
+    const statusTopic = buildTopic(NS, AGENT, "status");
+    await sessionStart("session-start-startup.json");
+    const status = await retainedEnvelope(client, statusTopic);
+    expect(status.type).toBe("working");
+    expect(status.payload).toEqual({ source: "harness-hook" });
+  });
+
   it("publishes a heartbeat", async () => {
     const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
     await sessionStart("session-start-startup.json");
