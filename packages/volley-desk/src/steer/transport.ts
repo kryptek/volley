@@ -31,6 +31,7 @@
  * credentials; without credentials the panel is read-only and offers
  * `copySteerCommand` instead.
  */
+import { newId as defaultNewId } from "../lib/id";
 import type { DeskMessage, Envelope } from "../store/types";
 import type { SentSteer, SteerLogEvent, SteerType } from "./ackState";
 
@@ -169,7 +170,7 @@ export function createSteerTransport(
 ): SteerTransport {
   const { identity, onEvent } = opts;
   const timeoutMs = opts.timeoutMs ?? CONTROL_TIMEOUT_MS;
-  const newId = opts.newId ?? (() => crypto.randomUUID());
+  const newId = opts.newId ?? defaultNewId;
   const now = opts.now ?? (() => new Date());
   /** Last seq per target agent. */
   const lastSeq = new Map<string, number>();

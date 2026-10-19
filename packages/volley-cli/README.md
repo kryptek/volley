@@ -275,7 +275,23 @@ volley lease run --pool backend-it -- mvn -q verify
 
 volley lease acquire --pool build --lease-id nightly-1     # {"pool":"build","lease_id":"nightly-1","holder":"lease-x1y2z3","waited_s":0}
 volley lease release --pool build --lease-id nightly-1 --holder lease-x1y2z3   # default holder: a <holder>.<rand> id's prefix
-volley lease status                                        # every pool: holders, queue, reasons
+volley lease status                                        # every pool: holders, queue, reasons, by machine
+```
+
+`status` groups each pool's holders and queued requests under the machine they run on, hosts by
+name and `(unknown host)` last (a holder volleyd did not spawn, or every holder of a supervisor
+that does not report hosts); a pool with a `per_machine` cap shows it, and each machine's share of
+it:
+
+```text
+backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it leases held on box-a (per machine)
+  box-a  1/1 held
+    held    l-3  agent-a  since 2026-10-19T12:00:00.000Z
+    queued  l-4  agent-c  since 2026-10-19T12:00:00.000Z
+  box-b  1/1 held
+    held    l-2  agent-b  since 2026-10-19T12:00:00.000Z
+  (unknown host)  1 held
+    held    l-1  hand-1  since 2026-10-19T12:00:00.000Z
 ```
 
 - **Holder** = `--holder`, else the `agent_id` in `<--project-dir or cwd>/.volley/agent.json`, else a

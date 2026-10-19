@@ -28,6 +28,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `readiness.schema.json` | `_system/machines/<name>/readiness` (the supervisor only) | section 4.6.15 |
 | `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | section 4.6.10 |
 | `account.schema.json` | `accounts.json` account registry file (not an envelope) | section 4.6.10 |
+| `setup-result.schema.json` | the `result` of a `setup_plan` (`$defs/plan`) or `setup_apply` (`$defs/applied`) answer on `_system/auth/replies/<correlation_id>` | section 4.6.10 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
 | `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | sections 4.6, 4.6.15 |
 

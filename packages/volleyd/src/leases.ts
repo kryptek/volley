@@ -8,15 +8,25 @@ import type { JournalEvent, LeasePoolConfig, NewEvent } from "./types";
  * publishes `poolPayload` retained on `volley/_system/leases/<pool>`. `replayLeases` rebuilds
  * the book from that journal on restart, so leases survive a daemon restart.
  *
- * Rules: grants are FIFO and never exceed the pool's current capacity; nothing is ever
+ * Rules: grants are FIFO and never exceed the pool's current capacity, nor, in a pool that sets
+ * `per_machine`, the holders' machine's share of it (a request its machine's cap holds back is
+ * skipped, so one from another machine behind it is granted); nothing is ever
  * preempted (a capacity cut, or a pool removed from config, only stops new grants); a lease
  * ends on release, on TTL expiry, or when its holder's status turns terminal. A pool removed
  * from config drops its queued requests (they never started), so their clients stop waiting.
  */
 
+/**
+ * The machine a holder runs on, by machine name (the supervisor's own under its
+ * `fleet.local_name`, never the `local` token: the daemon maps it before `step`); null for a
+ * holder the daemon did not spawn. Absent on leases from before machine-aware leases.
+ */
+export type LeaseHost = string | null;
+
 export interface HeldLease {
   lease_id: string;
   holder: string;
+  host?: LeaseHost;
   /** When the lease was granted. */
   since: string;
   ttl_s: number;
@@ -27,6 +37,7 @@ export interface HeldLease {
 export interface QueuedLease {
   lease_id: string;
   holder: string;
+  host?: LeaseHost;
   /** When the request arrived. */
   since: string;
   /** The TTL the lease will get when granted. Internal. */
@@ -51,7 +62,7 @@ export interface LeaseRequest {
 }
 
 export type LeaseInput =
-  | { kind: "request"; pool: string; req: LeaseRequest }
+  | { kind: "request"; pool: string; req: LeaseRequest; host?: LeaseHost }
   | { kind: "tick" }
   | { kind: "holder_status"; holder: string; status: string };
 
@@ -75,8 +86,9 @@ export interface LeaseStepResult {
 export interface LeasePoolPayload {
   pool: string;
   capacity: number;
-  held: { lease_id: string; holder: string; since: string; ttl_s: number }[];
-  queue: { lease_id: string; holder: string; since: string }[];
+  per_machine?: number;
+  held: { lease_id: string; holder: string; host?: LeaseHost; since: string; ttl_s: number }[];
+  queue: { lease_id: string; holder: string; host?: LeaseHost; since: string }[];
   reasons: string[];
 }
 
@@ -95,6 +107,22 @@ export const emptyBook = (): LeaseBook => ({});
 const plus = (iso: string, seconds: number) =>
   new Date(Date.parse(iso) + seconds * 1000).toISOString();
 
+/** The host fields of a lease or its events: nothing when the host is unknown (absent). */
+const hostOf = (host: LeaseHost | undefined) => (host !== undefined ? { host } : {});
+
+/**
+ * Leases of `pool` held by holders on `host`: 0 for a pool with none, and for a null (or
+ * absent) host, since a hand-run holder is on no machine's cap.
+ */
+export function heldOn(book: LeaseBook, pool: string, host: LeaseHost | undefined): number {
+  if (host === null || host === undefined) return 0;
+  return book[pool]?.held.filter((h) => h.host === host).length ?? 0;
+}
+
+/** A queued request's machine is at the pool's `per_machine` cap (never, when it sets none). */
+const machineFull = (book: LeaseBook, pool: string, cfg: LeasePoolConfig, q: QueuedLease) =>
+  cfg.per_machine !== undefined && heldOn(book, pool, q.host) >= cfg.per_machine;
+
 const has = (p: PoolLeases | undefined, leaseId: string) =>
   p !== undefined &&
   (p.held.some((h) => h.lease_id === leaseId) || p.queue.some((q) => q.lease_id === leaseId));
@@ -109,6 +137,7 @@ export function applyLeaseEvent(book: LeaseBook, ev: JournalEvent | NewEvent): L
     pool: string;
     lease_id: string;
     holder: string;
+    host?: LeaseHost;
     ttl_s?: number;
     renewed?: boolean;
   };
@@ -120,7 +149,13 @@ export function applyLeaseEvent(book: LeaseBook, ev: JournalEvent | NewEvent): L
   switch (ev.type) {
     case "lease_requested":
       if (!has(p, d.lease_id))
-        p.queue.push({ lease_id: d.lease_id, holder: d.holder, since: at, ttl_s: ttl });
+        p.queue.push({
+          lease_id: d.lease_id,
+          holder: d.holder,
+          ...hostOf(d.host),
+          since: at,
+          ttl_s: ttl,
+        });
       break;
     case "lease_granted":
       if (d.renewed === true) {
@@ -133,6 +168,7 @@ export function applyLeaseEvent(book: LeaseBook, ev: JournalEvent | NewEvent): L
           p.held.push({
             lease_id: d.lease_id,
             holder: d.holder,
+            ...hostOf(d.host),
             since: at,
             ttl_s: ttl,
             expires_at: plus(at, ttl),
@@ -162,8 +198,9 @@ export function replayLeases(events: readonly JournalEvent[]): LeaseBook {
 /**
  * One input → the events it causes, applied. After the input itself, every step expires leases
  * past their TTL, drops the queued requests of pools no longer configured, and then grants
- * queued requests FIFO while a pool is under its current capacity — so a capacity increase is
- * granted on the next tick and a decrease only waits for releases.
+ * queued requests FIFO while a pool is under its current capacity, skipping a request whose
+ * machine is at the pool's `per_machine` cap — so a capacity increase is granted on the next
+ * tick and a decrease (of either cap) only waits for releases.
  */
 export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext): LeaseStepResult {
   const at = ctx.now.toISOString();
@@ -192,11 +229,16 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
       rejected = `pool ${pool} is not configured`;
     } else if (req.op === "acquire") {
       if (heldBy === undefined && queuedBy === undefined) {
-        emit("lease_requested", { ...ref, ttl_s: req.ttl_s ?? cfg.ttl_s ?? ctx.defaultTtlS });
+        emit("lease_requested", {
+          ...ref,
+          ...hostOf(input.host),
+          ttl_s: req.ttl_s ?? cfg.ttl_s ?? ctx.defaultTtlS,
+        });
       }
     } else if (heldBy?.holder === req.holder) {
       emit("lease_granted", {
         ...ref,
+        ...hostOf(heldBy.host),
         ttl_s: req.ttl_s ?? heldBy.ttl_s,
         renewed: true,
       });
@@ -238,12 +280,14 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
     if (cfg === undefined) continue;
     for (;;) {
       const p = cur[pool];
-      const next = p?.queue[0];
-      if (p === undefined || next === undefined || p.held.length >= cfg.capacity) break;
+      if (p === undefined || p.held.length >= cfg.capacity) break;
+      const next = p.queue.find((q) => !machineFull(cur, pool, cfg, q));
+      if (next === undefined) break;
       emit("lease_granted", {
         pool,
         lease_id: next.lease_id,
         holder: next.holder,
+        ...hostOf(next.host),
         ttl_s: next.ttl_s,
       });
     }
@@ -253,8 +297,11 @@ export function step(book: LeaseBook, input: LeaseInput, ctx: LeaseStepContext):
 }
 
 /**
- * The retained pool state. `reasons` explains the queue; a pool removed from config reports
- * capacity 0 and says new requests are rejected, until its last holder releases.
+ * The retained pool state. `reasons` explains the queue, naming the cap that holds each request:
+ * one line per request its machine's `per_machine` cap holds back (that cap still holds it once
+ * the pool frees a slot), and one line for the rest, which the pool's capacity holds. A pool
+ * removed from config reports capacity 0 and says new requests are rejected, until its last
+ * holder releases.
  */
 export function poolPayload(
   pool: string,
@@ -267,14 +314,34 @@ export function poolPayload(
   const capacity = cfg?.capacity ?? 0;
   const reasons: string[] = [];
   if (cfg === undefined) reasons.push(`pool ${pool} removed from config: new requests rejected`);
-  else if (p.queue.length > 0)
-    reasons.push(`queued: ${p.held.length}/${capacity} ${pool} leases held`);
+  else {
+    const perMachine = p.queue.filter((q) => machineFull(book, pool, cfg, q));
+    if (perMachine.length < p.queue.length)
+      reasons.push(`queued: ${p.held.length}/${capacity} ${pool} leases held`);
+    for (const q of perMachine) {
+      reasons.push(
+        `queued ${q.lease_id}: ${heldOn(book, pool, q.host)}/${cfg.per_machine} ${pool} leases held on ${q.host} (per machine)`,
+      );
+    }
+  }
   reasons.push(...extraReasons);
   return {
     pool,
     capacity,
-    held: p.held.map(({ lease_id, holder, since, ttl_s }) => ({ lease_id, holder, since, ttl_s })),
-    queue: p.queue.map(({ lease_id, holder, since }) => ({ lease_id, holder, since })),
+    ...(cfg?.per_machine !== undefined ? { per_machine: cfg.per_machine } : {}),
+    held: p.held.map(({ lease_id, holder, host, since, ttl_s }) => ({
+      lease_id,
+      holder,
+      ...hostOf(host),
+      since,
+      ttl_s,
+    })),
+    queue: p.queue.map(({ lease_id, holder, host, since }) => ({
+      lease_id,
+      holder,
+      ...hostOf(host),
+      since,
+    })),
     reasons,
   };
 }
