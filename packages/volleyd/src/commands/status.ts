@@ -12,8 +12,12 @@ const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
 else the session registered for this directory).
---json prints the wave-state payload(s) exactly as published on volley/_waves/<wave>/state
-(each task's pr { number, head_sha, ci, checks }, stage_group and alarms included).
+--json prints, for one wave, its wave-state payload exactly as published on
+volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
+alarms included); without a wave, { waves: [those payloads], agent_logins }.
+Without a wave, a first line counts the broker's agent logins (as last re-read: after each
+mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
+(--json: agent_logins).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -44,6 +48,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     const states =
       wave !== undefined ? [res.result as WaveState] : (res.result as { waves: WaveState[] }).waves;
     const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
+    const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -53,12 +58,18 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     }
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
+        (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
         (states.length === 0
           ? "no waves\n"
           : states.map((s) => formatWave(s, { caller, decisions })).join("\n")),
     );
     return EXIT.OK;
   });
+}
+
+/** `agent logins: N live, M swept` (status header, from the daemon's credential sweep). */
+export function formatLogins(l: { live: number; swept: number }): string {
+  return `agent logins: ${l.live} live, ${l.swept} swept`;
 }
 
 function parseStatus(argv: string[]) {

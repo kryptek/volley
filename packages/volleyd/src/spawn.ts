@@ -19,6 +19,7 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
+  type AgentCredentials,
   type BrokerCredentials,
   agentIdFor,
   mintCredentials,
@@ -34,7 +35,7 @@ import {
   renderMcpConfig,
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
-import { retainedTopics } from "./retire";
+import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
@@ -111,8 +112,10 @@ export interface SpawnDeps {
   hooksDir: string;
   /** `packages/volley-mcp/src/index.ts` on the agent's host: its `.volley/mcp.json` server. */
   mcpEntry: string;
-  /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
+  /** Mint per-agent broker logins; false for an open broker. */
   mintCredentials: boolean;
+  /** Where the logins come from: volleyd's Dynamic Security control connection (dynsec.ts). */
+  credentials?: AgentCredentials;
   tunables: Pick<
     Tunables,
     "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
@@ -130,6 +133,8 @@ export interface SpawnDeps {
   briefsDir?: string;
   /** Publish an empty retained payload (clears a superseded attempt's records). Default: none. */
   clearRetained?: (topic: string) => Promise<void>;
+  /** Publish a retained message (a superseded attempt's `reaped` status). Default: none. */
+  publishRetained?: (topic: string, payload: string) => Promise<void>;
   /**
    * Open a decision through the daemon's decision store (published retained, notify bridge).
    * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
@@ -226,8 +231,6 @@ const secondsMs = (s: number) => s * 1000;
 
 /** The volleyd agent id, the parent of agents in a wave without an owner. */
 const SUPERVISOR = "volleyd";
-/** The Desk's fixed identity: it steers agents, so they ack to its mailbox. */
-const DESK = "desk";
 
 interface Ctx {
   req: SpawnRequest;
@@ -424,9 +427,8 @@ async function launchAttempt(
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
-    // Everyone who may steer it: the owner (or volleyd), volleyd, and the Desk. A later owner
-    // (`claim`) is granted then (daemon.ts extendAckGrants).
-    creds = await mintCredentials(host.exec, agentId, [parent, SUPERVISOR, DESK]);
+    // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
+    creds = await mintCredentials(deps.credentials, agentId);
   }
   try {
     await writeAgentJson(host, ctx.worktree, {
@@ -508,7 +510,10 @@ async function launchAttempt(
     }
     return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
-    if (creds !== undefined) await revokeCredentials(host.exec, agentId);
+    // A bare revoke, not the delete path: this is almost always a failure before or at the
+    // launch, when no session holds the login. (A journal failure right after a launch is the rare
+    // exception, and its retained records are not cleared here.)
+    if (creds !== undefined) await revokeCredentials(deps.credentials, agentId);
     throw e;
   }
 }
@@ -656,10 +661,27 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
-  const revoked = prev.minted ? await revokeCredentials(deps.host.exec, prev.agentId) : null;
-  if (deps.clearRetained !== undefined) {
-    for (const topic of retainedTopics(ctx.namespace, prev.agentId))
-      await deps.clearRetained(topic);
+  // A stalled attempt may still be connected: delete its login through the delete path (`reaped`
+  // first, records cleared before and after the delete), as every other delete does.
+  let revoked: boolean | null = null;
+  if (prev.minted && deps.publishRetained !== undefined && deps.clearRetained !== undefined) {
+    revoked = await reapAndRevoke(
+      prev.agentId,
+      ctx.namespace,
+      {
+        credentials: deps.credentials,
+        publishRetained: deps.publishRetained,
+        clearRetained: deps.clearRetained,
+        journal: deps.journal,
+      },
+      req.task,
+    );
+  } else {
+    if (prev.minted) revoked = await revokeCredentials(deps.credentials, prev.agentId);
+    if (deps.clearRetained !== undefined) {
+      for (const topic of retainedTopics(ctx.namespace, prev.agentId))
+        await deps.clearRetained(topic);
+    }
   }
   const attempt = prev.attempt + 1;
   const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);

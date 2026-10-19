@@ -11,6 +11,11 @@ import { type BrokerAuth, authFromEnv, resolveBrokerAuth } from "volley-mcp/conf
 
 /** volleyd's credentials file, in `$VOLLEYD_HOME`. */
 export const BROKER_FILE = "broker.json";
+/**
+ * The broker's Dynamic Security admin login volleyd mints and deletes agent logins with, in
+ * `$VOLLEYD_HOME` (`volley auth init --volleyd-file`); else `$VOLLEY_AUTH_DIR/admin.json`.
+ */
+export const ADMIN_FILE = "dynsec-admin.json";
 
 /** The daemon's credentials: `<home>/broker.json` wins, then `VOLLEY_AUTH_*`; null = anonymous. */
 export function daemonAuth(
@@ -19,6 +24,28 @@ export function daemonAuth(
 ): BrokerAuth | null {
   const path = join(home, BROKER_FILE);
   if (!existsSync(path)) return authFromEnv(env);
+  return readCredentialsFile(path);
+}
+
+/**
+ * The dynsec admin login: `<home>/dynsec-admin.json`, else `$VOLLEY_AUTH_DIR/admin.json`, else
+ * null (volleyd then mints nothing: spawns fail with CREDENTIALS_FAILED unless `--no-mint`).
+ */
+export function daemonAdminAuth(
+  home: string,
+  env: Record<string, string | undefined>,
+): BrokerAuth | null {
+  for (const path of [
+    join(home, ADMIN_FILE),
+    ...(env.VOLLEY_AUTH_DIR !== undefined ? [join(env.VOLLEY_AUTH_DIR, "admin.json")] : []),
+  ]) {
+    if (existsSync(path)) return readCredentialsFile(path);
+  }
+  return null;
+}
+
+/** `{username, password}` from a mode-0600 file (anything looser is refused). */
+function readCredentialsFile(path: string): BrokerAuth {
   const mode = statSync(path).mode & 0o777;
   if ((mode & 0o077) !== 0) {
     throw new Error(

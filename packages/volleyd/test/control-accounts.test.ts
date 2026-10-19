@@ -20,9 +20,10 @@ const USERS = [
   "volleyd",
   "admin-1",
   "steer-1",
-  "redeem-0000abcd",
-  "redeem-0000beef",
-  "redeem-51600001",
+  // One-time token logins: the token id is the username.
+  "0000abcd",
+  "0000beef",
+  "51600001",
 ];
 
 /**
@@ -79,7 +80,7 @@ function fakeAuth(): FakeExec & { accounts: Map<string, string>; tokens: Map<str
         tokens.set(token, { id, role: flag("--role"), state: "fresh" });
         return ok({
           token,
-          username: `redeem-${id}`,
+          username: id,
           expires_at: "2026-10-18T12:10:00.000Z",
         });
       }
@@ -113,12 +114,13 @@ interface Tok {
   state: "fresh" | "used" | "expired";
 }
 
-/** The broker ACL the shipped acl.conf would apply, reduced to the auth topics. */
+/** The broker ACL the shipped roles (examples/mosquitto-auth/roles.json) apply, reduced to the auth topics. */
 function canPublish(user: string | undefined, topic: string): boolean {
   if (user === "volleyd") return true;
   if (topic.startsWith("volley/_system/auth/ops/")) return topic === authOpsTopic(user ?? "");
-  // A token login writes only its own redeem topic; nobody else writes under volley-auth/.
-  if (user?.startsWith("redeem-")) return topic === tokenRedeemTopic(user.slice("redeem-".length));
+  // A token login (username = token id, `%u` in the token role) writes only its own redeem
+  // topic; nobody else writes under volley-auth/.
+  if (user !== undefined && /^[0-9a-f]{8}$/.test(user)) return topic === tokenRedeemTopic(user);
   if (topic.startsWith("volley-auth/")) return false;
   return !topic.startsWith("volley/_system/auth/");
 }
@@ -474,13 +476,12 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     /** Redeem `token` as token `id`'s own login, on its own topic; the answer on its reply topic. */
     const redeemVia = (id: string, token: string) =>
       request(
-        `redeem-${id}`,
+        id,
         tokenRedeemTopic(id),
         { op: "token_redeem", token, label: "Desk on mac", reply_key: replyKey },
         3000,
         { replyTopic: tokenReplyTopic(id) },
       );
-    const redeem = (user: string, token: string) => redeemVia(user.slice("redeem-".length), token);
 
     it("a token is redeemed only on its own topic: another token's topic is refused", async () => {
       const r = await redeemVia("0000beef", "vly_admin_0000abcd_secret");
@@ -492,7 +493,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     it("the answer goes only to the token's reply topic, not the correlation_id one", async () => {
       const cid = randomUUID();
       const onCid = request(
-        "redeem-0000abcd",
+        "0000abcd",
         tokenRedeemTopic("0000abcd"),
         { op: "token_redeem", token: "vly_admin_0000abcd_secret", label: "x", reply_key: replyKey },
         1500,
@@ -502,7 +503,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     });
 
     it("a valid token mints an admin credential bound to the label and burns the token", async () => {
-      const r = await redeem("redeem-0000abcd", "vly_admin_0000abcd_secret");
+      const r = await redeemVia("0000abcd", "vly_admin_0000abcd_secret");
       expect(r).toMatchObject({
         ok: true,
         op: "token_redeem",
@@ -515,22 +516,22 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       expect(call?.argv).toEqual(["volley", "auth", "redeem", "--label", "Desk on mac", "--json"]);
       expect(call?.opts.input).toBe("vly_admin_0000abcd_secret\n");
       expect(systemEvents().find((e) => e.type === "token_redeemed")?.data).toEqual({
-        by: "redeem-0000abcd",
+        by: "0000abcd",
         name: "admin-0000abcd",
         role: "admin",
         label: "Desk on mac",
       });
 
-      const again = await redeem("redeem-0000abcd", "vly_admin_0000abcd_secret");
+      const again = await redeemVia("0000abcd", "vly_admin_0000abcd_secret");
       expect(again).toMatchObject({ ok: false });
       expect(again?.error).toContain("already used");
     });
 
     it("an expired or unknown token is refused", async () => {
-      const expired = await redeem("redeem-0000beef", "vly_admin_0000beef_old");
+      const expired = await redeemVia("0000beef", "vly_admin_0000beef_old");
       expect(expired).toMatchObject({ ok: false });
       expect(expired?.error).toContain("expired");
-      const unknown = await redeem("redeem-0000beef", "vly_admin_0000beef_guess");
+      const unknown = await redeemVia("0000beef", "vly_admin_0000beef_guess");
       expect(unknown?.error).toContain("invalid token");
       expect(systemEvents().some((e) => e.type === "token_redeemed")).toBe(false);
     });
@@ -581,12 +582,12 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       label: "Owner's phone",
     });
 
-    // The token's own `redeem-<id>` login is the CLI's to mint; the fake's first id is 51600001.
+    // The token's own login (username = its id) is the CLI's to mint; the fake's first id is 51600001.
     const id = secret.token.split("_")[2] as string;
     expect(id).toBe("51600001");
     const redeemAs = () =>
       request(
-        `redeem-${id}`,
+        id,
         tokenRedeemTopic(id),
         { op: "token_redeem", token: secret.token, label: "iPhone", reply_key: replyKey },
         3000,

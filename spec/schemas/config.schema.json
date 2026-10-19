@@ -205,6 +205,20 @@
           "maximum": 3600,
           "description": "Seconds a stopped wave's agents get to publish a terminal status after their cancel; any still running then is force-retired (records cleared, login deleted)."
         },
+        "dynsec_batch_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 50,
+          "description": "Milliseconds the supervisor collects broker login changes (mints, deletes) before sending them as one Dynamic Security control message, so the broker rewrites its state file once per batch (spec section 4.6.13). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "credential_sweep_interval_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400,
+          "default": 600,
+          "description": "Seconds between credential sweeps, which delete the broker logins of agents that are no longer live (spec section 4.6.13). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "claude": {
           "type": "object",
           "additionalProperties": false,

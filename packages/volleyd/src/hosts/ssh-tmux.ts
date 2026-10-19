@@ -93,7 +93,7 @@ const SSH_FAILED = 255;
 /** True when the result is ssh failing, not the remote command. */
 const transportFailed = (r: ExecResult) => r.timedOut || r.code === SSH_FAILED;
 
-/** Programs that act on the daemon's own machine (the broker's credentials), never the box. */
+/** Programs that act on the daemon's own machine (`volley auth`: the broker's logins), never the box. */
 const LOCAL_PROGRAMS = new Set(["volley"]);
 
 /**

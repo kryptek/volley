@@ -52,9 +52,10 @@ import { AGENT_BRANCH } from "./worktree";
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
  *     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
  *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
- *   volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
- *   volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
- *   volley auth rm-agent <agent_id> [--no-reload]
+ *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
+ *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+ *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
+ *     retains no $SYS/broker/version)
  *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
  *   volley auth add <agent_id> --role ROLE [--kind KIND] --json
  *   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
@@ -714,6 +715,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return localTmux(args, opts);
     case "volley":
       return volley(args);
+    case "mosquitto":
+      return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
     case "sysctl":
@@ -960,33 +963,14 @@ const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
   redeem: (a) => a.length === 3 && a[0] === "--label" && LABEL(a[1]) && a[2] === "--json",
 };
 
-/**
- * `volley auth add-agent|grant|rm-agent <id>`: mint, extend the ack grant of (ACL only), and
- * revoke one agent's broker credentials.
- */
+/** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
-  const [group, verb, id, ...rest] = args;
+  const [group, verb] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
-  if (group !== "auth" || (verb !== "add-agent" && verb !== "rm-agent" && verb !== "grant"))
-    return deny(name);
-  if (id === undefined || !AGENT_ID.test(id)) return deny(`${name} (agent id)`);
-  let acks = 0;
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--no-reload") continue;
-    if (verb === "add-agent" && a === "--json") continue;
-    if (verb !== "rm-agent" && a === "--ack-to" && AGENT_ID.test(rest[i + 1] ?? "")) {
-      acks++;
-      i++;
-      continue;
-    }
-    return deny(`${name} ${a}`);
-  }
-  if (verb === "grant" && acks === 0) return deny(`${name} (no --ack-to)`);
-  return ALLOW;
+  return deny(name);
 }
 
 /** The service plist `volleyd install` writes under `home` (`$HOME/Library/LaunchAgents`). */

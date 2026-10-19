@@ -419,9 +419,9 @@ describe("SshTmuxHost", () => {
 
   it("exec routes credentials and the brief gate to the daemon's machine, the rest remote", async () => {
     const r = remote((s) => (argvIs("cat")(s) ? { stdout: "the brief\n" } : undefined));
-    r.fake.on(["volley", "auth", "add-agent"], { stdout: '{"username":"a","password":"p"}' });
-    await r.host.exec(["volley", "auth", "add-agent", "a", "--json"]);
-    expect(r.fake.calls.at(-1)?.argv).toEqual(["volley", "auth", "add-agent", "a", "--json"]);
+    r.fake.on(["volley", "auth", "list"], { stdout: '{"accounts":[]}' });
+    await r.host.exec(["volley", "auth", "list", "--json"]);
+    expect(r.fake.calls.at(-1)?.argv).toEqual(["volley", "auth", "list", "--json"]);
 
     // The brief gate is a local program: it gets a local copy of the remote brief.
     let seen = "";

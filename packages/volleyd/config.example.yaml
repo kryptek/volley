@@ -47,6 +47,9 @@
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
 # stop_grace_s: 30              # after `volleyd stop`: seconds agents get to end; then force-retired
+# dynsec_batch_ms: 50           # window collecting simultaneous mints / deletes into ONE broker
+#                               # control message (one Dynamic Security state-file rewrite)
+# credential_sweep_interval_s: 600  # seconds between sweeps deleting logins of agents no longer live
 
 # Claude account profiles (README "Claude accounts"): the account an agent runs under when its
 # task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or

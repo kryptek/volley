@@ -12,6 +12,7 @@ import { retainedTopics } from "../src/retire";
 import type { JournalEvent } from "../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
@@ -35,6 +36,7 @@ describe("relaunch of a spawn-type decision", () => {
   let daemon: Daemon;
   let clock: FakeClock;
   let waits: JournalWait;
+  let creds: MemoryCredentials;
   const sessions = new Set<Promise<void>>();
 
   const journal = (): JournalEvent[] =>
@@ -96,10 +98,8 @@ describe("relaunch of a spawn-type decision", () => {
       })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
+    creds = memoryCredentials();
     host = fakeHost(fake);
     let launches = 0;
     host.onLaunch = (spec) => {
@@ -142,6 +142,7 @@ describe("relaunch of a spawn-type decision", () => {
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
+        credentials: creds,
       },
     });
     waits = journalWait(env.home, () => daemon);
@@ -211,11 +212,11 @@ describe("relaunch of a spawn-type decision", () => {
       credentials_revoked: true,
       lock_released: true,
     });
-    expect(host.fake.argvs(["volley", "auth", "rm-agent", A1])).toHaveLength(1);
+    expect(creds.revoked).toEqual([A1]);
     for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
     // A new login for attempt 2, the same role spawned again, and it registers.
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
-    expect(host.fake.argvs(["volley", "auth", "add-agent", A2])).toHaveLength(1);
+    expect(creds.minted).toEqual([A1, A2]);
     const spawned = journal().find((e) => e.type === "agent_spawned" && e.data.agent_id === A2);
     expect(spawned?.data).toMatchObject({ role: "implementer", attempt: 2 });
     const types = journal().map((e) => e.type);
@@ -257,8 +258,16 @@ describe("relaunch of a spawn-type decision", () => {
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
   });
 
-  // S5 (#95) owns `reaped`-on-delete; this base has no S5 yet. Its integration fills this in.
-  it.todo("publishes reaped for <role>-1 through the S5 delete path once S5 lands");
+  it("the relaunched agent's deleted login is reported: reaped { credentials_deleted } journaled", async () => {
+    const opened = await setup("mcp");
+    await resolve(opened.data.decision_id as string, "relaunch");
+    const reaped = await event(
+      (e) => e.type === "agent_reaped_by_supervisor" && e.data.agent_id === A1,
+    );
+    expect(reaped.data).toEqual({ agent_id: A1, reason: "credentials_deleted" });
+    await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
+    await waits.settled();
+  });
 });
 
 describe("relaunch of a pipeline role (the review stage continues)", () => {

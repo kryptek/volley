@@ -14,6 +14,7 @@ import type { JournalEvent } from "../src/types";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
@@ -25,6 +26,7 @@ describe("daemon spawn loop", () => {
   let env: DaemonEnv;
   let agent: VolleyBroker;
   let host: FakeHost;
+  let creds: MemoryCredentials;
   let repo: string;
   let claudeJson: string;
   let daemon: Daemon;
@@ -70,10 +72,7 @@ describe("daemon spawn loop", () => {
       })
       .on(["gh", "issue", "view"], {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-      })
-      .on(["volley", "auth", "add-agent"], (argv) => ({
-        stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-      }));
+      });
     // The implementer's claimed artifacts (T6 verifies them before retiring it): pushed, one PR
     // for its branch against the release branch, CI green on the head, release branch current.
     const wt = join(env.home, "wt", "w1", "T1-implementer");
@@ -105,6 +104,7 @@ describe("daemon spawn loop", () => {
         ]),
       })
       .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
+    creds = memoryCredentials();
     host = fakeHost(fake);
     // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
     host.onLaunch = () => {
@@ -137,6 +137,7 @@ describe("daemon spawn loop", () => {
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
+        credentials: creds,
       },
     });
     waits = journalWait(env.home, () => daemon);
@@ -216,9 +217,7 @@ describe("daemon spawn loop", () => {
     };
     expect(gated.payload.gates).toEqual(["T1"]);
     expect(existsSync(gated.payload.tasks[0]?.evidence_path as string)).toBe(true);
-    expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([
-      ["volley", "auth", "rm-agent", ID],
-    ]);
+    expect(creds.revoked).toEqual([ID]);
     expect(await env.retained(registryTopic(ID))).toBeNull();
     expect(await env.retained(buildTopic(NS, ID, "status"))).toBeNull();
     expect(await env.retained(buildTopic(NS, ID, "result"))).toBeNull();
@@ -264,7 +263,7 @@ describe("daemon spawn loop", () => {
     await clock.advance(600); // two graces
     await waits.settled();
     expect(journal().some((e) => e.type === "agent_retired")).toBe(false);
-    expect(host.fake.argvs(["volley", "auth", "rm-agent"])).toEqual([]);
+    expect(creds.revoked).toEqual([]);
     expect(existsSync(lock)).toBe(true);
     // Reaped for good: retired after the grace.
     await pub(buildTopic(NS, ID, "status"), "reaped", "status", { reason: "lwt" });

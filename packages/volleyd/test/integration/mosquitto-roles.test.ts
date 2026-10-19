@@ -4,12 +4,11 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { authOpsTopic, tokenRedeemTopic, tokenReplyTopic } from "../../src/accounts";
 
 /**
- * The account role templates (`volley auth add --role`) and a token login (`volley auth token`)
- * against real mosquitto with the shipped examples/mosquitto-auth/acl.conf. Opt-in: needs
- * VOLLEY_INTEGRATION=1 and VOLLEY_AUTH_BROKER_URL pointing at a PRIVATE mosquitto started as
- * volley-mcp's test/integration/mosquitto-auth.conf describes. auth-fixture.sh appends the
- * role blocks volley-cli's auth.test.ts proves the generator writes; each password is
- * "<username>-test-pw".
+ * The account roles (`volley auth add --role`) and a token login (`volley auth token`, username =
+ * the token id) against real mosquitto 2.1 with Volley's shared Dynamic Security roles. Opt-in:
+ * needs VOLLEY_INTEGRATION=1 and VOLLEY_AUTH_BROKER_URL pointing at a PRIVATE broker
+ * bootstrapped by volley-cli's test/integration/dynsec-fixture.ts (each password is
+ * "<username>-test-pw").
  */
 const AUTH_URL = process.env.VOLLEY_AUTH_BROKER_URL;
 const RUN = process.env.VOLLEY_INTEGRATION === "1" && AUTH_URL !== undefined;
@@ -28,7 +27,7 @@ async function connectAs(username: string): Promise<VolleyBroker> {
   return b;
 }
 
-describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", () => {
+describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
   let observer: VolleyBroker;
   let stop: () => Promise<void>;
   const clients: VolleyBroker[] = [];
@@ -113,13 +112,13 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
     const tokenRegistry = probe("token-registry");
     const tokenLease = probe("token-lease");
     const steerRedeem = probe("steer-redeem");
-    await attempt("redeem-0000abcd", tokenRedeemTopic("0000abcd"), redeem);
-    await attempt("redeem-0000abcd", tokenRedeemTopic("0000beef"), otherToken);
-    await attempt("redeem-0000abcd", `volley/${NS}/some-agent/mailbox`, tokenMailbox);
+    await attempt("0000abcd", tokenRedeemTopic("0000abcd"), redeem);
+    await attempt("0000abcd", tokenRedeemTopic("0000beef"), otherToken);
+    await attempt("0000abcd", `volley/${NS}/some-agent/mailbox`, tokenMailbox);
     // The shared %u patterns would grant these; the token block denies the whole tree.
-    await attempt("redeem-0000abcd", `volley/${NS}/redeem-0000abcd/status`, tokenStatus);
-    await attempt("redeem-0000abcd", "volley/_system/registry/redeem-0000abcd", tokenRegistry);
-    await attempt("redeem-0000abcd", "volley/_system/leases/gpu/requests", tokenLease);
+    await attempt("0000abcd", `volley/${NS}/0000abcd/status`, tokenStatus);
+    await attempt("0000abcd", "volley/_system/registry/0000abcd", tokenRegistry);
+    await attempt("0000abcd", "volley/_system/leases/gpu/requests", tokenLease);
     await attempt("steer-test", tokenRedeemTopic("0000abcd"), steerRedeem);
     expect(await delivered(redeem)).toBe(true);
     for (const p of [
@@ -135,10 +134,14 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
   });
 
   it("a token login reads only its own reply topic: not volley/#, not another token's", async () => {
-    const c = await connectAs("redeem-0000abcd");
+    const c = await connectAs("0000abcd");
     clients.push(c);
     const got: string[] = [];
-    await c.subscribeStream("#", (m) => got.push(m.payload));
+    // Dynamic Security refuses the subscription itself (acl_file used to accept it and filter).
+    for (const filter of ["#", "volley/#", "volley-auth/redeem/+/reply"]) {
+      await expect(c.subscribeStream(filter, () => {})).rejects.toThrow(/subscribe failed/);
+    }
+    await c.subscribeStream(tokenReplyTopic("0000abcd"), (m) => got.push(m.payload));
     const tree = probe("tree-status");
     const otherReply = probe("other-token-reply");
     const otherRequest = probe("other-token-request");
@@ -156,7 +159,7 @@ describe.skipIf(!RUN)("account roles against real mosquitto + the shipped ACL", 
 
   it("nobody but volleyd writes a token's reply topic", async () => {
     const forged = probe("forged-token-reply");
-    for (const who of ["admin-test", "steer-test", "supervisor-test", "redeem-0000abcd"]) {
+    for (const who of ["admin-test", "steer-test", "supervisor-test", "0000abcd"]) {
       await attempt(who, tokenReplyTopic("0000abcd"), forged);
     }
     // broker round-trip: an ACL-denied publish is dropped silently; give a delivery time to show.

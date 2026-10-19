@@ -59,7 +59,10 @@
             "merged_by_operator",
             "agent_force_retired",
             "alarm_cleared",
-            "wave_account_moved"
+            "wave_account_moved",
+            "agent_reaped_by_supervisor",
+            "credentials_revoked",
+            "credentials_swept"
           ]
         },
         "payload": {

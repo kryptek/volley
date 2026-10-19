@@ -10,6 +10,7 @@ import { SYSTEM_WAVE } from "../../src/types";
 import type { JournalEvent } from "../../src/types";
 import { eventually } from "./broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
+import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./fake-host";
 import { type EventMatch, journalWait } from "./journal-wait";
@@ -25,6 +26,8 @@ export interface SupervisedEnv {
   env: DaemonEnv;
   daemon: Daemon;
   host: FakeHost;
+  /** The agent logins the daemon minted and revoked. */
+  creds: MemoryCredentials;
   repo: string;
   /** The simulated agent's own broker connection. */
   agent: VolleyBroker;
@@ -67,8 +70,15 @@ export interface SupervisedEnvOptions {
   namespace?: string;
   /** Extra fake-exec replies (prefix, reply). */
   exec?: [string[], Parameters<FakeExec["on"]>[1]][];
+  /** The agent-login store the daemon uses (default: a fresh in-memory one). */
+  creds?: MemoryCredentials;
   /** Runs when the implementer is launched (credentials minted, not yet supervised). */
   onLaunch?: (daemon: Daemon) => void;
+  /**
+   * More tasks for the wave (YAML under `tasks:`, e.g. `T2: { issue: 42 }`). Their agents are
+   * launched but never register: they stay in verification (running in the wave, not supervised).
+   */
+  tasks?: string[];
   /** The wave's pipeline (default `[implement]`). */
   pipeline?: string;
   /** Extra top-level wave-file lines (e.g. `spawn_budget: 1`). */
@@ -94,12 +104,10 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
-    })
-    .on(["volley", "auth", "add-agent"], (argv) => ({
-      stdout: JSON.stringify({ username: argv[3], password: "pw" }),
-    }));
+    });
   for (const [prefix, reply] of o.exec ?? []) fake.on(prefix, reply);
   const host = fakeHost(fake);
+  const creds = o.creds ?? memoryCredentials();
   const ns = o.namespace ?? NS;
 
   const pub = (topic: string, type: string, channel: string, payload: unknown, retain = true) =>
@@ -129,7 +137,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
   /** Simulated sessions still publishing (cleanup waits for them before disconnecting). */
   const sessions = new Set<Promise<void>>();
-  host.onLaunch = () => {
+  host.onLaunch = (spec) => {
+    if (!spec.cwd.endsWith("/T1-implementer")) return; // an extra task's agent: silent
     o.onLaunch?.(daemon);
     // Started at once: the daemon subscribed to the agent before launching it.
     const session = (async () => {
@@ -159,6 +168,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
       claudeJsonPath: claudeJson,
       hooksDir: "/opt/volley-hooks",
       reapGraceMs: o.reapGraceMs ?? 300,
+      credentials: creds,
     },
     ...o.daemon,
   };
@@ -166,7 +176,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   const waveFile = join(env.home, "w1.yaml");
   writeFileSync(
     waveFile,
-    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\n${(o.tasks ?? []).map((t) => `  ${t}\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
   const r = await runCli(["run", waveFile], env.env);
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);
@@ -184,12 +194,14 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   };
   const event = (match: EventMatch, n = 1, wave = "w1") => waits.event(wave, match, n);
   await event("agent_registered");
+  await event("agent_spawned", 1 + (o.tasks ?? []).length);
   // Supervision starts once the daemon has consumed the verification outcome.
   await waits.settled();
   return {
     env,
     daemon,
     host,
+    creds,
     repo,
     agent,
     pub,

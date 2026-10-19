@@ -330,18 +330,26 @@ describe("verify through hook signals (Aedes)", () => {
       lock: spawned[0]?.data.lock,
     });
     // the first identity is revoked before the second is minted, and journaled as retired
-    expect(env.host.fake.argvs(["volley", "auth"]).map((a) => `${a[2]} ${a[3]}`)).toEqual([
-      "add-agent w1-t1-implementer-1",
-      "rm-agent w1-t1-implementer-1",
-      "add-agent w1-t1-implementer-2",
-    ]);
+    expect(env.creds.minted).toEqual(["w1-t1-implementer-1", "w1-t1-implementer-2"]);
+    expect(env.creds.revoked).toEqual(["w1-t1-implementer-1"]);
     expect(env.events.find((e) => e.type === "agent_retired")?.data).toMatchObject({
       agent_id: "w1-t1-implementer-1",
       status: "superseded",
       credentials_revoked: true,
       lock_released: false,
     });
-    expect(env.cleared).toEqual(retainedTopics(NS, "w1-t1-implementer-1"));
+    // Through the delete path: `reaped { credentials_deleted }` first, the records cleared
+    // before the delete and again after it.
+    expect(env.published.map((p) => [p.topic, JSON.parse(p.payload).type])).toEqual([
+      [buildTopic(NS, "w1-t1-implementer-1", "status"), "reaped"],
+    ]);
+    expect(env.cleared).toEqual([
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+    ]);
+    expect(env.events.map((e) => e.type)).toEqual(
+      expect.arrayContaining(["agent_reaped_by_supervisor", "credentials_revoked"]),
+    );
     // cleanup sees only the second attempt as live, and nothing once it is retired too.
     const j = Journal.open(join(env.home, "waves", "w1"));
     j.append({ type: "wave_submitted", data: { wave: env.wave } });

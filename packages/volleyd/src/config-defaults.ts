@@ -33,6 +33,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
   stop_grace_s: 30,
+  dynsec_batch_ms: 50,
+  credential_sweep_interval_s: 600,
   claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
 };
@@ -76,6 +78,8 @@ export const DAEMON_DEFAULTS = {
   tick_ms: 10_000,
   /** How long the CLI waits for the daemon's retained status before saying "not running". */
   probe_ms: 1_000,
+  /** How often the cached agent-login count (`volleyd status`) is re-read from the broker. */
+  login_count_refresh_ms: 30_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
   /** How often the daemon checks its broker connection; a lost connection makes it exit. */
@@ -136,6 +140,11 @@ export const DAEMON_DEFAULTS = {
    * (and redeemed) one-time tokens, when the daemon uses broker auth.
    */
   token_prune_ms: 60_000,
+  /** How long a Dynamic Security control message may wait for its answer (and the connect). */
+  dynsec_timeout_ms: 10_000,
+  /** Reconnect backoff of volleyd's control connection after a failed open: doubles up to max. */
+  dynsec_reconnect_base_ms: 1_000,
+  dynsec_reconnect_max_ms: 30_000,
   /** Smallest RSA modulus a request's `reply_key` may have: secrets are sealed to it. */
   reply_key_min_bits: 2048,
   /** Retry headroom of the derived spawn budget: this share of the wave's pipeline roles, at least `spawn_budget_retry_min`. */

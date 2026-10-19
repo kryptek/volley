@@ -85,6 +85,10 @@ export interface Tunables {
   screen_tail_interval_s: number;
   /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
   stop_grace_s: number;
+  /** Window collecting broker login changes into one Dynamic Security control message. */
+  dynsec_batch_ms: number;
+  /** Seconds between credential sweeps (credential-sweep.ts). */
+  credential_sweep_interval_s: number;
   /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
   claude: { default_account: string | null; warn_at_pct: number };
   hosts: Record<string, RemoteHostConfig>;
@@ -298,6 +302,10 @@ export const WAVE_EVENT_TYPES = [
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
   "wave_account_moved",
+  // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
+  "agent_reaped_by_supervisor",
+  "credentials_revoked",
+  "credentials_swept",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

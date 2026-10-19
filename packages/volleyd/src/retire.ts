@@ -1,11 +1,11 @@
+import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
-import type { ExecFn } from "./exec";
-import { revokeCredentials } from "./identity";
+import { type AgentCredentials, revokeCredentials } from "./identity";
 import { TERMINAL_STATUS, readLock } from "./locks";
 import { SpawnError } from "./spawn-error";
 import type { NewEvent, TaskId } from "./types";
 
-/** The retained per-agent records a retire clears (registry + six retained channels). */
+/** The retained per-agent records volleyd clears (registry + six per-agent channels). */
 export function retainedTopics(namespace: string, agentId: string): string[] {
   return [
     registryTopic(agentId),
@@ -23,6 +23,117 @@ export function retainedTopics(namespace: string, agentId: string): string[] {
  */
 const DAEMON_ENDED: ReadonlySet<string> = new Set(["moved", "stopped", "relaunched"]);
 
+/** Why volleyd deleted an agent's login, in its `reaped` status. */
+export const CREDENTIALS_DELETED = "credentials_deleted";
+
+export interface ReapDeps {
+  credentials: AgentCredentials | undefined;
+  /** Publish a retained message (the `reaped` status). */
+  publishRetained: (topic: string, payload: string) => Promise<void>;
+  /** Publish an empty retained payload (clears the record). */
+  clearRetained: (topic: string) => Promise<void>;
+  journal: (ev: NewEvent) => unknown | Promise<unknown>;
+}
+
+/**
+ * The one way volleyd deletes an agent's login (retire, sweep, stop). Deleting a client
+ * disconnects it WITHOUT its will (measured on 2.0.22 and 2.1.2), so nobody else would say it is
+ * gone: volleyd publishes its retained `status: reaped { reason: "credentials_deleted" }` first,
+ * then clears its retained records itself (registry, status, progress, result, capability,
+ * screen, usage), and only then deletes the login (batched with the other deletes of the moment).
+ * A still connected agent can re-publish a record inside that window (a `stop` cancels it just
+ * before), so once the login is gone, and the agent with it, the records are cleared once more.
+ * Journaled as `agent_reaped_by_supervisor` and `credentials_revoked`. Returns whether the delete
+ * succeeded.
+ */
+export async function reapAndRevoke(
+  agentId: string,
+  namespace: string,
+  deps: ReapDeps,
+  task?: TaskId,
+): Promise<boolean> {
+  const status = buildEnvelope({
+    agentId,
+    parentId: null,
+    channel: "status",
+    type: "reaped",
+    payload: { reason: CREDENTIALS_DELETED, by: "volleyd" },
+  });
+  await deps.publishRetained(buildTopic(namespace, agentId, "status"), JSON.stringify(status));
+  for (const topic of retainedTopics(namespace, agentId)) await deps.clearRetained(topic);
+  await deps.journal({
+    type: "agent_reaped_by_supervisor",
+    ...(task !== undefined ? { task } : {}),
+    data: { agent_id: agentId, reason: CREDENTIALS_DELETED },
+  });
+  const revoked = await revokeCredentials(deps.credentials, agentId);
+  if (revoked)
+    for (const topic of retainedTopics(namespace, agentId)) await deps.clearRetained(topic);
+  await deps.journal({
+    type: "credentials_revoked",
+    ...(task !== undefined ? { task } : {}),
+    data: { agent_id: agentId, ok: revoked },
+  });
+  return revoked;
+}
+
+/**
+ * Run `jobs` so that the logins they delete go out together (`volleyd stop` deletes all of a
+ * wave's logins at once). Each job runs alone until it finishes or asks to revoke a login; that
+ * revoke is held. Once every job got that far, the held revokes are all sent in the same tick, so
+ * the store's batch window carries them as one control message; then each held job finishes, one
+ * at a time (a later revoke goes straight to the store). Rethrows the first job failure at the end.
+ */
+export async function withJointRevokes(
+  credentials: AgentCredentials | undefined,
+  jobs: readonly ((credentials: AgentCredentials | undefined) => Promise<unknown>)[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  const held: { id: string; done: (ok: boolean) => void; end: Promise<void> }[] = [];
+  /** Set while a job runs in the first pass: where its revoke is parked. */
+  let park: ((id: string, done: (ok: boolean) => void) => void) | null = null;
+  const joint: AgentCredentials | undefined =
+    credentials === undefined
+      ? undefined
+      : {
+          mint: credentials.mint,
+          revoke: (id) => {
+            const p = park;
+            return p === null ? credentials.revoke(id) : new Promise<boolean>((d) => p(id, d));
+          },
+        };
+  for (const run of jobs) {
+    let parked: { id: string; done: (ok: boolean) => void } | null = null;
+    let onPark: () => void = () => {};
+    const parkedNow = new Promise<void>((r) => {
+      onPark = r;
+    });
+    park = (id, done) => {
+      park = null;
+      parked = { id, done };
+      onPark();
+    };
+    const end = run(joint).then(
+      () => {},
+      (e: unknown) => {
+        errors.push(e);
+      },
+    );
+    await Promise.race([end, parkedNow]);
+    park = null;
+    const p = parked as { id: string; done: (ok: boolean) => void } | null;
+    if (p !== null) held.push({ ...p, end });
+  }
+  if (credentials !== undefined && held.length > 0) {
+    const results = await Promise.all(held.map((h) => credentials.revoke(h.id).catch(() => false)));
+    for (const [i, h] of held.entries()) {
+      h.done(results[i] === true);
+      await h.end;
+    }
+  }
+  if (errors.length > 0) throw errors[0];
+}
+
 export interface RetireRequest {
   wave: string;
   task: TaskId;
@@ -35,7 +146,7 @@ export interface RetireRequest {
   waveAgents: ReadonlySet<string>;
   /** The agent's worktree lock, released if it still names this agent. */
   lockPath?: string;
-  /** Whether credentials were minted for it (`volley auth rm-agent` is skipped otherwise). */
+  /** Whether a login was minted for it (no delete, and no `reaped`, otherwise). */
   minted: boolean;
   /** The terminal status envelope's payload (summary, pr_url, reason, …), kept in the journal. */
   terminal?: unknown;
@@ -45,11 +156,7 @@ export interface RetireRequest {
   workspace?: string;
 }
 
-export interface RetireDeps {
-  exec: ExecFn;
-  /** Publish an empty retained payload (clears the record). */
-  clearRetained: (topic: string) => Promise<void>;
-  journal: (ev: NewEvent) => unknown | Promise<unknown>;
+export interface RetireDeps extends ReapDeps {
   /** Remove the lock file at `path` (only called when it names this agent). */
   releaseLock: (path: string) => void;
   /**
@@ -74,10 +181,11 @@ export function closableAfterRestart(ref: string, session: string): boolean {
 }
 
 /**
- * Retire one agent after the daemon has consumed its terminal status: revoke its broker
- * credentials, clear its retained records, release its worktree lock, journal `agent_retired`.
- * Only this wave's own agents, only terminal (or DAEMON_ENDED) ones. Its workspace is closed
- * (`closeWorkspace`, the retire's own consent); the worktree and branch stay: removing them is
+ * Retire one agent after the daemon has consumed its terminal status: delete its broker login
+ * through reapAndRevoke (or, for an agent with none, just clear its retained records), release
+ * its worktree lock, journal `agent_retired`. Only this wave's own agents, only terminal (or
+ * DAEMON_ENDED) ones. Its workspace is closed (`closeWorkspace`, the retire's own consent); the
+ * worktree and branch stay: removing them is
  * `volleyd cleanup <wave> --yes`.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {
@@ -93,8 +201,12 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
       { agent_id: req.agentId, status: req.status },
     );
   }
-  const revoked = req.minted ? await revokeCredentials(deps.exec, req.agentId) : null;
-  for (const topic of retainedTopics(req.namespace, req.agentId)) await deps.clearRetained(topic);
+  let revoked: boolean | null = null;
+  if (req.minted) {
+    revoked = await reapAndRevoke(req.agentId, req.namespace, deps, req.task);
+  } else {
+    for (const topic of retainedTopics(req.namespace, req.agentId)) await deps.clearRetained(topic);
+  }
   let released = false;
   if (req.lockPath !== undefined && readLock(req.lockPath)?.agent_id === req.agentId) {
     deps.releaseLock(req.lockPath);

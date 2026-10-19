@@ -7,8 +7,8 @@ bottom, and record the results at the end. The narrower per-package checklists
 
 What it covers, in order:
 
-1. a password-protected broker on **private ports**;
-2. `volley auth init`: the fixed identities and their files;
+1. a mosquitto 2.1 broker with Dynamic Security on **private ports**;
+2. `volley auth init`: the shared roles, the fixed identities and their files;
 3. the `volleyd` launchd service (fresh machines only), then the daemon for the wave;
 4. the coordinator's hooks;
 5. Desk sign-in on the laptop and on a phone over the LAN;
@@ -20,7 +20,7 @@ What it covers, in order:
 Each step says what to run and what you should see. Tick the box only when you saw it.
 
 **Your everyday setup is never touched.** Everything the smoke creates lives under one new
-directory, `$SMOKE`: the broker, its password and ACL files, volleyd's journals, the `volley` /
+directory, `$SMOKE`: the broker, its Dynamic Security state file, volleyd's journals, the `volley` /
 `volleyd` links, the coordinator's hook and MCP settings. The smoke does not stop, restart,
 reinstall or signal your everyday broker, does not touch an installed volleyd service, and does
 not write to `~/.claude/settings.json`, your user-scope MCP config or anything on your `PATH`.
@@ -31,7 +31,8 @@ Teardown (§8) prints what it will remove and asks before removing it.
 ## 0. What you need
 
 - [ ] **Laptop** (macOS; runs the broker, `volleyd`, the coordinator session and the Desk) with
-  `bun`, `mosquitto` (`brew install mosquitto`), `cmux`, `claude`, `gh` (authenticated), `git`.
+  `bun`, **mosquitto 2.1 or newer** (`brew install mosquitto`; `mosquitto -h | head -1` says
+  `mosquitto version 2.1.x`), `cmux`, `claude`, `gh` (authenticated), `git`.
 - [ ] **Second machine** ("the box"; Linux or macOS) reachable by key-based, non-interactive ssh
   from the laptop (`ssh -o BatchMode=yes <target> true` succeeds), with every prerequisite in
   [volleyd README → Remote hosts](../packages/volleyd/README.md#remote-hosts-ssh--tmux): `bash`,
@@ -78,9 +79,9 @@ export SMOKE=$HOME/volley-smoke-v0.2                   # everything the smoke cr
 export BROKER_PORT=22883 WS_PORT=29001                 # private: not 1883 / 9001
 export LAN_IP=$(ipconfig getifaddr en0)                # the laptop's Wi-Fi address
 export VOLLEY_BROKER_URL=mqtt://127.0.0.1:$BROKER_PORT
-export VOLLEY_AUTH_DIR=$SMOKE/auth                     # passwd, acl.conf, coordinator.json
+export VOLLEY_AUTH_DIR=$SMOKE/auth                     # admin.json, coordinator.json, accounts
 export VOLLEYD_HOME=$SMOKE/volleyd                     # journals, config.yaml, broker.json
-export PATH=$SMOKE/bin:$PATH                           # the smoke's volley, volleyd and pkill
+export PATH=$SMOKE/bin:$PATH                           # the smoke's volley and volleyd
 ```
 
 - [ ] Create `$SMOKE` (once, in the first terminal). `mkdir` without `-p` fails if the directory
@@ -89,55 +90,43 @@ export PATH=$SMOKE/bin:$PATH                           # the smoke's volley, vol
   ```sh
   mkdir -m 0700 "$SMOKE" && mkdir "$SMOKE/bin" "$SMOKE/data" "$VOLLEYD_HOME"
   ```
-- [ ] Put this checkout's `volley` and `volleyd` on the smoke's `PATH` (`volleyd` shells out to
-  `volley auth add-agent` to mint agent credentials). The links live in `$SMOKE/bin`, so any
+- [ ] Put this checkout's `volley` and `volleyd` on the smoke's `PATH` (volleyd runs
+  `volley auth` for account ops). The links live in `$SMOKE/bin`, so any
   `volley` / `volleyd` you already have installed stays as it is:
   ```sh
   ln -s "$VOLLEY_REPO/packages/volley-cli/src/cli.ts" "$SMOKE/bin/volley"
   ln -s "$VOLLEY_REPO/packages/volleyd/src/cli.ts" "$SMOKE/bin/volleyd"
   volley --version && volleyd --version     # both print 0.2.0
   ```
-- [ ] Keep `volley auth` from signalling your everyday broker. Every `volley auth` change reloads
-  the broker with `pkill -HUP -x mosquitto`, which reaches **every** mosquitto on the laptop and
-  makes your everyday broker re-read its password and ACL files mid-smoke. This shim, first on the
-  smoke's `PATH`, sends that one signal to the smoke broker only and passes any other `pkill`
-  through:
-  ```sh
-  cat > "$SMOKE/bin/pkill" <<EOF
-  #!/bin/sh
-  if [ "\$*" = "-HUP -x mosquitto" ]; then exec kill -HUP "\$(cat '$SMOKE/mosquitto.pid')"; fi
-  exec /usr/bin/pkill "\$@"
-  EOF
-  chmod +x "$SMOKE/bin/pkill"
-  command -v pkill                          # $SMOKE/bin/pkill
-  ```
-  volleyd (run from a smoke terminal) inherits this `PATH`, so the reloads it triggers go through
-  the shim too.
+- [ ] Nothing signals your everyday broker: logins are created and deleted over the smoke
+  broker's own control topic, and neither `volley auth` nor volleyd sends any process a signal.
 
 ---
 
-## 1. A private broker with auth
+## 1. A private broker with Dynamic Security
 
-- [ ] Create the identities **before** the broker exists (mosquitto refuses to start without its
-  password file):
+- [ ] Create the plugin's state file and its admin login **before** the broker exists, for the
+  smoke's own paths (`--no-config`: the smoke writes its broker config itself, below):
   ```sh
-  volley auth init --dir "$VOLLEY_AUTH_DIR" --coordinator-file --volleyd-file --no-reload
+  volley auth init --dir "$VOLLEY_AUTH_DIR" --no-config \
+    --state-file "$SMOKE/data/dynamic-security.json" --coordinator-file --volleyd-file
   ```
-  It prints three passwords **once** (`volleyd`, `desk`, `coordinator`): write them down.
-  Expect `passwd` and `acl.conf` in `$VOLLEY_AUTH_DIR` (directory mode 0700, files 0600),
-  `coordinator.json` beside them (0600), and volleyd's credentials in
-  `$VOLLEYD_HOME/broker.json` (0600):
-  ```sh
-  ls -la "$VOLLEY_AUTH_DIR" "$VOLLEYD_HOME/broker.json"
-  ```
-- [ ] Write the private broker's config. TCP stays on loopback; the WebSocket listener binds the
-  LAN address so the phone can reach it. Both require a password and the shipped ACL. Do this on a
-  network you trust and stop the broker when you are done:
+  It refuses a mosquitto older than 2.1 (`BROKER_TOO_OLD`, with install instructions) before
+  changing anything. Otherwise it creates `$SMOKE/data/dynamic-security.json`, stores the admin
+  login in `$VOLLEY_AUTH_DIR/admin.json` (0600), cannot reach the broker yet, and says so: "Next:
+  restart the broker … then run `volley auth init` again" (exit 1, expected here).
+- [ ] Write the private broker's config. The plugin comes **before** any listener with
+  `per_listener_settings false` (the shipped `examples/mosquitto-localhost.conf` is the same, on
+  the default ports). TCP stays on loopback; the WebSocket listener binds the LAN address so the
+  phone can reach it. Do this on a network you trust and stop the broker when you are done:
   ```sh
   cat > "$SMOKE/mosquitto.conf" <<EOF
+  per_listener_settings false
+  plugin $(brew --prefix)/opt/mosquitto/lib/mosquitto_dynamic_security.so
+  plugin_opt_config_file $SMOKE/data/dynamic-security.json
   allow_anonymous false
-  password_file $VOLLEY_AUTH_DIR/passwd
-  acl_file $VOLLEY_AUTH_DIR/acl.conf
+  set_tcp_nodelay true
+  max_queued_messages 10000
   pid_file $SMOKE/mosquitto.pid
   listener $BROKER_PORT 127.0.0.1
   listener $WS_PORT $LAN_IP
@@ -151,6 +140,23 @@ export PATH=$SMOKE/bin:$PATH                           # the smoke's volley, vol
   mosquitto -c "$SMOKE/mosquitto.conf" -d
   cat "$SMOKE/mosquitto.pid"                        # the smoke broker's pid
   ```
+- [ ] Rerun `init` against it: it creates the eight shared roles and the fixed identities, and
+  prints three passwords **once** (`volleyd`, `desk`, `coordinator`): write them down. Expect
+  `coordinator.json` in `$VOLLEY_AUTH_DIR` (0600) and volleyd's login plus the admin login it mints
+  agents with in `$VOLLEYD_HOME` (`broker.json`, `dynsec-admin.json`, 0600). A second rerun says
+  "Nothing to do" and changes no password:
+  ```sh
+  volley auth init --dir "$VOLLEY_AUTH_DIR" --no-config \
+    --state-file "$SMOKE/data/dynamic-security.json" --coordinator-file --volleyd-file
+  ls -la "$VOLLEY_AUTH_DIR" "$VOLLEYD_HOME/broker.json" "$VOLLEYD_HOME/dynsec-admin.json"
+  volley auth init --dir "$VOLLEY_AUTH_DIR" --no-config --state-file "$SMOKE/data/dynamic-security.json"
+  volley auth list-agents --dir "$VOLLEY_AUTH_DIR"  # No agent logins.
+  ```
+- [ ] **Reusing a broker initialised before v0.2.0's `usage` channel** (an earlier smoke or dev
+  broker): rerun `volley auth init` as above. If it reports a drifted role, run
+  `volley auth migrate --roles --yes` (the role's holders reconnect). Otherwise the old
+  `volley-agent` role silently drops every agent's `usage` samples, and volleyd logs
+  `dynsec: warning: the broker's volley-agent role differs from this version's` at start.
 - [ ] Both listeners are up, and the broker refuses anonymous and wrong-password clients:
   ```sh
   lsof -nP -iTCP:$BROKER_PORT -sTCP:LISTEN; lsof -nP -iTCP:$WS_PORT -sTCP:LISTEN
@@ -193,8 +199,7 @@ for you. Your installed service, if you have one, is never stopped, replaced or 
   ```
   If you skipped it, write "skipped (service already installed)" in Results.
 - [ ] For the wave, run the daemon in the foreground, so it uses the smoke's `VOLLEYD_HOME` and
-  mints agents into the smoke's password file (the plist does not carry `VOLLEY_AUTH_DIR`, so a
-  service would mint into the default `<mosquitto etc>/volley`). An everyday service you already
+  mints agents on the smoke broker with `$VOLLEYD_HOME/dynsec-admin.json`. An everyday service you already
   run is on your everyday broker and carries on unaffected:
   ```sh
   volleyd daemon 2>&1 | tee "$SMOKE/volleyd-foreground.log"   # leave this terminal running
@@ -379,7 +384,9 @@ owned by the coordinator, so it comes before the claim). After each, note in Res
   `kill -STOP`), then `volleyd stop "$WAVE2"`. After `stop_grace_s` (30 s) the journal has
   `agent_force_retired { reason: "stop" }`, and the agent's registry, status, progress, result,
   capability, screen and usage records are gone: the Desk stops drawing it. Its screen is no longer read
-  (no `read timed out` lines in the daemon log). `kill -CONT` it afterwards and close it.
+  (no `read timed out` lines in the daemon log). `agent_reaped_by_supervisor` +
+  `credentials_revoked { ok: true }` follow, and `volley auth list-agents` no longer lists it.
+  `kill -CONT` it afterwards and close it.
 
 ### Urgent steer on a coordinator-owned wave
 
@@ -464,11 +471,19 @@ The wave's owner is `desk` since the claim:
 - [ ] Every retired agent's workspace is already closed (cmux locally, `tmux ls` on the box):
   no stale workspaces are left; each `agent_retired` says `workspace_closed: true`.
 - [ ] `volleyd cleanup "$WAVE"` lists what it would remove; `volleyd cleanup "$WAVE" --yes`
-  removes the retired worktrees and workspaces on both machines, keeps the branches, and every
-  identity minted for the wave (implementers, reviewers, fixups, rebases) is revoked:
+  removes the retired worktrees and workspaces on both machines and keeps the branches.
+- [ ] Every login minted for the wave (implementers, reviewers, fixups, rebases) is gone: volleyd
+  deleted each one when it retired its agent (the agent's retained status flipped to `reaped
+  {reason: credentials_deleted}` and its records were cleared, with no broker reload), and the
+  sweep caught any leftover. The login count is back at its baseline from before the wave:
   ```sh
-  grep -c "^$WAVE-" "$VOLLEY_AUTH_DIR/passwd"    # 0
+  volley auth list-agents --dir "$VOLLEY_AUTH_DIR"   # No agent logins.
+  volleyd status | head -1                          # agent logins: 0 live, <n> swept
   ```
+- [ ] `volleyd stop` leaves no login behind either: start a second, one-task wave, and once its
+  agent is working run `volleyd stop <that wave> --by desk`. Its agent is retired when it ends,
+  or force-retired once `stop_grace_s` (30 s) has passed (`agent_retired {status: stopped}` in its
+  journal), and `volley auth list-agents` is empty again.
 
 ---
 

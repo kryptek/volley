@@ -1,0 +1,389 @@
+{
+  "$comment": "Generated from packages/volley-cli/src/auth/roles.ts (volley auth init creates these roles once). Dynamic Security ACL types; %u is the client's username (mosquitto >= 2.1).",
+  "roles": [
+    {
+      "rolename": "volley-volleyd",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley-auth/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley-auth/#",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-coordinator",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/mailbox",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/status",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/progress",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/result",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/capability",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/control",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/_user/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/registry/+",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-desk",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/mailbox",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley/_system/desk-probe/%c",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-supervisor",
+      "acls": [
+        {
+          "priority": 10,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/auth/ops/#",
+          "allow": false
+        },
+        {
+          "priority": 10,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/auth/replies/#",
+          "allow": false
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley/#",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-admin",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/mailbox",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/status",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/progress",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/result",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/capability",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/control",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/+/_user/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/registry/+",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/auth/ops/%u",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-token",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley-auth/redeem/%u",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley-auth/redeem/%u/reply",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-account",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/status",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/progress",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/result",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/capability",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/control",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/_user/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/registry/%u",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/leases/+/requests",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/machines/%u",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/machines/%u/#",
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "volley-agent",
+      "acls": [
+        {
+          "priority": 0,
+          "acltype": "subscribePattern",
+          "topic": "volley/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/status",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/progress",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/result",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/capability",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/usage",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/control",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/%u/_user/#",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/registry/%u",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/leases/+/requests",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/volleyd/mailbox",
+          "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/+/desk/mailbox",
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "fixed_clients": {
+    "volleyd": ["volley-volleyd"],
+    "desk": ["volley-account", "volley-desk"],
+    "coordinator": ["volley-account", "volley-coordinator"]
+  },
+  "account_roles": {
+    "admin": ["volley-account", "volley-admin"],
+    "steer": ["volley-account", "volley-desk"],
+    "watch": ["volley-account"],
+    "supervisor": ["volley-account", "volley-supervisor"],
+    "peer": ["volley-account"]
+  },
+  "agent_login": ["volley-agent"],
+  "token_login": ["volley-token"]
+}

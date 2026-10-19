@@ -313,21 +313,22 @@ while its answer is still pending is not run twice; it gets the one answer.
 
 ## Accounts and one-time tokens
 
-The Desk manages broker accounts through the daemon, never by writing the password file itself
+The Desk manages broker accounts through the daemon, never by creating logins itself
 (SPEC §4.6.10). The daemon in turn only runs `volley auth` through the [fence](#the-authority-fence):
-`volley auth` owns `passwd`, `acl.conf`, `accounts.json` and `tokens.json` in `$VOLLEY_AUTH_DIR`.
+`volley auth` owns the accounts' and tokens' broker logins and `accounts.json` / `tokens.json` in
+`$VOLLEY_AUTH_DIR`.
 
 **Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
 mailbox cannot say who sent a request (the daemon refuses them there with a pointer). An admin
 publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "query"`, a fresh
-`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker ACL grants that topic only
-to admin accounts and only for their own username, so the topic names the sender; the daemon
+`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin role grants that
+topic only to admin accounts and only for their own username (`%u`), so the topic names the sender; the daemon
 then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
 `account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
 process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
 under its name. Requests are never retained: the daemon clears a request topic's retained message
 after each request, so a restart cannot replay one. `account_rotate` of the sender's own account is
-refused: the reload that applies the new password disconnects the client holding the old one
+refused: setting the new password disconnects the client holding the old one
 before the answer arrives (rotate yourself with `volley auth rotate` or through another admin).
 
 | `op` | Fields | `result` | `sealed` (decrypts to) | Journal (`_system`) |
@@ -340,16 +341,16 @@ before the answer arrives (rotate yourself with `volley auth rotate` or through 
 
 **Token redemption.** `volley auth token` prints a one-time admin token in the operator's
 terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
-broker login `redeem-<id>`, so the broker keeps `allow_anonymous false` (an anonymous client would
-inherit the ACL's read of the whole tree). That login may only write `volley-auth/redeem/<id>` and
-read `volley-auth/redeem/<id>/reply`: its ACL block denies `volley/#` (where every shared grant
-lives), so it sees nothing of the tree and nothing of other tokens. The client connects as that
+broker login named by the token id `<id>`, so the broker keeps `allow_anonymous false`. That login
+holds only the `volley-token` role: it may write `volley-auth/redeem/<id>` and read
+`volley-auth/redeem/<id>/reply` (`%u`), and subscribe to nothing else, so it sees nothing of the
+tree and nothing of other tokens. The client connects as that
 login, subscribes to the reply topic and publishes `{ op: "token_redeem", token, label, reply_key }`
 on the request topic; the daemon refuses a token whose id is not the topic's, then pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
 which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
-journaled as `token_redeemed { by, name, role, label }`. A used, expired or unknown token is
-refused. The token's login is not removed during redemption (mosquitto would disconnect the client
-on the reload before it hears the answer): `volley auth` drops it about a minute after redemption
+journaled as `token_redeemed { by, name, role, label }` (`by` is the token id: the redeeming login). A used, expired or unknown token is
+refused. The token's login is not removed during redemption (deleting it would disconnect the
+client before it hears the answer): `volley auth` drops it about a minute after redemption
 or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
 (when it uses broker auth) so that happens without anyone running a command.
 
@@ -553,7 +554,8 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   delete path as a retire: `agent_force_retired { agent_id, role, reason: "stop" }`, then its
   retained `registry`/`status`/`progress`/`result`/`capability`/`screen`/`usage` records are cleared, its
   login deleted, its lock released (`agent_retired { status: "stopped" }`), so the Desk stops
-  drawing it. A daemon restarted into a stopped wave gives its agents what is left of the grace
+  drawing it; their logins are deleted together, in one control message, so no broker login
+  outlives a stop. A daemon restarted into a stopped wave gives its agents what is left of the grace
   (counted from `wave_stopped`), then force-retires what is left; a workspace ref read back from
   the journal is closed only when it still names that agent (a UUID or its own tmux session; a
   short `workspace:<n>` ref may name another workspace by then, so it is left for `cleanup --yes`
@@ -639,6 +641,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
+| `dynsec_batch_ms` | the next batch of broker login changes | — |
+| `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 
@@ -667,7 +671,7 @@ lists every key with its default and example pools, commented out.
 | 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
-| 5 | **Identity** `volley auth add-agent <id> --ack-to <parent> --ack-to volleyd --json` → `.volley/agent.json` (mode 0600) | `identity.ts` | `CREDENTIALS_FAILED` |
+| 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
 | 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
@@ -734,6 +738,21 @@ shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `p
 wave owner, else `volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker`
 block; the MCP server and the hooks both read it, so no flag or env carries identity.
 `volleyd daemon --no-mint` skips minting for an anonymous broker (no `broker` block).
+
+**Broker logins** (mosquitto ≥ 2.1, Dynamic Security; [`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md),
+SPEC §4.6.13). The daemon keeps **one** admin control connection to the plugin
+(`$VOLLEYD_HOME/dynsec-admin.json`, from `volley auth init --volleyd-file`; else
+`$VOLLEY_AUTH_DIR/admin.json`), opened at start, version-checked on every open (a broker older than
+2.1 makes `volleyd daemon` exit with `BROKER_TOO_OLD`), and reconnected with backoff after a drop. A
+mint is one `createClient` (username = agent id, a random password, role `volley-agent` inline);
+the mints (and deletes) of the same `dynsec_batch_ms` window go as **one** control message, so the
+broker rewrites its state file once per batch, and each answer is matched to its own agent (a failed
+element fails only that spawn, `CREDENTIALS_FAILED`). A connection drop fails the commands in
+flight once (`CREDENTIALS_FAILED`: the spawn's own retry runs later over the reconnected link). A mint
+that finds its agent login already there (a retry) sets it a new password; it never takes over a
+login that is not an agent login. No ACL is changed per agent and no `volley auth` command or signal
+is involved: the agent role already lets an agent ack volleyd and the Desk (an ack to a
+random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
@@ -975,11 +994,14 @@ handed to the pipeline, which verifies the claim and retires the agent once it i
 LWT) is retired only after the reap grace passes with no fresh status or heartbeat (see
 [Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
-reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
-retained payloads on its `registry`, `status`, `progress`, `result`, `capability`, `screen` and
-`usage` topics, the lock released, the agent's workspace closed (its cmux workspace, or its tmux
-session on an ssh host: `agent_retired { workspace, workspace_closed }`), and `agent_retired {
-status, terminal, result }` journaled. `terminal` is the
+reconnect with a fresh `spawning` (SPEC §6.5). Retiring deletes the agent's login through the
+**delete path** (SPEC §4.6.13; a deleted login is disconnected without its will, so no LWT reports
+it): volleyd publishes the agent's retained `status: reaped { reason: "credentials_deleted" }`,
+then empty retained payloads on its `registry`, `status`, `progress`, `result`, `capability`,
+`screen` and `usage` topics, then the batched `deleteClient` (journaled `agent_reaped_by_supervisor`
+and `credentials_revoked`); then the lock is released, the agent's workspace closed (its cmux
+workspace, or its tmux session on an ssh host: `agent_retired { workspace, workspace_closed }`),
+and `agent_retired { status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
 --yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's
@@ -993,6 +1015,22 @@ Accepting the dialog by hand in any worktree of the repo works too: every tick r
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
 
+
+### Credential sweep
+
+Dynamic Security logins never expire, and every change rewrites the plugin's whole state file, so
+the file size (about 300 bytes per login) drives the cost of every mint. With a dynsec admin login
+the daemon therefore **sweeps**: at start and every `credential_sweep_interval_s` (default 600) it
+lists the logins holding `volley-agent` alone and deletes, through the delete path, each one with no
+live agent behind it: not supervised, not running in a wave that is neither stopped nor complete, no
+worktree lock naming it, no non-terminal retained status (`spawning`, `registered`, `working`,
+`blocked`…, in any namespace), and not minted (or first seen) within `spawn_timeout_s`. One sweep's
+deletes go as one control message; it journals `credentials_swept { agent_ids }` in `_system`. The
+fixed identities, accounts, token logins and the admin are never candidates. `volleyd status` starts
+with `agent logins: N live, M swept` (the agent logins on the broker, a count volleyd re-reads after
+each of its mints and deletes, each sweep and every 30 s, so `status` never waits on the broker,
+and the total swept per the `_system` journal); `--json` has
+`agent_logins: { live, swept }`.
 ### Remote hosts (ssh + tmux)
 
 A task can run its agents on a second machine: no cmux there, agents in tmux sessions, reached
@@ -1447,9 +1485,10 @@ ALLOW (program by bare name only — never a path):
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
-  volley auth add-agent <agent_id> [--ack-to <agent_id>]… [--json] [--no-reload]
-  volley auth grant <agent_id> --ack-to <agent_id>… [--no-reload]
-  volley auth rm-agent <agent_id> [--no-reload]
+  (agent logins are minted and deleted over volleyd's own Dynamic Security control
+  connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+  mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
+    retains no $SYS/broker/version)
   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
   volley auth add <agent_id> --role ROLE [--kind KIND] --json
   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json

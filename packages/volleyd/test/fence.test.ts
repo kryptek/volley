@@ -257,9 +257,20 @@ const DENIED: string[][] = [
   ["sudo", "git", "status"],
   ["env", "git", "push"],
   ["curl", "https://example.com"],
-  // volley: only auth add-agent / rm-agent, exact options
+  // volley: only the account verbs, exact options. Agent logins go over volleyd's own
+  // Dynamic Security connection (dynsec.ts): add-agent / rm-agent / grant are never run.
   ["volley", "auth", "init"],
+  ["volley", "auth", "migrate"],
+  ["volley", "auth", "list-agents", "--json"],
   ["volley", "pub", "volley/x/y/status", "{}"],
+  ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--json"],
+  ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
+  ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b"],
+  ["volley", "auth", "reload"],
+  // mosquitto: only -h (its version)
+  ["mosquitto", "-c", "/tmp/x.conf"],
+  ["mosquitto", "-h", "-v"],
+  ["pkill", "-HUP", "-x", "mosquitto"],
   ["volley", "auth", "add-agent", "--json"],
   ["volley", "auth", "add-agent", "Bad_Id"],
   ["volley", "auth", "add-agent", "a1", "--dir", "/tmp/x"],
@@ -292,10 +303,7 @@ const DENIED: string[][] = [
 ];
 
 const ALLOWED: string[][] = [
-  ["volley", "auth", "add-agent", "w1-t1-implementer-1", "--ack-to", "volleyd", "--json"],
-  ["volley", "auth", "add-agent", "a1", "--ack-to", "p1", "--ack-to", "volleyd", "--no-reload"],
-  ["volley", "auth", "rm-agent", "w1-t1-implementer-1"],
-  ["volley", "auth", "grant", "w1-t1-implementer-1", "--ack-to", "coord-b", "--no-reload"],
+  ["mosquitto", "-h"],
   ["volley", "auth", "list", "--json"],
   ["volley", "auth", "add", "phone", "--role", "steer", "--json"],
   ["volley", "auth", "add", "laptop", "--role", "peer", "--kind", "machine", "--json"],

@@ -1,0 +1,124 @@
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  LAYOUTS,
+  configTraps,
+  detectLayout,
+  generateConfig,
+  writeConfig,
+} from "../../src/auth/config";
+
+const lines = (s: string) =>
+  s
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+
+describe("generateConfig", () => {
+  const conf = generateConfig(LAYOUTS["brew-arm64"]);
+
+  it("loads the plugin BEFORE any listener, with per_listener_settings false", () => {
+    const l = lines(conf);
+    const plugin = l.findIndex((x) => x.startsWith("plugin "));
+    const state = l.findIndex((x) => x.startsWith("plugin_opt_config_file "));
+    const firstListener = l.findIndex((x) => x.startsWith("listener "));
+    expect(plugin).toBeGreaterThanOrEqual(0);
+    expect(state).toBe(plugin + 1);
+    expect(plugin).toBeLessThan(firstListener);
+    expect(l.indexOf("per_listener_settings false")).toBeLessThan(plugin);
+  });
+
+  it("anonymous off, Nagle off, raised queue, both listeners on 127.0.0.1", () => {
+    const l = lines(conf);
+    expect(l).toContain("allow_anonymous false");
+    expect(l).toContain("set_tcp_nodelay true");
+    expect(l).toContain("max_queued_messages 10000");
+    expect(l).toContain("listener 1883 127.0.0.1");
+    expect(l).toContain("listener 9001 127.0.0.1");
+    expect(l[l.indexOf("listener 9001 127.0.0.1") + 1]).toBe("protocol websockets");
+    expect(l.some((x) => x.startsWith("password_file") || x.startsWith("acl_file"))).toBe(false);
+  });
+
+  it("has no traps of its own", () => {
+    expect(configTraps(conf)).toEqual([]);
+  });
+
+  it("the shipped examples are this generator's output", () => {
+    const repo = new URL("../../../../examples/", import.meta.url);
+    expect(readFileSync(new URL("mosquitto-localhost.conf", repo), "utf-8")).toBe(
+      generateConfig(LAYOUTS["brew-arm64"]),
+    );
+    expect(readFileSync(new URL("mosquitto-auth/mosquitto-dynsec.conf", repo), "utf-8")).toBe(
+      generateConfig(LAYOUTS.container),
+    );
+  });
+});
+
+describe("configTraps", () => {
+  it("names per_listener_settings true", () => {
+    const t = configTraps("per_listener_settings true\nlistener 1883\n");
+    expect(t).toHaveLength(1);
+    expect(t[0]).toContain("per_listener_settings true");
+  });
+
+  it("names the plugin loaded twice (also across an include_dir file)", () => {
+    const one = "plugin /usr/lib/mosquitto_dynamic_security.so\n";
+    expect(configTraps(one + one)[0]).toContain("loaded twice");
+    expect(configTraps(one, [one])[0]).toContain("loaded twice");
+    expect(configTraps(one)).toEqual([]);
+  });
+
+  it("ignores commented-out lines", () => {
+    expect(configTraps("# per_listener_settings true\n")).toEqual([]);
+  });
+});
+
+describe("detectLayout", () => {
+  it("the snap layout puts the state file under /var/snap/mosquitto/common/", () => {
+    const l = detectLayout({ exists: (p) => p === "/snap/mosquitto/current", arch: "x64" });
+    expect(l.name).toBe("snap");
+    expect(l.stateFile.startsWith("/var/snap/mosquitto/common/")).toBe(true);
+    expect(l.config).toBe("/var/snap/mosquitto/common/mosquitto.conf");
+    expect(l.plugin).toBe(
+      "/snap/mosquitto/current/usr/lib/x86_64-linux-gnu/mosquitto_dynamic_security.so",
+    );
+    expect(
+      detectLayout({ exists: (p) => p === "/snap/mosquitto/current", arch: "arm64" }).plugin,
+    ).toContain("aarch64-linux-gnu");
+    expect(l.restart).toBe("sudo snap restart mosquitto");
+  });
+
+  it("Homebrew on Apple Silicon, then Intel, else /etc/mosquitto", () => {
+    expect(
+      detectLayout({ exists: (p) => p === "/opt/homebrew/etc/mosquitto", arch: "arm64" }).name,
+    ).toBe("brew-arm64");
+    expect(
+      detectLayout({ exists: (p) => p === "/usr/local/etc/mosquitto", arch: "x64" }).name,
+    ).toBe("brew-intel");
+    expect(detectLayout({ exists: () => false, arch: "x64" }).name).toBe("etc");
+  });
+});
+
+describe("writeConfig", () => {
+  it("writes atomically, backs the old file up, and is a no-op when unchanged", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const path = join(dir, "mosquitto.conf");
+    writeFileSync(path, "listener 1883\n");
+    const now = new Date("2026-10-18T12:00:00Z");
+    const r = writeConfig(path, "new\n", now);
+    expect(r).toEqual({ written: true, backup: `${path}.volley-backup-20261018T120000Z` });
+    expect(readFileSync(path, "utf-8")).toBe("new\n");
+    expect(readFileSync(r.backup as string, "utf-8")).toBe("listener 1883\n");
+    expect(writeConfig(path, "new\n", now)).toEqual({ written: false, backup: null });
+    expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("a new file needs no backup", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const path = join(dir, "mosquitto.conf");
+    expect(writeConfig(path, "x\n", new Date())).toEqual({ written: true, backup: null });
+    expect(existsSync(path)).toBe(true);
+  });
+});

@@ -36,7 +36,7 @@ describe("stop force-retires agents that never ack", () => {
     expect(forced.data).toMatchObject({ agent_id: AGENT, role: "implementer", reason: "stop" });
     const retired = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
     expect(retired.data).toMatchObject({ status: "stopped", credentials_revoked: true });
-    expect(s.host.fake.argvs(["volley", "auth", "rm-agent", AGENT])).toHaveLength(1);
+    expect(s.creds.revoked).toEqual([AGENT]);
     for (const topic of retainedTopics(NS, AGENT)) expect(await s.env.retained(topic)).toBeNull();
   });
 
@@ -72,7 +72,14 @@ describe("stop force-retires agents that never ack", () => {
     expect((await s.event("agent_force_retired")).data.agent_id).toBe(AGENT);
   });
 
-  // S5 (#95) owns `reaped`-on-delete and the orphan sweep (the same force path); not in this base.
-  it.todo("a force-retired agent publishes reaped through the S5 delete path once S5 lands");
-  it.todo("the S5 orphan sweep force-retires through forceRetireWave's path once S5 lands");
+  it("a force-retired agent's deleted login is reported: reaped { credentials_deleted } journaled", async () => {
+    await stopped();
+    await clock.armed(30_000);
+    await clock.advance(30_000);
+    const reaped = await s.event("agent_reaped_by_supervisor");
+    expect(reaped.data).toEqual({ agent_id: AGENT, reason: "credentials_deleted" });
+    expect((await s.event("credentials_revoked")).data).toEqual({ agent_id: AGENT, ok: true });
+  });
+  // The orphan sweep deletes through the same delete path, but calls reapAndRevoke directly, not
+  // through forceRetireWave: credential-sweep.test.ts proves its reaped-then-clear order.
 });
