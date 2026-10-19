@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  BRIEF_PREFACE_TEMPLATE,
+  DEFAULT_BRIEF_PREFACE,
   type IssueInput,
   type WaveOptions,
+  ensureBriefPreface,
   parseDependsOn,
   taskIdFor,
   waveFromIssues,
@@ -15,9 +18,13 @@ import {
 const VOLLEYD_CLI = fileURLToPath(new URL("../../volleyd/src/cli.ts", import.meta.url));
 const HELPER_CLI = fileURLToPath(new URL("../scripts/wave-from-issues.ts", import.meta.url));
 
+const tmp = mkdtempSync(join(tmpdir(), "wave-from-issues-"));
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
 const OPTS: WaveOptions = {
   wave: "2026-10-18-example",
-  repo: "/tmp/example-repo",
+  // Never created: the CLI writes a brief preface into a --repo that exists.
+  repo: join(tmp, "example-repo"),
   releaseBranch: "release/2026-10-18-example",
   model: "claude-opus-5-5",
 };
@@ -32,13 +39,14 @@ const THREE: IssueInput[] = [
   },
 ];
 
-const tmp = mkdtempSync(join(tmpdir(), "wave-from-issues-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-
 function volleydValidate(yaml: string): { code: number | null; out: string } {
   const file = join(tmp, `wave-${Math.random().toString(36).slice(2)}.yaml`);
   writeFileSync(file, yaml);
-  const r = spawnSync("bun", [VOLLEYD_CLI, "validate", file], { encoding: "utf-8" });
+  const r = spawnSync("bun", [VOLLEYD_CLI, "validate", file], {
+    encoding: "utf-8",
+    // Not the operator's config.yaml (validate reads its brief_preface_max_bytes).
+    env: { ...process.env, VOLLEYD_HOME: join(tmp, "no-volleyd-home") },
+  });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -469,5 +477,95 @@ describe("wave-from-issues CLI", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("--satisfied");
     expect(r.stderr).toContain("abc");
+  });
+});
+
+describe("brief preface", () => {
+  const template = readFileSync(BRIEF_PREFACE_TEMPLATE);
+
+  it("the generated wave file points at the repo's preface, and validates", () => {
+    const { yaml } = waveFromIssues(THREE, OPTS);
+    expect(DEFAULT_BRIEF_PREFACE).toBe(".volley/brief-preface.md");
+    expect(yaml).toContain('brief_preface: ".volley/brief-preface.md"\n');
+    expect(volleydValidate(yaml).code).toBe(0);
+    expect(waveFromIssues(THREE, { ...OPTS, briefPreface: "docs/agent-rules.md" }).yaml).toContain(
+      'brief_preface: "docs/agent-rules.md"\n',
+    );
+  });
+
+  it("the template carries the public-repo hygiene rules and a slot for the repo's own", () => {
+    const text = template.toString("utf-8");
+    for (const rule of [
+      /person's name/,
+      /local username/,
+      /machine path/,
+      /private hostname/,
+      /"the owner"/,
+    ])
+      expect(text).toMatch(rule);
+    expect(text).toContain("## Repository rules");
+  });
+
+  it("writes the template when the preface is absent", () => {
+    const repo = mkdtempSync(join(tmp, "repo-"));
+    const r = ensureBriefPreface(repo);
+    expect(r).toEqual({ path: join(repo, ".volley", "brief-preface.md"), created: true });
+    expect(readFileSync(r.path).equals(template)).toBe(true);
+  });
+
+  it("never overwrites an existing preface (byte for byte)", () => {
+    const repo = mkdtempSync(join(tmp, "repo-"));
+    mkdirSync(join(repo, ".volley"));
+    const mine = Buffer.from("# Our rules\n\nOnly ours.\n\u00e9\n");
+    writeFileSync(join(repo, ".volley", "brief-preface.md"), mine);
+    expect(ensureBriefPreface(repo).created).toBe(false);
+    expect(readFileSync(join(repo, ".volley", "brief-preface.md")).equals(mine)).toBe(true);
+    // Another path (relative to the repo, or absolute) is honoured the same way.
+    const abs = join(tmp, `rules-${Math.random().toString(36).slice(2)}.md`);
+    expect(ensureBriefPreface(repo, abs)).toEqual({ path: abs, created: true });
+    expect(ensureBriefPreface(repo, "docs/rules.md").path).toBe(join(repo, "docs", "rules.md"));
+  });
+
+  it("a ~/ path is under the home directory, as volleyd reads it (not under the repo)", () => {
+    const repo = mkdtempSync(join(tmp, "repo-"));
+    const home = mkdtempSync(join(tmp, "home-"));
+    expect(ensureBriefPreface(repo, "~/rules.md", home)).toEqual({
+      path: join(home, "rules.md"),
+      created: true,
+    });
+    expect(existsSync(join(repo, "~"))).toBe(false);
+  });
+
+  it("the CLI writes the preface into a repo on this machine, and says so", () => {
+    const repo = mkdtempSync(join(tmp, "repo-"));
+    const input = join(tmp, "issues-preface.json");
+    writeFileSync(input, JSON.stringify(THREE));
+    const run = () =>
+      spawnSync(
+        "bun",
+        [
+          HELPER_CLI,
+          input,
+          "--wave",
+          OPTS.wave,
+          "--repo",
+          repo,
+          "--release-branch",
+          OPTS.releaseBranch,
+          "--model",
+          OPTS.model,
+        ],
+        { encoding: "utf-8" },
+      );
+    const first = run();
+    expect(first.status).toBe(0);
+    const file = join(repo, ".volley", "brief-preface.md");
+    expect(existsSync(file)).toBe(true);
+    expect(first.stderr).toContain(`wrote ${file} from the template`);
+    writeFileSync(file, "edited\n");
+    const second = run();
+    expect(second.status).toBe(0);
+    expect(readFileSync(file, "utf-8")).toBe("edited\n");
+    expect(second.stderr).toContain(`brief preface: ${file} (kept)`);
   });
 });

@@ -87,6 +87,7 @@ tasks:
 # spawn_budget: 20           # default: spawn_budget_multiplier × task count
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
+# brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run;
@@ -492,6 +493,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `worktree_root` | spawns after the change | existing worktrees untouched |
 | `spawn_timeout_s` | spawns after the change | — |
 | `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
+| `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 
@@ -519,7 +521,7 @@ lists every key with its default and example pools, commented out.
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
 | 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
-| 4 | **Brief** `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `SPAWN_BRIEF_REJECTED` |
+| 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** `volley auth add-agent <id> --ack-to <parent> --ack-to volleyd --json` → `.volley/agent.json` (mode 0600) | `identity.ts` | `CREDENTIALS_FAILED` |
 | 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
@@ -610,9 +612,43 @@ Escape that `volleyd stop` sends. The brief never appears in an argv.
 **Brief gate and extras.** If `$VOLLEYD_HOME/brief-gate` exists and is executable, it runs as
 `brief-gate <worktree>/.volley/brief.md` in the worktree; a non-zero exit is
 `SPAWN_BRIEF_REJECTED`. It is a local file rather than a config tunable on purpose: a gate is a
-program, and tunables can be changed over the broker. Repo-specific brief text comes from
-`<repo>/.volley/brief-extra.md` (kept out of git by the exclude above). See
-[`briefs/README.md`](briefs/README.md).
+program, and tunables can be changed over the broker. Repo-specific notes come from
+`<repo>/.volley/brief-extra.md` (kept out of git by the exclude above), appended as a
+"Repository notes" section. See [`briefs/README.md`](briefs/README.md).
+
+### Brief preface
+
+Repository **rules** go in the brief preface; repository **notes** in `brief-extra.md`. The
+preface is `<repo>/.volley/brief-preface.md`, or the file the wave file names with
+`brief_preface:` (relative to `repo`, or absolute). Its bytes are put at the top of **every**
+brief volleyd writes — implementer, both reviewers, fixup, rebase — verbatim (no `{{…}}`
+expansion), followed by a `---` rule and then the role's template. `brief-extra.md` is the
+opposite end: optional notes (build commands, gates) rendered into the template's
+"Repository notes" section at the bottom. `/volley-issues` writes `brief_preface:` into the wave
+files it generates and creates the file from its public-repo hygiene template when it is missing
+(never overwriting one).
+
+- **Which repo.** The default path is under the wave's `repo:` as written. `brief-extra.md` is
+  looked up at the clone's top level instead (`git rev-parse --show-toplevel`). So if `repo:`
+  points at a subdirectory, name the preface with `brief_preface:` or point `repo:` at the top
+  level.
+- **Where it is read.** On volleyd's own host, at `run` (and each plan version) and again at
+  every spawn, so an edit reaches the next spawn. A task on a remote host gets the preface read
+  here.
+- **Size.** At most `brief_preface_max_bytes` (default 16 KiB, a tunable): over it,
+  `volleyd validate` exits 1 and `volleyd run` is refused with `BRIEF_PREFACE_TOO_LARGE`, and a
+  spawn after the file grew is refused (journaled `alarm_raised { code }`, like any refusal).
+- **No file.** Briefs are the role templates alone; `brief_preface_missing { path }` is
+  journaled once per wave (at `run`, or at the first plan version without one). A blank file
+  (whitespace only) counts as no file, so what `validate` / `status` report is what the agents
+  get.
+- **Encoding.** The file must be UTF-8 (its exact bytes go into the brief): one that is not is
+  refused by `validate`, `run` and a spawn.
+- **Visibility.** `volleyd validate` prints `brief preface: <path> (<bytes> B, sha256 <12 hex>)`
+  or `brief preface: none (no <path>)`. `wave_submitted` and every `wave_versioned` carry
+  `brief_preface: { path, sha256, bytes } | null`, which is the wave state's `brief_preface`
+  (SPEC §4.6.9), so the Desk and the coordinator can see which rules the agents got;
+  `volleyd status` prints the same line under the wave's header.
 
 ### Lock semantics
 
@@ -821,7 +857,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Repo trust | the box's own `~/.claude.json`, read at every spawn (only the trust bits); an untrusted repo opens `repo_untrusted` with `host` and `target` (see below) |
 | Lock | `$VOLLEYD_HOME/hosts/<target>/locks/` — keyed by target and worktree path |
 | Worktree | `git -C <repo> fetch origin <release_branch>`, then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
-| Brief | `.volley/brief-extra.md` is read from the box's clone |
+| Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
 | Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'`. Never `--mcp-config` |
 | Screen | `tmux capture-pane -p -t =<session>: -S-<lines>`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
@@ -1040,7 +1076,12 @@ job names; an infra-shaped failure (cancelled, runner lost, checkout or network 
 `ci_none_grace_ms` asks the owner (`accept` / `cancel`).
 
 **Reviews.** Reviewers publish `vol_publish(channel="result", type="review", payload={ findings:
-[{ severity: P1|P2|P3, file, line?, text }], verdict })` (`review-result.schema.json`). A `done`
+[{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene: { checked: true, findings } })`
+(`review-result.schema.json`). Both reviewer briefs carry a fixed public-hygiene line, whatever
+the repo's preface says: "flag as P1 any person name, local username, machine path (home
+directories, temp paths), private hostname or IP in the diff, commit messages or PR text".
+`hygiene.findings` lists those hits; volleyd folds them into the review's findings, so the
+fixup gets them. A result without `hygiene.checked` is not a parseable result. A `done`
 without a parseable result is steered once, then `agent_blocked` (`respawn` / `skip`). The
 spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
 `ISSUE.md` in its worktree). A P1 from
@@ -1065,6 +1106,23 @@ reaped (its LWT, past the reap grace) is handled like a `failed` one: retired, t
 merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI green on it) and, if
 the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
 reviewer runs again (then the fixup, if it finds anything), and the check repeats.
+
+**The merge_ready invariant.** The review stage is load-bearing, so the transition into the gate
+goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's pipeline must
+have a stored review with a verdict that holds for the **current head** — a review of that
+head, or of one it descends from only through fixups that ran after that review (they worked
+from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
+re-verified) was reviewed by nobody, so reviews of the heads before it no longer count. A
+violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
+any GitHub check) and again at the gate, and journals
+`alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
+`agent_blocked` decision (`rereview` / `cancel`) that names the roles. `rereview` runs those
+reviewers again at the current head (the next review round; the fixup follows if they find
+anything), then the gate is checked again; `cancel` cancels the task. The only way past the reviews is a wave file whose
+pipeline for the task lists no review stage (`pipeline: [implement, merge_ready]`): that gate is
+journaled as `alarm_raised { alarm: "reviews_skipped_by_plan" }` and the task carries
+`reviews_skipped_by_plan: true` in the wave state (`volleyd status`: "reviews skipped by plan").
+A review the owner `skip`ped through a decision is a stored review and counts.
 
 **Evidence package** at the gate: `$VOLLEYD_HOME/waves/<wave>/evidence/<task>.md` + `.json` —
 PR URL, head SHA, CI status and run links on that exact head, both reviews' findings and how each

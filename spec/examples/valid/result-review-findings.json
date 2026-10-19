@@ -16,6 +16,17 @@
       { "severity": "P3", "file": "src/batch.ts", "text": "Name the magic number." }
     ],
     "verdict": "changes_requested",
+    "hygiene": {
+      "checked": true,
+      "findings": [
+        {
+          "severity": "P1",
+          "file": "docs/setup.md",
+          "line": 12,
+          "text": "A home-directory path with a local username; write a placeholder instead."
+        }
+      ]
+    },
     "summary": "One blocker: the empty-batch short-circuit is missing."
   }
 }

@@ -61,6 +61,12 @@
     "config": {
       "$ref": "config.schema.json#/$defs/tunables",
       "description": "Per-wave overrides of the supervisor tunables, layered over the global config."
+    },
+    "brief_preface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "The brief preface file (spec section 4.6.9): a path relative to repo, or absolute. Its bytes are prepended verbatim to every brief the supervisor writes for this wave. Default: .volley/brief-preface.md in the repo."
     }
   },
   "$defs": {

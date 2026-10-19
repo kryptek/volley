@@ -306,6 +306,11 @@ hard-code your everyday broker's credentials) are left alone.
   ```sh
   cd "$TEST_REPO" && volleyd validate ".volley/waves/$WAVE.yaml"
   ```
+- [ ] **Brief preface.** The wave file has `brief_preface: ".volley/brief-preface.md"`, and the
+  skill wrote that file from its template (`wrote … from the template` on its stderr) unless it
+  already existed. Add one repo rule under `## Repository rules`, then re-validate: the output
+  ends with `brief preface: $TEST_REPO/.volley/brief-preface.md (<bytes> B, sha256 <12 hex>)`,
+  and the sha256 prefix matches `sha256sum "$TEST_REPO/.volley/brief-preface.md"`.
 - [ ] **Tracking branch** (remove this step once volleyd fetches a release branch that exists
   only on origin): a release branch pushed from another clone is only `origin/release/<x>` in
   the laptop's clone, and `volleyd run` needs it as a local branch. If
@@ -325,6 +330,19 @@ hard-code your everyday broker's credentials) are left alone.
 - [ ] The Desk shows the wave window (dependency graph, owner chip = the coordinator), an agent
   window per agent with live narration and a Terminal tab (box agents: `source: tmux`).
 - [ ] The dependent task stays `queued` with a reason until its dependency is done.
+- [ ] **The preface reached every agent.** `volleyd status "$WAVE"` shows
+  `brief preface: <path> (<bytes> B, sha256 <12 hex>)` under the header (the same as
+  `validate`). Every agent's `.volley/brief.md` starts with the preface's exact bytes, then a
+  `---` rule, then its role's template — check the implementers now, and each reviewer, fixup and
+  rebase brief as they spawn in section 7 (`ssh "$BOX" cat …` for box worktrees):
+  ```sh
+  P="$TEST_REPO/.volley/brief-preface.md"
+  for b in <worktree_root>/"$WAVE"/*/.volley/brief.md; do
+    cmp -n "$(wc -c < "$P")" "$P" "$b" && echo "ok $b"
+  done
+  ```
+  Both reviewer briefs also carry the `Public hygiene: flag as P1 …` line, and their `result`
+  carries `hygiene: { checked: true, … }`.
 
 ---
 
@@ -456,7 +474,7 @@ RESULTS (<date>, release head <sha>):
   2. service (round trip / skipped):
   3. hooks + lease:
   4. Desk laptop / phone:
-  5. wave spawn (local / box):
+  5. wave spawn (local / box), brief preface on every role's brief:
   6. kill / urgent refused / claim / urgent / config / pause:
   7. gates, merges, completion, cleanup:
   Issues found:

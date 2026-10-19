@@ -545,6 +545,49 @@ describe("pipeline: the PR head at the gate and at the merge", () => {
     );
   });
 
+  it("a push after the reviews breaks the merge_ready invariant: the owner gets a decision, rereview re-runs the reviewers at the new head", async () => {
+    await reviewed();
+    // Someone pushes H3 to the PR after the fixup's H2 was verified, before the gate.
+    h.world.before = (a) => {
+      if (a[1] !== "pr" || a[2] !== "view") return;
+      h.world.before = undefined;
+      h.world.origin[h.PR_BRANCH] = H3;
+      (h.world.prs[0] as { headRefOid: string }).headRefOid = H3;
+      h.world.ci[H3] = "green";
+    };
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.record().pipeline.T1?.moves).toEqual([{ from: H2, to: H3, touched: [] }]);
+    // Nobody reviewed H3: no gate, the task is parked on a decision that says why.
+    expect(h.record().state?.gates).toEqual([]);
+    expect(h.events.find((e) => e.data.alarm === "merge_ready_invariant")?.data).toMatchObject({
+      head: H3,
+      stale: ["spec_reviewer", "quality_reviewer"],
+    });
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "agent_blocked", task: "T1", options: ["rereview", "cancel"] });
+    expect(d?.question).toMatch(/spec_reviewer, quality_reviewer/);
+    expect(stage()).toBe("awaiting_decision");
+    expect(h.task()?.why_waiting).toMatch(/awaiting decision/);
+    // Parked: later ticks neither ask again nor poll GitHub.
+    const calls = h.calls.length;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.openDecisions()).toHaveLength(1);
+    expect(h.calls.length).toBe(calls);
+
+    await h.resolve(d?.decision_id as string, "rereview");
+    const reviewers = h.spawns.filter((s) => s.role !== "implementer" && s.start?.ref === H3);
+    expect(reviewers.map((s) => s.role)).toEqual(["spec_reviewer", "quality_reviewer"]);
+    expect(reviewers.every((s) => s.start?.detach === true)).toBe(true);
+    expect(stage()).toBe("spec_review");
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("merge_ready");
+    expect(evidence().head_sha).toBe(H3);
+  });
+
   it("a PR merged at another head than the gated one is done, with an alarm naming both", async () => {
     await implemented({ pipeline: "[implement, merge_ready]" });
     (h.world.prs[0] as { headRefOid: string }).headRefOid = H2;

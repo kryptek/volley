@@ -137,7 +137,8 @@ export interface PipelineMarker {
     | "review_result"
     | "fixup_result"
     | "agent_failed"
-    | "reviewers_disagree";
+    | "reviewers_disagree"
+    | "merge_ready_invariant";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -414,9 +415,7 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onVerified(v, ev);
     case "rebase_checked":
       if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.head !== v.p.head) return [];
-      return ev.check.behind === 0
-        ? [{ kind: "gate", check: ev.check, diffstats: ev.diffstats }]
-        : enterRebase(v);
+      return ev.check.behind === 0 ? guardedGate(v, ev) : enterRebase(v);
     case "head_moved":
       return onHeadMoved(v, ev);
     case "merge_checked":
@@ -426,6 +425,117 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "decision_resolved":
       return onResolved(v, ev.decision);
   }
+}
+
+/** The outcome of the merge_ready invariant for a task (`mergeReadyCheck`). */
+export type MergeReadyCheck =
+  | { ok: true; skippedByPlan: boolean }
+  | { ok: false; head?: string; missing: ReviewerRole[]; stale: ReviewerRole[] };
+
+/**
+ * The merge_ready invariant: every reviewer role in the task's pipeline has a stored review with
+ * a verdict that holds for the current head — a review of the head itself, or of a head the
+ * current one descends from only through fixups that worked from that review's round or later
+ * (they ran after it) and rebases. A head pushed outside the pipeline (`moves`) was reviewed by
+ * nobody. A pipeline without review stages passes, as `skippedByPlan`: the wave file said so.
+ */
+export function mergeReadyCheck(stages: PipelineStage[][], p: TaskPipeline): MergeReadyCheck {
+  const planned = REVIEWER_ROLES.filter((r) =>
+    stages.some((g) => g.some((s) => STAGE_ROLE[s] === r)),
+  );
+  if (planned.length === 0) return { ok: true, skippedByPlan: true };
+  const missing = planned.filter((r) => p.reviews[r]?.result.verdict === undefined);
+  const stale = planned.filter((r) => {
+    const rv = p.reviews[r];
+    return rv?.result.verdict !== undefined && !reviewHolds(p, rv);
+  });
+  if (p.head === undefined || missing.length > 0 || stale.length > 0)
+    return { ok: false, ...(p.head !== undefined ? { head: p.head } : {}), missing, stale };
+  return { ok: true, skippedByPlan: false };
+}
+
+/** Does `rv` still hold at the current head (see mergeReadyCheck)? */
+function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
+  const seen = new Set<string>();
+  let head = p.head;
+  while (head !== undefined && !seen.has(head)) {
+    if (head === rv.head) return true;
+    seen.add(head);
+    const to = head;
+    const fixup = p.fixups.find((f) => f.to === to && f.round >= rv.round);
+    head = fixup?.from ?? p.rebases.find((r) => r.to === to)?.from;
+  }
+  return false;
+}
+
+/**
+ * A merge_ready invariant violation: an alarm, and a decision for the owner (`rereview` runs the
+ * missing / stale reviewers at the current head; `cancel`). Never a gate: volleyd never gates
+ * around a missing review. A task already parked on a decision gets the alarm only.
+ */
+function invariantViolation(
+  v: PipelineView,
+  c: Extract<MergeReadyCheck, { ok: false }>,
+): PipelineAction[] {
+  const alarm: PipelineAction = {
+    kind: "alarm",
+    key: `${v.task}/merge_ready_invariant/${v.p.head}`,
+    event: {
+      type: "alarm_raised",
+      task: v.task,
+      data: {
+        alarm: "merge_ready_invariant",
+        ...(c.head !== undefined ? { head: c.head } : {}),
+        missing: c.missing,
+        stale: c.stale,
+      },
+    },
+  };
+  if (v.stage === "awaiting_decision") return [alarm];
+  const at = c.head !== undefined ? c.head.slice(0, 12) : "no verified head";
+  const why = [
+    ...(c.missing.length > 0 ? [`no review from ${c.missing.join(", ")}`] : []),
+    ...(c.stale.length > 0 ? [`${c.stale.join(", ")} reviewed an older head`] : []),
+  ].join("; ");
+  return [
+    alarm,
+    {
+      kind: "decide",
+      marker: { on: "merge_ready_invariant", ...(c.head !== undefined ? { head: c.head } : {}) },
+      decision: {
+        kind: "agent_blocked",
+        task: v.task,
+        question: `merge_ready is blocked at ${at}: ${why} (e.g. a push outside the pipeline). rereview: run those reviewers at the current head; or cancel the task?`,
+        ...(v.p.pr !== undefined ? { pointers: { pr: v.p.pr.url } } : {}),
+        options: ["rereview", "cancel"],
+      },
+    },
+  ];
+}
+
+/** The end of the pipeline: the rebase check and gate when the invariant holds (no polling else). */
+function toGate(v: PipelineView): PipelineAction[] {
+  const c = mergeReadyCheck(v.stages, v.p);
+  return c.ok ? [{ kind: "check_rebase" }] : invariantViolation(v, c);
+}
+
+/** The gate, behind the merge_ready invariant (see invariantViolation). */
+function guardedGate(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "rebase_checked" }>,
+): PipelineAction[] {
+  const gate: PipelineAction = { kind: "gate", check: ev.check, diffstats: ev.diffstats };
+  const c = mergeReadyCheck(v.stages, v.p);
+  if (!c.ok) return invariantViolation(v, c);
+  if (!c.skippedByPlan) return [gate];
+  return [
+    {
+      kind: "alarm",
+      key: `${v.task}/reviews_skipped_by_plan`,
+      event: { type: "alarm_raised", task: v.task, data: { alarm: "reviews_skipped_by_plan" } },
+    },
+    gate,
+  ];
 }
 
 /** The publishing role whose verification produced the current head. */
@@ -586,7 +696,7 @@ function onDone(
             role: ev.role,
             agent_id: ev.agent_id,
             reason: "result",
-            text: 'Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested" }) — then publish done again.',
+            text: 'Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested", "hygiene": { "checked": true, "findings": [<public-hygiene P1s, same shape>] } }) — then publish done again.',
           },
         ];
       }
@@ -849,6 +959,17 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "respawn") ? [] : reask();
     case "reviewers_disagree":
       return [];
+    case "merge_ready_invariant": {
+      if (!isAnswer(answer, "rereview")) return reask();
+      const c = mergeReadyCheck(v.stages, v.p);
+      // Holds again (nothing to re-run): the next advance gates.
+      if (c.ok) return [];
+      const roles = REVIEWER_ROLES.filter((r) => c.missing.includes(r) || c.stale.includes(r));
+      const i = v.stages.findIndex((g) =>
+        g.some((s) => roles.includes(STAGE_ROLE[s] as ReviewerRole)),
+      );
+      return i >= 0 ? enterStep(v, i, roles) : [];
+    }
   }
 }
 
@@ -942,7 +1063,7 @@ function advance(v: PipelineView): PipelineAction[] {
       );
       if (i >= 0) return enterStep(v, i, p.rereview);
     }
-    return [{ kind: "check_rebase" }];
+    return toGate(v);
   }
   return enter(v, p.step + 1);
 }
@@ -950,7 +1071,7 @@ function advance(v: PipelineView): PipelineAction[] {
 /** Enter stage group `i` (skipping what has nothing to do); the end of the pipeline is the gate. */
 function enter(v: PipelineView, i: number): PipelineAction[] {
   const group = v.stages[i];
-  if (group === undefined || group.includes("merge_ready")) return [{ kind: "check_rebase" }];
+  if (group === undefined || group.includes("merge_ready")) return toGate(v);
   const roles = group.flatMap((s) => (s === "implement" ? [] : [STAGE_ROLE[s] as Role]));
   if (roles.length === 0) return enter(v, i + 1);
   if (roles.includes("fixup")) {
@@ -1456,6 +1577,8 @@ export class PipelineDriver {
     const { p } = v;
     const { head, pr } = p;
     if (head === undefined || pr === undefined) return;
+    // The invariant again, at the transition itself (next() alarms on a violation).
+    if (!mergeReadyCheck(v.stages, p).ok) return;
     const fixups: EvidenceInput["fixups"] = p.fixups.map(({ worktree: _w, ...f }) => {
       const stat = f.from !== undefined ? diffstats[`${f.from}..${f.to}`] : undefined;
       return { ...f, ...(stat !== undefined ? { diffstat: stat } : {}) };
