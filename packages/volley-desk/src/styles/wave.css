@@ -144,6 +144,43 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ------------------------------------------- ended waves, CI pending (S6) */
+.wave-ended {
+  opacity: 0.55;
+  filter: saturate(0.4);
+}
+.dag--ended .dag-stage {
+  text-decoration: line-through;
+}
+.chip--ended {
+  color: var(--mute);
+  border-color: rgba(163, 171, 192, 0.4);
+}
+.chip--ci {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+.wave-ci {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.wave-ci li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+.wave-ci-pipe {
+  color: var(--amber);
+  font: 11.5px var(--f-mono);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .clawd--wait {
     animation: none;

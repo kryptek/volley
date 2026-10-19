@@ -17,6 +17,17 @@
  * stay quiet. `offline` lists the spans after the first connect during which
  * the Desk was disconnected or settling, so coordinator silence is measured
  * only over time it could actually hear the broker.
+ *
+ * `syncing` is the reconnect / resume grace window: from every connect, and
+ * from the page coming back to the foreground (`visibilitychange → visible`,
+ * when the Desk also probes the broker with `client.reconnect()` instead of
+ * waiting for the keepalive to notice a dead socket), for `SYNC_GRACE_MS`
+ * (30 s). Retained state alone says
+ * nothing about liveness, so nobody is judged quiet or without signal then.
+ * A reconnect never clears feed rows or narration (see `resync`). Each agent's
+ * last narration is kept in `sessionStorage` (`NARRATION_STORAGE_PREFIX` +
+ * agent id), so a cold load (a phone that discarded the tab) shows it again,
+ * marked as restored, until a live one arrives.
  * Broker credentials (T14) make the Desk a writer (D4 steering): it signs in
  * as that identity, which becomes its `identity` (the sender of everything it
  * publishes, whose mailbox carries the answers) and `writer` is the client.
@@ -27,6 +38,7 @@
 import {
   type ReactNode,
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -44,7 +56,7 @@ import {
   type DeskMqttClient,
   createMqttClient,
 } from "./mqtt-client";
-import { initialState, pruneUnconfirmed, reduceAll, resync } from "./reducer";
+import { initialState, pruneUnconfirmed, reduceAll, restoreNarration, resync } from "./reducer";
 import type { DeskMessage, DeskState } from "./types";
 
 export const DEFAULT_BROKER_URL = "ws://localhost:9001";
@@ -85,6 +97,16 @@ const FLUSH_MS = 16;
 const SETTLE_MS = 3000;
 /** Offline spans kept (older ones are long past any `claim_after_s`). */
 const OFFLINE_KEEP = 50;
+/**
+ * The reconnect / resume grace window. A fixed span, not a tunable: the hooks
+ * heartbeat on each hook event (SPEC §4.3), not on an interval, so there is no
+ * heartbeat interval to derive it from. Long enough for a working session's
+ * next hook event or narration to arrive.
+ */
+export const SYNC_GRACE_MS = 30_000;
+
+/** sessionStorage key prefix for an agent's last narration (`{ text, at }`). */
+export const NARRATION_STORAGE_PREFIX = "volley-desk:narration:";
 
 export type Connection = "demo" | "connecting" | "connected" | "disconnected";
 
@@ -97,6 +119,8 @@ export interface DeskContextValue {
   settling: boolean;
   /** Spans the Desk was disconnected or settling after its first connect. */
   offline: readonly OfflineSpan[];
+  /** The reconnect / resume grace window is open; see the header. */
+  syncing: boolean;
   /** The Desk's broker identity when it can write; `null` when anonymous. */
   identity: string | null;
   /** Publishes as `identity` (steering, control requests); `null` when read-only. */
@@ -158,11 +182,35 @@ function localStorageOrNull(): Storage | null {
   }
 }
 
+function sessionStorageOrNull(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The narration saved for `id` this session, if any. */
+function savedNarration(storage: Storage, id: string): { text: string; at: number } | null {
+  try {
+    const v = JSON.parse(storage.getItem(NARRATION_STORAGE_PREFIX + id) ?? "null") as {
+      text?: unknown;
+      at?: unknown;
+    } | null;
+    return typeof v?.text === "string" && v.text !== "" && typeof v.at === "number"
+      ? { text: v.text, at: v.at }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export type Action =
   | { type: "apply"; msgs: DeskMessage[] }
   | { type: "tick"; step: number; now: number }
   | { type: "resync" }
-  | { type: "prune" };
+  | { type: "prune" }
+  | { type: "restore"; id: string; text: string; at: number };
 
 export function storeReducer(state: DeskState, a: Action): DeskState {
   switch (a.type) {
@@ -174,6 +222,8 @@ export function storeReducer(state: DeskState, a: Action): DeskState {
       return resync(state);
     case "prune":
       return pruneUnconfirmed(state);
+    case "restore":
+      return restoreNarration(state, a.id, a.text, a.at);
   }
 }
 
@@ -284,6 +334,15 @@ export function DeskStoreProvider({
   }));
   const [connection, setConnection] = useState<Connection>(demo ? "demo" : "connecting");
   const [settling, setSettling] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const graceTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const startGrace = useCallback(() => {
+    setSyncing(true);
+    clearTimeout(graceTimer.current);
+    graceTimer.current = setTimeout(() => setSyncing(false), SYNC_GRACE_MS);
+  }, []);
+  useEffect(() => () => clearTimeout(graceTimer.current), []);
+  const clientRef = useRef<DeskMqttClient | null>(null);
   const [offline, setOffline] = useState<readonly OfflineSpan[]>([]);
   const [liveWriter, setLiveWriter] = useState<SteerClient | null>(null);
   const [liveConnected, setLiveConnected] = useState(false);
@@ -335,7 +394,12 @@ export function DeskStoreProvider({
         return open ? [...spans.slice(0, -1), { from: last.from, to: at }] : spans;
       });
     };
-    const detach = attachClient(client, dispatch, { settleMs }, setConnection, onSettling);
+    clientRef.current = client;
+    const onConnection = (c: Connection) => {
+      setConnection(c);
+      if (c === "connected") startGrace();
+    };
+    const detach = attachClient(client, dispatch, { settleMs }, onConnection, onSettling);
     let refused = false;
     const refuse = (err: AuthFailedError) => {
       if (refused) return;
@@ -360,10 +424,56 @@ export function DeskStoreProvider({
     return () => {
       offError();
       detach();
+      clientRef.current = null;
       setLiveWriter(null);
       void client.disconnect();
     };
-  }, [brokerUrl, clientFactory, settleMs, auth]);
+  }, [brokerUrl, clientFactory, settleMs, auth, startGrace]);
+
+  // Back in the foreground (a phone resumed the tab): probe the broker now and sync again.
+  useEffect(() => {
+    if (brokerUrl === null || typeof document === "undefined") return;
+    let away = document.visibilityState === "hidden";
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        away = true;
+        return;
+      }
+      if (!away) return;
+      away = false;
+      clientRef.current?.reconnect?.();
+      startGrace();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [brokerUrl, startGrace]);
+
+  // Keep each agent's last narration for this session; restore it once for an agent that has none.
+  const savedAt = useRef<Record<string, number>>({});
+  const restoreTried = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (demo) return;
+    const storage = sessionStorageOrNull();
+    if (!storage) return;
+    for (const a of Object.values(state.agents)) {
+      if (a.narration !== null && a.narrationAt !== undefined) {
+        if (a.narrationRestored || savedAt.current[a.id] === a.narrationAt) continue;
+        savedAt.current[a.id] = a.narrationAt;
+        try {
+          storage.setItem(
+            NARRATION_STORAGE_PREFIX + a.id,
+            JSON.stringify({ text: a.narration, at: a.narrationAt }),
+          );
+        } catch {
+          // A full or blocked sessionStorage only loses the restore.
+        }
+      } else if (a.narration === null && !restoreTried.current.has(a.id)) {
+        restoreTried.current.add(a.id);
+        const saved = savedNarration(storage, a.id);
+        if (saved) dispatch({ type: "restore", id: a.id, ...saved });
+      }
+    }
+  }, [state.agents, demo]);
 
   // Writes only once the credentialed connection has actually come up (bad credentials never do).
   const writer = demo ? demoWriter : liveConnected ? liveWriter : null;
@@ -375,10 +485,11 @@ export function DeskStoreProvider({
       brokerUrl,
       settling,
       offline,
+      syncing: demo ? false : syncing,
       identity: writer ? identity : null,
       writer,
     }),
-    [state, connection, demo, brokerUrl, settling, offline, identity, writer],
+    [state, connection, demo, brokerUrl, settling, offline, syncing, identity, writer],
   );
   return <DeskContext.Provider value={value}>{children}</DeskContext.Provider>;
 }

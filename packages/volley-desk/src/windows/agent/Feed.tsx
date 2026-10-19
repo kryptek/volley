@@ -4,6 +4,9 @@
  * auto-scrolled to the bottom while the reader is there. Clicking a row toggles the pretty JSON of the
  * real envelope as it arrived, not a reconstruction. volleyd's control traffic (a mailbox `query`
  * with `payload.op` and its reply) is not shown: it is the daemon's, not a conversation with the agent.
+ * Heartbeats are liveness (the footer's dot and age), not rows: the store only counts them, and
+ * the "show heartbeats" toggle (off by default) adds one collapsed `heartbeat ×N · last 3s` row at
+ * the end.
  */
 import { type UIEvent, useLayoutEffect, useRef, useState } from "react";
 import { isControlTraffic } from "../../store/reducer";
@@ -70,6 +73,14 @@ function summary(e: FeedEntry): string {
   return "";
 }
 
+/** `3s`, `4m`, `1.2h` (the agent footer's `age`). */
+function ago(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+
 function clock(ms: number): string {
   const d = new Date(ms);
   return [d.getHours(), d.getMinutes(), d.getSeconds()]
@@ -80,51 +91,88 @@ function clock(ms: number): string {
 export function Feed({
   feed,
   noSignal = false,
-}: { feed: readonly FeedEntry[]; noSignal?: boolean }) {
+  heartbeats,
+  now,
+}: {
+  feed: readonly FeedEntry[];
+  noSignal?: boolean;
+  /** How many heartbeats arrived and the last one's time (ms), for the collapsed row. */
+  heartbeats?: { count: number; last: number | null };
+  /** Clock for the collapsed row's age; defaults to the render time. */
+  now?: number;
+}) {
   const [open, setOpen] = useState<FeedEntry | null>(null);
-  const { ref, onScroll } = useFollow<HTMLDivElement>(feed);
+  const [showBeats, setShowBeats] = useState(false);
+  const beats = showBeats && heartbeats && heartbeats.count > 0 ? heartbeats : null;
+  const { ref, onScroll } = useFollow<HTMLDivElement>(beats ? [feed, beats.count] : feed);
   // Stable sort: equal timestamps keep arrival order.
   const rows = feed
     .filter(
       (e) =>
         !(
           feedChannel(e) === "mailbox" && isControlTraffic(e.envelope, e.topic.split("/")[2] ?? "")
-        ),
+        ) && !(feedChannel(e) === "progress" && e.envelope.type === "heartbeat"),
     )
     .map((e, i) => ({ e, i, t: entryTime(e) }))
     .sort((a, b) => a.t - b.t || a.i - b.i);
 
-  if (rows.length === 0) {
+  const toggle = heartbeats && heartbeats.count > 0 && (
+    <label className="feed-beats dim">
+      <input type="checkbox" checked={showBeats} onChange={() => setShowBeats((v) => !v)} /> show
+      heartbeats
+    </label>
+  );
+  if (rows.length === 0 && !beats) {
     return (
-      <div className="feed feed--empty recessed dim">
-        no envelopes yet{noSignal ? " · no signal from this agent on this broker" : ""}
-      </div>
+      <>
+        {toggle}
+        <div className="feed feed--empty recessed dim">
+          no envelopes yet{noSignal ? " · no signal from this agent on this broker" : ""}
+        </div>
+      </>
     );
   }
   return (
-    <div className="feed recessed" ref={ref} onScroll={onScroll}>
-      {rows.map(({ e, t }) => {
-        const ch = feedChannel(e);
-        const isOpen = open === e;
-        return (
-          <div key={rowId(e)} className={`env ch-${ch}`}>
-            <button
-              type="button"
-              className="env-row"
-              aria-expanded={isOpen}
-              onClick={() => setOpen(isOpen ? null : e)}
-            >
-              <span className="mono dim">{clock(t)}</span>
-              <span className="env-ch">{ch}</span>
-              <span className="env-type">{e.envelope.type}</span>
-              <span className="env-msg">{summary(e)}</span>
-            </button>
-            {isOpen && (
-              <pre className="env-json recessed">{JSON.stringify(e.envelope, null, 2)}</pre>
-            )}
+    <>
+      {toggle}
+      <div className="feed recessed" ref={ref} onScroll={onScroll}>
+        {rows.map(({ e, t }) => {
+          const ch = feedChannel(e);
+          const isOpen = open === e;
+          return (
+            <div key={rowId(e)} className={`env ch-${ch}`}>
+              <button
+                type="button"
+                className="env-row"
+                aria-expanded={isOpen}
+                onClick={() => setOpen(isOpen ? null : e)}
+              >
+                <span className="mono dim">{clock(t)}</span>
+                <span className="env-ch">{ch}</span>
+                <span className="env-type">{e.envelope.type}</span>
+                <span className="env-msg">{summary(e)}</span>
+              </button>
+              {isOpen && (
+                <pre className="env-json recessed">{JSON.stringify(e.envelope, null, 2)}</pre>
+              )}
+            </div>
+          );
+        })}
+        {beats && (
+          <div className="env ch-progress env--heartbeats">
+            <div className="env-row">
+              <span className="mono dim">
+                {beats.last === null ? "--:--:--" : clock(beats.last)}
+              </span>
+              <span className="env-ch">progress</span>
+              <span className="env-type">
+                heartbeat ×{beats.count}
+                {beats.last !== null && ` · last ${ago((now ?? Date.now()) - beats.last)}`}
+              </span>
+            </div>
           </div>
-        );
-      })}
-    </div>
+        )}
+      </div>
+    </>
   );
 }

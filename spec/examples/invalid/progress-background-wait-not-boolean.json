@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T14:20:00.000Z",
+  "channel": "progress",
+  "type": "awaiting_input",
+  "payload": {
+    "seq": 112,
+    "source": "harness-hook",
+    "hook_event": "Notification",
+    "notification_type": "idle_prompt",
+    "background_wait": "yes"
+  }
+}

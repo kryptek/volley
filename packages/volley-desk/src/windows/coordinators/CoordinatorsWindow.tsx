@@ -4,7 +4,10 @@
  * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
  * viewport to the wave and its agents) and show/hide. A wave that has ended
  * shows a neutral `Complete` / `Stopped` instead: its coordinator is gone
- * because the work is done, and there is nothing to claim. Hidden waves keep
+ * because the work is done, and there is nothing to claim; with its agents it
+ * folds off the canvas under "Show finished" like finished agents. A
+ * coordinator idle with a background wait armed reads `Working · waiting on
+ * events`: it wakes on the wave's events, nobody has to answer. Hidden waves keep
  * running and still count towards the top-bar pill and notifications. The
  * first row is the supervisor (`volleyd`) with the top-bar pill's health: it
  * runs the waves, but it is not an agent and has no window of its own.
@@ -31,6 +34,9 @@ export const STATE_LABEL: Record<CoordinatorState, string> = {
   awaiting_input: "Waiting for your answer",
   gone: "No coordinator · claim it",
 };
+
+/** A working coordinator idle with a background wait armed. */
+export const WAITING_ON_EVENTS_LABEL = "Working · waiting on events";
 
 /** Labels for waves that have ended (`waveAttention` gives them tier `none`). */
 export const ENDED_LABEL: Partial<Record<string, string>> = {
@@ -60,8 +66,17 @@ export interface CoordinatorsWindowProps {
   fitTo?: (rects: readonly Rect[]) => void;
   clusterOf?: (wave: string) => Rect[];
   onClose: () => void;
-  /** The "show finished" toggle: agents that finished more than `graceMin` ago are hidden. */
-  finished?: { hidden: number; shown: boolean; graceMin: number; onToggle: () => void };
+  /**
+   * The "show finished" toggle: agents that finished more than `graceMin` ago
+   * (`hidden`) and stopped / complete waves with their agents (`waves`) are hidden.
+   */
+  finished?: {
+    hidden: number;
+    waves?: number;
+    shown: boolean;
+    graceMin: number;
+    onToggle: () => void;
+  };
   /** The supervisors for the first row; `[]` says volleyd is absent, omitted shows no row (demo). */
   supervisors?: readonly SupervisorView[];
   /** Clock for the supervisor's age (the App's attention tick). */
@@ -153,7 +168,12 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
                 </div>
                 <div className="coord-sub">
                   {c.id ?? "no owner"} ·{" "}
-                  <span className="coord-state">{ended ?? STATE_LABEL[c.state]}</span>
+                  <span className="coord-state">
+                    {ended ??
+                      (c.state === "working" && c.waitingOnEvents
+                        ? WAITING_ON_EVENTS_LABEL
+                        : STATE_LABEL[c.state])}
+                  </span>
                 </div>
                 <div className="coord-bar">
                   <span style={{ width: `${pctOf(w)}%`, background: accent }} />
@@ -185,6 +205,9 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
               · {p.finished.hidden} finished more than {p.finished.graceMin} min ago{" "}
               {p.finished.hidden === 1 ? "is" : "are"} hidden
             </span>
+          )}
+          {!p.finished.shown && (p.finished.waves ?? 0) > 0 && (
+            <span className="dim"> · {plural(p.finished.waves ?? 0, "ended wave")} hidden</span>
           )}
         </label>
       )}

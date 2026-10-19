@@ -229,6 +229,13 @@ export interface AgentAttention {
   sessionUrl?: string;
   workspace?: string;
   at: number;
+  /**
+   * The hooks saw a live background wait (`background_wait: true`): the agent
+   * ended its turn waiting on events, not on a person.
+   */
+  backgroundWait?: boolean;
+  /** The Notification hook's `notification_type` (`idle_prompt`, `permission_prompt`, …). */
+  notificationType?: string;
 }
 
 export interface AgentView {
@@ -251,6 +258,12 @@ export interface AgentView {
   narration: string | null;
   /** ms of the last `progress/heartbeat`. */
   heartbeat: number | null;
+  /** How many heartbeats arrived: they update liveness only and are kept out of `feed`. */
+  heartbeats?: number;
+  /** When the narration was current (ms). */
+  narrationAt?: number;
+  /** The narration was restored from this browser's session, not heard since the page loaded. */
+  narrationRestored?: boolean;
   /** The last `progress` envelope's type and time (ms), any type: a sign the agent is on this broker. */
   lastProgress?: { type: string; at: number };
   /** ms of the last message on any of the agent's topics. */
@@ -282,6 +295,8 @@ export interface CoordinatorView {
   id: string;
   waves: string[];
   state: CoordinatorState;
+  /** `working` but idle with a background wait armed: waiting on wave events, not on the owner. */
+  waitingOnEvents?: boolean;
   question?: string;
   text?: string;
   sessionUrl?: string;

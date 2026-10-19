@@ -199,6 +199,82 @@ describe("createMqttClient (desk)", () => {
   });
 });
 
+describe("createMqttClient reconnect() — the resume probe", () => {
+  let broker: TestBroker;
+  let client: DeskMqttClient | null = null;
+
+  beforeEach(async () => {
+    broker = await startTestBroker();
+  });
+
+  afterEach(async () => {
+    await client?.disconnect();
+    client = null;
+    await broker.close();
+  });
+
+  // reconnectPeriod > 0 as in production: mqtt.js then tracks every granted filter for
+  // resubscription and silently skips a SUBSCRIBE to one it already holds.
+  it("puts a SUBSCRIBE on the wire while connected and keeps a live socket", async () => {
+    client = createMqttClient({ url: broker.url, clientId: "desk-probe", reconnectPeriod: 2000 });
+    let disconnects = 0;
+    client.onDisconnect(() => {
+      disconnects += 1;
+    });
+    await client.connect();
+    const before = broker.subscriptions("desk-probe").length;
+
+    client.reconnect?.();
+    await waitFor(() => broker.subscriptions("desk-probe").length > before, 2000);
+    await new Promise((r) => setTimeout(r, 400));
+
+    expect(broker.subscriptions("desk-probe").slice(before)).toEqual([
+      "volley/_system/desk-probe/desk-probe",
+    ]);
+    expect(disconnects).toBe(0);
+  });
+
+  it("drops a socket the broker no longer answers on, then connects again", async () => {
+    client = createMqttClient({
+      url: broker.url,
+      clientId: "desk-dead",
+      reconnectPeriod: 50,
+      probeTimeoutMs: 300,
+    });
+    let connects = 0;
+    let disconnects = 0;
+    client.onConnect(() => {
+      connects += 1;
+    });
+    client.onDisconnect(() => {
+      disconnects += 1;
+    });
+    await client.connect();
+    broker.silenceClient("desk-dead");
+
+    client.reconnect?.();
+    await waitFor(() => disconnects >= 1 && connects >= 2, 3000);
+  });
+
+  it("connects again at once when already disconnected", async () => {
+    client = createMqttClient({ url: broker.url, clientId: "desk-down", reconnectPeriod: 60_000 });
+    let connects = 0;
+    let disconnects = 0;
+    client.onConnect(() => {
+      connects += 1;
+    });
+    client.onDisconnect(() => {
+      disconnects += 1;
+    });
+    await client.connect();
+    broker.dropClient("desk-down");
+    await waitFor(() => disconnects >= 1, 2000);
+
+    client.reconnect?.();
+    await waitFor(() => connects >= 2, 2000);
+  });
+});
+
 describe("createMqttClient publish (D4 steering)", () => {
   const creds = { username: "desk", password: "s3cret" };
   let broker: TestBroker;

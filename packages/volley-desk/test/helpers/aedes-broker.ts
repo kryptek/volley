@@ -11,6 +11,10 @@ export interface TestBroker {
   port: number;
   /** Destroy a connected client's socket without a DISCONNECT, as a network drop would. */
   dropClient: (clientId: string) => void;
+  /** Swallow everything the broker writes to a client: it goes silent but keeps the TCP link open. */
+  silenceClient: (clientId: string) => void;
+  /** Every topic filter each client has SUBSCRIBEd to, in order. */
+  subscriptions: (clientId: string) => string[];
   close: () => Promise<void>;
 }
 
@@ -36,6 +40,20 @@ export async function startTestBroker(opts: TestBrokerOptions = {}): Promise<Tes
       done(Object.assign(new Error("bad credentials"), { returnCode: 4 }) as never, false);
     };
   }
+  const subscribed = new Map<string, string[]>();
+  aedes.on("subscribe", (subs, client) => {
+    const list = subscribed.get(client.id) ?? [];
+    list.push(...subs.map((s) => s.topic));
+    subscribed.set(client.id, list);
+  });
+  const conn = (clientId: string) => {
+    const { clients } = aedes as unknown as {
+      clients: Record<string, { conn?: { destroy(): void; write: unknown } }>;
+    };
+    const c = clients[clientId];
+    if (!c?.conn) throw new Error(`no connected client ${clientId}`);
+    return c.conn;
+  };
   const server = createServer(aedes.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -46,14 +64,17 @@ export async function startTestBroker(opts: TestBrokerOptions = {}): Promise<Tes
   return {
     url: `mqtt://127.0.0.1:${port}`,
     port,
-    dropClient: (clientId) => {
-      const { clients } = aedes as unknown as {
-        clients: Record<string, { conn?: { destroy(): void } }>;
+    dropClient: (clientId) => conn(clientId).destroy(),
+    silenceClient: (clientId) => {
+      // A write that reports success and sends nothing: a half-dead link, as a
+      // suspended phone tab leaves it.
+      conn(clientId).write = (_chunk: unknown, ...rest: unknown[]) => {
+        const cb = rest.find((r) => typeof r === "function") as (() => void) | undefined;
+        cb?.();
+        return true;
       };
-      const c = clients[clientId];
-      if (!c?.conn) throw new Error(`no connected client ${clientId}`);
-      c.conn.destroy();
     },
+    subscriptions: (clientId) => [...(subscribed.get(clientId) ?? [])],
     close: () =>
       new Promise<void>((resolve, reject) => {
         aedes.close(() => {

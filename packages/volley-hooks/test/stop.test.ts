@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -63,6 +63,41 @@ describe("stop (agent mode)", () => {
     });
     await tick(150);
     expect((progress.envelopes[0]?.payload as { text: string }).text).toHaveLength(500);
+    await progress.stop();
+  });
+
+  it("records a live background wait from Stop's background_tasks on idle and in activity.json", async () => {
+    const dir = makeWorkdir({ agent_id: AGENT, namespace: NS, broker_url: broker.url });
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await runHook("stop", fixture("stop-background-tasks.json", dir), { cwd: dir });
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "heartbeat"]);
+    expect(progress.envelopes[0]?.payload).toMatchObject({ background_wait: true });
+    const activity = JSON.parse(readFileSync(join(dir, ".volley", "activity.json"), "utf-8"));
+    expect(activity).toMatchObject({ state: "idle", background_wait: true });
+    await progress.stop();
+  });
+
+  it("finished or absent background tasks are no wait", async () => {
+    const dir = makeWorkdir({ agent_id: AGENT, namespace: NS, broker_url: broker.url });
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    const done = [{ id: "bash_1", command: "sleep 1", status: "completed" }];
+    // Only the documented list of task objects counts: no count, map or bare value.
+    for (const background_tasks of [2, { bash_1: { status: "running" } }, ["bash_1"]]) {
+      await runHook("stop", fixture("stop-background-tasks.json", dir, { background_tasks }), {
+        cwd: dir,
+      });
+    }
+    await runHook("stop", fixture("stop-background-tasks.json", dir, { background_tasks: done }), {
+      cwd: dir,
+    });
+    await runHook("stop", fixture("stop-background-tasks.json", dir, { background_tasks: [] }), {
+      cwd: dir,
+    });
+    await tick(150);
+    for (const e of progress.envelopes) expect(e.payload).not.toHaveProperty("background_wait");
+    const activity = JSON.parse(readFileSync(join(dir, ".volley", "activity.json"), "utf-8"));
+    expect(activity).not.toHaveProperty("background_wait");
     await progress.stop();
   });
 
@@ -131,6 +166,20 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     await runHook("post-tool-use", fixture("post-tool-use.json", dir), { cwd: dir, env });
     await tick(150);
     expect(types(progress.envelopes).slice(5)).toEqual(["heartbeat"]);
+    await progress.stop();
+  });
+
+  it("a Stop ending in a question is a real question even with a background wait armed", async () => {
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    const asked = { last_assistant_message: "Both reviewers passed.\n\nShould I merge PR 12?" };
+    await runHook("stop", fixture("stop-background-tasks.json", dir, asked), { cwd: dir, env });
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "awaiting_input", "heartbeat"]);
+    expect(progress.envelopes[1]?.payload).toMatchObject({
+      hook_event: "Stop",
+      question: "Should I merge PR 12?",
+    });
+    expect(progress.envelopes[1]?.payload).not.toHaveProperty("background_wait");
     await progress.stop();
   });
 

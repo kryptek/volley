@@ -4,6 +4,14 @@
  * tasks in wave-file order within a column, each column centred vertically,
  * and cubic edges from a task's right edge to its dependents' left edge. The
  * layout is split out as the pure `layoutDag`.
+ *
+ * Given a `maxWidth` the graph cannot span (a phone: `columns × 172 px` wider
+ * than the window), the columns wrap into bands stacked top to bottom, as many
+ * columns per band as fit; an edge into a later band leaves its task's side,
+ * runs down the gutter between columns to the gap above the dependent's band,
+ * and enters the dependent from the top (or, below the first row, from the
+ * side through its own gutter), so it never crosses another node. Without one
+ * (the desktop) it is one band in a horizontally scrolling container.
  */
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
@@ -29,8 +37,15 @@ const W = 132;
 const H = 44;
 const GX = 40;
 const GY = 14;
+/** Gap between wrapped bands. */
+const GB = 2 * GY;
+export const DAG_NODE_W = W;
+export const DAG_NODE_H = H;
 
-export function layoutDag(tasks: readonly DagNode[]): DagLayout {
+/** The width of `n` columns side by side. */
+const spanOf = (n: number) => (n ? n * W + (n - 1) * GX + 8 : 0);
+
+export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayout {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const depth = new Map<string, number>();
   const visiting = new Set<string>();
@@ -55,23 +70,58 @@ export function layoutDag(tasks: readonly DagNode[]): DagLayout {
     cols[c] = list;
   }
   const ncol = cols.length;
-  const maxRows = Math.max(0, ...cols.map((c) => c?.length ?? 0));
+  // Columns per band: all of them, unless they overflow maxWidth.
+  const fit =
+    maxWidth !== undefined && spanOf(ncol) > maxWidth
+      ? Math.max(1, Math.floor((maxWidth - 8 + GX) / (W + GX)))
+      : Math.max(1, ncol);
+  const bands: DagNode[][][] = [];
+  for (let b = 0; b * fit < ncol; b++) bands.push(cols.slice(b * fit, b * fit + fit));
 
   const at = new Map<string, DagLayout["nodes"][number]>();
-  cols.forEach((list, col) => {
-    const off = ((maxRows - list.length) * (H + GY)) / 2;
-    list.forEach((t, row) => {
-      at.set(t.id, { ...t, col, row, x: 4 + col * (W + GX), y: 4 + off + row * (H + GY) });
+  const band = new Map<string, number>();
+  const bandTop: number[] = [];
+  let top = 4;
+  let maxRows = 0;
+  bands.forEach((bandCols, b) => {
+    bandTop[b] = top;
+    const rows = Math.max(0, ...bandCols.map((c) => c?.length ?? 0));
+    maxRows = Math.max(maxRows, rows);
+    bandCols.forEach((list, i) => {
+      const col = b * fit + i;
+      const off = ((rows - list.length) * (H + GY)) / 2;
+      list.forEach((t, row) => {
+        band.set(t.id, b);
+        at.set(t.id, { ...t, col, row, x: 4 + i * (W + GX), y: top + off + row * (H + GY) });
+      });
     });
+    top += rows * (H + GY) - GY + GB;
   });
   // Keep wave-file order so the DOM follows the file.
   const nodes = tasks.flatMap((t) => at.get(t.id) ?? []);
 
+  /** The x of the free lane beside a node at band column `i`: a gutter, else the right margin. */
+  const gutter = (i: number, x: number) =>
+    i < fit - 1 ? x + W + GX / 2 : i > 0 ? x - GX / 2 : x + W + 2;
   const edges: DagLayout["edges"] = [];
   for (const e of nodes) {
     for (const a of e.after) {
       const s = at.get(a);
       if (!s) continue;
+      const bs = band.get(a) ?? 0;
+      const be = band.get(e.id) ?? 0;
+      if (bs !== be) {
+        // Into a later band, through the gutters and the gap between bands (see the header).
+        const gs = gutter(s.col - bs * fit, s.x);
+        const ge = gutter(e.col - be * fit, e.x);
+        const gap = (bandTop[be] ?? e.y) - GB / 2;
+        const exit = gs > s.x ? s.x + W : s.x;
+        let d = `M${exit},${s.y + H / 2} H${gs} V${gap}`;
+        if (e.row === 0) d += ` H${e.x + W / 2} V${e.y}`;
+        else d += ` H${ge} V${e.y + H / 2} H${ge > e.x ? e.x + W : e.x}`;
+        edges.push({ from: a, to: e.id, d });
+        continue;
+      }
       const x1 = s.x + W;
       const y1 = s.y + H / 2;
       const x2 = e.x;
@@ -88,17 +138,32 @@ export function layoutDag(tasks: readonly DagNode[]): DagLayout {
     cols: ncol,
     nodes,
     edges,
-    width: ncol ? ncol * W + (ncol - 1) * GX + 8 : 0,
-    height: maxRows ? maxRows * H + (maxRows - 1) * GY + 8 : 0,
+    width: spanOf(Math.min(ncol, fit)),
+    height: maxRows ? top - GB + 4 : 0,
   };
 }
 
-export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: string }) {
-  const l = layoutDag(tasks);
+export function Dag({
+  tasks,
+  accent,
+  maxWidth,
+  ended = false,
+  labels = {},
+}: {
+  tasks: readonly DagNode[];
+  accent: string;
+  /** Wrap into bands within this width (a phone); omitted: one band, scrolled. */
+  maxWidth?: number | undefined;
+  /** The wave stopped or completed: stages are shown as they were, struck through. */
+  ended?: boolean;
+  /** Stage text overrides by task id (e.g. `waiting for CI`). */
+  labels?: Readonly<Record<string, string>>;
+}) {
+  const l = layoutDag(tasks, maxWidth);
   return (
     <div className="dag-scroll">
       <svg
-        className="dag"
+        className={`dag${ended ? " dag--ended" : ""}`}
         width={l.width}
         height={l.height}
         viewBox={`0 0 ${l.width} ${l.height}`}
@@ -114,6 +179,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
             transform={`translate(${t.x},${t.y})`}
             className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}`}
             data-col={t.col}
+            data-id={t.id}
           >
             {t.title && <title>{`${t.id} · ${t.title}`}</title>}
             <rect width={W} height={H} rx="9" />
@@ -121,7 +187,7 @@ export function Dag({ tasks, accent }: { tasks: readonly DagNode[]; accent: stri
               {t.id}
             </text>
             <text x="10" y="34" className="dag-stage">
-              {t.cancelled ? "cancelled" : STAGE_LABEL[t.stage]}
+              {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
             </text>
             <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
               #{t.issue}

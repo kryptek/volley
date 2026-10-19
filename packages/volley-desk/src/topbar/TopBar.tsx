@@ -1,6 +1,8 @@
 /**
  * The Desk top bar, ported from the prototype `App.tsx` header: brand, the
- * connection (or demo) tag, wave/agent/lease counts, the supervisor's health
+ * connection (or demo) tag (`syncing…` during the reconnect / resume grace
+ * window), wave/agent/lease counts (agents working: `workingCount`, every
+ * live agent of a task, parallel reviewers included), the supervisor's health
  * pill (`volleyd · working · 4s`, red when it is not running or absent), and
  * the `N need you` pill (click → go to the first). On the right: the
  * coordinators window toggle and the notification and chime switches
@@ -15,11 +17,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
+import { SYNCING_LABEL } from "../attention";
 import { noun } from "../lib/plural";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import { useNotifyToggle } from "../notify/use-notify-toggle";
 import type { Connection } from "../store/context";
-import { supervisorHealth, supervisorList } from "../store/reducer";
+import { supervisorHealth, supervisorList, workingCount } from "../store/reducer";
 import type { DeskState, SupervisorView } from "../store/types";
 import { age } from "../windows/agent/AgentWindow";
 import { Clawd } from "../windows/wave/Clawd";
@@ -40,6 +43,8 @@ export interface TopBarProps {
   compact?: boolean;
   /** The supervisor's clock (the App shares it with the coordinators row); else its own 2 s tick. */
   now?: number;
+  /** The reconnect / resume grace window is open. */
+  syncing?: boolean;
 }
 
 /** `fixed`, else a 2 s clock that runs only while `active`. */
@@ -110,7 +115,7 @@ function Toggle(p: {
 
 export function TopBar(p: TopBarProps) {
   const waves = Object.values(p.state.waves).filter((w) => w.state !== null).length;
-  const working = Object.values(p.state.agents).filter((a) => a.status?.type === "working").length;
+  const working = workingCount(p.state);
   const supervisors = supervisorList(p.state);
   const now = useNow(p.now, supervisors.length > 0);
 
@@ -122,7 +127,13 @@ export function TopBar(p: TopBarProps) {
         <span className="brand-mark">volley</span>
         <span className="brand-sub">desk</span>
       </div>
-      <span className="proto">{p.demo ? "Demo · sample data" : p.connection}</span>
+      <span className="proto">
+        {p.demo
+          ? "Demo · sample data"
+          : p.syncing && p.connection === "connected"
+            ? SYNCING_LABEL
+            : p.connection}
+      </span>
       {!p.compact && (
         <div className="topbar-mid">
           <span>

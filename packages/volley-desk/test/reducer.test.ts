@@ -188,12 +188,9 @@ describe("reducer — agent channels", () => {
     expect(a?.progress).toBe(40);
     // A live heartbeat is timed by local receipt, not the sender's clock (SPEC §3.1).
     expect(a?.heartbeat).toBe(1_000);
-    expect(a?.feed.map((f) => f.envelope.type)).toEqual([
-      "registered",
-      "working",
-      "narration",
-      "heartbeat",
-    ]);
+    // Heartbeats are liveness only: counted, never a feed row.
+    expect(a?.heartbeats).toBe(1);
+    expect(a?.feed.map((f) => f.envelope.type)).toEqual(["registered", "working", "narration"]);
   });
 
   it("keeps the narration when a progress message carries no msg", () => {
