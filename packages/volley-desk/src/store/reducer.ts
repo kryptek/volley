@@ -233,11 +233,11 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
 /**
  * Forget everything that retained topics hold, ahead of the replay that
  * follows a reconnect: waves (with their decisions), config, leases,
- * admission, Claude account records and usage samples, each agent's registry, status and screen, and each supervisor's
- * registry and status. Live-only parts — feed, narration, progress,
- * heartbeat, attention, a supervisor's namespace — are kept. Agents and
- * supervisors that were registered become `unconfirmed` until their registry
- * entry is replayed.
+ * admission, Claude account records and usage samples, each agent's
+ * registry, status and screen, and each supervisor's registry and status.
+ * Live-only parts — feed, narration, progress, heartbeat, attention, a
+ * supervisor's namespace — are kept. Agents and supervisors that were
+ * registered become `unconfirmed` until their registry entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
   const agents: Record<string, AgentView> = {};

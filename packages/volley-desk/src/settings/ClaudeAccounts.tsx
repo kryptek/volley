@@ -7,9 +7,10 @@
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
  * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
  * here…" lists the waves that have one open. **Add Claude account** is a
- * Stepper: pick the machine (`claude_account_add`), then "Open Anthropic
- * sign-in ↗" with the link from the `claude_signin_url` event, waiting until
- * `claude_signin_done`. The Desk shows only the provider's sign-in link, never
+ * Stepper: a label, then "Sign in on this machine" (`claude_account_add`;
+ * volleyd adds profiles on its own machine only, so a remote host gets the
+ * `volley claude add` hint), then "Open Anthropic sign-in ↗" with the link
+ * from the `claude_signin_url` event, waiting until `claude_signin_done`. The Desk shows only the provider's sign-in link, never
  * a credential. Defaults: the account for new waves (`claude.default_account`,
  * through config_set) and the warn-at threshold from config.
  */
@@ -36,6 +37,7 @@ import type {
   UsageWindow,
   WaveView,
 } from "../store/types";
+import { AckLine, type RowState } from "./ConfigRows";
 import type { ConfigTransport } from "./configTransport";
 import { Group, Row, Seg } from "./primitives";
 
@@ -58,6 +60,19 @@ const METER_WARN = 70;
 
 /** volleyd answers `agent_move_account` after the respawn; stopping alone may take a minute. */
 export const MOVE_ACCOUNT_TIMEOUT_MS = 120_000;
+/** How often the "resets in" times re-read the clock. */
+const CLOCK_TICK_MS = 30_000;
+
+/** The clock, ticking while the section is open; a fixed `now` (tests) never ticks. */
+function useNow(fixed: number | undefined): number {
+  const [now, setNow] = useState(() => fixed ?? Date.now());
+  useEffect(() => {
+    if (fixed !== undefined) return;
+    const t = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(t);
+  }, [fixed]);
+  return fixed ?? now;
+}
 
 /**
  * volleyd's profile registry (`claude_accounts`), fetched when the Desk can ask
@@ -206,12 +221,13 @@ type Adding =
 
 /** The add-account Stepper: machine → Anthropic's sign-in page → done. */
 function AddAccount({
-  machines,
+  remotes,
   signins,
   control,
   onClose,
 }: {
-  machines: string[];
+  /** Remote hosts seen in the account list: volleyd adds profiles on its own machine only. */
+  remotes: string[];
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
   onClose: () => void;
@@ -270,23 +286,26 @@ function AddAccount({
             value={s.label}
             onChange={(e) => setS({ phase: "pick", label: e.target.value })}
           />
+          {remotes.length > 0 && (
+            <p className="s-hint">
+              To add one on {remotes.join(", ")}, run <code>volley claude add</code> there: each
+              machine's volleyd adds its own.
+            </p>
+          )}
           {s.phase === "pick" && s.error && (
             <p className="s-error" role="alert">
               {s.error}
             </p>
           )}
           <div className="ny-actions">
-            {machines.map((m, i) => (
-              <button
-                key={m}
-                type="button"
-                className={`btn${i === 0 ? " btn--blue" : ""}`}
-                disabled={!s.label.trim()}
-                onClick={() => void start(m)}
-              >
-                Sign in on {machineName(m)}
-              </button>
-            ))}
+            <button
+              type="button"
+              className="btn btn--blue"
+              disabled={!s.label.trim()}
+              onClick={() => void start(LOCAL_MACHINE)}
+            >
+              Sign in on {machineName(LOCAL_MACHINE)}
+            </button>
             <button type="button" className="btn" onClick={onClose}>
               Cancel
             </button>
@@ -346,12 +365,16 @@ export function ClaudeAccounts({
   config,
   control,
   configTransport,
-  now = Date.now(),
+  now: fixedNow,
   onRegistry,
 }: ClaudeAccountsProps) {
   const [adding, setAdding] = useState(false);
   const [closed, setClosed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** A resolve in flight: the answers stay disabled so a double click sends one. */
+  const [busy, setBusy] = useState(false);
+  const [ack, setAck] = useState<RowState>();
+  const now = useNow(fixedNow);
   const registry = useClaudeRegistry(control, signinsDone(signins) + closed);
   useEffect(() => {
     if (registry.length) onRegistry?.(registry);
@@ -361,16 +384,23 @@ export function ClaudeAccounts({
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
-  const machines = [
-    LOCAL_MACHINE,
-    ...new Set(list.map((a) => a.machine).filter((m) => m !== LOCAL_MACHINE)),
-  ];
+  const remotes = [...new Set(list.map((a) => a.machine).filter((m) => m !== LOCAL_MACHINE))];
 
   const answer = async (d: DecisionPayload, text: string) => {
-    if (!control) return;
+    if (!control || busy) return;
     setError(null);
+    setBusy(true);
     const r = await control("resolve", resolveFields(d, text), `volleyd resolve ${d.decision_id}`);
+    setBusy(false);
     if (!r.ok) setError(r.error ?? "volleyd refused the answer");
+  };
+
+  const setDefault = (k: string) => {
+    if (!configTransport) return;
+    setAck({ state: "sending" });
+    void configTransport
+      .send({ claude: { default_account: k } })
+      .then((a) => setAck({ state: "done", ...a }));
   };
 
   const warnAt = config?.claude?.warn_at_pct ?? WARN_AT_DEFAULT;
@@ -423,6 +453,7 @@ export function ClaudeAccounts({
                   <button
                     type="button"
                     className="btn btn--hot"
+                    disabled={busy}
                     onClick={() => void answer(d, moveAnswer(d.wave, d.suggested as string))}
                   >
                     Move to {labelOf(d.suggested)}
@@ -431,6 +462,7 @@ export function ClaudeAccounts({
                 <button
                   type="button"
                   className="btn"
+                  disabled={busy}
                   onClick={() => void answer(d, notNowAnswer(d))}
                 >
                   Not now
@@ -451,7 +483,11 @@ export function ClaudeAccounts({
             key={a.id}
             a={a}
             movable={decisions.filter((d) => d.acct !== a.id)}
-            onMove={control ? (d) => void answer(d, moveAnswer(d.wave, a.id)) : null}
+            onMove={
+              control && !busy && !a.id.includes("@")
+                ? (d) => void answer(d, moveAnswer(d.wave, a.id))
+                : null
+            }
             now={now}
           />
         ))}
@@ -466,7 +502,7 @@ export function ClaudeAccounts({
       </div>
       {adding && control && (
         <AddAccount
-          machines={machines}
+          remotes={remotes}
           signins={signins}
           control={control}
           onClose={() => {
@@ -478,12 +514,15 @@ export function ClaudeAccounts({
       <Group title="Defaults">
         <Row label="Account for new waves" hint="A wave file's account: overrides it">
           {configTransport ? (
-            <Seg
-              label="Account for new waves"
-              options={defaults}
-              value={current}
-              onPick={(k) => void configTransport.send({ claude: { default_account: k } })}
-            />
+            <>
+              <Seg
+                label="Account for new waves"
+                options={defaults}
+                value={current}
+                onPick={setDefault}
+              />
+              <AckLine s={ack} />
+            </>
           ) : (
             <span className="mono s-hint">{defaults.find(([k]) => k === current)?.[1]}</span>
           )}

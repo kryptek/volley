@@ -553,7 +553,6 @@ function loadMessages(extra: number, now: number): DeskMessage[] {
   ];
 }
 
-/** Every retained/live message the demo starts from, oldest agent history first per agent. */
 /** Two Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
 function claudeUsage(now: number): DeskMessage[] {
   const win = (pct: number, inMin: number) => ({ pct, resets_at: iso(now + inMin * 60_000) });
@@ -616,6 +615,7 @@ function claudeUsage(now: number): DeskMessage[] {
   ];
 }
 
+/** Every retained/live message the demo starts from, oldest agent history first per agent. */
 export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[] {
   return [
     ...globals(now),

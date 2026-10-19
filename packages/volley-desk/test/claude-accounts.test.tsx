@@ -1,6 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ClaudeAccounts, type ClaudeAccountsProps } from "../src/settings/ClaudeAccounts";
+import {
+  ClaudeAccounts,
+  type ClaudeAccountsProps,
+  type ControlFn,
+} from "../src/settings/ClaudeAccounts";
+import { SettingsModal } from "../src/settings/SettingsModal";
+import { accountList } from "../src/store/claude";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type {
   ClaudeAccountPayload,
@@ -281,5 +287,171 @@ describe("ClaudeAccounts", () => {
     expect(screen.queryByRole("button", { name: "Move to Personal" })).toBeNull();
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByText("Most headroom")).toBeInTheDocument();
+  });
+});
+
+describe("ClaudeAccounts review fixes", () => {
+  const remote: ClaudeAccountPayload = {
+    ...personal,
+    account: "team@box",
+    label: "Team",
+    plan: "max",
+  };
+
+  it("Defaults shows a rejected config_set the way Supervisor's rows do", async () => {
+    const send = vi.fn(async () => ({
+      applied: false,
+      rejected: [{ path: "claude.default_account", reason: "unknown account" }],
+    }));
+    setup([], { configTransport: { identity: "desk", send } });
+    const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
+    await act(async () => {
+      fireEvent.click(within(group).getByRole("radio", { name: "Work" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "rejected · claude.default_account: unknown account",
+    );
+  });
+
+  it("Defaults shows an unanswered config_set as no answer, and an applied one", async () => {
+    const send = vi.fn(async () => ({
+      applied: false,
+      rejected: [],
+      error: "volleyd did not answer",
+      unanswered: true as const,
+    }));
+    setup([], { configTransport: { identity: "desk", send } });
+    const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
+    await act(async () => {
+      fireEvent.click(within(group).getByRole("radio", { name: "Work" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("no answer");
+    send.mockResolvedValueOnce({ applied: true, rejected: [], version: 4 } as never);
+    await act(async () => {
+      fireEvent.click(within(group).getByRole("radio", { name: "Personal" }));
+    });
+    expect(screen.getByText("applied · v4")).toBeInTheDocument();
+  });
+
+  it("Add offers only this machine; a remote host gets the command to run there", () => {
+    setup([accountMsg(remote)]);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    expect(screen.getByRole("button", { name: "Sign in on this machine" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Sign in on box/ })).toBeNull();
+    expect(screen.getByText("volley claude add").closest("p")).toHaveTextContent(
+      "To add one on box, run volley claude add there",
+    );
+  });
+
+  it("a remote account's card does not offer to move a wave there", () => {
+    setup([accountMsg(remote)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
+    const card = within(screen.getByRole("article", { name: "Team" }));
+    expect(card.getByRole("combobox", { name: "Move a wave to Team" })).toBeDisabled();
+  });
+
+  it("Move / Not now are disabled while an answer is in flight", async () => {
+    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
+    let release: (v: { ok: boolean }) => void = () => {};
+    control.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          release = r;
+        }),
+    );
+    const banner = within(screen.getByRole("status"));
+    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
+    expect(banner.getByRole("button", { name: "Move to Personal" })).toBeDisabled();
+    expect(banner.getByRole("button", { name: "Not now" })).toBeDisabled();
+    expect(
+      within(screen.getByRole("article", { name: "Personal" })).getByRole("combobox"),
+    ).toBeDisabled();
+    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
+    expect(control.mock.calls.filter((c) => (c as unknown[])[0] === "resolve")).toHaveLength(1);
+    await act(async () => release({ ok: true }));
+    expect(banner.getByRole("button", { name: "Not now" })).toBeEnabled();
+  });
+
+  it("the resets-in time keeps up with the clock while the section is open", () => {
+    vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const state = reduceAll(initialState(), [accountMsg(work)]);
+      render(
+        <ClaudeAccounts
+          accounts={state.claudeAccounts ?? {}}
+          signins={{}}
+          waves={{}}
+          config={config}
+          control={null}
+          configTransport={null}
+        />,
+      );
+      const five = () => screen.getByRole("meter", { name: "5-hour window" }).closest(".meter");
+      expect(five()).toHaveTextContent("resets in 4h 4m");
+      act(() => {
+        vi.advanceTimersByTime(60 * 60_000);
+      });
+      expect(five()).toHaveTextContent("resets in 3h 4m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("SettingsModal › the wave's Claude account", () => {
+  const accounts = accountList({
+    work,
+    personal,
+    "team@box": { ...personal, account: "team@box", label: "Team" },
+  });
+  const modal = (decisions: Record<string, DecisionPayload>, control: ControlFn | null) =>
+    render(
+      <SettingsModal
+        wave={wave(decisions)}
+        onClose={() => {}}
+        onOpenGlobal={() => {}}
+        accounts={accounts}
+        control={control}
+      />,
+    );
+
+  it("names the accounts the wave runs on, with no picker while no decision is open", () => {
+    modal({}, vi.fn());
+    expect(screen.getByText("Work")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
+    expect(screen.getByText(/offers a move when the account nears its limit/)).toBeInTheDocument();
+  });
+
+  it("with an open account_limit decision, picks a local account and resolves the move", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    modal({ [limit.decision_id]: limit }, control);
+    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
+    const options = within(pick)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+    expect(options).toEqual(["Move new agents to…", "Personal · 12%"]);
+    await act(async () => {
+      fireEvent.change(pick, { target: { value: "personal" } });
+    });
+    expect(control).toHaveBeenCalledWith("resolve", {
+      wave: "w1",
+      decision_id: "d-7k2m9q4x",
+      answer: "move wave w1 to personal",
+    });
+  });
+
+  it("shows volleyd's refusal", async () => {
+    const control = vi.fn(async () => ({ ok: false, error: "decision already resolved" }));
+    modal({ [limit.decision_id]: limit }, control);
+    await act(async () => {
+      fireEvent.change(screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" }), {
+        target: { value: "personal" },
+      });
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("decision already resolved");
+  });
+
+  it("read-only: no picker even with a decision open", () => {
+    modal({ [limit.decision_id]: limit }, null);
+    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
   });
 });
