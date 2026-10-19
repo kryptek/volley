@@ -20,6 +20,8 @@ export interface HookIdentity {
   projectDir: string;
   /** seq counter, locks, STEERING.md, activity and caches. */
   stateDir: string;
+  /** The Claude account profile a supervisor launched the agent under (agent.json `claude_account`). */
+  claudeAccount?: string;
 }
 
 /** The session's project directory: `$CLAUDE_PROJECT_DIR`, else the hook input's cwd. */
@@ -55,6 +57,7 @@ export function readAgentIdentity(dir: string, env: Env): HookIdentity | null {
       brokerUrl: config.brokerUrl,
       projectDir: dir,
       stateDir,
+      ...(config.claudeAccount !== undefined ? { claudeAccount: config.claudeAccount } : {}),
     };
   } catch (e) {
     throw new CredentialsError((e as Error).message, stateDir);
@@ -66,10 +69,17 @@ export function coordinatorEnabled(env: Env): boolean {
   return env.VOLLEY_HOOKS_COORDINATOR === "1";
 }
 
+/** Where the hooks keep machine-wide state: `$VOLLEY_HOOKS_STATE_DIR`, else `~/.volley/hooks`. */
+export function hooksStateRoot(env: Env): string {
+  return env.VOLLEY_HOOKS_STATE_DIR ?? join(homedir(), ".volley", "hooks");
+}
+
 /** Per-project state directory for a coordinator session (its cwd is a user repo: keep out). */
 export function coordinatorStateDir(dir: string, env: Env): string {
-  const root = env.VOLLEY_HOOKS_STATE_DIR ?? join(homedir(), ".volley", "hooks");
-  return join(root, createHash("sha256").update(canonical(dir)).digest("hex").slice(0, 16));
+  return join(
+    hooksStateRoot(env),
+    createHash("sha256").update(canonical(dir)).digest("hex").slice(0, 16),
+  );
 }
 
 function canonical(dir: string): string {

@@ -8,7 +8,8 @@ compacted away, or the agent is sitting at a prompt:
 - **mailbox messages are drained, injected into the session and acked** at the next prompt or tool call,
 - steering **survives compaction** (`.volley/STEERING.md`, re-injected on `SessionStart`),
 - **idle / awaiting-input / resumed** are published from native hook events,
-- every hook publishes a **heartbeat** (no heartbeat means the hooks are broken, not that the agent is idle).
+- every hook publishes a **heartbeat** (no heartbeat means the hooks are broken, not that the agent is idle),
+- the **statusLine publisher** reports the session's context fill and its Claude account's 5-hour and weekly usage.
 
 Each hook is a small Bun script that reads the hook's JSON from stdin and exits fast. In agent mode
 a directory without `.volley/agent.json` is a silent no-op that opens no socket. In coordinator
@@ -25,6 +26,7 @@ global settings file cheaply. On a broker that requires authentication the hooks
 - [Identity](#identity)
 - [Broker credentials](#broker-credentials)
 - [What each hook publishes](#what-each-hook-publishes)
+- [Usage statusLine](#usage-statusline)
 - [Mailbox drain](#mailbox-drain)
 - [Coordinator sessions](#coordinator-sessions)
 - [Heavy-operation leases](#heavy-operation-leases)
@@ -58,7 +60,9 @@ packages/volley-hooks/scripts/install.sh --uninstall  # remove only the volley-h
 
 `install.sh` substitutes the absolute package path, prefixes each command with
 `VOLLEY_HOOKS_COORDINATOR=1`, keeps your other hooks, backs the file up first, and is idempotent.
-`CLAUDE_SETTINGS` points it at a different file.
+It also installs the [usage statusLine](#usage-statusline); a `statusLine` you already had is
+saved to `<state root>/statusline-chain.json` and keeps drawing your status line, and
+`--uninstall` puts it back. `CLAUDE_SETTINGS` points it at a different file.
 
 ## Identity
 
@@ -134,6 +138,29 @@ Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not 
 model to reply `acknowledged: …` and publish `progress/steering_acked` with `correlation_id` set to
 the message id once it has acted on it; that envelope is what a dashboard shows as "agent
 acknowledged", and reviewers check the prose.
+
+## Usage statusLine
+
+The template's `statusLine` is `src/statusline/publish.ts`. Claude Code runs it with its
+statusLine JSON after each assistant message (and at session start, on permission-mode changes, …;
+it goes quiet while the session is idle). It publishes a retained `usage` envelope on
+`volley/<ns>/<agent>/usage` (SPEC §4.6.12, `usage.schema.json`):
+
+| Field | From the statusLine JSON |
+|---|---|
+| `account` | `claude_account` in `.volley/agent.json`; else `primary` without `CLAUDE_CONFIG_DIR`; else `null`, with `config_dir` set to it |
+| `model` | `model.id` |
+| `context_window` | `used_percentage`; `used` = `current_usage` input + cache-creation + cache-read tokens (null before the first request); `size` = `context_window_size` |
+| `rate_limits.five_hour`, `.weekly` | `rate_limits.five_hour` / `.seven_day`: `pct` = `used_percentage`, `resets_at` from epoch seconds; absent until Claude Code reports them |
+
+It publishes at most once per 15 s, unless the account, model or a reset time changed or a
+percentage moved by more than a point (`usage.json` in the state directory remembers the last
+publish). What the status line shows is printed first, before any connect: the output of the
+`statusLine` command `install.sh` saved (`<state root>/statusline-chain.json`, run with the same
+input under a 2 s timeout), else a minimal `<model> · ctx 4% · 5h 11% · 7d 43%`. A `--settings`
+statusLine replaces the profile's own, so a spawned agent's status line is the chained command or
+the minimal line too. Like the hooks, it never fails the session: a refused CONNECT is recorded in
+`hooks-error.json` and anything else is swallowed.
 
 ## Mailbox drain
 
@@ -266,7 +293,7 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_HOOKS_MQTT_VERSION` | `5` | `4` for a broker without MQTT 5 (expiry is then the broker's policy). |
 | `VOLLEY_SESSION_URL` | — | Coordinator: the session's URL, published as `session_url`. |
 | `VOLLEY_WORKSPACE` | `cmux identify` | Coordinator: the terminal workspace ref, published as `workspace`. |
-| `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root. |
+| `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root; also where `statusline-chain.json` lives. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
 | `VOLLEY_LEASE_CLI` | this repo's `volley-cli`, else `volley` | Shell fragment the lease hook uses to invoke the CLI. |
@@ -283,7 +310,7 @@ connections only (SPEC §4.4).
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
 `resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model),
-`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect) and, for
+`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests
