@@ -39,7 +39,7 @@ import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
-import type { NewEvent, TaskId, Tunables, Wave, WaveId, WaveTask } from "./types";
+import type { BranchUpdate, NewEvent, TaskId, Tunables, Wave, WaveId, WaveTask } from "./types";
 import {
   type AgentWatch,
   type VerifyResult,
@@ -78,6 +78,11 @@ export interface SpawnRequest {
   start?: { ref: string; detach: boolean };
   /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
   files?: Record<string, string>;
+  /**
+   * A rebase role's step under `branch_update: merge` (fixed when the step started): its brief is
+   * the merge one (`briefs/rebase-merge.md.tmpl`). Absent: rebase.
+   */
+  branch_update?: BranchUpdate;
   /**
    * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
    * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
@@ -119,7 +124,8 @@ export interface SpawnDeps {
   tunables: Pick<
     Tunables,
     "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
-  >;
+  > &
+    Partial<Pick<Tunables, "agent_mcp">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -384,7 +390,8 @@ async function launchAttempt(
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
-  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir), {
+  const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,
     namespace: ctx.namespace,
     wave: req.wave.wave,
@@ -450,6 +457,7 @@ async function launchAttempt(
       agentId,
       worktree: ctx.worktree,
       ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
+      ...(deps.tunables.agent_mcp === "inherit" ? { agentMcp: "inherit" as const } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -496,6 +504,8 @@ async function launchAttempt(
         worktree_reused: wt.reused,
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
+        ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),
+        ...(deps.tunables.agent_mcp === "inherit" ? { agent_mcp: "inherit" } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),

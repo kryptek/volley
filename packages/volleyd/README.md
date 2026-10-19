@@ -692,6 +692,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
+| `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
+| `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -803,7 +805,8 @@ random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
-`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`.
+`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
+(without `--strict-mcp-config` under `agent_mcp: inherit`, below).
 The hooks come in through `--settings`.
 
 **MCP wiring.** The agent's `volley` MCP server is volleyd's, not the user's: volleyd writes
@@ -815,7 +818,21 @@ credentials from `.volley/agent.json` in its cwd, so nothing secret is in either
 an older install) out of the session. `--mcp-config` is variadic, so it is passed in the `=`
 form (exactly one value) and `--` ends option parsing before the prompt, which is last: the
 prompt can never be swallowed as a config path. The fence pins this exact form, the path inside
-the sealed worktree, and (remote hosts) the `mcp.json` content. The cmux command starts with two spaces, which keeps it out of shell history and away
+the sealed worktree, and (remote hosts) the `mcp.json` content.
+
+**`agent_mcp: strict | inherit`** (a tunable, like `branch_update`; default `strict`). `strict` is
+the launch above: the agent has volleyd's `volley` server and nothing else, so every agent is
+reproducible and minimal, whatever the machine's user has installed. `inherit` drops
+`--strict-mcp-config`: the user's own MCP servers (plugin servers such as browser tools,
+claude.ai connectors, user- and project-scope servers) load beside volleyd's, as they do in a
+session started by hand. volleyd's server keeps the name `volley`, which Claude Code lets an
+`--mcp-config` server take over from a user-scope server of the same name, so an everyday
+`volley` entry (the coordinator's, with its own `VOLLEY_AGENT_ID`) never starts in an agent's
+session and the agent registers only as itself. A user server under another name that runs
+volley-mcp would start too (and read the agent's `.volley/agent.json`): keep the everyday entry
+named `volley`. The trade-off: more tools, but an agent whose tool set depends on the machine and
+on servers that may prompt, fail to connect or slow its start. The fence accepts both forms and
+nothing else; `agent_spawned` records `agent_mcp: "inherit"` when it applies. The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
@@ -1115,7 +1132,7 @@ the wave repo at `repo` (its `origin` must have the release branch) and a volley
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
-  servers on the box are not loaded (`--strict-mcp-config`). The
+  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`. The
 daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
 or host-key prompt fails the command). `remote_port` (default 21883) must be free on the box's
 loopback: a box that runs its own MQTT broker usually has 1883 taken, and a forward that cannot
@@ -1412,7 +1429,7 @@ the box, through that host's exec, where its worktrees are.
 | `implement` | `implementer` | `<task>-implementer`, branch from the release branch | artifacts verified |
 | `spec_review` ∥ `quality_review` | two fresh reviewers | each its own `--detach` worktree at the verified head | a parseable `review` result |
 | `fixup` | `fixup` | its own branch from the head; pushes `HEAD:<PR branch>` | artifacts verified |
-| (rebase) | `rebase` | its own branch from the head; lease-guarded push | artifacts verified |
+| (rebase) | `rebase` | its own branch from the head; lease-guarded push (`branch_update: merge`: a merge and a normal push) | artifacts verified (merge: the new head descends from the old) |
 | `merge_ready` | — | — | evidence written; the task is a gate |
 
 **Artifact verification** (`src/artifacts.ts`, read-only verbs only): the role's local HEAD
@@ -1423,7 +1440,8 @@ artifact is journaled (`alarm_raised { alarm: "artifact_missing", missing: push|
 agent is steered once ("push + open PR, then publish done again") and re-waited; still missing →
 an `agent_blocked` decision. Success journals `artifact_verified { role, head_sha, pr, ci_runs }`.
 The steer names what the role publishes: the implementer its branch and PR, the fixup its
-`git push origin HEAD:<PR branch>`, the rebase its lease-guarded push.
+`git push origin HEAD:<PR branch>`, the rebase its lease-guarded push (under `branch_update: merge`,
+its merge and normal push).
 
 **CI** is never re-run. Red on the head → a `ci_failed` decision with the run URLs and failed
 job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
@@ -1471,6 +1489,21 @@ reaped (its LWT, past the reap grace) is handled like a `failed` one: retired, t
 merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI green on it) and, if
 the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
 reviewer runs again (then the fixup, if it finds anything), and the check repeats.
+
+**`branch_update: rebase | merge`** (a tunable: `config.yaml`, `config_set` or a wave file's
+`config:`; default `rebase`) is how that step updates the branch. `rebase` is the above: rebase
+onto `origin/<release branch>`, then `git push --force-with-lease=<PR branch>:<old head>`. `merge`
+is for repositories that allow no force-push of any kind: the step's agent gets the merge brief
+(`briefs/rebase-merge.md.tmpl`) and a `.volley/rebase.md` that runs
+`git merge --no-edit origin/<release branch>` and a normal `git push origin HEAD:<PR branch>`, and
+its verification also requires the new head to descend from the head the step started at
+(`git merge-base --is-ancestor <old> <new>`): a rewritten branch (a rebase force-pushed anyway) is
+`artifact_missing` (`push`), steered once and then put to the owner. The merge commit contains
+the release head, so the gate's check finds the branch current. The mode is read when the step
+starts and journaled on its `stage_entered` (`branch_update: "merge"`), so the agent's brief, its
+`.volley/rebase.md` and the check agree even if the tunable changes meanwhile (an account move
+keeps it too). Steers and decisions call that role's work "merge (branch update)"; the role is
+still `rebase` in the wave state and the journal.
 
 **The merge_ready invariant.** The review stage is load-bearing, so the transition into the gate
 goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's pipeline must
@@ -1598,7 +1631,8 @@ ALLOW (program by bare name only — never a path):
     list-workspaces · ping
   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
-    `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+    `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
+    left out only under `agent_mcp: inherit`) — or from a
     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
     a profile's login state and plan, never a credential)
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named

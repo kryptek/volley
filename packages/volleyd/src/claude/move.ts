@@ -101,12 +101,13 @@ export async function moveAgentAccount(m: MoveRequest, d: MoveDeps): Promise<Mov
 /**
  * What a moved agent's respawn carries over from its `agent_spawned` record: a pipeline role
  * (reviewer, fixup, rebase) keeps its start point and continues in its own per-attempt worktree,
- * where its `.volley/` inputs (review.md, findings.md, …) still are. An implementer's worktree
- * is per role, so it needs neither.
+ * where its `.volley/` inputs (review.md, findings.md, …) still are, and a merge-mode rebase
+ * step keeps its merge brief. An implementer's worktree is per role, so it needs neither.
  */
 export function moveRespawn(spawned: Record<string, unknown> | undefined): {
   start?: { ref: string; detach: boolean };
   worktreeAttempt?: number;
+  branch_update?: "merge";
 } {
   if (typeof spawned?.start !== "string") return {};
   return {
@@ -117,6 +118,7 @@ export function moveRespawn(spawned: Record<string, unknown> | undefined): {
       : typeof spawned.attempt === "number"
         ? { worktreeAttempt: spawned.attempt }
         : {}),
+    ...(spawned.branch_update === "merge" ? { branch_update: "merge" as const } : {}),
   };
 }
 

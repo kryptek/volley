@@ -142,6 +142,22 @@ describe("moveRespawn (what a moved agent's respawn carries over)", () => {
     ).toEqual({ start: { ref: "abc123", detach: false }, worktreeAttempt: 1 });
   });
 
+  it("a merge-mode rebase step keeps its merge brief", () => {
+    expect(
+      moveRespawn({
+        role: "rebase",
+        attempt: 1,
+        start: "abc123",
+        detached: false,
+        branch_update: "merge",
+      }),
+    ).toEqual({
+      start: { ref: "abc123", detach: false },
+      worktreeAttempt: 1,
+      branch_update: "merge",
+    });
+  });
+
   it("an implementer (per-role worktree) needs neither", () => {
     expect(moveRespawn({ role: "implementer", attempt: 1 })).toEqual({});
     expect(moveRespawn(undefined)).toEqual({});

@@ -40,8 +40,15 @@ export interface BriefVars {
   extra: string;
 }
 
-export function loadTemplate(role: Role, dir: string = BRIEFS_DIR): string {
-  return readFileSync(join(dir, `${role}.md.tmpl`), "utf-8");
+/**
+ * `<role>.md.tmpl`, or `<role>-<variant>.md.tmpl` (the rebase role's `merge` brief, under
+ * `branch_update: merge`).
+ */
+export function loadTemplate(role: Role, dir: string = BRIEFS_DIR, variant?: "merge"): string {
+  return readFileSync(
+    join(dir, `${role}${variant !== undefined ? `-${variant}` : ""}.md.tmpl`),
+    "utf-8",
+  );
 }
 
 /**

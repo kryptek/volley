@@ -410,6 +410,8 @@ export interface SpawnerOptions {
 interface SpawnPipelineOptions {
   start?: SpawnStart;
   files?: Record<string, string>;
+  /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
+  branch_update?: "merge";
   /** An account move's resume note, appended to the brief. */
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
@@ -2970,6 +2972,7 @@ export class Daemon {
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
+      branchUpdate: () => this.config.effective(wave).branch_update,
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -3096,7 +3099,7 @@ export class Daemon {
     wave: WaveId,
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string> },
+    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
   ): void {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;

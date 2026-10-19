@@ -8,7 +8,7 @@ import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
-import type { JournalEvent, NewEvent } from "../../src/types";
+import type { BranchUpdate, JournalEvent, NewEvent } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
 
@@ -77,6 +77,8 @@ export interface Spawned {
   worktree: string;
   start?: SpawnStart;
   files: Record<string, string>;
+  /** How the step tells a rebase role to bring the branch up to date (absent: rebase). */
+  branch_update?: BranchUpdate;
 }
 
 export interface HarnessOptions {
@@ -87,6 +89,8 @@ export interface HarnessOptions {
   execFor?: (task: string, exec: ExecFn) => ExecFn;
   /** More tasks after T1 (queued, never admitted or driven), e.g. `{ T2: [T1] }` → `after: [T1]`. */
   dependents?: Record<string, string[]>;
+  /** The `branch_update` tunable the driver reads (default: absent, i.e. `rebase`). */
+  branchUpdate?: BranchUpdate;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -266,13 +270,26 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const retired: { agent_id: string; status: string }[] = [];
   /** Role spawns the daemon holds (budget, admission, a refused launch) while this is true. */
   let holdSpawns = false;
-  const spawnAgent = async (role: Role, start?: SpawnStart, files: Record<string, string> = {}) => {
+  let branchUpdate = o.branchUpdate;
+  const spawnAgent = async (
+    role: Role,
+    start?: SpawnStart,
+    files: Record<string, string> = {},
+    update?: BranchUpdate,
+  ) => {
     const attempt = (attempts[role] ?? 0) + 1;
     attempts[role] = attempt;
     const agent_id = agentIdFor("w1", "T1", role, attempt);
     const worktree = `/wt/w1/T1-${role}-${attempt}`;
     const branch = start?.detach ? "HEAD" : branchName("w1", "T1", role, attempt);
-    spawns.push({ role, agent_id, worktree, ...(start !== undefined ? { start } : {}), files });
+    spawns.push({
+      role,
+      agent_id,
+      worktree,
+      ...(start !== undefined ? { start } : {}),
+      files,
+      ...(update !== undefined ? { branch_update: update } : {}),
+    });
     if (start !== undefined) world.local[worktree] = start.ref;
     await journal({
       type: "agent_spawned",
@@ -305,7 +322,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     home,
     record: () => rec,
     journal,
-    spawn: async (_task, role, req) => (holdSpawns ? null : spawnAgent(role, req.start, req.files)),
+    spawn: async (_task, role, req) =>
+      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
+    ...(o.branchUpdate !== undefined ? { branchUpdate: () => branchUpdate ?? "rebase" } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);
@@ -406,6 +425,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         baseRefName: wave.release_branch,
         headRefOid: head,
       });
+    },
+    /** Change the `branch_update` tunable (a config_set): only a step entered later sees it. */
+    setBranchUpdate(m: BranchUpdate) {
+      branchUpdate = m;
     },
     /**
      * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,

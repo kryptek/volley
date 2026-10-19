@@ -19,6 +19,7 @@ import {
   HOOKS_DIR,
   LAUNCH_COMMAND,
   MCP_ENTRY,
+  VOLLEY_MCP_SERVER,
   hooksSettingsPath,
   mcpConfigPath,
   renderLaunchScript,
@@ -108,6 +109,36 @@ describe("launch.sh", () => {
     // The primary profile: no CLAUDE_CONFIG_DIR line at all.
     expect(script).not.toContain("CLAUDE_CONFIG_DIR");
   }
+
+  it("agent_mcp: inherit drops --strict-mcp-config but keeps volleyd's own `volley` server", () => {
+    const vars = {
+      hooksDir: "/opt/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree: "/wt/w1/T1-implementer",
+      agentMcp: "inherit" as const,
+    };
+    const s = renderLaunchScript(vars);
+    const exec = s.split("\n").find((l) => l.startsWith("exec claude ")) as string;
+    // The user's MCP servers (plugins, connectors) load beside volleyd's...
+    expect(exec).not.toContain("--strict-mcp-config");
+    expect(exec).toContain(" --mcp-config='/wt/w1/T1-implementer/.volley/mcp.json' ");
+    expect(exec.endsWith(' -- "$(cat .volley/brief.md)"')).toBe(true);
+    // ...and that server is named `volley`, the name Claude Code lets an --mcp-config entry take
+    // over from a user-scope one: an everyday `volley` (the coordinator's) never starts.
+    expect(Object.keys(JSON.parse(renderMcpConfig(MCP_ENTRY)).mcpServers)).toEqual([
+      VOLLEY_MCP_SERVER,
+    ]);
+    expect(VOLLEY_MCP_SERVER).toBe("volley");
+    // `strict` (and absent) is the script as before.
+    expect(renderLaunchScript({ ...vars, agentMcp: "strict" })).toBe(script);
+    // The fence seals both; a script whose strict flag was swapped for another is refused.
+    expect(() => sealLaunchScript(vars.worktree, s)).not.toThrow();
+    expect(() => sealLaunchScript(vars.worktree, script)).not.toThrow();
+    expect(() =>
+      sealLaunchScript(vars.worktree, script.replace("--strict-mcp-config", "--debug")),
+    ).toThrow(FenceError);
+  });
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
     expect(JSON.parse(readFileSync(hooksSettingsPath(HOOKS_DIR), "utf-8")).hooks).toBeDefined();
@@ -226,6 +257,35 @@ describe("launch (local cmux host)", () => {
     expect(fake.argvs(["git", "-C", env.repo, "worktree", "add"])).toHaveLength(1);
     const again = readFileSync(join(env.repo, ".git", "info", "exclude"), "utf-8");
     expect(again.split("\n").filter((l) => l === ".volley/")).toHaveLength(1);
+  });
+
+  it("agent_mcp: inherit (tunable) launches without --strict-mcp-config, as the agent's own identity", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit" };
+    const out = await spawnAgent(env.request(), env.deps);
+    expect(out.kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).not.toContain("--strict-mcp-config");
+    expect(script).toContain(`--mcp-config='${join(env.worktree, ".volley", "mcp.json")}'`);
+    // The only volley server is volleyd's, and it registers as the agent, not the coordinator.
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(Object.keys(mcp.mcpServers)).toEqual(["volley"]);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.agent_id).toBe("w1-t1-implementer-1");
+    expect(agent.agent_id).not.toMatch(/^coordinator/);
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      agent_mcp: "inherit",
+    });
+  });
+
+  it("agent_mcp defaults to strict", async () => {
+    env = await makeSpawnEnv();
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).toContain(" --strict-mcp-config ");
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).not.toHaveProperty(
+      "agent_mcp",
+    );
   });
 
   it("launch.sh, run by bash, execs claude with the brief as one positional argument", async () => {
