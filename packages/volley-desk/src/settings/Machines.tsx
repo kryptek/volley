@@ -50,6 +50,8 @@ export interface MachinesProps {
   now?: number;
   /** This machine's host as the Desk reaches it, for the ssh address's placeholder. */
   host?: string;
+  /** Told what the admin check found (Settings' account row shows an admin as one). */
+  onAdmin?: (admin: AdminStatus) => void;
 }
 
 /** The clock, ticking every `ms`; a fixed `now` (tests) never ticks. */
@@ -486,6 +488,10 @@ export function Machines(p: MachinesProps) {
   // A browser that cannot make a reply key at all (not even lib/rsa's): read-only.
   const secure = pairingSupported();
   const admin = useAdmin(secure ? p.ops : null, p.hubUp);
+  const { onAdmin } = p;
+  useEffect(() => {
+    if (admin !== null) onAdmin?.(admin);
+  }, [admin, onAdmin]);
   const [notice, setNotice] = useState<string | null>(null);
   const shown = useMemo(() => {
     const hosts = new Set(p.hosts ?? []);
