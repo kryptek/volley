@@ -466,3 +466,71 @@ export async function verifyOperatorMerge(
     error: `${o.sha} does not contain the gated head ${o.head}'s changes (not an ancestor, no equivalent patches, not its squash)`,
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// A PR head that moved after a gate: CI on the new head, what failed, what changed
+// ---------------------------------------------------------------------------------------------
+
+/** CI on exactly `head` (runs, aggregate state, failed job names), for a head the pipeline did not push. */
+export async function ciReport(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+): Promise<{ state: CiState; runs: CiRun[]; failed_jobs: string[]; infra: boolean }> {
+  return ciOn(exec, cwd, head);
+}
+
+/** The completed runs that failed a head. */
+export const failedRuns = (runs: CiRun[]): CiRun[] =>
+  runs.filter((r) => r.status === "completed" && FAILED.has(r.conclusion ?? ""));
+
+const MAX_FAILING_TESTS = 20;
+
+/**
+ * Failing test ids in a `gh run view --log-failed` log (`<job>\t<step>\t<line>`): vitest's
+ * `FAIL  <file> > <suite> > <name>` and bun's `(fail) <name>` lines, each once, in log order. Pure.
+ */
+export function failingTests(log: string): string[] {
+  const out: string[] = [];
+  for (const raw of log.split("\n")) {
+    const text = (raw.split("\t").at(-1) ?? "").replace(/^\S*\d{2}:\d{2}:\d{2}\S*Z\s/, "").trim();
+    const m = /^FAIL\s+(.+)$/.exec(text) ?? /^\(fail\)\s+(.+?)(\s+\[[\d.]+\s*m?s\])?$/.exec(text);
+    const id = m?.[1]?.trim();
+    if (id !== undefined && id !== "" && !out.includes(id)) out.push(id);
+    if (out.length >= MAX_FAILING_TESTS) break;
+  }
+  return out;
+}
+
+/** What a moved PR head brings: CI on it (and, when red, the failing tests), and the diff. */
+export interface MovedHeadFacts {
+  ci: { state: CiState; runs: CiRun[]; failed_jobs: string[]; failing_tests: string[] };
+  /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
+  log: string;
+  diffstat: string;
+}
+
+/** Gather MovedHeadFacts (read-only git / gh through the fenced exec). */
+export async function probeMovedHead(
+  exec: ExecFn,
+  o: { cwd: string; branch: string; from: string; to: string },
+): Promise<MovedHeadFacts> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  await git("fetch", "origin", o.branch);
+  const ci = await ciOn(exec, o.cwd, o.to);
+  const tests: string[] = [];
+  if (ci.state === "red") {
+    for (const run of failedRuns(ci.runs)) {
+      const r = await exec(["gh", "run", "view", String(run.id), "--log-failed"], { cwd: o.cwd });
+      if (r.code === 0)
+        for (const t of failingTests(r.stdout)) if (!tests.includes(t)) tests.push(t);
+    }
+  }
+  const log = await git("log", "--oneline", `${o.from}..${o.to}`);
+  const stat = await git("diff", "--stat", o.from, o.to);
+  return {
+    ci: { state: ci.state, runs: ci.runs, failed_jobs: ci.failed_jobs, failing_tests: tests },
+    log: log.code === 0 ? log.stdout.trim() : "",
+    diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",
+  };
+}

@@ -1,0 +1,6 @@
+test (volleyd)	Run tests	2026-10-18T12:03:01Z  RUN  v3.2.4 /repo/packages/volleyd
+test (volleyd)	Run tests	2026-10-18T12:03:09Z  FAIL  test/pipeline.test.ts > pipeline: the default sequence > implement then merge_ready
+test (volleyd)	Run tests	2026-10-18T12:03:09Z AssertionError: expected 1 to be 2
+test (volleyd)	Run tests	2026-10-18T12:03:10Z  FAIL  test/clock.test.ts > sleep > resolves on abort
+test (volleyd)	Run tests	2026-10-18T12:03:10Z  FAIL  test/pipeline.test.ts > pipeline: the default sequence > implement then merge_ready
+test (volleyd)	Run tests	2026-10-18T12:03:11Z  Tests  2 failed | 1186 passed (1188)

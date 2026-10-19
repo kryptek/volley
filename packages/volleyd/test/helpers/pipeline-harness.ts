@@ -57,6 +57,10 @@ export interface World {
   patches: Record<string, string>;
   /** `gh pr view` overrides by PR number (e.g. a `headRefOid` GitHub reports after a merge). */
   prView: Record<number, Record<string, unknown>>;
+  /** `gh run view <id> --json jobs` (default: one failed `test` job). */
+  runJobs?: string;
+  /** `gh run view <id> --log-failed`. */
+  runLog: string;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
   /** An argv this answers true for never returns (a hung network call). */
@@ -122,6 +126,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     releaseLog: "",
     patches: {},
     prView: {},
+    runLog: "",
   };
   const calls: string[][] = [];
   /** The exec options of every call, parallel to `calls`. */
@@ -230,6 +235,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       );
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
+      if (a.includes("--log-failed")) return out(world.runLog);
+      if (world.runJobs !== undefined) return out(world.runJobs);
       return out(
         JSON.stringify({
           jobs: [
