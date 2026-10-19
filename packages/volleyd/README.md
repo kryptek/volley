@@ -361,7 +361,10 @@ anything that needs `sudo` (the `etc` and `snap` layouts' broker config, state f
 `sudo volley setup --step security [--lan|--no-lan]`), the `container` layout's restart (its own
 command, from the host), volleyd's own service or password (either would stop the volleyd
 answering: `volley setup --step services` / `--step accounts`), and the macOS keychain copy of the
-coordinator's login (the logged-in session's: `volley setup --step accounts`). On a brew layout the
+coordinator's login (the logged-in session's: `volley setup --step accounts`). volleyd never reads
+the keychain, so once the coordinator's login is on file the accounts step plans no keychain change
+at all: it notes that the keychain can't be checked from the Desk and that `volley setup` checks it
+in a terminal (only a login that is new, or gets a new password, plans the copy there). On a brew layout the
 broker restart is applied last, after the answer is published (`restarting: true`); its result and
 the step's checks land in `setup.log`, and the Desk re-plans once it has reconnected. Setup ops are
 answered beside the daemon's serial queue, so a long step (the Desk build) never holds up waves.

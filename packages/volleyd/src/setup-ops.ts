@@ -117,6 +117,14 @@ const RESTART = "Restart the broker (";
 const KEYCHAIN = "Store the coordinator's broker login in the macOS keychain";
 const VOLLEYD_PASSWORD = "New password for volleyd,";
 const VOLLEYD_SERVICE = "Install volleyd as a ";
+/**
+ * The accounts step's note in place of the keychain change when volleyd could not tell whether
+ * the login is stored (it never reads the keychain): neither pending nor done. The Desk shows it
+ * as a note, not a passed check, by these words.
+ */
+export const KEYCHAIN_UNCHECKED =
+  "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)";
+
 /** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
 export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   WRITE,
@@ -200,6 +208,20 @@ interface Run {
   out: { stdout: string; stderr: string };
   /** The token the accounts step issued, for `sealed`. */
   token?: IssuedToken;
+  /** A planner asked the keychain, which volleyd never reads: whether it holds the login is unknown. */
+  keychainAsked: boolean;
+}
+
+/**
+ * The accounts plan without its keychain change when that change stands only for a read volleyd
+ * refused: the login may well be stored, so it is a note. A keychain change planned without a
+ * read (the coordinator's login is new or gets a new password) stays a terminal's change.
+ */
+function uncheckedKeychain(run: Run, name: StepName, plan: StepPlan): StepPlan {
+  if (name !== "accounts" || !run.keychainAsked) return plan;
+  const changes = plan.changes.filter((c) => !c.summary.startsWith(KEYCHAIN));
+  if (changes.length === plan.changes.length) return plan;
+  return { ...plan, found: [...plan.found, KEYCHAIN_UNCHECKED], changes };
 }
 
 export class SetupOps {
@@ -454,7 +476,7 @@ export class SetupOps {
     for (const [name, planner] of STEPS) {
       let plan: StepPlan;
       try {
-        plan = await planner(run.ctx);
+        plan = uncheckedKeychain(run, name, await planner(run.ctx));
       } catch (e) {
         const title = name === "detect" ? "Broker" : name[0]?.toUpperCase() + name.slice(1);
         plan = {
@@ -585,11 +607,16 @@ export class SetupOps {
       layout: () => layout,
     };
     // The keychain is the logged-in session's: never volleyd's (its change is terminal-only, and
-    // without a read the plan offers it there).
-    const desk: SetupExec = (argv, opts) =>
-      argv[0] === "security"
-        ? Promise.resolve({ code: 1, stdout: "", stderr: "the keychain is read from a terminal" })
-        : fenced(argv, opts);
+    // a plan that could only ask turns it into a note: `uncheckedKeychain`).
+    const desk: SetupExec = (argv, opts) => {
+      if (argv[0] !== "security") return fenced(argv, opts);
+      run.keychainAsked = true;
+      return Promise.resolve({
+        code: 1,
+        stdout: "",
+        stderr: "the keychain is read from a terminal",
+      });
+    };
     const exec = fencedExec(
       desk,
       setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun }),
@@ -620,6 +647,7 @@ export class SetupOps {
     const run: Run = {
       probes,
       out,
+      keychainAsked: false,
       ctx: {
         auth,
         deps,

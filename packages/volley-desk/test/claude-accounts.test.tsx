@@ -143,7 +143,8 @@ describe("ClaudeAccounts", () => {
   it("renders one card per account record with both meters and their resets", () => {
     setup();
     const cards = screen.getAllByRole("article");
-    expect(cards).toHaveLength(2);
+    // Work, Personal and this machine's own login (the primary), which has not reported yet.
+    expect(cards).toHaveLength(3);
     const w = within(screen.getByRole("article", { name: "Work" }));
     expect(w.getByText("max")).toHaveClass("chip");
     const five = w.getByRole("meter", { name: "5-hour window" });
@@ -415,7 +416,7 @@ describe("ClaudeAccounts review fixes", () => {
     vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval"] });
     try {
       const state = reduceAll(initialState(), [accountMsg(work)]);
-      render(
+      const { container } = render(
         <ClaudeAccounts
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
@@ -425,7 +426,10 @@ describe("ClaudeAccounts review fixes", () => {
           configTransport={null}
         />,
       );
-      const five = () => screen.getByRole("meter", { name: "5-hour window" }).closest(".meter");
+      const five = () =>
+        within(within(container).getByRole("article", { name: "Work" }))
+          .getByRole("meter", { name: "5-hour window" })
+          .closest(".meter");
       expect(five()).toHaveTextContent("resets in 4h 4m");
       act(() => {
         vi.advanceTimersByTime(60 * 60_000);
@@ -434,6 +438,115 @@ describe("ClaudeAccounts review fixes", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ClaudeAccounts › this machine's own login (the primary)", () => {
+  const primary: ClaudeAccountPayload = {
+    account: "primary",
+    plan: "max",
+    five_hour: { pct: 34, resets_at: "2026-10-18T16:00:00.000Z" },
+    weekly: { pct: 12, resets_at: null },
+    agents: ["w1-t3-implementer-1"],
+    waves: ["w1"],
+    sampled_at: "2026-10-18T14:06:00.000Z",
+  };
+  const registry = (rows: unknown[]) =>
+    vi.fn(async (op: string) =>
+      op === "claude_accounts" ? { ok: true, result: { accounts: rows } } : { ok: true },
+    ) as unknown as ControlFn;
+
+  it("shows a primary card from the start, before any usage, next to a newly added profile", async () => {
+    render(
+      <ClaudeAccounts
+        accounts={{}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={registry([{ id: "team", label: "Team", machine: "local" }])}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    await screen.findByRole("article", { name: "Team" });
+    const cards = screen.getAllByRole("article");
+    expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "Team",
+    ]);
+    const p = within(cards[0] as HTMLElement);
+    expect(p.getByText(/^primary · /)).toHaveTextContent("primary · Claude Code's default login");
+    expect(p.queryByText((_, el) => el?.classList.contains("chip") === true)).toBeNull();
+    for (const name of ["5-hour window", "This week"]) {
+      const m = p.getByRole("meter", { name });
+      expect(m).toHaveAttribute("aria-valuetext", "no usage reported yet");
+      expect(m.closest(".meter")).toHaveTextContent("no usage reported yet");
+    }
+  });
+
+  it("read-only, with nothing reported, still shows the primary card", () => {
+    render(
+      <ClaudeAccounts
+        accounts={{}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={null}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByRole("article", { name: "This machine's Claude login" })).toBeVisible();
+  });
+
+  it("the primary's usage record fills the same card, first, with its plan", () => {
+    const state = reduceAll(initialState(), [accountMsg(work), accountMsg(primary)]);
+    render(
+      <ClaudeAccounts
+        accounts={state.claudeAccounts ?? {}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={null}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    const cards = screen.getAllByRole("article");
+    expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "Work",
+    ]);
+    const p = within(cards[0] as HTMLElement);
+    expect(p.getByText("max")).toHaveClass("chip");
+    expect(p.getByRole("meter", { name: "5-hour window" })).toHaveAttribute("aria-valuenow", "34");
+    expect(p.getByText("1 agent")).toBeInTheDocument();
+  });
+
+  it("another machine's primary is that machine's card, not this one's", () => {
+    const state = reduceAll(initialState(), [accountMsg({ ...primary, account: "primary@box" })]);
+    render(
+      <ClaudeAccounts
+        accounts={state.claudeAccounts ?? {}}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={null}
+        configTransport={null}
+        now={NOW}
+      />,
+    );
+    expect(screen.getAllByRole("article").map((c) => c.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "primary@box",
+    ]);
+  });
+
+  it("Defaults still names the primary plainly", () => {
+    const send = vi.fn(async () => ({ applied: true, rejected: [] }));
+    setup([], { configTransport: { identity: "desk", send } });
+    const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
+    expect(within(group).getByRole("radio", { name: "Primary" })).toBeInTheDocument();
   });
 });
 

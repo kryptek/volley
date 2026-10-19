@@ -23,6 +23,7 @@ import { Daemon } from "../src/daemon";
 import type { ExecFn } from "../src/exec";
 import { readJournalFile } from "../src/journal";
 import {
+  KEYCHAIN_UNCHECKED,
   SetupOps,
   type SetupOpsOptions,
   TERMINAL_ONLY_PREFIXES,
@@ -491,13 +492,53 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       expect(text).not.toContain(token as string);
       expect(text).not.toContain(coordinator.password);
     }
-    // The plan after it: the step is done but for the terminal's change.
+    // The plan after it: the step is done. volleyd cannot read the keychain, so the copy there
+    // is neither pending nor done: a neutral note, never a change (a terminal's setup checks it).
     const again = step((await plan()).steps, "accounts");
-    expect(again.changes.map((c) => c.terminal !== undefined)).toEqual([true]);
+    expect(again.changes).toEqual([]);
+    expect(again.found).toContain(KEYCHAIN_UNCHECKED);
+    expect(m.fake.argvs(["security"])).toEqual([]);
     expect(existsSync(join(m.volleydHome, "broker.json"))).toBe(true);
     expect(existsSync(join(m.volleydHome, "dynsec-admin.json"))).toBe(true);
     // With the coordinator's login on file, the detect step counts the running agents.
     expect(step((await plan()).steps, "detect").found).toContain("2 agents running on the broker");
+  });
+
+  it("a keychain copy volleyd cannot check is a neutral note, in the Desk's words; Linux has none", async () => {
+    // The Desk shows this line as a note, not a check that passed: it keys on these words.
+    expect(KEYCHAIN_UNCHECKED).toBe(
+      "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)",
+    );
+    const ops = direct();
+    const planAccountsStep = async () => {
+      const r = await ops.handle("admin-1", { op: "setup_plan" });
+      expect(r.reply.ok, r.reply.error).toBe(true);
+      return step((r.reply.result as { steps: WireStep[] }).steps, "accounts");
+    };
+    // A fresh coordinator login is new: its keychain copy is a terminal's change, not unknown.
+    const fresh = await planAccountsStep();
+    expect(
+      fresh.changes.find((c) =>
+        c.summary.startsWith("Store the coordinator's broker login in the macOS keychain"),
+      )?.terminal?.command,
+    ).toBe("volley setup --step accounts");
+    expect(fresh.found).not.toContain(KEYCHAIN_UNCHECKED);
+    const applied = await ops.handle("admin-1", {
+      op: "setup_apply",
+      step: "accounts",
+      plan_id: fresh.plan_id,
+      reply_key: replyKey,
+    });
+    expect(applied.reply.ok, applied.reply.error).toBe(true);
+    const after = await planAccountsStep();
+    expect(after.changes).toEqual([]);
+    expect(after.found).toContain(KEYCHAIN_UNCHECKED);
+    platform = "linux";
+    const linux = await direct().handle("admin-1", { op: "setup_plan" });
+    const onLinux = step((linux.reply.result as { steps: WireStep[] }).steps, "accounts");
+    expect(onLinux.found).not.toContain(KEYCHAIN_UNCHECKED);
+    expect(onLinux.found.join("\n")).toContain("no OS keychain here");
+    expect(m.fake.argvs(["security"])).toEqual([]);
   });
 
   it("setup_apply without a usable reply_key is refused before anything runs", async () => {

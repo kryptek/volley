@@ -1,7 +1,8 @@
 /**
  * Settings › Claude accounts & usage, ported from the prototype
  * `ClaudeAccounts` (SPEC §4.6.11–12). One card per account (the supervisor's
- * retained usage records, plus registry profiles that have not reported yet):
+ * retained usage records, plus registry profiles that have not reported yet,
+ * and this machine's own login, the primary, first and from the start):
  * label, machine, plan chip, the 5-hour and weekly meters with their resets,
  * the agents and waves on it, and "Move a wave here…". An open
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
@@ -119,6 +120,34 @@ export interface ClaudeAccountsProps {
 
 const machineName = (m: string) => (m === LOCAL_MACHINE ? "this machine" : m);
 
+/** volleyd's id for Claude Code's default profile on its own machine. */
+const PRIMARY = "primary";
+/** How the primary's card names it: never just "primary", which reads as one more profile. */
+export const PRIMARY_LABEL = "This machine's Claude login";
+
+/**
+ * The list with this machine's own login first. It is always there (agents run on it by
+ * default), but it has a card only once it reports usage, so until then one is made up for it:
+ * an owner who adds a profile must not read the missing card as their login gone.
+ */
+function withPrimary(list: AccountInfo[]): AccountInfo[] {
+  const own = list.find((a) => a.id === PRIMARY);
+  const primary: AccountInfo =
+    own === undefined
+      ? {
+          id: PRIMARY,
+          label: PRIMARY_LABEL,
+          machine: LOCAL_MACHINE,
+          plan: null,
+          fiveHour: null,
+          weekly: null,
+          agents: [],
+          waves: [],
+        }
+      : { ...own, label: own.label === PRIMARY ? PRIMARY_LABEL : own.label };
+  return [primary, ...list.filter((a) => a !== own)];
+}
+
 function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: number }) {
   const pct = w === null ? null : Math.round(w.pct);
   const tone = pct === null ? "none" : pct >= METER_HOT ? "hot" : pct >= METER_WARN ? "warn" : "ok";
@@ -173,7 +202,9 @@ function AccountCard({
         <div className="min0">
           <b>{a.label}</b>
           <div className="s-hint ell">
-            {a.id} · {machineName(a.machine)}
+            {a.id === PRIMARY
+              ? `${PRIMARY} · Claude Code's default login`
+              : `${a.id} · ${machineName(a.machine)}`}
           </div>
         </div>
         {a.plan && <span className="chip">{a.plan}</span>}
@@ -381,7 +412,7 @@ export function ClaudeAccounts({
     if (registry.length) onRegistry?.(registry);
   }, [registry, onRegistry]);
 
-  const list = accountList(records, registry);
+  const list = withPrimary(accountList(records, registry));
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
@@ -405,12 +436,13 @@ export function ClaudeAccounts({
   };
 
   const warnAt = config?.claude?.warn_at_pct ?? WARN_AT_DEFAULT;
-  const current = config?.claude?.default_account ?? "primary";
+  const current = config?.claude?.default_account ?? PRIMARY;
   const defaults: [string, string][] = [
     ["most_headroom", "Most headroom"],
-    ["primary", labelOf("primary") || "Primary"],
+    // The Seg's options are short; the card names it in full.
+    [PRIMARY, labelOf(PRIMARY) === PRIMARY_LABEL ? "Primary" : labelOf(PRIMARY)],
     ...list
-      .filter((a) => a.machine === LOCAL_MACHINE && a.id !== "primary" && !a.id.includes("@"))
+      .filter((a) => a.machine === LOCAL_MACHINE && a.id !== PRIMARY && !a.id.includes("@"))
       .map((a): [string, string] => [a.id, a.label]),
   ];
   if (!defaults.some(([k]) => k === current)) defaults.push([current, current]);
