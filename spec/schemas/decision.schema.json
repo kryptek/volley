@@ -39,7 +39,8 @@
                 "remote_repo_missing",
                 "ci_failed",
                 "wave_complete",
-                "plan_change"
+                "plan_change",
+                "account_limit"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
@@ -78,6 +79,28 @@
               "type": "string",
               "minLength": 1,
               "description": "repo_untrusted / remote_repo_missing: the repo path the decision is about (on target, when set)."
+            },
+            "acct": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "account_limit: the Claude account whose 5-hour window crossed claude.warn_at_pct (spec section 4.6.12)."
+            },
+            "pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "account_limit: that window's used percentage when the decision opened."
+            },
+            "resets_at": {
+              "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+              "description": "account_limit: when that window resets."
+            },
+            "suggested": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                { "type": "null" }
+              ],
+              "description": "account_limit: the account with the most 5-hour headroom, or null when no other account has usage data."
             },
             "resolved": {
               "type": "object",

@@ -14,6 +14,8 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `capability.schema.json` | `capability` | section 4 |
 | `control.schema.json` | `control` (reserved) | section 4 |
 | `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
+| `usage.schema.json` | `usage` (the agent's harness) | section 4.6.12 |
+| `claude-account.schema.json` | `_system/claude-accounts/<acct>` | section 4.6.12 |
 | `wave-state.schema.json` | `_waves/<wave>/state` | section 4.6.1 |
 | `decision.schema.json` | `_waves/<wave>/decisions/<id>` | section 4.6.2 |
 | `wave-event.schema.json` | `_waves/<wave>/events` | section 4.6.3 |

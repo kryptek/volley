@@ -51,7 +51,8 @@
             "claude_signin_done",
             "claude_signin_failed",
             "claude_profile_synced",
-            "agent_account_moved"
+            "agent_account_moved",
+            "wave_account_moved"
           ]
         },
         "payload": {
