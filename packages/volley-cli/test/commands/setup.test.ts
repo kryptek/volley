@@ -7,6 +7,7 @@ import { cmd } from "../../src/auth/dynsec";
 import { SETUP_HELP, lanAddress, setup } from "../../src/commands/setup";
 import { makeBufferIO } from "../../src/io";
 import { LAN_QUESTION } from "../../src/setup/broker";
+import { readSetupInstall } from "../../src/setup/journal";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
@@ -135,7 +136,8 @@ describe("volley setup", () => {
     expect(readFileSync(m.layout.config, "utf-8")).toContain("listener 9001 127.0.0.1");
     expect(r.stdout).toContain("LAN access: off");
     expect(r.stdout).toContain("– skipped: a phone cannot reach the broker's WebSocket listener");
-    expect(r.stdout).not.toMatch(/#signin=/);
+    // No phone link (the admin token's link to this machine's Desk is printed either way).
+    expect(r.stdout).not.toMatch(/#signin=vly_signin_/);
     expect(r.stdout).not.toContain(COMPLETE);
     expect(r.stdout).toContain("Setup finished, except the step skipped above (Phone)");
     const tokens = JSON.parse(readFileSync(join(m.layout.authDir, "tokens.json"), "utf-8")).tokens;
@@ -174,6 +176,51 @@ describe("volley setup", () => {
     for (const argv of m.execCalls) {
       expect(() => fence(argv, argv[1] === "run" ? { cwd: desk } : undefined)).not.toThrow();
     }
+  });
+
+  it("records the install it used (layout, config, state file, auth dir, Desk) for volleyd's Desk plans", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
+    const saved = JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8"));
+    expect(saved).toEqual({
+      layout: m.layout.name,
+      config: m.layout.config,
+      state_file: m.layout.stateFile,
+      auth_dir: m.layout.authDir,
+      desk_host: "desk.example",
+      desk_port: 5288,
+    });
+    expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
+  });
+
+  it("a later run without the flags (`--step services` as the user) keeps and uses the record", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
+    const file = join(m.ctx.volleydHome, "setup.json");
+    // As if setup had run with --layout container --config … --dir …: what volleyd plans with.
+    const recorded = { ...JSON.parse(readFileSync(file, "utf-8")), layout: "brew-intel" };
+    writeFileSync(file, JSON.stringify(recorded));
+    const r = await run(["--yes", "--step", "services"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("brew-intel layout (from the last volley setup)");
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual(recorded);
+  });
+
+  it("records nothing for a run that stops before it finishes", async () => {
+    m.auth.mosquittoVersion = async () => null;
+    const r = await run(["--yes"]);
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
+  });
+
+  it("prints the admin token as a link to the Desk it serves (its --desk-port)", async () => {
+    const r = await run(["--yes", "--desk-port", "5288"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(
+      /Open the Desk with it on this machine: http:\/\/localhost:5288\/#signin=vly_admin_[0-9a-f]+_[0-9a-f]+/,
+    );
+    // From another device: the address the phone's link uses.
+    expect(r.stdout).toMatch(
+      /From another device: http:\/\/desk\.example:5288\/#signin=vly_admin_/,
+    );
   });
 
   it("a second run reports every step as already done and changes nothing", async () => {

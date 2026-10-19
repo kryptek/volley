@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
 import type { SetupContext, StepName } from "./step";
 
@@ -59,4 +60,76 @@ export function lastSetup(volleydHome: string): string | undefined {
     }
   }
   return newest;
+}
+
+/**
+ * `$VOLLEYD_HOME/setup.json`: the install the terminal's `volley setup` last finished against
+ * (its layout and the config, state file and auth dir it used, flags included, and the Desk it
+ * serves). volleyd plans the Desk's setup with it instead of the layout it would detect, a later
+ * `volley setup` without those flags defaults to it, and `volley auth token` links to its Desk.
+ * Paths only, never a secret.
+ */
+export interface SetupInstall {
+  layout: LayoutName;
+  config: string;
+  state_file: string;
+  auth_dir: string;
+  /** The Desk setup serves: the address a phone reaches it at, and its port. */
+  desk_host?: string;
+  desk_port?: number;
+}
+
+export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
+
+/** Record the install `ctx` runs against. A record, not a gate, like the journal. */
+export function writeSetupInstall(ctx: SetupContext): void {
+  const file = setupInstallFile(ctx.volleydHome);
+  const install: SetupInstall = {
+    layout: ctx.auth.layout.name,
+    config: ctx.config,
+    state_file: ctx.stateFile,
+    auth_dir: ctx.auth.dir,
+    desk_host: ctx.deskHost,
+    desk_port: ctx.deskPort,
+  };
+  try {
+    const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
+    const owner = typeof invoker === "object" ? invoker : null;
+    ensureOwnedDir(ctx.auth.deps, ctx.volleydHome, owner);
+    writeFileSync(file, `${JSON.stringify(install, null, 2)}\n`, { mode: 0o600 });
+    if (owner !== null) ctx.auth.deps.chown(file, owner.uid, owner.gid);
+  } catch {
+    // A record, not a gate.
+  }
+}
+
+/** The recorded install, or null when there is none (or it is not one this Volley knows). */
+export function readSetupInstall(volleydHome: string): SetupInstall | null {
+  const file = setupInstallFile(volleydHome);
+  if (!existsSync(file)) return null;
+  try {
+    const v = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
+    const str = (k: string) => (typeof v[k] === "string" && v[k] !== "" ? (v[k] as string) : null);
+    const [layout, config, stateFile, authDir] = [
+      str("layout"),
+      str("config"),
+      str("state_file"),
+      str("auth_dir"),
+    ];
+    if (layout === null || !Object.hasOwn(LAYOUTS, layout)) return null;
+    if (config === null || stateFile === null || authDir === null) return null;
+    const port = v.desk_port;
+    return {
+      layout: layout as LayoutName,
+      config,
+      state_file: stateFile,
+      auth_dir: authDir,
+      ...(str("desk_host") !== null ? { desk_host: str("desk_host") as string } : {}),
+      ...(typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536
+        ? { desk_port: port }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
 }

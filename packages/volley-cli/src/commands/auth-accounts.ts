@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isValidAgentId } from "volley-mcp/topics";
-import type { AdminLink, AuthContext } from "../auth/context";
+import { type AdminLink, type AuthContext, volleydHome } from "../auth/context";
 import { DynsecError, classify, cmd } from "../auth/dynsec";
 import {
   ACCOUNT_ROLE_MAP,
@@ -12,6 +12,7 @@ import {
   TOKEN_ROLES,
 } from "../auth/roles";
 import { EXIT, type ExitCode } from "../exit-codes";
+import { readSetupInstall } from "../setup/journal";
 import {
   DEFAULT_KIND,
   KINDS,
@@ -21,6 +22,7 @@ import {
   SIGNIN_ROLES,
   tokenUser,
 } from "./auth-roles";
+import { DESK_PORT } from "./desk-serve";
 
 /**
  * The account registry (`$VOLLEY_AUTH_DIR/accounts.json`) and one-time tokens
@@ -60,6 +62,10 @@ export interface AccountFlags {
   label?: string;
   ttl?: string;
   json: boolean;
+  /** token: the Desk the admin token's link opens (default: setup's record, else port 5199). */
+  deskUrl?: string;
+  /** token: the address other devices reach that Desk at (default: setup's record). */
+  deskHost?: string;
 }
 
 /** One-time admin tokens live 10 minutes unless `--ttl` says otherwise. */
@@ -197,6 +203,15 @@ async function createAccount(
   return EXIT.OK;
 }
 
+/** The Desk `volley setup` recorded (its port and LAN address), else this machine's on 5199. */
+function deskOf(ctx: AuthContext): { url: string; host?: string } {
+  const saved = readSetupInstall(volleydHome(ctx.env));
+  return {
+    url: `http://localhost:${saved?.desk_port ?? DESK_PORT}/`,
+    ...(saved?.desk_host !== undefined ? { host: saved.desk_host } : {}),
+  };
+}
+
 /** Issue a one-time token: hash in tokens.json, a login named by its id whose password it is. */
 async function issueToken(
   ctx: AuthContext,
@@ -207,6 +222,7 @@ async function issueToken(
   ttlS: number,
   label: string | undefined,
   json: boolean,
+  desk: { url: string; host?: string } = { url: `http://localhost:${DESK_PORT}/` },
 ): Promise<ExitCode> {
   const taken = new Set(readJson<TokenEntry>(tokensFile(ctx.dir), "tokens").map((t) => t.id));
   for (let tries = 0; ; tries++) {
@@ -244,11 +260,21 @@ async function issueToken(
       ctx.io.stdout(
         [
           kind === "admin"
-            ? "One-time admin token (single use; paste it into the Desk's sign-in):"
+            ? "One-time admin token (single use):"
             : `One-time ${role} sign-in token${label !== undefined ? ` for "${label}"` : ""} (single use):`,
           "",
           `  ${token}`,
           "",
+          // The Desk's sign-in form takes a username and password: a token works as a link.
+          ...(kind === "admin"
+            ? [
+                `Open the Desk with it on this machine: ${desk.url}#signin=${token}`,
+                desk.host !== undefined
+                  ? `From another device: http://${desk.host}:${new URL(desk.url).port || "80"}/#signin=${token}`
+                  : "(from another device, use this machine's address instead of localhost)",
+                "",
+              ]
+            : []),
           `It expires in ${minutes} (${expiresAt}). Only its hash is stored.`,
           "",
         ].join("\n"),
@@ -443,7 +469,11 @@ export async function accountVerb(
       case "list":
         return listAccounts(ctx, flags.json);
       case "token":
-        return issueToken(ctx, link, now, "admin", "admin", ttl as number, undefined, flags.json);
+        return issueToken(ctx, link, now, "admin", "admin", ttl as number, undefined, flags.json, {
+          ...deskOf(ctx),
+          ...(flags.deskUrl !== undefined ? { url: flags.deskUrl } : {}),
+          ...(flags.deskHost !== undefined ? { host: flags.deskHost } : {}),
+        });
       case "signin-link":
         return issueToken(
           ctx,

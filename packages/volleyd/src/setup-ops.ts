@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { type Layout, generateConfig } from "volley-cli/auth/config";
+import { LAYOUTS, type Layout, generateConfig, sameConfig } from "volley-cli/auth/config";
 import { type AuthContext, type AuthDeps, realAuthDeps } from "volley-cli/auth/context";
 import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
@@ -9,7 +9,7 @@ import { realSetupDeps } from "volley-cli/commands/setup";
 import type { IO } from "volley-cli/io";
 import { PHONE_LABEL, newDeskPassword, planAccounts, planPhone } from "volley-cli/setup/accounts";
 import { planDetect, planSecurity } from "volley-cli/setup/broker";
-import { appendSetupLog, lastSetup } from "volley-cli/setup/journal";
+import { appendSetupLog, lastSetup, readSetupInstall } from "volley-cli/setup/journal";
 import { planServices } from "volley-cli/setup/services";
 import {
   type AnonymousProbe,
@@ -516,7 +516,18 @@ export class SetupOps {
     }
     const real = realSetupDeps(env);
     const given = { ...real, ...o.deps };
-    const layout: Layout = (o.deps?.auth?.layout ?? realAuthDeps.layout)();
+    // The install the terminal's `volley setup` used (its --layout / --config / --dir), else
+    // the layout volleyd detects: never plan against another install than setup's.
+    const saved = readSetupInstall(o.volleydHome);
+    const layout: Layout =
+      saved !== null
+        ? {
+            ...LAYOUTS[saved.layout],
+            config: saved.config,
+            stateFile: saved.state_file,
+            authDir: saved.auth_dir,
+          }
+        : (o.deps?.auth?.layout ?? realAuthDeps.layout)();
     const home = env.HOME ?? homedir();
     const brew = layout.name === "brew-arm64" || layout.name === "brew-intel";
     const setup = mintSetupToken({
@@ -599,7 +610,7 @@ export class SetupOps {
       sleep: o.sleep,
     };
     const auth: AuthContext = {
-      dir: o.authDir ?? env.VOLLEY_AUTH_DIR ?? defaultAuthDir(layout),
+      dir: o.authDir ?? saved?.auth_dir ?? env.VOLLEY_AUTH_DIR ?? defaultAuthDir(layout),
       layout,
       url: o.brokerUrl,
       io,
@@ -642,7 +653,11 @@ function lanState(ctx: SetupContext): { planned: boolean; current: boolean | nul
   const open = generateConfig({ ...layout, wsBind: "" });
   if (local === open || ctx.lan === undefined) return undefined;
   const text = existsSync(ctx.config) ? readFileSync(ctx.config, "utf-8") : "";
-  return { planned: ctx.lan, current: text === open ? true : text === local ? false : null };
+  // sameConfig: the header may name `volley setup` or `volley auth init`, either is in place.
+  return {
+    planned: ctx.lan,
+    current: sameConfig(text, open) ? true : sameConfig(text, local) ? false : null,
+  };
 }
 
 /**

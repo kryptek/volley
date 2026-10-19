@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   constants,
   type KeyObject,
@@ -616,6 +616,12 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
       `${host} cannot ssh to ${target}: authorise its key here, or pass --target with an address it can reach. Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`,
     );
   }
+  if (redeemed.code === 127) {
+    // The shell found no such command: nothing ran on the host, so the code was not used.
+    return fail(
+      `pairing refused on ${host}: ${redeemed.stderr.trim() || "command not found"}\n${missingCommandHint(redeemed.stderr, host, remoteVolley)} Nothing was redeemed: the code is still valid.`,
+    );
+  }
   if (redeemed.code !== 0) {
     return fail(`pairing refused on ${host}: ${redeemed.stderr.trim() || `exit ${redeemed.code}`}`);
   }
@@ -1069,6 +1075,48 @@ const realExec: PeerExec = (argv, opts = {}) =>
     child.stdin.end(opts.input ?? "");
   });
 
+/** Where `volley setup` installs volley, written for the host's shell to expand. */
+const SETUP_VOLLEY = "~/.volley/bin/volley";
+
+/**
+ * What to do when the redeem command on the host exited 127, from the shell's own words:
+ * `bun` missing (the `#!/usr/bin/env bun` of a volley that is not setup's script), a bare
+ * command not on the PATH, or a path that does not exist. Never suggests what was just passed.
+ */
+export function missingCommandHint(stderr: string, host: string, remoteVolley: string): string {
+  const passedSetups = remoteVolley.split(/\s+/).includes(SETUP_VOLLEY);
+  const onPath = (cmd: string) =>
+    `\`${cmd}\` is not on ${host}'s PATH for a non-interactive ssh command.`;
+  if (
+    /(^|\s|\/)env: ['"]?bun['"]?: No such file/m.test(stderr) ||
+    /\bbun: command not found/.test(stderr)
+  ) {
+    return `${onPath("bun")} Volley needs it: rerun \`volley setup\` on ${host} (its ${SETUP_VOLLEY} runs bun by its full path) and pass --remote-volley '${SETUP_VOLLEY}', or pass bun's full path there: --remote-volley '<full path of bun there> ${passedSetups ? SETUP_VOLLEY : remoteVolley}' (e.g. ~/.bun/bin/bun or /opt/homebrew/bin/bun).`;
+  }
+  const named = /([^\s:]+): (command not found|No such file or directory)/.exec(stderr)?.[1];
+  const suggest = passedSetups
+    ? `Run \`volley setup\` on ${host} (it installs ${SETUP_VOLLEY}), or pass the full path to volley there with --remote-volley.`
+    : `Pass the full path to volley there, quoted so ${host}'s shell expands ~: --remote-volley '${SETUP_VOLLEY}' (where \`volley setup\` installs it).`;
+  if (named?.includes("/")) return `\`${named}\` does not exist on ${host}. ${suggest}`;
+  return `${onPath(named ?? remoteVolley)} ${suggest}`;
+}
+
+/**
+ * This user's login name. Bun's `os.userInfo().username` is only `$USER` (or "unknown" without
+ * it, as in a container or a service), so `id -un` answers then.
+ */
+export function currentUser(
+  info: () => string = () => os.userInfo().username,
+  idUn: () => string | null = () => {
+    const r = spawnSync("id", ["-un"], { encoding: "utf-8" });
+    return r.status === 0 ? r.stdout : null;
+  },
+): string {
+  const name = info();
+  if (name !== "" && name !== "unknown") return name;
+  return idUn()?.trim() || "unknown";
+}
+
 function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
@@ -1076,7 +1124,7 @@ function realDeps(): PeerDeps {
     home: os.homedir(),
     platform: process.platform,
     hostname: () => os.hostname(),
-    user: () => os.userInfo().username,
+    user: () => currentUser(),
     uid: () => os.userInfo().uid,
     arch: process.arch,
     cpus: () => Math.max(1, os.cpus().length),

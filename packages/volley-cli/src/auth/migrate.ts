@@ -150,6 +150,7 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       );
       return EXIT.ERROR;
     }
+    // A config `volley setup` wrote differs only in its header: writeConfig leaves it.
     const w = writeConfig(
       f.config,
       generateConfig({ ...layout, stateFile: f.stateFile }),

@@ -528,6 +528,9 @@ describe("volley auth", () => {
         expect(r.code).toBe(0);
         expect(r.stdout).toContain(TOKEN);
         expect(r.stdout).toContain("10 minutes");
+        // The sign-in form has no token field: the link is what works.
+        expect(r.stdout).toContain(`http://localhost:5199/#signin=${TOKEN}`);
+        expect(r.stdout).not.toContain("paste it");
         expect(JSON.stringify(tokens())).not.toContain(TOKEN);
         expect(tokens().tokens).toEqual([
           {
@@ -546,6 +549,26 @@ describe("volley auth", () => {
         });
         expect(fake.canPublish("00000001", "volley-auth/redeem/00000001")).toBe(true);
         expect(fake.canPublish("00000001", "volley-auth/redeem/00000002")).toBe(false);
+      });
+
+      it("token links to the Desk `volley setup` recorded (its port and LAN address)", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+          }),
+        );
+        const r = await run(["token"], deps);
+        expect(r.stdout).toContain(`http://localhost:5288/#signin=${TOKEN}`);
+        expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
       });
 
       it("token --json prints the token, its broker login and expiry", async () => {

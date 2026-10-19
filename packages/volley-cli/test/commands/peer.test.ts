@@ -20,6 +20,7 @@ import {
   type PeerDeps,
   type PeerExec,
   SYSTEMD_UNIT,
+  currentUser,
   defaultName,
   machineTopic,
   peerFile,
@@ -446,6 +447,72 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(existsSync(peerFile(home))).toBe(false);
   });
 
+  it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
+    const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("volley: command not found");
+    expect(r.stderr).toContain(
+      "`volley` is not on dev@host's PATH for a non-interactive ssh command",
+    );
+    // Quoted, so the host's shell expands ~ (its home, not this machine's).
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("bun missing on the host's ssh PATH: names bun, never says volley is missing", async () => {
+    for (const stderr of [
+      "env: bun: No such file or directory\n",
+      "/usr/bin/env: 'bun': No such file or directory\n",
+    ]) {
+      const f = fakeExec(hostSsh({ code: 127, stderr }));
+      const r = await run(
+        ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+        deps(f.exec),
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain(
+        "`bun` is not on dev@host's PATH for a non-interactive ssh command",
+      );
+      expect(r.stderr).toContain("rerun `volley setup` on dev@host");
+      expect(r.stderr).toContain("--remote-volley '<full path of bun there> ~/.volley/bin/volley'");
+      expect(r.stderr).not.toContain("does not exist");
+      expect(r.stderr).toContain("the code is still valid");
+    }
+  });
+
+  it("a --remote-volley path that is missing names that path, without suggesting it again", async () => {
+    const g = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /opt/volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "/opt/volley/bin/volley"],
+      deps(g.exec),
+    );
+    expect(r.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    // The suggested path itself missing: setup has not run there.
+    const h = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /home/dev/.volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const again = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+      deps(h.exec),
+    );
+    expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
+    expect(again.stderr).toContain(
+      "Run `volley setup` on dev@host (it installs ~/.volley/bin/volley)",
+    );
+    expect(again.stderr).not.toContain("--remote-volley '~/.volley/bin/volley'");
+  });
+
   it("a refused code writes nothing and installs nothing", async () => {
     const f = fakeExec(
       hostSsh({ code: 1, stderr: "volley peer redeem: invalid or expired pairing code\n" }),
@@ -704,5 +771,35 @@ describe("volley peer run (the service)", () => {
     const io = makeBufferIO();
     expect(await runService(io, deps(fakeExec(() => ({})).exec))).toBe(1);
     expect(io.readStderr()).toContain("volley peer join");
+  });
+});
+
+describe("the current user's name", () => {
+  it("uses os.userInfo(), and `id -un` when bun's userInfo has only $USER's fallback", () => {
+    expect(
+      currentUser(
+        () => "dev",
+        () => "other",
+      ),
+    ).toBe("dev");
+    expect(
+      currentUser(
+        () => "unknown",
+        () => "owner\n",
+      ),
+    ).toBe("owner");
+    expect(
+      currentUser(
+        () => "",
+        () => "owner",
+      ),
+    ).toBe("owner");
+    // Neither knows: the name stays unknown rather than empty.
+    expect(
+      currentUser(
+        () => "unknown",
+        () => null,
+      ),
+    ).toBe("unknown");
   });
 });

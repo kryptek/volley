@@ -129,7 +129,7 @@ describe("setup: broker", () => {
       const p = await planSecurity(m.ctx);
       const out = await applyAll(p);
       expect(readFileSync(m.layout.config, "utf-8")).toBe(
-        generateConfig({ ...m.layout, stateFile: m.layout.stateFile }),
+        generateConfig({ ...m.layout, stateFile: m.layout.stateFile, by: "volley setup" }),
       );
       const backups = readdirSync(dir).filter((f) => f.startsWith("mosquitto.conf.volley-backup-"));
       expect(backups).toEqual(["mosquitto.conf.volley-backup-20261018T120000Z"]);
@@ -144,6 +144,16 @@ describe("setup: broker", () => {
       const again = await planSecurity(m.ctx);
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain("1883: refuses anonymous clients");
+    });
+
+    it("a config `volley auth init` wrote is in place: only its header differs, nothing is rewritten", async () => {
+      await applyAll(await planSecurity(m.ctx));
+      const byInit = generateConfig({ ...m.layout, stateFile: m.layout.stateFile });
+      writeFileSync(m.layout.config, byInit);
+      const again = await planSecurity(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(again.found.join("\n")).toContain("is Volley's Dynamic Security config");
+      expect(readFileSync(m.layout.config, "utf-8")).toBe(byInit);
     });
 
     it("asks about LAN access (yes by default) when no flag decides, and keeps 1883 on loopback", async () => {
@@ -182,7 +192,12 @@ describe("setup: broker", () => {
       const p = await planSecurity(m.ctx);
       await applyAll(p);
       expect(readFileSync(m.layout.config, "utf-8")).toBe(
-        generateConfig({ ...m.layout, stateFile: m.layout.stateFile, wsBind: "" }),
+        generateConfig({
+          ...m.layout,
+          stateFile: m.layout.stateFile,
+          wsBind: "",
+          by: "volley setup",
+        }),
       );
       expect(readFileSync(m.layout.config, "utf-8")).toContain("not encrypted (no TLS)");
       expect(m.lanWs).toBe(true);

@@ -12,7 +12,12 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
-import { appendSetupLog, setupLogFile } from "../setup/journal";
+import {
+  appendSetupLog,
+  readSetupInstall,
+  setupLogFile,
+  writeSetupInstall,
+} from "../setup/journal";
 import { planServices } from "../setup/services";
 import {
   type Planner,
@@ -179,6 +184,12 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
   const str = (k: string) => values[k] as string | undefined;
   const given = injected ?? realSetupDeps(env);
+  const invoker = given.auth.invokingUser(env);
+  const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
+  const home = volleydHome(env, sudoHome);
+  // The install the last finished run used: without --layout (or with the same one) it is the
+  // default, so `volley setup --step services` after a `sudo volley setup --layout …` keeps it.
+  const saved = readSetupInstall(home);
   let layout: Layout = given.auth.layout();
   const layoutFlag = str("layout");
   if (layoutFlag !== undefined) {
@@ -187,6 +198,15 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       return EXIT.USAGE;
     }
     layout = LAYOUTS[layoutFlag as LayoutName];
+  }
+  const fromRecord = saved !== null && (layoutFlag ?? saved.layout) === saved.layout;
+  if (fromRecord && layoutFlag === undefined) {
+    layout = {
+      ...LAYOUTS[saved.layout],
+      config: saved.config,
+      stateFile: saved.state_file,
+      authDir: saved.auth_dir,
+    };
   }
   const only = (values.step as string[] | undefined) ?? [];
   const names = STEPS.map(([n]) => n as string);
@@ -197,7 +217,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     );
     return EXIT.USAGE;
   }
-  const portText = str("desk-port") ?? String(DESK_PORT);
+  const portText =
+    str("desk-port") ?? String((fromRecord ? saved.desk_port : undefined) ?? DESK_PORT);
   if (!/^\d+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65_535) {
     io.stderr("volley setup: --desk-port must be a port number (1..65535)\n");
     return EXIT.USAGE;
@@ -217,10 +238,12 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   // Every command goes through the fence: the exact commands the steps run, nothing else.
   const fence = setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun });
   const deps: SetupDeps = { ...given, exec: fencedExec(given.exec, fence) };
-  const invoker = deps.auth.invokingUser(env);
-  const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const auth: AuthContext = {
-    dir: str("dir") ?? env.VOLLEY_AUTH_DIR ?? defaultAuthDir(layout),
+    dir:
+      str("dir") ??
+      env.VOLLEY_AUTH_DIR ??
+      (fromRecord ? saved.auth_dir : undefined) ??
+      defaultAuthDir(layout),
     layout,
     url,
     io,
@@ -230,11 +253,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   const ctx: SetupContext = {
     auth,
     deps,
-    config: str("config") ?? layout.config,
-    stateFile: str("state-file") ?? layout.stateFile,
+    config: str("config") ?? (fromRecord ? saved.config : layout.config),
+    stateFile: str("state-file") ?? (fromRecord ? saved.state_file : layout.stateFile),
     ...listeners,
     home: sudoHome ?? env.HOME ?? homedir(),
-    volleydHome: volleydHome(env, sudoHome),
+    volleydHome: home,
     repair: values.repair === true,
     yes: values.yes === true,
     ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
@@ -247,7 +270,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
+    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
   const skipped: string[] = [];
@@ -317,6 +340,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     journal(name, "verified");
   }
+  // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
+  writeSetupInstall(ctx);
   io.stdout(
     [
       "",
