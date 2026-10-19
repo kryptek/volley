@@ -89,18 +89,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A random free port in 20000-39999, never one a real Volley broker uses, never one handed out
-# earlier in this run.
+# free_port: sets PORT to a random free port in 20000-39999 (so never 1883, 9001 or 18830,
+# where a real Volley broker listens) not handed out earlier in this run. It sets a variable
+# instead of printing, so the TAKEN bookkeeping survives (no command-substitution subshell).
 TAKEN=" "
 free_port() {
-  local p
   while :; do
-    p=$((20000 + RANDOM % 20000))
-    case "$p" in 1883 | 9001 | 18830) continue ;; esac
-    case "$TAKEN" in *" $p "*) continue ;; esac
-    if ! (echo >"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
-      TAKEN="$TAKEN$p "
-      echo "$p"
+    PORT=$((20000 + RANDOM % 20000))
+    case "$TAKEN" in *" $PORT "*) continue ;; esac
+    if ! (echo >"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+      TAKEN="$TAKEN$PORT "
       return
     fi
   done
@@ -110,15 +108,15 @@ ctrl dynsec init "$WORK/seed.json" admin "$ADMIN_PASS" >/dev/null
 # Re-running init on an existing file is the first thing an idempotent `volley auth init` does.
 INIT_RERUN="$(ctrl dynsec init "$WORK/seed.json" admin "$ADMIN_PASS" 2>&1; echo "exit=$?")"
 
-PORT="$(free_port)"
-WS_PORT="$(free_port)"
-PLS_PORT="$(free_port)"
-PLS_WS_PORT="$(free_port)"
+free_port; PLS_WS_PORT="$PORT"
+free_port; PLS_PORT="$PORT"
+free_port; WS_PORT="$PORT"
+free_port
 
 # The broker under test: the template, per_listener_settings false.
 mkdir -p "$WORK/main" "$WORK/pls"
 cp "$WORK/seed.json" "$WORK/main/dynamic-security.json"
-sed -e "s|@PER_LISTENER_SETTINGS@|false|" -e "s|@PLUGIN@|$PLUGIN|" \
+sed -e "s|@PLUGIN@|$PLUGIN|" \
   -e "s|@DYNSEC_JSON@|$WORK/main/dynamic-security.json|" -e "s|@PORT@|$PORT|" \
   -e "s|@WS_PORT@|$WS_PORT|" -e "s|@NODELAY@|${BENCH_NODELAY:-true}|" -e "s|@BIND@|127.0.0.1|" \
   -e "s|@LOG_FILE@|$WORK/main/mosquitto.log|" \
@@ -126,8 +124,8 @@ sed -e "s|@PER_LISTENER_SETTINGS@|false|" -e "s|@PLUGIN@|$PLUGIN|" \
 echo "pid_file $WORK/main/mosquitto.pid" >>"$WORK/main/mosquitto.conf"
 
 # README row (h): per_listener_settings true. Global options are then per listener and must
-# follow a `listener` line; written before the first one (as in the template) they create an
-# implicit default listener on port 1883. So this config repeats them under each listener,
+# follow a `listener` line; written before the first one (as in the template) they would create
+# an implicit default listener on port 1883. So this config repeats them under each listener,
 # which loads the plugin twice over the same file.
 cp "$WORK/seed.json" "$WORK/pls/dynamic-security.json"
 {
@@ -175,13 +173,17 @@ if [ -n "$IMAGE" ]; then
   export BENCH_STOP="docker stop -t 60 $C >/dev/null"
   export BENCH_KILL="docker kill -s KILL $C >/dev/null && docker wait $C >/dev/null"
   export BENCH_RSS="ps -o rss= -p \$(docker inspect -f '{{.State.Pid}}' $C)"
+  PID_EXPR="\$(docker inspect -f '{{.State.Pid}}' $C)"
 else
   MAIN_PID="$WORK/main/mosquitto.pid"
   export BENCH_START="'$MOSQUITTO' -c '$WORK/main/mosquitto.conf' -d"
   export BENCH_STOP="pid=\$(cat '$MAIN_PID'); kill \$pid; while kill -0 \$pid 2>/dev/null; do sleep 0.02; done"
   export BENCH_KILL="pid=\$(cat '$MAIN_PID'); kill -9 \$pid; while kill -0 \$pid 2>/dev/null; do sleep 0.02; done"
   export BENCH_RSS="ps -o rss= -p \$(cat '$MAIN_PID')"
+  PID_EXPR="\$(cat '$MAIN_PID')"
 fi
+# Cumulative broker CPU (user + system) in seconds: /proc on Linux, ps elsewhere ([[h:]m:]s).
+export BENCH_CPU="pid=$PID_EXPR; if [ -r /proc/\$pid/stat ]; then awk -v t=\$(getconf CLK_TCK) '{print (\$14+\$15)/t}' /proc/\$pid/stat; else ps -o time= -p \$pid; fi"
 
 NODELAY_NOTE=""
 [ "${BENCH_NODELAY:-true}" = "true" ] || NODELAY_NOTE=", set_tcp_nodelay false"

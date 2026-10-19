@@ -6,7 +6,8 @@
  * (`$CONTROL/dynamic-security/v1`) and measures every question the README's go/no-go table
  * answers: (a) `%u`/`%c` role ACLs, (b) create/delete latency, (c) churn isolation,
  * (d) scale, (e) persistence, (f) deleting/disabling a connected client, (g) expiry,
- * (h) listeners, (i) idempotent bootstrap. (j) compares two runs of this script.
+ * (h) listeners, (i) idempotent bootstrap, (k) per-agent roles at scale. (j) compares two runs
+ * of this script.
  *
  * Not run directly: `run-local.sh` / `run-2.1.sh` start a throwaway broker and pass it in:
  *   BENCH_URL, BENCH_WS_URL       tcp + websocket listener of the broker under test
@@ -14,10 +15,12 @@
  *   BENCH_JSON                    host path of the plugin's dynamic-security.json
  *   BENCH_START/_STOP/_KILL       shell commands: start, stop (SIGTERM, wait), SIGKILL
  *   BENCH_RSS                     shell command printing the broker's RSS in KiB
+ *   BENCH_CPU                     optional: shell command printing the broker's CPU seconds
  *   BENCH_PLS_URL/_WS_URL/_STATUS a second broker with per_listener_settings true
  *   BENCH_INIT_RERUN              output of re-running `dynsec init` on an existing file
  *   BENCH_LABEL, BENCH_OUT, BENCH_QUICK=1 (smaller sizes), BENCH_ONLY=a,b (sections)
  */
+import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, watch, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { Duplex } from "node:stream";
@@ -107,6 +110,8 @@ const START_CMD = need("BENCH_START");
 const STOP_CMD = need("BENCH_STOP");
 const KILL_CMD = need("BENCH_KILL");
 const RSS_CMD = need("BENCH_RSS");
+/** Optional: prints the broker's cumulative CPU time, as seconds or [[h:]m:]s. */
+const CPU_CMD = process.env.BENCH_CPU;
 const LABEL = process.env.BENCH_LABEL ?? "mosquitto";
 const OUT_DIR = process.env.BENCH_OUT ?? ".";
 const QUICK = process.env.BENCH_QUICK === "1";
@@ -163,6 +168,13 @@ async function sh(cmd: string): Promise<{ code: number; out: string }> {
     new Response(p.stderr).text(),
   ]);
   return { code: await p.exited, out: (out + err).trim() };
+}
+async function cpuSeconds(): Promise<number | null> {
+  if (!CPU_CMD) return null;
+  const out = (await sh(CPU_CMD)).out.trim();
+  const parts = out.split(":").map(Number);
+  if (parts.some((n) => !Number.isFinite(n))) return null;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
 }
 async function rssKiB(): Promise<number | null> {
   const r = await sh(RSS_CMD);
@@ -466,6 +478,11 @@ function bootstrapCommands(passwords: Record<string, string>): DynsecCommand[] {
   for (const who of ["volleyd", "desk", "coordinator"]) {
     cmds.push({ command: "createClient", username: who, password: passwords[who] ?? pw() });
     cmds.push({ command: "addClientRole", username: who, rolename: `volley-${who}` });
+    // acl.conf's `pattern` lines apply to every user, so the steering identities also get the
+    // own-channel grants (volleyd already writes all of volley/#).
+    if (who !== "volleyd") {
+      cmds.push({ command: "addClientRole", username: who, rolename: "volley-agent" });
+    }
   }
   return cmds;
 }
@@ -496,7 +513,21 @@ async function sectionBootstrap() {
     const k = `${r.command}: ${r.error}`;
     errorsByText[k] = (errorsByText[k] ?? 0) + 1;
   }
-  const untolerated = second.filter((r) => r.error && !/already/i.test(r.error)).length;
+  // Exactly the rerun errors README (i) tolerates; anything else counts against idempotency.
+  const tolerated: Record<string, RegExp> = {
+    createRole: /^Role already exists$/,
+    addRoleACL: /^ACL with this topic already exists$/,
+    createClient: /^Client already exists$/,
+    addClientRole: /^Internal error$/,
+  };
+  const untolerated = second.filter((r) => r.error && !tolerated[r.command]?.test(r.error)).length;
+  // The `addClientRole` text is not specific, so check the roles really are assigned.
+  const [desc] = await ctl.ok([{ command: "getClient", username: "coordinator" }]);
+  const coordinatorRoles = (
+    (desc?.data?.client as { roles?: Array<{ rolename: string }> })?.roles ?? []
+  )
+    .map((r) => r.rolename)
+    .sort();
   // A rerun keeps the FIRST password: the original credential still logs in.
   const oldPasswordStillWorks =
     (await tryConnect({ username: "coordinator", password: passwords.coordinator })) === "ok";
@@ -504,7 +535,11 @@ async function sectionBootstrap() {
   await desk.endAsync().catch(() => {});
 
   let initRerun: string | undefined = process.env.BENCH_INIT_RERUN;
-  if (initRerun) initRerun = initRerun.replace(/\s+/g, " ").trim();
+  if (initRerun)
+    initRerun = initRerun
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/'[^']*'/, "'<file>'");
   const mode = (statSync(JSON_PATH).mode & 0o777).toString(8);
   results.i_bootstrap = {
     commands: first.length,
@@ -513,6 +548,7 @@ async function sectionBootstrap() {
     rerunMs: secondMs,
     rerunErrors: errorsByText,
     rerunUntoleratedErrors: untolerated,
+    coordinatorRolesAfterRerun: coordinatorRoles,
     aclsAfterFirst,
     aclsAfterRerun: await aclCount(),
     connectedFixedIdentitiesKickedByRerun: kicked,
@@ -549,25 +585,31 @@ async function setupRoles() {
   ]);
 }
 
+/** The parent an agent acks to, besides volleyd (SPEC §4.4: acks go to the sender's mailbox). */
+const BENCH_PARENT = "coordinator-bench";
+
 /**
- * The fallback when `%u` is not substituted: one role per agent, its id written into the
- * topics literally. Created and deleted together with the client.
+ * S5's agent identity, and the fallback when `%u` is not substituted: one role
+ * `agent:<id>` per agent with the id written into its topics, minted together with the
+ * client in ONE control message (13 commands, 11 ACLs). Retire with deletePerAgentRole.
  */
 function perAgentRole(username: string, password: string): DynsecCommand[] {
-  const rolename = `agent-${username}`;
+  const rolename = `agent:${username}`;
   const own = ["status", "progress", "result", "capability", "control", "_user/#"];
   return [
     { command: "createRole", rolename },
     ...own.map((ch) => acl(rolename, "publishClientSend", `volley/+/${username}/${ch}`)),
     acl(rolename, "publishClientSend", `volley/_system/registry/${username}`),
+    acl(rolename, "publishClientSend", "volley/_system/leases/+/requests"),
+    acl(rolename, "publishClientSend", `volley/+/${BENCH_PARENT}/mailbox`),
+    acl(rolename, "publishClientSend", "volley/+/volleyd/mailbox"),
     acl(rolename, "subscribePattern", "volley/#"),
-    { command: "createClient", username, password },
-    { command: "addClientRole", username, rolename },
+    { command: "createClient", username, password, roles: [{ rolename }] },
   ];
 }
 const deletePerAgentRole = (username: string): DynsecCommand[] => [
   { command: "deleteClient", username },
-  { command: "deleteRole", rolename: `agent-${username}` },
+  { command: "deleteRole", rolename: `agent:${username}` },
 ];
 
 async function sectionAcl() {
@@ -825,6 +867,7 @@ async function sectionKick() {
     const closed: number[] = [];
     const will: number[] = [];
     let notClosed = 0;
+    let closedBeforeAck = 0;
     let noWill = 0;
     let reconnectWhileDisabled = "n/a";
     let reconnectAfterEnable = "n/a";
@@ -849,9 +892,12 @@ async function sectionKick() {
       const t0 = now();
       await ctl.ok([{ command: action, username: u }]);
       ack.push(now() - t0);
+      const tAck = now();
       const tc = await closeP;
       if (tc === null) notClosed++;
       else closed.push(tc - t0);
+      // Client-side order only: the ack and the close arrive on different sockets.
+      if (tc !== null && tc < tAck) closedBeforeAck++;
       const tw = await willP;
       if (tw === null) noWill++;
       else will.push(tw - t0);
@@ -908,6 +954,7 @@ async function sectionKick() {
       ackMs: summary(ack),
       disconnectMs: summary(closed),
       notDisconnected: notClosed,
+      closedBeforeAckClientSide: closedBeforeAck,
       willMs: summary(will),
       noWill,
       v5Reason,
@@ -974,35 +1021,8 @@ async function sectionLatency() {
     inline.push(now() - t);
     await ctl.ok([{ command: "deleteClient", username: u }]);
   }
-  // The fallback for brokers without `%u`: a role per agent (10 commands to create, 2 to delete).
-  const perAgent = [];
-  for (const conc of [1, 10]) {
-    const ops = QUICK ? 30 : 200;
-    const names = Array.from({ length: ops }, (_, i) => `${RUN}-bp${conc}-${i}`);
-    const create: number[] = [];
-    const del: number[] = [];
-    let t0 = now();
-    await pool(ops, conc, async (i) => {
-      const t = now();
-      await ctl.ok(perAgentRole(names[i] as string, pw()));
-      create.push(now() - t);
-    });
-    const createWall = now() - t0;
-    t0 = now();
-    await pool(ops, conc, async (i) => {
-      const t = now();
-      await ctl.ok(deletePerAgentRole(names[i] as string));
-      del.push(now() - t);
-    });
-    const deleteWall = now() - t0;
-    perAgent.push({
-      concurrency: conc,
-      ops,
-      create: { ...summary(create), opsPerSec: round(ops / (createWall / 1000)) },
-      delete: { ...summary(del), opsPerSec: round(ops / (deleteWall / 1000)) },
-    });
-  }
-  results.b_latency = { rows, inlineRoleCreate: summary(inline), perAgentRole: perAgent };
+  // Per-agent roles (mint + retire pairs) are measured in section (k).
+  results.b_latency = { rows, inlineRoleCreate: summary(inline) };
 }
 
 // --- (c) churn isolation + role edits with agents connected ---------------------------------------------
@@ -1227,7 +1247,8 @@ async function sectionScale(target: number) {
   for (let i = 0; i < (QUICK ? 5 : 20); i++) {
     const u = `${RUN}-ds${target}-${i}`;
     let t = now();
-    await ctl.ok(createAgent(u, pw()));
+    // 2 commands (createClient + addClientRole): 2 file writes on 2.0, 1 on 2.1.
+    await ctl.ok(createAgent(u, pw(), ["agent"]));
     single.push(now() - t);
     t = now();
     await ctl.ok([{ command: "deleteClient", username: u }]);
@@ -1314,7 +1335,7 @@ async function sectionPersistence(earlier: Array<{ name: string; password: strin
   for (let i = 0; i < writes; i++) {
     const u = `${RUN}-ew${i}`;
     const ino = statSync(JSON_PATH).ino;
-    await ctl.ok(createAgent(u, pw()));
+    await ctl.ok(createAgent(u, pw(), ["agent"]));
     const tAck = now();
     if (readFileSync(JSON_PATH, "utf8").includes(`"${u}"`)) {
       visibleAtAck++;
@@ -1350,8 +1371,9 @@ async function sectionPersistence(earlier: Array<{ name: string; password: strin
         const name = `${RUN}-ek${k}-${w}-${n}`;
         const password = pw();
         try {
-          await ctl.ok(createAgent(name, password), 10_000);
-          if (!stop) acked.push({ name, password });
+          await ctl.ok(createAgent(name, password, ["agent"]), 10_000);
+          // Every ack the client received is a real ack, even one read after the kill.
+          acked.push({ name, password });
         } catch {
           return;
         }
@@ -1413,6 +1435,367 @@ async function sectionPersistence(earlier: Array<{ name: string; password: strin
   };
 }
 
+// --- (k) per-agent roles at scale (S5's identity shape) -------------------------------------------
+
+interface FileClient {
+  username: string;
+  roles?: Array<{ rolename: string }>;
+  [k: string]: unknown;
+}
+interface FileRole {
+  rolename: string;
+  acls?: Array<Record<string, unknown>>;
+}
+
+/**
+ * The file entries `commands` would create, for writing a population into the stopped broker's
+ * dynamic-security.json: minting 10,000 agents over the API takes hours on 2.0.x, which rewrites
+ * the whole file after every command. The 2.0 hash format (PBKDF2-SHA512, 101 iterations) loads
+ * on 2.0 and 2.1 alike; each population is checked by logging in as one of its agents.
+ */
+function fileEntries(commands: DynsecCommand[]): { clients: FileClient[]; roles: FileRole[] } {
+  const roles = new Map<string, FileRole>();
+  const clients: FileClient[] = [];
+  for (const c of commands) {
+    if (c.command === "createRole")
+      roles.set(String(c.rolename), { rolename: String(c.rolename), acls: [] });
+    if (c.command === "addRoleACL") {
+      roles
+        .get(String(c.rolename))
+        ?.acls?.push({ acltype: c.acltype, topic: c.topic, allow: true });
+    }
+    if (c.command === "createClient") {
+      const salt = randomBytes(12);
+      const hash = pbkdf2Sync(String(c.password), salt, 101, 64, "sha512");
+      clients.push({
+        username: String(c.username),
+        password: hash.toString("base64"),
+        salt: salt.toString("base64"),
+        iterations: 101,
+        roles: (c.roles as Array<{ rolename: string }>) ?? [],
+      });
+    }
+  }
+  return { clients, roles: [...roles.values()] };
+}
+
+/** A population of `n` agents: per-agent roles, or clients sharing role `agent` (client-only). */
+function population(n: number, tag: string, perAgent: boolean) {
+  const password = pw();
+  const cmds: DynsecCommand[] = [];
+  for (let i = 0; i < n; i++) {
+    const username = `${RUN}-${tag}-${i}`;
+    if (perAgent) cmds.push(...perAgentRole(username, password));
+    else cmds.push({ command: "createClient", username, password, roles: [{ rolename: "agent" }] });
+  }
+  return { ...fileEntries(cmds), sample: { name: `${RUN}-${tag}-${n - 1}`, password } };
+}
+
+/**
+ * Stops the broker, replaces every agent in its file with `pop` (keeping the admin, the fixed
+ * identities and the publishers), starts it again and measures the load.
+ */
+async function loadPopulation(
+  pop: { clients: FileClient[]; roles: FileRole[]; sample?: { name: string; password: string } },
+  keep: (username: string) => boolean,
+) {
+  await ctl.close().catch(() => {});
+  await obs.client.endAsync(true).catch(() => {});
+  const stop = await sh(STOP_CMD);
+  if (stop.code !== 0) throw new Error(`stop failed: ${stop.out}`);
+  const doc = JSON.parse(readFileSync(JSON_PATH, "utf8")) as {
+    clients: FileClient[];
+    roles: FileRole[];
+  };
+  doc.clients = doc.clients.filter((c) => keep(c.username)).concat(pop.clients);
+  const held = new Set(doc.clients.flatMap((c) => (c.roles ?? []).map((r) => r.rolename)));
+  doc.roles = doc.roles
+    .filter((r) => !r.rolename.startsWith("agent:") || held.has(r.rolename))
+    .concat(pop.roles);
+  writeFileSync(JSON_PATH, JSON.stringify(doc), { mode: 0o600 });
+  const t = now();
+  const start = await sh(START_CMD);
+  if (start.code !== 0) throw new Error(`start failed: ${start.out}`);
+  const toAdminLoginMs = await waitForLogin(t);
+  let toAgentLoginMs: number | null = null;
+  if (pop.sample) {
+    const r = await tryConnect({
+      username: pop.sample.name,
+      password: pop.sample.password,
+      protocolVersion: 4,
+    });
+    if (r !== "ok") throw new Error(`injected agent ${pop.sample.name} cannot log in: ${r}`);
+    toAgentLoginMs = round(now() - t);
+  }
+  await reopen();
+  // Make the plugin rewrite the file in its own format before measuring its size.
+  const dummy = `${RUN}-ksave`;
+  await ctl.ok([
+    { command: "createClient", username: dummy, password: pw() },
+    { command: "deleteClient", username: dummy },
+  ]);
+  return {
+    agents: pop.clients.length,
+    rolesInFile: doc.roles.length,
+    toAdminLoginMs,
+    toAgentLoginMs,
+    dynsecJsonBytes: statSync(JSON_PATH).size,
+    brokerRssKiB: await rssKiB(),
+  };
+}
+
+/** Mints and immediately retires `n` agents, one at a time: the population stays constant. */
+async function mintRetire(n: number, tag: string) {
+  const mint: number[] = [];
+  const retire: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const u = `${RUN}-${tag}-${i}`;
+    let t = now();
+    await ctl.ok(perAgentRole(u, pw()));
+    mint.push(now() - t);
+    t = now();
+    await ctl.ok(deletePerAgentRole(u));
+    retire.push(now() - t);
+  }
+  return { mintMs: summary(mint), retireMs: summary(retire) };
+}
+
+/** Mints `n` pairs at concurrency `conc` on the one control connection, then retires them. */
+async function mintBatch(n: number, conc: number, tag: string) {
+  const names = Array.from({ length: n }, (_, i) => `${RUN}-${tag}-${i}`);
+  const mint: number[] = [];
+  const retire: number[] = [];
+  let t0 = now();
+  await pool(n, conc, async (i) => {
+    const t = now();
+    await ctl.ok(perAgentRole(names[i] as string, pw()));
+    mint.push(now() - t);
+  });
+  const mintWall = now() - t0;
+  t0 = now();
+  await pool(n, conc, async (i) => {
+    const t = now();
+    await ctl.ok(deletePerAgentRole(names[i] as string));
+    retire.push(now() - t);
+  });
+  const retireWall = now() - t0;
+  return {
+    pairs: n,
+    concurrency: conc,
+    mint: { ...summary(mint), pairsPerSec: round(n / (mintWall / 1000)) },
+    retire: { ...summary(retire), pairsPerSec: round(n / (retireWall / 1000)) },
+  };
+}
+
+/** One mint + retire pair per second for `seconds`: the pace a supervisor actually mints at. */
+async function pacedMintRetire(seconds: number, tag: string) {
+  const mint: number[] = [];
+  const retire: number[] = [];
+  for (let i = 0; i < seconds; i++) {
+    const t0 = now();
+    const u = `${RUN}-${tag}-${i}`;
+    await ctl.ok(perAgentRole(u, pw()));
+    mint.push(now() - t0);
+    const t1 = now();
+    await ctl.ok(deletePerAgentRole(u));
+    retire.push(now() - t1);
+    await sleep(Math.max(0, 1000 - (now() - t0)));
+  }
+  return { pairs: seconds, mintMs: summary(mint), retireMs: summary(retire) };
+}
+
+/**
+ * The publishers publish 10 msg/s each (QoS 1, `<seq>:<sent at>`) until `minMs` has passed AND
+ * `during` (if any) has finished. Returns end-to-end latency, losses, disconnects and broker CPU.
+ * A message counts as lost only if it has not arrived once the subscriber has been quiet for 2 s
+ * (late ones are in the latency). The subscriber is a real one: when the broker stalls, its queue
+ * (`max_queued_messages`, default 1000) overflows exactly as a Desk's would.
+ */
+async function publishRun<T>(agents: Agent[], minMs: number, during?: () => Promise<T>) {
+  const counter = await Observer.open("volley/bench/+/progress");
+  const latency: number[] = [];
+  const got = new Map<string, Set<number>>();
+  let lastMessageAt = now();
+  counter.client.on("message", (topic, payload) => {
+    lastMessageAt = now();
+    const [seq, sent] = payload.toString().split(":");
+    latency.push(now() - Number(sent));
+    const name = topic.split("/")[2] as string;
+    const set = got.get(name) ?? new Set<number>();
+    got.set(name, set);
+    set.add(Number(seq));
+  });
+  const acked = new Map(agents.map((a) => [a.name, new Set<number>()]));
+  const closesBefore = agents.map((a) => a.closes);
+  const cpu0 = await cpuSeconds();
+  const t0 = now();
+  let done = false;
+  const extra = (during ? during() : Promise.resolve(undefined)).finally(() => {
+    done = true;
+  });
+  const publishers = agents.map(async (a) => {
+    for (let seq = 0; !(done && now() - t0 >= minMs); seq++) {
+      a.client
+        .publishAsync(`volley/bench/${a.name}/progress`, `${seq}:${now()}`, { qos: 1 })
+        .then(() => acked.get(a.name)?.add(seq))
+        .catch(() => {});
+      await sleep(100);
+    }
+  });
+  const duringResult = await extra;
+  await Promise.all(publishers);
+  const seconds = (now() - t0) / 1000;
+  const cpu1 = await cpuSeconds();
+  const drainStart = now();
+  while (now() - lastMessageAt < 2000 && now() - drainStart < 180_000) await sleep(100);
+  await counter.client.endAsync();
+  let sent = 0;
+  let lost = 0;
+  for (const [name, seqs] of acked) {
+    sent += seqs.size;
+    for (const n of seqs) if (!got.get(name)?.has(n)) lost++;
+  }
+  return {
+    seconds: round(seconds),
+    messagesAcked: sent,
+    messagesLost: lost,
+    disconnects: agents.reduce((s, a, i) => s + a.closes - (closesBefore[i] ?? 0), 0),
+    latencyMs: summary(latency),
+    deliveredLaterThan1s: latency.filter((l) => l > 1000).length,
+    brokerCpuPercent:
+      cpu0 !== null && cpu1 !== null ? round(((cpu1 - cpu0) / seconds) * 100, 2) : null,
+    ...(duringResult !== undefined ? { during: duringResult } : {}),
+  };
+}
+
+/**
+ * Every publisher sends `perAgent` QoS 1 messages at once. Timed to the last PUBACK: the
+ * publish ACL check happens before it. A subscriber stays attached (so the receive check runs
+ * too) but delivery is not waited for: its queue limit, not the ACL, would set the pace.
+ */
+async function flood(agents: Agent[], perAgent: number) {
+  const counter = await Observer.open("volley/bench/+/progress");
+  let received = 0;
+  counter.client.on("message", () => {
+    received++;
+  });
+  const total = agents.length * perAgent;
+  const cpu0 = await cpuSeconds();
+  const t0 = now();
+  await Promise.all(
+    agents.map((a) =>
+      Promise.all(
+        Array.from({ length: perAgent }, (_, i) =>
+          a.client.publishAsync(`volley/bench/${a.name}/progress`, `f${i}:${now()}`, { qos: 1 }),
+        ),
+      ),
+    ),
+  );
+  const seconds = (now() - t0) / 1000;
+  const cpu1 = await cpuSeconds();
+  await sleep(500);
+  await counter.client.endAsync();
+  return {
+    messages: total,
+    seconds: round(seconds, 2),
+    pubackedPerSec: round(total / seconds),
+    deliveredToSubscriber: received,
+    brokerCpuSecPer10k:
+      cpu0 !== null && cpu1 !== null ? round(((cpu1 - cpu0) / total) * 10_000, 3) : null,
+  };
+}
+
+async function sectionPerAgent() {
+  const sizes = QUICK ? [100, 500, 2000] : [100, 1000, 10_000];
+  const samples = QUICK ? 10 : 50;
+  const runMs = QUICK ? 5_000 : 20_000;
+  const floodPerAgent = QUICK ? 50 : 200;
+  const fixed = new Set([ADMIN_USER, "volleyd", "desk", "coordinator"]);
+  const keep = (u: string) => fixed.has(u) || u.startsWith(`${RUN}-kp`);
+  const out: Record<string, unknown> = {
+    aclsPerRole: 11,
+    commandsPerMint: 13,
+    commandsPerRetire: 2,
+  };
+
+  // 50 publishers, minted over the API; they survive every population swap.
+  const agents: Agent[] = [];
+  for (let i = 0; i < 50; i++) {
+    const a = { name: `${RUN}-kp${i}`, password: pw(), acked: new Set<number>(), closes: 0 };
+    await ctl.ok(perAgentRole(a.name, a.password));
+    agents.push(a as Agent);
+  }
+  const connectAll = () => Promise.all(agents.map((a) => connectAgent(a)));
+  const disconnectAll = () => Promise.all(agents.map((a) => a.client.endAsync().catch(() => {})));
+
+  // Baseline: no agents besides the 50 publishers.
+  const base = await loadPopulation({ clients: [], roles: [] }, keep);
+  await connectAll();
+  out.baseline = {
+    ...base,
+    publish: await publishRun(agents, runMs),
+    flood: await flood(agents, floodPerAgent),
+  };
+  await disconnectAll();
+  log("(k) baseline done");
+
+  for (const n of sizes) {
+    const row: Record<string, unknown> = {};
+    if (n >= 1000) {
+      row.clientOnly = await loadPopulation(population(n, `kc${n}`, false), keep);
+      log(`(k) ${n}: client-only loaded`);
+    }
+    row.perAgent = await loadPopulation(population(n, `ka${n}`, true), keep);
+    log(`(k) ${n}: per-agent loaded, ${JSON.stringify(row.perAgent)}`);
+    row.mintRetire = await mintRetire(samples, `km${n}`);
+    log(`(k) ${n}: mint/retire ${JSON.stringify(row.mintRetire)}`);
+    if (n === sizes[0]) {
+      row.concurrency = [];
+      for (const conc of [1, 10, 50]) {
+        (row.concurrency as unknown[]).push(await mintBatch(QUICK ? 30 : 200, conc, `kb${conc}`));
+      }
+    }
+    if (n >= 1000) {
+      await connectAll();
+      row.publish = await publishRun(agents, runMs);
+      row.flood = await flood(agents, floodPerAgent);
+      // 1,000 other agents minted and retired while the publishers keep publishing; fewer
+      // (about two minutes' worth) where 1,000 would take longer than that.
+      const mr = row.mintRetire as { mintMs: Summary; retireMs: Summary };
+      const pairMs = mr.mintMs.mean + mr.retireMs.mean;
+      const full = QUICK ? 100 : 1000;
+      const churn = pairMs * full > 120_000 ? Math.max(20, Math.floor(120_000 / pairMs)) : full;
+      row.pacedChurnWhilePublishing = await publishRun(agents, runMs, () =>
+        pacedMintRetire(runMs / 1000, `ky${n}`),
+      );
+      log(`(k) ${n}: paced churn: ${JSON.stringify(row.pacedChurnWhilePublishing)}`);
+      row.churnWhilePublishing = await publishRun(agents, runMs, () =>
+        mintBatch(churn, 10, `kx${n}`),
+      );
+      log(`(k) ${n}: churn ${churn} pairs: ${JSON.stringify(row.churnWhilePublishing)}`);
+      await disconnectAll();
+    }
+    if (n === sizes[sizes.length - 1]) {
+      const r = await restart();
+      const t = now();
+      const p0 = agents[0] as Agent;
+      const login = await tryConnect({
+        username: p0.name,
+        password: p0.password,
+        protocolVersion: 4,
+      });
+      row.gracefulRestart = {
+        ...r,
+        publisherLogin: login,
+        publisherLoginMs: round(now() - t),
+        rssAfterRestartKiB: await rssKiB(),
+      };
+    }
+    out[`agents_${n}`] = row;
+  }
+  results.k_perAgent = out;
+}
+
 // --- main ----------------------------------------------------------------------------------------
 
 async function section(key: string, fn: () => Promise<unknown>) {
@@ -1457,7 +1840,7 @@ function table(): string {
     const d = l.delete as Record<string, number>;
     row(
       `(b) ${l.mode} c=${l.concurrency}`,
-      `create p50 ${c.p50} p95 ${c.p95} p99 ${c.p99} ms, ${c.opsPerSec}/s; delete p50 ${d.p50} p99 ${d.p99} ms, ${d.opsPerSec}/s`,
+      `create p50 ${c.p50} p95 ${c.p95} p99 ${c.p99} ms, ${c.opsPerSec}/s; delete p50 ${d.p50} p95 ${d.p95} p99 ${d.p99} ms, ${d.opsPerSec}/s`,
     );
   }
   row(
@@ -1494,6 +1877,41 @@ function table(): string {
     "(i) rerun untolerated errors / kicks",
     `${get("i_bootstrap.rerunUntoleratedErrors") ?? "n/a"} / ${get("i_bootstrap.connectedFixedIdentitiesKickedByRerun") ?? "n/a"}`,
   );
+  const k = get("k_perAgent") as Record<string, Record<string, unknown>> | undefined;
+  for (const [key, v] of Object.entries(k ?? {})) {
+    if (!key.startsWith("agents_")) continue;
+    const n = key.slice("agents_".length);
+    row(
+      `(k) ${n} agents: mint / retire`,
+      `${s(`k_perAgent.${key}.mintRetire.mintMs`)} / ${s(`k_perAgent.${key}.mintRetire.retireMs`)}`,
+    );
+    const pa = v.perAgent as Record<string, unknown> | undefined;
+    const co = v.clientOnly as Record<string, unknown> | undefined;
+    row(
+      `(k) ${n} agents: json / RSS / load`,
+      `${pa?.dynsecJsonBytes} B / ${pa?.brokerRssKiB} KiB / ${pa?.toAgentLoginMs} ms${co ? ` (client-only: ${co.dynsecJsonBytes} B / ${co.brokerRssKiB} KiB / ${co.toAgentLoginMs} ms)` : ""}`,
+    );
+    if (v.publish) {
+      row(
+        `(k) ${n} agents: publish p50/p99, CPU`,
+        `${get(`k_perAgent.${key}.publish.latencyMs.p50`)} / ${get(`k_perAgent.${key}.publish.latencyMs.p99`)} ms, ${get(`k_perAgent.${key}.publish.brokerCpuPercent`)}%; flood ${get(`k_perAgent.${key}.flood.pubackedPerSec`)}/s, ${get(`k_perAgent.${key}.flood.brokerCpuSecPer10k`)} CPU-s/10k`,
+      );
+      row(
+        `(k) ${n} agents: 1 pair/s paced`,
+        `disconnects ${get(`k_perAgent.${key}.pacedChurnWhilePublishing.disconnects`)}, lost ${get(`k_perAgent.${key}.pacedChurnWhilePublishing.messagesLost`)}, publish p50 ${get(`k_perAgent.${key}.pacedChurnWhilePublishing.latencyMs.p50`)} p99 ${get(`k_perAgent.${key}.pacedChurnWhilePublishing.latencyMs.p99`)} max ${get(`k_perAgent.${key}.pacedChurnWhilePublishing.latencyMs.max`)} ms`,
+      );
+      row(
+        `(k) ${n} agents: churn ${get(`k_perAgent.${key}.churnWhilePublishing.during.pairs`)} pairs`,
+        `disconnects ${get(`k_perAgent.${key}.churnWhilePublishing.disconnects`)}, lost ${get(`k_perAgent.${key}.churnWhilePublishing.messagesLost`)} of ${get(`k_perAgent.${key}.churnWhilePublishing.messagesAcked`)}, publish p99 ${get(`k_perAgent.${key}.churnWhilePublishing.latencyMs.p99`)} ms, mint ${get(`k_perAgent.${key}.churnWhilePublishing.during.mint.pairsPerSec`)} pairs/s`,
+      );
+    }
+  }
+  if (k?.baseline) {
+    row(
+      "(k) baseline (50 roles): publish p50/p99, CPU",
+      `${get("k_perAgent.baseline.publish.latencyMs.p50")} / ${get("k_perAgent.baseline.publish.latencyMs.p99")} ms, ${get("k_perAgent.baseline.publish.brokerCpuPercent")}%; flood ${get("k_perAgent.baseline.flood.pubackedPerSec")}/s, ${get("k_perAgent.baseline.flood.brokerCpuSecPer10k")} CPU-s/10k`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -1523,12 +1941,19 @@ await section("d", async () => {
 });
 await section("e", () => sectionPersistence(earlier));
 if (!QUICK) await section("d", () => sectionScale(10_000));
+await section("k", sectionPerAgent);
 
 await ctl.close().catch(() => {});
 await obs.client.endAsync(true).catch(() => {});
 const slug = LABEL.toLowerCase().replace(/[^a-z0-9.]+/g, "-");
 const outFile = join(OUT_DIR, `dynsec-${slug}.json`);
-if (existsSync(OUT_DIR)) writeFileSync(outFile, `${JSON.stringify(results, null, 2)}\n`);
+// Results are meant to be committed: no machine-local paths (work directory, checkout).
+const scrubbed = JSON.stringify(results, null, 2)
+  .split(dirname(dirname(JSON_PATH)))
+  .join("<work>")
+  .split(join(import.meta.dir, "../.."))
+  .join("<repo>");
+if (existsSync(OUT_DIR)) writeFileSync(outFile, `${scrubbed}\n`);
 console.log(table());
 console.log(`\nfull results: ${outFile}`);
 process.exit(0);
