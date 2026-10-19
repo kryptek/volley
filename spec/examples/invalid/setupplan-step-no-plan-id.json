@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "step": "detect",
+      "title": "Broker",
+      "found": [],
+      "changes": []
+    }
+  ]
+}

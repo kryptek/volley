@@ -78,6 +78,43 @@ function errorsFor(ref: string, value: unknown): PathError[] {
 const TUNABLES = "config.schema.json#/$defs/tunables";
 
 /**
+ * The tunables' schema errors, with a lease pool's `per_machine` above its `capacity` said
+ * plainly at the field's path: the schema can only express that bound as `if`/`then` pairs,
+ * whose errors (`must match "then" schema`) name neither the field nor the bound.
+ */
+function tunablesErrors(value: unknown): PathError[] {
+  const pools = isPlain(value) && isPlain(value.lease_pools) ? value.lease_pools : {};
+  const over = Object.entries(pools).flatMap(([name, p]) =>
+    isPlain(p) &&
+    typeof p.capacity === "number" &&
+    typeof p.per_machine === "number" &&
+    p.per_machine > p.capacity
+      ? [{ name, capacity: p.capacity }]
+      : [],
+  );
+  if (over.length === 0) return errorsFor(TUNABLES, value);
+  // Everything else about the value is still checked, with the over-cap fields left out.
+  const without = (p: Plain) =>
+    Object.fromEntries(Object.entries(p).filter(([k]) => k !== "per_machine"));
+  const rest = {
+    ...(value as Plain),
+    lease_pools: Object.fromEntries(
+      Object.entries(pools).map(([name, p]) => [
+        name,
+        isPlain(p) && over.some((o) => o.name === name) ? without(p) : p,
+      ]),
+    ),
+  };
+  return [
+    ...over.map(({ name, capacity }) => ({
+      path: `lease_pools.${name}.per_machine`,
+      reason: `must be at most capacity (${capacity})`,
+    })),
+    ...errorsFor(TUNABLES, rest),
+  ];
+}
+
+/**
  * The supervisor config model: built-in defaults ← `$VOLLEYD_HOME/config.yaml` ← per-wave
  * `config:` overrides. Every subsystem reads tunables through `get()`/`effective()` so a
  * `config_set` takes effect without a restart. Changes are validated against the T1 config
@@ -136,7 +173,7 @@ export class ConfigStore {
       }
       layer = (parsed ?? {}) as TunablesPatch;
       // The file is a patch over the defaults: what must be valid is the merged result.
-      const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(defaults, layer) : layer);
+      const errors = tunablesErrors(isPlain(layer) ? merge(defaults, layer) : layer);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
     return new ConfigStore(
@@ -206,7 +243,7 @@ export class ConfigStore {
     else rejected.push(...emptyObjects(patch));
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(this.defaults, nextLayer);
-    if (rejected.length === 0) rejected.push(...errorsFor(TUNABLES, nextGlobal));
+    if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal));
     if (rejected.length > 0) return { applied: false, rejected };
     return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
   }

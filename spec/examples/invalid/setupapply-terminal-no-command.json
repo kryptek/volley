@@ -1,0 +1,11 @@
+{
+  "step": "accounts",
+  "lines": [],
+  "problems": [],
+  "terminal": [
+    {
+      "summary": "Store the coordinator's login in the keychain",
+      "reason": "the keychain needs the logged-in session"
+    }
+  ]
+}

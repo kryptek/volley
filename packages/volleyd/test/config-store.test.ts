@@ -110,6 +110,23 @@ describe("ConfigStore layering", () => {
     ]);
   });
 
+  it("fails load on a per_machine above its pool's capacity, naming the path", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  build: { capacity: 2, per_machine: 3 }\n",
+    );
+    let err: unknown;
+    try {
+      open();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).errors).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
+    ]);
+  });
+
   it("fails load on an unknown key and on malformed YAML", () => {
     writeFileSync(join(home, "config.yaml"), "hard_ceilin: 5\n");
     expect(() => open()).toThrow(/hard_ceilin: unknown key/);
@@ -213,6 +230,25 @@ describe("applyPatch", () => {
     expect(r.applied).toBe(false);
     expect(r.rejected).toEqual([
       { path: "lease_pools.build", reason: "must have required property 'capacity'" },
+    ]);
+  });
+
+  it("refuses a per_machine above its pool's capacity, naming the path; equal is accepted", () => {
+    const c = open();
+    const r = c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 3 } } }, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
+    ]);
+    expect(c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 2 } } }, "x")).toEqual({
+      applied: true,
+      rejected: [],
+      version: 2,
+    });
+    // Cutting capacity below an existing per_machine is refused the same way.
+    const cut = c.applyPatch({ lease_pools: { build: { capacity: 1 } } }, "x");
+    expect(cut.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (1)" },
     ]);
   });
 

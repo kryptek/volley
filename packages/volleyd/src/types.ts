@@ -35,6 +35,8 @@ export type PipelineStep = PipelineStage | PipelineStage[];
 
 export interface LeasePoolConfig {
   capacity: number;
+  /** The most leases holders on one machine may hold at once (1..capacity); unset: capacity. */
+  per_machine?: number;
   ttl_s?: number;
   match?: string[];
 }

@@ -190,30 +190,46 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 
 A bare concurrency cap is the wrong tool: six agents editing files is fine, six running
 integration suites with containers is not. Heavy commands therefore take a lease from a
-machine-global **pool** (`lease_pools` in the config: `capacity`, optional `ttl_s`, and the
-`match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to wrap matching Bash
-commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+machine-global **pool** (`lease_pools` in the config: `capacity`, optional `per_machine` and
+`ttl_s`, and the `match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to
+wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
 
 - **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
   SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
   lease already held or queued is a no-op; `release` of a queued request cancels it.
 - **Grants** are FIFO, never past the pool's *current* capacity. The pool state is re-published
   retained after every request, with `reasons` such as `queued: 3/3 backend-it leases held`.
+- **Machine-aware**: each held and queued lease records its holder's `host`, resolved when the
+  request arrives from the holder's `agent_spawned` (its host; for this machine, its
+  `fleet.local_name`, by default derived from the host name, e.g. `MacBook-Pro.local` is
+  `macbook-pro`: never `local`), or `null` for a holder volleyd did not spawn (a hand-run
+  `volley lease acquire`). A held lease keeps its host across renewals. A pool that sets
+  `per_machine` (1 to `capacity`; unset means `capacity`, so a pool without it behaves as before)
+  also caps the leases the holders on one machine hold at once: a grant needs a free slot under
+  both caps, and a `null`-host holder counts toward `capacity` only. The earliest queued request
+  both caps admit is granted, so a request its own machine's cap holds back does not block one
+  from another machine behind it (FIFO still holds per machine), and its `reasons` line names
+  that cap: `queued l-4: 1/1 backend-it leases held on box-a (per machine)`. The pool state
+  carries `per_machine` and `held[].host` / `queue[].host`. `config_set` and `config.yaml` refuse
+  a `per_machine` above `capacity` (`lease_pools.<pool>.per_machine: must be at most capacity
+  (<n>)`), also when the patch lowers `capacity` under it.
 - **A lease ends** on release, on TTL expiry (`ttl_s` of the request, else the pool's, else
   1 hour; `renew` restarts it — `volley lease run` renews at half the TTL), or when the holder's
   retained `status` turns `reaped`, `done` or `failed`.
 - **Hot config, never preempt**: a capacity increase grants queued requests on the next tick; a
-  decrease stops granting until holders release; a removed pool keeps its holders, drops its
-  queued requests (they never started; each gets `rejected <lease_id>: pool <p> removed from
-  config`, and `volley lease run` then runs its command unleased), reports capacity 0 with
-  `pool <p> removed from config: new requests rejected`, rejects new acquires and disappears when
-  its last holder releases. Pools are machine-global: they come only from the global config, and a
-  wave file that sets `config.lease_pools` is rejected.
+  decrease (of `capacity` or `per_machine`) stops granting until holders release; a removed pool
+  keeps its holders, drops its queued requests (they never started; each gets `rejected
+  <lease_id>: pool <p> removed from config`, and `volley lease run` then runs its command
+  unleased), reports capacity 0 with `pool <p> removed from config: new requests rejected`,
+  rejects new acquires and disappears when its last holder releases. Pools are machine-global:
+  they come only from the global config, and a wave file that sets `config.lease_pools` is
+  rejected.
 - **Durable**: every grant/release/expiry is journaled as `lease_requested`, `lease_granted`,
   `lease_released` or `lease_expired` in the `_system` journal (mirrored on
-  `volley/_waves/_system/events`); a restart replays it, so held leases survive. Requests sent
-  while the daemon is down wait in its persistent session and are handled on the next start
-  (the daemon drains them like its mailbox).
+  `volley/_waves/_system/events`); `lease_requested` and `lease_granted` (a renewal's too) carry
+  the holder's `host`, and a restart replays it, so held leases and their per-machine counts
+  survive. Requests sent while the daemon is down wait in its persistent session and are handled
+  on the next start (the daemon drains them like its mailbox).
 
 ## Spawn admission
 
@@ -259,7 +275,7 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_waves/<wave>/decisions/<id>` | while open | Each open decision (`decision.schema.json`); cleared on resolve. |
 | `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision. |
 | `volley/_waves/_system/events` | no | Live mirror of `_system` journal events (the kill switch). |
-| `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `held`, FIFO `queue`, `reasons`. |
+| `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `per_machine?`, `held`, FIFO `queue` (each with the holder's `host`), `reasons`. |
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |

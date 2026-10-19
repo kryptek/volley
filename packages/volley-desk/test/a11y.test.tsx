@@ -7,7 +7,11 @@ import App from "../src/App";
 import { REDUCED_MOTION_QUERY, useReducedMotion } from "../src/a11y/motion";
 import { CHROMES } from "../src/look/options";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
+import { BrokerAccounts } from "../src/settings/BrokerAccounts";
+import { Setup } from "../src/settings/Setup";
+import { SetupWizard } from "../src/settings/SetupWizard";
 import { DeskStoreProvider } from "../src/store/context";
+import { PLAN, fakeOps } from "./helpers/auth-ops";
 
 const renderApp = () =>
   render(
@@ -63,7 +67,15 @@ describe("axe (jsdom)", () => {
     expect(await violations()).toEqual([]);
   }, 30_000);
 
-  it.each(["General", "Appearance", "Supervisor", "Machines", "About Volley"])(
+  it.each([
+    "General",
+    "Appearance",
+    "Supervisor",
+    "Broker accounts",
+    "Setup & Security",
+    "Machines",
+    "About Volley",
+  ])(
     "reports no violations in the Settings window's %s section",
     async (section) => {
       renderApp();
@@ -81,6 +93,63 @@ describe("axe (jsdom)", () => {
     },
     30_000,
   );
+});
+
+describe("axe (jsdom): the admin's onboarding views", () => {
+  const accounts = () =>
+    fakeOps({
+      setup_plan: () => ({ ok: true, result: PLAN }),
+      account_list: () => ({
+        ok: true,
+        result: {
+          accounts: [
+            {
+              name: "admin-0123abcd",
+              role: "admin",
+              kind: "human",
+              created: "2026-10-18T10:00:00Z",
+            },
+            { name: "desk-ipad", role: "steer", kind: "device", created: "2026-10-18T10:00:00Z" },
+          ],
+        },
+      }),
+    }).ops;
+
+  it("reports no violations in Broker accounts", async () => {
+    // In the Desk these live inside the Settings dialog: a <main> stands in for its landmark.
+    render(
+      <main>
+        <BrokerAccounts ops={accounts()} admin identity="admin-0123abcd" liveAgents={3} />
+      </main>,
+    );
+    await screen.findByText("desk-ipad");
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
+  it("reports no violations in Setup & Security", async () => {
+    render(
+      <main>
+        <Setup
+          ops={accounts()}
+          admin
+          identity="admin-0123abcd"
+          brokerUrl="ws://desk.example:9001"
+          deskUrl="http://desk.example:5199/"
+          onOpenSetup={() => {}}
+        />
+      </main>,
+    );
+    await screen.findByText("On");
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
+  it("reports no violations in the setup wizard", async () => {
+    render(<SetupWizard ops={accounts()} deskUrl="http://desk.example:5199/" onClose={() => {}} />);
+    await screen.findByText("Found your broker");
+    expect(await violations()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await violations()).toEqual([]);
+  }, 30_000);
 });
 
 describe("landmarks and roles", () => {
