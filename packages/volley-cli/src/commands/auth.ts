@@ -38,7 +38,7 @@ export interface AuthArgs {
  * coordinator.json, volley-mcp's MOSQUITTO_ETC_DIRS), else the layout's. The broker never reads
  * this directory, so it need not follow the layout.
  */
-function defaultAuthDir(layout: Layout): string {
+export function defaultAuthDir(layout: Layout): string {
   const etc = MOSQUITTO_ETC_DIRS.find((d) => existsSync(d));
   return etc !== undefined ? join(etc, "volley") : layout.authDir;
 }

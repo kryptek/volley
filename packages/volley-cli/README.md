@@ -6,7 +6,7 @@
 
 A small, fast CLI that lets shell scripts, cron jobs, CI runners, and any non-LLM process participate in Volley's coordination protocol — alongside Claude Code, Codex, and other MCP-driven agents.
 
-If you can write a bash one-liner, you can be a Volley agent. The eight subcommands cover everything: announce a status, watch for terminal states, subscribe to a stream, list who's around, launch a dashboard, surface agent transitions as system notifications, manage broker credentials, and wait for a heavy-operation lease.
+If you can write a bash one-liner, you can be a Volley agent. The subcommands cover everything: set the machine up (`volley setup`), announce a status, watch for terminal states, subscribe to a stream, list who's around, launch or serve the Desk, surface agent transitions as system notifications, manage broker credentials, and wait for a heavy-operation lease.
 
 ---
 
@@ -14,6 +14,8 @@ If you can write a bash one-liner, you can be a Volley agent. The eight subcomma
 
 - [Install](#install)
 - [The subcommands](#the-subcommands)
+- [`volley setup`](#volley-setup)
+- [`volley desk serve`](#volley-desk-serve)
 - [`volley dash`](#volley-dash)
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
@@ -58,6 +60,8 @@ volley --help
 | `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
+| `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
+| `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
 
 Each has its own `--help`:
 
@@ -69,7 +73,42 @@ volley list --help
 volley dash --help
 volley notify --help
 volley auth --help
+volley setup --help
 ```
+
+---
+
+## `volley setup`
+
+One idempotent command takes a machine from "mosquitto installed" to a phone-ready Desk. Five steps; each prints what it found and what it will change (config diffs included) **before** changing anything, then asks (`--yes` applies without asking):
+
+```sh
+volley setup            # interactive: confirm each step
+volley setup --yes      # non-interactive (WebSocket listener kept on this machine: no phone step)
+volley setup --yes --lan   # non-interactive, the broker's WebSocket listener open to your network
+volley setup --repair   # check and fix only (no new admin token, no phone link)
+volley setup --step services   # only the named step(s)
+```
+
+1. **Broker**: the install (`--layout`, detected as `volley auth` does), mosquitto's version (older than 2.1 is refused with the install hint), what the listeners on 1883 and 9001 do with an anonymous client, and how many agents are running (a retained status that has not ended).
+2. **Security**: the Dynamic Security broker config `volley auth init` writes (the diff is shown; the old file is backed up to `<config>.volley-backup-<timestamp>`), the plugin's state file with its admin login (`<dir>/admin.json`, 0600), a restart with the layout's command, then a check that **both** listeners refuse anonymous clients. It also asks whether devices on your network may reach the WebSocket listener (port 9001), which the Desk on a phone needs: interactively the recommended answer is yes; `--lan` / `--no-lan` decide without asking, and `--yes` alone means no. With LAN access on, the config gets `listener 9001` (every interface) while `listener 1883 127.0.0.1` stays local, and the check also probes `ws://<desk host>:9001`, which must refuse anonymous clients (reachable, and logging in), not be unreachable. Logins are required either way, but LAN traffic is **not encrypted** until a TLS listener exists: open it only on a network you trust. A rerun keeps whichever choice the config already has.
+3. **Accounts**: Volley's shared roles and the fixed identities `volleyd`, `desk`, `coordinator` (`volley auth init` underneath: existing logins keep their passwords, missing ones are created and their passwords printed once), their credential files (`<dir>/coordinator.json`, `$VOLLEYD_HOME/broker.json` and `dynsec-admin.json`; a login whose file is gone gets a new password), drifted roles (a grant this Volley added, such as the `usage` channel, missing from a broker set up earlier: publishes on it are dropped silently) with the `volley auth migrate --roles` change shown first, a copy of the coordinator's login in the macOS keychain (service `volley-broker`, written through `security -i` on stdin so the password is never on a command line; `coordinator.json` stays the file the hooks and the MCP env read, and elsewhere it is the only copy), and a **one-time admin token** for the Desk, printed in the terminal only.
+4. **Services**: volleyd (`volleyd install` on macOS, a `systemd --user` unit on Linux), the Volley hooks for coordinator sessions (`packages/volley-hooks/scripts/install.sh`, which backs up `~/.claude/settings.json`), and the Desk: built (`vite build`), rebuilt whenever its sources or `bun.lock` changed since the build setup recorded in `dist/.volley-build` (so `--repair` after an update serves a matching Desk), and served by `volley desk serve` on `0.0.0.0:5199` as a service. Under sudo it is skipped (the later steps still run): run `volley setup --step services` as your user.
+5. **Phone**: a one-time `steer` sign-in link for "Desk on phone" (10 minutes, single use), rendered as a QR code in the terminal with the URL `http://<this machine>:5199/#signin=<token>` (`--desk-host` names another address; the default is this machine's address on a physical interface, not a container or VPN bridge). When a phone cannot reach the broker's WebSocket listener at `ws://<desk host>:9001` (LAN access off), the step is skipped, no link is spent, and the run ends saying so instead of "Setup complete".
+
+A rerun plans nothing for what is in place and reports each step as already done. The admin token and the phone's link count as in place while pending or once redeemed: after they expired unused (10 minutes), a rerun issues new ones. Every step is journaled to `$VOLLEYD_HOME/setup.log` (summaries only, never a password or token). Every external command (the broker restart, `launchctl` / `systemctl`, `security`, the hooks installer, the Desk build) runs without a shell, through a fence that allows exactly those commands and refuses any other. The Desk build is refused while `packages/volley-desk/.env*` sets `VITE_VOLLEY_BROKER_*` (Vite would build it into the page served to your network). `--broker-url` must be `mqtt://`: TLS is not supported by `volley setup` yet.
+
+---
+
+## `volley desk serve`
+
+```sh
+volley desk serve                       # http://127.0.0.1:5199, from packages/volley-desk/dist
+volley desk serve --host 0.0.0.0        # for a phone on the LAN (what the setup service runs)
+volley desk serve --port 8080 --root /path/to/dist
+```
+
+A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from).
 
 ---
 

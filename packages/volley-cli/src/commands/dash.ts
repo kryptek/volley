@@ -185,7 +185,7 @@ function runChild(
  * bin shim, so try both `import.meta.url` (the source file's location) and
  * `realpathSync(process.argv[1])` (the entry point's real path).
  */
-function findRepoRoot(): string | null {
+export function findRepoRoot(): string | null {
   const candidates: string[] = [];
   try {
     candidates.push(fileURLToPath(import.meta.url));
