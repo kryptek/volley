@@ -285,12 +285,6 @@
           "acltype": "publishClientSend",
           "topic": "volley/_system/machines/%u",
           "allow": true
-        },
-        {
-          "priority": 0,
-          "acltype": "publishClientSend",
-          "topic": "volley/_system/machines/%u/#",
-          "allow": true
         }
       ]
     },

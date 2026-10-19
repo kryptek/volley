@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/machine.schema.json",
   "title": "Volley Machine Record",
-  "description": "A paired machine's retained health record, published to volley/_system/machines/<name> by the machine itself every heartbeat (its LWT republishes it with tunnel down), and by the supervisor when the heartbeat stops. See spec section 4.6.14.",
+  "description": "A paired machine's retained health record, published to volley/_system/machines/<name> by the machine itself every heartbeat (its LWT republishes it with tunnel down), and by the supervisor when the heartbeat stops; the supervisor publishes its own machine's record too (kind supervisor, tunnel local). States only, never a secret. See spec sections 4.6.14 and 4.6.15.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -18,8 +18,13 @@
             "name": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "not": { "const": "local" },
-              "description": "The machine's name: its peer account's username, the topic's last level and its hosts.<name> entry in the supervisor config."
+              "not": { "enum": ["local", "auto"] },
+              "description": "The machine's name: its peer account's username, the topic's last level and its hosts.<name> entry in the supervisor config (the supervisor's own machine: its fleet.local_name). Never local or auto, which a wave file's host: reserves."
+            },
+            "kind": {
+              "enum": ["peer", "supervisor"],
+              "default": "peer",
+              "description": "peer: a paired machine publishing as itself. supervisor: the supervisor's own machine, published by the supervisor (spec section 4.6.15). Absent: peer."
             },
             "os": {
               "type": "string",
@@ -30,8 +35,8 @@
             "arch": { "type": "string", "minLength": 1, "maxLength": 32 },
             "cores": { "type": "integer", "minimum": 1, "description": "Logical CPUs." },
             "tunnel": {
-              "enum": ["up", "down"],
-              "description": "up: the machine reached the broker through its tunnel when it published. down: its connection ended (LWT) or its heartbeat stopped (the supervisor's)."
+              "enum": ["up", "down", "local"],
+              "description": "up: the machine reached the broker through its tunnel when it published. down: its connection ended (LWT) or its heartbeat stopped (the supervisor's). local: the supervisor's own machine, which needs no tunnel (only with kind supervisor)."
             },
             "reason": {
               "enum": ["disconnect", "heartbeat_timeout"],
@@ -55,15 +60,136 @@
               "maximum": 65535,
               "description": "The port on the machine's 127.0.0.1 that reaches the broker (its hosts.<name>.tunnel.remote_port)."
             },
+            "memory": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["total_mb", "available_pct"],
+              "properties": {
+                "total_mb": { "type": "integer", "minimum": 1 },
+                "available_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+              }
+            },
+            "disk": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "free_gb", "free_pct"],
+              "description": "The filesystem holding the machine's agent worktrees.",
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "free_gb": { "type": "number", "minimum": 0 },
+                "free_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+              }
+            },
+            "uptime_s": { "type": "integer", "minimum": 0 },
+            "versions": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["peer", "volley", "bun", "git"],
+              "description": "Tool versions as the machine's doctor found them on the non-interactive ssh PATH; null when the tool is missing.",
+              "properties": {
+                "peer": { "$ref": "#/$defs/version" },
+                "volley": { "$ref": "#/$defs/version" },
+                "bun": { "$ref": "#/$defs/version" },
+                "node": { "$ref": "#/$defs/version" },
+                "git": { "$ref": "#/$defs/version" },
+                "gh": { "$ref": "#/$defs/version" },
+                "tmux": { "$ref": "#/$defs/version" },
+                "claude": { "$ref": "#/$defs/version" }
+              }
+            },
+            "auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["gh", "claude", "trust"],
+              "description": "Sign-in states only, never a credential, token or code.",
+              "properties": {
+                "gh": {
+                  "enum": ["ok", "unauthenticated", "missing", "no_write"],
+                  "description": "ok: gh is signed in and may push to the wave repo. no_write: signed in without write access. unauthenticated: gh is installed and signed out. missing: no gh."
+                },
+                "claude": {
+                  "enum": ["signed_in", "not_signed_in", "missing", "unknown"],
+                  "description": "The machine's default Claude Code profile."
+                },
+                "trust": {
+                  "enum": ["ok", "missing", "unknown"],
+                  "description": "Whether that profile trusts the wave repo's folder."
+                },
+                "claude_plan": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 1, "maxLength": 64 },
+                    { "type": "null" }
+                  ],
+                  "description": "The plan label Claude Code reports for the profile (e.g. max), when signed in."
+                }
+              }
+            },
+            "repo": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "exists"],
+              "description": "The wave repo's clone on the machine (its hosts.<name>.repo).",
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "exists": { "type": "boolean" },
+                "origin": {
+                  "type": "string",
+                  "maxLength": 512,
+                  "pattern": "^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[^\\s@:]+$",
+                  "not": { "pattern": "\\.git$" },
+                  "description": "The clone's origin normalised to <host>/<path> (e.g. github.com/example-org/example-repo): no scheme, no user, no credentials, no .git suffix."
+                },
+                "release_branch": { "type": "string", "minLength": 1, "maxLength": 255 },
+                "fetched_at": {
+                  "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+                  "description": "When the release branch was last fetched into the clone; null when never."
+                }
+              }
+            },
+            "checks": {
+              "type": "array",
+              "maxItems": 32,
+              "description": "The doctor's checks, in the order it ran them. Fix text is never in the record: the doctor that reads the record supplies it.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "ok", "severity", "detail"],
+                "properties": {
+                  "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+                  "ok": { "type": "boolean" },
+                  "severity": {
+                    "enum": ["block", "warn"],
+                    "description": "block: a failing check makes the machine not ready. warn: shown, never blocks."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "One line on what the check found."
+                  }
+                }
+              }
+            },
+            "doctor_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the doctor last ran (its checks and versions are from that run)."
+            },
             "last_seen": {
               "type": "string",
               "format": "date-time",
               "description": "When the machine last published a heartbeat."
             }
-          }
+          },
+          "if": { "properties": { "tunnel": { "const": "local" } }, "required": ["tunnel"] },
+          "then": { "properties": { "kind": { "const": "supervisor" } }, "required": ["kind"] }
         }
       },
       "required": ["channel", "type", "payload"]
     }
-  ]
+  ],
+  "$defs": {
+    "version": {
+      "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 64 }, { "type": "null" }]
+    }
+  }
 }

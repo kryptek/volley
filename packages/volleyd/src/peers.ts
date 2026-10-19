@@ -35,8 +35,11 @@ import type { NewEvent, RemoteHostConfig } from "./types";
 /** Unambiguous upper-case letters and digits (no I, L, O, 0, 1). */
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_RE = new RegExp(`^[${ALPHABET}]{4}-[${ALPHABET}]{4}$`);
-/** Names a peer may not take: the daemon's own host and the fixed broker identities. */
-const RESERVED_NAMES = new Set(["local", "volleyd", "desk", "coordinator"]);
+/**
+ * Names a peer may not take: the two a wave file's `host:` reserves (the daemon's own host, and
+ * `auto` for placement, SPEC §4.6.15) and the fixed broker identities.
+ */
+const RESERVED_NAMES = new Set(["local", "auto", "volleyd", "desk", "coordinator"]);
 
 export const isPairingCode = (c: string) => CODE_RE.test(c);
 

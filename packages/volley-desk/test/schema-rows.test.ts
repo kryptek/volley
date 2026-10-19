@@ -66,9 +66,18 @@ describe("schemaRows", () => {
 
   for (const [key, def] of Object.entries(props).filter(([, d]) => !isRecordMap(d))) {
     it(`renders ${key} with the schema's control type and bounds`, () => {
+      /** A nested object's leaves, keyed by their path under it (`weights.cpu`). */
+      const flat = (o: Record<string, JsonSchema>, pre = ""): Record<string, JsonSchema> =>
+        Object.fromEntries(
+          Object.entries(o).flatMap(([k, v]) =>
+            v.properties
+              ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
+              : [[`${pre}${k}`, v]],
+          ),
+        );
       const leaves = Object.entries(
         def.properties
-          ? (def.properties as Record<string, JsonSchema>)
+          ? flat(def.properties as Record<string, JsonSchema>)
           : def.additionalProperties
             ? Object.fromEntries(
                 Object.keys(values.lease_pools ?? {}).map((pool) => [
@@ -93,6 +102,10 @@ describe("schemaRows", () => {
             max: leaf.maximum,
             step: t === "integer" ? 1 : 0.1,
           });
+        } else if (t === "boolean") {
+          expect(row.control).toEqual({ kind: "toggle" });
+        } else if (Array.isArray(leaf.enum)) {
+          expect(row.control).toEqual({ kind: "choice", options: leaf.enum });
         } else {
           // strings, and string-or-null (fallback_model)
           const nullable = Array.isArray(leaf.oneOf);
@@ -133,6 +146,22 @@ describe("schemaRows", () => {
     expect(at.get("admission.ci_queue_max")?.label).toBe("CI queue max");
     expect(at.get("mailbox.session_expiry_s")?.label).toBe("Mailbox session expiry");
     expect(at.get("lease_pools.backend-it.capacity")?.label).toBe("backend-it pool capacity");
+  });
+
+  it("renders a boolean as a switch, a string enum as a choice, and a nested object per leaf", () => {
+    expect(at.get("require_fresh_base")).toMatchObject({
+      label: "Require fresh base",
+      control: { kind: "toggle" },
+    });
+    expect(at.get("placement.nudge_on_merge")).toMatchObject({
+      label: "Placement nudge on merge",
+      control: { kind: "choice", options: ["files", "all", "off"] },
+    });
+    expect(at.get("placement.weights.cpu")).toMatchObject({
+      label: "Placement weights cpu",
+      control: { kind: "slider", min: 0, max: 100, step: 1 },
+    });
+    expect(at.has("placement.weights")).toBe(false);
   });
 
   it("falls back to the bounds as the hint when the schema has no description", () => {

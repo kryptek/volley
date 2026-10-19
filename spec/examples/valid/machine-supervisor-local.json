@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:30:00.000Z",
+  "channel": "_system/machines",
+  "type": "machine",
+  "payload": {
+    "name": "studio",
+    "kind": "supervisor",
+    "os": "darwin",
+    "arch": "arm64",
+    "cores": 12,
+    "tunnel": "local",
+    "load": [3.1, 2.8, 2.5],
+    "agents": 5,
+    "memory": { "total_mb": 65536, "available_pct": 41 },
+    "disk": { "path": "~/.volley/worktrees", "free_gb": 212.4, "free_pct": 23 },
+    "uptime_s": 604800,
+    "versions": {
+      "peer": null,
+      "volley": "0.4.0",
+      "bun": "1.3.2",
+      "node": "24.10.0",
+      "git": "2.51.0",
+      "gh": "2.81.0",
+      "tmux": null,
+      "claude": "2.4.1"
+    },
+    "last_seen": "2026-10-19T09:30:00.000Z"
+  }
+}

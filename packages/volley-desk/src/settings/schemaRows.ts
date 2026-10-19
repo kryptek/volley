@@ -2,9 +2,10 @@
  * Settings rows, built generically from the T1 config schema
  * (`spec/schemas/config.schema.json`, bundled at build time) — there is no
  * hand-maintained list of tunables. Each leaf of `$defs/tunableProperties`
- * becomes one row: a bounded number is a stepped slider, a string (or
- * string-or-null) is a text field, and the `lease_pools` map gets one capacity
- * row per configured pool. Labels and units come from the key, hints from the
+ * becomes one row: a bounded number is a stepped slider, a boolean a switch, a
+ * string enum a choice, a string (or string-or-null) a text field, a nested
+ * object one row per leaf, and the `lease_pools` map gets one capacity row per
+ * configured pool. Labels and units come from the key, hints from the
  * schema `description` (else the bounds). Only the grouping into the modal's
  * sections is listed here; a tunable it does not know lands under "Other".
  */
@@ -50,6 +51,8 @@ const SECTION_OF: Record<string, Section> = {
 
 export type RowControl =
   | { kind: "slider"; min: number; max: number; step: number }
+  | { kind: "toggle" }
+  | { kind: "choice"; options: string[] }
   | { kind: "text"; nullable: boolean; minLength?: number; maxLength?: number };
 
 export interface SchemaRow {
@@ -101,6 +104,10 @@ function controlFor(path: string, s: JsonSchema): RowControl {
     }
     return { kind: "slider", min: s.minimum, max: s.maximum, step: s.type === "integer" ? 1 : 0.1 };
   }
+  if (s.type === "boolean") return { kind: "toggle" };
+  if (s.enum && s.enum.length > 0 && s.enum.every((v) => typeof v === "string")) {
+    return { kind: "choice", options: s.enum as string[] };
+  }
   const variants = s.oneOf ?? [s];
   const str = variants.find((v) => v.type === "string");
   if (str && variants.every((v) => v.type === "string" || v.type === "null")) {
@@ -116,7 +123,8 @@ function controlFor(path: string, s: JsonSchema): RowControl {
 
 function boundsHint(control: RowControl, unit: string): string {
   if (control.kind === "slider") return `${control.min}–${control.max}${unit ? ` ${unit}` : ""}`;
-  return control.nullable ? "Leave empty for none." : "";
+  if (control.kind === "text") return control.nullable ? "Leave empty for none." : "";
+  return "";
 }
 
 function row(
@@ -149,16 +157,15 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
     const section = SECTION_OF[key] ?? "Other";
     if (def.properties) {
       const prefix = section.toLowerCase() === key ? "" : `${wordsAndUnit(key).words} `;
-      return Object.entries(def.properties).map(([sub, leafRaw]) => {
-        const { words, unit } = wordsAndUnit(sub);
-        return row(
-          `${key}.${sub}`,
-          section,
-          sentence(prefix + words),
-          unit,
-          resolve(schema, leafRaw),
-        );
-      });
+      // A nested object (`placement.weights`) gives one row per leaf, its key in the label.
+      const leaves = (path: string, words: string, d: JsonSchema): SchemaRow[] =>
+        Object.entries(d.properties ?? {}).flatMap(([sub, leafRaw]) => {
+          const leaf = resolve(schema, leafRaw);
+          const w = wordsAndUnit(sub);
+          if (leaf.properties) return leaves(`${path}.${sub}`, `${words}${w.words} `, leaf);
+          return [row(`${path}.${sub}`, section, sentence(words + w.words), w.unit, leaf)];
+        });
+      return leaves(key, prefix, def);
     }
     if (typeof def.additionalProperties === "object") {
       const entry = resolve(schema, def.additionalProperties);

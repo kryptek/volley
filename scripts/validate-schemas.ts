@@ -29,6 +29,7 @@
  *   - `usage-*.json` -> usage.schema.json
  *   - `claudeaccount-*.json` -> claude-account.schema.json
  *   - `machine-*.json` -> machine.schema.json
+ *   - `readiness-*.json` -> readiness.schema.json
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -65,6 +66,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   usage: "usage.schema.json",
   claudeaccount: "claude-account.schema.json",
   machine: "machine.schema.json",
+  readiness: "readiness.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {

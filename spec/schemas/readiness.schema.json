@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/readiness.schema.json",
+  "title": "Volley Machine Readiness",
+  "description": "The supervisor's verdict on one machine, published retained to volley/_system/machines/<name>/readiness by the supervisor only. The machine record is the machine's statement about itself; this verdict needs the supervisor's config and version, so it has its own topic. States only, never a secret. See spec section 4.6.15.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/machines/readiness" },
+        "type": { "const": "readiness" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "ready",
+            "reasons",
+            "drain",
+            "max_agents",
+            "placed",
+            "path_ok",
+            "requirements",
+            "heavy",
+            "usage",
+            "eligible",
+            "checked_at"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "machine.schema.json#/allOf/1/properties/payload/properties/name",
+              "description": "The machine's name (the topic's second-to-last level)."
+            },
+            "ready": {
+              "type": "boolean",
+              "description": "true when no blocking check fails: the machine can run an agent (tunnel up or local, no failing block check, claude and bun on the PATH an agent gets, the supervisor's volley version, GitHub push access and Claude signed in). No doctor report yet: false."
+            },
+            "reasons": {
+              "type": "array",
+              "maxItems": 32,
+              "items": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "description": "One human-readable line per thing that keeps the machine from being ready; empty when ready."
+            },
+            "drain": {
+              "type": "boolean",
+              "description": "hosts.<name>.drain: the machine takes no new placements; its running agents finish."
+            },
+            "max_agents": {
+              "$ref": "config.schema.json#/$defs/remoteHost/properties/max_agents",
+              "description": "The machine's agent cap (hosts.<name>.max_agents; the supervisor's own machine: hard_ceiling)."
+            },
+            "placed": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Live supervised agents on the machine, plus placements reserved for it that have not spawned yet."
+            },
+            "path_ok": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["claude", "bun"],
+              "description": "Whether claude and bun resolve on the PATH an agent's session gets: the non-interactive ssh PATH on a peer, the supervisor's own agent environment on its own machine; null when not probed yet.",
+              "properties": {
+                "claude": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] },
+                "bun": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] }
+              }
+            },
+            "requirements": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["volley"],
+              "description": "What the supervisor requires of the machine, so its doctor can compare and provision.",
+              "properties": {
+                "volley": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "description": "The supervisor's own volley version: a peer's must match it."
+                },
+                "bun": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "description": "The lowest bun version the supervisor accepts."
+                },
+                "sharing": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "The supervisor's per-item sharing modes (spec section 4.6.11), which the machine's doctor applies to its own Claude profile.",
+                  "properties": {
+                    "settings.json": { "$ref": "#/$defs/shareMode" },
+                    "CLAUDE.md": { "$ref": "#/$defs/shareMode" },
+                    "skills": { "$ref": "#/$defs/shareMode" },
+                    "agents": { "$ref": "#/$defs/shareMode" },
+                    "commands": { "$ref": "#/$defs/shareMode" },
+                    "plugins": { "$ref": "#/$defs/shareMode" },
+                    "mcp": {
+                      "enum": ["copy", "own"],
+                      "description": "Never linked (spec section 4.6.11)."
+                    }
+                  }
+                }
+              }
+            },
+            "heavy": {
+              "type": "object",
+              "description": "Per lease pool that sets per_machine: the leases the machine's holders hold, and the pool's per-machine cap (spec section 4.6.5).",
+              "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+              "maxProperties": 32,
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["held", "per_machine"],
+                "properties": {
+                  "held": { "type": "integer", "minimum": 0 },
+                  "per_machine": {
+                    "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine"
+                  }
+                }
+              }
+            },
+            "usage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "five_hour_pct"],
+              "description": "The Claude account the machine's agents run under (spec section 4.6.12: <acct>@<host> for a peer) and its 5-hour usage; null while unknown.",
+              "properties": {
+                "account": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 1, "maxLength": 128 },
+                    { "type": "null" }
+                  ]
+                },
+                "five_hour_pct": {
+                  "oneOf": [{ "type": "number", "minimum": 0, "maximum": 100 }, { "type": "null" }]
+                }
+              }
+            },
+            "eligible": {
+              "type": "boolean",
+              "description": "Whether placement may put a new task there now: ready, not draining, under max_agents, not overloaded, enough memory and disk, Claude usage headroom."
+            },
+            "ineligible_reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "Why eligible is false, in one line; required then, absent otherwise."
+            },
+            "checked_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the supervisor last computed this verdict. It re-publishes at least every machine_down_after_ms, so an older checked_at, or a supervisor whose own status is not live, means the verdict is stale."
+            }
+          },
+          "if": { "properties": { "eligible": { "const": false } }, "required": ["eligible"] },
+          "then": { "required": ["ineligible_reason"] },
+          "else": { "not": { "required": ["ineligible_reason"] } }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": { "shareMode": { "enum": ["linked", "copy", "own"] } }
+}

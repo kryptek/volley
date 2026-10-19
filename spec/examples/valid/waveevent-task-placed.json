@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:59:58.000Z",
+  "channel": "_waves/events",
+  "type": "task_placed",
+  "payload": {
+    "wave": "w1",
+    "seq": 14,
+    "at": "2026-10-19T09:59:58.000Z",
+    "task": "T1",
+    "data": {
+      "task": "T1",
+      "host": "box-a",
+      "score": 0.72,
+      "by": "auto",
+      "candidates": [
+        { "host": "box-a", "score": 0.72, "line": "box-a 0.72: load 0.1/core, 2 of 4 slots free, 62% memory free, Claude 34%" },
+        { "host": "studio", "score": 0.41, "line": "studio 0.41: load 0.26/core, 7 of 12 slots free, 41% memory free, Claude 71%" },
+        { "host": "box-b", "score": null, "line": "box-b not eligible: claude is not on the non-interactive ssh PATH" }
+      ]
+    }
+  }
+}
