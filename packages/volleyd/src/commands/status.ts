@@ -12,9 +12,10 @@ const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
 else the session registered for this directory).
---json prints the wave-state payload(s) exactly as published on volley/_waves/<wave>/state.
-Without a wave, a first line counts the broker's agent logins: those left after the last
-credential sweep, and how many the sweeps deleted in total (--json: agent_logins).
+--json prints, for one wave, its wave-state payload exactly as published on
+volley/_waves/<wave>/state; without a wave, { waves: [those payloads], agent_logins }.
+Without a wave, a first line counts the broker's agent logins: those on the broker now, and
+how many the credential sweeps deleted in total (--json: agent_logins).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {

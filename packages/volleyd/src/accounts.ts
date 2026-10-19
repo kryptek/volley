@@ -392,7 +392,8 @@ export async function redeemToken(exec: ExecFn, topicId: string, p: Fields): Pro
     event: {
       type: "token_redeemed",
       data: {
-        by: `redeem-${String(r.out?.token_id ?? "")}`,
+        // The redeeming login: the token id is its username (SPEC §4.6.10).
+        by: String(r.out?.token_id ?? ""),
         name: creds.username,
         role,
         label: p.label,

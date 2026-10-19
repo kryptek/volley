@@ -147,6 +147,8 @@ export interface SpawnEnv {
   openDecisions: string[];
   /** Topics the spawn cleared with an empty retained payload (a superseded attempt's). */
   cleared: string[];
+  /** Retained messages the spawn published (a superseded attempt's `reaped` status). */
+  published: { topic: string; payload: string }[];
   deps: SpawnDeps;
   /** The logins the spawn minted and revoked. */
   creds: MemoryCredentials;
@@ -198,6 +200,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
   const events: NewEvent[] = [];
   const openDecisions: string[] = [];
   const cleared: string[] = [];
+  const published: { topic: string; payload: string }[] = [];
   const deps: SpawnDeps = {
     host,
     home,
@@ -222,6 +225,9 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     probe: { status: async () => null, registered: async () => false, lastHeartbeat: () => null },
     watch: o.watch ?? (async (ns, id) => fakeWatch(ns, id)),
     briefGate: null,
+    publishRetained: async (topic, payload) => {
+      published.push({ topic, payload });
+    },
     clearRetained: async (topic) => {
       cleared.push(topic);
     },
@@ -237,6 +243,7 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     events,
     openDecisions,
     cleared,
+    published,
     deps,
     creds,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),

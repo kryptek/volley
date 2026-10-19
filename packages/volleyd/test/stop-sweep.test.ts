@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { NS } from "./helpers/daemon-env";
+import { memoryCredentials } from "./helpers/fake-dynsec";
 import { runCli } from "./helpers/run-cli";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
-/** Finding 13: `volleyd stop` left the wave's broker logins behind. */
+/** `volleyd stop` must not leave the wave's broker logins behind. */
 describe("volleyd stop retires the wave's agents; a sweep then leaves no agent login", () => {
   let s: SupervisedEnv;
   afterEach(async () => {
@@ -33,6 +34,35 @@ describe("volleyd stop retires the wave's agents; a sweep then leaves no agent l
 
     await s.daemon.sweepCredentials();
     expect(waveLogins()).toEqual([]);
+  });
+
+  it("stop <wave> deletes all its agents' logins in ONE batched control message", async () => {
+    // The store batches like DynsecControl: deletes sent within the window share one message.
+    const creds = memoryCredentials();
+    const revoke = creds.revoke;
+    const batches: string[][] = [];
+    let pending: { id: string; done: (ok: boolean) => void }[] = [];
+    creds.revoke = (id) =>
+      new Promise((done) => {
+        pending.push({ id, done });
+        if (pending.length > 1) return;
+        setTimeout(() => {
+          const batch = pending;
+          pending = [];
+          batches.push(batch.map((b) => b.id).sort());
+          for (const b of batch) void revoke(b.id).then(b.done);
+        }, 100);
+      });
+    s = await makeSupervisedEnv({
+      creds,
+      tasks: ["T2: { issue: 42 }", "T3: { issue: 42 }"],
+      daemon: { credentialSweepMs: 3_600_000 },
+    });
+    const agents = [AGENT, "w1-t2-implementer-1", "w1-t3-implementer-1"];
+    expect(waveLogins().sort()).toEqual(agents);
+    expect((await runCli(["stop", "w1", "--by", "tester"], s.env.env)).exitCode).toBe(0);
+    await s.until(() => creds.revoked.length === 3);
+    expect(batches).toEqual([agents]);
   });
 
   it("stop --all: the same for every wave", async () => {

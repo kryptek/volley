@@ -34,7 +34,7 @@ import {
   renderMcpConfig,
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
-import { retainedTopics } from "./retire";
+import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
@@ -132,6 +132,8 @@ export interface SpawnDeps {
   briefsDir?: string;
   /** Publish an empty retained payload (clears a superseded attempt's records). Default: none. */
   clearRetained?: (topic: string) => Promise<void>;
+  /** Publish a retained message (a superseded attempt's `reaped` status). Default: none. */
+  publishRetained?: (topic: string, payload: string) => Promise<void>;
   /**
    * Open a decision through the daemon's decision store (published retained, notify bridge).
    * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
@@ -496,6 +498,8 @@ async function launchAttempt(
     }
     return { agentId, attempt, workspace, watch, minted: creds !== undefined, launchedAt };
   } catch (e) {
+    // Exempt from the delete path: the spawn failed before or at its launch, so no session has
+    // logged in with this login and published records yet; there is nothing to reap or clear.
     if (creds !== undefined) await revokeCredentials(deps.credentials, agentId);
     throw e;
   }
@@ -620,10 +624,27 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
-  const revoked = prev.minted ? await revokeCredentials(deps.credentials, prev.agentId) : null;
-  if (deps.clearRetained !== undefined) {
-    for (const topic of retainedTopics(ctx.namespace, prev.agentId))
-      await deps.clearRetained(topic);
+  // A stalled attempt may still be connected: delete its login through the delete path (`reaped`
+  // first, records cleared before and after the delete), as every other delete does.
+  let revoked: boolean | null = null;
+  if (prev.minted && deps.publishRetained !== undefined && deps.clearRetained !== undefined) {
+    revoked = await reapAndRevoke(
+      prev.agentId,
+      ctx.namespace,
+      {
+        credentials: deps.credentials,
+        publishRetained: deps.publishRetained,
+        clearRetained: deps.clearRetained,
+        journal: deps.journal,
+      },
+      req.task,
+    );
+  } else {
+    if (prev.minted) revoked = await revokeCredentials(deps.credentials, prev.agentId);
+    if (deps.clearRetained !== undefined) {
+      for (const topic of retainedTopics(ctx.namespace, prev.agentId))
+        await deps.clearRetained(topic);
+    }
   }
   const attempt = prev.attempt + 1;
   const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);

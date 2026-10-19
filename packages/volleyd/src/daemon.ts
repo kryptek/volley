@@ -102,7 +102,7 @@ import {
   TunnelSupervisor,
   tunnelKey,
 } from "./hosts/tunnel";
-import type { CredentialStore } from "./identity";
+import type { AgentCredentials, CredentialStore } from "./identity";
 import { Journal, WaveLog } from "./journal";
 import {
   HOLDER_GONE,
@@ -204,7 +204,7 @@ import {
   switchModel,
   switchesSent,
 } from "./recovery";
-import { type ReapDeps, reapAndRevoke, retireAgent } from "./retire";
+import { type ReapDeps, reapAndRevoke, retireAgent, withJointRevokes } from "./retire";
 import { ScreenPublisher } from "./screen-publisher";
 import {
   type SpawnDecision,
@@ -1181,9 +1181,12 @@ export class Daemon {
   }
 
   /** What the delete path (retire.ts reapAndRevoke) needs from the daemon. */
-  private reapDeps(journal?: ReapDeps["journal"]): ReapDeps {
+  private reapDeps(
+    journal?: ReapDeps["journal"],
+    credentials: AgentCredentials | undefined = this.credentials,
+  ): ReapDeps {
     return {
-      credentials: this.credentials,
+      credentials,
       publishRetained: (topic, payload) =>
         this.broker.publish(topic, payload, { qos: 1, retain: true }),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
@@ -1228,15 +1231,19 @@ export class Daemon {
     return live;
   }
 
-  /** Stop timers and the mailbox loop; nothing is published. */
-  private halt(): void {
+  /**
+   * Stop timers and the mailbox loop; nothing is published. A clean `stop()` passes false and
+   * closes the control connection itself once its queue has drained (a queued retire still
+   * deletes its login).
+   */
+  private halt(closeControl = true): void {
     this.running = false;
     clearInterval(this.timer);
     clearInterval(this.watchdog);
     clearInterval(this.screenTimer);
     clearInterval(this.pruneTimer);
     clearTimeout(this.sweepTimer);
-    void this.dynsec?.close();
+    if (closeControl) void this.dynsec?.close();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -1258,10 +1265,11 @@ export class Daemon {
 
   /** Publish a terminal status and disconnect cleanly (suppresses the LWT). */
   async stop(): Promise<void> {
-    this.halt();
+    this.halt(false);
     await this.claude.stop();
     await this.tunnelsStopped;
     await this.enqueue(async () => {});
+    await this.dynsec?.close();
     this.acks.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
@@ -2115,6 +2123,8 @@ export class Daemon {
       briefGate: briefGatePath(this.opts.home),
       ...(spawner.briefsDir !== undefined ? { briefsDir: spawner.briefsDir } : {}),
       clearRetained: (topic) => this.broker.publish(topic, "", { qos: 1, retain: true }),
+      publishRetained: (topic, payload) =>
+        this.broker.publish(topic, payload, { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
       prepareAccount: async (a) => {
         this.claude.prepare(a);
@@ -2485,7 +2495,11 @@ export class Daemon {
     if (watch.state.status !== null) check(watch.state.status.type);
   }
 
-  private async retire(agentId: string, status: string): Promise<void> {
+  private async retire(
+    agentId: string,
+    status: string,
+    credentials: AgentCredentials | undefined = this.credentials,
+  ): Promise<void> {
     const a = this.supervised.get(agentId);
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
@@ -2522,7 +2536,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
       },
       {
-        ...this.reapDeps((ev) => this.append(a.wave, ev)),
+        ...this.reapDeps((ev) => this.append(a.wave, ev), credentials),
         releaseLock: (path) => {
           try {
             unlinkSync(path);
@@ -3949,7 +3963,7 @@ export class Daemon {
           result: {
             waves: [...this.waves.keys()].map((w) => this.snapshot(w)),
             ...(this.killSwitch ? { kill_switch: true } : {}),
-            ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
+            ...(this.sweeper !== undefined ? { agent_logins: await this.sweeper.refresh() } : {}),
           },
         };
       }
@@ -4475,9 +4489,12 @@ export class Daemon {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
       cancelled.push(a.agent_id);
     }
-    // No login outlives a stop (finding 13): every agent of the wave is retired through the
-    // delete path now, its session having been told to stop and interrupted above.
-    for (const a of running) await this.retireStopped(wave, a);
+    // No login outlives a stop: every agent of the wave is retired through the delete path now,
+    // its session having been told to stop and interrupted above; their deletes go out together.
+    await withJointRevokes(
+      this.credentials,
+      running.map((a) => (credentials) => this.retireStopped(wave, a, credentials)),
+    );
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
     return cancelled;
   }
@@ -4486,9 +4503,10 @@ export class Daemon {
   private async retireStopped(
     wave: WaveId,
     a: { task: TaskId; role: string; agent_id: string },
+    credentials: AgentCredentials | undefined,
   ): Promise<void> {
     if (this.supervised.has(a.agent_id)) {
-      await this.retire(a.agent_id, "stopped");
+      await this.retire(a.agent_id, "stopped", credentials);
       return;
     }
     const spawned = this.journalEvents(wave)
@@ -4499,7 +4517,7 @@ export class Daemon {
       ? await reapAndRevoke(
           a.agent_id,
           this.agentNamespace(wave, a.agent_id),
-          this.reapDeps((ev) => this.append(wave, ev)),
+          this.reapDeps((ev) => this.append(wave, ev), credentials),
           a.task,
         )
       : null;

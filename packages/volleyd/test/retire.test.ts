@@ -9,6 +9,7 @@ import {
   reapAndRevoke,
   retainedTopics,
   retireAgent,
+  withJointRevokes,
 } from "../src/retire";
 import { SpawnError } from "../src/spawn-error";
 import type { NewEvent } from "../src/types";
@@ -65,17 +66,21 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-  it("publishes `reaped { credentials_deleted }`, clears every record, THEN deletes the login", async () => {
+  it("publishes `reaped { credentials_deleted }`, clears every record, THEN deletes the login (and clears again)", async () => {
     expect(await reapAndRevoke(ID, "ns", deps(), "T1")).toBe(true);
-    expect(log).toEqual([
-      `publish volley/ns/${ID}/status`,
+    const clears = [
       `clear volley/_system/registry/${ID}`,
       `clear volley/ns/${ID}/status`,
       `clear volley/ns/${ID}/progress`,
       `clear volley/ns/${ID}/result`,
       `clear volley/ns/${ID}/capability`,
       `clear volley/ns/${ID}/screen`,
+    ];
+    expect(log).toEqual([
+      `publish volley/ns/${ID}/status`,
+      ...clears,
       `deleteClient ${ID}`,
+      ...clears,
     ]);
     const status = JSON.parse(published[0]?.payload as string);
     expect(status).toMatchObject({
@@ -94,6 +99,63 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
     ]);
   });
 
+  it("a record the still-connected agent re-publishes before its login is deleted is cleared too", async () => {
+    const retained = new Map<string, string>();
+    const d = deps();
+    const r = await reapAndRevoke(
+      ID,
+      "ns",
+      {
+        ...d,
+        publishRetained: async (t, p) => {
+          retained.set(t, p);
+        },
+        clearRetained: async (t) => {
+          retained.delete(t);
+        },
+        credentials: {
+          mint: creds.mint,
+          revoke: async (id) => {
+            // Inside the batch window: the agent is still connected and publishes its status.
+            retained.set(`volley/ns/${ID}/status`, '{"type":"working"}');
+            return creds.revoke(id);
+          },
+        },
+      },
+      "T1",
+    );
+    expect(r).toBe(true);
+    expect([...retained.keys()]).toEqual([]);
+  });
+
+  it("withJointRevokes: deletes held until every job waits on one, then sent together", async () => {
+    const sent: string[][] = [];
+    let tick: string[] = [];
+    const store = {
+      mint: creds.mint,
+      revoke: async (id: string) => {
+        tick.push(id);
+        if (tick.length === 1) {
+          queueMicrotask(() => {
+            sent.push(tick);
+            tick = [];
+          });
+        }
+        return true;
+      },
+    };
+    const slow = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    await withJointRevokes(store, [
+      async (c) => c?.revoke("a"),
+      async (c) => {
+        await slow(30);
+        await c?.revoke("b");
+      },
+      async () => slow(10), // a job with no login to delete
+    ]);
+    expect(sent).toEqual([["a", "b"]]);
+  });
+
   it("after a terminal status: the delete path, the lock released, agent_retired journaled", async () => {
     const path = lockPath(home, "/wt/w1/T1-implementer");
     await acquireLock(
@@ -104,7 +166,7 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
     );
     await retireAgent(req({ lockPath: path }), deps());
     expect(creds.revoked).toEqual([ID]);
-    expect(cleared()).toEqual(retainedTopics("ns", ID));
+    expect(cleared()).toEqual([...retainedTopics("ns", ID), ...retainedTopics("ns", ID)]);
     expect(existsSync(path)).toBe(false);
     expect(events.map((e) => e.type)).toEqual([
       "agent_reaped_by_supervisor",
@@ -134,7 +196,7 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
 
   it.each(["failed", "reaped", "moved", "stopped"])("retires a %s agent too", async (status) => {
     await retireAgent(req({ status }), deps());
-    expect(cleared()).toHaveLength(6);
+    expect(cleared()).toHaveLength(12);
   });
 
   it.each([["working"], ["blocked"], [null]])(

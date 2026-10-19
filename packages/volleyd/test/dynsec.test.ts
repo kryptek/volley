@@ -122,6 +122,16 @@ describe("DynsecControl", () => {
     expect(control.opened).toBe(2);
   });
 
+  it("a reconnect checks the version again: a broker downgraded to 2.0 is refused", async () => {
+    await creds.mint("w1-t1-implementer-1");
+    await fake.setVersion("mosquitto version 2.0.22");
+    fake.kick(fake.admin.username);
+    await new Promise((r) => setTimeout(r, 1100)); // the watchdog notices the drop
+    const err = await creds.mint("w1-t2-implementer-1").catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("BROKER_TOO_OLD");
+    expect(control.opened).toBe(1);
+  });
+
   it("agentLogins lists only agent logins (never the desk or the admin)", async () => {
     await creds.mint("w1-t1-implementer-1");
     expect(await creds.agentLogins()).toEqual(["w1-t1-implementer-1"]);

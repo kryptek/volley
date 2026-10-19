@@ -60,6 +60,11 @@ export interface SupervisedEnvOptions {
   creds?: MemoryCredentials;
   /** Runs when the implementer is launched (credentials minted, not yet supervised). */
   onLaunch?: (daemon: Daemon) => void;
+  /**
+   * More tasks for the wave (YAML under `tasks:`, e.g. `T2: { issue: 42 }`). Their agents are
+   * launched but never register: they stay in verification (running in the wave, not supervised).
+   */
+  tasks?: string[];
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -112,7 +117,8 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     pub(buildTopic(ns, AGENT, "status"), type, "status", payload);
 
   // The launched session: MCP registers, the SessionStart hook re-publishes + heartbeats.
-  host.onLaunch = () => {
+  host.onLaunch = (spec) => {
+    if (!spec.cwd.endsWith("/T1-implementer")) return; // an extra task's agent: silent
     o.onLaunch?.(daemon);
     setTimeout(async () => {
       await status("spawning"); // the MCP server's lifecycle, before its registration
@@ -147,7 +153,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   const waveFile = join(env.home, "w1.yaml");
   writeFileSync(
     waveFile,
-    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\n${(o.tasks ?? []).map((t) => `  ${t}\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
   const r = await runCli(["run", waveFile], env.env);
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);
@@ -162,6 +168,9 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     }
   };
   await until(() => journal().some((e) => e.type === "agent_registered"));
+  await until(
+    () => journal().filter((e) => e.type === "agent_spawned").length >= 1 + (o.tasks ?? []).length,
+  );
   // Supervision starts once the daemon has consumed the verification outcome.
   await new Promise((res) => setTimeout(res, 100));
   return {

@@ -347,7 +347,7 @@ tree and nothing of other tokens. The client connects as that
 login, subscribes to the reply topic and publishes `{ op: "token_redeem", token, label, reply_key }`
 on the request topic; the daemon refuses a token whose id is not the topic's, then pipes the token to `volley auth redeem --label <label> --json` on **stdin** (never argv),
 which burns it and creates an account with the token's role (`admin-<id>` / `steer-<id>`),
-journaled as `token_redeemed { by, name, role, label }`. A used, expired or unknown token is
+journaled as `token_redeemed { by, name, role, label }` (`by` is the token id: the redeeming login). A used, expired or unknown token is
 refused. The token's login is not removed during redemption (deleting it would disconnect the
 client before it hears the answer): `volley auth` drops it about a minute after redemption
 or once the token expires, and the daemon runs `volley auth list --json` every `token_prune_ms`
@@ -935,8 +935,8 @@ worktree lock naming it, no non-terminal retained status (`spawning`, `registere
 `blocked`…, in any namespace), and not minted (or first seen) within `spawn_timeout_s`. One sweep's
 deletes go as one control message; it journals `credentials_swept { agent_ids }` in `_system`. The
 fixed identities, accounts, token logins and the admin are never candidates. `volleyd status` starts
-with `agent logins: N live, M swept` (the logins left after the last sweep, adjusted for mints and
-retires since, and the total swept per the `_system` journal); `--json` has
+with `agent logins: N live, M swept` (the agent logins on the broker right now, listed when the
+status is asked for, and the total swept per the `_system` journal); `--json` has
 `agent_logins: { live, swept }`.
 ### Remote hosts (ssh + tmux)
 

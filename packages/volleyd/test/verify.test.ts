@@ -291,7 +291,18 @@ describe("verify through hook signals (Aedes)", () => {
       credentials_revoked: true,
       lock_released: false,
     });
-    expect(env.cleared).toEqual(retainedTopics(NS, "w1-t1-implementer-1"));
+    // Through the delete path: `reaped { credentials_deleted }` first, the records cleared
+    // before the delete and again after it.
+    expect(env.published.map((p) => [p.topic, JSON.parse(p.payload).type])).toEqual([
+      [buildTopic(NS, "w1-t1-implementer-1", "status"), "reaped"],
+    ]);
+    expect(env.cleared).toEqual([
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+      ...retainedTopics(NS, "w1-t1-implementer-1"),
+    ]);
+    expect(env.events.map((e) => e.type)).toEqual(
+      expect.arrayContaining(["agent_reaped_by_supervisor", "credentials_revoked"]),
+    );
     // cleanup sees only the second attempt as live, and nothing once it is retired too.
     const j = Journal.open(join(env.home, "waves", "w1"));
     j.append({ type: "wave_submitted", data: { wave: env.wave } });

@@ -31,7 +31,7 @@ export interface SweepPlan {
   kept: string[];
 }
 
-/** Which logins to delete. Pure. */
+/** Which logins to delete. Also prunes and fills `i.firstSeen` in place (its only side effect). */
 export function planSweep(i: SweepInput): SweepPlan {
   const listed = new Set(i.logins);
   for (const id of [...i.firstSeen.keys()]) if (!listed.has(id)) i.firstSeen.delete(id);
@@ -66,7 +66,7 @@ export interface SweeperDeps {
 }
 
 export interface SweepCounts {
-  /** Agent logins left after the last sweep, adjusted for mints and revokes since. */
+  /** Agent logins on the broker: counted by the last sweep, or by `refresh()` since. */
   live: number;
   /** Logins swept, in total (from the `_system` journal across restarts). */
   swept: number;
@@ -80,6 +80,17 @@ export class CredentialSweeper {
     private readonly d: SweeperDeps,
     readonly counts: SweepCounts = { live: 0, swept: 0 },
   ) {}
+
+  /**
+   * The counts with `live` read from the broker now (one paged listClients), so mints and
+   * retires since the last sweep show; the last known count when the broker cannot answer.
+   */
+  async refresh(): Promise<SweepCounts> {
+    try {
+      this.counts.live = (await this.d.credentials.agentLogins()).length;
+    } catch {}
+    return { ...this.counts };
+  }
 
   /** One sweep (concurrent calls share it). Returns the swept agent ids. */
   sweep(): Promise<string[]> {

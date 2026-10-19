@@ -90,9 +90,10 @@ describe.skipIf(!RUN)("volleyd agent logins on mosquitto 2.1", () => {
     await new Promise((r) => setTimeout(r, 400));
     expect(agent.connected).toBe(false);
     const mine = seen.filter((m) => m.topic === statusTopic);
-    // volleyd's `reaped`, then the clear; the broker sent no will (it would say "disconnect").
+    // volleyd's `reaped`, the clear, the second clear after the delete; the broker sent no will
+    // (it would say "disconnect").
     expect(mine.map((m) => (m.payload === "" ? "" : JSON.parse(m.payload).payload.reason))).toEqual(
-      ["credentials_deleted", ""],
+      ["credentials_deleted", "", ""],
     );
     expect(await observer.queryRetained(statusTopic, 300)).toBeNull();
   });

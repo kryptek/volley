@@ -18,7 +18,7 @@ export function retainedTopics(namespace: string, agentId: string): string[] {
 /**
  * Retire statuses that are not the agent's own: `moved` is an account move (claude/move.ts),
  * whose cancel stopped the session before its respawn under another profile; `stopped` is
- * `volleyd stop`, which retires the wave's agents at once (finding 13: no login outlives it).
+ * `volleyd stop`, which retires the wave's agents at once (no login may outlive a stop).
  */
 const DAEMON_ENDED: ReadonlySet<string> = new Set(["moved", "stopped"]);
 
@@ -39,8 +39,10 @@ export interface ReapDeps {
  * disconnects it WITHOUT its will (measured on 2.0.22 and 2.1.2), so nobody else would say it is gone:
  * volleyd publishes its retained `status: reaped { reason: "credentials_deleted" }` first, then
  * clears its retained records itself (registry, status, progress, result, capability, screen),
- * and only then deletes the login (batched with the other deletes of the moment). Journaled as
- * `agent_reaped_by_supervisor` and `credentials_revoked`. Returns whether the delete succeeded.
+ * and only then deletes the login (batched with the other deletes of the moment). A still
+ * connected agent can re-publish a record inside that window (a `stop` cancels it just before),
+ * so once the login is gone, and the agent with it, the records are cleared once more. Journaled
+ * as `agent_reaped_by_supervisor` and `credentials_revoked`. Returns whether the delete succeeded.
  */
 export async function reapAndRevoke(
   agentId: string,
@@ -63,12 +65,71 @@ export async function reapAndRevoke(
     data: { agent_id: agentId, reason: CREDENTIALS_DELETED },
   });
   const revoked = await revokeCredentials(deps.credentials, agentId);
+  if (revoked)
+    for (const topic of retainedTopics(namespace, agentId)) await deps.clearRetained(topic);
   await deps.journal({
     type: "credentials_revoked",
     ...(task !== undefined ? { task } : {}),
     data: { agent_id: agentId, ok: revoked },
   });
   return revoked;
+}
+
+/**
+ * Run `jobs` so that the logins they delete go out together (`volleyd stop` deletes all of a
+ * wave's logins at once). Each job runs alone until it finishes or asks to revoke a login; that
+ * revoke is held. Once every job got that far, the held revokes are all sent in the same tick, so
+ * the store's batch window carries them as one control message; then each held job finishes, one
+ * at a time (a later revoke goes straight to the store). Rethrows the first job failure at the end.
+ */
+export async function withJointRevokes(
+  credentials: AgentCredentials | undefined,
+  jobs: readonly ((credentials: AgentCredentials | undefined) => Promise<unknown>)[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  const held: { id: string; done: (ok: boolean) => void; end: Promise<void> }[] = [];
+  /** Set while a job runs in the first pass: where its revoke is parked. */
+  let park: ((id: string, done: (ok: boolean) => void) => void) | null = null;
+  const joint: AgentCredentials | undefined =
+    credentials === undefined
+      ? undefined
+      : {
+          mint: credentials.mint,
+          revoke: (id) => {
+            const p = park;
+            return p === null ? credentials.revoke(id) : new Promise<boolean>((d) => p(id, d));
+          },
+        };
+  for (const run of jobs) {
+    let parked: { id: string; done: (ok: boolean) => void } | null = null;
+    let onPark: () => void = () => {};
+    const parkedNow = new Promise<void>((r) => {
+      onPark = r;
+    });
+    park = (id, done) => {
+      park = null;
+      parked = { id, done };
+      onPark();
+    };
+    const end = run(joint).then(
+      () => {},
+      (e: unknown) => {
+        errors.push(e);
+      },
+    );
+    await Promise.race([end, parkedNow]);
+    park = null;
+    const p = parked as { id: string; done: (ok: boolean) => void } | null;
+    if (p !== null) held.push({ ...p, end });
+  }
+  if (credentials !== undefined && held.length > 0) {
+    const results = await Promise.all(held.map((h) => credentials.revoke(h.id).catch(() => false)));
+    for (const [i, h] of held.entries()) {
+      h.done(results[i] === true);
+      await h.end;
+    }
+  }
+  if (errors.length > 0) throw errors[0];
 }
 
 export interface RetireRequest {

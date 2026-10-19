@@ -43,7 +43,7 @@ function auth() {
       return {
         stdout: JSON.stringify({
           token: `vly_signin_0000abcd_${"f".repeat(32)}`,
-          username: "redeem-0000abcd",
+          username: "0000abcd",
           expires_at: "2026-10-18T12:10:00.000Z",
         }),
       };

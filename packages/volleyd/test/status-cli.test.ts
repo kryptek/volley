@@ -306,6 +306,22 @@ describe("volleyd status: agent logins", () => {
     }
   });
 
+  it("the live count follows mints and retires between sweeps", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      const creds = memoryCredentials();
+      const d = await env.start({ spawner: { credentials: creds }, credentialSweepMs: 3_600_000 });
+      await d.sweepCredentials();
+      await creds.mint("w1-t1-implementer-1");
+      const line = async () => (await runCli(["status"], env.env)).stdout.split("\n")[0];
+      expect(await line()).toBe("agent logins: 1 live, 0 swept");
+      await creds.revoke("w1-t1-implementer-1");
+      expect(await line()).toBe("agent logins: 0 live, 0 swept");
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it("without a credential store there is no login line", async () => {
     const env = await makeDaemonEnv();
     try {
