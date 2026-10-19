@@ -28,7 +28,8 @@
  *
  * Machines (SPEC §4.6.14): each paired machine's retained health record goes
  * into `machines` by name, taken only from the machine itself or volleyd and
- * only when it names its topic's machine.
+ * only when it names its topic's machine. Which of them are machines at all
+ * (configured hosts) is the section's call, at render time.
  */
 import {
   type AgentAttention,
@@ -206,7 +207,10 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 /**
  * A machine record: kept when the machine itself or volleyd (its down record)
  * published it for this topic's machine; a cleared topic (`peer_remove`)
- * forgets the machine. Anything else leaves the slice as it was.
+ * forgets the machine. Anything else leaves the slice as it was. A down
+ * record that replaces an up one keeps the up one's load, agents and the
+ * later `last_seen`, as volleyd's `MachineHealth.observe` does: the LWT is
+ * built when the machine connects, so its values may be hours old.
  */
 function reduceMachine(state: DeskState, name: string, m: DeskMessage): DeskState {
   const env = m.envelope;
@@ -219,7 +223,21 @@ function reduceMachine(state: DeskState, name: string, m: DeskMessage): DeskStat
   ) {
     return state;
   }
-  return { ...state, machines: keyed(state.machines, name, p as MachinePayload) };
+  const next = p as MachinePayload;
+  const prior = state.machines?.[name];
+  const rec: MachinePayload =
+    next.tunnel === "down" && prior
+      ? {
+          ...prior,
+          tunnel: "down",
+          ...(next.reason !== undefined ? { reason: next.reason } : {}),
+          last_seen:
+            Date.parse(next.last_seen) > Date.parse(prior.last_seen)
+              ? next.last_seen
+              : prior.last_seen,
+        }
+      : next;
+  return { ...state, machines: keyed(state.machines, name, rec) };
 }
 
 /** `map` with `key` set to `value`, or removed when `value` is undefined (a cleared topic). */
@@ -904,6 +922,23 @@ export function workingCount(state: DeskState): number {
     const t = a.status?.type;
     if (t === "working") return true;
     return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;
+  }).length;
+}
+
+/**
+ * This machine's agents, for Settings › Machines: live agents (not
+ * coordinators, never supervisors, none of an ended wave, no terminal status)
+ * whose task names no remote `host`.
+ */
+export function localAgentCount(state: DeskState): number {
+  return Object.values(state.agents).filter((a) => {
+    if (state.coordinators[a.id] || isSupervisorId(a.id)) return false;
+    const w = state.waves[a.wave];
+    if (isEndedWave(w)) return false;
+    const t = a.status?.type;
+    if (t === undefined || TERMINAL_STATUS.has(t)) return false;
+    const task = w?.state?.tasks.find((x) => x.id === a.task);
+    return typeof task?.host !== "string";
   }).length;
 }
 

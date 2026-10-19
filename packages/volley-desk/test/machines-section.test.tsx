@@ -1,10 +1,19 @@
 import { constants, createPublicKey, publicEncrypt } from "node:crypto";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Machines, type MachinesProps, sshHost } from "../src/settings/Machines";
 import { DESK_SUBSCRIPTIONS } from "../src/store/mqtt-client";
-import { type PeerOps, createPeerOps, joinCommand } from "../src/store/peerOps";
-import { initialState, reduceAll, resync } from "../src/store/reducer";
+import {
+  ADMIN_PROBE_TIMEOUT_MS,
+  type AdminStatus,
+  type PeerInvite,
+  type PeerOps,
+  createPeerOps,
+  joinCommand,
+  newId,
+  pairingSupported,
+} from "../src/store/peerOps";
+import { initialState, localAgentCount, reduceAll, resync } from "../src/store/reducer";
 import type { DeskMessage, Envelope, MachinePayload } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-19T09:30:00.000Z");
@@ -87,6 +96,91 @@ describe("reducer: the machines slice", () => {
     expect(s.machines ?? {}).toEqual({});
   });
 
+  it("a disconnect record (the LWT, built at connect time) keeps the last heartbeat's load, agents and last_seen", () => {
+    const lwt: MachinePayload = {
+      ...boxA,
+      tunnel: "down",
+      reason: "disconnect",
+      load: [0, 0, 0],
+      agents: 0,
+      last_seen: iso(NOW - 5 * 3600_000),
+    };
+    const s = reduceAll(initialState(), [machineMsg(boxA), machineMsg(lwt)]);
+    expect(s.machines?.["box-a"]).toEqual({
+      ...boxA,
+      tunnel: "down",
+      reason: "disconnect",
+    });
+    // A later down record (volleyd's, after the heartbeat stops) still moves last_seen on.
+    const later = { ...lwt, reason: "heartbeat_timeout" as const, last_seen: iso(NOW + 60_000) };
+    const s2 = reduceAll(s, [machineMsg(later, "box-a", "volleyd")]);
+    expect(s2.machines?.["box-a"]).toMatchObject({
+      reason: "heartbeat_timeout",
+      load: boxA.load,
+      agents: 3,
+      last_seen: iso(NOW + 60_000),
+    });
+    // With no up record before it (a page loaded after the drop) it is taken as is.
+    expect(reduceAll(initialState(), [machineMsg(lwt)]).machines?.["box-a"]).toEqual(lwt);
+  });
+
+  it("counts this machine's agents: live ones whose task names no remote host", () => {
+    const wave = (tasks: Record<string, unknown>[]): DeskMessage => ({
+      topic: "volley/_waves/w1/state",
+      envelope: {
+        schema_version: "0.1",
+        agent_id: "volleyd",
+        channel: "_waves/state",
+        type: "wave-state",
+        wall_time: iso(NOW),
+        payload: {
+          wave: "w1",
+          version: 1,
+          owner: null,
+          repo: "r",
+          release_branch: "b",
+          status: "running",
+          tasks,
+          open_decisions: [],
+          gates: [],
+          updated_at: iso(NOW),
+        },
+      },
+      receivedAt: NOW,
+      retained: true,
+    });
+    const status = (id: string, type: string): DeskMessage => ({
+      topic: `volley/default/${id}/status`,
+      envelope: {
+        schema_version: "0.1",
+        agent_id: id,
+        channel: "status",
+        type,
+        wall_time: iso(NOW),
+        payload: {},
+      },
+      receivedAt: NOW,
+      retained: true,
+    });
+    const s = reduceAll(initialState(), [
+      wave([
+        { id: "t1", issue: 1, stage: "implementing", agents: { implementer: "w1-t1-impl" } },
+        {
+          id: "t2",
+          issue: 2,
+          stage: "implementing",
+          host: "box-a",
+          agents: { implementer: "w1-t2-impl" },
+        },
+        { id: "t3", issue: 3, stage: "done", agents: { implementer: "w1-t3-impl" } },
+      ]),
+      status("w1-t1-impl", "working"),
+      status("w1-t2-impl", "working"),
+      status("w1-t3-impl", "done"),
+    ]);
+    expect(localAgentCount(s)).toBe(1);
+  });
+
   it("is retained state: a reconnect resync forgets it until the replay", () => {
     const s = resync(reduceAll(initialState(), [machineMsg(boxA)]));
     expect(s.machines).toEqual({});
@@ -156,7 +250,7 @@ async function published(c: ReturnType<typeof fakeClient>, n: number) {
 describe("peer ops: admin requests on the Desk's own account-op topic", () => {
   it("peer_invite goes to volley/_system/auth/ops/<identity> with a reply_key; the sealed code is opened", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk" });
+    const ops = createPeerOps(c, { identity: "owner-desk", now: () => new Date(NOW) });
     const pending = ops.invite();
     const req = await published(c, 1);
     expect(req.topic).toBe("volley/_system/auth/ops/owner-desk");
@@ -210,44 +304,141 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     await expect(r).resolves.toEqual({ ok: true });
   });
 
-  it("admin(): an answered account_list proves an admin; no answer means not one; it asks once", async () => {
+  it("admin(): an answered account_list proves an admin; it asks once and then knows", async () => {
     const c = fakeClient();
     const ops = createPeerOps(c, { identity: "owner-desk" });
+    expect(ops.known()).toBeNull();
     const yes = ops.admin();
     const req = await published(c, 1);
     expect(req.env.payload).toEqual({ op: "account_list" });
     c.answer({ op: "account_list", ok: true, result: { accounts: [] } });
-    await expect(yes).resolves.toBe(true);
-    await expect(ops.admin()).resolves.toBe(true);
+    await expect(yes).resolves.toBe("admin");
+    expect(ops.known()).toBe("admin");
+    await expect(ops.admin()).resolves.toBe("admin");
     expect(c.published).toHaveLength(1);
-
-    // The broker drops a non-admin's publish to the topic: nothing ever answers.
-    const quiet = fakeClient();
-    await expect(
-      createPeerOps(quiet, { identity: "watcher", timeoutMs: 20 }).admin(),
-    ).resolves.toBe(false);
-    const refusing = fakeClient();
-    const no = createPeerOps(refusing, { identity: "watcher" }).admin();
-    await published(refusing, 1);
-    refusing.answer({ op: "account_list", ok: false, error: "watcher is not an admin account" });
-    await expect(no).resolves.toBe(false);
   });
 
-  it("the join command names the code and the ssh destination", () => {
+  it("admin(): volleyd's refusal is a definite no, and it is kept", async () => {
+    const refusing = fakeClient();
+    const ops = createPeerOps(refusing, { identity: "watcher" });
+    const no = ops.admin();
+    await published(refusing, 1);
+    refusing.answer({ op: "account_list", ok: false, error: "watcher is not an admin account" });
+    await expect(no).resolves.toBe("not-admin");
+    await expect(ops.admin()).resolves.toBe("not-admin");
+    expect(refusing.published).toHaveLength(1);
+  });
+
+  it("admin(): no answer is not a no; it is not kept, so the next ask asks again", async () => {
+    const quiet = fakeClient();
+    const ops = createPeerOps(quiet, { identity: "owner-desk", probeTimeoutMs: 20 });
+    await expect(ops.admin()).resolves.toBe("no-answer");
+    expect(ops.known()).toBeNull();
+    const again = ops.admin();
+    await published(quiet, 2);
+    quiet.answer({ op: "account_list", ok: true, result: { accounts: [] } });
+    await expect(again).resolves.toBe("admin");
+  });
+
+  it("admin(): the probe waits seconds, not the 30 s an op waits (account_list is a local read)", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops = createPeerOps(fakeClient(), { identity: "owner-desk" });
+      const r = ops.admin();
+      await vi.advanceTimersByTimeAsync(ADMIN_PROBE_TIMEOUT_MS);
+      await expect(r).resolves.toBe("no-answer");
+      expect(ADMIN_PROBE_TIMEOUT_MS).toBeLessThanOrEqual(5000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("admin(): the fixed identities are never admins (SPEC §4.6.13): no ask, known at once", async () => {
+    for (const identity of ["desk", "coordinator", "volleyd"]) {
+      const c = fakeClient();
+      const ops = createPeerOps(c, { identity });
+      expect(ops.known()).toBe("not-admin");
+      await expect(ops.admin()).resolves.toBe("not-admin");
+      expect(c.published).toHaveLength(0);
+    }
+  });
+
+  it("admin(): a role known from sign-in wins over the probe", async () => {
+    const c = fakeClient();
+    const admin = createPeerOps(c, { identity: "owner-desk", role: "admin" });
+    expect(admin.known()).toBe("admin");
+    await expect(admin.admin()).resolves.toBe("admin");
+    const steer = createPeerOps(c, { identity: "phone", role: "steer" });
+    expect(steer.known()).toBe("not-admin");
+    await expect(steer.admin()).resolves.toBe("not-admin");
+    expect(c.published).toHaveLength(0);
+  });
+
+  it("the code's expiry is counted from when the answer arrived (ttl_s), not volleyd's clock", async () => {
+    const c = fakeClient();
+    const ops = createPeerOps(c, { identity: "owner-desk", now: () => new Date(NOW) });
+    const pending = ops.invite();
+    const req = await published(c, 1);
+    // volleyd's clock runs 4 minutes ahead of this browser's.
+    c.answer({
+      op: "peer_invite",
+      ok: true,
+      result: { expires_at: iso(NOW + 14 * 60_000), ttl_s: 600 },
+      sealed: sealTo(req.env, { code: "MXQ4-7KDP" }),
+    });
+    await expect(pending).resolves.toMatchObject({ expiresAt: iso(NOW + 600_000) });
+  });
+
+  it("newId is a fresh UUID v4 (the envelope's correlation_id), even without crypto.randomUUID", () => {
+    const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const a = newId();
+    expect(a).toMatch(UUID_V4);
+    expect(newId()).not.toBe(a);
+    const { getRandomValues } = globalThis.crypto;
+    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+    try {
+      expect(globalThis.crypto.randomUUID).toBeUndefined();
+      expect(newId()).toMatch(UUID_V4);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("without a secure context (plain http on the LAN) nothing throws: ops answer, invite says why", async () => {
+    const { getRandomValues } = globalThis.crypto;
+    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+    vi.stubGlobal("isSecureContext", false);
+    try {
+      expect(pairingSupported()).toBe(false);
+      const c = fakeClient();
+      const ops = createPeerOps(c, { identity: "owner-desk", probeTimeoutMs: 20 });
+      const probe = ops.admin();
+      await published(c, 1);
+      c.answer({ op: "account_list", ok: true, result: { accounts: [] } });
+      await expect(probe).resolves.toBe("admin");
+      await expect(ops.invite()).resolves.toMatchObject({ ok: false, error: /https/ });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(pairingSupported()).toBe(true);
+  });
+
+  it("the join command names the code and the ssh destination; never a shell placeholder", () => {
     expect(joinCommand("MXQ4-7KDP", "owner@hub.local")).toBe(
       "volley peer join MXQ4-7KDP --to owner@hub.local",
     );
-    expect(joinCommand("MXQ4-7KDP", "")).toBe(
-      "volley peer join MXQ4-7KDP --to <you>@<this-machine>",
-    );
+    expect(joinCommand("MXQ4-7KDP", "  ")).toBe("volley peer join MXQ4-7KDP --to …");
   });
 });
 
 // ------------------------------------------------------------------ the section
 
+type Known = ReturnType<PeerOps["known"]>;
+
 function fakeOps(over: Partial<PeerOps> = {}) {
   return {
-    admin: vi.fn(async () => true),
+    known: vi.fn((): Known => null),
+    admin: vi.fn(async (): Promise<AdminStatus> => "admin"),
     invite: vi.fn(async () => ({
       ok: true as const,
       code: "MXQ4-7KDP",
@@ -262,10 +453,12 @@ function setup(props: Partial<MachinesProps> = {}) {
   const ops = fakeOps();
   const base: MachinesProps = {
     machines: { "box-a": boxA, "box-b": boxB },
+    hosts: ["box-a", "box-b", "box-c"],
     hubUp: true,
+    hubAgents: 2,
     ops,
     now: NOW,
-    host: "owner@hub.local",
+    host: "hub.local",
     ...props,
   };
   const r = render(<Machines {...base} />);
@@ -277,6 +470,14 @@ const card = (name: string) => screen.getByRole("article", { name });
 /** The join command as shown (its flags are wrapped so they never break at a hyphen). */
 const command = (text: string) =>
   screen.getByText((_, el) => el?.tagName === "CODE" && el.textContent === text);
+const address = () => screen.getByLabelText("This machine's ssh address");
+
+/** + Add a machine: the code is created at once (prototype), then the Join step shows. */
+async function addMachine() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
+  });
+}
 
 describe("Settings › Machines", () => {
   it("two retained machine records render two cards with their health, beside this machine", async () => {
@@ -296,60 +497,103 @@ describe("Settings › Machines", () => {
     const hub = within(card("This machine"));
     expect(hub.getByText("this one")).toBeInTheDocument();
     expect(hub.getByText("local")).toBeInTheDocument();
+    expect(hub.getByText("2 agents")).toBeInTheDocument();
     expect(hub.queryByRole("button", { name: /Remove/ })).toBeNull();
   });
 
-  it("Add a machine → Create pairing code calls peer_invite and shows the command with a countdown", async () => {
+  it("only configured hosts are machines (SPEC §4.6.14): another account's own record is not shown", async () => {
+    const rogue: MachinePayload = { ...boxC, name: "phone" };
+    setup({ machines: { "box-a": boxA, phone: rogue } });
+    await act(flush);
+    expect(card("box-a")).toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: "phone" })).toBeNull();
+  });
+
+  it("+ Add a machine creates the code at once (peer_invite) and shows the command with a countdown", async () => {
     const { ops } = setup();
     await act(flush);
-    fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
-    // It says what it will do before it does it.
-    expect(screen.getByText(/one-time pairing code/i)).toBeInTheDocument();
-    expect(ops.invite).not.toHaveBeenCalled();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    });
+    await addMachine();
     expect(ops.invite).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Run this on the other machine")).toBeInTheDocument();
-    expect(command("volley peer join MXQ4-7KDP --to owner@hub.local")).toBeInTheDocument();
     expect(screen.getByText("10:00")).toBeInTheDocument();
     expect(screen.getByText(/Waiting for the machine to join/)).toBeInTheDocument();
-    // The ssh destination is editable and the command follows it.
-    fireEvent.change(screen.getByLabelText("This machine's ssh address"), {
-      target: { value: "me@hub" },
-    });
+    // The ssh destination is this machine's, which only the owner knows: never a bare host guess.
+    expect(address()).toHaveValue("");
+    expect(address()).toHaveAttribute("placeholder", "you@hub.local");
+    fireEvent.change(address(), { target: { value: "me@hub" } });
     expect(command("volley peer join MXQ4-7KDP --to me@hub")).toBeInTheDocument();
   });
 
-  it("the countdown runs out into an expired code that offers a new one", async () => {
+  it("with no ssh address yet the command cannot be copied, and shows no shell placeholder", async () => {
+    setup({ host: "" });
+    await act(flush);
+    await addMachine();
+    expect(address()).toBeRequired();
+    expect(address()).toHaveAttribute("placeholder", "you@hub-hostname");
+    expect(command("volley peer join MXQ4-7KDP --to …")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Copy/ })).toBeDisabled();
+    expect(screen.getByText(/Enter this machine’s ssh address/)).toBeInTheDocument();
+    fireEvent.change(address(), { target: { value: "owner@hub" } });
+    expect(screen.getByRole("button", { name: /Copy/ })).toBeEnabled();
+  });
+
+  it("Cancel is off while the code is being created (closing would still mint one)", async () => {
+    let answer: (v: PeerInvite) => void = () => {};
+    const ops = fakeOps({
+      invite: vi.fn(
+        () =>
+          new Promise<PeerInvite>((r) => {
+            answer = r;
+          }),
+      ),
+    });
+    setup({ ops });
+    await act(flush);
+    await addMachine();
+    expect(screen.getByText(/Creating a one-time pairing code/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await act(async () => answer({ ok: true, code: "MXQ4-7KDP", expiresAt: iso(NOW + 600_000) }));
+    expect(screen.getByText("Run this on the other machine")).toBeInTheDocument();
+  });
+
+  it("the countdown runs out into an expired code that is no longer shown and offers a new one", async () => {
     const { rerender } = setup();
     await act(flush);
-    fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    });
+    await addMachine();
+    fireEvent.change(address(), { target: { value: "me@hub" } });
     rerender({ now: NOW + 9 * 60_000 + 55_000 });
     expect(screen.getByText("0:05")).toBeInTheDocument();
     rerender({ now: NOW + 601_000 });
     expect(screen.getByText(/The code expired/)).toBeInTheDocument();
+    expect(screen.queryByText(/MXQ4-7KDP/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Copy/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Create a new code" })).toBeInTheDocument();
   });
 
-  it("a new machine record flips the Stepper to Joined; Done closes it", async () => {
+  it("a new machine record flips the Stepper to Joined, which stays; Done closes it", async () => {
     const { rerender } = setup();
     await act(flush);
-    fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    });
+    await addMachine();
     // A record that was already there is not the new machine.
     rerender({ machines: { "box-a": { ...boxA, agents: 4 }, "box-b": boxB } });
     expect(screen.queryByText(/joined/)).toBeNull();
     rerender({ machines: { "box-a": boxA, "box-b": boxB, "box-c": boxC } });
     expect(screen.getByRole("heading", { name: /box-c joined/ })).toBeInTheDocument();
+    // Its record going away again does not send the Stepper back to a spent code.
+    rerender({ machines: { "box-a": boxA, "box-b": boxB } });
+    expect(screen.getByRole("heading", { name: /box-c joined/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("heading", { name: /box-c joined/ })).toBeNull();
     expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
+  });
+
+  it("a record from an account that is not a configured host does not flip Joined", async () => {
+    const { rerender } = setup();
+    await act(flush);
+    await addMachine();
+    rerender({ machines: { "box-a": boxA, "box-b": boxB, phone: { ...boxC, name: "phone" } } });
+    expect(screen.queryByText(/joined/)).toBeNull();
+    expect(screen.getByText(/Waiting for the machine to join/)).toBeInTheDocument();
   });
 
   it("a refused invite says why and offers to try again", async () => {
@@ -361,10 +605,7 @@ describe("Settings › Machines", () => {
     });
     setup({ ops });
     await act(flush);
-    fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    });
+    await addMachine();
     expect(screen.getByRole("alert")).toHaveTextContent("volleyd did not answer within 10s");
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
@@ -399,15 +640,40 @@ describe("Settings › Machines", () => {
     expect(within(card("box-a")).getByRole("alert")).toHaveTextContent("box-a is not paired");
   });
 
-  it("a non-admin session sees the machines but no buttons, and the terminal commands instead", async () => {
-    const ops = fakeOps({ admin: vi.fn(async () => false) });
+  it("a non-admin session sees the machines but no buttons, the terminal commands and how to pair here", async () => {
+    const ops = fakeOps({ admin: vi.fn(async (): Promise<AdminStatus> => "not-admin") });
     setup({ ops });
     await act(flush);
     expect(card("box-a")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByText(/Read-only/)).toBeInTheDocument();
+    expect(screen.getByText(/sign in to the Desk with an admin account/i)).toBeInTheDocument();
     expect(screen.getByText("volley peer invite")).toBeInTheDocument();
     expect(ops.invite).not.toHaveBeenCalled();
+  });
+
+  it("a role known at sign-in shows at once: no 'Checking…' for a known admin or non-admin", () => {
+    setup({ ops: fakeOps({ known: vi.fn((): Known => "admin") }) });
+    expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
+    expect(screen.queryByText(/Checking/)).toBeNull();
+    cleanup();
+    setup({ ops: fakeOps({ known: vi.fn((): Known => "not-admin") }) });
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText(/Read-only/)).toBeInTheDocument();
+  });
+
+  it("volleyd not answering is said as such, and the section asks again when volleyd comes up", async () => {
+    const admin = vi.fn(async (): Promise<AdminStatus> => "no-answer");
+    const ops = fakeOps({ admin });
+    const { rerender } = setup({ ops, hubUp: false });
+    await act(flush);
+    expect(screen.getByText(/volleyd did not answer/)).toBeInTheDocument();
+    expect(screen.queryByText(/takes an admin account/)).toBeNull();
+    admin.mockResolvedValue("admin");
+    rerender({ hubUp: true });
+    await act(flush);
+    expect(admin).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
   });
 
   it("without an op channel (not signed in, demo) it is read-only too", async () => {
@@ -417,7 +683,24 @@ describe("Settings › Machines", () => {
     expect(screen.getByText(/Read-only/)).toBeInTheDocument();
   });
 
-  it("the ssh address starts as the broker's host, blank when the Desk is on this machine", () => {
+  it("on a plain-http page (no secure context) it renders, read-only, and says why", async () => {
+    const { getRandomValues } = globalThis.crypto;
+    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+    vi.stubGlobal("isSecureContext", false);
+    try {
+      const c = fakeClient();
+      setup({ ops: createPeerOps(c, { identity: "owner-desk", probeTimeoutMs: 20 }) });
+      await act(flush);
+      expect(card("box-a")).toBeInTheDocument();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.getByText(/needs https or localhost/)).toBeInTheDocument();
+      expect(screen.getByText("volley peer invite")).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("the ssh address hint is the broker's host, none when the Desk is on this machine", () => {
     expect(sshHost("ws://hub.local:9001")).toBe("hub.local");
     expect(sshHost("ws://127.0.0.1:9001")).toBe("");
     expect(sshHost("ws://localhost:9001")).toBe("");

@@ -66,6 +66,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  localAgentCount,
   stageChip,
   supervisorHealth,
   supervisorList,
@@ -233,6 +234,10 @@ export default function App() {
     () => (writer && identity && !demo ? createPeerOps(writer, { identity }) : null),
     [writer, identity, demo],
   );
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
+  useEffect(() => {
+    void peerOps?.admin();
+  }, [peerOps]);
   // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
   const settingsWaveGone = settings !== null && !state.waves[settings];
   useEffect(() => {
@@ -727,7 +732,9 @@ export default function App() {
           }}
           machines={{
             machines: state.machines ?? {},
+            hosts: Object.keys(state.config?.hosts ?? {}),
             hubUp: !supervisorHealth(state.supervisors[DAEMON_AGENT_ID]).down,
+            hubAgents: localAgentCount(state),
             ops: peerOps,
             host: sshHost(brokerUrl),
           }}

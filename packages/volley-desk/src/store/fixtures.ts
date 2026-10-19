@@ -458,7 +458,10 @@ function globals(now: number): DeskMessage[] {
     wake_grace_s: 60,
     idle_grace_s: 180,
     screen_tail_interval_s: 5,
-    hosts: {},
+    hosts: {
+      "box-a": { target: "owner@box-a", tunnel: { remote_port: 21883, supervise: false } },
+      "box-b": { target: "owner@box-b", tunnel: { remote_port: 21884, supervise: false } },
+    },
     claude: { default_account: "most_headroom", warn_at_pct: 90 },
   };
   const since = iso(now - 20 * 60_000);

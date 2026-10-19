@@ -18,9 +18,6 @@
   text-align: left;
   min-width: 0;
 }
-.machine--hub {
-  border-color: rgba(52, 199, 89, 0.3);
-}
 .machine--add {
   align-items: center;
   justify-content: center;
@@ -33,7 +30,7 @@
 }
 .machine--add:hover {
   color: var(--ink);
-  border-color: rgba(52, 199, 89, 0.6);
+  border-color: rgba(110, 231, 249, 0.5);
 }
 .m-head {
   display: flex;
@@ -45,9 +42,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.m-head .chip {
-  margin-left: auto;
 }
 .m-stats {
   display: flex;
@@ -96,7 +90,7 @@
   margin: 12px 0 0;
 }
 .pair--machine {
-  border-color: rgba(52, 199, 89, 0.45);
+  border-color: rgba(110, 231, 249, 0.35);
 }
 .pair--machine .ny-actions {
   display: flex;
