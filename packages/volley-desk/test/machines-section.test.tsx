@@ -2,6 +2,8 @@ import { constants, createPublicKey, publicEncrypt } from "node:crypto";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Machines, type MachinesProps, sshHost } from "../src/settings/Machines";
+import { CREDENTIALS_STORAGE_KEY } from "../src/store/context";
+import { type ReplyKey, createAuthOps } from "../src/store/control";
 import { DESK_SUBSCRIPTIONS } from "../src/store/mqtt-client";
 import {
   ADMIN_PROBE_TIMEOUT_MS,
@@ -10,7 +12,6 @@ import {
   type PeerOps,
   createPeerOps,
   joinCommand,
-  newId,
   pairingSupported,
 } from "../src/store/peerOps";
 import { initialState, localAgentCount, reduceAll, resync } from "../src/store/reducer";
@@ -247,10 +248,45 @@ async function published(c: ReturnType<typeof fakeClient>, n: number) {
   return c.published[n - 1] as { topic: string; env: Envelope };
 }
 
-describe("peer ops: admin requests on the Desk's own account-op topic", () => {
+/** A reply key that opens nothing: for requests whose answers carry no secret. */
+const stubKey = async (): Promise<ReplyKey> => ({
+  jwk: { kty: "RSA", n: "n", e: "AQAB" },
+  open: async () => ({}),
+});
+
+/** The pairing ops as App builds them: over the Desk's admin channel (`createAuthOps`). */
+function peerOps(
+  c: ReturnType<typeof fakeClient>,
+  o: {
+    identity?: string;
+    role?: string;
+    probeTimeoutMs?: number;
+    replyKey?: () => Promise<ReplyKey>;
+  } = {},
+) {
+  const auth = createAuthOps(c, {
+    identity: o.identity ?? "owner-desk",
+    now: () => new Date(NOW),
+    ...(o.replyKey ? { replyKey: o.replyKey } : {}),
+  });
+  return createPeerOps(auth, {
+    now: () => new Date(NOW),
+    ...(o.role !== undefined ? { role: o.role } : {}),
+    ...(o.probeTimeoutMs !== undefined ? { probeTimeoutMs: o.probeTimeoutMs } : {}),
+  });
+}
+
+/** A page without WebCrypto, as a phone on plain http sees it: only `getRandomValues`. */
+function plainHttp() {
+  const { getRandomValues } = globalThis.crypto;
+  vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+  vi.stubGlobal("isSecureContext", false);
+}
+
+describe("peer ops: admin requests on the Desk's admin channel", () => {
   it("peer_invite goes to volley/_system/auth/ops/<identity> with a reply_key; the sealed code is opened", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk", now: () => new Date(NOW) });
+    const ops = peerOps(c);
     const pending = ops.invite();
     const req = await published(c, 1);
     expect(req.topic).toBe("volley/_system/auth/ops/owner-desk");
@@ -262,7 +298,9 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     });
     expect(req.env.correlation_id).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
     const key = (req.env.payload as { reply_key: Record<string, unknown> }).reply_key;
-    expect(Object.keys(key).sort()).toEqual(["e", "kty", "n"]);
+    expect(key).toMatchObject({ kty: "RSA", n: expect.any(String), e: expect.any(String) });
+    // The public half only.
+    for (const k of ["d", "p", "q", "dp", "dq", "qi"]) expect(key).not.toHaveProperty(k);
     // A forged answer from anyone but volleyd is ignored.
     c.answer(
       { op: "peer_invite", ok: true, sealed: sealTo(req.env, { code: "XXXX-XXXX" }) },
@@ -278,9 +316,21 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     await expect(pending).resolves.toEqual({ ok: true, code: "MXQ4-7KDP", expiresAt: expires });
   });
 
+  it("rides the same admin channel as the account ops: one reply key per session", async () => {
+    const c = fakeClient();
+    const auth = createAuthOps(c, { identity: "owner-desk", timeoutMs: 20 });
+    await auth.request("account_list");
+    const pending = createPeerOps(auth).invite();
+    const req = await published(c, 2);
+    const keyOf = (env: Envelope) => (env.payload as { reply_key: unknown }).reply_key;
+    expect(keyOf(req.env)).toEqual(keyOf((c.published[0] as { env: Envelope }).env));
+    c.answer({ op: "peer_invite", ok: true, sealed: sealTo(req.env, { code: "MXQ4-7KDP" }) });
+    await expect(pending).resolves.toMatchObject({ ok: true, code: "MXQ4-7KDP" });
+  });
+
   it("a refused invite, and one whose answer carries no code, say why", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk" });
+    const ops = peerOps(c);
     const refused = ops.invite();
     await published(c, 1);
     c.answer({ op: "peer_invite", ok: false, error: "owner-desk is not an admin account" });
@@ -296,21 +346,21 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
 
   it("peer_remove sends the name and resolves with volleyd's answer", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk" });
+    const ops = peerOps(c, { replyKey: stubKey });
     const r = ops.remove("box-a");
     const req = await published(c, 1);
-    expect(req.env.payload).toEqual({ op: "peer_remove", name: "box-a" });
+    expect(req.env.payload).toMatchObject({ op: "peer_remove", name: "box-a" });
     c.answer({ op: "peer_remove", ok: true, result: { revoked: true, host_removed: true } });
     await expect(r).resolves.toEqual({ ok: true });
   });
 
   it("admin(): an answered account_list proves an admin; it asks once and then knows", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk" });
+    const ops = peerOps(c, { replyKey: stubKey });
     expect(ops.known()).toBeNull();
     const yes = ops.admin();
     const req = await published(c, 1);
-    expect(req.env.payload).toEqual({ op: "account_list" });
+    expect(req.env.payload).toMatchObject({ op: "account_list" });
     c.answer({ op: "account_list", ok: true, result: { accounts: [] } });
     await expect(yes).resolves.toBe("admin");
     expect(ops.known()).toBe("admin");
@@ -318,9 +368,29 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     expect(c.published).toHaveLength(1);
   });
 
+  it("admin(): a yes is stored with the sign-in, so Setup & Security knows it too", async () => {
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "owner-desk", password: "pw" }),
+    );
+    try {
+      const c = fakeClient();
+      const yes = peerOps(c, { replyKey: stubKey }).admin();
+      await published(c, 1);
+      c.answer({ op: "account_list", ok: true, result: { accounts: [] } });
+      await expect(yes).resolves.toBe("admin");
+      expect(JSON.parse(localStorage.getItem(CREDENTIALS_STORAGE_KEY) ?? "{}")).toMatchObject({
+        username: "owner-desk",
+        role: "admin",
+      });
+    } finally {
+      localStorage.removeItem(CREDENTIALS_STORAGE_KEY);
+    }
+  });
+
   it("admin(): volleyd's refusal is a definite no, and it is kept", async () => {
     const refusing = fakeClient();
-    const ops = createPeerOps(refusing, { identity: "watcher" });
+    const ops = peerOps(refusing, { identity: "watcher", replyKey: stubKey });
     const no = ops.admin();
     await published(refusing, 1);
     refusing.answer({ op: "account_list", ok: false, error: "watcher is not an admin account" });
@@ -331,7 +401,7 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
 
   it("admin(): no answer is not a no; it is not kept, so the next ask asks again", async () => {
     const quiet = fakeClient();
-    const ops = createPeerOps(quiet, { identity: "owner-desk", probeTimeoutMs: 20 });
+    const ops = peerOps(quiet, { probeTimeoutMs: 20, replyKey: stubKey });
     await expect(ops.admin()).resolves.toBe("no-answer");
     expect(ops.known()).toBeNull();
     const again = ops.admin();
@@ -340,10 +410,18 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     await expect(again).resolves.toBe("admin");
   });
 
+  it("admin(): an unsent probe is not a no either", async () => {
+    const c = fakeClient();
+    c.publish.mockRejectedValueOnce(new Error("not connected"));
+    const ops = peerOps(c, { replyKey: stubKey });
+    await expect(ops.admin()).resolves.toBe("no-answer");
+    expect(ops.known()).toBeNull();
+  });
+
   it("admin(): the probe waits seconds, not the 30 s an op waits (account_list is a local read)", async () => {
     vi.useFakeTimers();
     try {
-      const ops = createPeerOps(fakeClient(), { identity: "owner-desk" });
+      const ops = peerOps(fakeClient(), { replyKey: stubKey });
       const r = ops.admin();
       await vi.advanceTimersByTimeAsync(ADMIN_PROBE_TIMEOUT_MS);
       await expect(r).resolves.toBe("no-answer");
@@ -356,7 +434,7 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
   it("admin(): the fixed identities are never admins (SPEC §4.6.13): no ask, known at once", async () => {
     for (const identity of ["desk", "coordinator", "volleyd"]) {
       const c = fakeClient();
-      const ops = createPeerOps(c, { identity });
+      const ops = peerOps(c, { identity });
       expect(ops.known()).toBe("not-admin");
       await expect(ops.admin()).resolves.toBe("not-admin");
       expect(c.published).toHaveLength(0);
@@ -365,10 +443,10 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
 
   it("admin(): a role known from sign-in wins over the probe", async () => {
     const c = fakeClient();
-    const admin = createPeerOps(c, { identity: "owner-desk", role: "admin" });
+    const admin = peerOps(c, { role: "admin" });
     expect(admin.known()).toBe("admin");
     await expect(admin.admin()).resolves.toBe("admin");
-    const steer = createPeerOps(c, { identity: "phone", role: "steer" });
+    const steer = peerOps(c, { identity: "phone", role: "steer" });
     expect(steer.known()).toBe("not-admin");
     await expect(steer.admin()).resolves.toBe("not-admin");
     expect(c.published).toHaveLength(0);
@@ -376,7 +454,7 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
 
   it("the code's expiry is counted from when the answer arrived (ttl_s), not volleyd's clock", async () => {
     const c = fakeClient();
-    const ops = createPeerOps(c, { identity: "owner-desk", now: () => new Date(NOW) });
+    const ops = peerOps(c);
     const pending = ops.invite();
     const req = await published(c, 1);
     // volleyd's clock runs 4 minutes ahead of this browser's.
@@ -389,34 +467,37 @@ describe("peer ops: admin requests on the Desk's own account-op topic", () => {
     await expect(pending).resolves.toMatchObject({ expiresAt: iso(NOW + 600_000) });
   });
 
-  it("newId is a fresh UUID v4 (the envelope's correlation_id), even without crypto.randomUUID", () => {
-    const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-    const a = newId();
-    expect(a).toMatch(UUID_V4);
-    expect(newId()).not.toBe(a);
-    const { getRandomValues } = globalThis.crypto;
-    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+  it("on plain http (no WebCrypto, a phone on the LAN) pairing works: the reply key is lib/rsa's", async () => {
+    plainHttp();
     try {
-      expect(globalThis.crypto.randomUUID).toBeUndefined();
-      expect(newId()).toMatch(UUID_V4);
+      expect(pairingSupported()).toBe(true);
+      const c = fakeClient();
+      const ops = peerOps(c);
+      const pending = ops.invite();
+      const req = await published(c, 1);
+      expect(req.env.correlation_id).toMatch(/^[0-9a-f-]{36}$/);
+      c.answer({
+        op: "peer_invite",
+        ok: true,
+        result: { ttl_s: 600 },
+        sealed: sealTo(req.env, { code: "MXQ4-7KDP" }),
+      });
+      await expect(pending).resolves.toMatchObject({ ok: true, code: "MXQ4-7KDP" });
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("without a secure context (plain http on the LAN) nothing throws: ops answer, invite says why", async () => {
-    const { getRandomValues } = globalThis.crypto;
-    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+  it("a browser that cannot make a reply key at all: nothing throws, invite says why", async () => {
+    vi.stubGlobal("crypto", {});
     vi.stubGlobal("isSecureContext", false);
     try {
       expect(pairingSupported()).toBe(false);
       const c = fakeClient();
-      const ops = createPeerOps(c, { identity: "owner-desk", probeTimeoutMs: 20 });
-      const probe = ops.admin();
-      await published(c, 1);
-      c.answer({ op: "account_list", ok: true, result: { accounts: [] } });
-      await expect(probe).resolves.toBe("admin");
-      await expect(ops.invite()).resolves.toMatchObject({ ok: false, error: /https/ });
+      const ops = peerOps(c, { probeTimeoutMs: 20 });
+      await expect(ops.admin()).resolves.toBe("no-answer");
+      await expect(ops.invite()).resolves.toMatchObject({ ok: false, error: /volley peer invite/ });
+      expect(c.published).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -683,17 +764,29 @@ describe("Settings › Machines", () => {
     expect(screen.getByText(/Read-only/)).toBeInTheDocument();
   });
 
-  it("on a plain-http page (no secure context) it renders, read-only, and says why", async () => {
-    const { getRandomValues } = globalThis.crypto;
-    vi.stubGlobal("crypto", { getRandomValues: getRandomValues.bind(globalThis.crypto) });
+  it("on a plain-http page (no WebCrypto) an admin can still pair", async () => {
+    plainHttp();
+    try {
+      setup({ ops: fakeOps({ known: vi.fn((): Known => "admin") }) });
+      await act(flush);
+      expect(card("box-a")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
+      expect(screen.queryByText(/Read-only/)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a browser that cannot make a reply key at all renders read-only, and says why", async () => {
+    vi.stubGlobal("crypto", {});
     vi.stubGlobal("isSecureContext", false);
     try {
       const c = fakeClient();
-      setup({ ops: createPeerOps(c, { identity: "owner-desk", probeTimeoutMs: 20 }) });
+      setup({ ops: peerOps(c, { probeTimeoutMs: 20 }) });
       await act(flush);
       expect(card("box-a")).toBeInTheDocument();
       expect(screen.queryByRole("button")).toBeNull();
-      expect(screen.getByText(/needs https or localhost/)).toBeInTheDocument();
+      expect(screen.getByText(/cannot make the key/)).toBeInTheDocument();
       expect(screen.getByText("volley peer invite")).toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();

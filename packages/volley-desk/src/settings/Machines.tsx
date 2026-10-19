@@ -16,8 +16,9 @@
  * waiting until a record for a host that was not there before arrives
  * (joined), then Done. **Remove…** asks first, then sends `peer_remove`,
  * which revokes the machine's account and clears its record. Any other
- * session (not signed in, not an admin, demo, a plain-http page without
- * WebCrypto) is read-only and is shown the terminal commands instead.
+ * session (not signed in, not an admin, demo, a browser that cannot make a
+ * reply key at all) is read-only and is shown the terminal commands instead.
+ * A plain-http LAN page can pair: its reply key comes from `lib/rsa.ts`.
  */
 import { Copy01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -470,7 +471,7 @@ function AddMachine({
 /** Why this session cannot pair, said before the terminal commands. */
 function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
   if (!secure) {
-    return "Read-only here: pairing from the Desk needs https or localhost, and this page is plain http.";
+    return "Read-only here: this browser cannot make the key that keeps the pairing code private.";
   }
   if (admin === null) return "Checking whether this Desk may pair machines…";
   if (admin === "no-answer") {
@@ -482,6 +483,7 @@ function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
 export function Machines(p: MachinesProps) {
   const [adding, setAdding] = useState(false);
   const now = useNow(p.now, adding ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
+  // A browser that cannot make a reply key at all (not even lib/rsa's): read-only.
   const secure = pairingSupported();
   const admin = useAdmin(secure ? p.ops : null, p.hubUp);
   const [notice, setNotice] = useState<string | null>(null);

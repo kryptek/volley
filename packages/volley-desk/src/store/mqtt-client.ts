@@ -86,6 +86,7 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_system/claude-accounts/+",
   "volley/_system/claude/+/signin",
   "volley/_system/machines/+",
+  // volleyd's answers to account ops (SPEC §4.6.10); secrets in them are sealed to the requester.
   "volley/_system/auth/replies/+",
 ] as const;
 
@@ -260,5 +261,98 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
     onConnect: on(connectHandlers),
     onDisconnect: on(disconnectHandlers),
     onError: on(errorHandlers),
+  };
+}
+
+/**
+ * A one-time token's own short-lived broker login (SPEC §4.6.10): username = the token id,
+ * password = the token. Its role grants exactly two topics, `volley-auth/redeem/<id>` (write)
+ * and `.../reply` (read), so this client subscribes to nothing by itself, never reconnects and
+ * is ended as soon as the redemption has its answer.
+ */
+export interface TokenClient {
+  /** Rejects with `AuthFailedError` when the broker refuses the login (a used or expired token). */
+  connect(): Promise<void>;
+  /** Rejects when the broker refuses the subscription. */
+  subscribe(topic: string): Promise<void>;
+  publish(topic: string, payload: string): Promise<void>;
+  onMessage(handler: (topic: string, payload: string) => void): () => void;
+  end(): Promise<void>;
+}
+
+/** SUBACK return code for a refused subscription. */
+const SUBACK_FAILURE = 128;
+
+export function createTokenClient(url: string, auth: BrokerCredentials): TokenClient {
+  const handlers = new Set<(topic: string, payload: string) => void>();
+  let client: MqttClient | null = null;
+  return {
+    connect() {
+      return new Promise<void>((resolve, reject) => {
+        const instance = mqtt.connect(url, {
+          clientId: `volley-desk-token-${Math.random().toString(36).slice(2, 10)}`,
+          username: auth.username,
+          password: auth.password,
+          reconnectPeriod: 0,
+          connectTimeout: 10_000,
+        });
+        client = instance;
+        instance.on("message", (topic, payload) => {
+          const text = new TextDecoder().decode(payload);
+          for (const h of handlers) h(topic, text);
+        });
+        instance.once("connect", () => resolve());
+        // `on`, not `once`: mqtt.js emits every stream error, and an "error" with no listener
+        // throws. Only the first settles the connect; the rest are dropped (the client is ended).
+        let settled = false;
+        instance.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          reject(asAuthFailure(err));
+        });
+        instance.once("close", () => {
+          // A refused CONNACK also closes the socket: let its error (AUTH_FAILED) settle first.
+          setTimeout(() => {
+            settled = true;
+            reject(new Error(`could not reach the broker at ${url}`));
+          }, 0);
+        });
+      });
+    },
+    subscribe(topic) {
+      const instance = client;
+      if (instance === null) return Promise.reject(new Error("not connected to the broker"));
+      return new Promise<void>((resolve, reject) => {
+        instance.subscribe(topic, { qos: 1 }, (err, granted) => {
+          if (err) reject(err);
+          else if (granted?.some((g) => g.qos === SUBACK_FAILURE))
+            reject(new Error(`the broker refused the subscription to ${topic}`));
+          else resolve();
+        });
+      });
+    },
+    publish(topic, payload) {
+      const instance = client;
+      if (instance === null) return Promise.reject(new Error("not connected to the broker"));
+      return new Promise<void>((resolve, reject) => {
+        instance.publish(topic, payload, { qos: 1, retain: false }, (err) =>
+          err ? reject(err) : resolve(),
+        );
+      });
+    },
+    onMessage(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    end() {
+      const instance = client;
+      client = null;
+      if (instance === null) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        instance.end(true, {}, () => resolve());
+      });
+    },
   };
 }

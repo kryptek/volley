@@ -1,33 +1,25 @@
 /**
  * The Desk's machine-pairing ops (SPEC §4.6.14). `peer_invite` and
  * `peer_remove` create and revoke broker access, so they are admin ops: like
- * every account op (§4.6.10) they go to the Desk's own
- * `volley/_system/auth/ops/<identity>` (QoS 1, not retained) as a `query` on
- * channel `_system/auth` with a fresh `correlation_id`, never to volleyd's
- * mailbox, and volleyd answers on `volley/_system/auth/replies/<correlation_id>`
- * with an `ack` that is accepted only from `volleyd`.
+ * every account op (§4.6.10) they travel the Desk's admin channel
+ * (`createAuthOps` in `control.ts`): the Desk's own
+ * `volley/_system/auth/ops/<identity>`, answered on
+ * `volley/_system/auth/replies/<correlation_id>` by `volleyd` only. This
+ * module is a thin layer over that channel: the pairing code comes back in
+ * `sealed`, opened with the session's reply key, which is WebCrypto's on
+ * https or localhost and `lib/rsa.ts`'s on a plain-http LAN page.
  *
  * The broker grants an account-op topic only to an admin account, for its own
  * username, so a non-admin's request is dropped and nothing ever answers it.
  * `admin()` first uses what is already known: a role from sign-in, or one of
  * the fixed identities, which are never admins (§4.6.13). Otherwise it asks
  * the read-only `account_list` with a short wait and counts an answer as
- * proof and a refusal as a no; both are kept. No answer (volleyd down, or a
- * non-admin's dropped publish) is neither, and is not kept: the next ask asks
- * again.
- *
- * Every account may read the answer topics, so the pairing code comes back
- * sealed: the request carries `reply_key`, the public half of a fresh
- * RSA-OAEP (SHA-256, 2048-bit) key made in this browser with WebCrypto, and
- * only this page holds the private half that opens `sealed`. WebCrypto exists
- * only in a secure context (https or localhost): on a plain-http page the
- * Desk cannot pair (`pairingSupported()`), and nothing here throws.
+ * proof (stored with the sign-in, as Setup & Security does) and a refusal as
+ * a no; both are kept. No answer (volleyd down, or a non-admin's dropped
+ * publish) is neither, and is not kept: the next ask asks again.
  */
-import type { SteerClient } from "../steer/transport";
-import type { Envelope } from "./types";
+import { type AuthAnswer, type AuthOps, rememberRole } from "./control";
 
-/** volleyd's agent id: the only sender whose answer counts. */
-const DAEMON = "volleyd";
 /** The wait `volley peer invite` / `remove` use too: volleyd checks the account registry first. */
 export const AUTH_OP_TIMEOUT_MS = 30_000;
 /** The admin probe's wait: `account_list` is answered from a local file. */
@@ -36,10 +28,6 @@ export const ADMIN_PROBE_TIMEOUT_MS = 5000;
 export const FIXED_IDENTITIES: ReadonlySet<string> = new Set(["desk", "coordinator", "volleyd"]);
 /** volleyd's `peer_code_ttl_s` default: how long a code lasts when an answer leaves it out. */
 const CODE_TTL_S = 600;
-
-export const authOpsTopic = (username: string) => `volley/_system/auth/ops/${username}`;
-export const authReplyTopic = (correlationId: string) =>
-  `volley/_system/auth/replies/${correlationId}`;
 
 export interface PeerOpResult {
   ok: boolean;
@@ -64,74 +52,17 @@ export interface PeerOps {
   remove(name: string): Promise<PeerOpResult>;
 }
 
-/** An account op's answer (an `ack` payload). */
-interface Answer {
-  ok: boolean;
-  /** volleyd answered (an `ack`), as opposed to a timeout or an unsent request. */
-  answered?: boolean;
-  error?: string;
-  result?: unknown;
-  sealed?: string;
-}
-
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 /**
- * A fresh UUID v4 (the envelope's `correlation_id` format) from
- * `crypto.getRandomValues`, which, unlike `crypto.randomUUID`, also exists on
- * a plain-http page.
+ * Whether this page can make a reply key: WebCrypto (a secure context), or
+ * `lib/rsa.ts`'s fallback, which needs only `crypto.getRandomValues` and
+ * BigInt. A browser with neither cannot pair from the Desk.
  */
-export function newId(): string {
-  const b = crypto.getRandomValues(new Uint8Array(16));
-  b[6] = ((b[6] ?? 0) & 0x0f) | 0x40;
-  b[8] = ((b[8] ?? 0) & 0x3f) | 0x80;
-  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
-
-/** Whether this page can make a reply key: WebCrypto is there only in a secure context. */
 export function pairingSupported(): boolean {
+  const c = globalThis.crypto;
   return (
-    globalThis.isSecureContext !== false &&
-    typeof globalThis.crypto?.subtle?.generateKey === "function"
+    typeof c?.subtle?.generateKey === "function" ||
+    (typeof c?.getRandomValues === "function" && typeof BigInt === "function")
   );
-}
-
-/** A fresh reply key: the public JWK (just `kty`, `n`, `e`) and the private key that opens answers. */
-async function replyKeyPair(): Promise<{ jwk: Record<string, unknown>; privateKey: CryptoKey }> {
-  const pair = await crypto.subtle.generateKey(
-    {
-      name: "RSA-OAEP",
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: "SHA-256",
-    },
-    true,
-    ["encrypt", "decrypt"],
-  );
-  const { kty, n, e } = await crypto.subtle.exportKey("jwk", pair.publicKey);
-  return { jwk: { kty, n, e }, privateKey: pair.privateKey };
-}
-
-function fromBase64url(s: string): Uint8Array<ArrayBuffer> {
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
-  const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
-  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
-}
-
-/** Open `sealed` with `key`; `null` when it is missing or not ours. */
-async function unseal(
-  key: CryptoKey,
-  sealed: string | undefined,
-): Promise<Record<string, unknown> | null> {
-  if (sealed === undefined) return null;
-  try {
-    const plain = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, key, fromBase64url(sealed));
-    const v = JSON.parse(new TextDecoder().decode(plain)) as unknown;
-    return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 /** The command the new machine runs; `to` is this machine's ssh destination (`…` until it is known). */
@@ -139,22 +70,21 @@ export function joinCommand(code: string, to: string): string {
   return `volley peer join ${code} --to ${to.trim() || "…"}`;
 }
 
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 export function createPeerOps(
-  client: SteerClient,
+  auth: AuthOps,
   opts: {
-    identity: string;
     /** The role the Desk's sign-in minted, when it knows it: no probe then. */
     role?: string | null;
     timeoutMs?: number;
     probeTimeoutMs?: number;
-    newId?: () => string;
     now?: () => Date;
-  },
+  } = {},
 ): PeerOps {
-  const { identity } = opts;
+  const { identity } = auth;
   const timeoutMs = opts.timeoutMs ?? AUTH_OP_TIMEOUT_MS;
   const probeTimeoutMs = opts.probeTimeoutMs ?? ADMIN_PROBE_TIMEOUT_MS;
-  const makeId = opts.newId ?? newId;
   const now = opts.now ?? (() => new Date());
   let known: Exclude<AdminStatus, "no-answer"> | null =
     typeof opts.role === "string"
@@ -166,62 +96,13 @@ export function createPeerOps(
         : null;
   let probe: Promise<AdminStatus> | null = null;
 
-  const ask = (op: string, fields: Record<string, unknown>, waitMs = timeoutMs): Promise<Answer> =>
-    new Promise<Answer>((resolve) => {
-      let id: string;
-      try {
-        id = makeId();
-      } catch (err) {
-        resolve({ ok: false, error: message(err) });
-        return;
-      }
-      const topic = authReplyTopic(id);
-      let off = () => {};
-      const timer = setTimeout(
-        () => done({ ok: false, error: `volleyd did not answer within ${waitMs / 1000}s` }),
-        waitMs,
-      );
-      function done(a: Answer) {
-        clearTimeout(timer);
-        off();
-        resolve(a);
-      }
-      // Listen before publishing so a fast answer is not missed.
-      off = client.onMessage((m) => {
-        const env = m.envelope;
-        if (
-          m.topic !== topic ||
-          env?.type !== "ack" ||
-          env.agent_id !== DAEMON ||
-          env.correlation_id !== id
-        ) {
-          return;
-        }
-        const p = (env.payload ?? {}) as Record<string, unknown>;
-        done({
-          ok: p.ok === true,
-          answered: true,
-          ...(typeof p.error === "string" ? { error: p.error } : {}),
-          ...(p.result !== undefined ? { result: p.result } : {}),
-          ...(typeof p.sealed === "string" ? { sealed: p.sealed } : {}),
-        });
-      });
-      const req: Envelope = {
-        schema_version: "0.1",
-        agent_id: identity,
-        parent_id: null,
-        channel: "_system/auth",
-        type: "query",
-        wall_time: now().toISOString(),
-        correlation_id: id,
-        payload: { op, ...fields },
-      };
-      client
-        .publish(authOpsTopic(identity), JSON.stringify(req))
-        .catch((err: unknown) => done({ ok: false, error: message(err) }));
-    });
+  /** `auth.request`, which never rejects here: a throw is an unsent request. */
+  const ask = (op: string, fields: Record<string, unknown>, waitMs: number) =>
+    auth
+      .request(op, fields, { timeoutMs: waitMs })
+      .catch((err: unknown): AuthAnswer => ({ ok: false, error: message(err), unsent: true }));
 
-  const refusal = (a: Answer, what: string) => a.error ?? `volleyd refused ${what}`;
+  const refusal = (a: AuthAnswer, what: string) => a.error ?? `volleyd refused ${what}`;
 
   return {
     known: () => known,
@@ -230,8 +111,10 @@ export function createPeerOps(
       probe ??= ask("account_list", {}, probeTimeoutMs).then((a) => {
         probe = null;
         // A refusal is an answer; a timeout or an unsent publish is not.
-        if (a.ok) known = "admin";
-        else if (a.answered) known = "not-admin";
+        if (a.ok) {
+          known = "admin";
+          rememberRole(identity, "admin");
+        } else if (!a.unanswered && !a.unsent) known = "not-admin";
         return known ?? "no-answer";
       });
       return probe;
@@ -240,18 +123,12 @@ export function createPeerOps(
       if (!pairingSupported()) {
         return {
           ok: false,
-          error: "pairing from the Desk needs https or localhost; use volley peer invite",
+          error: "this browser cannot make the reply key pairing needs; use volley peer invite",
         };
       }
-      let key: Awaited<ReturnType<typeof replyKeyPair>>;
-      try {
-        key = await replyKeyPair();
-      } catch (err) {
-        return { ok: false, error: `this browser cannot make a reply key: ${message(err)}` };
-      }
-      const a = await ask("peer_invite", { reply_key: key.jwk });
+      const a = await ask("peer_invite", {}, timeoutMs);
       if (!a.ok) return { ok: false, error: refusal(a, "the pairing code") };
-      const code = (await unseal(key.privateKey, a.sealed))?.code;
+      const code = a.secret?.code;
       if (typeof code !== "string") {
         return { ok: false, error: "volleyd's answer carried no pairing code" };
       }
@@ -270,7 +147,7 @@ export function createPeerOps(
       };
     },
     async remove(name) {
-      const a = await ask("peer_remove", { name });
+      const a = await ask("peer_remove", { name }, timeoutMs);
       return a.ok ? { ok: true } : { ok: false, error: refusal(a, `removing ${name}`) };
     },
   };

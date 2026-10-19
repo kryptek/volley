@@ -1,9 +1,7 @@
 /**
  * The Settings window's sections, ported from the prototype `settings.tsx`
  * (`SECTIONS`): the sidebar label, the coloured icon tile, the sidebar group
- * and the extra words the sidebar search matches. Broker accounts, Machines
- * and Setup are placeholders until Onboarding fills them,
- * listed now so search and layout are final.
+ * and the extra words the sidebar search matches.
  */
 import {
   ComputerIcon,
@@ -77,8 +75,7 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: Key01Icon,
     tint: "#ff9f0a",
     group: 1,
-    keywords: "password login desk coordinator rotate revoke",
-    placeholder: true,
+    keywords: "password login desk coordinator viewer rotate revoke admin",
   },
   {
     key: "machines",
@@ -94,8 +91,7 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: Rocket01Icon,
     tint: "#ff453a",
     group: 2,
-    keywords: "setup wizard broker token security",
-    placeholder: true,
+    keywords: "setup wizard broker token security admin phone qr sign-in link",
   },
   {
     key: "about",

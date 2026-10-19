@@ -9,7 +9,11 @@
  * `look/`): the picked React Bits background under its dim, the window chrome,
  * Needs-you and narration effects, tethers and the dock. The Settings window (O1,
  * `settings/SettingsWindow.tsx`) holds General, Appearance, Supervisor (the global
- * volleyd config) and About; a wave's ⚙ opens that wave's effective config.
+ * volleyd config), the Onboarding sections and About; a wave's ⚙ opens that wave's
+ * effective config. Onboarding (O4): Broker accounts and Setup & Security talk to
+ * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
+ * opens Setup & Security once, its Preview shows the sign-in screen, and Open setup…
+ * closes Settings and shows the setup wizard in its own modal (as the prototype).
  * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
@@ -30,6 +34,7 @@ import {
   openDecisions,
   waveAttention,
 } from "./attention";
+import { SignInPreview } from "./auth/SignInGate";
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import {
@@ -54,18 +59,21 @@ import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { sshHost } from "./settings/Machines";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
+import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
+import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps } from "./store/peerOps";
 import {
   UNASSIGNED,
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isSupervisorId,
   localAgentCount,
   stageChip,
   supervisorHealth,
@@ -193,6 +201,16 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
   return next;
 }
 
+/** Agents whose last status is not terminal (as `volley setup` counts "agents running"), supervisors aside. */
+function liveAgentCount(state: DeskState): number {
+  return Object.values(state.agents).filter(
+    (a) =>
+      !isSupervisorId(a.id) &&
+      a.status != null &&
+      !["done", "failed", "reaped"].includes(a.status.type),
+  ).length;
+}
+
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
@@ -229,15 +247,6 @@ export default function App() {
         : null,
     [writer, identity, demo, daemonNs],
   );
-  // Settings › Machines: pairing ops go on the Desk's own account-op topic (admin accounts only).
-  const peerOps = useMemo(
-    () => (writer && identity && !demo ? createPeerOps(writer, { identity }) : null),
-    [writer, identity, demo],
-  );
-  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
-  useEffect(() => {
-    void peerOps?.admin();
-  }, [peerOps]);
   // The settings modal closes for good when its wave goes away; it must not reopen if it returns.
   const settingsWaveGone = settings !== null && !state.waves[settings];
   useEffect(() => {
@@ -249,8 +258,33 @@ export default function App() {
   const webgl = useWebGL();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl);
-  /** The Settings window's section while it is open. */
-  const [deskSettings, setDeskSettings] = useState<SectionKey | null>(null);
+  /** The Settings window's section while it is open; setup once after an admin token sign-in. */
+  const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
+    takeFirstRun() ? "setup" : null,
+  );
+  /** volleyd's admin channel (account and setup ops); the Desk's own account must be an admin. */
+  const authOps = useMemo(
+    () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
+    [writer, identity, demo],
+  );
+  // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
+  const peerOps = useMemo(
+    () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
+    [authOps],
+  );
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
+  useEffect(() => {
+    void peerOps?.admin();
+  }, [peerOps]);
+  /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
+  const [preview, setPreview] = useState(false);
+  /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
+  const [setupWizard, setSetupWizard] = useState<{ repair: boolean } | null>(null);
+  /** Closing the wizard goes back to where it was opened: Settings › Setup & Security. */
+  const closeSetupWizard = () => {
+    setSetupWizard(null);
+    setDeskSettings("setup");
+  };
 
   const allGroups = agentsByWave(state);
   // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
@@ -510,7 +544,9 @@ export default function App() {
     zoomAt: (f) => zoomAt(f),
     arrange,
     closeTop: () => {
-      if (settings !== null) setSettings(null);
+      if (preview) setPreview(false);
+      else if (setupWizard !== null) closeSetupWizard();
+      else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
       else if (steerOpen !== null) setSteerOpen(null);
       else return false;
@@ -738,8 +774,41 @@ export default function App() {
             ops: peerOps,
             host: sshHost(brokerUrl),
           }}
+          onboarding={{
+            ops: authOps,
+            brokerUrl,
+            deskUrl: deskUrl(window.location),
+            onPreviewSignIn: () => {
+              setDeskSettings(null);
+              setPreview(true);
+            },
+            liveAgents: liveAgentCount(state),
+            onOpenSetup: (repair) => {
+              setDeskSettings(null);
+              setSetupWizard({ repair });
+            },
+          }}
           onArrange={arrange}
           onClose={() => setDeskSettings(null)}
+        />
+      )}
+
+      {setupWizard !== null && authOps !== null && (
+        <SetupWizard
+          ops={authOps}
+          deskUrl={deskUrl(window.location)}
+          repair={setupWizard.repair}
+          onClose={closeSetupWizard}
+        />
+      )}
+
+      {preview && (
+        <SignInPreview
+          brokerUrl={brokerUrl ?? "demo"}
+          onClose={() => {
+            setPreview(false);
+            setDeskSettings("setup");
+          }}
         />
       )}
 
