@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { formatBriefPreface } from "../brief";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
@@ -107,14 +108,17 @@ export function formatWave(
   const header =
     `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
+  // Which rules the agents got (absent: a state from before the field).
+  const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
     const pr = t.pr !== undefined ? `  PR #${t.pr.number}` : "";
-    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${t.stage.padEnd(14)}${pr}${why}\n`;
+    const skipped = t.reviews_skipped_by_plan === true ? "  reviews skipped by plan" : "";
+    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${t.stage.padEnd(14)}${pr}${skipped}${why}\n`;
   });
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + rows.join("") + decisions.join("");
+  return header + preface + rows.join("") + decisions.join("");
 }

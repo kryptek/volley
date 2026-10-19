@@ -2,15 +2,19 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  BriefPrefaceTooLarge,
   type Role,
   briefExtra,
   briefExtraFrom,
   briefExtraPath,
+  briefPrefacePath,
   loadTemplate,
+  readBriefPreface,
   renderBrief,
   runBriefGate,
+  withPreface,
 } from "./brief";
-import { DAEMON_DEFAULTS } from "./config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
 import { sealLaunchScript } from "./fence";
 import type { Host } from "./hosts/host";
 import {
@@ -96,7 +100,8 @@ export interface SpawnDeps {
   mcpEntry: string;
   /** Mint per-agent broker credentials (`volley auth add-agent`); false for an open broker. */
   mintCredentials: boolean;
-  tunables: Pick<Tunables, "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s">;
+  tunables: Pick<Tunables, "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s"> &
+    Partial<Pick<Tunables, "brief_preface_max_bytes">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -291,6 +296,21 @@ interface Launched {
   launchedAt: number;
 }
 
+/**
+ * The wave's brief preface, read at each spawn on the supervisor's host (the wave state shows
+ * the one read at submit). Over `brief_preface_max_bytes` refuses the spawn.
+ */
+function loadPreface(wave: Wave, deps: SpawnDeps) {
+  const path = briefPrefacePath(wave.repo, wave.brief_preface);
+  const max = deps.tunables.brief_preface_max_bytes ?? CONFIG_DEFAULTS.brief_preface_max_bytes;
+  try {
+    return readBriefPreface(path, max);
+  } catch (e) {
+    if (!(e instanceof BriefPrefaceTooLarge)) throw e;
+    throw new SpawnError("BRIEF_PREFACE_TOO_LARGE", e.message, e.detail);
+  }
+}
+
 /** Steps 2–5 for one attempt: everything up to a running terminal and a live watch. */
 async function launchAttempt(
   ctx: Ctx,
@@ -319,7 +339,8 @@ async function launchAttempt(
   }
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
-  const brief = renderBrief(loadTemplate(req.role, deps.briefsDir), {
+  const preface = loadPreface(req.wave, deps);
+  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir), {
     agent_id: agentId,
     namespace: ctx.namespace,
     wave: req.wave.wave,
@@ -338,7 +359,7 @@ async function launchAttempt(
         ? briefExtraFrom(await host.readFile(briefExtraPath(ctx.root)))
         : briefExtra(ctx.root),
   });
-  await host.writeFile(briefPath, brief);
+  await host.writeFile(briefPath, withPreface(preface, rendered));
   if (deps.briefGate !== null)
     await runBriefGate(host.exec, deps.briefGate, briefPath, ctx.worktree);
 

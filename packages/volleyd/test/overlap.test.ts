@@ -130,7 +130,9 @@ tasks:
     expect(res.warnings).toEqual([
       "overlap: w2/Y and w1/X both touch packages/widget/src/registry.ts",
     ]);
-    const alarms = daemon.journalEvents("w2").filter((e) => e.type === "alarm_raised");
+    const alarms = daemon
+      .journalEvents("w2")
+      .filter((e) => e.type === "alarm_raised" && e.data.alarm === "overlap_warning");
     expect(alarms).toHaveLength(1);
     expect(alarms[0]?.task).toBe("Y");
     expect(alarms[0]?.data).toEqual({
@@ -244,6 +246,10 @@ tasks:
   it("no overlap → no warning and nothing journaled", async () => {
     const res = await client.request("run", { wave_yaml: wave("w3", 3) });
     expect(res.warnings ?? []).toEqual([]);
-    expect(daemon.journalEvents("w3").filter((e) => e.type === "alarm_raised")).toEqual([]);
+    expect(
+      daemon
+        .journalEvents("w3")
+        .filter((e) => e.type === "alarm_raised" && e.data.alarm === "overlap_warning"),
+    ).toEqual([]);
   });
 });

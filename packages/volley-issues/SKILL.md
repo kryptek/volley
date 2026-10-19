@@ -125,17 +125,44 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --out .volley/waves/$WAVE.yaml
 ```
 
-The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array). Show the user the generated file.
+The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array). Show the user the generated file.
+
+**The brief preface: public-repo hygiene rules go here.** The wave file carries `brief_preface: ".volley/brief-preface.md"` (`--brief-preface <path>` names another file, relative to the repo or absolute). volleyd puts that file, byte for byte, at the top of **every** brief it writes — implementer, both reviewers, fixup, rebase — above the role's own template. It is the only way to give volleyd-spawned agents the rules you would otherwise put in a hand-written brief, so rules like "this repository is public: no person names, no local usernames, no machine paths, no private hostnames or IPs" belong in it. When the repo is on this machine and the file does not exist, the helper writes it from `templates/brief-preface.md` and says so on stderr (`wrote <path> from the template`); an existing preface is never changed (`brief preface: <path> (kept)`). Show it to the user and add the repository's own rules under its `## Repository rules` heading:
+
+```bash
+cat "$(git rev-parse --show-toplevel)/.volley/brief-preface.md"
+```
+
+```markdown
+# Rules for this repository (read before anything else)
+...
+## Public-repo hygiene
+
+This repository is public. Never put any of these into code, comments, docs, test fixtures,
+commit messages, branch names or PR text:
+
+- a person's name (write "the owner", "a maintainer" or "the user" instead);
+- a local username, or an email address that is not a project address;
+- a machine path: home directories, temp paths, worktree paths;
+- a private hostname, internal domain or IP address;
+...
+## Repository rules
+
+<!-- build and test commands, gates, files that must not change, conventions -->
+```
+
+The preface is copied verbatim (no `{{placeholder}}` expansion) and is capped at `brief_preface_max_bytes` (16 KiB by default; a larger file refuses `volleyd validate` and `volleyd run` with `BRIEF_PREFACE_TOO_LARGE`). `.volley/brief-extra.md` is different: optional per-repo *notes* (build commands, gates) appended as a "Repository notes" section at the end of each brief. Rules go in the preface; notes in the extra. Reviewers also check public hygiene on their own (a fixed line in their briefs), so a leak is a P1 even in a repo with no preface.
 
 ### Step 4: validate and submit
 
 ```bash
 volleyd validate .volley/waves/$WAVE.yaml
 # ok: wave <wave> v1 — <n> task(s), critical path <k>, release branch release/<wave>
+# brief preface: <repo>/.volley/brief-preface.md (<bytes> B, sha256 <12 hex>)
 volleyd run .volley/waves/$WAVE.yaml --owner <COORDINATOR-AGENT-ID>
 ```
 
-`volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator's auto-suffixed id: only the owner may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory; if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
+`volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. Check its `brief preface:` line: `brief preface: none (no <path>)` means the agents get no repo rules — write the preface first (above). `volleyd status "$WAVE"` shows the same line under its header for the running wave, with the sha256 of the file the agents got. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator's auto-suffixed id: only the owner may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory; if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
 
 ### Step 5: volleyd coordinator loop
 

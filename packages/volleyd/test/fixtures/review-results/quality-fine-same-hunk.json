@@ -7,5 +7,6 @@
       "text": "Short-circuit reads fine; maybe rename the flag."
     }
   ],
-  "verdict": "approve"
+  "verdict": "approve",
+  "hygiene": { "checked": true, "findings": [] }
 }

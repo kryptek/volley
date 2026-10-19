@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
+import { CONFIG_DEFAULTS } from "../config-defaults";
 import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { criticalPaths } from "../scheduler";
@@ -12,6 +14,11 @@ Parse and validate a wave file locally (no daemon needed). Exit 0 when valid, 1 
 path-qualified errors when not. When the wave's repo is on this machine, its release branch must
 exist there, locally or as origin/<branch> (RELEASE_BRANCH_MISSING otherwise); a repo that is
 not here is noted, and the daemon checks it at \`run\`.
+
+It also prints the brief preface every agent of the wave would get — its path, size and sha256
+prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
+brief_preface_max_bytes (the wave's config: value, else the default; \`run\` re-checks it
+against the daemon's config).
 `;
 
 export async function validate({ argv, io }: CommandArgs): Promise<ExitCode> {
@@ -54,11 +61,20 @@ export async function validate({ argv, io }: CommandArgs): Promise<ExitCode> {
         return EXIT.ERROR;
       }
     }
+    const prefacePath = briefPrefacePath(wave.repo, wave.brief_preface);
+    const preface = readBriefPreface(
+      prefacePath,
+      wave.config.brief_preface_max_bytes ?? CONFIG_DEFAULTS.brief_preface_max_bytes,
+    );
+    const prefaceLine =
+      preface === null
+        ? `${formatBriefPreface(null)} (no ${prefacePath})`
+        : formatBriefPreface(preface);
     const cp = criticalPaths(wave);
     const longest = Math.max(...Object.values(cp));
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${note}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n`,
     );
     return EXIT.OK;
   } catch (e) {

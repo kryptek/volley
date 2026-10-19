@@ -137,6 +137,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       open_decisions: [],
       gates: [],
       spec: specOf(wave),
+      ...briefPrefaceOf(ev),
       updated_at: ev.at,
     };
     return next;
@@ -158,6 +159,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       state.version = plan.version;
       state.release_branch = plan.release_branch;
       state.spec = specOf(plan);
+      Object.assign(state, briefPrefaceOf(ev));
       for (const t of state.tasks) {
         const issue = wave.tasks[t.id]?.issue;
         if (issue !== undefined) t.issue = issue;
@@ -295,6 +297,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         };
       }
       break;
+    case "alarm_raised":
+      // Gated without reviews: the wave file's pipeline for the task lists none.
+      if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
+        task.reviews_skipped_by_plan = true;
+      break;
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
@@ -315,6 +322,13 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
 
   derive(state, next);
   return next;
+}
+
+/** wave-state `brief_preface` from a submit / version event (absent in older journals). */
+function briefPrefaceOf(ev: JournalEvent): Pick<WaveState, "brief_preface"> {
+  return Object.hasOwn(ev.data, "brief_preface")
+    ? { brief_preface: (ev.data.brief_preface as WaveState["brief_preface"]) ?? null }
+    : {};
 }
 
 /** The wave-state `spec`: the submitted file's shape. */

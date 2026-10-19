@@ -43,11 +43,21 @@
     },
     "review": {
       "type": "object",
-      "required": ["findings", "verdict"],
+      "required": ["findings", "verdict", "hygiene"],
       "properties": {
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "verdict": { "enum": ["approve", "changes_requested"] },
+        "hygiene": { "$ref": "#/$defs/hygiene" },
         "summary": { "type": "string" }
+      }
+    },
+    "hygiene": {
+      "type": "object",
+      "description": "The reviewer's public-hygiene check of the diff, commit messages and PR text: person names, local usernames, machine paths, private hostnames or IPs. Every finding is a P1. A review without checked: true is not a review result.",
+      "required": ["checked", "findings"],
+      "properties": {
+        "checked": { "const": true },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
       }
     },
     "fixup": {

@@ -75,19 +75,20 @@ describe("volleyd daemon + control channel", () => {
     // subscribeStream resolves after SUBACK, so nothing published after it can be missed.
     const unsubscribe = await sub.subscribeStream(waveEventsTopic(WAVE), (m) => got.push(m));
     expect((await runCli(["run", EXAMPLE], t.env)).exitCode).toBe(0);
-    await waitFor(() => got.length >= 6);
+    await waitFor(() => got.length >= 7);
     await unsubscribe();
     await sub.disconnect();
     const msgs = got.map((m) => JSON.parse(m.payload));
     expect(msgs.map((m) => m.type)).toEqual([
       "wave_submitted",
+      "alarm_raised", // brief_preface_missing: the example repo has no preface
       "task_queued",
       "task_queued",
       "task_queued",
       "task_queued",
       "task_admitted",
     ]);
-    expect(msgs.map((m) => m.payload.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(msgs.map((m) => m.payload.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     for (const m of msgs) expect(schemaErrors("wave-event.schema.json", m)).toEqual([]);
   });
 
