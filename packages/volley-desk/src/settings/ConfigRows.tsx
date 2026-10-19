@@ -126,7 +126,7 @@ function TextControl(p: {
   };
   return (
     <input
-      className="cfg-text mono"
+      className="cfg-text recessed mono"
       aria-label={p.row.label}
       value={draft}
       disabled={p.disabled}

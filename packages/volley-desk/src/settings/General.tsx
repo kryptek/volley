@@ -4,13 +4,14 @@
  * notifications (the sound and the browser notifications, the same settings
  * as the top bar's toggles) and the agent windows' narration effect. The
  * look's keys persist through `useLook`, the notification ones through
- * `useNotifySettings`.
+ * `useNotifySettings` (sound is `notify.sound` in `volley-dash:notify`, shared
+ * with the top bar, not a look key); the switch is `useNotifyToggle`.
  */
 import { useState } from "react";
 import { NARR_LABEL } from "../look/options";
 import { FINISHED_GRACE_MAX_MIN, type Look, isGraceMin } from "../look/useLook";
-import { requestNotificationPermission } from "../notify/notify-permission";
-import type { NotifyOptions } from "../notify/use-notify-settings";
+import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
+import { useNotifyToggle } from "../notify/use-notify-toggle";
 import { Group, Row, Seg, Toggle } from "./primitives";
 import "../styles/look.css";
 
@@ -30,7 +31,7 @@ function GraceInput({ value, onCommit }: { value: number; onCommit: (min: number
   return (
     <input
       id="look-finished-grace"
-      className="look-num mono"
+      className="look-num recessed mono"
       type="number"
       min={0}
       max={FINISHED_GRACE_MAX_MIN}
@@ -45,9 +46,6 @@ function GraceInput({ value, onCommit }: { value: number; onCommit: (min: number
   );
 }
 
-const blockedNow = () =>
-  typeof Notification !== "undefined" && Notification.permission === "denied";
-
 export function General({
   look,
   setLook,
@@ -58,18 +56,10 @@ export function General({
   look: Look;
   setLook: (change: Partial<Look>) => void;
   notify: NotifyOptions;
-  setNotify: (next: NotifyOptions) => void;
+  setNotify: SetNotify;
   onArrange: () => void;
 }) {
-  const [blocked, setBlocked] = useState(blockedNow);
-  const toggleNotify = (on: boolean) => {
-    if (!on) return setNotify({ ...notify, enabled: false });
-    void requestNotificationPermission().then((result) => {
-      // Only a refusal is "blocked"; dismissing the prompt leaves it askable.
-      setBlocked(result === "denied");
-      setNotify({ ...notify, enabled: result === "granted" });
-    });
-  };
+  const { toggle: toggleNotify, blocked } = useNotifyToggle(setNotify);
   return (
     <>
       <Group title="Canvas">
@@ -109,7 +99,7 @@ export function General({
           <Toggle
             label="Sound when something needs you"
             on={notify.sound}
-            onChange={(sound) => setNotify({ ...notify, sound })}
+            onChange={(sound) => setNotify((prev) => ({ ...prev, sound }))}
           />
         </Row>
         <Row

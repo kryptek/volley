@@ -5,21 +5,24 @@
  * broker account and the sections in three groups with coloured icon tiles;
  * the main pane shows the picked section (General, Appearance, Supervisor,
  * About; the Onboarding sections are placeholders for now). Escape, the
- * close button and a scrim click close it; focus moves in on open (and Tab
- * stays inside) and goes back to the opener on close.
+ * close button and a scrim click close it (Escape in a search box with a
+ * query clears the query instead); focus moves in on open (and Tab stays
+ * inside) and goes back to the opener on close. It is built like a Desk
+ * window (D10): the `win-depth` lift and gradient body, and a `win-edge`.
  */
 import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import type { Look } from "../look/useLook";
-import type { NotifyOptions } from "../notify/use-notify-settings";
+import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import type { ConfigPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
 import { General } from "./General";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
+import { clearOnEscape } from "./primitives";
 import {
   SECTION_GROUPS,
   type SectionDef,
@@ -34,7 +37,7 @@ export interface SettingsWindowProps {
   look: Look;
   setLook: (change: Partial<Look>) => void;
   notify: NotifyOptions;
-  setNotify: (next: NotifyOptions) => void;
+  setNotify: SetNotify;
   /** Whether this browser has WebGL (`useWebGL`). */
   webgl: boolean;
   /** The Desk's broker identity; `null` when anonymous. */
@@ -85,7 +88,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
     <div className="modal-scrim" onPointerDown={(e) => e.target === e.currentTarget && p.onClose()}>
       <div
         ref={dialog}
-        className="mac-settings"
+        className="mac-settings win-depth"
         // biome-ignore lint/a11y/useSemanticElements: the prototype's modal markup and CSS (scrim + div)
         role="dialog"
         aria-modal="true"
@@ -104,19 +107,24 @@ export function SettingsWindow(p: SettingsWindowProps) {
             <i className="y" />
             <i className="g" />
           </div>
-          <label className="ms-search">
+          <label className="ms-search recessed">
             <HugeiconsIcon icon={Search01Icon} size={13} strokeWidth={1.8} />
             <input
               type="search"
               placeholder="Search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => clearOnEscape(e, q, setQ)}
               aria-label="Search settings"
             />
           </label>
           {/* biome-ignore lint/a11y/useSemanticElements: a labelled block of text, not a form fieldset */}
           <div className="ms-account" role="group" aria-label="Signed-in account">
-            <div className="avatar" aria-hidden="true">
+            <div
+              className="avatar"
+              aria-hidden="true"
+              title={`${p.identity ?? "Not signed in"} · ${accountRole(p.identity, p.demo)}`}
+            >
               {p.identity ? initials(p.identity) : "?"}
             </div>
             <div className="min0">
@@ -186,6 +194,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
             )}
           </div>
         </div>
+        <span className="win-edge" aria-hidden="true" />
       </div>
     </div>
   );

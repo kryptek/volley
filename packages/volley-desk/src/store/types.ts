@@ -240,11 +240,17 @@ export interface AgentView {
   registered: boolean;
   registry: RegistryPayload | null;
   model: string | null;
-  status: { type: string; payload: unknown; at: number } | null;
+  /**
+   * `at` is the envelope's `wall_time` (the sender's clock); `seenAt` is when
+   * it reached this Desk (`wall_time` for a retained replay), skew-free.
+   */
+  status: { type: string; payload: unknown; at: number; seenAt?: number } | null;
   progress: number | null;
   narration: string | null;
   /** ms of the last `progress/heartbeat`. */
   heartbeat: number | null;
+  /** The last `progress` envelope's type and time (ms), any type: a sign the agent is on this broker. */
+  lastProgress?: { type: string; at: number };
   /** ms of the last message on any of the agent's topics. */
   lastSeen: number;
   /** Set when an `awaiting_input` is outstanding; cleared by `resumed` (SPEC §4.3). */
@@ -280,10 +286,30 @@ export interface CoordinatorView {
   workspace?: string;
 }
 
+/**
+ * A supervisor (`volleyd`): a registered Volley agent that is shown as health
+ * (the top-bar pill, the coordinators window's first row), never as an agent
+ * window.
+ */
+export interface SupervisorView {
+  id: string;
+  namespace: string | null;
+  registry: RegistryPayload | null;
+  /** The latest status type (`working`, `reaped`, …); null while none is retained. */
+  status: string | null;
+  /** ms of its last sign of life: registry, status or progress. */
+  lastHeartbeat: number | null;
+  version?: string;
+  /** How many waves it reports supervising (its `working` status's `waves`). */
+  wavesOwned: number | null;
+}
+
 export interface DeskState {
   waves: Record<string, WaveView>;
   agents: Record<string, AgentView>;
   coordinators: Record<string, CoordinatorView>;
+  /** Supervisors by agent id; they are never in `agents`. */
+  supervisors: Record<string, SupervisorView>;
   config: ConfigPayload | null;
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */

@@ -93,10 +93,10 @@ describe("App without WebGL", () => {
       "true",
     );
     expect(panel.getByText(BG_NO_WEBGL_NOTE)).toBeInTheDocument();
-    const style = within(panel.getByRole("group", { name: "Window style" }));
-    expect(style.queryByRole("button", { name: "Liquid glass" })).toBeNull();
-    expect(style.getByRole("button", { name: "Frosted glass" })).toHaveAttribute(
-      "aria-pressed",
+    const style = within(panel.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.queryByRole("radio", { name: "Liquid glass" })).toBeNull();
+    expect(style.getByRole("radio", { name: "Frosted glass" })).toHaveAttribute(
+      "aria-checked",
       "true",
     );
     // The saved look is untouched: a browser with WebGL still gets Aurora and liquid glass.
@@ -131,6 +131,6 @@ describe("App without WebGL", () => {
     const grid = within(screen.getByRole("group", { name: "Backgrounds" }));
     expect(grid.getAllByRole("button")).toHaveLength(BACKGROUNDS.length);
     expect(screen.queryByText(BG_NO_WEBGL_NOTE)).toBeNull();
-    expect(screen.getByRole("button", { name: "Liquid glass" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Liquid glass" })).toBeInTheDocument();
   });
 });

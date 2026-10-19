@@ -37,7 +37,7 @@ import {
 import type { OfflineSpan } from "../attention";
 import { DEMO_IDENTITY, createDemoSteerClient } from "../steer/demoClient";
 import type { SteerClient } from "../steer/transport";
-import { demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
+import { demoAgentCount, demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
 import {
   AuthFailedError,
   type BrokerCredentials,
@@ -279,7 +279,7 @@ export function DeskStoreProvider({
   );
   const identity = demo ? DEMO_IDENTITY : (auth?.username ?? null);
   const [state, dispatch] = useReducer(storeReducer, undefined, () => ({
-    ...(demo ? demoState() : initialState()),
+    ...(demo ? demoState(Date.now(), demoAgentCount(window.location.search)) : initialState()),
     ...(identity !== null ? { self: identity } : {}),
   }));
   const [connection, setConnection] = useState<Connection>(demo ? "demo" : "connecting");

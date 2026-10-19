@@ -190,12 +190,22 @@ const token = (name: string): string => {
   return (m[1] as string).trim();
 };
 const resolveVar = (v: string) => v.replace(/^var\(--([a-z-]+)\)$/, (_, n: string) => token(n));
-function chromeBackground(chrome: string): string {
+function chromeRule(chrome: string): string {
   for (const f of ["desk.css", "look.css"]) {
-    const m = css(f).match(new RegExp(`\\.chrome-${chrome}\\s*\\{[^}]*?background:\\s*([^;]+);`));
-    if (m) return resolveVar((m[1] as string).trim());
+    const m = css(f).match(new RegExp(`\\.win-inner\\.chrome-${chrome}\\s*\\{([^}]*)\\}`));
+    if (m) return m[1] as string;
   }
-  throw new Error(`no background for chrome-${chrome}`);
+  throw new Error(`no rule for chrome-${chrome}`);
+}
+function chromeBackground(chrome: string): string {
+  const m = chromeRule(chrome).match(/background-color:\s*([^;]+);/);
+  if (!m) throw new Error(`no background for chrome-${chrome}`);
+  return resolveVar((m[1] as string).trim());
+}
+/** The colour stops of a chrome's depth gradient (`--win-body`, D10). */
+function bodyStops(chrome: string): string[] {
+  const m = chromeRule(chrome).match(/--win-body:\s*([^;]+);/);
+  return m ? [...(m[1] as string).matchAll(/rgba?\([^)]+\)|#[0-9a-f]{6}/gi)].map((x) => x[0]) : [];
 }
 
 describe("contrast (WCAG AA, 4.5:1 for text)", () => {
@@ -203,17 +213,21 @@ describe("contrast (WCAG AA, 4.5:1 for text)", () => {
   // over the darker React Bits backgrounds), every chrome must keep body,
   // muted and dim text at AA. Glow draws its own BorderGlow fill (Frame.tsx).
   const ground = parseColor(token("ground")).rgb;
-  const surfaces: Record<string, RGB> = {};
+  // The depth gradient (D10) lies over the body colour: every one of its stops must keep AA.
+  const surfaces: Record<string, RGB[]> = {};
   for (const chrome of CHROMES) {
     const bg = chrome === "glow" ? "rgba(14,16,26,.78)" : chromeBackground(chrome);
-    surfaces[chrome] = over(parseColor(bg), ground);
+    const body = over(parseColor(bg), ground);
+    surfaces[chrome] = [body, ...bodyStops(chrome).map((c) => over(parseColor(c), body))];
   }
 
   it.each(CHROMES)("text tokens on the %s chrome", (chrome) => {
-    const surface = surfaces[chrome] as RGB;
-    for (const t of ["ink", "mute", "dim"]) {
-      const ratio = contrast(parseColor(token(t)).rgb, surface);
-      expect(ratio, `--${t} on ${chrome}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+    expect(bodyStops(chrome).length, `${chrome} depth gradient`).toBeGreaterThan(0);
+    for (const surface of surfaces[chrome] as RGB[]) {
+      for (const t of ["ink", "mute", "dim"]) {
+        const ratio = contrast(parseColor(token(t)).rgb, surface);
+        expect(ratio, `--${t} on ${chrome}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
     }
   });
 

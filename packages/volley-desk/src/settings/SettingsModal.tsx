@@ -4,12 +4,13 @@
  * (`ConfigRows`, wave scope), read-only — volleyd applies config_set to the
  * global config, and per-wave values come from the wave file's `config:`
  * block. "Global settings…" opens Settings › Supervisor, where the global
- * config is edited.
+ * config is edited. Built like a Desk window (D10): `win-depth` and a `win-edge`.
  */
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type CSSProperties, useEffect, useRef } from "react";
 import { useFocusTrap } from "../a11y/keys";
+import { PrimaryAction } from "../look/PrimaryAction";
 import type { WaveView } from "../store/types";
 import { Clawd } from "../windows/wave/Clawd";
 import { accentFor } from "../windows/wave/accent";
@@ -41,7 +42,7 @@ export function SettingsModal({ wave, onClose, onOpenGlobal }: SettingsModalProp
     <div className="modal-scrim" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={dialog}
-        className="modal"
+        className="modal win-depth"
         // biome-ignore lint/a11y/useSemanticElements: the prototype's modal markup and CSS (scrim + div)
         role="dialog"
         aria-modal="true"
@@ -81,10 +82,9 @@ export function SettingsModal({ wave, onClose, onOpenGlobal }: SettingsModalProp
           <span className="dim">
             Read-only here · <code>volleyd config set</code> changes the global config
           </span>
-          <button type="button" className="btn btn--hot" onClick={onClose}>
-            Done
-          </button>
+          <PrimaryAction onClick={onClose}>Done</PrimaryAction>
         </footer>
+        <span className="win-edge" aria-hidden="true" />
       </div>
     </div>
   );

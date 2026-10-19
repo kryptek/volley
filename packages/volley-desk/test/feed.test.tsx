@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { Envelope, FeedEntry } from "../src/store/types";
+import { initialState, isControlTraffic, reduceAll } from "../src/store/reducer";
+import type { DeskMessage, Envelope, FeedEntry } from "../src/store/types";
 import { Feed } from "../src/windows/agent/Feed";
 
 const AGENT = "ci-speed-t3b-implementer-1";
@@ -132,5 +133,63 @@ describe("Feed", () => {
     // FEED_LIMIT reached: the oldest entry is sliced off as a new one arrives.
     rerender(<Feed feed={[steer, narr, more]} />);
     expect(screen.getByRole("button", { name: /Matrix written/ }).closest(".env")).toBe(before);
+  });
+
+  it("shows the empty hint for an agent with no signal", () => {
+    render(<Feed feed={[]} noSignal />);
+    expect(screen.getByText(/no envelopes yet/)).toHaveTextContent(/no signal/);
+  });
+});
+
+describe("Feed control traffic", () => {
+  // volleyd's control channel: a mailbox `query` with `payload.op` to the supervisor, answered by
+  // an `ack` from it that echoes `acked_type: "query"` and the op. Only that ack reaches an agent's
+  // mailbox (the requester's), and it is not a conversation with the agent.
+  const from = (e: FeedEntry, agent_id: string): FeedEntry => ({
+    ...e,
+    envelope: { ...e.envelope, agent_id },
+  });
+  const reply = from(
+    entry("mailbox", "ack", { acked_type: "query", op: "status", ok: true, text: "2 waves" }, 11),
+    "volleyd",
+  );
+  // `op` is not reserved (SPEC §4.4): between two agents the same shapes are a conversation.
+  const peerQuery = entry("mailbox", "query", { op: "lint", text: "can you lint shard 2?" }, 12);
+  const peerAck = entry(
+    "mailbox",
+    "ack",
+    { acked_type: "query", op: "lint", text: "linting shard 2" },
+    13,
+  );
+  const plainQuery = entry("mailbox", "query", { text: "what are you on?" }, 20);
+  const ack = entry("mailbox", "ack", { acked_type: "steering" }, 31);
+
+  it("hides the supervisor's control replies; steering, acks and peer queries still show", () => {
+    render(<Feed feed={[working, reply, steer, ack, plainQuery, peerQuery, peerAck, narr]} />);
+    expect(screen.queryByRole("button", { name: /2 waves/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /keep the matrix to 4 shards/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /what are you on\?/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /can you lint shard 2/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /linting shard 2/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(7);
+  });
+
+  it("the store never rings control traffic into an agent's feed", () => {
+    const m = (e: FeedEntry): DeskMessage => ({ ...e });
+    const s = reduceAll(initialState(), [m(working), m(reply), m(steer), m(peerQuery)]);
+    expect(s.agents[AGENT]?.feed.map((f) => f.envelope.type)).toEqual([
+      "working",
+      "steering",
+      "query",
+    ]);
+  });
+
+  it("a query is control traffic only when it is addressed to a supervisor", () => {
+    const q = peerQuery.envelope;
+    expect(isControlTraffic(q, "volleyd")).toBe(true);
+    expect(isControlTraffic(q, AGENT)).toBe(false);
+    expect(isControlTraffic(q, "sup-main", (id) => id === "sup-main")).toBe(true);
+    expect(isControlTraffic(reply.envelope, AGENT)).toBe(true);
+    expect(isControlTraffic(peerAck.envelope, AGENT)).toBe(false);
   });
 });

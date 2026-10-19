@@ -146,27 +146,28 @@ describe("Settings › Appearance and General", () => {
   it("window style, Needs-you and narration segments set the look", () => {
     render(<Harness />);
     const seg = (group: string, name: string) =>
-      within(screen.getByRole("group", { name: group })).getByRole("button", { name });
+      within(screen.getByRole("radiogroup", { name: group })).getByRole("radio", { name });
     const picks: [string, string, keyof Look, string][] = [
-      ["Window style", "Frosted glass", "chrome", "glass"],
+      // Each pick changes the value (picking the current option again is a no-op).
       ["Window style", "Liquid glass", "chrome", "liquid"],
       ["Window style", "Spotlight", "chrome", "spotlight"],
       ["Window style", "Border glow", "chrome", "glow"],
       ["Window style", "Solid", "chrome", "solid"],
+      ["Window style", "Frosted glass", "chrome", "glass"],
       ["Needs you effect", "Electric border", "attn", "electric"],
       ["Needs you effect", "Star border", "attn", "star"],
       ["Needs you effect", "Pulse", "attn", "pulse"],
-      ["Narration effect", "Decrypt", "narr", "decrypt"],
       ["Narration effect", "Shiny", "narr", "shiny"],
       ["Narration effect", "Plain", "narr", "plain"],
+      ["Narration effect", "Decrypt", "narr", "decrypt"],
     ];
     for (const [group, name, key, value] of picks) {
       fireEvent.click(seg(group, name));
       expect(latest[key]).toBe(value);
       expect(stored()[key]).toBe(value);
-      expect(seg(group, name)).toHaveAttribute("aria-pressed", "true");
+      expect(seg(group, name)).toHaveAttribute("aria-checked", "true");
     }
-    expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-pressed", "false");
+    expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-checked", "false");
   });
 
   it("toggles auto-arrange and arranges on demand", () => {
@@ -227,7 +228,7 @@ describe("App look (demo mode)", () => {
     expect((container.querySelector(".bg-dim") as HTMLElement).style.opacity).toBe("0.4");
     const agents = container.querySelectorAll(".world .win .narr").length;
     expect(agents).toBeGreaterThan(0);
-    expect(container.querySelectorAll(".world svg.tethers path")).toHaveLength(agents);
+    expect(container.querySelectorAll(".world svg.tethers path.tether-core")).toHaveLength(agents);
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
     const n = pill.match(/(\d+) needs? you/)?.[1];
     expect(n).toBeDefined();
@@ -239,7 +240,7 @@ describe("App look (demo mode)", () => {
   it("draws tethers only for the agents of visible waves", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
     const { container } = renderApp();
-    const paths = () => container.querySelectorAll(".world svg.tethers path").length;
+    const paths = () => container.querySelectorAll(".world svg.tethers path.tether-core").length;
     const agents = () => container.querySelectorAll(".world .win .narr").length;
     const before = paths();
     const first = container.querySelector(".coord-list > li") as HTMLElement;
@@ -256,14 +257,14 @@ describe("App look (demo mode)", () => {
     const { container } = renderApp();
     fireEvent.click(dock().getByRole("button", { name: "Settings" }));
     const settings = within(screen.getByRole("dialog", { name: "Settings" }));
-    fireEvent.click(settings.getByRole("button", { name: "Plain" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Plain" }));
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "plain");
     fireEvent.click(settings.getByRole("button", { name: "Appearance" }));
-    fireEvent.click(settings.getByRole("button", { name: "Solid" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Solid" }));
     const inners = [...container.querySelectorAll(".world .win-inner")];
     expect(inners.length).toBeGreaterThan(0);
     for (const el of inners) expect(el).toHaveClass("chrome-solid");
-    fireEvent.click(settings.getByRole("button", { name: "Star border" }));
+    fireEvent.click(settings.getByRole("radio", { name: "Star border" }));
     expect(container.querySelector(".world .win--attn-you .star-border")).not.toBeNull();
     expect(container.querySelector(".world .win-attn-pulse")).toBeNull();
     fireEvent.click(settings.getByRole("switch", { name: "Tethers" }));

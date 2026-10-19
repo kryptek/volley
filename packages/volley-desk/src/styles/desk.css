@@ -3,7 +3,10 @@
  * the pannable world, window frame (glass and solid chromes), shared controls
  * and the top bar. Window-content rules live next to their windows; the
  * background, tethers, React Bits chromes, dock and Appearance rules are in
- * look.css.
+ * look.css. Depth (D10): every window chrome is built like the sign-in card
+ * (signin.css) — layered shadows, a gradient body, glass, and a `win-edge`
+ * overlay for the lit top edge, dark bottom edge and inner ring — and every
+ * text box is `recessed` like its `f3d` fields.
  */
 :root {
   --ink: #e8ecf4;
@@ -20,6 +23,9 @@
   --f-ui: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
   --f-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --f-display: "Bricolage Grotesque", "Instrument Sans", system-ui, sans-serif;
+  /* The sign-in card's lift: contact shadow, ambient, a wide soft drop. */
+  --win-shadow: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 24px -6px rgba(0, 0, 0, 0.55), 0 40px 80px
+    -20px rgba(0, 0, 0, 0.85);
   color-scheme: dark;
 }
 html,
@@ -131,15 +137,40 @@ code {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line);
-  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
 }
-.chrome-glass {
-  background: var(--panel);
-  backdrop-filter: blur(22px) saturate(1.35);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
+/* Depth: the chrome sets the body colour and its --win-body gradient; this lifts and lights it. */
+.win-depth {
+  background-image: var(--win-body);
+  box-shadow: var(--win-shadow);
+  border-color: rgba(255, 255, 255, 0.1);
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.chrome-solid {
-  background: var(--panel-solid);
+.win[data-tilt] .win-depth {
+  transform: perspective(1400px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+}
+.win-edge {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5), inset 0 0
+    0 1px color-mix(in srgb, var(--acc) 7%, rgba(255, 255, 255, 0.03));
+}
+.win-inner.chrome-glass {
+  background-color: rgba(13, 15, 25, 0.42);
+  --win-body: linear-gradient(
+    160deg,
+    rgba(34, 38, 58, 0.5),
+    rgba(14, 16, 28, 0.32) 55%,
+    rgba(10, 11, 20, 0.55)
+  );
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+}
+.win-inner.chrome-solid {
+  background-color: var(--panel-solid);
+  --win-body: linear-gradient(160deg, #1a1d2c, #10121c 55%, #0b0c15);
 }
 .win-bar {
   display: flex;
@@ -202,6 +233,38 @@ code {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* ------------------------------------------------------------- recessed */
+/*
+ * The sign-in `f3d` field recipe for every text box: panels (feed, terminal,
+ * YAML, envelope JSON, the steering input) and fields (settings, search). A
+ * field rings on keyboard focus, a panel while focus is inside it.
+ */
+.recessed {
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
+    rgba(255, 255, 255, 0.08);
+  transition: box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.recessed:focus-visible,
+input.recessed:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--acc, #6ee7f9) 55%, transparent);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
+    color-mix(in srgb, var(--acc, #6ee7f9) 18%, transparent), 0 0 22px
+    color-mix(in srgb, var(--acc, #6ee7f9) 22%, transparent);
+}
+.recessed:focus-within:has(:focus-visible),
+.steer-input.recessed:focus-within {
+  border-color: color-mix(in srgb, var(--acc, #6ee7f9) 45%, transparent);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
+    color-mix(in srgb, var(--acc, #6ee7f9) 14%, transparent);
+}
+.steer-input {
+  border-radius: 14px;
+  padding: 3px;
 }
 
 /* ------------------------------------------------------------- controls */
@@ -281,6 +344,26 @@ code {
 .btn--hot:hover {
   background: #ff9274;
 }
+/* Primary actions (look/PrimaryAction.tsx): the sign-in's `spec-wrap` frame, sized for a window. */
+.action-spec {
+  display: inline-flex;
+  border-radius: 11px;
+  padding: 1px;
+  background: linear-gradient(120deg, #6ee7f9, #7c6cf6 50%, #c264f0);
+  box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.7), 0 0 30px -10px rgba(139, 92, 246, 0.7);
+}
+.action-spec--hot {
+  background: linear-gradient(120deg, #ffb199, #ff7a59 50%, #f472b6);
+  box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.7), 0 0 30px -10px rgba(255, 122, 89, 0.75);
+}
+.action-spec.is-busy {
+  filter: saturate(0.7) brightness(0.9);
+}
+.action-spec > .specular-button {
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
 .pill {
   padding: 5px 10px;
   border-radius: 999px;
@@ -359,6 +442,9 @@ code {
 }
 
 @media (max-width: 699.98px) {
+  .win[data-tilt] .win-depth {
+    transform: none;
+  }
   .topbar-mid {
     display: none;
   }
@@ -370,8 +456,31 @@ code {
   .win--born {
     animation: none;
   }
+  .win-depth {
+    transition: none;
+  }
+  .win[data-tilt] .win-depth {
+    transform: none;
+  }
   .world--anim,
   .world--anim .win {
     transition: none;
   }
+}
+
+/* supervisor health (top-bar pill, coordinators row), no-signal agent label */
+.sup-pill {
+  font-family: var(--f-mono);
+  white-space: nowrap;
+}
+.sup-pill i,
+.coord--sup .coord-dot {
+  background: var(--ok);
+}
+.sup-pill.chip--hot i,
+.coord--sup.st-gone .coord-dot {
+  background: var(--hot);
+}
+.a-nosignal {
+  margin: 6px 0;
 }

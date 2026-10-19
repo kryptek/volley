@@ -1,6 +1,8 @@
 /**
  * React Bits allow-list check. The Desk may only use the free React Bits
- * components the approved prototype uses; each is installed from the shadcn
+ * components the approved prototype uses, plus the reviewed D10 adoptions
+ * (GooeyNav tabs and pickers; RubberSegment, allowed but not installed since
+ * its one use went away); each is installed from the shadcn
  * registry into `src/rb/<Name>/` (see README "React Bits"). Any top-level
  * entry of `src/rb/` (directory or file) whose name is not on this list fails
  * the check, so a Pro component or an unreviewed addition can't slip in. Files
@@ -40,6 +42,7 @@ export const REACT_BITS_ALLOW_LIST: readonly string[] = [
   "GhostFibers",
   "GlassSurface",
   "GlideSelect",
+  "GooeyNav",
   "GradientASCII",
   "GradientBlinds",
   "GradientWaves",
@@ -74,6 +77,7 @@ export const REACT_BITS_ALLOW_LIST: readonly string[] = [
   "PromptBar",
   "Radar",
   "RippleGrid",
+  "RubberSegment",
   "Scanner",
   "ShapeGrid",
   "ShapeWaves",
@@ -86,7 +90,6 @@ export const REACT_BITS_ALLOW_LIST: readonly string[] = [
   "SpotlightCard",
   "StarBorder",
   "StatusMark",
-  "SwipeToast",
   "ThoughtLine",
   "Threads",
   "Topography",

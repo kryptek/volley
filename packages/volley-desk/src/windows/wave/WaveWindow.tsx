@@ -9,6 +9,7 @@ import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { Frame, type FrameProps } from "../../canvas/Frame";
+import { plural } from "../../lib/plural";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
 import { Dag, type DagNode } from "./Dag";
@@ -120,8 +121,6 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
     ];
   });
 }
-
-const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 export function WaveWindow(p: WaveWindowProps) {
   const now = useNow(p.now);

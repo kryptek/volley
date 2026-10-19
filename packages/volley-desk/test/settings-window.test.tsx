@@ -1,9 +1,15 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
 import App from "../src/App";
 import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
-import { type NotifyOptions, useNotifySettings } from "../src/notify/use-notify-settings";
+import {
+  NOTIFY_STORAGE_KEY,
+  type NotifyOptions,
+  useNotifySettings,
+} from "../src/notify/use-notify-settings";
 import { SettingsWindow, type SettingsWindowProps } from "../src/settings/SettingsWindow";
 import { type ConfigClient, createConfigTransport } from "../src/settings/configTransport";
 import { SETTINGS_SECTIONS, type SectionKey } from "../src/settings/sections";
@@ -34,6 +40,35 @@ const config: ConfigPayload = {
   spawn_timeout_s: 180,
   wake_grace_s: 120,
 };
+
+const settingsCss = readFileSync(join(__dirname, "../src/styles/settings.css"), "utf8").replace(
+  /\s+/g,
+  " ",
+);
+
+/** A Notification API whose permission prompt stays open until the returned function answers it. */
+function pendingPermission(): (result: NotificationPermission) => void {
+  let answer: (result: NotificationPermission) => void = () => {};
+  const ctor = vi.fn() as unknown as typeof Notification;
+  Object.defineProperty(ctor, "permission", { value: "default", configurable: true });
+  Object.defineProperty(ctor, "requestPermission", {
+    value: () =>
+      new Promise<NotificationPermission>((resolve) => {
+        answer = resolve;
+      }),
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "Notification", {
+    configurable: true,
+    writable: true,
+    value: ctor,
+  });
+  return (result) => answer(result);
+}
+
+afterEach(() => {
+  (globalThis as { Notification?: unknown }).Notification = undefined;
+});
 
 let latestLook: Look;
 let latestNotify: NotifyOptions;
@@ -132,8 +167,12 @@ describe("SettingsWindow", () => {
     const account = () => within(screen.getByRole("group", { name: "Signed-in account" }));
     expect(account().getByText("desk")).toBeInTheDocument();
     expect(account().getByText(/Desk · can steer and change settings/)).toBeInTheDocument();
-    rerender(<Harness identity="alfred" />);
-    expect(account().getByText("alfred")).toBeInTheDocument();
+    // At phone width only the avatar shows: its title carries the name and the role.
+    expect(
+      screen.getByRole("group", { name: "Signed-in account" }).querySelector(".avatar"),
+    ).toHaveAttribute("title", expect.stringMatching(/^desk · Desk · can steer/));
+    rerender(<Harness identity="implementer-k3p9" />);
+    expect(account().getByText("implementer-k3p9")).toBeInTheDocument();
     expect(account().getByText(/Agent identity/)).toBeInTheDocument();
     rerender(<Harness identity={null} />);
     expect(account().getByText("Not signed in")).toBeInTheDocument();
@@ -160,8 +199,8 @@ describe("SettingsWindow", () => {
       expect(latestLook.showFinished).toBe(true);
       expect(stored().showFinished).toBe(true);
 
-      const narr = within(screen.getByRole("group", { name: "Narration effect" }));
-      fireEvent.click(narr.getByRole("button", { name: "Shiny" }));
+      const narr = within(screen.getByRole("radiogroup", { name: "Narration effect" }));
+      fireEvent.click(narr.getByRole("radio", { name: "Shiny" }));
       expect(latestLook.narr).toBe("shiny");
       expect(stored().narr).toBe("shiny");
     });
@@ -201,6 +240,20 @@ describe("SettingsWindow", () => {
       expect(await screen.findByText(/Blocked in this browser/)).toBeInTheDocument();
       expect(latestNotify.enabled).toBe(false);
     });
+
+    it("a sound change while the permission prompt is open survives its answer", async () => {
+      const answer = pendingPermission();
+      render(<Harness />);
+      fireEvent.click(screen.getByRole("switch", { name: "Browser notifications" }));
+      fireEvent.click(screen.getByRole("switch", { name: "Sound when something needs you" }));
+      expect(latestNotify.sound).toBe(false);
+      await act(async () => answer("granted"));
+      expect(latestNotify).toMatchObject({ enabled: true, sound: false });
+      expect(JSON.parse(localStorage.getItem(NOTIFY_STORAGE_KEY) ?? "{}")).toMatchObject({
+        enabled: true,
+        sound: false,
+      });
+    });
   });
 
   describe("Appearance", () => {
@@ -236,7 +289,7 @@ describe("SettingsWindow", () => {
       expect(latestLook.dim).toBe(0.6);
       expect(screen.getByText("60%")).toBeInTheDocument();
       const seg = (group: string, name: string) =>
-        within(screen.getByRole("group", { name: group })).getByRole("button", { name });
+        within(screen.getByRole("radiogroup", { name: group })).getByRole("radio", { name });
       fireEvent.click(seg("Window style", "Solid"));
       expect(latestLook.chrome).toBe("solid");
       fireEvent.click(seg("Needs you effect", "Star border"));
@@ -309,6 +362,53 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("is built like a Desk window (D10): lifted depth body and the lit edge", () => {
+    render(<Harness />);
+    expect(dialog()).toHaveClass("win-depth");
+    expect(dialog().querySelector(":scope > .win-edge")).not.toBeNull();
+    const rule = settingsCss.slice(settingsCss.indexOf(".mac-settings {"));
+    expect(rule.slice(0, rule.indexOf("}"))).toMatch(/--win-body: linear-gradient/);
+  });
+
+  it("the pickers are Gooey Nav radiogroups: one Tab stop, arrow keys move and commit (D10)", () => {
+    render(<Harness initial="appearance" />);
+    const group = screen.getByRole("radiogroup", { name: "Window style" });
+    expect(group.querySelector(".gooey-nav.gooey-seg")).not.toBeNull();
+    const radio = (name: string) => within(group).getByRole("radio", { name });
+    expect(radio("Frosted glass")).toHaveAttribute("aria-checked", "true");
+    expect(radio("Frosted glass")).toHaveAttribute("tabindex", "0");
+    expect(radio("Liquid glass")).toHaveAttribute("tabindex", "-1");
+    radio("Frosted glass").focus();
+    fireEvent.keyDown(radio("Frosted glass"), { key: "ArrowRight" });
+    expect(latestLook.chrome).toBe("liquid");
+    expect(radio("Liquid glass")).toHaveAttribute("aria-checked", "true");
+    expect(radio("Liquid glass")).toHaveAttribute("tabindex", "0");
+    expect(document.activeElement).toBe(radio("Liquid glass"));
+    fireEvent.keyDown(radio("Liquid glass"), { key: "End" });
+    expect(latestLook.chrome).toBe("solid");
+    // Wraps, as the agent tabs do.
+    fireEvent.keyDown(radio("Solid"), { key: "ArrowRight" });
+    expect(latestLook.chrome).toBe("glass");
+    fireEvent.keyDown(radio("Frosted glass"), { key: "ArrowUp" });
+    expect(latestLook.chrome).toBe("solid");
+  });
+
+  it.each([
+    ["the sidebar search", "general" as SectionKey, "Search settings"],
+    ["the background search", "appearance" as SectionKey, "Search backgrounds"],
+  ])("Escape in %s clears a query and keeps the window open", (_, initial, name) => {
+    const onClose = vi.fn();
+    render(<Harness initial={initial} onClose={onClose} />);
+    const box = screen.getByRole("searchbox", { name });
+    fireEvent.change(box, { target: { value: "zzz" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(box).toHaveValue("");
+    expect(onClose).not.toHaveBeenCalled();
+    // An empty box: Escape closes the window as anywhere else.
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("About shows the package version, the licences and the React Bits credit", () => {
     render(<Harness initial="about" />);
     const body = within(dialog());
@@ -349,7 +449,7 @@ describe("App: the Settings window", () => {
     ).toBeInTheDocument();
     open("Appearance");
     fireEvent.click(
-      within(screen.getByRole("group", { name: "Window style" })).getByRole("button", {
+      within(screen.getByRole("radiogroup", { name: "Window style" })).getByRole("radio", {
         name: "Solid",
       }),
     );
@@ -358,6 +458,52 @@ describe("App: the Settings window", () => {
     for (const el of inners) expect(el).toHaveClass("chrome-solid");
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+  });
+
+  it("the top bar's notification toggle keeps a sound change made while the prompt is open", async () => {
+    const answer = pendingPermission();
+    renderApp();
+    const bar = within(document.querySelector(".topbar") as HTMLElement);
+    fireEvent.click(bar.getByRole("button", { name: "Browser notifications" }));
+    fireEvent.click(bar.getByRole("button", { name: "Sound" }));
+    await act(async () => answer("granted"));
+    expect(bar.getByRole("button", { name: "Sound" })).toHaveAttribute("aria-pressed", "false");
+    expect(JSON.parse(localStorage.getItem(NOTIFY_STORAGE_KEY) ?? "{}")).toMatchObject({
+      enabled: true,
+      sound: false,
+    });
+    // One "blocked" answer for both toggles: the top bar's and General's agree.
+    fireEvent.click(bar.getByRole("button", { name: "Browser notifications" }));
+    expect(bar.getByRole("button", { name: "Browser notifications" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("gives focus back to the dock's Settings item when it closes", () => {
+    renderApp();
+    const item = dock().getByRole("button", { name: "Settings" });
+    item.focus();
+    fireEvent.click(item);
+    expect(dialog().contains(document.activeElement)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(item).toHaveFocus();
+  });
+
+  it("f, + and - leave the canvas alone while the Settings window is open", () => {
+    const { container } = renderApp();
+    const view = () => (container.querySelector(".world") as HTMLElement).style.transform;
+    const v0 = view();
+    fireEvent.click(dock().getByRole("button", { name: "Settings" }));
+    const sw = within(dialog()).getByRole("switch", { name: "Auto-arrange" });
+    sw.focus();
+    for (const key of ["f", "+", "=", "-"]) {
+      fireEvent.keyDown(sw, { key });
+      fireEvent.keyDown(dialog(), { key });
+    }
+    expect(view()).toBe(v0);
+    expect(container.querySelector(".world--anim")).toBeNull();
   });
 
   it("a wave's settings link to the Supervisor section for the global config", () => {

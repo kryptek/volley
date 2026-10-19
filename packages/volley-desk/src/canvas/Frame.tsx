@@ -8,6 +8,14 @@
  * window at attention tier `you` is wrapped in its Needs-you effect
  * (`attnStyle`): the pulse (the owner's default), an `ElectricBorder` or a
  * `StarBorder`. The `wrapAttention` slot overrides the effect.
+ * Depth (D10): every chrome is the sign-in card's raised, lit object
+ * (`win-depth` in desk.css: layered shadows, gradient body, glass) with a
+ * `win-edge` overlay drawing the lit top edge, dark bottom edge and inner
+ * highlight ring above the content. The window tilts toward the pointer by up
+ * to `TILT_MAX_DEG` (`--rx` / `--ry` + `data-tilt`, set on the element, so no
+ * re-render); never while dragged, under reduced motion or at phone width. The
+ * box and the gate are read once per hover (again after a drag), not on every
+ * pointer move. `onDrag` reports the title-bar drag (the tethers sway then).
  */
 import type React from "react";
 import "../styles/attention.css";
@@ -20,12 +28,14 @@ import {
   useRef,
   useState,
 } from "react";
+import { REDUCED_MOTION_QUERY } from "../a11y/motion";
 import type { AttnStyle, Chrome } from "../look/options";
 import BorderGlow from "../rb/BorderGlow/BorderGlow";
 import ElectricBorder from "../rb/ElectricBorder/ElectricBorder";
 import GlassSurface from "../rb/GlassSurface/GlassSurface";
 import SpotlightCard from "../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../rb/StarBorder/StarBorder";
+import { NARROW_PX } from "./useViewport";
 
 export type { AttnStyle, Chrome } from "../look/options";
 export type Attention = "you" | "coordinator" | "info";
@@ -34,6 +44,12 @@ const HOT = "#ff7a59";
 
 /** How long a new window keeps its `win--born` class. */
 export const BORN_MS = 4000;
+/** The most a window tilts toward the pointer, in degrees. */
+export const TILT_MAX_DEG = 2;
+
+/** Tilt only with motion allowed and outside the phone layout. */
+const tiltAllowed = (): boolean =>
+  window.innerWidth >= NARROW_PX && !window.matchMedia?.(REDUCED_MOTION_QUERY).matches;
 
 /** The default Needs-you effect: a pulsing border (styles/attention.css). */
 export function pulse(framed: ReactNode): ReactNode {
@@ -123,6 +139,8 @@ export interface FrameProps {
   onMove: (dx: number, dy: number) => void;
   onFocus: () => void;
   onSize?: (w: number, h: number) => void;
+  /** The title bar is grabbed (`true`) or let go (`false`). */
+  onDrag?: (dragging: boolean) => void;
   born?: boolean;
 }
 
@@ -147,10 +165,35 @@ export function Frame(p: FrameProps) {
     return () => ro.disconnect();
   }, []);
 
+  // The hovered box and whether tilt is allowed, until the pointer leaves or a drag moves the window.
+  const hovered = useRef<{ r: DOMRect; allowed: boolean } | null>(null);
+  const untilt = () => {
+    const el = box.current;
+    if (!el?.hasAttribute("data-tilt")) return;
+    el.removeAttribute("data-tilt");
+    el.style.removeProperty("--rx");
+    el.style.removeProperty("--ry");
+  };
+  const tilt = (e: React.PointerEvent) => {
+    const el = box.current;
+    if (!el || last.current || e.pointerType === "touch") return;
+    hovered.current ??= { r: el.getBoundingClientRect(), allowed: tiltAllowed() };
+    const { r, allowed } = hovered.current;
+    if (!allowed || r.width <= 0 || r.height <= 0) return;
+    const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    el.style.setProperty("--rx", `${((0.5 - fy) * 2 * TILT_MAX_DEG).toFixed(2)}deg`);
+    el.style.setProperty("--ry", `${((fx - 0.5) * 2 * TILT_MAX_DEG).toFixed(2)}deg`);
+    el.setAttribute("data-tilt", "");
+  };
+
   const down = (e: React.PointerEvent) => {
     if ((e.target as Element).closest("button")) return;
+    untilt();
+    hovered.current = null;
     last.current = { x: e.clientX, y: e.clientY };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    p.onDrag?.(true);
   };
   const move = (e: React.PointerEvent) => {
     if (!last.current) return;
@@ -158,11 +201,14 @@ export function Frame(p: FrameProps) {
     last.current = { x: e.clientX, y: e.clientY };
   };
   const up = () => {
+    if (!last.current) return;
     last.current = null;
+    hovered.current = null;
+    p.onDrag?.(false);
   };
 
   const inner = (
-    <div className={`win-inner chrome-${p.chrome}`}>
+    <div className={`win-inner win-depth chrome-${p.chrome}`}>
       {p.chrome === "liquid" && (
         <div className="win-glass" aria-hidden>
           <GlassSurface
@@ -190,6 +236,7 @@ export function Frame(p: FrameProps) {
       </header>
       <div className="win-body">{p.children}</div>
       {p.footer && <footer className="win-foot">{p.footer}</footer>}
+      <span className="win-edge" aria-hidden="true" />
     </div>
   );
 
@@ -230,6 +277,14 @@ export function Frame(p: FrameProps) {
         } as CSSProperties
       }
       onPointerDownCapture={p.onFocus}
+      onPointerEnter={() => {
+        hovered.current = null;
+      }}
+      onPointerMove={tilt}
+      onPointerLeave={() => {
+        hovered.current = null;
+        untilt();
+      }}
       aria-label={p.label ?? (typeof p.title === "string" ? p.title : undefined)}
     >
       {p.attn === "you" ? wrap(framed) : framed}

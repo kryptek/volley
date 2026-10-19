@@ -32,7 +32,7 @@ export interface PathReason {
   reason: string;
 }
 
-/** What the settings modal shows for one request. */
+/** What a config row shows for one request (Settings › Supervisor). */
 export interface ConfigAck {
   applied: boolean;
   version?: number;

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import App from "../src/App";
@@ -32,6 +34,19 @@ describe("the dock", () => {
       "Zoom out",
       "Settings",
     ]);
+  });
+
+  it("its panel is lifted and lit like the Desk's windows (D10)", () => {
+    const css = readFileSync(join(__dirname, "../src/styles/look.css"), "utf8").replace(
+      /\s+/g,
+      " ",
+    );
+    const at = css.indexOf(".dock-wrap .dock {");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const rule = css.slice(at, css.indexOf("}", at));
+    expect(rule).toMatch(/background: linear-gradient\( ?160deg/);
+    expect(rule).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
+    expect(rule).toMatch(/var\(--win-shadow\)/);
   });
 
   it("no longer carries Appearance or auto-arrange, and the aside is gone", () => {

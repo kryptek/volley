@@ -26,7 +26,7 @@ export function WaveYaml({ wave }: { wave: WaveStatePayload }) {
   const spec = wave.spec;
   const specTasks = spec?.tasks ?? {};
   return (
-    <pre className="yaml" aria-label="Wave file">
+    <pre className="yaml recessed" aria-label="Wave file">
       {k("wave")}: {v(wave.wave)}
       {"\n"}
       {k("release_branch")}: {v(spec?.release_branch ?? wave.release_branch)}

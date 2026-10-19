@@ -139,7 +139,7 @@ describe("keyboard: dialogs", () => {
     expect(document.querySelector(".steer")).not.toBeNull();
   });
 
-  it("f, + and - leave the canvas alone while the settings modal is open", () => {
+  it("f, + and - leave the canvas alone while a wave's settings are open", () => {
     vi.useFakeTimers();
     const { container } = renderApp();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
@@ -155,7 +155,7 @@ describe("keyboard: dialogs", () => {
     expect(container.querySelector(".world--anim")).toBeNull();
   });
 
-  it("traps focus in the settings modal", () => {
+  it("traps focus in a wave's settings", () => {
     renderApp();
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
     const dialog = screen.getByRole("dialog", { name: "Wave settings" });

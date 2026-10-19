@@ -2,8 +2,8 @@
  * Vitest setup — jest-dom matchers, RTL cleanup, and the browser APIs jsdom
  * lacks but the canvas uses: `ResizeObserver` (Frame sizing) and pointer
  * capture (pan and title-bar drag). The React Bits components (D7) also want
- * `IntersectionObserver`, `matchMedia`, `Element.animate` (SwipeToast's
- * fuse; a stub animation that never finishes) and a canvas `getContext`; jsdom's
+ * `IntersectionObserver`, `matchMedia`, `Element.animate` (a stub
+ * animation that never finishes) and a canvas `getContext`; jsdom's
  * `getContext` logs "not implemented", so it is replaced with one that
  * quietly returns null (no 2D / WebGL here, as in a browser without them).
  */

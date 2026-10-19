@@ -11,7 +11,7 @@ import { BG_NO_WEBGL_NOTE, needsWebGL } from "../look/Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "../look/backgrounds";
 import { ATTN_LABEL, CHROME_LABEL } from "../look/options";
 import { DIM_MAX, type Look } from "../look/useLook";
-import { Group, Row, Seg, Toggle } from "./primitives";
+import { Group, Row, Seg, Toggle, clearOnEscape } from "./primitives";
 import "../styles/look.css";
 
 export function Appearance({
@@ -47,11 +47,12 @@ export function Appearance({
             Now: <b>{current?.name ?? look.bg}</b>
           </div>
           <input
-            className="bg-search"
+            className="bg-search recessed"
             type="search"
             placeholder="Search backgrounds…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => clearOnEscape(e, q, setQ)}
             aria-label="Search backgrounds"
           />
           {!webgl && <p className="s-hint">{BG_NO_WEBGL_NOTE}</p>}

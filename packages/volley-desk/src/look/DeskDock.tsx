@@ -1,9 +1,9 @@
 /**
- * The dock and transient notices, ported from the prototype `App.tsx`: a
- * React Bits `Dock` with six items — the coordinators window (badge: what
- * needs you), tethers, arrange & fit, zoom in / out and the Settings window
- * (appearance and auto-arrange live there) — and a React Bits `SwipeToast`
- * for one notice at a time (`useToast`).
+ * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with six
+ * items — the coordinators window (badge: what needs you), tethers, arrange &
+ * fit, zoom in / out and the Settings window (appearance and auto-arrange
+ * live there). Its panel is lifted and lit like the Desk's windows (D10,
+ * `.dock-wrap .dock` in look.css).
  */
 import {
   FullScreenIcon,
@@ -14,14 +14,11 @@ import {
   ZoomOutAreaIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useRef, useState } from "react";
 import Dock, { type DockItemData } from "../rb/Dock/Dock";
-import SwipeToast from "../rb/SwipeToast/SwipeToast";
 import "../styles/look.css";
 
 /** Zoom step for the dock's zoom buttons (prototype). */
 export const DOCK_ZOOM = 1.2;
-export const TOAST_MS = 5200;
 
 const icon = (i: typeof UserGroupIcon) => <HugeiconsIcon icon={i} size={22} />;
 
@@ -80,40 +77,5 @@ export function DeskDock(p: DeskDockProps) {
         showLabels
       />
     </nav>
-  );
-}
-
-export interface Toast {
-  title: string;
-  desc?: string;
-  n: number;
-}
-
-/** One transient notice at a time; a new one replaces the last. */
-export function useToast(): [Toast | null, (title: string, desc?: string) => void, () => void] {
-  const [toast, setToast] = useState<Toast | null>(null);
-  const n = useRef(0);
-  const say = useCallback((title: string, desc?: string) => {
-    n.current += 1;
-    setToast({ title, n: n.current, ...(desc !== undefined ? { desc } : {}) });
-  }, []);
-  const close = useCallback(() => setToast(null), []);
-  return [toast, say, close];
-}
-
-export function DeskToast({ toast, onClose }: { toast: Toast | null; onClose: () => void }) {
-  if (!toast) return null;
-  return (
-    <SwipeToast
-      key={toast.n}
-      open
-      title={toast.title}
-      {...(toast.desc !== undefined ? { description: toast.desc } : {})}
-      duration={TOAST_MS}
-      background="rgba(14,16,26,.95)"
-      color="#e8ecf4"
-      fuseColor="#6ee7f9"
-      onClose={onClose}
-    />
   );
 }
