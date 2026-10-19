@@ -52,6 +52,14 @@ describe("stop force-retires agents that never ack", () => {
     expect(s.journal().filter((e) => e.type === "agent_retired")).toHaveLength(1);
   });
 
+  it("a wave resumed within the grace keeps its agents", async () => {
+    await stopped();
+    expect((await runCli(["resume", "w1", "--by", "tester"], s.env.env)).exitCode).toBe(0);
+    await clock.advance(30_000);
+    await s.settled();
+    expect(s.journal().some((e) => e.type === "agent_force_retired")).toBe(false);
+  });
+
   it("stop_grace_s is a tunable (per-wave config)", async () => {
     clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({ daemon: { clock }, config: "stop_grace_s: 5" });

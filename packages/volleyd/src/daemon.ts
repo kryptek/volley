@@ -4573,6 +4573,8 @@ export class Daemon {
         return { ok: false, error: `${KILL_SWITCH_REASON}: \`volleyd resume --all\` first` };
       if (state.status === "complete") return { ok: false, error: `wave '${w.wave}' is complete` };
       await this.append(w.wave, { type: "wave_resumed", data: { by } });
+      this.time.clearTimeout(this.stopGrace.get(w.wave));
+      this.stopGrace.delete(w.wave);
       await this.tickNow();
       return done(true);
     }
@@ -4625,7 +4627,8 @@ export class Daemon {
    */
   private async forceRetireWave(wave: WaveId, reason: string): Promise<void> {
     const log = this.waves.get(wave);
-    if (log === undefined || !this.running) return;
+    // Resumed meanwhile: its agents carry on.
+    if (log === undefined || !this.running || log.record.state?.status !== "stopped") return;
     for (const a of runningAgents(log.record, retiredAgents(log))) {
       await this.append(wave, {
         type: "agent_force_retired",

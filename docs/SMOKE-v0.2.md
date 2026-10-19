@@ -363,6 +363,24 @@ owned by the coordinator, so it comes before the claim). After each, note in Res
   smoke terminal, or from the Desk). A fresh agent spawns with the next attempt number and
   carries on.
 
+### A refused login, relaunched
+
+- [ ] Break one agent's broker login before it starts (e.g. delete its client in the broker right
+  after `agent_spawned`). Its hooks print `AUTH_FAILED`; within `spawn_timeout_s` a
+  `hooks_auth_failed` decision opens, the agent gets an Escape and the steering "stop: your
+  broker login is being repaired", and stops working. The question asks nobody to edit
+  credentials.
+- [ ] Resolve it with `relaunch`. The journal has `relaunched { from_agent, to_agent }`, the old
+  agent's records are gone from the Desk, and `<role>-2` registers and carries on.
+
+### A silent agent at stop
+
+- [ ] On a throwaway wave, stop one agent's session from answering (suspend its `claude` with
+  `kill -STOP`), then `volleyd stop "$WAVE2"`. After `stop_grace_s` (30 s) the journal has
+  `agent_force_retired { reason: "stop" }`, and the agent's registry, status, progress, result,
+  capability and screen records are gone: the Desk stops drawing it. Its screen is no longer read
+  (no `read timed out` lines in the daemon log). `kill -CONT` it afterwards and close it.
+
 ### Urgent steer on a coordinator-owned wave
 
 - [ ] While the coordinator still owns the wave, send an urgent `/stop` from the Desk to one of
@@ -425,6 +443,22 @@ The wave's owner is `desk` since the claim:
 - [ ] Merge that PR into the release branch by hand. Within about a minute the task is `done`
   (`stage_entered {stage: "done", merged: true}`) and its dependent is admitted and spawned **by
   volleyd** (do not `volleyd spawn` it).
+- [ ] While a task sits at `merge_ready`, merge the release branch into its PR branch and push
+  (or push any commit to it). Within about a minute `pr_head_moved { from, to }` is journaled,
+  the task leaves `merge_ready`, its evidence is marked stale, `ci_pending` shows CI on the new
+  head, then a `pr_head_moved` decision asks `rereview | fixup | cancel`. With CI red on the new
+  head, its failed jobs and failing tests are in the decision; answer `fixup`: `<task>-fixup-2`
+  spawns and its `.volley/findings.md` opens with the CI failure and the diff. Its gate's
+  evidence lists both heads in `head_history`.
+- [ ] Merge one gated PR outside GitHub's merge button: squash it locally onto the release
+  branch with the PR number in the subject (`… (#<n>)`), push, close the PR. Within about a
+  minute the task is `done` with `artifact_verified { via: "outside_github" }` and its merged
+  commit's own CI; no `pr_closed_unmerged` alarm. (Without the `(#<n>)` subject a `pr_closed`
+  decision asks `landed | abandoned`; `volleyd merged "$WAVE" <task> --sha <sha>` answers it
+  with proof.)
+- [ ] After an implementer's `done`, while CI runs, `volleyd status "$WAVE"` says
+  `CI pending on <sha7> (n/m checks)` and `--json` has the task's `pr.ci: running`; during the
+  reviews it shows `review (spec + quality)` with both reviewers.
 - [ ] After the last merge the wave completes (`wave_complete`); the Desk shows it finished, and
   admission stops sampling CI for its repo.
 - [ ] `volleyd cleanup "$WAVE"` lists what it would remove; `volleyd cleanup "$WAVE" --yes`
