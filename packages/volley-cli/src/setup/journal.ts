@@ -77,6 +77,8 @@ export interface SetupInstall {
   /** The Desk setup serves: the address a phone reaches it at, and its port. */
   desk_host?: string;
   desk_port?: number;
+  /** Whether the WebSocket listener is open to the LAN (`--lan`); `volley auth init` keeps it. */
+  lan?: boolean;
 }
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
@@ -84,6 +86,8 @@ export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setu
 /** Record the install `ctx` runs against. A record, not a gate, like the journal. */
 export function writeSetupInstall(ctx: SetupContext): void {
   const file = setupInstallFile(ctx.volleydHome);
+  // A run that skipped the security step (`--step services`) keeps the LAN choice on record.
+  const lan = ctx.lan ?? readSetupInstall(ctx.volleydHome)?.lan;
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -91,6 +95,7 @@ export function writeSetupInstall(ctx: SetupContext): void {
     auth_dir: ctx.auth.dir,
     desk_host: ctx.deskHost,
     desk_port: ctx.deskPort,
+    ...(lan !== undefined ? { lan } : {}),
   };
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
@@ -128,6 +133,7 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
       ...(typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536
         ? { desk_port: port }
         : {}),
+      ...(typeof v.lan === "boolean" ? { lan: v.lan } : {}),
     };
   } catch {
     return null;

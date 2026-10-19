@@ -662,6 +662,47 @@ describe("volley peer on the supervisor's machine", () => {
     }
   });
 
+  it("redeem after a `--dir` setup finds the coordinator's file in the auth dir setup.json recorded", async () => {
+    const locked = await startTestBroker({
+      credentials: { username: "coordinator", password: "c-pw" },
+    });
+    try {
+      // `volley setup --dir <dir>` recorded the dir; ssh gives redeem no VOLLEY_AUTH_DIR.
+      const dir = join(home, "custom-auth");
+      const vhome = join(home, "volleyd");
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(vhome, { recursive: true });
+      writeFileSync(
+        join(dir, "coordinator.json"),
+        JSON.stringify({ username: "coordinator", password: "c-pw" }),
+        { mode: 0o600 },
+      );
+      writeFileSync(
+        join(vhome, "setup.json"),
+        JSON.stringify({
+          layout: "etc",
+          config: "/etc/mosquitto/mosquitto.conf",
+          state_file: "/var/lib/mosquitto/dynamic-security.json",
+          auth_dir: dir,
+        }),
+      );
+      const io = makeBufferIO();
+      const code = await runPeer(
+        {
+          argv: ["redeem"],
+          env: { VOLLEY_BROKER_URL: locked.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: vhome },
+          io,
+        },
+        deps(fakeExec(() => ({})).exec, { readStdin: async () => "{}" }),
+      );
+      // Signed in (it gets as far as finding no volleyd), not refused for want of credentials.
+      expect(io.readStderr()).toContain("volleyd is not running");
+      expect(code).toBe(EXIT.ERROR);
+    } finally {
+      await locked.close();
+    }
+  });
+
   it("invite and remove never sign in with the coordinator's file: they need an admin login", async () => {
     writeFileSync(
       join(home, "coordinator.json"),

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   ClaudeAccounts,
@@ -174,6 +174,46 @@ describe("ClaudeAccounts", () => {
       "resolve",
       { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to personal" },
       expect.any(String),
+    );
+  });
+
+  it("labels a suggested account with no usage yet (a newly signed-in profile) as such", async () => {
+    const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
+    const control = vi.fn(async (op: string) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: [{ id: "fresh", label: "fresh", machine: "local" }] } }
+        : { ok: true },
+    );
+    setup([], {
+      waves: { w1: wave({ [fresh.decision_id]: fresh }) },
+      control,
+      onRegistry: () => {},
+    });
+    const banner = screen.getByRole("status");
+    await waitFor(() => expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?"));
+    await act(async () => {
+      fireEvent.click(within(banner).getByRole("button", { name: "Move to fresh" }));
+    });
+    expect(control).toHaveBeenCalledWith(
+      "resolve",
+      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to fresh" },
+      expect.any(String),
+    );
+  });
+
+  it("says nothing of the suggestion's usage while the Desk has no record of it", () => {
+    const ghost = { ...limit, options: ["move wave w1 to ghost", "not now"], suggested: "ghost" };
+    setup([], { waves: { w1: wave({ [ghost.decision_id]: ghost }) } });
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Move wave w1 to ghost? New agents");
+    expect(banner).not.toHaveTextContent("no usage yet");
+  });
+
+  it("a suggestion that reported only weekly usage reads no 5-hour usage yet", () => {
+    const weeklyOnly = { ...personal, five_hour: null };
+    setup([accountMsg(weeklyOnly)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Move wave w1 to Personal (no 5-hour usage yet)?",
     );
   });
 
@@ -403,6 +443,9 @@ describe("SettingsModal › the wave's Claude account", () => {
     personal,
     "team@box": { ...personal, account: "team@box", label: "Team" },
   });
+  const withFresh = accountList({ work, personal }, [
+    { id: "fresh", label: "Fresh", machine: "local", signed_in_at: "2026-10-18T13:00:00.000Z" },
+  ]);
   const modal = (decisions: Record<string, DecisionPayload>, control: ControlFn | null) =>
     render(
       <SettingsModal
@@ -437,6 +480,24 @@ describe("SettingsModal › the wave's Claude account", () => {
       decision_id: "d-7k2m9q4x",
       answer: "move wave w1 to personal",
     });
+  });
+
+  it("labels an account with no usage yet in the picker", () => {
+    render(
+      <SettingsModal
+        wave={wave({ [limit.decision_id]: limit })}
+        onClose={() => {}}
+        onOpenGlobal={() => {}}
+        accounts={withFresh}
+        control={vi.fn(async () => ({ ok: true }))}
+      />,
+    );
+    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
+    expect(
+      within(pick)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["Move new agents to…", "Personal · 12%", "Fresh · no usage yet"]);
   });
 
   it("shows volleyd's refusal", async () => {

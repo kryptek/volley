@@ -18,9 +18,11 @@ import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { volleydHome } from "../auth/context";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { readSetupInstall } from "../setup/journal";
 import { authOpsTopic } from "./auth-roles";
 
 /**
@@ -68,7 +70,8 @@ Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; list and redeem: else
-                       coordinator.json). invite and remove need an admin account.
+                       coordinator.json in VOLLEY_AUTH_DIR or the auth dir \`volley setup\`
+                       recorded). invite and remove need an admin account.
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
   --timeout <seconds>  How long to wait for volleyd's answer (default 30)
 `;
@@ -258,6 +261,16 @@ function unseal(key: KeyObject, sealed: string | undefined): Record<string, unkn
   }
 }
 
+/**
+ * `env`, with VOLLEY_AUTH_DIR set to the auth dir in `$VOLLEYD_HOME/setup.json` when it names none
+ * (a `--dir` or `--layout container` setup keeps coordinator.json outside the default dir).
+ */
+function withSetupAuthDir(env: Record<string, string | undefined>) {
+  if (env.VOLLEY_AUTH_DIR !== undefined) return env;
+  const saved = readSetupInstall(volleydHome(env));
+  return saved === null ? env : { ...env, VOLLEY_AUTH_DIR: saved.auth_dir };
+}
+
 /** Where volleyd answers an account-op request (accounts.ts in volleyd). */
 const authReplyTopic = (correlationId: string) => `volley/_system/auth/replies/${correlationId}`;
 
@@ -288,9 +301,10 @@ async function ask(
     return EXIT.USAGE;
   }
   try {
-    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves.
+    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves, from
+    // the auth dir `volley setup` recorded when VOLLEY_AUTH_DIR does not name one.
     auth = resolveAuth({ username: v.username, password: v.password }, env);
-    if (!admin) auth ??= readCoordinatorAuth(env);
+    if (!admin) auth ??= readCoordinatorAuth(withSetupAuthDir(env));
   } catch (e) {
     io.stderr(`volley peer ${verb}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;

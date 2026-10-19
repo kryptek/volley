@@ -509,7 +509,10 @@ never the local `primary`, and that record opens no decision (a wave move cannot
 When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
 can override it), each running wave with agents on that account gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
-most headroom among those under the threshold in both windows (none: only `not now`), with
+most headroom among those under the threshold in both windows, else a signed-in account that
+has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
+reported weekly usage; a signed-in profile before `primary`, whose interactive use goes
+unreported; none: only `not now`), with
 the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
 nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
@@ -1181,7 +1184,8 @@ volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
 there needs it; if not, the join stops before the code is used) and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
-ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
+`VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
 account named after the machine (`--name`, default its short hostname) and adds
 `hosts.<name>`:
 

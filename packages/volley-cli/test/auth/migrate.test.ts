@@ -227,6 +227,23 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     expect(readdirSync(join(dir, "etc")).length).toBe(backups);
   });
 
+  it("keeps a LAN WebSocket listener from the old config, and shows the change before writing", async () => {
+    writeFileSync(
+      layout.config,
+      `listener 1883 127.0.0.1\nlistener 9001\nprotocol websockets\nallow_anonymous false\npassword_file ${authDir}/passwd\nacl_file ${authDir}/acl.conf\n`,
+    );
+    const r = await run(["migrate"], fakeDeps(fake, layout));
+    expect(r.code).toBe(0);
+    const conf = readFileSync(layout.config, "utf-8");
+    expect(conf).toMatch(/^listener 9001$/m);
+    expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+    expect(r.stdout).toContain(`-password_file ${authDir}/passwd`);
+    expect(r.stdout).toContain("open to the LAN");
+    expect(r.stdout.indexOf(`--- ${layout.config}`)).toBeLessThan(
+      r.stdout.indexOf(`Wrote ${layout.config}`),
+    );
+  });
+
   it("an agent.json without a password gets a new one, written before its login exists", async () => {
     const id = AGENTS[0] as string;
     writeFileSync(

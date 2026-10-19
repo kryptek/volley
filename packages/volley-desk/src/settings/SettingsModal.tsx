@@ -15,7 +15,13 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import { PrimaryAction } from "../look/PrimaryAction";
-import { type AccountInfo, moveAnswer, openLimitDecisions, resolveFields } from "../store/claude";
+import {
+  type AccountInfo,
+  fiveHourLabel,
+  moveAnswer,
+  openLimitDecisions,
+  resolveFields,
+} from "../store/claude";
 import type { WaveView } from "../store/types";
 import { Clawd } from "../windows/wave/Clawd";
 import { accentFor } from "../windows/wave/accent";
@@ -69,7 +75,7 @@ function WaveAccount({
           <option value="">Move new agents to…</option>
           {targets.map((a) => (
             <option key={a.id} value={a.id}>
-              {a.fiveHour ? `${a.label} · ${Math.round(a.fiveHour.pct)}%` : a.label}
+              {`${a.label} · ${fiveHourLabel(a.fiveHour?.pct ?? null, a.weekly?.pct ?? null)}`}
             </option>
           ))}
         </select>
