@@ -4,7 +4,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { decisionPayload, decisionTopic, renderDecisionsMd } from "../src/decisions";
+import {
+  type DecisionRecord,
+  MACHINE_DOWN_OPTIONS,
+  decisionPayload,
+  decisionTopic,
+  describeDecision,
+  machineDownInput,
+  renderDecisionsMd,
+} from "../src/decisions";
 import { ready } from "../src/scheduler";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
@@ -325,6 +333,91 @@ describe("decisionPayload", () => {
         correlation_id: null,
       }),
     ).toEqual([]);
+  });
+});
+
+describe("machine_down (SPEC §4.6.15: a machine that stays down)", () => {
+  const DOWN = Date.parse("2026-10-19T10:00:00.000Z");
+  const facts = {
+    host: "box-a",
+    downSince: DOWN,
+    now: DOWN + 5 * 60_000,
+    why: "no heartbeat for 90 s",
+    queued: ["T3", "T4"],
+    running: ["T1"],
+    best: "studio",
+  };
+  const asRecord = (f = facts): DecisionRecord => {
+    const { input, data } = machineDownInput(f);
+    return {
+      ...data,
+      decision_id: input.id ?? "machine_down-box-a",
+      wave: "w1",
+      task: input.task,
+      kind: input.kind,
+      question: input.question,
+      ...(input.options !== undefined ? { options: input.options } : {}),
+      pointers: {},
+      opened_at: new Date(f.now).toISOString(),
+    } as DecisionRecord;
+  };
+  const env = (payload: unknown) => ({
+    schema_version: "0.1",
+    agent_id: "volleyd",
+    parent_id: null,
+    wall_time: "2026-10-19T10:05:00.000Z",
+    channel: "_waves/decisions",
+    type: "decision_opened",
+    payload,
+    correlation_id: null,
+  });
+
+  it("is wave-level, carries host, down_since and every unfinished task, and validates", () => {
+    const { input, data } = machineDownInput(facts);
+    expect(input).toMatchObject({ kind: "machine_down", task: null });
+    expect(input.options).toEqual(["wait", "re-place queued tasks", "cancel"]);
+    expect(MACHINE_DOWN_OPTIONS).toEqual(input.options);
+    expect(data).toEqual({
+      host: "box-a",
+      down_since: "2026-10-19T10:00:00.000Z",
+      tasks: ["T1", "T3", "T4"],
+    });
+    const p = decisionPayload(asRecord());
+    expect(p).toMatchObject({ host: "box-a", down_since: data.down_since, tasks: data.tasks });
+    expect(schemaErrors("decision.schema.json", env(p))).toEqual([]);
+    // Without its facts the schema refuses it.
+    const { tasks: _t, ...bare } = p as unknown as Record<string, unknown>;
+    expect(schemaErrors("decision.schema.json", env(bare))).not.toEqual([]);
+  });
+
+  it("says what happened, what each option does and what happens if nobody answers", () => {
+    const q = machineDownInput(facts).input.question;
+    expect(q).toBe(
+      "box-a has been down 5 min (no heartbeat for 90 s). 2 queued tasks were placed there: T3 and T4. T1 is running there and is left alone: a running agent is never moved. " +
+        "wait: keep the queued tasks parked until box-a is back; this is what happens if nobody answers, and this question closes itself when box-a returns. " +
+        "re-place queued tasks: place T3 and T4 again without box-a (best now: studio). " +
+        "cancel: cancel T1, T3 and T4.",
+    );
+    expect(describeDecision(decisionPayload(asRecord()))).toBe(
+      `decision machine_down-box-a (machine_down) on w1: ${q}`,
+    );
+  });
+
+  it("one queued task, none running, and nowhere to re-place it yet", () => {
+    const q = machineDownInput({ ...facts, queued: ["T3"], running: [], best: null }).input
+      .question;
+    expect(q).toContain("1 queued task was placed there: T3.");
+    expect(q).not.toContain("running there");
+    expect(q).toContain(
+      "re-place queued tasks: place T3 again without box-a (no other machine is eligible now: it would wait for one).",
+    );
+    expect(q).toContain("cancel: cancel T3.");
+  });
+
+  it("only running tasks: nothing to re-place, said plainly", () => {
+    const q = machineDownInput({ ...facts, queued: [], running: ["T1", "T2"] }).input.question;
+    expect(q).toContain("No queued task was placed there. T1 and T2 are running there");
+    expect(q).toContain("re-place queued tasks: nothing is queued there now.");
   });
 });
 

@@ -731,6 +731,56 @@ describe("volley peer on the supervisor's machine", () => {
     expect(r.stdout).toContain("removed box-a: account revoked, hosts.box-a removed");
   });
 
+  it("remove --drain sends drain: true and says the machine is drained, then removed", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, removing: "drain", agents: 2, revoked: false, host_removed: false },
+    }));
+    const r = await run(["remove", "box-a", "--drain"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a", drain: true });
+    expect(v.seen[0]?.now).toBeUndefined();
+    expect(r.stdout).toBe(
+      "draining box-a: nothing new starts there; 2 agents left. volleyd removes it (revokes its account, drops hosts.box-a) once they finish.\n",
+    );
+  });
+
+  it("remove --now sends now: true and says the agents are being stopped", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, removing: "now", agents: 1, revoked: false, host_removed: false },
+    }));
+    const r = await run(["remove", "box-a", "--now"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a", now: true });
+    expect(r.stdout).toContain("stopping 1 agent on box-a");
+    expect(r.stdout).toContain("respawn");
+  });
+
+  it("remove --drain on an idle machine removes it at once, as plain remove does", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, revoked: true, host_removed: true },
+    }));
+    const r = await run(["remove", "box-a", "--drain"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.stdout).toContain("removed box-a: account revoked, hosts.box-a removed");
+  });
+
+  it("remove refuses --drain with --now, and --drain on another verb", async () => {
+    const both = await run(
+      ["remove", "box-a", "--drain", "--now"],
+      deps(fakeExec(() => ({})).exec),
+    );
+    expect(both.exitCode).toBe(2);
+    expect(both.stderr).toContain("--drain and --now exclude each other");
+    const other = await run(["list", "--drain"], deps(fakeExec(() => ({})).exec));
+    expect(other.exitCode).toBe(2);
+    expect(other.stderr).toContain("--drain is an option of volley peer remove only");
+  });
+
   it("list prints each machine's health", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,

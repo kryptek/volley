@@ -266,7 +266,7 @@
               "minimum": 0.1,
               "maximum": 16,
               "default": 1.5,
-              "description": "A machine whose 1-minute load per core is above this takes no new placement."
+              "description": "A machine whose load per core (the higher of its 1- and 5-minute load averages) is above this takes no new placement."
             },
             "mem_available_min_pct": {
               "type": "integer",

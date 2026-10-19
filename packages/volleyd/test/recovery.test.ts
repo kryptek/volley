@@ -3,17 +3,21 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { registryTopic } from "volley-mcp/topics";
+import type { DecisionPayload } from "../src/decisions";
 import { mintModelSwitchToken } from "../src/fence";
 import {
   CREDIT_CLASS,
   LIMITED_CLASS,
   UNVERIFIED_CLASS,
   creditOccurrences,
+  isRespawnAnswer,
   modelSwitchInput,
   parseSwitchAnswer,
   recoveryAllowed,
+  respawnTarget,
   switchModel,
   switchOptions,
+  withRespawnOn,
 } from "../src/recovery";
 import type { JournalEvent } from "../src/types";
 import { watchAgent } from "../src/verify";
@@ -21,6 +25,8 @@ import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { FIXTURES, fakeHost } from "./helpers/fake-host";
+import { type Fleet, makeFleet } from "./helpers/fleet-env";
+import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 const NS = "volleyd-test";
@@ -32,6 +38,147 @@ const creditOpened = (at: number, agent = AGENT, seq = 1): JournalEvent => ({
   type: "decision_opened",
   task: "T1",
   data: { decision_id: `d-${seq}`, kind: "model_switch", class: CREDIT_CLASS, agent_id: agent },
+});
+
+describe("respawn on <best> (SPEC §4.6.15: an agent whose host is down or not eligible)", () => {
+  const failed = {
+    kind: "agent_blocked" as const,
+    task: "T1",
+    question:
+      "w1-t1-implementer-1 (implementer) failed. Respawn the implementer, or cancel the task?",
+    options: ["respawn", "cancel"],
+  };
+
+  it("adds the third option right after respawn, saying where and why", () => {
+    const d = withRespawnOn(failed, {
+      host: "box-a",
+      why: "down (no heartbeat for 90 s)",
+      best: "studio",
+      role: "implementer",
+    });
+    expect(d.options).toEqual(["respawn", "respawn on studio", "cancel"]);
+    expect(d.question).toBe(
+      `${failed.question} box-a is down (no heartbeat for 90 s): respawn on studio starts the implementer on studio instead (the best eligible machine now), in a fresh worktree there; respawn starts it on box-a again.`,
+    );
+    // Asked again with the same options: not added twice.
+    expect(withRespawnOn(d, { host: "box-a", why: "down", best: "box-b" })).toEqual(d);
+  });
+
+  it("only decisions that offer respawn get it", () => {
+    const other = { ...failed, options: ["skip", "cancel"] };
+    expect(withRespawnOn(other, { host: "box-a", why: "down", best: "studio" })).toEqual(other);
+  });
+
+  it("an answer counts only when it is the offered option (case and space aside)", () => {
+    const offered = ["respawn", "respawn on studio", "cancel"];
+    expect(respawnTarget(" Respawn on studio ", offered)).toBe("studio");
+    expect(respawnTarget("respawn on box-b", offered)).toBeNull();
+    expect(respawnTarget("respawn", offered)).toBeNull();
+    expect(isRespawnAnswer("respawn", offered)).toBe(true);
+    expect(isRespawnAnswer("respawn on studio", offered)).toBe(true);
+    expect(isRespawnAnswer("respawn on box-b", offered)).toBe(false);
+    expect(isRespawnAnswer("cancel", offered)).toBe(false);
+  });
+});
+
+describe("respawn on <best>: the role starts elsewhere with the task's branch and PR", () => {
+  let h: Harness;
+  afterEach(() => h?.cleanup());
+
+  it("a reviewer that failed on a down machine is respawned with the same PR branch and URL", async () => {
+    const H1 = sha(0x1001);
+    h = pipelineHarness({
+      // What the daemon adds when the task's machine (box) is down and studio is the best one.
+      decideWith: (input, extra) =>
+        withRespawnOn(input, {
+          host: "box",
+          why: "down (disconnected)",
+          best: "studio",
+          role: (extra.pipeline as { role: string }).role,
+        }),
+    });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { status: "failed" });
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["respawn", "respawn on studio", "cancel"]);
+    await h.resolve(d?.decision_id as string, "respawn on studio");
+    const specs = h.spawns.filter((s) => s.role === "spec_reviewer");
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.agent_id).not.toBe(specs[0]?.agent_id);
+    expect(specs[1]?.start).toEqual({ ref: H1, detach: true });
+    // The same branch and PR, by name: the review brief is the one the first reviewer had.
+    expect(specs[1]?.files["review.md"]).toBe(specs[0]?.files["review.md"]);
+    expect(specs[1]?.files["review.md"]).toContain("https://github.com/example/repo/pull/7");
+  });
+
+  it("an answer that is not the offered machine is asked again, nothing respawns", async () => {
+    h = pipelineHarness({
+      decideWith: (input) => withRespawnOn(input, { host: "box", why: "down", best: "studio" }),
+    });
+    await h.start();
+    h.openPr(sha(0x1001));
+    await h.finish("implementer", { status: "failed" });
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "respawn on elsewhere");
+    expect(h.spawns.filter((s) => s.role === "implementer")).toHaveLength(1);
+    expect(h.openDecisions()[0]?.question).toMatch(/^"respawn on elsewhere" is not one of/);
+  });
+});
+
+describe("daemon: a reaped agent on a down machine offers respawn on <best>", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("offers the live best machine; choosing it re-places the task and respawns the role there", async () => {
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await f.tick();
+    const first = f.agentOf("w1", "T1");
+    await f.supervised(first);
+    await f.lwt();
+    await f.finish(first, "reaped");
+    // Past the reap grace: retired, and the pipeline asks.
+    let d: DecisionPayload | null = null;
+    for (let i = 0; i < 20 && d === null; i++) {
+      await f.tick(60_000);
+      const opened = f
+        .journal("w1")
+        .find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      if (opened !== undefined) d = await f.decision("w1", opened.data.decision_id as string);
+    }
+    expect(d?.options).toEqual(["respawn", "respawn on control", "cancel"]);
+    expect(d?.question).toContain(
+      "box is down (disconnected): respawn on control starts the implementer on control instead",
+    );
+    expect(f.local.launches).toHaveLength(0);
+
+    await f.resolve("w1", d?.decision_id as string, "respawn on control");
+    const placed = f.journal("w1").filter((e) => e.type === "task_placed");
+    expect(placed.at(-1)?.data).toMatchObject({
+      task: "T1",
+      host: "control",
+      by: "decision",
+      from: "box",
+      local: true,
+    });
+    await f.tick();
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    // A fresh worktree there, cut from the release branch.
+    expect(f.local.worktrees.at(-1)).toMatchObject({
+      branch: "w1/T1-implementer-2",
+      base: "release/w1",
+    });
+    expect((await f.task("w1", "T1"))?.placement).toMatchObject({
+      host: "control",
+      by: "decision",
+    });
+  });
 });
 
 describe("model_switch decision (credit_exhausted)", () => {

@@ -652,12 +652,12 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect((await verdict("box"))?.payload).toMatchObject({
       ready: true,
       eligible: false,
-      ineligible_reason: "load 32.0 on 16 cores (2.00 per core > max 1.5)",
+      ineligible_reason: "overloaded: load 32.0 on 16 cores · no new agents",
     });
     await submit("w4", "", "  T1: { issue: 42, host: auto }\n");
     await tick();
     expect((await state("w4")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
-      "no eligible machine: box: load 32.0 on 16 cores (2.00 per core > max 1.5)",
+      "no eligible machine: box: overloaded: load 32.0 on 16 cores · no new agents",
     );
     // Back under the maximum: held by the same hysteresis as admission until it has been clear.
     await beat();
@@ -696,7 +696,9 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     localClaude = false;
     await setup();
     await beat({ memory: { total_mb: 65536, available_pct: 9 } });
-    expect((await verdict("box"))?.payload.ineligible_reason).toBe("memory available 9% (min 10%)");
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe(
+      "overloaded: memory available 9% (min 10%) · no new agents",
+    );
     await beat();
     // The same record again (a reconnect's retained copy, a QoS 1 duplicate): not a clean sample.
     await heartbeat();
@@ -718,7 +720,9 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     await setup();
     await beat({ memory: { total_mb: 65536, available_pct: 8 } });
     // The supervisor's minimum (10%) holds box for the verdict...
-    expect((await verdict("box"))?.payload.ineligible_reason).toBe("memory available 8% (min 10%)");
+    expect((await verdict("box"))?.payload.ineligible_reason).toBe(
+      "overloaded: memory available 8% (min 10%) · no new agents",
+    );
     // ...and a wave whose own minimum is 5% places there.
     await submit(
       "w7",

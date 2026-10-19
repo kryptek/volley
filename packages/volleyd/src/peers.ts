@@ -30,6 +30,11 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *   - `peer_remove {name}` → revokes the peer account, removes `hosts.<name>` and clears the
  *     machine's retained record; the machine's tunnel service stops at its next check. Only a
  *     paired machine (or a `peer` account): a host configured by hand is never removed.
+ *   - `peer_remove {name, drain: true}` on a machine with live agents → sets `hosts.<name>.drain`
+ *     (nothing new is placed there), answers at once and journals `peer_drain_started`; the
+ *     daemon finishes the removal (`finishRemoval`, `peer_removed`) once no agent runs there.
+ *     `{name, now: true}` likewise, but the daemon stops those agents (`stop_grace_s`) and opens
+ *     their respawn decisions first. With no live agent either removes at once.
  *   - `peers` → the paired machines' records and names.
  *   - `peer_doctor {name, fix?, clone?}` → runs `volley peer doctor --json [--fix --yes]
  *     [--clone]` on the configured host `name` over ssh (the Desk's Repair) and answers with the
@@ -103,6 +108,10 @@ export interface PeerDeps {
   clearMachine: (name: string) => Promise<void>;
   /** The supervisor's own machine name (SPEC §4.6.15): never a peer's. */
   localName?: () => string;
+  /** `hosts.<name>.drain: true` (a drain or remove-now in progress); omitted: not supported. */
+  setDrain?: (name: string, by: string) => PatchResult;
+  /** The live supervised agents on machine `name` (a drain waits for them). */
+  liveAgents?: (name: string) => string[];
   /** The configured host `name` as a remote host (`peer_doctor`); a string: why it cannot be. */
   remote?: (name: string) => RemoteHost | string;
   machines: () => MachineRecord[];
@@ -276,6 +285,19 @@ export class PeerService {
     if (typeof name !== "string" || !isValidAgentId(name)) {
       return refuse("name must match [a-z0-9][a-z0-9_-]{0,62}");
     }
+    for (const k of ["drain", "now"] as const) {
+      if (p[k] !== undefined && typeof p[k] !== "boolean")
+        return refuse(`${k} must be true or false`);
+    }
+    if (p.drain === true && p.now === true) {
+      return refuse(
+        "drain and now exclude each other: drain lets the running agents finish, now stops them",
+      );
+    }
+    const mode: RemovalMode | null = p.drain === true ? "drain" : p.now === true ? "now" : null;
+    if (mode !== null && Object.hasOwn(this.removals(), name)) {
+      return refuse(`"${name}" is being removed already`);
+    }
     const accounts = await listAccounts(this.deps.exec);
     if (typeof accounts === "string") return refuse(accounts);
     const account = accounts.find((a) => a.name === name);
@@ -294,6 +316,65 @@ export class PeerService {
     }
     // A peer account's or a paired machine's host entry; never one configured by hand alone.
     const isHost = configured;
+    const agents = mode !== null && isHost ? (this.deps.liveAgents?.(name) ?? []) : [];
+    if (mode !== null && agents.length > 0) return this.startRemoval(name, mode, agents, by);
+    return this.removeNow(name, by, account);
+  }
+
+  /**
+   * A drain or remove-now on a machine with live agents: nothing new is placed there from now on
+   * (`hosts.<name>.drain`), the removal is remembered (it survives a restart) and journaled as
+   * `peer_drain_started`, and the answer comes at once. The daemon calls `finishRemoval` once no
+   * agent runs there.
+   */
+  private startRemoval(name: string, mode: RemovalMode, agents: string[], by: string): PeerReply {
+    if (this.deps.setDrain === undefined) return refuse(`${mode} is not supported here`);
+    const r = this.deps.setDrain(name, by);
+    if (!r.applied) {
+      return refuse(`hosts.${name}.drain not set: ${r.rejected.map((e) => e.reason).join("; ")}`);
+    }
+    const at = new Date(this.deps.now()).toISOString();
+    this.writeFile(this.paired(), { ...this.removals(), [name]: { by, mode, at } });
+    this.deps.journal({ type: "peer_drain_started", data: { by, name, mode, agents } });
+    return {
+      ok: true,
+      result: { name, removing: mode, agents: agents.length, revoked: false, host_removed: false },
+    };
+  }
+
+  /** Removals started with `drain` or `now` that have not finished, by machine name. */
+  removals(): Record<string, PendingRemoval> {
+    return this.readFile().removing;
+  }
+
+  /**
+   * Finish a drain or remove-now: the removal itself, by whoever asked for it. A refusal (the
+   * account could not be revoked, say) leaves it pending, for the next sweep to try again.
+   */
+  async finishRemoval(name: string): Promise<PeerReply> {
+    const pending = this.removals()[name];
+    if (pending === undefined) return refuse(`"${name}" is not being removed`);
+    const accounts = await listAccounts(this.deps.exec);
+    if (typeof accounts === "string") return refuse(accounts);
+    return this.removeNow(
+      name,
+      pending.by,
+      accounts.find((a) => a.name === name && a.role === "peer"),
+    );
+  }
+
+  /**
+   * Revoke the peer `account` (if any), drop the host entry and the pairing, clear the record,
+   * journal `peer_removed`.
+   */
+  private async removeNow(
+    name: string,
+    by: string,
+    account: { name: string } | undefined,
+  ): Promise<PeerReply> {
+    const paired = this.paired();
+    const wasPaired = Object.hasOwn(paired, name);
+    const isHost = Object.hasOwn(this.deps.hosts(), name);
     if (account !== undefined) {
       const r = await volleyAuth(this.deps.exec, ["revoke", name]);
       if (!r.ok) return refuse(r.error);
@@ -307,6 +388,10 @@ export class PeerService {
     if (wasPaired) {
       const { [name]: _gone, ...rest } = paired;
       this.writePaired(rest);
+    }
+    if (Object.hasOwn(this.removals(), name)) {
+      const { [name]: _done, ...rest } = this.removals();
+      this.writeFile(this.paired(), rest);
     }
     await this.deps.clearMachine(name);
     const data = { by, name, revoked: account !== undefined, host_removed: isHost };
@@ -366,20 +451,42 @@ export class PeerService {
 
   /** Names this daemon paired (`peer_join`), with when and how it reaches them. */
   paired(): Record<string, PairedMachine> {
-    if (!existsSync(this.deps.pairedFile)) return {};
+    return this.readFile().peers;
+  }
+
+  /** `peers.json`: the paired machines, and the removals in progress (`removing`). */
+  private readFile(): {
+    peers: Record<string, PairedMachine>;
+    removing: Record<string, PendingRemoval>;
+  } {
+    const obj = (v: unknown) => (typeof v === "object" && v !== null && !Array.isArray(v) ? v : {});
+    if (!existsSync(this.deps.pairedFile)) return { peers: {}, removing: {} };
     try {
-      const peers = (JSON.parse(readFileSync(this.deps.pairedFile, "utf-8")) as { peers?: unknown })
-        .peers;
-      return typeof peers === "object" && peers !== null && !Array.isArray(peers)
-        ? (peers as Record<string, PairedMachine>)
-        : {};
+      const f = JSON.parse(readFileSync(this.deps.pairedFile, "utf-8")) as {
+        peers?: unknown;
+        removing?: unknown;
+      };
+      return {
+        peers: obj(f.peers) as Record<string, PairedMachine>,
+        removing: obj(f.removing) as Record<string, PendingRemoval>,
+      };
     } catch {
-      return {};
+      return { peers: {}, removing: {} };
     }
   }
 
   private writePaired(peers: Record<string, PairedMachine>): void {
-    writeJson(this.deps.pairedFile, { peers });
+    this.writeFile(peers, this.removals());
+  }
+
+  private writeFile(
+    peers: Record<string, PairedMachine>,
+    removing: Record<string, PendingRemoval>,
+  ): void {
+    writeJson(this.deps.pairedFile, {
+      peers,
+      ...(Object.keys(removing).length > 0 ? { removing } : {}),
+    });
   }
 
   /** The outstanding code `code` is, or null; a wrong one counts towards revoking them all. */
@@ -450,6 +557,17 @@ export function doctorPlan(
 export interface PairedMachine {
   target: string;
   joined_at: string;
+}
+
+/** `drain`: the running agents finish; `now`: the daemon stops them (`stop_grace_s`). */
+export type RemovalMode = "drain" | "now";
+
+/** A `peer_remove { drain | now }` that has not finished (`peers.json` `removing`). */
+export interface PendingRemoval {
+  by: string;
+  mode: RemovalMode;
+  /** When it was asked for (the grace of `now` counts from it). */
+  at: string;
 }
 
 /** Atomically, mode 0600. */

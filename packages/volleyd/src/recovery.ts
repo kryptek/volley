@@ -16,6 +16,47 @@ import { type AgentWatch, sameModel } from "./verify";
  * offers no switch (decision only). Models are never switched without approval.
  */
 
+// ---------------------------------------------------------------------------------------------
+// Fleet (F6, SPEC §4.6.15): `respawn on <best>` for an agent whose host is down or not eligible
+// ---------------------------------------------------------------------------------------------
+
+const RESPAWN = "respawn";
+const RESPAWN_ON = "respawn on ";
+const norm = (s: string) => s.trim().toLowerCase();
+
+/**
+ * A decision that offers `respawn` about an agent whose host is down or not eligible also offers
+ * `respawn on <best>` (the best eligible machine now), right after `respawn`, and its question
+ * says what it does. A decision that does not offer `respawn`, or offers a `respawn on` already
+ * (asked again), is returned unchanged. Pure.
+ */
+export function withRespawnOn(
+  input: DecisionInput,
+  o: { host: string; why: string; best: string; role?: string },
+): DecisionInput {
+  const options = input.options ?? [];
+  const at = options.findIndex((x) => norm(x) === RESPAWN);
+  if (at === -1 || options.some((x) => norm(x).startsWith(RESPAWN_ON))) return input;
+  const role = o.role ?? "agent";
+  return {
+    ...input,
+    options: [...options.slice(0, at + 1), `${RESPAWN_ON}${o.best}`, ...options.slice(at + 1)],
+    question: `${input.question} ${o.host} is ${o.why}: ${RESPAWN_ON}${o.best} starts the ${role} on ${o.best} instead (the best eligible machine now), in a fresh worktree there; respawn starts it on ${o.host} again.`,
+  };
+}
+
+/** The machine an answer names when it is one of `options`' `respawn on <machine>`; else null. */
+export function respawnTarget(answer: string, options: readonly string[] = []): string | null {
+  const a = norm(answer);
+  if (!a.startsWith(RESPAWN_ON) || !options.some((o) => norm(o) === a)) return null;
+  const name = a.slice(RESPAWN_ON.length).trim();
+  return name === "" ? null : name;
+}
+
+/** `respawn`, or an offered `respawn on <machine>`: both replace the role's run. */
+export const isRespawnAnswer = (answer: string, options: readonly string[] = []): boolean =>
+  norm(answer) === RESPAWN || respawnTarget(answer, options) !== null;
+
 /** `class` of the decision a credit_exhausted signal opens. */
 export const CREDIT_CLASS = "credit_exhausted";
 /** `class` of the decision re-opened when a switch was not verified. */

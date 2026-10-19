@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
-import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
@@ -14,8 +14,10 @@ import type { MachineRecord } from "../src/machines";
 import { PeerService, isPairingCode, normalizeCode } from "../src/peers";
 import type { NewEvent, RemoteHostConfig } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NO_PRESSURE, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
+import { type Fleet, makeFleet } from "./helpers/fleet-env";
 
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const REPLY_KEY = publicKey.export({ format: "jwk" });
@@ -692,5 +694,162 @@ describe("shared with volley-cli's peer.ts", () => {
     expect(cli.PEER_DEFAULTS.ssh_connect_timeout_s).toBe(DAEMON_DEFAULTS.ssh_connect_timeout_s);
     expect(cli.PEER_DEFAULTS.ssh_alive_interval_s).toBe(DAEMON_DEFAULTS.ssh_alive_interval_s);
     expect(cli.machineTopic("box-a")).toBe("volley/_system/machines/box-a");
+  });
+});
+
+describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
+  let f: Fleet;
+  const config = () => readFileSync(join(f.env.home, "config.yaml"), "utf-8");
+  const types = () => f.system().map((e) => e.type);
+
+  /** w1's T1 runs on box, supervised. */
+  const runOnBox = async () => {
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await f.tick();
+    const id = f.agentOf("w1", "T1");
+    await f.supervised(id);
+    return id;
+  };
+
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("drain: answers at once, journals peer_drain_started, places nothing there; removes once its agent retires", async () => {
+    const t1 = await runOnBox();
+    const r = await f.adminOp({ op: "peer_remove", name: "box", drain: true });
+    expect(r).toMatchObject({
+      ok: true,
+      result: { name: "box", removing: "drain", agents: 1, revoked: false, host_removed: false },
+    });
+    expect(f.system().find((e) => e.type === "peer_drain_started")?.data).toEqual({
+      by: "admin-1",
+      name: "box",
+      mode: "drain",
+      agents: [t1],
+    });
+    expect(types()).not.toContain("peer_removed");
+    await f.tick();
+    expect(await f.verdict("box")).toMatchObject({ drain: true, eligible: false, placed: 1 });
+
+    // A drained host receives no placement, though the wave prefers it.
+    await f.submit("w2", "placement: auto\nplacement_prefer: [box]\n", "  T2: { issue: 42 }\n");
+    await f.tick();
+    expect(f.journal("w2").find((e) => e.type === "task_placed")?.data).toMatchObject({
+      host: "control",
+      by: "auto",
+    });
+    // Its running agent is left to finish.
+    expect(f.box()?.closed).toEqual([]);
+    expect(f.journal("w1").some((e) => e.type === "steering_sent")).toBe(false);
+    await f.tick();
+    expect(types()).not.toContain("peer_removed");
+
+    await f.finish(t1, "failed");
+    await eventually(async () => {
+      await f.tick();
+      return types().includes("peer_removed");
+    });
+    expect(f.system().find((e) => e.type === "peer_removed")?.data).toEqual({
+      by: "admin-1",
+      name: "box",
+      revoked: true,
+      host_removed: true,
+    });
+    expect(config()).not.toContain("box:");
+    expect(f.accounts.has("box")).toBe(false);
+    // Asking again: it is gone.
+    expect(await f.adminOp({ op: "peer_remove", name: "box", drain: true })).toMatchObject({
+      ok: false,
+      error: 'no peer named "box"',
+    });
+  });
+
+  it("now: stops the agent, after stop_grace_s retires it and opens its respawn decision, then removes", async () => {
+    const t1 = await runOnBox();
+    const r = await f.adminOp({ op: "peer_remove", name: "box", now: true });
+    expect(r).toMatchObject({ ok: true, result: { removing: "now", agents: 1 } });
+    expect(f.system().find((e) => e.type === "peer_drain_started")?.data).toMatchObject({
+      mode: "now",
+      agents: [t1],
+    });
+    // Told to stop at once.
+    expect(
+      f
+        .journal("w1")
+        .some(
+          (e) => e.type === "steering_sent" && e.data.agent_id === t1 && e.data.type === "cancel",
+        ),
+    ).toBe(true);
+    await f.tick(CONFIG_DEFAULTS.stop_grace_s * 1000 - 2000);
+    expect(types()).not.toContain("peer_removed");
+    await f.tick(2000);
+    expect(f.journal("w1").find((e) => e.type === "agent_force_retired")?.data).toMatchObject({
+      agent_id: t1,
+      reason: "peer_remove",
+    });
+    const opened = f
+      .journal("w1")
+      .find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+    expect(opened?.data.question).toMatch(
+      new RegExp(
+        `^${t1} \\(implementer\\) was stopped: box is being removed\\. Respawn the implementer`,
+      ),
+    );
+    expect(opened?.data.options).toEqual(["respawn", "respawn on control", "cancel"]);
+    await eventually(async () => {
+      await f.tick();
+      return types().includes("peer_removed");
+    });
+    expect(config()).not.toContain("box:");
+  });
+
+  it("an agent that ends itself during a remove-now counts as stopped, not done", async () => {
+    const t1 = await runOnBox();
+    await f.adminOp({ op: "peer_remove", name: "box", now: true });
+    await f.finish(t1, "done");
+    await eventually(async () => {
+      await f.tick();
+      return f
+        .journal("w1")
+        .some((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+    });
+    expect(f.journal("w1").some((e) => e.type === "artifact_verified")).toBe(false);
+    await eventually(async () => {
+      await f.tick();
+      return types().includes("peer_removed");
+    });
+  });
+
+  it("refusals: drain and now together, a non-boolean, a second removal; no live agent removes at once", async () => {
+    expect(
+      await f.adminOp({ op: "peer_remove", name: "box", drain: true, now: true }),
+    ).toMatchObject({
+      ok: false,
+      error:
+        "drain and now exclude each other: drain lets the running agents finish, now stops them",
+    });
+    expect(await f.adminOp({ op: "peer_remove", name: "box", drain: "yes" })).toMatchObject({
+      ok: false,
+      error: "drain must be true or false",
+    });
+    await runOnBox();
+    expect(await f.adminOp({ op: "peer_remove", name: "box", drain: true })).toMatchObject({
+      ok: true,
+    });
+    expect(await f.adminOp({ op: "peer_remove", name: "box", now: true })).toMatchObject({
+      ok: false,
+      error: '"box" is being removed already',
+    });
+  });
+
+  it("with no live agent there, drain removes at once", async () => {
+    const r = await f.adminOp({ op: "peer_remove", name: "box", drain: true });
+    expect(r).toMatchObject({ ok: true, result: { revoked: true, host_removed: true } });
+    expect(types()).toContain("peer_removed");
+    expect(types()).not.toContain("peer_drain_started");
   });
 });

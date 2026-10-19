@@ -113,6 +113,8 @@ interface Entry {
   status: MachineStatus;
   /** When the supervisor last received an `up` record (its own clock). */
   heardAt: number;
+  /** When it went down (its own clock); undefined while it is up. */
+  downAt?: number;
 }
 
 export class MachineHealth {
@@ -140,7 +142,14 @@ export class MachineHealth {
           }
         : incoming;
     const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
-    this.machines.set(record.name, { record, status, heardAt });
+    const downAt =
+      status === "up" ? undefined : prior?.status === "down" ? prior.downAt : this.deps.now();
+    this.machines.set(record.name, {
+      record,
+      status,
+      heardAt,
+      ...(downAt !== undefined ? { downAt } : {}),
+    });
     if (prior?.status !== status) this.deps.onChange(record.name, status, record);
   }
 
@@ -156,7 +165,7 @@ export class MachineHealth {
       // The supervisor's own machine publishes no heartbeat to miss: it is always up.
       if (e.status !== "up" || e.record.tunnel === "local" || now - e.heardAt < limit) continue;
       const record: MachineRecord = { ...e.record, tunnel: "down", reason: "heartbeat_timeout" };
-      this.machines.set(name, { ...e, record, status: "down" });
+      this.machines.set(name, { ...e, record, status: "down", downAt: now });
       down.push(record);
       this.deps.onChange(name, "down", record);
     }
@@ -175,6 +184,14 @@ export class MachineHealth {
   /** The machine's status; undefined for a host that never published a record. */
   status(name: string): MachineStatus | undefined {
     return this.machines.get(name)?.status;
+  }
+
+  /**
+   * When the supervisor marked the machine down (its own clock, epoch ms); undefined while it is
+   * up or unknown. A `machine_down` decision opens `placement.down_decision_after_s` after it.
+   */
+  downSince(name: string): number | undefined {
+    return this.machines.get(name)?.downAt;
   }
 
   record(name: string): MachineRecord | undefined {

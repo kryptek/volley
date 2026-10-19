@@ -70,7 +70,11 @@ const HELP = `Usage:
                                                A one-time pairing code (XXXX-XXXX, 10 min);
                                                --for: re-pair the paired machine <name>
     volley peer list [--json]                  Paired machines and their health
-    volley peer remove <name>                  Unpair: revoke its account, drop hosts.<name>
+    volley peer remove <name> [--drain | --now]
+                                               Unpair: revoke its account, drop hosts.<name>;
+                                               --drain: place nothing new there and remove it
+                                               once its agents finish; --now: stop them (each
+                                               gets a respawn question), then remove it
   On the machine to pair:
     volley peer join <code> --to <host> [--name <name>] [--target <user@this-machine>]
                      [--repo <path>] [--volley-dir <path>] [--port <port>]
@@ -130,6 +134,8 @@ const OPTIONS = {
   "remote-volley": { type: "string" },
   "no-service": { type: "boolean" },
   replace: { type: "boolean" },
+  drain: { type: "boolean" },
+  now: { type: "boolean" },
   for: { type: "string" },
   fix: { type: "boolean" },
   yes: { type: "boolean" },
@@ -157,6 +163,8 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   sharing: ["doctor"],
   for: ["invite"],
   replace: ["join"],
+  drain: ["remove"],
+  now: ["remove"],
 };
 
 /** Mirrors volleyd's config-defaults (separate package: no import across the boundary). */
@@ -302,6 +310,11 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
       return list(v, env, io);
     case "remove":
       if (pos.length !== 1) return usage("needs exactly one <name>");
+      if (v.drain === true && v.now === true) {
+        return usage(
+          "--drain and --now exclude each other: --drain lets the running agents finish, --now stops them",
+        );
+      }
       return remove(pos[0] as string, v, env, io);
     case "redeem":
       if (pos.length !== 0) return usage("takes no arguments (the request is JSON on stdin)");
@@ -555,9 +568,27 @@ async function remove(
   env: Record<string, string | undefined>,
   io: IO,
 ): Promise<ExitCode> {
-  const a = await ask("remove", "peer_remove", { name }, v, env, io, true);
+  const mode = v.drain === true ? { drain: true } : v.now === true ? { now: true } : {};
+  const a = await ask("remove", "peer_remove", { name, ...mode }, v, env, io, true);
   if (typeof a === "number") return a;
-  const r = (a.result ?? {}) as { revoked?: boolean; host_removed?: boolean };
+  const r = (a.result ?? {}) as {
+    revoked?: boolean;
+    host_removed?: boolean;
+    removing?: "drain" | "now";
+    agents?: number;
+  };
+  // Agents still run there: volleyd answered at once and finishes the removal later.
+  if (r.removing !== undefined) {
+    const n = r.agents ?? 0;
+    const agents = `${n} agent${n === 1 ? "" : "s"}`;
+    const finish = `volleyd removes it (revokes its account, drops hosts.${name}) once they finish.`;
+    io.stdout(
+      r.removing === "drain"
+        ? `draining ${name}: nothing new starts there; ${agents} left. ${finish}\n`
+        : `stopping ${agents} on ${name}: each is asked to stop now and retired after stop_grace_s, and its task gets a respawn question (respawn on another machine, or cancel). ${finish}\n`,
+    );
+    return EXIT.OK;
+  }
   io.stdout(
     `removed ${name}: ${r.revoked === true ? "account revoked" : "no account"}, ${r.host_removed === true ? `hosts.${name} removed` : `no hosts.${name}`}, machine record cleared\nIts tunnel service stops at its next check.\n`,
   );

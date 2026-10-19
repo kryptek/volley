@@ -46,6 +46,8 @@ export const CONFIG_DEFAULTS: Tunables = {
     mem_available_min_pct: 10,
     disk_free_min_gb: 5,
     weights: { cpu: 40, slots: 30, mem: 15, usage: 15 },
+    // --- Fleet: a machine that stays down (SPEC §4.6.15) ---
+    down_decision_after_s: 300,
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   fleet: { local_name: null },

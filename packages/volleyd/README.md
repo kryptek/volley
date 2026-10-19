@@ -1410,7 +1410,8 @@ placed when admitted).
 
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`
-is under `max_agents`, its 1-minute load per core is at most `placement.load_per_core_max` (1.5),
+is under `max_agents`, its load per core (the higher of its 1- and 5-minute load averages) is at
+most `placement.load_per_core_max` (1.5),
 its available memory is at least `placement.mem_available_min_pct` (10 %), its free disk at least
 `placement.disk_free_min_gb` (5 GB), its account's 5-hour usage is under `claude.warn_at_pct`
 (unknown usage passes), its own admission is not holding starts (below), and, for a `heavy: true`
@@ -1442,8 +1443,8 @@ as written:
 ```
 load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%
 load 3.2 on 16 cores · 0/4 agents · 71% mem · usage 34% · heavy slots 1/1 free (backend-it) · preferred
-ineligible: load 32.0 on 16 cores (2.00 per core > max 1.5)
-ineligible: memory available 9% (min 10%)
+ineligible: overloaded: load 32.0 on 16 cores · no new agents
+ineligible: overloaded: memory available 9% (min 10%) · no new agents
 ineligible: claude not on the non-interactive ssh PATH (...) (readiness)
 ineligible: 4/4 agents (max_agents)
 ineligible: heavy slots 0/1 free (backend-it)
@@ -1498,8 +1499,76 @@ if admitted now: T1 → box-a (0.85), T3 → local (0.58)
 
 Tunables (`config set`, hot): `placement.load_per_core_max`, `placement.mem_available_min_pct`,
 `placement.disk_free_min_gb`, `placement.weights.{cpu,slots,mem,usage}` (not all four 0).
-A machine that stays down, re-placement and drain decisions are not placement's: nothing running
-is ever moved.
+A machine that stays down, re-placement and drain are the owner's decisions (next section):
+nothing running is ever moved.
+
+---
+
+## Fleet: down, overload, drain, remove
+
+What happens when a machine goes away, gets busy, or is taken out of the fleet (SPEC §4.6.14,
+§4.6.15). The rule throughout: nothing is re-placed or moved without the owner's answer, and a
+running agent is never migrated.
+
+**Down.** A machine whose heartbeat stops (or whose LWT arrives) is down: its spawns park, every
+unfinished task there shows `host_down`, and each wave with tasks there journals `MACHINE_DOWN`
+(§4.6.14). volleyd remembers since when, on its own clock (`MachineHealth.downSince`). Once it has
+been down for `placement.down_decision_after_s` (default 300), each running wave with unfinished
+tasks there gets one wave-level `machine_down` decision carrying `host`, `down_since` and `tasks`
+(running and queued):
+
+```
+box-a has been down 5 min (no heartbeat for 90 s). 2 queued tasks were placed there: T3 and T4.
+T1 is running there and is left alone: a running agent is never moved. wait: keep the queued
+tasks parked until box-a is back; this is what happens if nobody answers, and this question
+closes itself when box-a returns. re-place queued tasks: place T3 and T4 again without box-a
+(best now: studio). cancel: cancel T1, T3 and T4.
+```
+
+- `wait` (also what happens with no answer): everything stays parked. volleyd asks again only when
+  a task with no agent yet would park there that the last question did not name.
+- `re-place queued tasks` (the Desk pre-fills it): each listed task that still has no agent and is
+  still on that machine goes through placement again (F3's `place`, with the down machine
+  excluded and each choice reserved for the next), journaled `task_placed { by: "decision",
+  from: "box-a" }`. Tasks with an agent stay where they are. A task with no eligible machine stays
+  and says why (`alarm_raised { code: NOT_REPLACED }`).
+- `cancel`: every listed task not finished is cancelled; a running agent there is sent `cancel`
+  (it waits in its mailbox while the machine is away).
+- The machine coming back resolves an open `machine_down` with `wait` (`by: volleyd`).
+
+**Respawn on another machine.** A decision that offers `respawn` for an agent whose machine is
+down or not eligible (an agent reaped while its machine is away, an agent stopped by a remove-now)
+also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened (F3's
+placement with that machine excluded), and its question says what it does. Answering it re-places
+the task there first (`task_placed { by: "decision", from }`), then respawns the role: a fresh
+worktree cut from `origin/<release>` there; a later role (reviewer, fixup) starts at the task's
+verified head with its branch and PR, by name. Only the offered machine counts as an answer.
+
+**Overloaded.** A machine whose load per core (the higher of the 1- and 5-minute averages) is over
+`placement.load_per_core_max`, or whose available memory is under
+`placement.mem_available_min_pct`, takes no new placement, and its readiness says
+`ineligible_reason: "overloaded: load 24.1 on 16 cores · no new agents"`. Nothing running there is
+touched. A peer stays ineligible until `admission.hysteresis_samples` (3) clean heartbeats in a
+row (`recovering: load per core clear for 2/3 samples`).
+
+**Drain.** `hosts.<name>.drain: true` (hot, `config set`) takes a machine out of placement; its
+readiness shows `drain: true` and `placed` (the Desk: "draining · 2 agents left").
+
+**Remove: at once, drain, now.** `peer_remove { name }` (`volley peer remove <name>`) removes a
+paired machine at once. With live agents there:
+
+- `{ name, drain: true }` (`--drain`) sets `hosts.<name>.drain`, answers at once
+  (`result: { removing: "drain", agents }`) and journals `peer_drain_started { by, name, mode,
+  agents }` in `_system`; each tick, once no agent (or spawn in flight) is left there, volleyd
+  finishes the removal and journals `peer_removed`.
+- `{ name, now: true }` (`--now`) does the same and sends each agent there a `cancel` at once; one
+  still live `stop_grace_s` later is force-retired (`agent_force_retired { reason: peer_remove }`).
+  Either way its role ends as stopped (a `done` it publishes meanwhile is not accepted) and the
+  pipeline opens its respawn decision, which offers `respawn on <best>`.
+
+With no live agent either removes at once. A pending removal is kept in `peers.json`
+(`removing`), so it survives a restart. `drain` and `now` exclude each other, and a second
+removal of a machine being removed is refused.
 
 ---
 

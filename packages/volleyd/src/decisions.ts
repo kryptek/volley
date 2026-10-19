@@ -31,6 +31,7 @@ export const DECISION_KINDS = [
   "pr_head_moved",
   "spawn_budget_exhausted",
   "account_limit",
+  "machine_down",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -64,6 +65,9 @@ export interface DecisionPayload {
   pct?: number;
   resets_at?: string | null;
   suggested?: string | null;
+  /** machine_down: when the supervisor marked `host` down, and the wave's unfinished tasks there. */
+  down_since?: string;
+  tasks?: TaskId[];
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -206,6 +210,13 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
           ...(d.suggested !== undefined ? { suggested: d.suggested } : {}),
         }
       : {};
+  const down =
+    d.kind === "machine_down"
+      ? {
+          ...(typeof d.down_since === "string" ? { down_since: d.down_since } : {}),
+          ...(Array.isArray(d.tasks) ? { tasks: d.tasks } : {}),
+        }
+      : {};
   return {
     decision_id: d.decision_id,
     wave: d.wave,
@@ -222,6 +233,78 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     ...str("change"),
     ...str("acct"),
     ...limit,
+    ...down,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fleet (F6, SPEC §4.6.15): a machine that stays down
+// ---------------------------------------------------------------------------------------------
+
+/** A `machine_down` decision's options; `wait` is what happens when nobody answers. */
+export const MACHINE_DOWN_OPTIONS = ["wait", "re-place queued tasks", "cancel"];
+export const MACHINE_DOWN_WAIT = "wait";
+export const MACHINE_DOWN_REPLACE = "re-place queued tasks";
+export const MACHINE_DOWN_CANCEL = "cancel";
+
+/** What the supervisor knows when a machine has been down for `down_decision_after_s`. */
+export interface MachineDownFacts {
+  host: string;
+  /** When the supervisor marked it down, and now (epoch ms, its own clock). */
+  downSince: number;
+  now: number;
+  /** Why it is down (`MachineHealth.whyDown`): `no heartbeat for 90 s`, `disconnected`. */
+  why: string;
+  /** The wave's tasks there with no agent yet (they would be re-placed), and those running. */
+  queued: TaskId[];
+  running: TaskId[];
+  /** Where the queued tasks would go now (placement without `host`); null: nowhere yet. */
+  best: string | null;
+}
+
+/** `T1`, `T1 and T2`, `T1, T2 and T3`. */
+const listOf = (ids: readonly string[]): string =>
+  ids.length <= 1 ? (ids[0] ?? "") : `${ids.slice(0, -1).join(", ")} and ${ids.at(-1)}`;
+
+/** `5 min`, `1 h 5 min`: how long a machine has been down. */
+function duration(ms: number): string {
+  const min = Math.max(1, Math.round(ms / 60_000));
+  return min < 60
+    ? `${min} min`
+    : `${Math.floor(min / 60)} h${min % 60 > 0 ? ` ${min % 60} min` : ""}`;
+}
+
+/**
+ * The wave-level `machine_down` decision (pure): its question says what happened, what each
+ * option does and what happens if nobody answers; `data` is the facts the payload carries.
+ */
+export function machineDownInput(f: MachineDownFacts): {
+  input: DecisionInput;
+  data: { host: string; down_since: string; tasks: TaskId[] };
+} {
+  const { host, queued, running } = f;
+  const all = [...new Set([...running, ...queued])].sort();
+  const what =
+    queued.length === 0
+      ? "No queued task was placed there."
+      : `${queued.length} queued task${queued.length === 1 ? " was" : "s were"} placed there: ${listOf(queued)}.`;
+  const live =
+    running.length === 0
+      ? ""
+      : ` ${listOf(running)} ${running.length === 1 ? "is" : "are"} running there and ${running.length === 1 ? "is" : "are"} left alone: a running agent is never moved.`;
+  const replace =
+    queued.length === 0
+      ? "re-place queued tasks: nothing is queued there now."
+      : `re-place queued tasks: place ${listOf(queued)} again without ${host} (${f.best !== null ? `best now: ${f.best}` : `no other machine is eligible now: ${queued.length === 1 ? "it" : "they"} would wait for one`}).`;
+  const question = [
+    `${host} has been down ${duration(f.now - f.downSince)} (${f.why}). ${what}${live}`,
+    `wait: keep the queued tasks parked until ${host} is back; this is what happens if nobody answers, and this question closes itself when ${host} returns.`,
+    replace,
+    `cancel: cancel ${listOf(all)}.`,
+  ].join(" ");
+  return {
+    input: { kind: "machine_down", task: null, question, options: [...MACHINE_DOWN_OPTIONS] },
+    data: { host, down_since: new Date(f.downSince).toISOString(), tasks: all },
   };
 }
 
