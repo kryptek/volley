@@ -20,10 +20,17 @@
  * never gets an agent window. volleyd's control channel — a mailbox `query`
  * with `payload.op` and the daemon's `ack` echoing it — is kept out of every
  * agent's feed.
+ *
+ * Claude accounts (SPEC §4.6.11–12): an agent's retained `usage` sample is
+ * kept in `usage` by agent id (never a feed row: it is a meter, not news), the
+ * supervisor's per-account records in `claudeAccounts`, and sign-in events in
+ * `signins` by account (live-only).
  */
 import {
   type AgentAttention,
   type AgentView,
+  type ClaudeAccountPayload,
+  type ClaudeSignin,
   type ConfigPayload,
   type CoordinatorView,
   type DecisionPayload,
@@ -38,6 +45,7 @@ import {
   type ScreenPayload,
   type SteeringReceipts,
   type SupervisorView,
+  type UsagePayload,
   type WaveStatePayload,
   type WaveView,
 } from "./types";
@@ -77,7 +85,10 @@ export type Route =
   | { kind: "decision"; wave: string; decisionId: string }
   | { kind: "config" }
   | { kind: "lease"; pool: string }
-  | { kind: "admission" };
+  | { kind: "admission" }
+  | { kind: "claudeAccount"; acct: string }
+  | { kind: "signin"; acct: string }
+  | { kind: "usage"; agentId: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
@@ -88,6 +99,8 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 4 && b === "registry" && c) return { kind: "registry", agentId: c };
     if (p.length === 4 && b === "leases" && c) return { kind: "lease", pool: c };
     if (p.length === 3 && b === "admission") return { kind: "admission" };
+    if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
+    if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
     return null;
   }
   if (a === "_waves") {
@@ -99,6 +112,7 @@ export function routeTopic(topic: string): Route | null {
     return null;
   }
   if (p.length === 4 && a && b && !a.startsWith("_")) {
+    if (c === "usage") return { kind: "usage", agentId: b };
     const channel = AGENT_CHANNELS.find((ch) => ch === c);
     if (channel) return { kind: "agent", namespace: a, agentId: b, channel };
   }
@@ -161,7 +175,57 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
         ...state,
         admission: (m.envelope?.payload as Record<string, unknown> | undefined) ?? null,
       };
+    case "claudeAccount":
+      return {
+        ...state,
+        claudeAccounts: keyed(
+          state.claudeAccounts,
+          route.acct,
+          m.envelope?.payload as ClaudeAccountPayload | undefined,
+        ),
+      };
+    case "usage":
+      return {
+        ...state,
+        usage: keyed(state.usage, route.agentId, m.envelope?.payload as UsagePayload | undefined),
+      };
+    case "signin":
+      return reduceSignin(state, route.acct, m);
   }
+}
+
+/** `map` with `key` set to `value`, or removed when `value` is undefined (a cleared topic). */
+function keyed<V>(map: Record<string, V> | undefined, key: string, value: V | undefined) {
+  const next = { ...map };
+  if (value === undefined) delete next[key];
+  else next[key] = value;
+  return next;
+}
+
+const SIGNIN_STATE: Record<string, ClaudeSignin["state"]> = {
+  claude_signin_url: "waiting",
+  claude_signin_done: "done",
+  claude_signin_failed: "failed",
+};
+
+/** A sign-in event: the URL (waiting), then done or failed. The link is kept until a new URL. */
+function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  const next = env ? SIGNIN_STATE[env.type] : undefined;
+  if (!env || next === undefined) return state;
+  const p = record(env.payload);
+  const prev = next === "waiting" ? undefined : state.signins?.[acct];
+  const signin: ClaudeSignin = {
+    acct,
+    state: next,
+    at: m.receivedAt,
+    ...optional("url", str(p.url) ?? prev?.url),
+    ...optional("flow", str(p.flow) ?? prev?.flow),
+    ...optional("attach", str(p.attach) ?? prev?.attach),
+    ...optional("plan", str(p.plan)),
+    ...optional("reason", str(p.reason)),
+  };
+  return { ...state, signins: { ...state.signins, [acct]: signin } };
 }
 
 // ------------------------------------------------------------------ resync
@@ -169,11 +233,11 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 /**
  * Forget everything that retained topics hold, ahead of the replay that
  * follows a reconnect: waves (with their decisions), config, leases,
- * admission, each agent's registry, status and screen, and each supervisor's
- * registry and status. Live-only parts — feed, narration, progress,
- * heartbeat, attention, a supervisor's namespace — are kept. Agents and
- * supervisors that were registered become `unconfirmed` until their registry
- * entry is replayed.
+ * admission, Claude account records and usage samples, each agent's
+ * registry, status and screen, and each supervisor's registry and status.
+ * Live-only parts — feed, narration, progress, heartbeat, attention, a
+ * supervisor's namespace — are kept. Agents and supervisors that were
+ * registered become `unconfirmed` until their registry entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
   const agents: Record<string, AgentView> = {};
@@ -206,6 +270,8 @@ export function resync(state: DeskState): DeskState {
     config: null,
     leases: {},
     admission: null,
+    claudeAccounts: {},
+    usage: {},
     unconfirmed: [...unconfirmed],
   };
 }

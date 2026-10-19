@@ -58,7 +58,8 @@
             "pr_head_moved",
             "merged_by_operator",
             "agent_force_retired",
-            "alarm_cleared"
+            "alarm_cleared",
+            "wave_account_moved"
           ]
         },
         "payload": {

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/usage.schema.json",
+  "title": "Volley Usage Channel Message",
+  "description": "Retained usage sample of one agent's Claude Code session (its context window and its Claude account's rate-limit windows), published by the agent's harness (the volley-hooks statusLine publisher) to volley/<ns>/<agent_id>/usage. See spec section 4.6.12.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "usage" },
+        "type": { "const": "usage" },
+        "payload": {
+          "type": "object",
+          "required": ["account", "model", "context_window", "rate_limits", "captured_at"],
+          "properties": {
+            "account": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                { "type": "null" }
+              ],
+              "description": "The Claude account the session runs under (spec section 4.6.11): primary, or a supervisor's registry id. null when the publisher cannot tell (see config_dir)."
+            },
+            "config_dir": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The session's CLAUDE_CONFIG_DIR, when account is null and one is set: a supervisor maps it to the profile it belongs to."
+            },
+            "model": {
+              "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+              "description": "The session's model id."
+            },
+            "context_window": {
+              "type": "object",
+              "required": ["used_percentage", "used", "size"],
+              "properties": {
+                "used_percentage": {
+                  "oneOf": [{ "type": "number", "minimum": 0, "maximum": 100 }, { "type": "null" }],
+                  "description": "How full the context window is; null early in a session."
+                },
+                "used": {
+                  "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }],
+                  "description": "Tokens in the context window (the last request's input, cache reads and cache writes); null before the first request."
+                },
+                "size": {
+                  "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }],
+                  "description": "The context window's size in tokens."
+                }
+              }
+            },
+            "rate_limits": {
+              "type": "object",
+              "description": "The account's subscription windows. Each is absent until the harness reports it (subscriptions only, after the first response), and once its reset passes.",
+              "properties": {
+                "five_hour": { "$ref": "#/$defs/window" },
+                "weekly": { "$ref": "#/$defs/window" }
+              }
+            },
+            "captured_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "window": {
+      "type": "object",
+      "required": ["pct", "resets_at"],
+      "properties": {
+        "pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "resets_at": {
+          "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

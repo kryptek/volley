@@ -82,6 +82,9 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_waves/_config",
   "volley/_system/leases/+",
   "volley/_system/admission",
+  "volley/+/+/usage",
+  "volley/_system/claude-accounts/+",
+  "volley/_system/claude/+/signin",
 ] as const;
 
 /**

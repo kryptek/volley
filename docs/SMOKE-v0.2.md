@@ -378,7 +378,7 @@ owned by the coordinator, so it comes before the claim). After each, note in Res
 - [ ] On a throwaway wave, stop one agent's session from answering (suspend its `claude` with
   `kill -STOP`), then `volleyd stop "$WAVE2"`. After `stop_grace_s` (30 s) the journal has
   `agent_force_retired { reason: "stop" }`, and the agent's registry, status, progress, result,
-  capability and screen records are gone: the Desk stops drawing it. Its screen is no longer read
+  capability, screen and usage records are gone: the Desk stops drawing it. Its screen is no longer read
   (no `read timed out` lines in the daemon log). `kill -CONT` it afterwards and close it.
 
 ### Urgent steer on a coordinator-owned wave

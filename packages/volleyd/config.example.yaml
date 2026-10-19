@@ -50,9 +50,12 @@
 
 # Claude account profiles (README "Claude accounts"): the account an agent runs under when its
 # task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or
-# most_headroom (the primary until usage metering exists). null: primary.
+# most_headroom (the signed-in account with the lowest 5-hour usage; the primary without usage
+# data). null: primary. warn_at_pct: the 5-hour usage at which each wave on that account gets an
+# account_limit decision (README "Usage metering"); nothing moves unless you answer it.
 # claude:
 #   default_account: null
+#   warn_at_pct: 90
 
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and

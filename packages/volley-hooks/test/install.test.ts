@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { PACKAGE_ROOT, hookEnv } from "./helpers/hooks";
 
 const install = (settings: string, ...args: string[]) =>
   execFileSync(join(PACKAGE_ROOT, "scripts", "install.sh"), args, {
-    env: hookEnv({ CLAUDE_SETTINGS: settings }),
+    env: hookEnv({ CLAUDE_SETTINGS: settings, VOLLEY_HOOKS_STATE_DIR: join(settings, "..", "st") }),
     encoding: "utf-8",
   });
 
@@ -59,5 +59,34 @@ describe("scripts/install.sh", () => {
     const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
     install(settings);
     expect(Object.keys(read(settings).hooks)).toHaveLength(8);
+  });
+
+  it("installs the usage statusLine and keeps the user's own as its chained command", () => {
+    const dir = mkdtempSync(join(tmpdir(), "volley-hooks-install-"));
+    const settings = join(dir, "settings.json");
+    const own = { type: "command", command: "~/bin/my-status", padding: 1 };
+    writeFileSync(settings, JSON.stringify({ statusLine: own }));
+    install(settings);
+    const chain = join(dir, "st", "statusline-chain.json");
+    expect((read(settings) as unknown as { statusLine: unknown }).statusLine).toEqual({
+      type: "command",
+      command: `VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/statusline/publish.ts"`,
+      padding: 0,
+    });
+    expect(JSON.parse(readFileSync(chain, "utf-8"))).toEqual(own);
+
+    // A re-install keeps the saved command; --uninstall puts it back.
+    install(settings);
+    expect(JSON.parse(readFileSync(chain, "utf-8"))).toEqual(own);
+    install(settings, "--uninstall");
+    expect((read(settings) as unknown as { statusLine: unknown }).statusLine).toEqual(own);
+    expect(existsSync(chain)).toBe(false);
+  });
+
+  it("removes its statusLine on uninstall when the user had none", () => {
+    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    install(settings);
+    install(settings, "--uninstall");
+    expect(read(settings) as unknown).toEqual({});
   });
 });

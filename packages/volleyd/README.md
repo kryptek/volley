@@ -409,8 +409,10 @@ is never used: it prints a bearer token Volley would have to carry. The `_system
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
 
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
-`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` falls
-back to the primary until usage metering can rank accounts. A spawn under an unknown account, one
+`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
+signed-in account with the lowest 5-hour usage (see "Usage metering"), or the primary while no
+account has usage data. An account that has not reported usage yet is not ranked, so a profile
+at 80% wins over a primary that simply has not reported (it may be at 0%). A spawn under an unknown account, one
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
@@ -451,6 +453,37 @@ end of its brief. A reviewer, fixup or rebase keeps its start point and its own 
 with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
 the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
 alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
+
+### Usage metering
+
+Every spawned agent's `--settings` (the hooks template) carries volley-hooks' statusLine
+publisher, so Claude Code hands it the session's usage after each assistant message and it
+publishes a retained sample on `volley/<ns>/<agent>/usage` (SPEC §4.6.12): the context window
+(`used_percentage`, `used`, `size`) and the account's 5-hour and weekly windows (`pct`,
+`resets_at`), at most every 15 s unless a percentage moved by more than a point. The daemon
+folds the samples per account (the windows are the account's, so the newest sample carrying a
+window wins) and publishes `volley/_system/claude-accounts/<acct>` retained: label and plan from
+the registry, both windows, the agents on it and their waves. A sample that names no account
+but a `CLAUDE_CONFIG_DIR` (a coordinator session under a profile) is matched to that profile.
+Retiring an agent clears its `usage` topic, which drops it from its account's record; the
+account's windows stay, across restarts too (`$VOLLEYD_HOME/claude-usage.json`, written on every
+change and read back at start, not from the broker). A sample's wave and host come from the
+agent's `agent_spawned`, so a sample retained while the daemon was down is attributed (and can
+open `account_limit`) as soon as the restarted daemon reads it. A remote host's agent runs under
+that host's own Claude login: its samples fold into `<acct>@<host>` (e.g. `primary@gpu-box`),
+never the local `primary`, and that record opens no decision (a wave move cannot reach it).
+
+When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
+can override it), each running wave with agents on that account gets one wave-level
+`account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
+most headroom among those under the threshold in both windows (none: only `not now`), with
+the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
+nor for the same window once answered. **Nothing switches on its own.**
+Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
+one is refused and the decision stays open) journals `wave_account_moved { from, to, by,
+decision_id }`: the wave's new agents that would have started under `from` start under `to`,
+and running agents finish where they are. The weekly window is informational. The same data
+resolves `most_headroom`.
 
 ---
 
@@ -518,7 +551,7 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   daemon's clock) to publish a terminal status; one that acks is retired as usual. Every agent
   still running when the grace ends is **force-retired** without its ack, through the same
   delete path as a retire: `agent_force_retired { agent_id, role, reason: "stop" }`, then its
-  retained `registry`/`status`/`progress`/`result`/`capability`/`screen` records are cleared, its
+  retained `registry`/`status`/`progress`/`result`/`capability`/`screen`/`usage` records are cleared, its
   login deleted, its lock released (`agent_retired { status: "stopped" }`), so the Desk stops
   drawing it. A daemon restarted into a stopped wave gives its agents what is left of the grace
   (counted from `wave_stopped`), then force-retires what is left; a workspace ref read back from
@@ -943,10 +976,10 @@ LWT) is retired only after the reap grace passes with no fresh status or heartbe
 [Recovery](#recovery): `heartbeat_alarm_s`, or `wake_grace_s` right after a host wake): a
 network blip or an MCP-server restart also fires the LWT, and the assigned identity may
 reconnect with a fresh `spawning` (SPEC §6.5). Retiring means `volley auth rm-agent <id>`, empty
-retained payloads on its `registry`, `status`, `progress`, `result`, `capability` and `screen` topics, the
-lock released, the agent's workspace closed (its cmux workspace, or its tmux session on an ssh
-host: `agent_retired { workspace, workspace_closed }`), and `agent_retired { status, terminal,
-result }` journaled. `terminal` is the
+retained payloads on its `registry`, `status`, `progress`, `result`, `capability`, `screen` and
+`usage` topics, the lock released, the agent's workspace closed (its cmux workspace, or its tmux
+session on an ssh host: `agent_retired { workspace, workspace_closed }`), and `agent_retired {
+status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
 so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
 --yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's

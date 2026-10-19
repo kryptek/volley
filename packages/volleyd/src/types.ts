@@ -85,8 +85,8 @@ export interface Tunables {
   screen_tail_interval_s: number;
   /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
   stop_grace_s: number;
-  /** Claude account profiles (src/claude/): which account an agent runs under by default. */
-  claude: { default_account: string | null };
+  /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
+  claude: { default_account: string | null; warn_at_pct: number };
   hosts: Record<string, RemoteHostConfig>;
 }
 
@@ -296,6 +296,8 @@ export const WAVE_EVENT_TYPES = [
   "merged_by_operator",
   "agent_force_retired",
   "alarm_cleared",
+  // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
+  "wave_account_moved",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

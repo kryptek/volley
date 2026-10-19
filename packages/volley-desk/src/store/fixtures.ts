@@ -459,6 +459,7 @@ function globals(now: number): DeskMessage[] {
     idle_grace_s: 180,
     screen_tail_interval_s: 5,
     hosts: {},
+    claude: { default_account: "most_headroom", warn_at_pct: 90 },
   };
   const since = iso(now - 20 * 60_000);
   const heavy = {
@@ -552,10 +553,73 @@ function loadMessages(extra: number, now: number): DeskMessage[] {
   ];
 }
 
+/** Two Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
+function claudeUsage(now: number): DeskMessage[] {
+  const win = (pct: number, inMin: number) => ({ pct, resets_at: iso(now + inMin * 60_000) });
+  const accounts = [
+    {
+      account: "work",
+      label: "Work",
+      plan: "max",
+      five_hour: win(34, 130),
+      weekly: win(41, 4 * 1440),
+      agents: ["status-chip-t1-fixup-1", "status-chip-t2-implementer-1"],
+      waves: ["status-chip"],
+    },
+    {
+      account: "personal",
+      label: "Personal",
+      plan: "pro",
+      five_hour: win(12, 242),
+      weekly: win(22, 5 * 1440),
+      agents: ["ci-speed-t3b-implementer-1"],
+      waves: ["ci-speed"],
+    },
+  ];
+  const samples: [string, string, number, number][] = [
+    ["status-chip-t1-fixup-1", "work", 143_000, 200_000],
+    ["status-chip-t2-implementer-1", "work", 61_000, 200_000],
+    ["ci-speed-t3b-implementer-1", "personal", 182_000, 200_000],
+  ];
+  return [
+    ...accounts.map((a) => ({
+      topic: `volley/_system/claude-accounts/${a.account}`,
+      envelope: env(
+        "volleyd",
+        "_system/claude-accounts",
+        "claude_account",
+        { ...a, sampled_at: iso(now - 30_000) },
+        now,
+      ),
+      receivedAt: now,
+      retained: true,
+    })),
+    ...samples.map(([id, account, used, size]) => ({
+      topic: `volley/${NS}/${id}/usage`,
+      envelope: env(
+        id,
+        "usage",
+        "usage",
+        {
+          account,
+          model: MODEL,
+          context_window: { used_percentage: Math.round((used / size) * 100), used, size },
+          rate_limits: {},
+          captured_at: iso(now - 30_000),
+        },
+        now,
+      ),
+      receivedAt: now,
+      retained: true,
+    })),
+  ];
+}
+
 /** Every retained/live message the demo starts from, oldest agent history first per agent. */
 export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[] {
   return [
     ...globals(now),
+    ...claudeUsage(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
     ...AGENTS.flatMap((a) => agentMessages(a, now)),
     ...loadMessages(agents - AGENTS.length, now),

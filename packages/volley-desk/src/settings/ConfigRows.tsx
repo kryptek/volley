@@ -31,7 +31,8 @@ import {
 import "../styles/settings.css";
 
 export type ConfigScope = "wave" | "global";
-type RowState = { state: "sending" } | ({ state: "done" } & ConfigAck);
+/** A config row's request: in flight, or volleyd's answer. */
+export type RowState = { state: "sending" } | ({ state: "done" } & ConfigAck);
 
 /** Slider commits this close together send one config_set, with the last value. */
 export const SLIDER_COMMIT_MS = 400;
@@ -46,7 +47,8 @@ function display(value: unknown, unit: string): string {
   return `${String(value)}${gap}${unit}`;
 }
 
-function AckLine({ s }: { s: RowState | undefined }) {
+/** What volleyd answered a row's config_set: applied, rejected, failed or no answer. */
+export function AckLine({ s }: { s: RowState | undefined }) {
   if (!s) return null;
   if (s.state === "sending") return <div className="cfg-ack dim">sending…</div>;
   if (s.applied) {

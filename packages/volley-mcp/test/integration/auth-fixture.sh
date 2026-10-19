@@ -36,6 +36,7 @@ topic write volley/+/+/status
 topic write volley/+/+/progress
 topic write volley/+/+/result
 topic write volley/+/+/capability
+topic write volley/+/+/usage
 topic write volley/+/+/control
 topic write volley/+/+/_user/#
 topic write volley/_system/registry/+

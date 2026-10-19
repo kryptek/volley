@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:10:00.000Z",
+  "channel": "_waves/events",
+  "type": "wave_account_moved",
+  "payload": {
+    "wave": "w1",
+    "seq": 42,
+    "at": "2026-10-18T14:10:00.000Z",
+    "data": { "from": "work", "to": "personal", "by": "desk", "decision_id": "d-7k2m9q4x" }
+  }
+}

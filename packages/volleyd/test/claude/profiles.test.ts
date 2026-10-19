@@ -97,12 +97,29 @@ describe("selectAccount: task > wave > config default > primary", () => {
     ).toMatchObject({ id: "work", source: "task" });
   });
 
-  it("most_headroom falls back to the primary until usage metering exists", () => {
+  it("most_headroom falls back to the primary without usage data", () => {
     expect(selectAccount(r, reg, { configDefault: "most_headroom" })).toEqual({
       id: PRIMARY_ACCOUNT,
       dir: null,
       source: "config",
       fallback: "most_headroom",
+    });
+    expect(selectAccount(r, reg, { configDefault: "most_headroom" }, () => null)).toMatchObject({
+      id: PRIMARY_ACCOUNT,
+      fallback: "most_headroom",
+    });
+  });
+
+  it("most_headroom resolves to the account usage metering ranks first", () => {
+    expect(selectAccount(r, reg, { wave: "most_headroom" }, () => "work")).toEqual({
+      id: "work",
+      dir: profileDir(r, "work"),
+      source: "wave",
+    });
+    expect(selectAccount(r, reg, { wave: "most_headroom" }, () => PRIMARY_ACCOUNT)).toEqual({
+      id: PRIMARY_ACCOUNT,
+      dir: null,
+      source: "wave",
     });
   });
 

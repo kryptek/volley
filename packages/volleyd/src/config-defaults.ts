@@ -33,7 +33,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
   stop_grace_s: 30,
-  claude: { default_account: null },
+  claude: { default_account: null, warn_at_pct: 90 },
   hosts: {},
 };
 
