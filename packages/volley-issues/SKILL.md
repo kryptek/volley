@@ -2,6 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
+version: 0.2
 ---
 
 # /volley-issues
@@ -13,6 +14,8 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 ## Prerequisites
 
 Before invoking `/volley-issues`:
+
+**This skill is current.** This file declares `version: 0.2` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
 1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
@@ -98,7 +101,7 @@ gh issue list --state open --label enhancement --limit 200 --json number,title,b
 
 ### Step 2: derive dependencies
 
-Each issue becomes task `i<N>`. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis and parentheticals allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after: [i101, i102]`: that task starts only once its dependencies are `done` (see the gate note in Step 5). `Depends on: none` (or `n/a`) declares no dependencies. An empty `Depends on:` label reads the `- #N` list items under it. `owner/repo#N` and issue URLs are accepted when `--repo-slug` names this repository; any other repository is an error.
+Each issue becomes a task named by the task tag its title starts with (`O0: …`, `T3b — …`, `D10 - …` give `O0`, `T3b`, `D10`: one to three capitals, one to three digits, an optional lower-case letter, then `:`, a dash or `—`), or `i<N>` when the title has none. A product or format name that fits the pattern (`S3:`, `EC2 -`, `K8s:`, `UTF8 -`) is not read as a tag. When two issues would get the same id (two `O1:` titles, or ids that differ only in case), the tagged ones fall back to `i<N>` and the helper prints a warning naming them: retitle one if you want the tag ids. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis and parentheticals allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after:` with those issues' task ids (`after: [i101, i102]`, or `after: [O0, T4]` for tagged titles): that task starts only once its dependencies are `done` (see the gate note in Step 5). `Depends on: none` (or `n/a`) declares no dependencies. An empty `Depends on:` label reads the `- #N` list items under it. `owner/repo#N` and issue URLs are accepted when `--repo-slug` names this repository; any other repository is an error.
 
 - A dependency line the helper cannot read (`Depends on: T3`, free text next to the references) is an error naming the issue, never a silently dropped dependency. Rewrite the line as `#N` references (or `none`) in the issue, or fix the JSON, and re-run.
 - A dependency on an issue **outside** the set is an error that names it. Either add that issue to the set, or, if it is already merged (`gh issue view <N> --json state` is `CLOSED` and its PR is in the release branch), pass it with `--satisfied <N,...>` so it is dropped.
@@ -202,6 +205,8 @@ When dispatching 2 or more issues:
    git push -u origin release/$DATE-<theme>
    ```
    The theme can be derived from the issue set (e.g. `agent-roadmap` for #143-#148).
+
+   **Tracking branch** (remove this note once volleyd fetches a release branch that exists only on origin): if the release branch was created and pushed from another clone, the repo volleyd works in has only `origin/release/<x>`. Before `volleyd run`, make it a local branch: `git -C <repo> fetch origin && git -C <repo> branch --track release/<x> origin/release/<x>`.
 
 2. **Initialize the migration counter** from the repo's current highest migration:
    ```bash

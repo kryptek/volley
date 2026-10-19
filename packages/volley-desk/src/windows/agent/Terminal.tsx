@@ -4,6 +4,7 @@
  * caret and `tl-cmd` / `tl-ok` / `tl-bad` line classes; a capture the
  * supervisor has flagged `screen_stale` in the wave state carries a `stale`
  * marker. A new capture scrolls to the bottom only while the reader is there.
+ * An agent with no signal says so in the empty state.
  */
 import type { ScreenPayload } from "../../store/types";
 import { useFollow } from "./Feed";
@@ -16,7 +17,11 @@ export function lineClass(line: string): string {
   return "";
 }
 
-export function Terminal({ screen, stale }: { screen: ScreenPayload | null; stale: boolean }) {
+export function Terminal({
+  screen,
+  stale,
+  noSignal = false,
+}: { screen: ScreenPayload | null; stale: boolean; noSignal?: boolean }) {
   const { ref, onScroll } = useFollow<HTMLDivElement>(screen);
 
   return (
@@ -27,7 +32,9 @@ export function Terminal({ screen, stale }: { screen: ScreenPayload | null; stal
         </span>
       )}
       {screen === null ? (
-        <div className="term-empty dim">no screen yet</div>
+        <div className="term-empty dim">
+          no screen yet{noSignal ? " · no signal from this agent on this broker" : ""}
+        </div>
       ) : (
         <>
           {screen.lines.map((line, i) => {

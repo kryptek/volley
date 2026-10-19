@@ -397,6 +397,7 @@ describe("needsYouTargets", () => {
         "coord-1": coord("working"),
         "coord-2": coord("gone", { id: "coord-2", waves: ["w2"] }),
       },
+      supervisors: {},
       config: null,
       leases: {},
       admission: null,

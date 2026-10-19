@@ -227,6 +227,124 @@ describe("waveFromIssues", () => {
   });
 });
 
+describe("task ids from title tags", () => {
+  const TAGGED: IssueInput[] = [
+    { number: 68, title: "O0: onboarding groundwork", body: "Depends on: none" },
+    { number: 70, title: "T3b — fence follow-up", body: "Depends on: #68" },
+    { number: 71, title: "D10 - desk polish", body: "Depends on: #68, #70" },
+    { number: 72, title: "Untagged chore", body: "Depends on: #71" },
+  ];
+
+  it("uses the title's task tag, keeping its case", () => {
+    expect(taskIdFor(68, "O0: onboarding groundwork")).toBe("O0");
+    expect(taskIdFor(70, "T3b — fence follow-up")).toBe("T3b");
+    expect(taskIdFor(71, "D10 - desk polish")).toBe("D10");
+    expect(taskIdFor(73, "ABC123:no space")).toBe("ABC123");
+    expect(taskIdFor(79, "T5 – en dash")).toBe("T5");
+  });
+
+  it("does not read a product or format name as a task tag", () => {
+    for (const title of [
+      "S3: upload fails",
+      "EC2 - instance type",
+      "K8s: manifests",
+      "MP3: metadata",
+      "UTF8 - decoding",
+      "I18n: strings",
+      "A11y: focus rings",
+    ]) {
+      expect(taskIdFor(85, title)).toBe("i85");
+    }
+  });
+
+  it("falls back to i<N> for a title without a tag", () => {
+    expect(taskIdFor(72, "Untagged chore")).toBe("i72");
+    expect(taskIdFor(74, "T4 without a separator")).toBe("i74");
+    expect(taskIdFor(75, "fix: T4 lower-case prefix")).toBe("i75");
+    expect(taskIdFor(76, "ABCD1: tag too long")).toBe("i76");
+    expect(taskIdFor(77, "")).toBe("i77");
+    expect(taskIdFor(78)).toBe("i78");
+  });
+
+  it("names tasks by tag and resolves after: through the same mapping", () => {
+    const { yaml } = waveFromIssues(TAGGED, OPTS);
+    expect(yaml).toContain('  O0:\n    issue: 68\n    title: "O0: onboarding groundwork"\n');
+    expect(yaml).toContain("  T3b:\n    issue: 70\n");
+    expect(yaml).toContain("    after: [O0]\n");
+    expect(yaml).toContain("  D10:\n    issue: 71\n");
+    expect(yaml).toContain("    after: [O0, T3b]\n");
+    expect(yaml).toContain("  i72:\n    issue: 72\n");
+    expect(yaml).toContain("    after: [D10]\n");
+  });
+
+  it("output with tagged ids passes volleyd validate", () => {
+    const r = volleydValidate(waveFromIssues(TAGGED, OPTS).yaml);
+    expect(r.out).toContain("4 task(s), critical path 4");
+    expect(r.code).toBe(0);
+  });
+
+  it("falls back to i<N> for a tag used by two issues, warning with both named", () => {
+    const dup: IssueInput[] = [
+      { number: 80, title: "O1: first", body: "" },
+      { number: 81, title: "O1 — second", body: "Depends on: #80" },
+      { number: 82, title: "O2: third", body: "Depends on: #81" },
+    ];
+    const { yaml, warnings } = waveFromIssues(dup, OPTS);
+    expect(yaml).toContain("  i80:\n    issue: 80\n");
+    expect(yaml).toContain("  i81:\n    issue: 81\n");
+    expect(yaml).toContain("    after: [i80]\n");
+    expect(yaml).toContain("  O2:\n    issue: 82\n");
+    expect(yaml).toContain("    after: [i81]\n");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/'O1'.*#80.*#81.*i80.*i81/);
+    expect(volleydValidate(yaml).code).toBe(0);
+  });
+
+  it("falls back when a tag collides with another issue's fallback id, ignoring case", () => {
+    // volleyd rejects task ids that differ only in case, so the helper must not emit them.
+    const clash: IssueInput[] = [
+      { number: 90, title: "Untagged", body: "" },
+      { number: 91, title: "I90: tagged like a fallback", body: "" },
+    ];
+    const { yaml, warnings } = waveFromIssues(clash, OPTS);
+    expect(yaml).toContain("  i90:\n    issue: 90\n");
+    expect(yaml).toContain("  i91:\n    issue: 91\n");
+    expect(warnings.join(" ")).toMatch(/#91/);
+    expect(volleydValidate(yaml).code).toBe(0);
+  });
+
+  it("CLI: a repeated tag still writes the wave and warns on stderr", () => {
+    const input = join(tmp, "dup-issues.json");
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { number: 1, title: "R2: upload", body: "Depends on: none" },
+        { number: 2, title: "R2: download", body: "Depends on: none" },
+      ]),
+    );
+    const r = spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        OPTS.wave,
+        "--repo",
+        OPTS.repo,
+        "--release-branch",
+        OPTS.releaseBranch,
+        "--model",
+        OPTS.model,
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("  i1:\n    issue: 1\n");
+    expect(r.stdout).toContain("  i2:\n    issue: 2\n");
+    expect(r.stderr).toMatch(/warning: .*'R2'.*#1.*#2/);
+  });
+});
+
 describe("wave-from-issues CLI", () => {
   it("reads issues JSON and writes the wave file", () => {
     const input = join(tmp, "issues.json");

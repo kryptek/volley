@@ -67,7 +67,7 @@ bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
   --model claude-opus-4-7 --out .volley/waves/2026-10-18-example.yaml
 ```
 
-Each issue becomes task `i<N>`; `Depends on: #101` becomes `after: [i101]`.
+Each issue becomes a task named by its title's task tag (`O0: …` → `O0`), else `i<N>`; `Depends on: #101` becomes `after: [i101]` (or the tag of #101).
 `--repo-slug <owner/repo>` also accepts `owner/repo#N` references and issue
 URLs for this repository. A dependency outside the set is an error naming it,
 unless it is listed in `--satisfied` (already merged); so is a dependency line

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { type BrokerAuth, authFromEnv, loadConfig, readCoordinatorAuth } from "volley-mcp/config";
@@ -585,14 +586,24 @@ async function cancel(broker: VolleyBroker, pool: string, leaseId: string, holde
  * forwarded to that whole group, so `sh -c 'cd x && mvn verify'` stops `mvn` too, not just the
  * shell. If we die without cleaning up (SIGKILL), `guardGroup` stops the group: the will has
  * already released the lease, so the command must not keep running unleased.
+ *
+ * The guard needs the group's id, so it can only start after the group exists. A shell gate
+ * leads the group and execs the command only once the guard is armed (a line on fd 3); dying
+ * before that closes fd 3 and the gate exits without running it. Otherwise a SIGKILL right
+ * after the spawn would leave the command running with no guard.
  */
 function exec(command: string[], traps: Traps): Promise<ExitCode> {
-  const [cmd, ...args] = command as [string, ...string[]];
   // Signalled before the command started: do not start it.
   if (traps.signal.aborted) return Promise.resolve(signalExit(traps.caught()));
   return new Promise((resolveExit) => {
-    const child = spawn(cmd, args, { stdio: "inherit", detached: true });
+    const child = spawn("sh", ["-c", 'read -r _ <&3 || exit 1; exec "$@" 3<&-', "sh", ...command], {
+      stdio: ["inherit", "inherit", "inherit", "pipe"],
+      detached: true,
+    });
+    const gate = child.stdio[3] as Writable | null | undefined;
+    gate?.on("error", () => {});
     const unguard = child.pid !== undefined ? guardGroup(child.pid) : () => {};
+    gate?.end("\n");
     const forward = () => {
       const sig = traps.caught() ?? "SIGTERM";
       try {
