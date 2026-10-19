@@ -1655,7 +1655,10 @@ export class Daemon {
       this.log(`ignored lease request: holder ${req.holder} is not the sender ${env.agent_id}`);
       return;
     }
-    await this.runLeases({ kind: "request", pool, req });
+    // Machine-aware leases (F4): the holder's machine, from its `agent_spawned` (null: a
+    // hand-run holder the daemon did not spawn), counted against the pool's `per_machine`.
+    const host = this.spawnedAgents.get(req.holder)?.host ?? null;
+    await this.runLeases({ kind: "request", pool, req, host });
   }
 
   /** Step the lease book: journal + mirror every event, re-publish the pools it touched. */

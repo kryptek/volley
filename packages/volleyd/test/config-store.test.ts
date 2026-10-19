@@ -207,6 +207,25 @@ describe("applyPatch", () => {
     ]);
   });
 
+  it("refuses a per_machine above its pool's capacity, naming the path; equal is accepted", () => {
+    const c = open();
+    const r = c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 3 } } }, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
+    ]);
+    expect(c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 2 } } }, "x")).toEqual({
+      applied: true,
+      rejected: [],
+      version: 2,
+    });
+    // Cutting capacity below an existing per_machine is refused the same way.
+    const cut = c.applyPatch({ lease_pools: { build: { capacity: 1 } } }, "x");
+    expect(cut.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (1)" },
+    ]);
+  });
+
   it("rejects an empty sub-object as a no-op, without bumping the version", () => {
     const c = open();
     const r = c.applyPatch({ admission: {} }, "x");
