@@ -56,7 +56,7 @@ describe("agent window account picker", () => {
     const pick = screen.getByRole("combobox", { name: "Claude account for T1" });
     expect(pick).toHaveValue("work");
     const names = [...pick.querySelectorAll("option")].map((o) => o.textContent);
-    expect(names).toEqual(["Work · 91%", "Personal · 12%", "Fresh"]);
+    expect(names).toEqual(["Work · 91%", "Personal · 12%", "Fresh · no usage yet"]);
   });
 
   it("choosing another account asks for confirmation then calls agent_move_account", async () => {

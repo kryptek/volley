@@ -35,6 +35,12 @@ export interface AccountInfo {
   waves: string[];
 }
 
+/**
+ * How a picker or a suggestion labels an account that has not reported usage (a newly signed-in
+ * profile): available, never a reason to leave it out (SPEC §4.6.12).
+ */
+export const NO_USAGE_YET = "no usage yet";
+
 /** What the agent window's picker lists. */
 export interface AccountChoice {
   id: string;

@@ -287,7 +287,9 @@ export function parseMoveAnswer(answer: string): { wave: string; to: string } | 
 /**
  * The `account_limit` decisions to open: for each account whose 5-hour window is at or over
  * `warnAtPct` (and has not reset), each wave with agents on it, unless that wave has one open
- * for the account or already answered one for this window (same `resets_at`). Never a move.
+ * for the account or already answered one for this window (same `resets_at`). The suggestion is
+ * the candidate with the most known headroom, else one with no usage yet (a newly signed-in
+ * account), labelled so. Never a move.
  */
 export function limitDecisions(o: {
   accounts: Record<string, AccountUsage>;
@@ -308,20 +310,25 @@ export function limitDecisions(o: {
       const r = o.accounts[c];
       return (
         c !== a.account &&
-        r !== undefined &&
-        (livePct(r.five_hour, o.now) ?? 0) < o.warnAtPct &&
-        (livePct(r.weekly, o.now) ?? 0) < o.warnAtPct
+        (livePct(r?.five_hour ?? null, o.now) ?? 0) < o.warnAtPct &&
+        (livePct(r?.weekly ?? null, o.now) ?? 0) < o.warnAtPct
       );
     });
-    const suggested = mostHeadroom(o.accounts, roomy, o.now);
+    // known headroom first; else a signed-in account with no usage yet (offered, never taken)
+    const suggested =
+      mostHeadroom(o.accounts, roomy, o.now) ??
+      roomy.find((c) => (o.accounts[c]?.five_hour ?? null) === null) ??
+      null;
+    const used =
+      suggested === null ? null : livePct(o.accounts[suggested]?.five_hour ?? null, o.now);
     for (const wave of a.waves) {
       const seen = o.existing.filter((e) => e.wave === wave && e.acct === a.account);
       if (seen.some((e) => e.open || e.resets_at === w.resets_at)) continue;
       const resets = w.resets_at !== null ? ` (resets ${w.resets_at})` : "";
       const ask =
         suggested !== null
-          ? ` Move wave ${wave} to ${suggested} (${Math.round(livePct(o.accounts[suggested]?.five_hour ?? null, o.now) ?? 0)}%)? New agents would start there; running agents finish where they are.`
-          : " No other account has known headroom to suggest; nothing moves unless you move the wave.";
+          ? ` Move wave ${wave} to ${suggested} (${used === null ? "no usage yet" : `${Math.round(used)}%`})? New agents would start there; running agents finish where they are.`
+          : " No other signed-in account has room to suggest; nothing moves unless you move the wave.";
       out.push({
         wave,
         input: {

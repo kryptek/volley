@@ -177,6 +177,24 @@ describe("ClaudeAccounts", () => {
     );
   });
 
+  it("labels a suggested account with no usage yet (a newly signed-in profile) as such", async () => {
+    const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
+    const { control } = setup([], {
+      waves: { w1: wave({ [fresh.decision_id]: fresh }) },
+      onRegistry: () => {},
+    });
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?");
+    await act(async () => {
+      fireEvent.click(within(banner).getByRole("button", { name: "Move to fresh" }));
+    });
+    expect(control).toHaveBeenCalledWith(
+      "resolve",
+      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to fresh" },
+      expect.any(String),
+    );
+  });
+
   it("Not now answers the decision with its not-now option", async () => {
     const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
     await act(async () => {
@@ -403,6 +421,9 @@ describe("SettingsModal › the wave's Claude account", () => {
     personal,
     "team@box": { ...personal, account: "team@box", label: "Team" },
   });
+  const withFresh = accountList({ work, personal }, [
+    { id: "fresh", label: "Fresh", machine: "local", signed_in_at: "2026-10-18T13:00:00.000Z" },
+  ]);
   const modal = (decisions: Record<string, DecisionPayload>, control: ControlFn | null) =>
     render(
       <SettingsModal
@@ -437,6 +458,24 @@ describe("SettingsModal › the wave's Claude account", () => {
       decision_id: "d-7k2m9q4x",
       answer: "move wave w1 to personal",
     });
+  });
+
+  it("labels an account with no usage yet in the picker", () => {
+    render(
+      <SettingsModal
+        wave={wave({ [limit.decision_id]: limit })}
+        onClose={() => {}}
+        onOpenGlobal={() => {}}
+        accounts={withFresh}
+        control={vi.fn(async () => ({ ok: true }))}
+      />,
+    );
+    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
+    expect(
+      within(pick)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["Move new agents to…", "Personal · 12%", "Fresh · no usage yet"]);
   });
 
   it("shows volleyd's refusal", async () => {

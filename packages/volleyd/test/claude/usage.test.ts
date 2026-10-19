@@ -214,6 +214,52 @@ describe("limitDecisions", () => {
       expect(mine?.extra.suggested).toBeNull();
     }
   });
+  it("suggests a signed-in account with no usage yet, labelled so, when none has known headroom", () => {
+    const at = "2026-10-18T14:00:00.000Z";
+    const b = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
+    const [d] = limitDecisions({
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["primary", "work", "fresh"],
+      existing: [],
+      now: NOW,
+    }).filter((x) => x.extra.acct === "work" && x.wave === "w1");
+    // the first candidate without a sample: never moved automatically, only offered
+    expect(d?.extra.suggested).toBe("primary");
+    expect(d?.input.options).toEqual(["move wave w1 to primary", "not now"]);
+    expect(d?.input.question).toContain("Move wave w1 to primary (no usage yet)?");
+    expect(d?.input.question).not.toContain("No other account");
+  });
+
+  it("prefers an account with known headroom over one with no usage yet", () => {
+    const at = "2026-10-18T14:00:00.000Z";
+    let b = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
+    b = fold(b, "x", null, sample("spare", 30, at));
+    const [d] = limitDecisions({
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["primary", "work", "spare"],
+      existing: [],
+      now: NOW,
+    });
+    expect(d?.extra.suggested).toBe("spare");
+    expect(d?.input.question).toContain("Move wave w1 to spare (30%)?");
+  });
+
+  it("an account whose sample carried no 5-hour window counts as no usage yet", () => {
+    const at = "2026-10-18T14:00:00.000Z";
+    let b = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
+    b = fold(b, "x", null, sample("spare", null, at, 20));
+    const [d] = limitDecisions({
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["work", "spare"],
+      existing: [],
+      now: NOW,
+    });
+    expect(d?.extra.suggested).toBe("spare");
+    expect(d?.input.question).toContain("(no usage yet)");
+  });
 });
 
 describe("remote hosts", () => {

@@ -21,6 +21,7 @@ import type { ControlReply } from "../steer/transport";
 import {
   type AccountInfo,
   LOCAL_MACHINE,
+  NO_USAGE_YET,
   type RegistryAccount,
   accountList,
   moveAnswer,
@@ -434,8 +435,11 @@ export function ClaudeAccounts({
               {d.suggested ? (
                 <>
                   Move wave <b>{d.wave}</b> to <b>{labelOf(d.suggested)}</b>
-                  {target?.fiveHour ? ` (${Math.round(target.fiveHour.pct)}% used)` : ""}? New
-                  agents start on {labelOf(d.suggested)}; running agents finish where they are.
+                  {target?.fiveHour
+                    ? ` (${Math.round(target.fiveHour.pct)}% used)`
+                    : ` (${NO_USAGE_YET})`}
+                  ? New agents start on {labelOf(d.suggested)}; running agents finish where they
+                  are.
                 </>
               ) : (
                 <>
