@@ -123,6 +123,7 @@ describe("volley setup", () => {
       "services",
       "services",
       "services",
+      "services",
       "phone",
     ]);
   });
@@ -236,7 +237,7 @@ describe("volley setup", () => {
       LAN_QUESTION,
       "Apply these 3 changes (Security)?",
       "Apply these 3 changes (Accounts)?",
-      "Apply these 4 changes (Services)?",
+      "Apply these 5 changes (Services)?",
       "Apply this change (Phone)?",
     ]);
   });

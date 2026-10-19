@@ -1,14 +1,27 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { writeConfig } from "../auth/config";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
 /**
- * Step 4 of `volley setup`: volleyd as a service (`volleyd install` on macOS, a systemd user
- * unit on Linux), the Volley hooks for coordinator sessions (volley-hooks' install.sh), and the
- * built Desk served by `volley desk serve` as a service, for the phone.
+ * Step 4 of `volley setup`: the `volley` and `volleyd` commands linked into ~/.volley/bin (on the
+ * services' PATH: volleyd runs `volley auth` to redeem the Desk's sign-in links), volleyd as a
+ * service (`volleyd install` on macOS, a systemd user unit on Linux), the Volley hooks for
+ * coordinator sessions (volley-hooks' install.sh), and the built Desk served by
+ * `volley desk serve` as a service, for the phone.
  */
 
 /** A long-running service setup installs. */
@@ -192,14 +205,77 @@ async function systemdChange(
   };
 }
 
-/** The environment the services run with: where volleyd lives, which broker, a usable PATH. */
+/** Where setup links the `volley` and `volleyd` commands. */
+export const binDir = (ctx: SetupContext) => join(ctx.home, ".volley", "bin");
+
+/** The services' PATH: the linked commands first, then the PATH setup runs with. */
+function servicePath(ctx: SetupContext): string {
+  const path = ctx.auth.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  const bin = binDir(ctx);
+  return path.split(":").includes(bin) ? path : `${bin}:${path}`;
+}
+
+/**
+ * The environment the services run with: where volleyd lives, which broker, the auth dir its
+ * `volley auth` calls use (the one setup used, even when `--dir` / `--layout` chose it), a usable
+ * PATH.
+ */
 function serviceEnv(ctx: SetupContext): Record<string, string> {
-  const env = ctx.auth.env;
   return {
     VOLLEYD_HOME: ctx.volleydHome,
     VOLLEY_BROKER_URL: ctx.auth.url,
-    VOLLEY_NAMESPACE: env.VOLLEY_NAMESPACE ?? "default",
-    PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    VOLLEY_AUTH_DIR: ctx.auth.dir,
+    VOLLEY_NAMESPACE: ctx.auth.env.VOLLEY_NAMESPACE ?? "default",
+    PATH: servicePath(ctx),
+  };
+}
+
+/** What a symlink at `path` points to, or null when there is none. */
+function linkTarget(path: string): string | null {
+  try {
+    return lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `volley` and `volleyd` linked into ~/.volley/bin from this checkout. volleyd runs `volley auth`
+ * by name (redeeming the Desk's sign-in links and admin tokens), so the services need it on their
+ * PATH; a fresh machine has it nowhere else.
+ */
+function linkChange(ctx: SetupContext, repo: string, found: string[]): Change | null {
+  const bin = binDir(ctx);
+  const links: [string, string][] = [
+    ["volley", join(repo, "packages", "volley-cli", "src", "cli.ts")],
+    ["volleyd", join(repo, "packages", "volleyd", "src", "cli.ts")],
+  ];
+  const wrong = links.filter(([name, target]) => linkTarget(join(bin, name)) !== target);
+  if (wrong.length === 0) {
+    found.push(`volley, volleyd: linked in ${bin}`);
+    return null;
+  }
+  return {
+    summary: `Link the volley and volleyd commands into ${bin} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`,
+    detail: wrong
+      .map(([name, target]) => {
+        const path = join(bin, name);
+        const now = linkTarget(path) ?? (existsSync(path) ? "a file" : "nothing");
+        return `${path} -> ${target} (now: ${now})`;
+      })
+      .join("\n"),
+    apply: async () => {
+      mkdirSync(bin, { recursive: true });
+      for (const [name, target] of wrong) {
+        const path = join(bin, name);
+        rmSync(path, { force: true });
+        symlinkSync(target, path);
+      }
+      return [
+        `Linked ${wrong.map(([name]) => name).join(" and ")} into ${bin}; the services run with it on their PATH.`,
+        `To run them from your shell, add it to your PATH (in ~/.zshrc or ~/.bashrc): export PATH="${bin}:$PATH"`,
+      ];
+    },
   };
 }
 
@@ -269,11 +345,15 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     if (c !== null) plan.changes.push(c);
   };
 
+  push(linkChange(ctx, repo, plan.found));
+
   // volleyd.
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
   if (platform === "darwin") {
     const install = [bun, volleydCli, "install", "--broker-url", ctx.auth.url];
-    const dry = await ctx.deps.exec([...install, "--dry-run"]);
+    // `volleyd install` writes the PATH it runs with into the plist.
+    const installEnv = { ...ctx.auth.env, PATH: env.PATH };
+    const dry = await ctx.deps.exec([...install, "--dry-run"], { env: installEnv });
     if (dry.code !== 0) {
       plan.blocked = `\`volleyd install --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;
       return plan;
@@ -291,7 +371,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
         summary: "Install volleyd as a launchd service (volleyd install)",
         detail: current === text ? "installed, not loaded" : unifiedDiff(path, current, text),
         apply: async () => {
-          const r = await must(ctx, install);
+          const r = await must(ctx, install, { env: installEnv });
           return [r.stdout.trim()];
         },
       });

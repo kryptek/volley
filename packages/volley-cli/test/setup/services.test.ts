@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,6 +21,10 @@ import {
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HOOKED_SETTINGS, fakeMachine } from "../helpers/setup-machine";
+
+/** The change that puts `volley` and `volleyd` on a PATH (volleyd runs `volley auth`). */
+const LINK_SUMMARY = (m: FakeMachine) =>
+  `Link the volley and volleyd commands into ${join(m.ctx.home, ".volley", "bin")} (volleyd runs \`volley auth\` to redeem the Desk's sign-in links)`;
 
 /** Commands that only read state. */
 const READ_ONLY = (a: string[]) =>
@@ -46,13 +59,14 @@ describe("setup: services", () => {
       const p = await planServices(m.ctx);
       expect(p.blocked).toBeUndefined();
       expect(p.changes.map((c) => c.summary)).toEqual([
+        LINK_SUMMARY(m),
         "Install volleyd as a launchd service (volleyd install)",
         `Install the Volley hooks for coordinator sessions into ${m.settingsFile}`,
         "Build the Desk (vite build in packages/volley-desk)",
         "Install `volley desk serve` as a launchd service on 0.0.0.0:5199",
       ]);
-      expect(p.changes[1]?.detail).toContain('+  "hooks": {');
-      expect(p.changes[3]?.detail).toContain("<string>serve</string>");
+      expect(p.changes[2]?.detail).toContain('+  "hooks": {');
+      expect(p.changes[4]?.detail).toContain("<string>serve</string>");
       expect(m.execCalls.every(READ_ONLY)).toBe(true);
       expect(existsSync(m.settingsFile)).toBe(false);
       expect(existsSync(m.deskDist)).toBe(false);
@@ -129,6 +143,38 @@ describe("setup: services", () => {
       expect(out.join("\n")).toContain(".volley-backup-20261018T120000Z");
     });
 
+    it("links volley and volleyd from this checkout and puts the links on volleyd's PATH", async () => {
+      const bin = join(m.ctx.home, ".volley", "bin");
+      const repo = m.deps.repoRoot as string;
+      const out = await applyAll(await planServices(m.ctx));
+      expect(readlinkSync(join(bin, "volley"))).toBe(
+        join(repo, "packages", "volley-cli", "src", "cli.ts"),
+      );
+      expect(readlinkSync(join(bin, "volleyd"))).toBe(
+        join(repo, "packages", "volleyd", "src", "cli.ts"),
+      );
+      expect(out.join("\n")).toContain(`export PATH="${bin}:$PATH"`);
+      // `volleyd install` writes the PATH it runs with into the plist: the links come first.
+      const install = m.execCalls.findIndex((a) => a[2] === "install" && !a.includes("--dry-run"));
+      expect(m.execEnvs[install]?.PATH).toBe(`${bin}:/usr/local/bin:/usr/bin:/bin`);
+      const again = await planServices(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(again.found.join("\n")).toContain(`volley, volleyd: linked in ${bin}`);
+    });
+
+    it("relinks commands that point at another checkout", async () => {
+      const bin = join(m.ctx.home, ".volley", "bin");
+      mkdirSync(bin, { recursive: true });
+      symlinkSync("/elsewhere/volley-cli/src/cli.ts", join(bin, "volley"));
+      const p = await planServices(m.ctx);
+      expect(p.changes[0]?.summary).toBe(LINK_SUMMARY(m));
+      expect(p.changes[0]?.detail).toContain("/elsewhere/volley-cli/src/cli.ts");
+      await applyAll(p);
+      expect(readlinkSync(join(bin, "volley"))).toBe(
+        join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts"),
+      );
+    });
+
     it("is skipped as root: the services belong to the user", async () => {
       m.auth.invokingUser = () => ({ uid: 501, gid: 20, home: m.ctx.home });
       const p = await planServices(m.ctx);
@@ -147,6 +193,7 @@ describe("setup: services", () => {
     it("writes user units for volleyd and the Desk and enables them", async () => {
       const p = await planServices(m.ctx);
       expect(p.changes.map((c) => c.summary)).toEqual([
+        LINK_SUMMARY(m),
         "Install volleyd as a systemd user service (volleyd.service)",
         `Install the Volley hooks for coordinator sessions into ${m.settingsFile}`,
         "Build the Desk (vite build in packages/volley-desk)",
@@ -160,6 +207,10 @@ describe("setup: services", () => {
       expect(unit).toContain("/packages/volleyd/src/cli.ts daemon");
       expect(unit).toContain(`Environment="VOLLEYD_HOME=${m.ctx.volleydHome}"`);
       expect(unit).toContain(`Environment="VOLLEY_BROKER_URL=${m.ctx.auth.url}"`);
+      expect(unit).toContain(`Environment="VOLLEY_AUTH_DIR=${m.ctx.auth.dir}"`);
+      expect(unit).toContain(
+        `Environment="PATH=${join(m.ctx.home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin"`,
+      );
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "daemon-reload"]);
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "enable", "volleyd.service"]);
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "restart", "volley-desk.service"]);
@@ -180,6 +231,7 @@ describe("setup: services", () => {
     m = fakeMachine(fake, dir, { platform: "win32" });
     const p = await planServices(m.ctx);
     expect(p.changes.map((c) => c.summary)).toEqual([
+      LINK_SUMMARY(m),
       `Install the Volley hooks for coordinator sessions into ${m.settingsFile}`,
       "Build the Desk (vite build in packages/volley-desk)",
     ]);
