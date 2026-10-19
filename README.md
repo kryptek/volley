@@ -220,6 +220,8 @@ export VOLLEY_AUTH_USERNAME=coordinator
 export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
 ```
 
+`VOLLEY_AGENT_ID` is a **prefix**: the server appends a fresh `-xxxx` at every start, so this session registers as `coordinator-xxxx` (and two sessions sharing the registration still get distinct ids). Leave it set: without it the id is named after the session's working directory (`volley-xxxx` in this checkout), which reads as just another agent, while the `--owner` a wave is submitted with, the Desk's owner chip and `★ yours`, and the [v0.2 owner smoke](docs/SMOKE-v0.2.md) all expect the `coordinator-` id. For a separate registry (a smoke run, say), change `VOLLEY_NAMESPACE` instead.
+
 Then **quit Claude Code completely (Cmd-Q) and reopen it.** MCP registration is read at startup.
 
 Verify:

@@ -5,6 +5,20 @@ export interface ValidationResult {
   errors: string[];
 }
 
+/**
+ * The skill's frontmatter `version:`: the `major.minor` of this package's version, so a release
+ * bump of `package.json` is what moves it (SKILL.md's field must follow). `scripts/install.sh
+ * --check` compares an installed copy's version with this repo's.
+ */
+export const SKILL_VERSION = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: string;
+  }
+).version
+  .split(".")
+  .slice(0, 2)
+  .join(".");
+
 /** Major section headings that must be present in the SKILL.md body. */
 export const REQUIRED_SECTIONS = [
   "## Prerequisites",
@@ -52,7 +66,7 @@ export function splitFrontmatter(source: string): { frontmatter: string | null; 
   return { frontmatter: source.slice(4, closeIdx), body: source.slice(closeIdx + 5) };
 }
 
-/** Tiny YAML parser — same scope as volley-skill's: 3 fields, no nesting. */
+/** Tiny YAML parser — same scope as volley-skill's: flat scalar fields, no nesting. */
 export function parseSimpleYaml(yaml: string): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (const rawLine of yaml.split("\n")) {
@@ -91,6 +105,11 @@ export function validateFrontmatter(source: string): ValidationResult {
   }
   if (parsed.user_invocable !== true) {
     errors.push("frontmatter.user_invocable must be true");
+  }
+  if (parsed.version !== SKILL_VERSION) {
+    errors.push(
+      `frontmatter.version must be "${SKILL_VERSION}", got ${JSON.stringify(parsed.version)}`,
+    );
   }
   return { ok: errors.length === 0, errors };
 }

@@ -209,6 +209,17 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
 `VOLLEY_WORKSPACE`, else `cmux identify` (`caller.workspace_ref`) when running inside cmux. The
 coordinator's own mailbox is drained too, so acks for messages it sent land in its context.
 
+**Coordinator id.** The hooks take no id of their own: they publish as the newest live registry
+entry whose `cwd` is the session's directory, which is the id the session's MCP server
+registered. That server builds it from `VOLLEY_AGENT_ID` (a prefix, plus a fresh `-xxxx`), so
+the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"` in its `env` (the full
+`claude mcp add-json` line is in the
+[root README](../../README.md#4-register-the-mcp-server-with-claude-code)).
+Without it the id is named after the working directory (`<repo>-xxxx`), and the "needs you"
+items above land on an id that reads as an ordinary agent; the wave `--owner`, the Desk's
+owner chip and `★ yours`, and the v0.2 owner smoke all expect `coordinator-xxxx`. A separate
+registry (a smoke run) is a different `VOLLEY_NAMESPACE`, not a different prefix.
+
 ## Heavy-operation leases
 
 `pre-tool-use-lease.ts` (PreToolUse, matcher `Bash`) keeps heavy commands inside volleyd's lease
