@@ -39,8 +39,9 @@ async function heartbeat(agentId: string, sentAt?: Date) {
     type: "heartbeat",
     payload: { source: "harness-hook", seq: 1, hook_event: "PostToolUse" },
   });
+  // QoS 1: once the broker acks it, it is on the daemon's connection ahead of any later request.
   await pub.publish(`volley/${NS}/${agentId}/progress`, JSON.stringify(env), {
-    qos: 0,
+    qos: 1,
     retain: false,
   });
 }
@@ -49,7 +50,10 @@ function advanceClock(ms: number) {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(Date.now() + ms);
 }
-const settle = () => new Promise((r) => setTimeout(r, 150));
+/** What was published before it has been read by the daemon: a control round-trip behind it. */
+const settle = async () => {
+  expect((await client.request("status", {})).ok).toBe(true);
+};
 const TWO_HOURS = 2 * 3600_000;
 
 async function agentRegistry(agentId: string, cwd: string, wallTime?: string) {

@@ -16,7 +16,9 @@ import {
 import { Daemon } from "../src/daemon";
 import { admit } from "../src/scheduler";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
@@ -38,6 +40,8 @@ let home: string;
 let daemon: Daemon;
 let client: ControlClient;
 let agent: VolleyBroker;
+/** The daemon's clock: a steer's ack wait closes only when the test moves it. */
+let clock: FakeClock;
 const interrupted: string[] = [];
 
 const start = () =>
@@ -45,6 +49,7 @@ const start = () =>
     brokerUrl: broker.url,
     namespace: NS,
     home,
+    clock,
     tickMs: 0,
     protocolVersion: 4,
     pressure: NO_PRESSURE,
@@ -55,6 +60,7 @@ const start = () =>
 
 beforeEach(async () => {
   interrupted.length = 0;
+  clock = fakeClock();
   broker = await startTestBroker();
   home = mkdtempSync(join(tmpdir(), "volleyd-controls-"));
   daemon = await start();
@@ -86,13 +92,16 @@ afterEach(async () => {
 
 const task = (id: string) => daemon.snapshot(WAVE)?.tasks.find((x) => x.id === id);
 
-/** Wait for an outcome itself, never a fixed delay (a loaded machine stretches any delay). */
-async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
-  const until = Date.now() + ms;
-  while (!cond()) {
-    if (Date.now() > until) throw new Error("waitFor: condition never held");
-    await new Promise((r) => setTimeout(r, 10));
-  }
+/** Wait for an outcome itself, never a fixed delay: answers reach the sender over MQTT. */
+const waitFor = eventually;
+
+/**
+ * Everything published to the daemon before this call has been read and handled: a control
+ * round-trip queued behind it on the daemon's connection (its mailbox is drained in order).
+ */
+async function consumed(): Promise<void> {
+  expect((await client.request("status", {})).ok).toBe(true);
+  await daemon.settled();
 }
 
 /**
@@ -236,6 +245,7 @@ describe("stop", () => {
 describe("steer", () => {
   it("sends mailbox steering with seq 1 then 2, supersedes on the second, and reports the ack", async () => {
     const seen: ReturnType<typeof parseEnvelope>[] = [];
+    const replies: Promise<void>[] = [];
     const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
       const env = parseEnvelope(payload);
       seen.push(env);
@@ -243,19 +253,21 @@ describe("steer", () => {
       // Simulated recipient, per the SPEC: a §4.4 mailbox `ack` (received) to the sender's
       // mailbox for every message, and a §4.3 `steering_acked` on its own progress channel once
       // the model acted — here only on the second message.
-      void agent.publish(
-        `volley/${NS}/volleyd/mailbox`,
-        JSON.stringify(
-          buildEnvelope({
-            agentId: "agent-a1",
-            parentId: null,
-            channel: "mailbox",
-            type: "ack",
-            correlationId: env.correlation_id,
-            payload: { text: "ACKED", acked_type: env.type },
-          }),
+      replies.push(
+        agent.publish(
+          `volley/${NS}/volleyd/mailbox`,
+          JSON.stringify(
+            buildEnvelope({
+              agentId: "agent-a1",
+              parentId: null,
+              channel: "mailbox",
+              type: "ack",
+              correlationId: env.correlation_id,
+              payload: { text: "ACKED", acked_type: env.type },
+            }),
+          ),
+          { qos: 1, retain: false },
         ),
-        { qos: 1, retain: false },
       );
       if ((env.payload as { seq?: number }).seq === 2) {
         const acted = buildEnvelope({
@@ -274,13 +286,20 @@ describe("steer", () => {
       }
     });
 
-    const first = await client.request("steer", {
+    const pending = client.request("steer", {
       wave: WAVE,
       task: "A",
       text: "use the v2 client",
       by: "coord-a",
       wait_ack_ms: 200,
     });
+    // The recipient's mailbox ack is in; then the ack wait runs out (no `steering_acked`).
+    await waitFor(() => replies.length === 1);
+    await Promise.all(replies);
+    await consumed();
+    await clock.armed(200);
+    await clock.advance(200);
+    const first = await pending;
     expect(first.error).toBeUndefined();
     expect(first.result).toMatchObject({
       agent_id: "agent-a1",
@@ -343,6 +362,8 @@ describe("steer", () => {
     // then a third after it has been answered.
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
+    await consumed();
+    await clock.advance(300); // the first one's ack wait runs out: answered once
     await waitFor(() => answers.length >= 1);
     await sender.publish(`volley/${NS}/volleyd/mailbox`, query, { qos: 1, retain: false });
     await waitFor(() => answers.length >= 2);
@@ -361,6 +382,7 @@ describe("steer", () => {
   it("ignores acks from anyone but the steered agent", async () => {
     const impostor = new VolleyBroker();
     await impostor.connect({ url: broker.url, agentId: "agent-zz" });
+    const fakes: Promise<void>[] = [];
     const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
       const env = parseEnvelope(payload);
       if (env?.correlation_id == null) return;
@@ -376,22 +398,31 @@ describe("steer", () => {
             payload: { text: "ACKED" },
           }),
         );
-      void impostor.publish(`volley/${NS}/volleyd/mailbox`, as("ack", "mailbox"), {
-        qos: 1,
-        retain: false,
-      });
-      void impostor.publish(`volley/${NS}/agent-zz/progress`, as("steering_acked", "progress"), {
-        qos: 0,
-        retain: false,
-      });
+      fakes.push(
+        impostor.publish(`volley/${NS}/volleyd/mailbox`, as("ack", "mailbox"), {
+          qos: 1,
+          retain: false,
+        }),
+        impostor.publish(`volley/${NS}/agent-zz/progress`, as("steering_acked", "progress"), {
+          qos: 1,
+          retain: false,
+        }),
+      );
     });
-    const res = await client.request("steer", {
+    const pending = client.request("steer", {
       wave: WAVE,
       task: "A",
       text: "x",
       by: "coord-a",
       wait_ack_ms: 400,
     });
+    // The impostor's acks are in before the wait runs out: they must not count.
+    await waitFor(() => fakes.length === 2);
+    await Promise.all(fakes);
+    await consumed();
+    await clock.armed(400);
+    await clock.advance(400);
+    const res = await pending;
     await unsub();
     await impostor.disconnect();
     expect(res.result).toMatchObject({ delivery: "delivered", received: false, acked: false });

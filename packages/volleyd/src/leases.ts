@@ -1,3 +1,4 @@
+import { dateOf, systemClock } from "./clock";
 import type { JournalEvent, LeasePoolConfig, NewEvent } from "./types";
 
 /**
@@ -111,7 +112,8 @@ export function applyLeaseEvent(book: LeaseBook, ev: JournalEvent | NewEvent): L
     ttl_s?: number;
     renewed?: boolean;
   };
-  const at = ev.at ?? new Date().toISOString();
+  // real clock: the fallback for an event without `at` (lease steps always stamp one)
+  const at = ev.at ?? dateOf(systemClock).toISOString();
   const prev = book[d.pool] ?? { held: [], queue: [] };
   const p: PoolLeases = { held: [...prev.held], queue: [...prev.queue] };
   const ttl = d.ttl_s ?? 0;

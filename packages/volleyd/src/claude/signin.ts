@@ -202,7 +202,7 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
         d.root,
         d.acct,
         s.plan !== undefined ? { plan: s.plan } : {},
-        new Date().toISOString(),
+        new Date(d.now()).toISOString(),
       );
       return finish({
         type: "claude_signin_done",

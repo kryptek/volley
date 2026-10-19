@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
+import { dateOf, systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
 import { type Journal, writeFileAtomic } from "./journal";
 import { type PathError, toPathErrors, validator } from "./schemas";
@@ -138,7 +139,11 @@ export class ConfigStore {
       const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(defaults, layer) : layer);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
-    return new ConfigStore({ ...opts, now: opts.now ?? (() => new Date()), defaults }, layer);
+    return new ConfigStore(
+      // real clock: the default when the daemon injects no clock
+      { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults },
+      layer,
+    );
   }
 
   /** Register (or replace) a wave's `config:` overrides. Validated by the wave-file schema. */

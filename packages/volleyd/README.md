@@ -45,6 +45,7 @@ coordinator session.
 - [The authority fence](#the-authority-fence)
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
+- [Testing: the clock contract](#testing-the-clock-contract)
 
 ---
 
@@ -1428,3 +1429,55 @@ resolve) at install time. Re-run `volleyd install` after changing any of them.
 
 Same table as `volley`: `0` success · `1` error (validation failure, daemon not running, broker
 down, request rejected) · `2` usage error · `124` the daemon did not answer in time.
+
+---
+
+## Testing: the clock contract
+
+Every timer volleyd arms and every wall-clock read it makes goes through one `Clock`
+(`src/clock.ts`: `now`, `mono`, `setTimeout` / `clearTimeout`, `setInterval` / `clearInterval`).
+The daemon takes it as `DaemonOptions.clock` (default: `systemClock`, real timers) and hands it to
+everything it runs: the admission tick, the spawn-refusal backoff, verification windows, reap
+graces, steer ack waits, tunnel restarts and checks, screen captures and their read bounds, the
+token-prune interval, sign-in polls, and the sleep/wake sampler. The times it stamps and compares
+come from the same clock: journal events (wave and `_system`), decisions, config changes, worktree
+locks and their staleness check, so a daemon on a fake clock journals fake time. `systemClock`
+holds the only real timers in `src/`; `test/no-wall-clock.test.ts` fails on any `setTimeout`,
+`setInterval`, `Date.now()`, `performance.now()` or `new Date()` elsewhere, and on any use of
+`systemClock` (or a `globalThis` timer) not on a line commented `// real clock: <why>`. Those are
+the defaults of an injectable clock and code that runs on the real one: a real child process
+(`exec.ts`), the CLI's own timeouts, file mtimes, a hooks process's own stamps. In `daemon.ts`
+`systemClock` appears only as the default of `DaemonOptions.clock`.
+
+A test that depends on daemon timing never waits for real time to pass:
+
+- **Drive the clock.** Pass `fakeClock()` (`test/helpers/fake-clock.ts`) as the daemon's `clock`.
+  Its timers fire only on `advance(ms)` / `advanceTo(wall)` / `advanceToNext()`, in due order,
+  with pending promise continuations flushed after each. Nothing global is faked: the MQTT client
+  and the Aedes broker keep running on real I/O. `armed(ms)` resolves once the daemon has
+  scheduled a timer of that length — the sync point between "it consumed the message" and "move
+  past what it scheduled". It matches any armed timer of that length, intervals included and
+  ones armed before the call, so on a daemon clock (whose watchdog interval is always armed) use
+  a length only the awaited step schedules. `sleepHost(ms)` moves the wall clock only (a host sleep, for wake
+  detection).
+- **Await the event, never poll for it.** `journalWait(home, () => daemon)`
+  (`test/helpers/journal-wait.ts`) resolves `event(wave, type | predicate, n)` from the append
+  itself (`Daemon.onJournal`); events already in the journal count. `settled()` waits until the
+  daemon is idle — its queue drained, no spawn launching, every append published — before a test
+  reads the published state or asserts that nothing happened.
+- **Broker round-trips only** may be re-checked: `eventually(pred)` (`test/helpers/broker-wait.ts`)
+  has no deadline of its own (vitest's test timeout bounds it). To prove the daemon has read what
+  was published before, prefer a control round-trip behind it on the daemon's connection
+  (`SupervisedEnv.consumed()`). Any remaining real timer (a sleep, a race, a delayed start),
+  deadline or elapsed-time bound in `test/` carries a `broker round-trip:` or `real process:`
+  comment saying why, or the grep-guard fails.
+
+```ts
+const clock = fakeClock(T0);
+const daemon = await env.start({ clock });
+const waits = journalWait(env.home, () => daemon);
+// … a spawn is refused: spawn_failed, retry in 30 s
+await clock.advance(30_000);
+await daemon.tick();
+expect((await waits.event("w1", "spawn_failed", 2)).data).toMatchObject({ attempt: 2 });
+```

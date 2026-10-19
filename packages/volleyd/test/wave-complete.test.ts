@@ -4,6 +4,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
 
@@ -48,13 +49,8 @@ async function retainedState(): Promise<Record<string, unknown>> {
   return env.payload;
 }
 
-async function waitFor(cond: () => boolean | Promise<boolean>, ms = 5000): Promise<void> {
-  const until = Date.now() + ms;
-  while (!(await cond())) {
-    if (Date.now() > until) throw new Error("waitFor: condition never held");
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
+/** The owner's status/progress reach the daemon, and its retained state the reader, over MQTT. */
+const waitFor = eventually;
 
 describe("a wave completes", () => {
   it("every task done → wave_complete journaled once, status complete, wave_complete decision open", async () => {
