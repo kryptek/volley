@@ -12,7 +12,7 @@ import {
   renderRemoteScript,
   sealLaunchScript,
 } from "../src/fence";
-import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 
 /** The one local argv a remote command runs as. */
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
@@ -241,6 +241,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
       hooksDir: "/home/dev/src/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
+      worktree: "/wt/x",
       // Exactly what SshTmuxHost.launchEnv emits.
       env: {
         VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883",
@@ -331,12 +332,41 @@ describe("remote allow-list (ssh … bash -s)", () => {
       }),
       "a hooks dir inside .volley/": renderLaunchScript({ ...vars, hooksDir: "/src/r/.volley/x" }),
       "a hooks dir inside .VOLLEY/": renderLaunchScript({ ...vars, hooksDir: "/src/r/.VOLLEY/x" }),
+      "another worktree's mcp.json": renderLaunchScript({ ...vars, worktree: "/wt/y" }),
+      "the variadic --mcp-config form": ok.replace("--mcp-config=", "--mcp-config "),
     };
     for (const [why, content] of Object.entries(bad)) {
       expect(() => assertAllowed(SSH, remote(write(content))), why).toThrow(FenceError);
     }
     // Appending to a launch script could add any command after the exec.
     expect(() => assertAllowed(SSH, remote(write(ok, { append: true })))).toThrow(FenceError);
+  });
+
+  it("a .volley/mcp.json write must be exactly renderMcpConfig of an absolute volley-mcp entry", () => {
+    const write = (content: string, append = false): RemoteStep => ({
+      argv: ["base64", "-d"],
+      stdin: Buffer.from(content).toString("base64"),
+      stdout: "/wt/x/.volley/mcp.json",
+      ...(append ? { append: true } : {}),
+    });
+    const entry = "/home/dev/src/volley/packages/volley-mcp/src/index.ts";
+    expect(() => assertAllowed(SSH, remote(write(renderMcpConfig(entry))))).not.toThrow();
+    const bad: Record<string, string> = {
+      "arbitrary JSON": JSON.stringify({
+        mcpServers: { x: { command: "sh", args: ["-c", "id"] } },
+      }),
+      "a relative entry": renderMcpConfig("packages/volley-mcp/src/index.ts"),
+      "an entry with ..": renderMcpConfig("/home/dev/../tmp/evil/volley-mcp/src/index.ts"),
+      "another file than volley-mcp's": renderMcpConfig("/tmp/evil.ts"),
+      "an entry inside .volley/": renderMcpConfig("/wt/x/.volley/packages/volley-mcp/src/index.ts"),
+      "an extra line": `${renderMcpConfig(entry)}\n{}`,
+    };
+    for (const [why, content] of Object.entries(bad)) {
+      expect(() => assertAllowed(SSH, remote(write(content))), why).toThrow(FenceError);
+    }
+    expect(() => assertAllowed(SSH, remote(write(renderMcpConfig(entry), true)))).toThrow(
+      FenceError,
+    );
   });
 
   it("P1-A probe: the whole hooks-dir chain is refused as one script", () => {
@@ -347,12 +377,14 @@ describe("remote allow-list (ssh … bash -s)", () => {
         hooksDir: "/home/dev/src/volley/packages/volley-hooks",
         model: "claude-opus-5-5",
         agentId: "w1-t1-implementer-1",
+        worktree: "/wt/x",
       }),
     );
     const evil = renderLaunchScript({
       hooksDir: "/home/dev/src/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
+      worktree: "/wt/x",
       env: { VOLLEY_HOOKS_DIR: "/src/r/.volley/x" },
     });
     const steps: RemoteStep[] = [
@@ -407,6 +439,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
         hooksDir: "/home/dev/src/volley/packages/volley-hooks",
         model: "claude-opus-5-5",
         agentId: "w1-t1-implementer-1",
+        worktree: "/wt/x",
       }),
     );
     for (const [why, steps] of Object.entries(chains)) {
@@ -426,6 +459,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
         hooksDir: "/home/dev/src/volley/packages/volley-hooks",
         model: "claude-opus-5-5",
         agentId: "w1-t1-implementer-1",
+        worktree: "/wt/x",
       }),
     );
     expect(() =>

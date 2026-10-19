@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { daemonAuth } from "../broker-auth";
+import { defaultsFor } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { Daemon, type DaemonOptions, type SpawnerOptions } from "../daemon";
@@ -95,6 +96,8 @@ export function daemonStartOptions(
     home,
     ...(auth !== null ? { auth } : {}),
     ...(spawner !== undefined ? { spawner } : {}),
+    // worktree_root defaults to $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set.
+    configDefaults: defaultsFor(env),
     issueBody: ghIssueBody,
   };
 }

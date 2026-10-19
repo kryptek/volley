@@ -52,6 +52,7 @@ function fakeRemote(spec: RemoteHostSpec, local: FakeHost, forwarded: () => bool
     spec,
     screenSource: "tmux",
     hooksDir: `${spec.volley_dir}/packages/volley-hooks`,
+    mcpEntry: `${spec.volley_dir}/packages/volley-mcp/src/index.ts`,
     brokerUrl: `mqtt://127.0.0.1:${spec.tunnel.remote_port}`,
     tunnel: false,
     tunnelChecks: 0,
@@ -149,6 +150,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         }),
         { qos: 1, retain },
       );
+    await pub(buildTopic(NS, id, "status"), "spawning", "status", {});
     await pub(registryTopic(id), "registered", "_system/registry", {
       capabilities: [],
       cwd: "/wt",
@@ -290,7 +292,18 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     const launch = readFileSync(join(wt, ".volley", "launch.sh"), "utf-8");
     expect(launch).toContain("export VOLLEY_HOOKS_DIR='/opt/volley/packages/volley-hooks'");
     expect(launch).toContain("export VOLLEY_AGENT_ID='w1-t1-implementer-1'");
-    expect(launch).not.toContain("--mcp-config");
+    // The box's own volley-mcp, wired through the worktree's mcp.json.
+    expect(launch).toContain(
+      `--strict-mcp-config --mcp-config='${join(wt, ".volley", "mcp.json")}'`,
+    );
+    expect(JSON.parse(readFileSync(join(wt, ".volley", "mcp.json"), "utf-8"))).toEqual({
+      mcpServers: {
+        volley: {
+          command: "bun",
+          args: ["run", `${box.spec.volley_dir}/packages/volley-mcp/src/index.ts`],
+        },
+      },
+    });
     // The lock is keyed by the target as well as the worktree path.
     const spawned = journal("w1").find((e) => e.type === "agent_spawned")?.data;
     expect(spawned).toMatchObject({ host: "box", remote: { target: "dev@box", repo } });
@@ -554,7 +567,13 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     };
     await submit("w1", "  T1: { issue: 42, host: box }\n");
     await tickUntil(() => journal("w1").some((e) => e.data.code === "LAUNCH_FAILED"));
-    expect(journal("w1").some((e) => e.type === "decision_opened")).toBe(false);
+    // Visible as a failed spawn with its retry (spawn_failed), never as a missing clone.
+    await tickUntil(() => journal("w1").some((e) => e.type === "spawn_failed"));
+    const kinds = journal("w1")
+      .filter((e) => e.type === "decision_opened")
+      .map((e) => e.data.kind);
+    expect(kinds).not.toContain("remote_repo_missing");
+    expect(kinds).toEqual(["spawn_failed"]);
     expect(box.launches).toHaveLength(0);
   });
 

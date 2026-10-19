@@ -51,6 +51,8 @@
                 "mailbox",
                 "worktree_root",
                 "spawn_timeout_s",
+                "spawn_retry_max_s",
+                "spawn_retry_max",
                 "wake_grace_s",
                 "idle_grace_s",
                 "screen_tail_interval_s",
@@ -162,6 +164,20 @@
           "minimum": 10,
           "maximum": 3600,
           "description": "Seconds to wait for a spawned agent's registration before retrying."
+        },
+        "spawn_retry_max_s": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 86400,
+          "default": 900,
+          "description": "Cap, in seconds, on the automatic retry delay of a failed spawn (the delay starts at 30 s and doubles per failure)."
+        },
+        "spawn_retry_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 8,
+          "description": "Failed spawn attempts in a row after which the supervisor stops retrying automatically (its spawn_failed decision then says so)."
         },
         "wake_grace_s": {
           "type": "integer",

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-defaults";
 import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
 import { Journal } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
@@ -24,6 +24,27 @@ describe("volleydHome", () => {
   it("is $VOLLEYD_HOME, else ~/.volley/volleyd", () => {
     expect(volleydHome({ VOLLEYD_HOME: "/x/y" })).toBe("/x/y");
     expect(volleydHome({ HOME: "/home/u" })).toBe("/home/u/.volley/volleyd");
+  });
+});
+
+describe("worktree_root under VOLLEYD_HOME", () => {
+  it("defaults to $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set", () => {
+    expect(defaultsFor({ VOLLEYD_HOME: "/smoke/home" }).worktree_root).toBe(
+      "/smoke/home/worktrees",
+    );
+    expect(defaultsFor({}).worktree_root).toBe(CONFIG_DEFAULTS.worktree_root);
+  });
+
+  it("an explicit config.yaml worktree_root still wins", () => {
+    const system = Journal.open(join(home, "waves", SYSTEM_WAVE));
+    const defaults = defaultsFor({ VOLLEYD_HOME: home });
+    expect(ConfigStore.load({ home, system, now, defaults }).get("worktree_root")).toBe(
+      join(home, "worktrees"),
+    );
+    writeFileSync(join(home, "config.yaml"), "worktree_root: /elsewhere/wt\n");
+    expect(ConfigStore.load({ home, system, now, defaults }).get("worktree_root")).toBe(
+      "/elsewhere/wt",
+    );
   });
 });
 
