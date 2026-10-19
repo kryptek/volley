@@ -56,6 +56,7 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
+import { sshHost } from "./settings/Machines";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
@@ -65,14 +66,17 @@ import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
-import { createAuthOps, deskUrl, takeFirstRun } from "./store/control";
+import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
+import { createPeerOps } from "./store/peerOps";
 import {
   UNASSIGNED,
   agentsByWave,
   endedWaves,
   finishedAgents,
   isSupervisorId,
+  localAgentCount,
   stageChip,
+  supervisorHealth,
   supervisorList,
   supervisorNamespace,
 } from "./store/reducer";
@@ -263,6 +267,15 @@ export default function App() {
     () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
     [writer, identity, demo],
   );
+  // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
+  const peerOps = useMemo(
+    () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
+    [authOps],
+  );
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
+  useEffect(() => {
+    void peerOps?.admin();
+  }, [peerOps]);
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
   /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
@@ -752,6 +765,14 @@ export default function App() {
             waves: state.waves,
             control,
             onRegistry: setRegistry,
+          }}
+          machines={{
+            machines: state.machines ?? {},
+            hosts: Object.keys(state.config?.hosts ?? {}),
+            hubUp: !supervisorHealth(state.supervisors[DAEMON_AGENT_ID]).down,
+            hubAgents: localAgentCount(state),
+            ops: peerOps,
+            host: sshHost(brokerUrl),
           }}
           onboarding={{
             ops: authOps,

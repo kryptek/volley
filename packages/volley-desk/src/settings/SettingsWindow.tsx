@@ -4,9 +4,8 @@
  * over the section labels and keywords (`matchSections`), the signed-in
  * broker account and the sections in three groups with coloured icon tiles;
  * the main pane shows the picked section (General, Appearance, Supervisor,
- * Claude accounts & usage, Broker accounts, Setup & Security, About; Machines
- * is a placeholder for now). Escape, the
- * close button and a scrim click close it (Escape in a search box with a
+ * Claude accounts & usage, Broker accounts, Machines, Setup & Security,
+ * About). Escape, the close button and a scrim click close it (Escape in a search box with a
  * query clears the query instead); focus moves in on open (and Tab stays
  * inside) and goes back to the opener on close. It is built like a Desk
  * window (D10): the `win-depth` lift and gradient body, and a `win-edge`.
@@ -24,6 +23,7 @@ import { Appearance } from "./Appearance";
 import { BrokerAccounts } from "./BrokerAccounts";
 import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
+import { Machines, type MachinesProps } from "./Machines";
 import { Setup, useAdminRole } from "./Setup";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
@@ -58,6 +58,8 @@ export interface SettingsWindowProps {
   initial?: SectionKey;
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
   claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
+  /** Settings › Machines: the machine records and the pairing ops. */
+  machines?: MachinesProps;
   /** Settings › Broker accounts and Setup & Security: volleyd's admin channel and where the Desk is. */
   onboarding?: {
     /** `null` when the Desk cannot send admin ops (anonymous, demo). */
@@ -230,6 +232,9 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 role={role}
                 liveAgents={p.onboarding?.liveAgents ?? null}
               />
+            )}
+            {sec === "machines" && (
+              <Machines {...(p.machines ?? { machines: {}, hubUp: false, ops: null })} />
             )}
             {sec === "setup" && (
               <Setup

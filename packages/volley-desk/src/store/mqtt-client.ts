@@ -85,6 +85,7 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/+/+/usage",
   "volley/_system/claude-accounts/+",
   "volley/_system/claude/+/signin",
+  "volley/_system/machines/+",
   // volleyd's answers to account ops (SPEC §4.6.10); secrets in them are sealed to the requester.
   "volley/_system/auth/replies/+",
 ] as const;
