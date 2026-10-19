@@ -105,6 +105,36 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     expect(r.reasons).toEqual([expect.stringMatching(/^bun not on the PATH .*own agents/)]);
   });
 
+  it("an ssh failure of the PATH probe: path_ok nulls and the transport reason", () => {
+    const r = readiness(
+      input({ probe: null, probeError: "ssh to dev@box-a failed: Connection refused" }),
+    );
+    expect(r).toMatchObject({
+      ready: false,
+      path_ok: { claude: null, bun: null },
+      reasons: ["PATH probe over ssh failed: ssh to dev@box-a failed: Connection refused"],
+    });
+  });
+
+  it("the supervisor's own doctor run without a wave repo: its repo.* checks do not count", () => {
+    const own = record({
+      name: "control",
+      kind: "supervisor",
+      tunnel: "local",
+      checks: [
+        { id: "tool.bun", ok: true, severity: "block", detail: "bun" },
+        { id: "repo.clone", ok: false, severity: "block", detail: "no wave repo: pass --repo" },
+      ],
+    });
+    const { repo: _none, ...noRepo } = own;
+    const base = { name: "control", local: true, hostOrigin: null };
+    expect(readiness(input({ ...base, record: noRepo, noRepo: true })).reasons).toEqual([]);
+    // Given a repo, a failing clone check blocks as on any machine.
+    expect(readiness(input({ ...base, record: noRepo })).reasons).toEqual([
+      "repo.clone: no wave repo: pass --repo",
+    ]);
+  });
+
   it("drain: true is ineligible with ineligible_reason draining (and still ready)", () => {
     const r = readiness(input({ host: { max_agents: 4, drain: true } }));
     expect(r).toMatchObject({ ready: true, drain: true, eligible: false });

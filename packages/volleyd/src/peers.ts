@@ -314,7 +314,12 @@ export class PeerService {
     return { ok: true, result: { name, revoked: data.revoked, host_removed: isHost } };
   }
 
-  async doctor(p: Fields): Promise<PeerReply> {
+  /**
+   * `peer_doctor`'s request, checked before anything runs: the host to run it on, or the refusal.
+   * The run itself (`runDoctor`) is an ssh round-trip of up to `peer_doctor_timeout_ms`, so the
+   * daemon awaits it outside its queue.
+   */
+  doctorRequest(p: Fields): PeerReply | DoctorRun {
     const name = p.name;
     if (typeof name !== "string" || !isValidAgentId(name)) {
       return refuse("name must match [a-z0-9][a-z0-9_-]{0,62}");
@@ -331,6 +336,11 @@ export class PeerService {
       return refuse(`no configured host named "${name}"`);
     const host = this.deps.remote?.(name) ?? "remote hosts are not available";
     if (typeof host === "string") return refuse(host);
+    return { name, fix, clone, host };
+  }
+
+  /** Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not. */
+  async runDoctor({ name, fix, clone, host }: DoctorRun): Promise<PeerReply> {
     let report: DoctorReport;
     try {
       report = await host.runDoctor({ fix, clone });
@@ -415,6 +425,14 @@ export class PeerService {
   private write(codes: StoredCode[]): void {
     writeJson(this.deps.file, { codes });
   }
+}
+
+/** A checked `peer_doctor` request (`doctorRequest`), ready to run. */
+export interface DoctorRun {
+  name: string;
+  fix: boolean;
+  clone: boolean;
+  host: RemoteHost;
 }
 
 /** What a fix would change: each failing check with its fix text, in the doctor's order. */

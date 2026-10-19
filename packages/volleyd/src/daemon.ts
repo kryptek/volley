@@ -22,7 +22,7 @@ import {
   totalmem,
   uptime,
 } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
@@ -164,7 +164,7 @@ import {
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
-import { type PeerReply, PeerService } from "./peers";
+import { type DoctorRun, type PeerReply, PeerService } from "./peers";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -385,13 +385,13 @@ export interface DaemonOptions {
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
   /**
-   * The Fleet (SPEC §4.6.15): the supervisor's own machine's doctor (default: none, so its
-   * machine is not ready; `volleyd daemon` passes `realLocalDoctor`), the PATH probe of its own
-   * agents' environment (default: `PATH` resolved here), and the version a machine must run
-   * (default: this package's).
+   * The Fleet (SPEC §4.6.15): the supervisor's own machine's doctor, given the running wave's
+   * repo or null (default: none, so its machine is not ready; `volleyd daemon` passes
+   * `realLocalDoctor`), the PATH probe of its own agents' environment (default: `PATH` resolved
+   * here), and the version a machine must run (default: this package's).
    */
   fleet?: {
-    localDoctor?: () => Promise<DoctorReport | null>;
+    localDoctor?: (repo: string | null) => Promise<DoctorReport | null>;
     localPath?: () => PathProbe;
     version?: string;
   };
@@ -489,6 +489,14 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+/**
+ * An account op answered after a long run outside the daemon's queue (`peer_doctor`): `later`
+ * resolves to the answer and the `_system` record to journal with it.
+ */
+interface DeferredAuth {
+  later: () => Promise<AuthOutcome & { journal?: NewEvent }>;
+}
+
 /** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
 const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove", "peer_doctor"]);
 
@@ -555,10 +563,17 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
   };
 }
 
-/** The supervisor's own doctor (SPEC §4.6.15): `volley peer doctor --json` through the fence. */
-export function realLocalDoctor(exec: ExecFn = realExec): () => Promise<DoctorReport | null> {
-  return async () => {
-    const r = await exec(["volley", "peer", "doctor", "--json"], {
+/**
+ * The supervisor's own doctor (SPEC §4.6.15): `volley peer doctor --json [--repo <repo>]` through
+ * the fence. The supervisor is no peer (it has no `peer.json`), so the running wave's repo is the
+ * clone it checks; with none, the report's `repo.*` checks only say that no repo was given.
+ */
+export function realLocalDoctor(
+  exec: ExecFn = realExec,
+): (repo: string | null) => Promise<DoctorReport | null> {
+  return async (repo) => {
+    const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
+    const r = await exec(argv, {
       timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
     }).catch(() => null);
     // A failing block check exits 1 with the report on stdout.
@@ -838,10 +853,27 @@ export class Daemon {
   /** The supervisor's own machine record, as last published (and when). */
   private ownRecord: MachineRecord | undefined;
   private ownRecordAt: number | null = null;
-  /** The supervisor's own doctor: its last report, when it last started, whether it runs now. */
+  /**
+   * The supervisor's own doctor: its last report, the repo that run checked (null: none; undefined:
+   * no run finished yet), when it last started, whether it runs now.
+   */
   private localReport: DoctorReport | null = null;
+  private localDoctorRepo: string | null | undefined = undefined;
+  /** The repo the last run started with (a failed run is not retried before the next beat). */
+  private localDoctorTried: string | null = null;
   private localDoctorAt: number | null = null;
   private localDoctorRunning = false;
+  /**
+   * Machines whose verdict has its inputs in this process (SPEC §4.6.15): until then a verdict is
+   * neither published nor journaled, so a restart neither replaces the last retained verdict nor
+   * journals a flip from inputs not gathered yet. `fleetSince`: when this process began, the
+   * bound on the wait (`machine_down_after_ms`).
+   */
+  private readonly readinessSettled = new Set<string>();
+  private fleetSince: number | null = null;
+  /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
+  private readonly doctoring = new Set<string>();
+  private readonly authRunning = new Set<string>();
   /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
   private readonly probes = new Map<
     string,
@@ -2694,10 +2726,13 @@ export class Daemon {
   private async fleetTick(): Promise<void> {
     const beat = DAEMON_DEFAULTS.machine_heartbeat_ms;
     const now = this.now();
+    this.fleetSince ??= now;
     if (
       this.opts.fleet?.localDoctor !== undefined &&
       !this.localDoctorRunning &&
-      (this.localDoctorAt === null || now - this.localDoctorAt >= beat)
+      (this.localDoctorAt === null ||
+        now - this.localDoctorAt >= beat ||
+        this.localDoctorTried !== this.waveRepo())
     ) {
       void this.runLocalDoctor();
     }
@@ -2711,20 +2746,31 @@ export class Daemon {
     await this.publishReadiness();
   }
 
-  /** The supervisor's own doctor (`volley peer doctor --json`); its report fills the own record. */
+  /**
+   * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
+   * report fills the own record. Runs again at once when the running wave's repo changes.
+   */
   private async runLocalDoctor(): Promise<void> {
     const doctor = this.opts.fleet?.localDoctor;
     if (doctor === undefined) return;
     this.localDoctorRunning = true;
     this.localDoctorAt = this.now();
+    const repo = this.waveRepo();
+    this.localDoctorTried = repo;
     try {
-      const report = await doctor().catch((e: unknown) => {
+      const report = await doctor(repo).catch((e: unknown) => {
         this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
         return null;
       });
-      if (report === null || !this.running) return;
+      if (!this.running) return;
+      // A failed run settles the verdict too (on the last report, or none).
       await this.enqueue(async () => {
-        this.localReport = report;
+        if (report !== null) {
+          this.localReport = report;
+          this.localDoctorRepo = repo;
+        } else if (this.localDoctorRepo === undefined) {
+          this.localDoctorRepo = null;
+        }
         await this.publishOwnRecord();
         await this.publishReadiness(this.config.localName());
       });
@@ -2815,6 +2861,8 @@ export class Daemon {
     for (const name of only === undefined ? names : names.filter((n) => n === only)) {
       const isLocal = name === local;
       if (!isLocal) this.maybeProbe(name);
+      // Inputs not gathered yet in this process: the last retained verdict stands.
+      if (!this.isSettled(name, isLocal)) continue;
       const v = readiness(this.readinessInput(name, isLocal, cfg, shared));
       const key = readinessKey(v);
       const now = this.now();
@@ -2831,8 +2879,8 @@ export class Daemon {
           true,
         );
       }
-      // A machine's first verdict is its baseline (nothing changed yet); a restart compares with
-      // the last journaled one.
+      // A machine's first settled verdict is its baseline (nothing changed yet); a restart
+      // compares with the last journaled one.
       const was = this.journaledReadiness.get(name);
       if (was === undefined)
         this.journaledReadiness.set(name, { ready: v.ready, reasons: v.reasons });
@@ -2846,10 +2894,35 @@ export class Daemon {
     }
   }
 
+  /**
+   * Whether machine `name`'s verdict has its inputs: a peer's record has folded in and its first
+   * PATH probe finished (none runs while its tunnel is not up); the own machine's first doctor run
+   * finished. Either way at most `machine_down_after_ms` after this process began. Once settled,
+   * a machine stays settled.
+   */
+  private isSettled(name: string, isLocal: boolean): boolean {
+    if (this.readinessSettled.has(name)) return true;
+    let warm: boolean;
+    if (isLocal) {
+      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorRepo !== undefined;
+    } else {
+      const r = this.machines.record(name);
+      const probe = this.probes.get(name);
+      warm = r !== undefined && (r.tunnel !== "up" || (probe !== undefined && !probe.running));
+    }
+    this.fleetSince ??= this.now();
+    if (!warm && this.now() - this.fleetSince < DAEMON_DEFAULTS.machine_down_after_ms) {
+      return false;
+    }
+    this.readinessSettled.add(name);
+    return true;
+  }
+
   /** A removed (or renamed) machine: its verdict cleared, its probe forgotten. */
   private async clearReadiness(name: string): Promise<void> {
     this.published.delete(name);
     this.probes.delete(name);
+    this.readinessSettled.delete(name);
     await this.clearRetained(readinessTopic(name));
   }
 
@@ -2871,6 +2944,8 @@ export class Daemon {
       name,
       record: isLocal ? this.ownRecord : this.machines.record(name),
       local: isLocal,
+      // The own machine is capped by hard_ceiling, which caps every supervised agent: its
+      // headroom is the ceiling less all of them, wherever they run.
       host: isLocal
         ? { max_agents: cfg.hard_ceiling, drain: false }
         : {
@@ -2878,10 +2953,12 @@ export class Daemon {
             drain: h?.drain ?? REMOTE_HOST_DEFAULTS.drain,
           },
       hostVersion: this.version,
-      hostOrigin: this.localReport?.repo?.origin ?? null,
+      hostOrigin:
+        typeof this.localDoctorRepo === "string" ? (this.localReport?.repo?.origin ?? null) : null,
+      ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
-      placed: this.placedOn(name),
+      placed: isLocal ? this.supervised.size : this.placedOn(name),
       heavy: Object.fromEntries(
         Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
           c.per_machine === undefined
@@ -2899,8 +2976,21 @@ export class Daemon {
   }
 
   /**
-   * What every verdict's `requirements` adds to the version: the lowest bun the running waves'
-   * repo accepts (`engines.bun`, else `packageManager`), and the own `sharing.yaml` modes.
+   * The wave repo the supervisor's own clone is checked against: the running wave's (the first by
+   * wave id when several run), as an absolute path; null when no wave runs.
+   */
+  private waveRepo(): string | null {
+    const repos = this.runningWaves()
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, l]) => l.record.wave?.repo ?? "")
+      .filter((r) => r !== "");
+    return repos[0] !== undefined ? resolve(repoDir(repos[0])) : null;
+  }
+
+  /**
+   * What every verdict's `requirements` adds to the version: the bun the running wave's repo
+   * (`waveRepo`) asks for (`engines.bun`, else `packageManager`), and the own `sharing.yaml`
+   * modes.
    */
   private requirementsExtra(): Pick<ReadinessInput, "bun" | "sharing"> {
     let sharing: Sharing | undefined;
@@ -2910,9 +3000,8 @@ export class Daemon {
       sharing = undefined;
     }
     let bun: string | undefined;
-    for (const [, l] of this.runningWaves()) {
-      const dir = repoDir(l.record.wave?.repo ?? "");
-      if (dir === "" || bun !== undefined) continue;
+    const dir = this.waveRepo();
+    if (dir !== null) {
       try {
         const p = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")) as {
           engines?: { bun?: unknown };
@@ -2971,11 +3060,43 @@ export class Daemon {
       });
   }
 
-  /** `peer_doctor` (admin, peers.ts): after it, the box's PATH is probed again. */
-  private async peerDoctor(p: Record<string, unknown>): Promise<PeerReply> {
-    const r = await this.peers.doctor(p);
-    if (r.ok && typeof p.name === "string") this.probes.delete(p.name);
-    return r;
+  /**
+   * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
+   * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
+   * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
+   * PATH is probed again, and `peer_doctor_run` is journaled.
+   */
+  private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const req = this.peers.doctorRequest(p);
+    if (!("host" in req)) return { reply: authReply("peer_doctor", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_doctor", {
+          ok: false,
+          error: `a doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
+    const run: DoctorRun = req;
+    return {
+      later: async () => {
+        let r: PeerReply;
+        try {
+          r = await this.peers.runDoctor(run);
+        } finally {
+          this.doctoring.delete(run.name);
+        }
+        if (r.ok) this.probes.delete(run.name);
+        return {
+          reply: authReply("peer_doctor", r),
+          journal: {
+            type: "peer_doctor_run",
+            data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
+          },
+        };
+      },
+    };
   }
 
   /**
@@ -4936,9 +5057,30 @@ export class Daemon {
     const key = `${topic}/${cid}`;
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
+    // A redelivery of a request still running (peer_doctor): its answer comes when the run ends.
+    if (this.authRunning.has(key)) return;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     const exec = this.opts.authExec ?? realExec;
-    let out: AuthOutcome;
+    const failed = (e: unknown): AuthOutcome => ({
+      reply: {
+        text: "ACKED",
+        acked_type: "query",
+        op: typeof payload.op === "string" ? payload.op : "",
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    });
+    const finish = async (o: AuthOutcome & { journal?: NewEvent }) => {
+      if (o.event !== undefined) this.system.append(o.event, dateOf(this.time));
+      if (o.journal !== undefined) await this.appendSystem(o.journal);
+      if (!o.reply.ok) this.log(`refused ${o.reply.op || "auth request"}: ${o.reply.error}`);
+      this.authAnswered.set(key, o.reply);
+      if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+        this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+      }
+      await send(o.reply);
+    };
+    let out: AuthOutcome | DeferredAuth;
     try {
       if (tokenId !== null) {
         out = await redeemToken(exec, tokenId, payload);
@@ -4957,41 +5099,43 @@ export class Daemon {
           : await accountOp(exec, sender, payload, lastSeen);
       }
     } catch (e) {
-      const op = typeof payload.op === "string" ? payload.op : "";
-      out = {
-        reply: {
-          text: "ACKED",
-          acked_type: "query",
-          op,
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        },
-      };
+      out = failed(e);
     }
-    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
-    if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
-    this.authAnswered.set(key, out.reply);
-    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
-      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    if ("later" in out) {
+      // Outside the queue: only the answer (and its journal record) goes back through it.
+      const { later } = out;
+      this.authRunning.add(key);
+      void later()
+        .catch(failed)
+        .then((o) =>
+          this.enqueue(async () => {
+            this.authRunning.delete(key);
+            if (this.running) await finish(o);
+          }),
+        );
+      return;
     }
-    await send(out.reply);
+    await finish(out);
   }
 
   /**
    * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
    * names: the account ops' admin check, then peers.ts (which journals them itself).
    */
-  private async peerAdminOp(exec: ExecFn, sender: string, p: Record<string, unknown>) {
+  private async peerAdminOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
     const accounts = await listAccounts(exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    if (op === "peer_doctor") return this.peerDoctor(p, sender);
     const r =
       op === "peer_invite"
         ? await this.peers.invite(p, sender)
-        : op === "peer_doctor"
-          ? await this.peerDoctor(p)
-          : await this.peers.remove(p, sender);
+        : await this.peers.remove(p, sender);
     const { rejected: _r, ...answer } = r;
     return { reply: authReply(op, answer) };
   }

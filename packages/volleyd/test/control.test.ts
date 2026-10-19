@@ -10,6 +10,7 @@ import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
+import { readJournalFile } from "../src/journal";
 import type { DoctorReport } from "../src/machines";
 import { SYSTEM_WAVE } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
@@ -560,6 +561,51 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
     const r = await op("admin-1", { op: "peer_doctor", name: "box-a" });
     expect(r).toMatchObject({ ok: false, op: "peer_doctor" });
     expect(r.error).toContain("Connection refused");
+  });
+
+  it("a run holds no queue: config_set and ticks go on meanwhile; a second run on the box is refused until it ends; each run is journaled", async () => {
+    let release!: (r: DoctorReport) => void;
+    answers.doctor = () =>
+      new Promise<DoctorReport>((r) => {
+        release = r;
+      });
+    const pending = op("admin-1", { op: "peer_doctor", name: "box-a", fix: true });
+    await eventually(async () => (box?.doctorRuns.length ?? 0) === 1);
+
+    // The doctor is still running on the box: the daemon's queue is not.
+    const client = await ControlClient.connect(broker.url, NS, {
+      username: "admin-1",
+      password: pw("admin-1"),
+    });
+    try {
+      const r = await client.request("config_set", {
+        patch: { hosts: { "box-a": { max_agents: 2 } } },
+        by: "tester",
+      });
+      expect(r).toMatchObject({ ok: true });
+    } finally {
+      await client.close();
+    }
+    await daemon.tick();
+    expect(
+      await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true }),
+    ).toMatchObject({ ok: false, error: 'a doctor run on "box-a" is already in progress' });
+    expect(box?.doctorRuns).toHaveLength(1);
+
+    release(REPORT);
+    expect(await pending).toMatchObject({ ok: true, result: { name: "box-a", fix: true } });
+    const runs = () =>
+      readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).filter(
+        (e) => e.type === "peer_doctor_run",
+      );
+    expect(runs().map((e) => e.data)).toEqual([
+      { by: "admin-1", name: "box-a", fix: true, clone: false, ok: true },
+    ]);
+
+    // Ended: the box takes the next run.
+    answers.doctor = REPORT;
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a" })).toMatchObject({ ok: true });
+    expect(runs().map((e) => e.data.ok)).toEqual([true, true]);
   });
 
   it("refuses an unknown host and --clone without --fix before ssh", async () => {

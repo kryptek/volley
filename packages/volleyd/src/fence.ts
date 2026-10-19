@@ -62,8 +62,9 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
  *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
  *     LABEL 1..64 printable characters, not starting with `-`
- *   volley peer doctor --json   (the supervisor's own machine's doctor report, SPEC §4.6.15:
- *     never --fix, which runs only on a box through ssh)
+ *   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
+ *     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
+ *     an absolute path with no `.`/`..` segment and no control character
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -968,13 +969,27 @@ const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
   redeem: (a) => a.length === 3 && a[0] === "--label" && LABEL(a[1]) && a[2] === "--json",
 };
 
+/** The own doctor's `--repo`: absolute, normalised (no `.`/`..` segment), no control character. */
+function isRepoPath(p: string | undefined): boolean {
+  if (p === undefined || !p.startsWith("/")) return false;
+  return (
+    [...p].every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f) &&
+    !p.split("/").some((seg) => seg === "." || seg === "..")
+  );
+}
+
 /** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
   const [group, verb] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
   // The supervisor is its own machine's doctor (SPEC §4.6.15): a report, never a fix.
-  if (group === "peer" && verb === "doctor" && args.length === 3 && args[2] === "--json")
-    return ALLOW;
+  if (group === "peer" && verb === "doctor") {
+    const rest = args.slice(2);
+    const ok =
+      rest[0] === "--json" &&
+      (rest.length === 1 || (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])));
+    return ok ? ALLOW : deny(`volley peer doctor ${rest.join(" ")} (only --json [--repo <abs>])`);
+  }
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }

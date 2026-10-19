@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { Sharing } from "./claude/sharing";
+import { PATH_PROBE_TOOLS } from "./fence";
 import { type MachineRecord, machineTopic } from "./machines";
 
 /**
@@ -18,8 +19,11 @@ import { type MachineRecord, machineTopic } from "./machines";
 export const READINESS_CHANNEL = "_system/machines/readiness";
 export const readinessTopic = (name: string) => `${machineTopic(name)}/readiness`;
 
-/** The tools the PATH probe looks for (`command -v claude bun`): what an agent session runs. */
-export const PATH_TOOLS = ["claude", "bun"] as const;
+/**
+ * The tools the PATH probe looks for (`command -v claude bun`): what an agent session runs. The
+ * fence's list, so the probe never asks for a name the fence refuses.
+ */
+export const PATH_TOOLS = PATH_PROBE_TOOLS;
 export type PathTool = (typeof PATH_TOOLS)[number];
 export type PathProbe = Record<PathTool, boolean>;
 
@@ -39,6 +43,11 @@ export interface ReadinessInput {
   hostVersion: string;
   /** The supervisor's own clone's origin (its doctor's `repo.origin`), when known. */
   hostOrigin?: string | null;
+  /**
+   * The supervisor's own machine whose doctor ran without a wave repo (no wave is running): its
+   * `repo.*` checks say only that no repo was given, so they do not count.
+   */
+  noRepo?: boolean;
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
   /** Why the last PATH probe could not run (ssh failed, the host is not reachable). */
@@ -99,6 +108,7 @@ function doctorReasons(r: MachineRecord, i: ReadinessInput): string[] {
   const out: string[] = [];
   // volley.version is the doctor's view of our requirement; the comparison below decides.
   for (const c of r.checks ?? []) {
+    if (i.noRepo === true && c.id.startsWith("repo.")) continue;
     if (!c.ok && c.severity === "block" && c.id !== "volley.version") {
       out.push(`${c.id}: ${c.detail}`);
     }

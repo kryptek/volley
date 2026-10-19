@@ -264,8 +264,11 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
 export interface FakeRemoteAnswers {
   /** probePath's answer (an Error: ssh failed). Default: both tools resolve. */
   path?: PathProbe | Error;
-  /** runDoctor's answer (an Error: ssh failed). Default: an all-green report. */
-  doctor?: DoctorReport | Error;
+  /**
+   * runDoctor's answer (an Error: ssh failed; a function: a run that ends when its promise does).
+   * Default: an all-green report.
+   */
+  doctor?: DoctorReport | Error | (() => Promise<DoctorReport>);
 }
 
 export type FakeRemoteHost = FakeHost &
@@ -319,7 +322,7 @@ export function fakeRemoteHost(
       h.doctorRuns.push(opts);
       const a = h.answers.doctor ?? GREEN_DOCTOR;
       if (a instanceof Error) throw a;
-      return a;
+      return typeof a === "function" ? a() : a;
     },
   });
   return h;

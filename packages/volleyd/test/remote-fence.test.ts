@@ -679,9 +679,21 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
     );
   });
 
-  it("the supervisor's own doctor: `volley peer doctor --json` locally, nothing more", () => {
+  it("the supervisor's own doctor: `volley peer doctor --json [--repo <abs>]` locally, nothing more", () => {
     expect(() => assertAllowed([...DOCTOR, "--json"])).not.toThrow();
+    expect(() => assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo"])).not.toThrow();
     expect(() => assertAllowed([...DOCTOR, "--json", "--fix", "--yes"])).toThrow(FenceError);
+    expect(() =>
+      assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo", "--fix", "--yes"]),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo", "--clone"])).toThrow(
+      FenceError,
+    );
+    for (const bad of ["repo", "-x", "--fix", "/srv/../etc", "/srv/./repo", "/srv/re\npo", ""]) {
+      expect(() => assertAllowed([...DOCTOR, "--json", "--repo", bad]), bad).toThrow(FenceError);
+    }
+    expect(() => assertAllowed([...DOCTOR, "--repo", "/srv/repo", "--json"])).toThrow(FenceError);
+    expect(() => assertAllowed([...DOCTOR, "--json", "--repo"])).toThrow(FenceError);
     expect(() => assertAllowed(["volley", "peer", "remove", "box-a"])).toThrow(FenceError);
   });
 });

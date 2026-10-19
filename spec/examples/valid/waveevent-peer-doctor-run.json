@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T12:07:30.000Z",
+  "channel": "_waves/events",
+  "type": "peer_doctor_run",
+  "payload": {
+    "wave": "_system",
+    "seq": 42,
+    "at": "2026-10-19T12:07:30.000Z",
+    "data": {
+      "by": "admin-1",
+      "name": "box-a",
+      "fix": true,
+      "clone": false,
+      "ok": true
+    }
+  }
+}

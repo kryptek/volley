@@ -343,6 +343,8 @@ export const WAVE_EVENT_TYPES = [
   "merge_nudge_sent",
   // Fleet (SPEC §4.6.15): a machine's readiness verdict changed, in the `_system` journal.
   "machine_readiness_changed",
+  // Fleet (SPEC §4.6.14): an admin's `peer_doctor` ran on a paired machine, in `_system`.
+  "peer_doctor_run",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

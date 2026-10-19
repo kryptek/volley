@@ -281,6 +281,24 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
     expect(auth.accounts.has("box-a")).toBe(false);
   });
 
+  it("refuses the supervisor's own machine name before the code is burned", async () => {
+    peers = new PeerService({
+      ...(peers as unknown as { deps: ConstructorParameters<typeof PeerService>[0] }).deps,
+      localName: () => "control",
+    });
+    const code = await invite();
+    const r = await peers.join(joinFields(code, { name: "control" }), "cli");
+    expect(r).toMatchObject({
+      ok: false,
+      error: '"control" is the supervisor\'s own machine name (fleet.local_name)',
+    });
+    expect(auth.accounts.has("control")).toBe(false);
+    expect(hosts).toEqual({});
+    // Not burned: the same code still pairs another name.
+    expect(await peers.join(joinFields(code), "cli")).toMatchObject({ ok: true });
+    expect(Object.keys(hosts)).toEqual(["box-a"]);
+  });
+
   describe("re-pairing: invite --for and join { replace }", () => {
     const inviteFor = async (name: string) => {
       const r = await peers.invite({ reply_key: REPLY_KEY, for: name }, "admin-1");
