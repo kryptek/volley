@@ -21,7 +21,7 @@ const GOOD_FRONTMATTER = `---
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents coordinated via Volley
 user_invocable: true
-version: 0.2
+version: ${SKILL_VERSION}
 ---
 `;
 
@@ -59,8 +59,7 @@ describe("validateFrontmatter", () => {
     expect(validateFrontmatter(GOOD_FRONTMATTER).ok).toBe(true);
   });
   it("rejects wrong name", () => {
-    const bad =
-      "---\nname: not-volley-issues\ndescription: x\nuser_invocable: true\nversion: 0.2\n---\n";
+    const bad = `---\nname: not-volley-issues\ndescription: x\nuser_invocable: true\nversion: ${SKILL_VERSION}\n---\n`;
     expect(validateFrontmatter(bad).errors.join(" ")).toContain('name must be "volley-issues"');
   });
   it("rejects user_invocable: false", () => {
@@ -68,11 +67,11 @@ describe("validateFrontmatter", () => {
     expect(validateFrontmatter(bad).errors.join(" ")).toContain("user_invocable must be true");
   });
   it("rejects a missing or different version", () => {
-    const missing = GOOD_FRONTMATTER.replace("version: 0.2\n", "");
+    const missing = GOOD_FRONTMATTER.replace(`version: ${SKILL_VERSION}\n`, "");
     expect(validateFrontmatter(missing).errors.join(" ")).toContain(
       `version must be "${SKILL_VERSION}"`,
     );
-    const old = GOOD_FRONTMATTER.replace("version: 0.2", "version: 0.1");
+    const old = GOOD_FRONTMATTER.replace(`version: ${SKILL_VERSION}`, "version: 0.1");
     expect(validateFrontmatter(old).errors.join(" ")).toContain("version must be");
   });
   it("rejects empty description", () => {

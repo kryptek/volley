@@ -2,7 +2,40 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
-## 0.2.0 — unreleased
+## 0.3.0 — unreleased
+
+The onboarding release: a fresh machine reaches a phone-signed-in Desk, a paired second machine
+and a second Claude account without reading source. It is also the first tag of everything listed
+under 0.2.0, which was never tagged on its own. Owner smoke: [`SMOKE.md`](SMOKE.md) Plan 11 (and
+[`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md) for the supervisor).
+
+### Added
+
+- **`volley setup`**, the first-run and repair wizard: broker (mosquitto ≥ 2.1), security (the
+  Dynamic Security config with the diff shown and the old file backed up, a restart, both
+  listeners checked against anonymous clients, and a choice about LAN access to the WebSocket
+  listener), accounts (roles, fixed identities, the macOS keychain, a one-time admin token),
+  services (volleyd, the hooks, the Desk served by `volley desk serve` on port 5199, and
+  `volley` / `volleyd` linked into `~/.volley/bin`) and a phone sign-in QR code. Every step says
+  what it will change before changing it, and a rerun changes nothing.
+- **The Desk's onboarding**: the first-run setup wizard (the same five steps through volleyd's
+  `setup_plan` / `setup_apply`), one-time sign-in links and admin tokens (`#signin=<token>`),
+  Settings › Broker accounts, Setup & Security, Machines and Claude accounts & usage.
+- **Broker accounts and one-time tokens** on mosquitto 2.1 Dynamic Security: `volley auth add |
+  rotate | revoke | list | token | signin-link | redeem`, `volley auth migrate` from a
+  `password_file` / `acl_file` setup.
+- **Paired machines**: `volley peer invite | join | list | remove | run`: one code gives a
+  second machine its own account, an ssh tunnel service and a health heartbeat.
+- **Several Claude accounts**: `volley claude add | signin | list | sync | move`, usage meters
+  from the statusLine, and an `account_limit` decision at `claude.warn_at_pct` (volleyd never
+  switches accounts by itself).
+
+### Changed
+
+- Broker auth needs **mosquitto 2.1 or newer** with the Dynamic Security plugin (no password or
+  ACL files); an older broker is refused with `BROKER_TOO_OLD`.
+
+## 0.2.0 — never tagged (shipped in 0.3.0)
 
 The supervisor release: Volley grows from a messaging protocol into a dispatch system that
 survives the coordinator session. Owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).

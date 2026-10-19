@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Volley is an agent-messaging protocol — an MQTT topic + JSON envelope convention that lets agents from any vendor (Claude Code, Codex, plain shell scripts) coordinate across machines. This repo ships the spec, a reference MCP server, a CLI, the `volleyd` wave supervisor, Claude Code hooks, the Volley Desk dashboard, and Claude Code skills (`/volley`, `/volley-issues`).
 
-**Status:** public; pre-1.0. The last tagged release is `v0.1.3` (notify subcommand + dashboard browser notifications); `v0.2.0` (volleyd, volley-hooks, broker auth, the Desk) is in release prep — every package is versioned `0.2.0`, and its owner smoke path is `docs/SMOKE-v0.2.md`. Canonical repository URL is in `spec/SPEC.md`.
+**Status:** public; pre-1.0. The last tagged release is `v0.1.3` (notify subcommand + dashboard browser notifications); `v0.3.0` is in release prep — every package is versioned `0.3.0`. It ships what `v0.2.0` planned (volleyd, volley-hooks, broker auth on mosquitto ≥ 2.1 Dynamic Security, the Desk; owner smoke path `docs/SMOKE-v0.2.md`) plus onboarding: `volley setup`, the Desk's setup wizard and one-time sign-in links, `volley peer` pairing and `volley claude` accounts (owner smoke: `SMOKE.md` Plan 11). Canonical repository URL is in `spec/SPEC.md`.
 
 **Authoritative docs (read these before changing anything substantive):**
 - `spec/SPEC.md` — wire-format contract, MUST/SHOULD/MAY conformance, error codes
@@ -53,7 +53,7 @@ The mosquitto integration test is opt-in because it needs a real broker on `loca
 
 ## Architecture
 
-**Bun workspace.** `volley-mcp` (MCP server), `volley-cli` (CLI), `volley-dash` (dashboard), the skill packages, and `volleyd` (wave supervisor daemon).
+**Bun workspace.** `volley-mcp` (MCP server), `volley-cli` (CLI, including `volley setup` in `src/setup/` and the broker-auth commands in `src/auth/`), `volley-desk` (the Desk, behind `volley dash`), `volley-dash` (the legacy dashboard), `volley-hooks` (Claude Code hooks), the skill packages, and `volleyd` (wave supervisor daemon).
 
 **`packages/volley-mcp/` — the reference MCP server.** Strictly layered, single I/O boundary:
 - `broker.ts` is the **only** file that imports `mqtt`. It wraps the client with `connect` (arms LWT), `publish`, `queryRetained` (subscribes to read the retained value at one topic), `subscribeCollect` (collects N messages or until a timeout), `disconnect`, `simulateCrash`.
