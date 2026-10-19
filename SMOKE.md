@@ -297,19 +297,26 @@ on GitHub with one small open issue and a pushed release branch
      T1: { issue: <n> }
    ```
    `volleyd validate smoke.yaml` → `ok: wave … 1 task(s)`.
-   - **A wave on `second`.** Copy it to `second.yaml` with a new `wave:` id and the line
-     `account: second` (above `tasks:`), then `volleyd run second.yaml`.
+   - **The threshold prompt, before `second` has any usage.** Run it now, while `second` is
+     signed in but has not run an agent: its card shows no 5-hour or weekly meter. (If it does,
+     from an earlier run, add another account with a new label, e.g. `third`, the same way, and
+     read `third` for `second` below.) `volleyd config set claude.warn_at_pct 1`, then
+     `volleyd run smoke.yaml` (the primary account) and let the agent work until the primary's
+     card shows its 5-hour window at 1 % or more.
+     **Pass:** Settings › Claude accounts & usage shows an *account_limit* banner for the
+     primary account that reads "Move wave <w> to second (no usage yet)? …" and offers
+     **Move to second** and **Not now**. **Fail:** the banner names `second` with a percentage
+     ("(N% used)"), or says no other account has headroom and offers only **Not now**, while
+     `second`'s card still shows no meter (item 3 of #140 has regressed). Those two are what
+     an account that already has a sample gets (under 1 %, and at 1 % or more), which is why this
+     runs before the wave on `second`. **Nothing moves by itself:** the agent stays on the
+     primary. Answer **Not now** and leave the wave running.
+   - **A wave on `second`.** Copy `smoke.yaml` to `second.yaml` with a new `wave:` id and the
+     line `account: second` (above `tasks:`), then `volleyd run second.yaml`.
      **Pass:** its agent starts, and Settings › Claude accounts & usage shows it (and the wave)
      on the `second` card, not the primary's. `volleyd stop <that wave>`.
-   - **The threshold prompt.** `volleyd config set claude.warn_at_pct 1`, then
-     `volleyd run smoke.yaml` (the primary account) and let the agent work for a minute.
-     **Pass:** Settings › Claude accounts & usage shows an *account_limit* banner for the
-     primary account. A signed-in account with no usage sample yet is offered, labelled
-     "no usage yet" (**Move to second**); one above 1 % is not, so after the wave on `second`
-     the banner may say no other account has headroom and offer only **Not now**: either is a
-     pass. **Nothing moves by itself:** the agent stays on the primary. Answer **Not now**.
-   - **Moving an agent.** In the agent's window, pick `second` in the account picker in its
-     title and confirm.
+   - **Moving an agent.** In the primary wave's agent window, pick `second` in the account
+     picker in its title and confirm.
      **Pass:** the agent restarts under `second`, in the same worktree, and
      `<worktree>/.volley/brief.md` ends with a resume note.
    Afterwards: `volleyd stop <wave>` and `volleyd config set claude.warn_at_pct 90`.
