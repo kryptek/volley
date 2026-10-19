@@ -21,6 +21,7 @@ import {
   coordinatorFor,
   ctxFrom,
   needsYouTargets,
+  noSignalFor,
   openDecisions,
   waveAttention,
 } from "./attention";
@@ -36,10 +37,12 @@ import {
 } from "./canvas/useViewport";
 import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
+import { plural } from "./lib/plural";
 import { Appearance } from "./look/Appearance";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock, DeskToast, useToast } from "./look/DeskDock";
 import { type Tether, Tethers } from "./look/Tethers";
+import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
@@ -48,7 +51,13 @@ import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTranspo
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { useDesk } from "./store/context";
-import { UNASSIGNED, agentsByWave, finishedAgents } from "./store/reducer";
+import {
+  UNASSIGNED,
+  agentsByWave,
+  finishedAgents,
+  supervisorList,
+  supervisorNamespace,
+} from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
@@ -71,6 +80,8 @@ const WAVE_H = 440;
 const AGENT_H = 470;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
+/** The supervisor's age (top-bar pill, coordinators row) ticks this often while one is shown. */
+const SUPERVISOR_TICK_MS = 2000;
 
 const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
 
@@ -102,8 +113,8 @@ function interruptBlocker(state: DeskState, a: AgentView): string | undefined {
 
 type Pos = { x: number; y: number };
 
-/** Rough coordinators window height for the initial fit: header + one row per wave + note. */
-const coordsH = (waves: number) => 150 + 66 * waves;
+/** Rough coordinators window height for the initial fit: header + one row per wave and supervisor + note. */
+const coordsH = (rows: number) => 150 + 66 * rows;
 
 /**
  * Placeholder layout: one row per wave, its agents in two columns to the
@@ -134,9 +145,12 @@ function placeholderLayout(
 
 const frameAttn = (a: Attn): Attention | undefined => (a.tier === "none" ? undefined : a.tier);
 
-function useNow(ms: number): number {
+/** A clock ticking every `ms`; `null` stops it. */
+function useNow(ms: number | null): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (ms === null) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), ms);
     return () => clearInterval(t);
   }, [ms]);
@@ -186,7 +200,7 @@ export default function App() {
   const ctx = ctxFrom(state, ctxOpts);
   const [settings, setSettings] = useState<string | null>(null);
   // config_set goes to volleyd's mailbox in its own namespace and is answered on ours there.
-  const daemonNs = state.agents[DAEMON_AGENT_ID]?.namespace ?? "default";
+  const daemonNs = supervisorNamespace(state, DAEMON_AGENT_ID);
   const configTransport = useMemo(
     () =>
       writer && identity && !demo
@@ -259,11 +273,16 @@ export default function App() {
   ];
   const visible = waveIds.filter((id) => !hidden.has(id));
   const waveList = Object.values(state.waves).filter((w) => w.state !== null);
+  // The coordinators window's supervisor row; the demo has no volleyd to report as absent.
+  const supervisors = demo ? undefined : supervisorList(state);
+  // One clock for both, so the pill and the row show the same age.
+  const supNow = useNow(supervisors?.length ? SUPERVISOR_TICK_MS : null);
+  const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
   const rects: Rect[] = [
     ...visible.flatMap(clusterOf),
-    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(waveList.length))] : []),
+    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(coordsRows))] : []),
   ];
   const fitted = useRef(false);
   useEffect(() => {
@@ -275,6 +294,8 @@ export default function App() {
   // ------------------------------------------------------- arrange & fit
   const autoArrange = look.autoArrange;
   const [animating, setAnimating] = useState(false);
+  // The window whose title bar is held: only its tethers sway (D10).
+  const [dragging, setDragging] = useState<string | null>(null);
   const animEnd = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(animEnd.current), []);
   const arrange = () => {
@@ -282,14 +303,17 @@ export default function App() {
     for (const id of Object.keys(sizes.current)) {
       if (id !== COORDS_ID && !state.agents[id] && !waveIds.includes(id)) delete sizes.current[id];
     }
+    // The waves, then the unassigned group and the coordinators window as side
+    // clusters: arrange closes the waves' first row with them.
     const clusters: Cluster[] = [
-      ...(coordsShown
-        ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(waveList.length)), kids: [] }]
-        : []),
       ...visible.map((id) => ({
         main: sizeOf(id, WAVE_W, WAVE_H),
         kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
+        ...(id === UNASSIGNED ? { side: true } : {}),
       })),
+      ...(coordsShown
+        ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
+        : []),
     ];
     const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
     if (!r) return;
@@ -324,6 +348,7 @@ export default function App() {
     attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
+    onDrag: (on: boolean) => setDragging((d) => (on ? id : d === id ? null : d)),
     // A window not laid out yet (0 × 0) keeps its fallback size.
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
@@ -398,10 +423,13 @@ export default function App() {
   const tethers: Tether[] = visible.flatMap((id) =>
     (groups[id] ?? []).map((a) => ({
       id: a.id,
+      waveId: id,
       // The rendered width: on a phone the wave window is clamped.
       wave: rectOf(id, WAVE_W, WAVE_H),
       agent: pos(a.id),
       accent: accentOf(id),
+      // A new `progress` envelope sends a pulse down the cable (D10).
+      beat: progressBeat(a.feed),
     })),
   );
   useDeskKeys({
@@ -443,7 +471,7 @@ export default function App() {
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
         <World view={view} animating={animating}>
-          <Tethers on={look.tethers} tethers={tethers} />
+          <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -461,6 +489,8 @@ export default function App() {
               fitTo={fitTo}
               clusterOf={clusterOf}
               onClose={() => setCoordsOpen(false)}
+              {...(supervisors ? { supervisors } : {})}
+              now={supNow}
               finished={{
                 hidden: finishedHidden,
                 shown: look.showFinished,
@@ -474,7 +504,7 @@ export default function App() {
             if (!wave) {
               return (
                 <Frame key={id} {...frame(id, NEUTRAL_ACCENT, WAVE_W)} title={id}>
-                  <div className="dim">{groups[id]?.length ?? 0} agents with no wave</div>
+                  <div className="dim">{plural(groups[id]?.length ?? 0, "agent")} with no wave</div>
                 </Frame>
               );
             }
@@ -540,6 +570,7 @@ export default function App() {
                   frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
                   narrationFx={look.narr}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
+                  noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
                   onChat={toggleSteer}
                   steerOpen={steerOpen === a.id}
                   steer={
@@ -585,6 +616,7 @@ export default function App() {
         notify={notify}
         setNotify={setNotify}
         compact={narrow}
+        now={supNow}
       />
 
       {lookOpen && (

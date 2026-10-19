@@ -596,6 +596,19 @@ launch command is typed into that pane (`agent_spawned { recovered_from, recover
 "update_prompt" }`). A second workspace is never opened in the same worktree. A second failed
 verification opens `unknown_screen`.
 
+### Unattended coordinator starts
+
+Claude Code's first-run *Claude in Chrome* prompt ("use Chrome browser?") waits for a key, and
+it is asked once per user profile, whenever Chrome is found and `claudeInChromeDefaultEnabled`
+is unset in the profile's `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` with a custom
+config dir). An unattended start — a coordinator session, or an agent spawned on a host whose
+profile never answered it — stalls on that prompt. Before the first unattended start on each
+host and user profile, answer it once in an interactive `claude` (or set *Claude in Chrome →
+Enabled by default* in `/config`) so the key holds `true` or `false`; `claude --no-chrome` also
+skips it, for that session only. Today the screen classifies as `unknown_screen`; a dedicated
+`browser_prompt` class (decision: "Needs you: answer Claude Code's Chrome prompt on `<host>`")
+is a follow-up.
+
 ### Journal mapping
 
 The journal's event types are the closed `wave-event` enum, so the steps use it as follows:

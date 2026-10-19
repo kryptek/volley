@@ -84,11 +84,10 @@
   font-size: 12px;
   color: var(--mute);
 }
+/* Recessed (desk.css `.recessed`, D10). */
 .steer-ro-input {
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid var(--line);
-  background: rgba(10, 12, 20, 0.92);
   color: var(--ink);
   font: inherit;
   font-size: 13px;

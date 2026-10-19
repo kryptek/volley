@@ -56,6 +56,13 @@ Before running any subcommand:
    `agent_id`) or `vol_list_agents` and look for the entry whose
    `capabilities` include `coordinator`.
 
+   Keep `"VOLLEY_AGENT_ID": "coordinator"`. Without it the id is named after the session's
+   working directory (`volley-XXXX` in a volley checkout, `<repo>-XXXX` elsewhere), which
+   reads as just another agent: the `--owner` a `/volley-issues` wave is submitted with, the
+   Desk's owner chip and `★ yours`, and the v0.2 owner smoke (`docs/SMOKE-v0.2.md`) all
+   expect the `coordinator-XXXX` id. For a separate registry (a smoke run, a dispatch batch),
+   change `VOLLEY_NAMESPACE` rather than the prefix.
+
    If `~/.claude/skills/volley/SKILL.md` exists but the MCP isn't registered, also try running `bash <volley-repo>/packages/volley-skill/scripts/install.sh` — the installer prints a ready-to-paste `claude mcp add-json` command with the path already filled in.
 
 2. Confirm the broker is reachable. If any tool call returns `{ code: "BROKER_DOWN" }`, stop and tell the user to start mosquitto: `brew services start mosquitto`. Do NOT retry the tool call until they confirm.

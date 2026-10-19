@@ -138,6 +138,34 @@ describe("SettingsModal", () => {
     setExecCommand(undefined);
   });
 
+  it("the scope is a radiogroup: one Tab stop, arrow keys move and commit the scope (D10)", () => {
+    setup(null);
+    const group = screen.getByRole("radiogroup", { name: "Scope" });
+    const waveRadio = within(group).getByRole("radio", { name: /This wave/ });
+    const globalRadio = within(group).getByRole("radio", { name: "Global" });
+    // Roving tabindex: only the checked radio is in the Tab order.
+    expect(waveRadio).toHaveAttribute("aria-checked", "true");
+    expect(waveRadio).toHaveAttribute("tabindex", "0");
+    expect(globalRadio).toHaveAttribute("aria-checked", "false");
+    expect(globalRadio).toHaveAttribute("tabindex", "-1");
+    const fallback = () => screen.queryByRole("textbox", { name: "Fallback model" });
+    // The wave's effective config is read-only.
+    expect(fallback()).toBeDisabled();
+    waveRadio.focus();
+    fireEvent.keyDown(waveRadio, { key: "ArrowRight" });
+    expect(globalRadio).toHaveAttribute("aria-checked", "true");
+    expect(globalRadio).toHaveAttribute("tabindex", "0");
+    expect(waveRadio).toHaveAttribute("tabindex", "-1");
+    expect(document.activeElement).toBe(globalRadio);
+    // The rows switch to the global scope: editable global values.
+    expect(fallback()).toBeEnabled();
+    expect(fallback()).toHaveValue("claude-sonnet-5-5");
+    fireEvent.keyDown(globalRadio, { key: "ArrowLeft" });
+    expect(waveRadio).toHaveAttribute("aria-checked", "true");
+    expect(document.activeElement).toBe(waveRadio);
+    expect(fallback()).toBeDisabled();
+  });
+
   it("builds its sections from the schema and shows the current global values", () => {
     setup(null);
     fireEvent.click(screen.getByRole("radio", { name: "Global" }));

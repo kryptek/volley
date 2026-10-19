@@ -99,6 +99,11 @@ describe("CoordinatorsWindow", () => {
     expect(screen.getByText("2 need you")).toHaveClass("chip--hot");
   });
 
+  it("says `1 needs you` for one", () => {
+    setup({ needsYou: 1 });
+    expect(screen.getByText("1 needs you")).toHaveClass("chip--hot");
+  });
+
   it("shows each wave's progress", () => {
     setup();
     const bar = row("ci-speed").querySelector(".coord-bar > span") as HTMLElement;
@@ -156,5 +161,13 @@ describe("CoordinatorsWindow", () => {
     const p = setup();
     fireEvent.click(screen.getByRole("button", { name: "Close coordinators" }));
     expect(p.onClose).toHaveBeenCalled();
+  });
+});
+
+describe("CoordinatorsWindow supervisor row", () => {
+  it("is absent without supervisors (the demo), so the first row is the first wave", () => {
+    setup();
+    expect(screen.queryByRole("listitem", { name: /^Supervisor/ })).toBeNull();
+    expect(screen.getAllByRole("listitem")[0]).toHaveAccessibleName("status-chip");
   });
 });

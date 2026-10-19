@@ -11,8 +11,16 @@
  * - **coordinator** — an open decision or a merge-ready gate on a wave with a
  *   live coordinator, or a stuck agent with one. Items left unresolved for
  *   `escalate_after_min` are promoted to **you**.
- * - **info** — notable but nobody's job yet: an open PR, a lease wait.
+ * - **info** — notable but nobody's job yet: an open PR, a lease wait, an
+ *   agent with no signal (below). A no-signal implementer in stage
+ *   `implement` under a live coordinator is that coordinator's: **coordinator**.
  * - **none** — nothing to see.
+ *
+ * **No signal**: a live (not finished, blocked or waiting) agent whose
+ * registry entry is here but no status, progress or heartbeat is, or whose
+ * last one is older than `no_signal_after_s` (default 120 s, read like
+ * `claim_after_s`; not a SPEC §4.6.4 tunable yet). Typically its Volley MCP
+ * server is connected to another broker, so it only looks idle.
  *
  * `claim_after_s` comes from the wave's `effective_config`, else the retained
  * global config, else volleyd's default. `escalate_after_min` is read the same
@@ -33,6 +41,7 @@ import type {
   DecisionPayload,
   DeskState,
   LeasePoolPayload,
+  RegistryPayload,
   Tunables,
   WaveTask,
   WaveView,
@@ -44,6 +53,9 @@ export type Tier = "you" | "coordinator" | "info" | "none";
 export const DEFAULT_CLAIM_AFTER_S = 1800;
 /** The prototype's default `escalate_after_min`. */
 export const DEFAULT_ESCALATE_AFTER_MIN = 15;
+/** Silence after which a live agent has no signal (`no_signal_after_s`). */
+export const DEFAULT_NO_SIGNAL_AFTER_S = 120;
+export const NO_SIGNAL_LABEL = "no signal — MCP not on this broker?";
 
 export interface AttentionCtx {
   now: number;
@@ -118,6 +130,8 @@ function tunables(w: WaveView | undefined, ctx: AttentionCtx) {
     escalateMs:
       (num(local.escalate_after_min, global.escalate_after_min) ?? DEFAULT_ESCALATE_AFTER_MIN) *
       60_000,
+    noSignalMs:
+      (num(local.no_signal_after_s, global.no_signal_after_s) ?? DEFAULT_NO_SIGNAL_AFTER_S) * 1000,
   };
 }
 
@@ -284,8 +298,63 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
         : { tier: "you", reason };
     }
   }
+  const ns = noSignalFor(a, w, ctx);
+  if (ns) {
+    const stage = s?.tasks.find((t) => t.id === task)?.stage;
+    const theirs = live && a.role === "implementer" && stage === "implement";
+    return theirs ? handled(ns.reason, ns.since, w, ctx) : { tier: "info", reason: ns.reason };
+  }
   const tasks = s?.tasks.filter((t) => t.id === task) ?? [];
   return infoFor(tasks, [a.id], ctx);
+}
+
+/** An agent's no-signal state: the window's label and tooltip, and its attention reason. */
+export interface NoSignal {
+  label: string;
+  /** The wave state's `why_waiting` for the agent's task when the supervisor set one, else the label. */
+  reason: string;
+  /** Tooltip: what is missing and where the session runs, when its registry says. */
+  title: string;
+  /** ms the silence began: the last signal plus `no_signal_after_s`, else its registration. */
+  since: number;
+}
+
+/** The agent's no-signal state (see the module comment), or null while it has a signal. */
+export function noSignalFor(
+  a: AgentView,
+  w: WaveView | undefined,
+  ctx: AttentionCtx,
+): NoSignal | null {
+  const type = a.status?.type;
+  if (type !== undefined && (ENDED_STATUS.has(type) || STUCK_STATUS.has(type))) return null;
+  // Quiet on purpose: waiting for a human, or its turn ended (the hooks said so, on this broker).
+  if (a.attention || a.lastProgress?.type === "idle") return null;
+  // Local receipt for live messages: a sender's skewed clock must not read as silence.
+  const signals = [a.status?.seenAt ?? a.status?.at, a.heartbeat, a.lastProgress?.at].filter(
+    (t): t is number => typeof t === "number" && Number.isFinite(t),
+  );
+  const reg: Partial<RegistryPayload> = a.registry ?? {};
+  let silent: number | null = null;
+  let since: number;
+  if (signals.length === 0) {
+    if (!a.registered) return null;
+    since = parseTime(reg.started_at) ?? a.lastSeen;
+  } else {
+    silent = connectedSilence(Math.max(...signals), ctx.now, ctx.offline);
+    const limit = tunables(w, ctx).noSignalMs;
+    if (silent <= limit) return null;
+    since = ctx.now - (silent - limit);
+  }
+  const why = a.task ? w?.state?.tasks.find((t) => t.id === a.task)?.why_waiting : undefined;
+  const head =
+    silent === null
+      ? `${a.id} registered here but has published no status, progress or heartbeat.`
+      : `Nothing from ${a.id} for ${Math.round(silent / 1000)} s.`;
+  const where = [typeof reg.cwd === "string" && reg.cwd !== "" && `the session runs in ${reg.cwd}`]
+    .filter(Boolean)
+    .join("; ");
+  const title = `${head} Its Volley MCP server may be connected to another broker${where ? ` (${where})` : ""}.`;
+  return { label: NO_SIGNAL_LABEL, reason: why || NO_SIGNAL_LABEL, title, since };
 }
 
 /** `Blocked: <reason>` from the status payload, without doubling a leading "Blocked". */

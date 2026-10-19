@@ -4,7 +4,9 @@ import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import {
+  DEMO_AGENTS_MAX,
   NARRATION_POOL,
+  demoAgentCount,
   demoMessages,
   demoReviewer,
   demoState,
@@ -92,6 +94,38 @@ describe("fixtures — tick", () => {
     expect(added).toHaveLength(1);
     expect(added[0]).toMatchObject({ role: "spec_reviewer", bornAt: NOW + 22_000 });
     expect(added[0]?.wave).not.toBe(UNASSIGNED);
+  });
+});
+
+describe("fixtures — sized demo (?demo=1&agents=N, for the 20-agent fps check)", () => {
+  it("reads the agent count from the query, clamped to the stock 5 … DEMO_AGENTS_MAX", () => {
+    expect(demoAgentCount("?demo=1")).toBe(5);
+    expect(demoAgentCount("?demo=1&agents=20")).toBe(20);
+    expect(demoAgentCount("?demo=1&agents=2")).toBe(5);
+    expect(demoAgentCount("?demo=1&agents=999")).toBe(DEMO_AGENTS_MAX);
+    expect(demoAgentCount("?demo=1&agents=lots")).toBe(5);
+  });
+
+  it("adds working agents on a load wave, all assigned, keeping the stock demo", () => {
+    const s = demoState(NOW, 20);
+    expect(Object.keys(s.agents)).toHaveLength(20);
+    expect(Object.keys(s.waves)).toHaveLength(4);
+    expect(agentsByWave(s)[UNASSIGNED]).toEqual([]);
+    const stock = demoState(NOW);
+    for (const id of Object.keys(stock.agents)) expect(s.agents[id]).toBeDefined();
+    const extra = Object.values(s.agents).filter((a) => !stock.agents[a.id]);
+    expect(extra).toHaveLength(15);
+    for (const a of extra) expect(a.status?.type).toBe("working");
+  });
+
+  it("every added agent narrates on tick, so every tether pulses", () => {
+    const s = demoState(NOW, 20);
+    const stock = demoState(NOW);
+    const next = tick(s, 0, NOW + 2600);
+    const extra = Object.keys(s.agents).filter((id) => !stock.agents[id]);
+    for (const id of extra) {
+      expect(next.agents[id]?.feed.length, id).toBeGreaterThan(s.agents[id]?.feed.length ?? 0);
+    }
   });
 });
 

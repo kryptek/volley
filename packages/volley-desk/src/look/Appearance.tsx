@@ -54,7 +54,7 @@ function GraceInput({ value, onCommit }: { value: number; onCommit: (min: number
   return (
     <input
       id="look-finished-grace"
-      className="look-num mono"
+      className="look-num recessed mono"
       type="number"
       min={0}
       max={FINISHED_GRACE_MAX_MIN}
@@ -110,7 +110,7 @@ export function Appearance({
         Now: <b>{current?.name ?? look.bg}</b>
       </div>
       <input
-        className="bg-search"
+        className="bg-search recessed"
         type="search"
         placeholder="Search backgrounds…"
         value={q}
