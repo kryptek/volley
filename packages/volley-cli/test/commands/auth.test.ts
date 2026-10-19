@@ -167,7 +167,75 @@ describe("volley auth", () => {
       );
       const r = await run(["init"]);
       expect(r.code).toBe(0);
-      expect(readFileSync(layout.config, "utf-8")).toMatch(/^listener 9001$/m);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001$/m);
+      expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) open to the LAN, as `volley setup` recorded (`volley setup --no-lan` closes it).",
+      );
+    });
+
+    it("a loopback 9001 in the config beats a stale `lan: true` in setup.json", async () => {
+      const home = join(dir, "volleyd-home");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, "setup.json"), JSON.stringify({ layout: "brew-arm64", lan: true }));
+      const old = generateConfig(layout).replace(/\nset_tcp_nodelay true\n/, "\n");
+      writeFileSync(layout.config, old);
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toMatch(/^listener 9001$/m);
+      expect(r.stdout).not.toContain("Kept the WebSocket listener");
+    });
+
+    it("keeps the bind of the 9001 WebSocket listener, never another WebSocket listener's", async () => {
+      writeFileSync(
+        layout.config,
+        "listener 1883 127.0.0.1\nlistener 8080\nprotocol websockets\nlistener 9001 127.0.0.1\nprotocol websockets\n",
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toMatch(/^listener 9001$/m);
+      expect(r.stdout).toContain("Listener change: WebSocket 8080 on every interface removed");
+      expect(r.stdout).not.toContain("Kept the WebSocket listener");
+    });
+
+    it("a hand-written bind is kept without claiming `volley setup --lan` opened it", async () => {
+      writeFileSync(
+        layout.config,
+        "listener 1883 127.0.0.1\nlistener 9001 192.0.2.10\nprotocol websockets\n",
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).not.toContain("volley setup --lan");
+      expect(conf).toContain("kept from the previous config");
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) on 192.0.2.10, as the previous config had it.",
+      );
+      expect(r.stdout).not.toContain("--no-lan");
+    });
+
+    it("on the container layout a loopback 9001 is kept with no `--no-lan` hint", async () => {
+      layout = {
+        ...LAYOUTS.container,
+        config: layout.config,
+        authDir,
+        stateFile: layout.stateFile,
+      };
+      writeFileSync(layout.config, "listener 1883\nlistener 9001 127.0.0.1\nprotocol websockets\n");
+      const r = await run(["init"], fakeDeps(fake, layout));
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toContain("volley setup --lan");
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) on 127.0.0.1, as the previous config had it.",
+      );
+      expect(r.stdout).not.toContain("--no-lan");
     });
 
     it("refuses a broker older than 2.1 before anything is written", async () => {

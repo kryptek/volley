@@ -159,9 +159,12 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       );
       return EXIT.ERROR;
     }
-    // The WebSocket listener keeps its bind (`volley setup --lan` opened it to the LAN, or the
-    // config's own); with none to read, the LAN choice setup.json recorded.
-    const found = configListeners(current).find((l) => l.protocol === "websockets")?.bind;
+    // The WebSocket listener on 9001 keeps its bind (`volley setup --lan` opened it to the LAN,
+    // or the config's own; never another WebSocket listener's); with none to read, the LAN
+    // choice setup.json recorded.
+    const found = configListeners(current).find(
+      (l) => l.protocol === "websockets" && l.port === 9001,
+    )?.bind;
     const recorded = readSetupInstall(volleydHome(ctx.env, sudoUser?.home))?.lan;
     const wsBind = found ?? (recorded === true ? "" : layout.bind);
     const wanted = generateConfig({ ...layout, stateFile: f.stateFile, wsBind });
@@ -179,8 +182,10 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       restartNeeded = true;
       out.push(`Wrote ${f.config}.`);
       if (wsBind !== layout.bind) {
+        // Only a LAN bind on a loopback layout is `volley setup --lan`'s, which `--no-lan` closes.
+        const lan = wsBind === "" && layout.bind !== "";
         out.push(
-          `Kept the WebSocket listener (9001) ${wsBind === "" ? "open to the LAN" : `on ${wsBind}`}, as ${found !== undefined ? "the previous config had it" : "`volley setup` recorded"} (\`volley setup --no-lan\` closes it).`,
+          `Kept the WebSocket listener (9001) ${lan ? "open to the LAN" : `on ${wsBind}`}, as ${found !== undefined ? "the previous config had it" : "`volley setup` recorded"}${lan ? " (`volley setup --no-lan` closes it)" : ""}.`,
         );
       }
       if (w.backup !== null) {

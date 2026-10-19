@@ -96,6 +96,26 @@ describe("configListeners / listenerChanges", () => {
       "Listener change: TCP 8883 on every interface removed",
     ]);
   });
+
+  it("pairs a listener with the one on its own port before the rest", () => {
+    const local = generateConfig(LAYOUTS.etc);
+    const two =
+      "listener 1883 127.0.0.1\nlistener 8080\nprotocol websockets\nlistener 9001\nprotocol websockets\n";
+    expect(listenerChanges(two, local)).toEqual([
+      "Listener change: WebSocket 9001 on every interface → 127.0.0.1",
+      "Listener change: WebSocket 8080 on every interface removed",
+    ]);
+  });
+
+  it("names the LAN only for `volley setup --lan`'s bind; any other kept bind gets a neutral comment", () => {
+    expect(generateConfig({ ...LAYOUTS.etc, wsBind: "" })).toContain("volley setup --lan");
+    const kept = generateConfig({ ...LAYOUTS.etc, wsBind: "192.0.2.10" });
+    expect(kept).not.toContain("volley setup --lan");
+    expect(kept).toContain("# WebSocket bind kept from the previous config.");
+    const container = generateConfig({ ...LAYOUTS.container, wsBind: "127.0.0.1" });
+    expect(container).not.toContain("volley setup --lan");
+    expect(generateConfig(LAYOUTS.container)).not.toContain("kept from the previous config");
+  });
 });
 
 describe("configTraps", () => {
