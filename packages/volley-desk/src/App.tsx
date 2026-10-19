@@ -9,7 +9,10 @@
  * `look/`): the picked React Bits background under its dim, the window chrome,
  * Needs-you and narration effects, tethers and the dock. The Settings window (O1,
  * `settings/SettingsWindow.tsx`) holds General, Appearance, Supervisor (the global
- * volleyd config) and About; a wave's ⚙ opens that wave's effective config.
+ * volleyd config), the Onboarding sections and About; a wave's ⚙ opens that wave's
+ * effective config. Onboarding (O4): Broker accounts and Setup & Security talk to
+ * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
+ * opens Setup & Security once, and its Preview shows the sign-in screen.
  * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
@@ -30,6 +33,7 @@ import {
   openDecisions,
   waveAttention,
 } from "./attention";
+import { SignInPreview } from "./auth/SignInGate";
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import {
@@ -59,6 +63,7 @@ import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
+import { createAuthOps, deskUrl, takeFirstRun } from "./store/control";
 import {
   UNASSIGNED,
   agentsByWave,
@@ -190,7 +195,8 @@ function useGateSince(state: DeskState, settling: boolean): Record<string, numbe
 }
 
 export default function App() {
-  const { state, connection, demo, settling, offline, syncing, writer, identity } = useDesk();
+  const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
+    useDesk();
   const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
   const vw = useViewportWidth();
   const narrow = vw < NARROW_PX;
@@ -235,8 +241,17 @@ export default function App() {
   const webgl = useWebGL();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl);
-  /** The Settings window's section while it is open. */
-  const [deskSettings, setDeskSettings] = useState<SectionKey | null>(null);
+  /** The Settings window's section while it is open; setup once after an admin token sign-in. */
+  const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
+    takeFirstRun() ? "setup" : null,
+  );
+  /** volleyd's admin channel (account and setup ops); the Desk's own account must be an admin. */
+  const authOps = useMemo(
+    () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
+    [writer, identity, demo],
+  );
+  /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
+  const [preview, setPreview] = useState(false);
 
   const allGroups = agentsByWave(state);
   // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
@@ -496,7 +511,8 @@ export default function App() {
     zoomAt: (f) => zoomAt(f),
     arrange,
     closeTop: () => {
-      if (settings !== null) setSettings(null);
+      if (preview) setPreview(false);
+      else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
       else if (steerOpen !== null) setSteerOpen(null);
       else return false;
@@ -716,8 +732,27 @@ export default function App() {
             control,
             onRegistry: setRegistry,
           }}
+          onboarding={{
+            ops: authOps,
+            brokerUrl,
+            deskUrl: deskUrl(window.location),
+            onPreviewSignIn: () => {
+              setDeskSettings(null);
+              setPreview(true);
+            },
+          }}
           onArrange={arrange}
           onClose={() => setDeskSettings(null)}
+        />
+      )}
+
+      {preview && (
+        <SignInPreview
+          brokerUrl={brokerUrl ?? "demo"}
+          onClose={() => {
+            setPreview(false);
+            setDeskSettings("setup");
+          }}
         />
       )}
 

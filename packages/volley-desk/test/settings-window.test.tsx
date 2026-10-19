@@ -426,14 +426,24 @@ describe("SettingsWindow", () => {
     expect(body.getByText("Warn me at")).toBeInTheDocument();
   });
 
-  it.each([
-    ["accounts", "Broker accounts"],
-    ["machines", "Machines"],
-    ["setup", "Setup & Security"],
-  ] as [SectionKey, string][])("%s is a placeholder until Onboarding fills it", (key, label) => {
-    render(<Harness initial={key} />);
-    expect(heading()).toHaveTextContent(label);
-    expect(within(dialog()).getByText(/Coming with Onboarding/)).toBeInTheDocument();
+  it.each([["machines", "Machines"]] as [SectionKey, string][])(
+    "%s is a placeholder until Onboarding fills it",
+    (key, label) => {
+      render(<Harness initial={key} />);
+      expect(heading()).toHaveTextContent(label);
+      expect(within(dialog()).getByText(/Coming with Onboarding/)).toBeInTheDocument();
+    },
+  );
+
+  it("Broker accounts and Setup & Security are read-only without an admin", () => {
+    render(<Harness initial="accounts" />);
+    expect(heading()).toHaveTextContent("Broker accounts");
+    expect(within(dialog()).getByText(/Only an admin can list and manage/)).toBeInTheDocument();
+    expect(within(dialog()).queryByText(/Coming with Onboarding/)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog()).getByRole("button", { name: "Setup & Security" }));
+    expect(heading()).toHaveTextContent("Setup & Security");
+    expect(within(dialog()).getByText("Connected to")).toBeInTheDocument();
+    expect(within(dialog()).queryByRole("button", { name: "Open setup…" })).toBeNull();
   });
 });
 
