@@ -1,0 +1,211 @@
+{
+  "label": "mosquitto version 2.1.2 (container eclipse-mosquitto:2.1.2-alpine, set_tcp_nodelay false)",
+  "quick": false,
+  "run": "z07i",
+  "j_crossVersion": "2.0 file in 2.1: broker starts, admin login ok; 2.1 file in 2.0: broker starts, admin login REFUSED (Client auto-1ABEEA25-9134-F884-FD78-06999A77BB9C disconnected, not authorised.)",
+  "brokerVersion": "mosquitto version 2.1.2",
+  "b_latency": {
+    "rows": [
+      {
+        "mode": "shared",
+        "concurrency": 1,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 41.97,
+          "p95": 42.05,
+          "p99": 43.02,
+          "max": 43.04,
+          "mean": 41.79,
+          "opsPerSec": 23.9
+        },
+        "delete": {
+          "n": 200,
+          "p50": 41.01,
+          "p95": 41.99,
+          "p99": 42.04,
+          "max": 42.14,
+          "mean": 41.13,
+          "opsPerSec": 24.3
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 10,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 41.88,
+          "p95": 42.17,
+          "p99": 42.96,
+          "max": 43.02,
+          "mean": 41.84,
+          "opsPerSec": 238.5
+        },
+        "delete": {
+          "n": 200,
+          "p50": 40.95,
+          "p95": 41.13,
+          "p99": 41.98,
+          "max": 42.02,
+          "mean": 40.99,
+          "opsPerSec": 243.6
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 50,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 41.84,
+          "p95": 42.63,
+          "p99": 42.7,
+          "max": 42.75,
+          "mean": 42,
+          "opsPerSec": 1183.1
+        },
+        "delete": {
+          "n": 200,
+          "p50": 41.71,
+          "p95": 42.12,
+          "p99": 42.16,
+          "max": 42.19,
+          "mean": 41.63,
+          "opsPerSec": 1196.6
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 200,
+        "ops": 400,
+        "create": {
+          "n": 400,
+          "p50": 126.82,
+          "p95": 183.67,
+          "p99": 187.68,
+          "max": 187.71,
+          "mean": 112.25,
+          "opsPerSec": 1266.2
+        },
+        "delete": {
+          "n": 400,
+          "p50": 84.04,
+          "p95": 126.29,
+          "p99": 167.96,
+          "max": 167.97,
+          "mean": 86.22,
+          "opsPerSec": 1908.1
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 1,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 41.96,
+          "p95": 42.05,
+          "p99": 42.97,
+          "max": 43.06,
+          "mean": 41.66,
+          "opsPerSec": 24
+        },
+        "delete": {
+          "n": 200,
+          "p50": 41,
+          "p95": 41.96,
+          "p99": 42.02,
+          "max": 42.03,
+          "mean": 41.08,
+          "opsPerSec": 24.3
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 10,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 41.92,
+          "p95": 43.39,
+          "p99": 43.87,
+          "max": 43.92,
+          "mean": 41.84,
+          "opsPerSec": 238.3
+        },
+        "delete": {
+          "n": 200,
+          "p50": 41.12,
+          "p95": 42.36,
+          "p99": 42.62,
+          "max": 42.92,
+          "mean": 41.31,
+          "opsPerSec": 241.8
+        },
+        "responsesSeenByOtherConnections": 5400
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 50,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 31.52,
+          "p95": 76.28,
+          "p99": 92.23,
+          "max": 92.45,
+          "mean": 36.26,
+          "opsPerSec": 1082.5
+        },
+        "delete": {
+          "n": 200,
+          "p50": 16.82,
+          "p95": 33.7,
+          "p99": 37.31,
+          "max": 37.44,
+          "mean": 17.63,
+          "opsPerSec": 2729.1
+        },
+        "responsesSeenByOtherConnections": 29367
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 200,
+        "ops": 400,
+        "create": {
+          "n": 400,
+          "p50": 261.82,
+          "p95": 295.03,
+          "p99": 307.91,
+          "max": 479.65,
+          "mean": 240.57,
+          "opsPerSec": 696.2
+        },
+        "delete": {
+          "n": 400,
+          "p50": 139.44,
+          "p95": 223.82,
+          "p99": 228.25,
+          "max": 306.26,
+          "mean": 159.01,
+          "opsPerSec": 1090.8
+        },
+        "responsesSeenByOtherConnections": 238746
+      }
+    ],
+    "inlineRoleCreate": {
+      "n": 100,
+      "p50": 41.06,
+      "p95": 41.97,
+      "p99": 42.06,
+      "max": 42.36,
+      "mean": 41.21
+    }
+  }
+}

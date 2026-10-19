@@ -1,0 +1,1101 @@
+{
+  "label": "mosquitto version 2.1.2 (container eclipse-mosquitto:2.1.2-alpine)",
+  "quick": false,
+  "run": "3d4g",
+  "j_crossVersion": "2.0 file in 2.1: broker starts, admin login ok; 2.1 file in 2.0: broker starts, admin login REFUSED (Client auto-B898AC35-48EB-2088-76A0-FD06F80611F0 disconnected, not authorised.)",
+  "brokerVersion": "mosquitto version 2.1.2",
+  "i_bootstrap": {
+    "commands": 36,
+    "firstRunMs": 4.2,
+    "firstRunErrors": [],
+    "rerunMs": 0.4,
+    "rerunErrors": {
+      "createRole: Role already exists": 4,
+      "addRoleACL: ACL with this topic already exists": 24,
+      "createClient: Client already exists": 3,
+      "addClientRole: Internal error": 5
+    },
+    "rerunUntoleratedErrors": 0,
+    "coordinatorRolesAfterRerun": ["volley-agent", "volley-coordinator"],
+    "aclsAfterFirst": 9,
+    "aclsAfterRerun": 9,
+    "connectedFixedIdentitiesKickedByRerun": 0,
+    "rerunKeepsOriginalPassword": true,
+    "initRerunOnExistingFile": "dynsec init: Unable to open '<file>' for writing (File exists). exit=0",
+    "dynsecJsonModeAfterPluginWrite": "600"
+  },
+  "a_acl": {
+    "cases": [
+      {
+        "who": "3d4g-x",
+        "topic": "volley/bench/3d4g-x/status",
+        "note": "own status (%u)",
+        "expect": true,
+        "delivered": true,
+        "pass": true
+      },
+      {
+        "who": "3d4g-x",
+        "topic": "volley/bench/3d4g-y/mailbox",
+        "note": "other agent's mailbox",
+        "expect": false,
+        "delivered": false,
+        "pass": true
+      },
+      {
+        "who": "3d4g-x",
+        "topic": "volley/bench/3d4g-y/status",
+        "note": "other agent's status",
+        "expect": false,
+        "delivered": false,
+        "pass": true
+      },
+      {
+        "who": "3d4g-x",
+        "topic": "volley/_system/registry/3d4g-x",
+        "note": "own registry entry",
+        "expect": true,
+        "delivered": true,
+        "pass": true
+      },
+      {
+        "who": "3d4g-x",
+        "topic": "volley/_system/registry/3d4g-y",
+        "note": "other registry entry",
+        "expect": false,
+        "delivered": false,
+        "pass": true
+      },
+      {
+        "who": "3d4g-c",
+        "topic": "volley/bench/3d4g-cid/status",
+        "note": "%c = client id",
+        "expect": true,
+        "delivered": true,
+        "pass": true
+      },
+      {
+        "who": "3d4g-c",
+        "topic": "volley/bench/3d4g-c/status",
+        "note": "%c is not the username",
+        "expect": false,
+        "delivered": false,
+        "pass": true
+      },
+      {
+        "who": "3d4g-x",
+        "topic": "volley/_waves/3d4g-x/status",
+        "note": "`+` matches _waves (caveat)",
+        "expect": true,
+        "delivered": true,
+        "pass": true
+      },
+      {
+        "who": "3d4g-l",
+        "topic": "volley/bench/3d4g-l/status",
+        "note": "per-agent literal role: own status",
+        "expect": true,
+        "delivered": true,
+        "pass": true
+      },
+      {
+        "who": "3d4g-l",
+        "topic": "volley/bench/3d4g-y/mailbox",
+        "note": "per-agent literal role: other mailbox",
+        "expect": false,
+        "delivered": false,
+        "pass": true
+      }
+    ],
+    "patternCasesPass": true,
+    "literalControlPass": true,
+    "v5PubackOnDenied": "Publish error: Not authorized",
+    "v311PubackOnDenied": "PUBACK success (MQTT 3.1.1 has no reason code; the message is dropped)",
+    "subscribeGranted": ["volley/bench/+/mailbox -> qos 1", "volley/# -> qos 1"]
+  },
+  "h_listeners": {
+    "perListenerSettingsFalse": {
+      "tcp dynsec client": "ok",
+      "tcp wrong password": "refused (CONNACK 5)",
+      "tcp anonymous": "refused (CONNACK 5)",
+      "ws dynsec client": "ok",
+      "ws wrong password": "refused (CONNACK 5)",
+      "ws anonymous": "refused (CONNACK 5)",
+      "ws ACL: other mailbox delivered": "false",
+      "ws ACL: own status delivered": "true"
+    },
+    "perListenerSettingsTrue": {
+      "status": "did not start: 1792376807: Plugin dynamic-security has registered to receive 'acl-check' events. 1792376807: Plugin dynamic-security has registered to receive 'tick' events. 1792376807: Plugin dynamic-security loaded. 1792376807: Loading plugin: /usr/lib/mosquitto_dynamic_security.so 1792376807: Error: Dynamic security plugin can currently only be loaded once. 1792376807: Note that this was previously incorrectly allowed but could cause problems with duplicate entries in the config. 1792376807: Error: Plugin returned 31 when initialising. 1792376807: mosquitto version 2.1.2 terminating "
+    }
+  },
+  "g_expiry": {
+    "createWithUnknownFields": "accepted",
+    "getClientFields": ["username", "roles", "groups", "connections"],
+    "fileEntryFields": ["username", "roles", "encoded_password"],
+    "anyExpiryField": false
+  },
+  "f_kick": {
+    "deleteClient": {
+      "trials": 20,
+      "controlCrashWillMs": 0.44,
+      "ackMs": {
+        "n": 20,
+        "p50": 2.14,
+        "p95": 2.49,
+        "p99": 2.51,
+        "max": 2.51,
+        "mean": 2.01
+      },
+      "disconnectMs": {
+        "n": 20,
+        "p50": 2.31,
+        "p95": 2.63,
+        "p99": 2.66,
+        "max": 2.66,
+        "mean": 2.17
+      },
+      "notDisconnected": 0,
+      "closedBeforeAckClientSide": 0,
+      "willMs": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "noWill": 20,
+      "v5Reason": "DISCONNECT reason 152"
+    },
+    "disableClient": {
+      "trials": 20,
+      "controlCrashWillMs": 0.16,
+      "ackMs": {
+        "n": 20,
+        "p50": 2.11,
+        "p95": 2.3,
+        "p99": 2.35,
+        "max": 2.35,
+        "mean": 1.88
+      },
+      "disconnectMs": {
+        "n": 20,
+        "p50": 2.24,
+        "p95": 2.45,
+        "p99": 2.49,
+        "max": 2.49,
+        "mean": 2.01
+      },
+      "notDisconnected": 0,
+      "closedBeforeAckClientSide": 0,
+      "willMs": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "noWill": 20,
+      "v5Reason": "DISCONNECT reason 152",
+      "reconnectWhileDisabled": "refused (CONNACK 5)",
+      "reconnectAfterEnable": "ok"
+    }
+  },
+  "b_latency": {
+    "rows": [
+      {
+        "mode": "shared",
+        "concurrency": 1,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 0.72,
+          "p95": 0.92,
+          "p99": 2.5,
+          "max": 2.67,
+          "mean": 0.78,
+          "opsPerSec": 1286.8
+        },
+        "delete": {
+          "n": 200,
+          "p50": 0.34,
+          "p95": 0.52,
+          "p99": 2.16,
+          "max": 2.2,
+          "mean": 0.37,
+          "opsPerSec": 2665.4
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 10,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 6.16,
+          "p95": 9.32,
+          "p99": 10.13,
+          "max": 10.14,
+          "mean": 6.34,
+          "opsPerSec": 1543
+        },
+        "delete": {
+          "n": 200,
+          "p50": 2.85,
+          "p95": 6.04,
+          "p99": 6.59,
+          "max": 6.62,
+          "mean": 2.96,
+          "opsPerSec": 3354.8
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 50,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 28.89,
+          "p95": 42.69,
+          "p99": 46.63,
+          "max": 46.64,
+          "mean": 27.96,
+          "opsPerSec": 1583.7
+        },
+        "delete": {
+          "n": 200,
+          "p50": 13.83,
+          "p95": 22.26,
+          "p99": 22.3,
+          "max": 22.31,
+          "mean": 13.77,
+          "opsPerSec": 3511.3
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "shared",
+        "concurrency": 200,
+        "ops": 400,
+        "create": {
+          "n": 400,
+          "p50": 129.76,
+          "p95": 198.01,
+          "p99": 209.97,
+          "max": 210,
+          "mean": 116.64,
+          "opsPerSec": 1193.4
+        },
+        "delete": {
+          "n": 400,
+          "p50": 86.06,
+          "p95": 124.38,
+          "p99": 138.13,
+          "max": 138.16,
+          "mean": 85.26,
+          "opsPerSec": 2129.2
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 1,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 0.72,
+          "p95": 2.04,
+          "p99": 2.54,
+          "max": 2.55,
+          "mean": 0.78,
+          "opsPerSec": 1274.7
+        },
+        "delete": {
+          "n": 200,
+          "p50": 0.34,
+          "p95": 0.52,
+          "p99": 1.93,
+          "max": 2.24,
+          "mean": 0.38,
+          "opsPerSec": 2662.3
+        },
+        "responsesSeenByOtherConnections": 0
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 10,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 6.35,
+          "p95": 12.89,
+          "p99": 15.38,
+          "max": 15.85,
+          "mean": 7.08,
+          "opsPerSec": 1399.9
+        },
+        "delete": {
+          "n": 200,
+          "p50": 3.21,
+          "p95": 6.21,
+          "p99": 8.8,
+          "max": 10.41,
+          "mean": 3.44,
+          "opsPerSec": 2881.8
+        },
+        "responsesSeenByOtherConnections": 5399
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 50,
+        "ops": 200,
+        "create": {
+          "n": 200,
+          "p50": 38.5,
+          "p95": 76.5,
+          "p99": 91.99,
+          "max": 91.99,
+          "mean": 41.84,
+          "opsPerSec": 1092.3
+        },
+        "delete": {
+          "n": 200,
+          "p50": 24.16,
+          "p95": 34.36,
+          "p99": 43.39,
+          "max": 56.37,
+          "mean": 25.83,
+          "opsPerSec": 1814.3
+        },
+        "responsesSeenByOtherConnections": 29367
+      },
+      {
+        "mode": "per-worker",
+        "concurrency": 200,
+        "ops": 400,
+        "create": {
+          "n": 400,
+          "p50": 341.72,
+          "p95": 419.57,
+          "p99": 420.98,
+          "max": 422.37,
+          "mean": 327.81,
+          "opsPerSec": 525.1
+        },
+        "delete": {
+          "n": 400,
+          "p50": 256.23,
+          "p95": 319.36,
+          "p99": 335.44,
+          "max": 339.88,
+          "mean": 246.79,
+          "opsPerSec": 671
+        },
+        "responsesSeenByOtherConnections": 238411
+      }
+    ],
+    "inlineRoleCreate": {
+      "n": 100,
+      "p50": 0.47,
+      "p95": 0.64,
+      "p99": 2.69,
+      "max": 3.02,
+      "mean": 0.54
+    }
+  },
+  "c_churn": {
+    "agents": 50,
+    "msgPerSecPerAgent": 10,
+    "churnSlots": 200,
+    "durationS": 30,
+    "churnCycles": 18452,
+    "churnCyclesPerSec": 615.1,
+    "churnCycleMs": {
+      "n": 18452,
+      "p50": 329.02,
+      "p95": 345.43,
+      "p99": 358.27,
+      "max": 446.41,
+      "mean": 326.56
+    },
+    "churnErrors": 0,
+    "agentMessagesAcked": 15000,
+    "agentMessagesLost": 0,
+    "agentDisconnects": 0,
+    "observerDisconnects": 0
+  },
+  "c_roleEdits": {
+    "addRoleACL (new ACL) on role agent": {
+      "kickedOf50": 50,
+      "errors": []
+    },
+    "addRoleACL (same ACL again) on role agent": {
+      "kickedOf50": 0,
+      "errors": ["ACL with this topic already exists"]
+    },
+    "removeRoleACL on role agent": {
+      "kickedOf50": 50,
+      "errors": []
+    },
+    "createRole + addRoleACL on an unrelated role": {
+      "kickedOf50": 0,
+      "errors": []
+    },
+    "addClientRole on one connected agent": {
+      "kickedOf50": 1,
+      "errors": []
+    },
+    "setClientPassword on one connected agent": {
+      "kickedOf50": 1,
+      "errors": []
+    },
+    "createClient + deleteClient of an unrelated client": {
+      "kickedOf50": 0,
+      "errors": []
+    }
+  },
+  "d_scale_baseline": {
+    "clients": 7,
+    "dynsecJsonBytes": 7756,
+    "brokerRssKiB": 9104,
+    "stopMs": 106.8,
+    "startToLoginMs": 124.6
+  },
+  "d_scale_1000": {
+    "clients": 1000,
+    "bulkCreate": {
+      "created": 993,
+      "batchSize": 100,
+      "seconds": 0.4,
+      "clientsPerSec": 2812.3,
+      "firstBatchMs": 34.6,
+      "lastBatchMs": 34.9
+    },
+    "singleCreateAtSize": {
+      "n": 20,
+      "p50": 2.22,
+      "p95": 3.52,
+      "p99": 3.64,
+      "max": 3.64,
+      "mean": 2.37
+    },
+    "singleDeleteAtSize": {
+      "n": 20,
+      "p50": 1.87,
+      "p95": 3.08,
+      "p99": 3.59,
+      "max": 3.59,
+      "mean": 2.02
+    },
+    "listClientsAll": {
+      "n": 5,
+      "p50": 0.35,
+      "p95": 0.67,
+      "p99": 0.67,
+      "max": 0.67,
+      "mean": 0.39,
+      "responseBytes": 16937
+    },
+    "listClientsPage100": {
+      "n": 10,
+      "p50": 0.06,
+      "p95": 0.1,
+      "p99": 0.1,
+      "max": 0.1,
+      "mean": 0.07
+    },
+    "loginAtSize": {
+      "n": 5,
+      "p50": 0.53,
+      "p95": 0.8,
+      "p99": 0.8,
+      "max": 0.8,
+      "mean": 0.58
+    },
+    "dynsecJsonBytes": 304553,
+    "brokerRssKiB": 10068,
+    "rssAfterRestartKiB": 9576,
+    "gracefulStopMs": 93.4,
+    "restartToFirstLoginMs": 128.8,
+    "sampleLoginAfterRestart": "ok"
+  },
+  "e_persistence": {
+    "cadence": {
+      "writes": 30,
+      "visibleInFileAtAck": 30,
+      "visibleDelayMs": {
+        "n": 30,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "fileReplacedByRename": 30,
+      "tempFilesSeen": ["dynamic-security.json.new"]
+    },
+    "kill9": {
+      "trials": 10,
+      "corruptFiles": 0,
+      "ackedButMissing": 0,
+      "ackedTotal": 2219,
+      "loginFailures": 0,
+      "rows": [
+        {
+          "acked": 320,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 138.3,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 341,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 163.7,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 290,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": [],
+          "restartMs": 153.2,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 190,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 153.8,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 158,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 166.7,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 151,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 153.8,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 101,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 160.8,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 272,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 184.6,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 186,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 186.8,
+          "loginOk": 13,
+          "loginTried": 13
+        },
+        {
+          "acked": 210,
+          "json": "ok",
+          "ackedButMissing": 0,
+          "leftovers": ["dynamic-security.json.new"],
+          "restartMs": 191.1,
+          "loginOk": 13,
+          "loginTried": 13
+        }
+      ]
+    }
+  },
+  "d_scale_10000": {
+    "clients": 10000,
+    "bulkCreate": {
+      "created": 6722,
+      "batchSize": 100,
+      "seconds": 3.3,
+      "clientsPerSec": 2032.8,
+      "firstBatchMs": 40.9,
+      "lastBatchMs": 28.4
+    },
+    "singleCreateAtSize": {
+      "n": 20,
+      "p50": 20.19,
+      "p95": 21.74,
+      "p99": 23.06,
+      "max": 23.06,
+      "mean": 20.51
+    },
+    "singleDeleteAtSize": {
+      "n": 20,
+      "p50": 19.76,
+      "p95": 21.58,
+      "p99": 21.63,
+      "max": 21.63,
+      "mean": 20.04
+    },
+    "listClientsAll": {
+      "n": 5,
+      "p50": 2.58,
+      "p95": 3.33,
+      "p99": 3.33,
+      "max": 3.33,
+      "mean": 2.63,
+      "responseBytes": 178864
+    },
+    "listClientsPage100": {
+      "n": 10,
+      "p50": 0.08,
+      "p95": 0.16,
+      "p99": 0.16,
+      "max": 0.16,
+      "mean": 0.09
+    },
+    "loginAtSize": {
+      "n": 5,
+      "p50": 0.51,
+      "p95": 0.75,
+      "p99": 0.75,
+      "max": 0.75,
+      "mean": 0.56
+    },
+    "dynsecJsonBytes": 3004479,
+    "brokerRssKiB": 22420,
+    "rssAfterRestartKiB": 22216,
+    "gracefulStopMs": 111.3,
+    "restartToFirstLoginMs": 448.3,
+    "sampleLoginAfterRestart": "ok"
+  },
+  "k_perAgent": {
+    "aclsPerRole": 11,
+    "commandsPerMint": 13,
+    "commandsPerRetire": 2,
+    "baseline": {
+      "agents": 0,
+      "rolesInFile": 59,
+      "toAdminLoginMs": 133.2,
+      "toAgentLoginMs": null,
+      "dynsecJsonBytes": 97181,
+      "brokerRssKiB": 8768,
+      "publish": {
+        "seconds": 20.1,
+        "messagesAcked": 9850,
+        "messagesLost": 0,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 9850,
+          "p50": 0.93,
+          "p95": 1.27,
+          "p99": 1.45,
+          "max": 2.11,
+          "mean": 0.91
+        },
+        "deliveredLaterThan1s": 0,
+        "brokerCpuPercent": 1.39
+      },
+      "flood": {
+        "messages": 10000,
+        "seconds": 0.07,
+        "pubackedPerSec": 134113.7,
+        "deliveredToSubscriber": 1060,
+        "brokerCpuSecPer10k": 0.06
+      }
+    },
+    "agents_100": {
+      "perAgent": {
+        "agents": 100,
+        "rolesInFile": 159,
+        "toAdminLoginMs": 128,
+        "toAgentLoginMs": 128.4,
+        "dynsecJsonBytes": 274581,
+        "brokerRssKiB": 9064
+      },
+      "mintRetire": {
+        "mintMs": {
+          "n": 50,
+          "p50": 2.73,
+          "p95": 3.69,
+          "p99": 3.73,
+          "max": 3.73,
+          "mean": 2.98
+        },
+        "retireMs": {
+          "n": 50,
+          "p50": 2.32,
+          "p95": 2.58,
+          "p99": 2.6,
+          "max": 2.6,
+          "mean": 2.34
+        }
+      },
+      "concurrency": [
+        {
+          "pairs": 200,
+          "concurrency": 1,
+          "mint": {
+            "n": 200,
+            "p50": 4.47,
+            "p95": 6.14,
+            "p99": 6.45,
+            "max": 7.68,
+            "mean": 4.51,
+            "pairsPerSec": 221.4
+          },
+          "retire": {
+            "n": 200,
+            "p50": 3.85,
+            "p95": 5.54,
+            "p99": 6.47,
+            "max": 6.56,
+            "mean": 3.87,
+            "pairsPerSec": 258
+          }
+        },
+        {
+          "pairs": 200,
+          "concurrency": 10,
+          "mint": {
+            "n": 200,
+            "p50": 40.07,
+            "p95": 53.86,
+            "p99": 56.23,
+            "max": 56.77,
+            "mean": 39.8,
+            "pairsPerSec": 244.4
+          },
+          "retire": {
+            "n": 200,
+            "p50": 35.91,
+            "p95": 49.85,
+            "p99": 53.49,
+            "max": 53.55,
+            "mean": 36.33,
+            "pairsPerSec": 273.8
+          }
+        },
+        {
+          "pairs": 200,
+          "concurrency": 50,
+          "mint": {
+            "n": 200,
+            "p50": 187.78,
+            "p95": 251.88,
+            "p99": 260.01,
+            "max": 261.15,
+            "mean": 173.44,
+            "pairsPerSec": 242.6
+          },
+          "retire": {
+            "n": 200,
+            "p50": 180.81,
+            "p95": 260.9,
+            "p99": 260.94,
+            "max": 260.94,
+            "mean": 173.86,
+            "pairsPerSec": 271.6
+          }
+        }
+      ]
+    },
+    "agents_1000": {
+      "clientOnly": {
+        "agents": 1000,
+        "rolesInFile": 59,
+        "toAdminLoginMs": 134.5,
+        "toAgentLoginMs": 134.8,
+        "dynsecJsonBytes": 324072,
+        "brokerRssKiB": 10232
+      },
+      "perAgent": {
+        "agents": 1000,
+        "rolesInFile": 1059,
+        "toAdminLoginMs": 153.2,
+        "toAgentLoginMs": 153.4,
+        "dynsecJsonBytes": 1891082,
+        "brokerRssKiB": 13732
+      },
+      "mintRetire": {
+        "mintMs": {
+          "n": 50,
+          "p50": 16.16,
+          "p95": 16.53,
+          "p99": 17.09,
+          "max": 17.09,
+          "mean": 16.17
+        },
+        "retireMs": {
+          "n": 50,
+          "p50": 15.76,
+          "p95": 16,
+          "p99": 16.17,
+          "max": 16.17,
+          "mean": 15.73
+        }
+      },
+      "publish": {
+        "seconds": 20.1,
+        "messagesAcked": 9850,
+        "messagesLost": 0,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 9850,
+          "p50": 0.92,
+          "p95": 1.27,
+          "p99": 1.39,
+          "max": 2.19,
+          "mean": 0.91
+        },
+        "deliveredLaterThan1s": 0,
+        "brokerCpuPercent": 1.45
+      },
+      "flood": {
+        "messages": 10000,
+        "seconds": 0.07,
+        "pubackedPerSec": 134203.6,
+        "deliveredToSubscriber": 1071,
+        "brokerCpuSecPer10k": 0.06
+      },
+      "pacedChurnWhilePublishing": {
+        "seconds": 20,
+        "messagesAcked": 9850,
+        "messagesLost": 0,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 9850,
+          "p50": 0.94,
+          "p95": 1.41,
+          "p99": 19.61,
+          "max": 35.18,
+          "mean": 1.48
+        },
+        "deliveredLaterThan1s": 0,
+        "brokerCpuPercent": 4.64,
+        "during": {
+          "pairs": 20,
+          "mintMs": {
+            "n": 20,
+            "p50": 18.45,
+            "p95": 18.78,
+            "p99": 18.99,
+            "max": 18.99,
+            "mean": 17.99
+          },
+          "retireMs": {
+            "n": 20,
+            "p50": 15.99,
+            "p95": 16.66,
+            "p99": 16.67,
+            "max": 16.67,
+            "mean": 16.06
+          }
+        }
+      },
+      "churnWhilePublishing": {
+        "seconds": 48.8,
+        "messagesAcked": 24078,
+        "messagesLost": 9588,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 14490,
+          "p50": 2257.97,
+          "p95": 7163.41,
+          "p99": 7599.98,
+          "max": 7834.56,
+          "mean": 2765.61
+        },
+        "deliveredLaterThan1s": 9550,
+        "brokerCpuPercent": 99.8,
+        "during": {
+          "pairs": 1000,
+          "concurrency": 10,
+          "mint": {
+            "n": 1000,
+            "p50": 249.69,
+            "p95": 317.05,
+            "p99": 321.59,
+            "max": 323.18,
+            "mean": 243.77,
+            "pairsPerSec": 40.8
+          },
+          "retire": {
+            "n": 1000,
+            "p50": 245.97,
+            "p95": 313.3,
+            "p99": 317.47,
+            "max": 317.97,
+            "mean": 242.15,
+            "pairsPerSec": 41.3
+          }
+        }
+      }
+    },
+    "agents_10000": {
+      "clientOnly": {
+        "agents": 10000,
+        "rolesInFile": 59,
+        "toAdminLoginMs": 470.9,
+        "toAgentLoginMs": 471.2,
+        "dynsecJsonBytes": 2386072,
+        "brokerRssKiB": 22352
+      },
+      "perAgent": {
+        "agents": 10000,
+        "rolesInFile": 10059,
+        "toAdminLoginMs": 305.7,
+        "toAgentLoginMs": 306.1,
+        "dynsecJsonBytes": 18236082,
+        "brokerRssKiB": 58212
+      },
+      "mintRetire": {
+        "mintMs": {
+          "n": 50,
+          "p50": 155.13,
+          "p95": 157.78,
+          "p99": 162.49,
+          "max": 162.49,
+          "mean": 155.4
+        },
+        "retireMs": {
+          "n": 50,
+          "p50": 155.11,
+          "p95": 158.37,
+          "p99": 160.51,
+          "max": 160.51,
+          "mean": 155.28
+        }
+      },
+      "publish": {
+        "seconds": 20.1,
+        "messagesAcked": 9850,
+        "messagesLost": 0,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 9850,
+          "p50": 0.92,
+          "p95": 1.28,
+          "p99": 1.48,
+          "max": 4.73,
+          "mean": 0.93
+        },
+        "deliveredLaterThan1s": 0,
+        "brokerCpuPercent": 1.4
+      },
+      "flood": {
+        "messages": 10000,
+        "seconds": 0.08,
+        "pubackedPerSec": 129932.3,
+        "deliveredToSubscriber": 1071,
+        "brokerCpuSecPer10k": 0.06
+      },
+      "pacedChurnWhilePublishing": {
+        "seconds": 20.1,
+        "messagesAcked": 9850,
+        "messagesLost": 0,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 9850,
+          "p50": 1,
+          "p95": 214.91,
+          "p99": 298.38,
+          "max": 322.73,
+          "mean": 38.74
+        },
+        "deliveredLaterThan1s": 0,
+        "brokerCpuPercent": 32.53,
+        "during": {
+          "pairs": 20,
+          "mintMs": {
+            "n": 20,
+            "p50": 156.72,
+            "p95": 162.43,
+            "p99": 162.46,
+            "max": 162.46,
+            "mean": 157.3
+          },
+          "retireMs": {
+            "n": 20,
+            "p50": 156.65,
+            "p95": 159.41,
+            "p99": 160.15,
+            "max": 160.15,
+            "mean": 157.2
+          }
+        }
+      },
+      "churnWhilePublishing": {
+        "seconds": 123.4,
+        "messagesAcked": 60500,
+        "messagesLost": 54080,
+        "disconnects": 0,
+        "latencyMs": {
+          "n": 6420,
+          "p50": 16277.03,
+          "p95": 40643.61,
+          "p99": 41335.03,
+          "max": 41716.04,
+          "mean": 19397.5
+        },
+        "deliveredLaterThan1s": 6326,
+        "brokerCpuPercent": 99.93,
+        "during": {
+          "pairs": 386,
+          "concurrency": 10,
+          "mint": {
+            "n": 386,
+            "p50": 1593.71,
+            "p95": 1632.79,
+            "p99": 1637.36,
+            "max": 1643.11,
+            "mean": 1581.06,
+            "pairsPerSec": 6.3
+          },
+          "retire": {
+            "n": 386,
+            "p50": 1594.01,
+            "p95": 1623.97,
+            "p99": 1641.63,
+            "max": 1641.73,
+            "mean": 1587.41,
+            "pairsPerSec": 6.3
+          }
+        }
+      },
+      "gracefulRestart": {
+        "stopMs": 122.6,
+        "startToLoginMs": 357.5,
+        "publisherLogin": "ok",
+        "publisherLoginMs": 0.5,
+        "rssAfterRestartKiB": 57536
+      }
+    }
+  }
+}

@@ -366,6 +366,8 @@ packages/volley-hooks/    Claude Code hooks: real model in the registry, mailbox
 packages/volleyd/         Wave supervisor daemon (pre-release): wave files, durable journal, DAG scheduler,
                           authority fence, runtime-tunable config, launchd service. `volleyd --help`.
 
+bench/                    Benchmarks and spikes behind design decisions (bench/README.md).
+
 examples/bridges/         Adapters that publish external events (CI, webhooks, ...) onto Volley topics.
   github-actions/         GitHub Actions → mosquitto bridge script.
 ```
