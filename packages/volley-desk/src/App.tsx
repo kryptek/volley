@@ -295,10 +295,10 @@ export default function App() {
     0,
   );
   const finishedHidden = look.showFinished ? 0 : finishedCount;
-  // While a connect's replay settles, an agent with no status yet is not known to be live: it
-  // stays off the canvas (never laid out) until its status says which it is (C11).
-  const unclassified =
-    settling && connection === "connected" ? unclassifiedAgents(state) : new Set<string>();
+  // An agent with no status yet (its registry entry replayed ahead of it, or a reconnect's
+  // resync) is not known to be live: it stays off the canvas, never laid out, until its
+  // retained status (SPEC: always the agent's current state) says which it is (C11).
+  const unclassified = unclassifiedAgents(state);
   const offCanvas = (a: AgentView) =>
     unclassified.has(a.id) || (finishedHidden > 0 && finished.has(a.id));
   const groups =

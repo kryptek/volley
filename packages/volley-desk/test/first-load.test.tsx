@@ -81,6 +81,20 @@ describe("first load with ~300 retained finished agents (C11)", () => {
     expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
   });
 
+  it("a status replay slower than the settle window still never flashes the finished agents", () => {
+    const { f, windows, step } = mount();
+    step(() => {
+      f.up();
+      for (const m of replay("registry")) f.emit(m);
+    }, 4000); // a slow link: the statuses are still on their way when the replay settles
+    expect(windows(FINISHED_PREFIX)).toEqual([]);
+    step(() => {
+      for (const m of replay("status")) f.emit(m);
+    }, 100);
+    expect(windows(FINISHED_PREFIX)).toEqual([]);
+    expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+  });
+
   it("a reconnect keeps the live agents on the canvas and never brings the finished ones back", () => {
     const { f, windows, step } = mount();
     step(() => {
