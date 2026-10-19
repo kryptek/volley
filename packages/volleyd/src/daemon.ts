@@ -191,6 +191,7 @@ import {
   type Reconciliation,
   type TaskFacts,
   execProbes,
+  reconcileSkip,
   reconcileTargets,
   reconcileTask,
 } from "./reconcile";
@@ -654,6 +655,8 @@ export class Daemon {
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
   private readonly deferred = new Set<string>();
+  /** A stopped wave's grace timer (`stop_grace_s`): then its silent agents are force-retired. */
+  private readonly stopGrace = new Map<WaveId, TimerHandle>();
   /** Answered auth requests by `<topic>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly authAnswered = new Map<string, AuthReply>();
   /** When each account last sent an auth request (account_list's `last_seen`). */
@@ -1131,6 +1134,8 @@ export class Daemon {
     this.time.clearInterval(this.watchdog);
     this.time.clearInterval(this.screenTimer);
     this.time.clearInterval(this.pruneTimer);
+    for (const t of this.stopGrace.values()) this.time.clearTimeout(t);
+    this.stopGrace.clear();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -3232,6 +3237,24 @@ export class Daemon {
     const jobs: Promise<void>[] = [];
     for (const [wave, log] of this.waves) {
       const rec = log.record;
+      const skipped = reconcileSkip(rec);
+      if (skipped !== null) {
+        jobs.push(
+          this.serial(async () => {
+            for (const t of reconcileTargets(rec, log.journal.readAll()))
+              await this.append(wave, {
+                type: "reconciled",
+                task: t.task,
+                data: { agent_id: t.agent_id, drift: [], skipped },
+              });
+            // The stop's grace ran out while the daemon was down: nothing of the wave lives on.
+            if (rec.state?.status === "stopped") await this.forceRetireWave(wave, "stop");
+          }).catch((e: unknown) =>
+            this.log(`reconcile ${wave}: ${e instanceof Error ? e.message : String(e)}`),
+          ),
+        );
+        continue;
+      }
       const repo = rec.wave?.repo !== undefined ? expandHome(rec.wave.repo) : undefined;
       const ns = rec.wave?.namespace ?? this.opts.namespace;
       for (const t of reconcileTargets(rec, log.journal.readAll())) {
@@ -3544,6 +3567,11 @@ export class Daemon {
   }
 
   /** The wave state as published: the reduced journal plus effective config and admission reasons. */
+  /** The agents whose terminals are being captured (screen-publisher.ts). */
+  capturing(): string[] {
+    return this.screens.tracked();
+  }
+
   snapshot(wave: WaveId): WaveState | null {
     const rec = this.waves.get(wave)?.record;
     if (rec?.state == null) return null;
@@ -4570,10 +4598,44 @@ export class Daemon {
     const cancelled: string[] = [];
     for (const a of runningAgents(log.record, retiredAgents(log))) {
       await this.cancelAgent(wave, a, by, cancelPayload(wave, a.task, by));
+      // A stopped wave's terminals are no longer supervised: nobody reads them again.
+      await this.screens.untrack(a.agent_id);
       cancelled.push(a.agent_id);
     }
     this.log(`wave ${wave} stopped by ${by}; cancelled ${cancelled.length} agent(s)`);
+    const graceS = this.config.effective(wave).stop_grace_s;
+    this.time.clearTimeout(this.stopGrace.get(wave));
+    this.stopGrace.set(
+      wave,
+      this.time.setTimeout(() => {
+        this.stopGrace.delete(wave);
+        void this.enqueue(() => this.forceRetireWave(wave, "stop"));
+      }, secondsMs(graceS)),
+    );
     return cancelled;
+  }
+
+  /**
+   * The agents of `wave` that never published a terminal status (stop's grace ran out, or the
+   * daemon restarted into a stopped wave): each is retired through the delete path — retained
+   * registry/status/progress/result/capability/screen cleared, its login deleted, its lock
+   * released — after `agent_force_retired { reason }`. No ack is needed.
+   */
+  private async forceRetireWave(wave: WaveId, reason: string): Promise<void> {
+    const log = this.waves.get(wave);
+    if (log === undefined || !this.running) return;
+    for (const a of runningAgents(log.record, retiredAgents(log))) {
+      await this.append(wave, {
+        type: "agent_force_retired",
+        task: a.task,
+        data: { agent_id: a.agent_id, role: a.role, reason },
+      });
+      try {
+        await this.retireAny(wave, a.agent_id, "stopped");
+      } catch (e) {
+        this.log(`force-retire ${a.agent_id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
 
   /** Send one running agent a mailbox `cancel` (journaled) and interrupt its session. */

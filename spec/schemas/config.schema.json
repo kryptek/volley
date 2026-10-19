@@ -199,6 +199,12 @@
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
         },
+        "stop_grace_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Seconds a stopped wave's agents get to publish a terminal status after their cancel; any still running then is force-retired (records cleared, login deleted)."
+        },
         "claude": {
           "type": "object",
           "additionalProperties": false,

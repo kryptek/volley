@@ -46,6 +46,7 @@
 # brief_preface_max_bytes: 16384  # largest brief preface; a larger one refuses run / the spawn
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+# stop_grace_s: 30              # after `volleyd stop`: seconds agents get to end; then force-retired
 
 # Claude account profiles (README "Claude accounts"): the account an agent runs under when its
 # task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or

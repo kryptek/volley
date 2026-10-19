@@ -73,6 +73,8 @@ interface Tracked {
   nextAt: number;
   lastHash: string | null;
   failures: number;
+  /** Consecutive reads that hit the hard timeout (a closed workspace never answers). */
+  timeouts: number;
   stale: boolean;
   inflight: Promise<void> | null;
   /** The retained publish in flight, if any (never rejects). */
@@ -104,6 +106,7 @@ export class ScreenPublisher {
       nextAt: this.now(),
       lastHash: null,
       failures: 0,
+      timeouts: 0,
       stale: false,
       inflight: null,
       publishing: null,
@@ -123,6 +126,11 @@ export class ScreenPublisher {
   /** Stop capturing every agent (daemon halt); in-flight captures finish but publish nothing new. */
   clear(): void {
     this.agents.clear();
+  }
+
+  /** The agents being captured. */
+  tracked(): string[] {
+    return [...this.agents.keys()];
   }
 
   isStale(agentId: string): boolean {
@@ -172,7 +180,14 @@ export class ScreenPublisher {
       this.clock.clearTimeout(slowTimer);
       this.clock.clearTimeout(hardTimer);
     });
-    if (timedOut) this.log(`screen ${target.agentId}: read timed out`);
+    const closed = DAEMON_DEFAULTS.screen_closed_after_timeouts;
+    a.timeouts = timedOut ? a.timeouts + 1 : 0;
+    // A workspace that stopped answering is logged until it is taken for closed, then once.
+    if (timedOut && a.timeouts <= closed) this.log(`screen ${target.agentId}: read timed out`);
+    if (timedOut && a.timeouts === closed)
+      this.log(
+        `screen ${target.agentId}: ${closed} reads in a row timed out (workspace closed?); reading it hourly`,
+      );
     const finished = this.now();
     const slow = slowFired || finished - started > this.slowMs;
     a.failures = screen === null ? a.failures + 1 : 0;
@@ -181,7 +196,12 @@ export class ScreenPublisher {
       a,
       slow || a.failures >= DAEMON_DEFAULTS.screen_max_failures || (a.stale && screen === null),
     );
-    const delayS = a.stale ? DAEMON_DEFAULTS.screen_backoff_s : target.intervalS();
+    const delayS =
+      a.timeouts >= closed
+        ? DAEMON_DEFAULTS.screen_closed_backoff_s
+        : a.stale
+          ? DAEMON_DEFAULTS.screen_backoff_s
+          : target.intervalS();
     a.nextAt = finished + delayS * 1000;
 
     let tail: ScreenPayload | null = null;

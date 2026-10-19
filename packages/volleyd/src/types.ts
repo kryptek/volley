@@ -83,6 +83,8 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
+  stop_grace_s: number;
   /** Claude account profiles (src/claude/): which account an agent runs under by default. */
   claude: { default_account: string | null };
   hosts: Record<string, RemoteHostConfig>;
