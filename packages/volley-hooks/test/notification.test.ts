@@ -133,6 +133,57 @@ describe("notification", () => {
     });
   });
 
+  describe("coordinator after a Stop with a background wait armed", () => {
+    let coordDir: string;
+    let env: Record<string, string>;
+    beforeEach(async () => {
+      coordDir = makeWorkdir();
+      env = {
+        VOLLEY_HOOKS_COORDINATOR: "1",
+        VOLLEY_BROKER_URL: broker.url,
+        VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+      };
+      await publishRegistry(client, "coordinator-ab12", "default", {
+        capabilities: [],
+        cwd: coordDir,
+        started_at: "2026-10-18T10:00:00.000Z",
+      });
+      await runHook("stop", fixture("stop-background-tasks.json", coordDir), {
+        cwd: coordDir,
+        env,
+      });
+    });
+
+    it("idle_prompt → awaiting_input with background_wait: true", async () => {
+      const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
+      expect(first(envs).type).toBe("awaiting_input");
+      expect(first(envs).payload).toMatchObject({
+        notification_type: "idle_prompt",
+        background_wait: true,
+      });
+    });
+
+    it("a permission_prompt never carries it", async () => {
+      const envs = await notify(
+        "notification-permission-prompt.json",
+        coordDir,
+        env,
+        "coordinator-ab12",
+      );
+      expect(first(envs).type).toBe("awaiting_input");
+      expect(first(envs).payload).not.toHaveProperty("background_wait");
+    });
+
+    it("once the session works again the wait is gone", async () => {
+      await runHook("post-tool-use", fixture("post-tool-use.json", coordDir), {
+        cwd: coordDir,
+        env,
+      });
+      const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
+      expect(first(envs).payload).not.toHaveProperty("background_wait");
+    });
+  });
+
   it("coordinator: agent_needs_input without a prior question uses the message", async () => {
     const coordDir = makeWorkdir();
     const env = {

@@ -177,6 +177,35 @@ export interface Activity {
   hook_event: string;
   /** The question the last Stop ended on (a later idle notification asks the same one). */
   question?: string;
+  /**
+   * The last Stop ended the turn with a background task still running (Stop's
+   * `background_tasks`): the session idles waiting on that task's events, not on a person.
+   * Cleared when the session works again.
+   */
+  background_wait?: boolean;
+}
+
+/** Background task states that are over; anything else (or no state) is still running. */
+const FINISHED_TASK =
+  /^(completed|complete|done|finished|failed|killed|cancell?ed|exited|stopped)$/i;
+
+/**
+ * Whether Stop's `background_tasks` input lists a task still running. Accepts the list of
+ * task objects (a `status` / `state` that is over does not count), a map of them, or a count.
+ */
+export function hasLiveBackgroundTask(tasks: unknown): boolean {
+  if (typeof tasks === "number") return tasks > 0;
+  const list = Array.isArray(tasks)
+    ? tasks
+    : tasks !== null && typeof tasks === "object"
+      ? Object.values(tasks)
+      : [];
+  return list.some((t) => {
+    if (t === null || typeof t !== "object") return t !== null && t !== undefined;
+    const r = t as Record<string, unknown>;
+    const state = typeof r.status === "string" ? r.status : r.state;
+    return typeof state !== "string" || !FINISHED_TASK.test(state);
+  });
 }
 
 export function readActivity(stateDir: string): Activity | null {
