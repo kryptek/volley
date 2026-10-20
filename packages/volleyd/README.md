@@ -40,6 +40,7 @@ coordinator session.
 - [Claude accounts](#claude-accounts)
 - [Decisions](#decisions)
 - [Autopilot](#autopilot)
+- [Needs-you inbox](#needs-you-inbox)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
 - [Steering](#steering)
@@ -143,7 +144,9 @@ config.hard_ceiling: must be <= 100
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. |
 | `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
-| `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>]` | Answer a decision (owner only). |
+| `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>] [--where <where>]` | Answer a decision (owner only). Its inbox item is answered too, where `--where` says (default `cli`). |
+| `volleyd inbox [--all] [--json]` | The needs-you inbox: everything waiting for a person, one line each ([Needs-you inbox](#needs-you-inbox)). |
+| `volleyd inbox answer <id> <answer> [--where <where>] [--version <n>]` | Answer one item through the referee; a late answer is refused with where the first was given (exit 1). |
 | `volleyd merge <wave> <task>` | Merge one gated task now, at its gated head, through the merge queue's fenced verb (owner only; under `merge: manual` too). Answers with the merge commit, or the refusal ([The merge queue](#the-merge-queue)). |
 | `volleyd policy [wave] [--json]` | Autopilot's effective policy table: the decisions volleyd answers itself, with each budget ([Autopilot](#autopilot)). `--json` prints `{ rules, config }`. |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
@@ -296,6 +299,7 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_waves/<wave>/events` | no | Live mirror of each journal event. The journal is the record. |
 | `volley/_waves/_config` | yes | Effective global config + `version` / `updated_at` / `updated_by`. |
 | `volley/_waves/<wave>/decisions/<id>` | while open | Each open decision (`decision.schema.json`); cleared on resolve. |
+| `volley/_inbox/<id>` | yes, then cleared | Each needs-you inbox item (`inbox-item.schema.json`); answered ones stay `autopilot.inbox_answered_ttl_s`. |
 | `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision. |
 | `volley/_waves/_system/events` | no | Live mirror of `_system` journal events (the kill switch). |
 | `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `per_machine?`, `held`, FIFO `queue` (each with the holder's `host`), `reasons`. |
@@ -726,6 +730,53 @@ autopilot: on
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
+```
+
+---
+
+## Needs-you inbox
+
+What waits for a person (SPEC §4.6.18) is one retained record per item on `volley/_inbox/<id>`,
+published by volleyd only (`inbox-item.schema.json`): `{ id, kind, version, owner_only, wave?,
+task?, agent_id, title, question, options?: [{ label, description? }], allow_other?, multi?,
+pointers, opened_at, source, answered? }`. Kinds and their ids:
+
+| Kind | Id | Opened by |
+|---|---|---|
+| `decision` | `d-<wave>-<decision_id>` | every decision volleyd opens (mirrored here) |
+| `picker` | `p-<agent_id>-<tool_use_id>` | a Claude Code picker in a session (`openInboxItem`) |
+| `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (`openInboxItem`) |
+| `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
+
+**volleyd is the referee.** An answer is the mailbox op `inbox_answer { id, version, answer,
+where }`, from any login that may steer. It is accepted only at the item's current `version`
+(compare-and-set): the first accepted answer bumps the version, sets `answered { answer, by,
+where, at }`, journals `inbox_answered { id, kind, answer, by, where, version }` (in the item's
+wave, else `_system`) and acts on it. A later answer is refused with `already answered on
+<where>`: `desk·phone`, `<machine>·terminal`, `cli` or `autopilot`. Every path closes an item
+through the same referee, so every answer is journaled:
+
+- a decision's item is answered whenever the decision is resolved: `volleyd resolve` (where
+  `--where` says, default `cli`), an autopilot answer (`autopilot`), or the Desk;
+- an `inbox_answer` on a decision item resolves the decision (the trust check and plan answers
+  apply as for `resolve`); resolving it again with `volleyd resolve` is still a no-op, and says
+  `already answered on <where>`;
+- an answer to any other kind goes to the handler its subsystem registered
+  (`daemon.inboxHandlers.set(kind, fn)`).
+
+`owner_only` comes from `autopilot.owner_only` for decisions: autopilot never answers those, and
+the Desk notifies the owner's phone. An answered item stays retained with `answered` for
+`autopilot.inbox_answered_ttl_s` (default 600) and is then cleared. The journal is the record:
+on start volleyd rebuilds the inbox from `inbox_opened` / `inbox_answered` and re-publishes it.
+
+```
+$ volleyd inbox
+d-w1-d-3k9x2m7q  decision  2m  owner-only? no  Reviewers disagree · w1/T1  [blocker | fine]
+  The spec reviewer calls the missing retry a P1; the quality reviewer says fine. Is it a blocker?
+$ volleyd inbox answer d-w1-d-3k9x2m7q blocker
+answered d-w1-d-3k9x2m7q (cli): blocker
+$ volleyd inbox answer d-w1-d-3k9x2m7q fine
+volleyd inbox answer: already answered on cli
 ```
 
 ---

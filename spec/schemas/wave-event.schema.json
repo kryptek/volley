@@ -88,7 +88,9 @@
             "peer_drain_started",
             "repo_visibility_detected",
             "decision_auto_resolved",
-            "decision_escalated"
+            "decision_escalated",
+            "inbox_opened",
+            "inbox_answered"
           ]
         },
         "payload": {
@@ -303,6 +305,33 @@
                           "max": { "type": "number", "minimum": 0 }
                         }
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "inbox_answered" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["id", "kind", "answer", "by", "where", "version"],
+                    "properties": {
+                      "id": { "type": "string", "pattern": "^[dphr]-[A-Za-z0-9_-]{1,200}$" },
+                      "kind": { "enum": ["decision", "picker", "handoff", "release"] },
+                      "answer": { "type": "string", "minLength": 1 },
+                      "by": { "type": "string", "minLength": 1 },
+                      "where": { "$ref": "inbox-item.schema.json#/$defs/where" },
+                      "version": { "type": "integer", "minimum": 2 }
                     }
                   }
                 }

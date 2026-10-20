@@ -23,6 +23,7 @@ Commands:
   cleanup     Remove a wave's retired worktrees and workspaces (--yes)
   decisions   List open decisions
   resolve     Answer a decision (owner only)
+  inbox       The needs-you inbox: what waits for a person; inbox answer <id> <answer>
   policy      Show autopilot's policy table: the decisions volleyd answers itself
   claim       Take over a wave whose owner is gone
   pause       Stop admitting new tasks in a wave
@@ -59,6 +60,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   cleanup: async () => (await import("./commands/cleanup")).cleanup,
   decisions: async () => (await import("./commands/decisions")).decisions,
   resolve: async () => (await import("./commands/resolve")).resolve,
+  inbox: async () => (await import("./commands/inbox")).inbox,
   policy: async () => (await import("./commands/policy")).policy,
   claim: async () => (await import("./commands/claim")).claim,
   pause: async () => (await import("./commands/pause")).pause,
