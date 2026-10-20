@@ -39,3 +39,6 @@ mosquitto.log
 
 # Internal planning + design docs (local only; do not commit)
 docs/superpowers/
+
+# Sound-theme generation output (sounds/README.md): candidates, never committed
+sounds/review/
