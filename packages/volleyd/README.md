@@ -1365,7 +1365,10 @@ that is not `done` / `merge_ready` / `cancelled`, its current agents — the lat
 not retired — are compared with the retained registry entry and status, any heartbeat seen while
 reconciling (the daemon keeps none across a restart, so only a live one counts), the worktree
 lock, git (`rev-parse --verify` of the branch) and — for an agent that reported `done` while the
-daemon was down — GitHub (`gh pr list --head`, `gh pr checks`). The probes run concurrently and
+daemon was down — GitHub (`gh pr list --head`, `gh pr checks --json
+bucket,workflow,event,link`; checks are grouped by the run id in `link` and only the latest
+run per workflow and event counts, so `volleyd status` shows the replacement's CI, and a run
+cancelled with nothing replacing it stays red even when some of its jobs passed). The probes run concurrently and
 beside the serial queue, after the mailbox loop started (control ops are answered meanwhile);
 one `reconciled { agent_id, drift, action?, branch: { name, exists, head } }` per agent is
 journaled inside it:
@@ -1479,9 +1482,16 @@ The steer names what the role publishes: the implementer its branch and PR, the 
 `git push origin HEAD:<PR branch>`, the rebase its lease-guarded push (under `branch_update: merge`,
 its merge and normal push).
 
-**CI** is never re-run. Red on the head → a `ci_failed` decision with the run URLs and failed
-job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
-"check the hosting provider's status page first". Pending CI is re-checked every
+**CI** is never re-run. CI on a head is the latest run per workflow and trigger event: a run that
+a newer run of the same workflow and event replaced on the same head (a concurrency
+`cancel-in-progress` cancel, a re-push) is superseded. It decides nothing, is left out of the run
+URLs and check counts, and is listed under `ci.superseded` in the evidence package; a `push` run
+and a `pull_request` run of one workflow are both the head's CI. Red on the head → a `ci_failed`
+decision with the run URLs and failed job names (`data.infra`, and `data.infra_reason`:
+`startup` \| `steps` \| `cancelled` \| `null`). A run that never started, or failed only in
+runner, checkout or network steps, adds "check the hosting provider's status page first"; when
+every failed run was cancelled and nothing replaced it, the decision says to re-run it (or push
+again) instead. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
 `ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },

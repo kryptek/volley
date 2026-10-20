@@ -6,6 +6,11 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Fixed
 
+- **CI gate stuck red on a superseded run:** volleyd judges CI on a head by the latest run per workflow and trigger event. A run
+  cancelled by `concurrency: cancel-in-progress` and replaced by a newer run on the same head no longer opens `ci_failed`
+  (re-verify looped on it forever), and restart reconciliation ignores its cancelled check. A cancelled run that nothing
+  replaced still fails, and now says to re-run it rather than to check the provider's status page. The evidence package lists
+  superseded runs under `ci.superseded` (SPEC §4.6.8). (#176)
 - **Reviewer hygiene follows the repository's visibility** (`public_hygiene: auto | on | off`, tunable, default `auto`). Under
   `auto` volleyd reads the repository's visibility once per wave version (`gh repo view`, journaled as
   `repo_visibility_detected`): a public repository, or one whose visibility cannot be read (`repo_visibility_unknown` alarm),
