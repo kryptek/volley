@@ -142,6 +142,13 @@ export const DAEMON_DEFAULTS = {
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
    * `spawn_retry_max_s` tunable. */
   spawn_retry_base_ms: 30_000,
+  /** Bound on one `cmux new-workspace`: a launch still pending then has an unknown outcome. */
+  launch_timeout_ms: 60_000,
+  /** After a launch with an unknown outcome: how long to wait for the agent's registration
+   * signals before deciding it never started (spawn.ts reconcileLaunch). */
+  launch_reconcile_ms: 30_000,
+  /** Bound on one workspace lookup (`cmux list-workspaces`); a lookup still pending then fails. */
+  workspace_lookup_timeout_ms: 10_000,
   /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
    * treated as failed (an ssh remote with no agent, a credential prompt). */
   git_fetch_timeout_ms: 30_000,
