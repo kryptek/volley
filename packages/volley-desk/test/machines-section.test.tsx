@@ -657,7 +657,7 @@ describe("Settings › Machines", () => {
     const b = within(card("box-b"));
     expect(b.getByText("darwin · 8 cores")).toBeInTheDocument();
     expect(b.getByText("tunnel down")).toHaveClass("hb", "hb--stale");
-    expect(b.getByText(/no heartbeat · last seen 5m ago/)).toBeInTheDocument();
+    expect(b.getByText("down · last seen 5m ago · no heartbeat")).toBeInTheDocument();
     expect(b.getByText(/new agents for it wait/i)).toBeInTheDocument();
     const hub = within(card("This machine"));
     expect(hub.getByText("this one")).toBeInTheDocument();
@@ -775,14 +775,14 @@ describe("Settings › Machines", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 
-  it("Remove… asks first, then calls peer_remove", async () => {
+  it("Remove… opens the Remove sheet first, then calls peer_remove", async () => {
     const { ops } = setup();
     await act(flush);
     fireEvent.click(within(card("box-a")).getByRole("button", { name: "Remove…" }));
     expect(ops.remove).not.toHaveBeenCalled();
-    const confirm = within(card("box-a"));
-    expect(confirm.getByText(/revokes its broker account/)).toBeInTheDocument();
-    fireEvent.click(confirm.getByRole("button", { name: "Cancel" }));
+    const sheet = within(screen.getByRole("dialog", { name: "Remove box-a" }));
+    expect(sheet.getByText(/revoke box-a's broker account/)).toBeInTheDocument();
+    fireEvent.click(sheet.getByRole("button", { name: "Close" }));
     expect(ops.remove).not.toHaveBeenCalled();
     fireEvent.click(within(card("box-a")).getByRole("button", { name: "Remove…" }));
     await act(async () => {

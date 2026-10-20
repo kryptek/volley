@@ -80,7 +80,7 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
-import { sshHost } from "./settings/Machines";
+import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
@@ -97,6 +97,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isLiveAgent,
   isSession,
   isSupervisorId,
   localAgentCount,
@@ -1118,6 +1119,14 @@ export default function App() {
             hubAgents: localAgentCount(state),
             ops: peerOps,
             host: sshHost(brokerUrl),
+            readiness: state.readiness ?? {},
+            localName: state.config?.fleet?.local_name,
+            configTransport,
+            accounts: state.claudeAccounts ?? {},
+            agentsOn: agentsOnMachines(
+              Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
+              (id) => isLiveAgent(state, id),
+            ),
           }}
           onboarding={{
             ops: authOps,

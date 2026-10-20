@@ -1057,6 +1057,12 @@ export function workingCount(state: DeskState): number {
   }).length;
 }
 
+/** Whether agent `id` is running: it has a status and it is not terminal. */
+export function isLiveAgent(state: DeskState, id: string): boolean {
+  const t = state.agents[id]?.status?.type;
+  return t !== undefined && !TERMINAL_STATUS.has(t);
+}
+
 /**
  * This machine's agents, for Settings › Machines: live agents (not
  * coordinators, never supervisors, none of an ended wave, no terminal status)

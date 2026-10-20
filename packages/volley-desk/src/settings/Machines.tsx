@@ -22,12 +22,19 @@
  */
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
-import type { MachinePayload } from "../store/types";
-import { CopyCommand, MachineCard } from "./MachineCard";
+import type {
+  ClaudeAccountPayload,
+  MachinePayload,
+  ReadinessPayload,
+  WaveStatePayload,
+} from "../store/types";
+import { MachineCard, countdown } from "./MachineCard";
+import { CopyCommand } from "./MachineRows";
+import type { ConfigTransport } from "./configTransport";
 import "../styles/machines.css";
 
 const MACHINES_TINT = "#34c759";
@@ -52,6 +59,41 @@ export interface MachinesProps {
   host?: string;
   /** Told what the admin check found (Settings' account row shows an admin as one). */
   onAdmin?: (admin: AdminStatus) => void;
+  /** volleyd's readiness verdicts, by machine name (`volley/_system/machines/<name>/readiness`). */
+  readiness?: Record<string, ReadinessPayload>;
+  /** The supervisor's own machine name (`_config` `fleet.local_name`): its record is "this one". */
+  localName?: string | null | undefined;
+  /** volleyd's config channel, for the cap editors; `null` = read-only. */
+  configTransport?: ConfigTransport | null;
+  /** The Claude account records, for each machine's usage meter. */
+  accounts?: Record<string, ClaudeAccountPayload>;
+  /** Each machine's live agents (`agentsOnMachines`), listed by Remove. */
+  agentsOn?: Record<string, string[]>;
+  /** The remote Claude sign-in's button for a machine, when the Desk has one. */
+  signIn?: (machine: string) => ReactNode;
+}
+
+const FINISHED: ReadonlySet<string> = new Set(["done", "cancelled"]);
+
+/**
+ * Each machine's agents, from the waves' unfinished tasks: a task's machine is its `host`, else
+ * its placement's (the supervisor's own machine, under its local name). `live` narrows them to
+ * the agents still running (the store's statuses).
+ */
+export function agentsOnMachines(
+  states: readonly WaveStatePayload[],
+  live: (agentId: string) => boolean = () => true,
+): Record<string, string[]> {
+  const on: Record<string, string[]> = {};
+  for (const s of states) {
+    for (const t of s.tasks) {
+      const host = t.host ?? t.placement?.host;
+      if (!host || FINISHED.has(t.stage)) continue;
+      const ids = Object.values(t.agents).filter((a): a is string => !!a && live(a));
+      if (ids.length) on[host] = [...(on[host] ?? []), ...ids];
+    }
+  }
+  return on;
 }
 
 /** The clock, ticking every `ms`; a fixed `now` (tests) never ticks. */
@@ -111,12 +153,6 @@ export function sshHost(brokerUrl: string | null): string {
     return "";
   }
 }
-
-/** `m:ss` left until `iso`. */
-const countdown = (iso: string, now: number) => {
-  const left = Math.max(0, Math.ceil((Date.parse(iso) - now) / 1000));
-  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
-};
 
 /** This machine: the broker and volleyd run here, so it has no tunnel and no record. */
 function HubCard({ up, agents }: { up: boolean; agents: number }) {
@@ -332,7 +368,10 @@ function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
 
 export function Machines(p: MachinesProps) {
   const [adding, setAdding] = useState(false);
-  const now = useNow(p.now, adding ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
+  /** Re-pairing codes counting down on cards. */
+  const [counting, setCounting] = useState(0);
+  const onCountdown = useCallback((on: boolean) => setCounting((n) => n + (on ? 1 : -1)), []);
+  const now = useNow(p.now, adding || counting > 0 ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
   // A browser that cannot make a reply key at all (not even lib/rsa's): read-only.
   const secure = pairingSupported();
   const admin = useAdmin(secure ? p.ops : null, p.hubUp);
@@ -347,6 +386,26 @@ export function Machines(p: MachinesProps) {
   }, [p.machines, p.hosts]);
   const machines = Object.values(shown).sort((a, b) => a.name.localeCompare(b.name));
   const canPair = secure && admin === "admin" && p.ops !== null;
+  // volleyd's own record, published as itself under its local name (never a configured host).
+  const own = p.localName ? p.machines[p.localName] : undefined;
+  const card = (m: MachinePayload, self = false) => (
+    <MachineCard
+      key={m.name}
+      m={m}
+      r={p.readiness?.[m.name]}
+      now={now}
+      self={self}
+      admin={canPair}
+      ops={p.ops}
+      config={p.configTransport}
+      accounts={p.accounts}
+      agents={p.agentsOn?.[m.name]}
+      host={p.host}
+      onRemoved={setNotice}
+      signIn={p.signIn?.(m.name)}
+      onCountdown={onCountdown}
+    />
+  );
 
   return (
     <div className="machines-section">
@@ -356,17 +415,8 @@ export function Machines(p: MachinesProps) {
       </p>
       {notice && <output className="s-hint m-notice">{notice}</output>}
       <div className="machines">
-        <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />
-        {machines.map((m) => (
-          <MachineCard
-            key={m.name}
-            m={m}
-            now={now}
-            admin={canPair}
-            ops={p.ops}
-            onRemoved={(name) => setNotice(`${name} removed: its account was revoked.`)}
-          />
-        ))}
+        {own ? card(own, true) : <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />}
+        {machines.map((m) => card(m))}
         {canPair && !adding && (
           <button
             type="button"
