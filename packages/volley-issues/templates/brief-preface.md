@@ -24,4 +24,10 @@ force it.
 ## Repository rules
 
 <!-- Add this repository's own rules here: build and test commands, gates to run before a PR,
-     files that must not change, conventions reviewers should hold the diff to. -->
+     files that must not change, conventions reviewers should hold the diff to. For example, in
+     a repository that keeps changelog fragments:
+
+- Record the user-visible change as a new file, `changes/<issue>.<type>.md` (`<type>`: added |
+  changed | fixed | removed | docs; see `changes/README.md`); never edit `CHANGELOG.md`: the
+  release assembles it with `bun run changelog`.
+-->

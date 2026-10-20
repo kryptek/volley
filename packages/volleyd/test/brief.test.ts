@@ -71,6 +71,15 @@ describe("brief templates", () => {
     expect(render("rebase")).toContain(".volley/rebase.md");
   });
 
+  it("the implementer and the fixup record the change as a changes/ fragment, never in CHANGELOG.md", () => {
+    const impl = renderBrief(loadTemplate("implementer"), VARS);
+    expect(impl).toContain("`changes/42.<added|changed|fixed|removed|docs>.md`");
+    expect(impl).toContain("never edit `CHANGELOG.md`");
+    const fixup = renderBrief(loadTemplate("fixup"), { ...VARS, role: "fixup" });
+    expect(fixup).toContain("`changes/42.");
+    expect(fixup).toContain("never edit `CHANGELOG.md`");
+  });
+
   it("the quality reviewer reviews the diff only; pipeline roles say what their worktree is cut from", () => {
     const render = (role: (typeof ROLES)[number]) =>
       renderBrief(loadTemplate(role), { ...VARS, role });

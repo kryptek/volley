@@ -191,7 +191,7 @@ For each event printed, by `type`:
   volleyd resolve <decision-id> <answer...> --wave "$WAVE" --rationale "<why>"
   ```
   The task resumes and the answer reaches its next stage.
-- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
+- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. A PR that touches `packages/` or `spec/` adds a `changes/` fragment and leaves `CHANGELOG.md` alone (CI's Changelog fragment job checks it; see `changes/README.md`). If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
 - **`alarm_raised`**, **`task_cancelled`**, **`wave_stopped`**: tell the user what happened and where to look (`volleyd status "$WAVE"`). Skip `alarm_raised { alarm: "reviews_skipped_by_plan" }`: it marks a gate the wave file asked for (a pipeline without reviews), not a fault. A `merge_ready_invariant` alarm comes with an `agent_blocked` decision (`rereview` / `cancel`): a head nobody reviewed (usually a push outside the pipeline) must be reviewed again before the gate.
 - **`stage_entered` with `data.stage` = `done`** (`data.merged: true`): volleyd saw the task's PR merged into the release branch. Informational; its dependents are admitted on their own (see **Merges and dependents**).
 - **`wave_complete`**: every task is settled; go to Step 6. Before acting on it (and if it never arrives), confirm with your own check: every task is `done` or `cancelled` in `volleyd status "$WAVE"`, and every PR is merged (`gh pr view <pr> --json state`).
@@ -453,6 +453,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
    - `cd` to the agent's worktree (`/private/tmp/example-issue-<N>`).
    - `git status && git diff` to inspect the changes.
    - Read the agent's `DEPLOY.md` (do not commit it).
+   - Changelog: when the diff touches `packages/` or `spec/` it must add a fragment, `changes/<N>.<added|changed|fixed|removed|docs>.md` (see `changes/README.md`); if the agent wrote none, add one from its summary. Never edit `CHANGELOG.md` (CI rejects a non-release commit that does).
    - If the diff looks good: `git add -A && git commit -m "feat: implement <issue-title>"` then `git push origin issue-<N>-<slug>` and `gh pr create --base <release-branch-or-main> --title "feat: <issue-title>" --body "<...>"`, where `<issue-title>` is `gh issue view <N> --json title -q .title | bun <skill-dir>/scripts/brief-title.ts <N>` (no role: `#<N> <issue title>`, shell-safe like `<brief-title>`). Embed the `DEPLOY.md` contents in the PR body under a `## Deployment Requirements` section.
 
 3. **If `blocked`**:
@@ -494,19 +495,25 @@ Once every dispatched agent has reached `done` AND its PR is merged into the rel
    gh workflow run deploy-admin-frontend.yml --ref release/<date>-<theme> -f environment=staging
    ```
 
-2. **After staging verification**, squash-merge the release branch into main:
+2. **Assemble the changelog** on the release branch, before the version bump commit:
+   ```bash
+   bun run changelog --version <v> --date <YYYY-MM-DD> --commit
+   ```
+   It turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; then bump the `package.json` versions in the same release PR. The volley-cli version test checks that the newest section matches the root version.
+
+3. **After staging verification**, squash-merge the release branch into main:
    ```bash
    gh pr create --base main --head release/<date>-<theme> --title "Release: <date> — <theme>"
    gh pr merge --squash
    ```
 
-3. **Delete the release branch** after merge:
+4. **Delete the release branch** after merge:
    ```bash
    git branch -D release/<date>-<theme>
    git push origin --delete release/<date>-<theme>
    ```
 
-4. **Remove the migration counter** (cleanup):
+5. **Remove the migration counter** (cleanup):
    ```bash
    rm -f /tmp/example-next-migration.txt /tmp/example-next-migration.txt.lock.d
    ```
