@@ -245,6 +245,7 @@ import type {
   AgentMcp,
   CoordinatorAttention,
   JournalEvent,
+  MergeMode,
   NewEvent,
   NudgeOnMerge,
   PublicHygiene,
@@ -615,7 +616,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "peer_invite",
   "peer_remove",
   "peer_doctor",
-  // An admin archives any ended wave (SPEC §4.6.17), whoever owns it.
+  // An admin archives any ended wave (SPEC §4.6.18), whoever owns it.
   "archive",
 ]);
 
@@ -1473,7 +1474,7 @@ export class Daemon {
     await this.publishConfig();
     await this.publishArchiveIndex();
     // An archived wave's retained topics, in case a crash came between journaling wave_archived
-    // and clearing them (a clear is not a re-publish, SPEC §4.6.17).
+    // and clearing them (a clear is not a re-publish, SPEC §4.6.18).
     for (const [wave, log] of this.archived) {
       await this.clearRetained(waveStateTopic(wave));
       for (const id of Object.keys(log.record.decisions))
@@ -3019,7 +3020,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Archiving (archive.ts, SPEC §4.6.17): an ended wave leaves the live set; its files stay.
+  // Archiving (archive.ts, SPEC §4.6.18): an ended wave leaves the live set; its files stay.
   // -------------------------------------------------------------------------------------------
 
   /** Why `wave` cannot be archived right now (it has ended, but its agents have not yet). */
@@ -4824,7 +4825,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
@@ -4876,6 +4877,10 @@ export class Daemon {
       },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
+      // --- Autopilot merging (SPEC §4.6.17): the wave file's merge:, else autopilot.merge. ---
+      mergeMode: () =>
+        log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
+      mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.

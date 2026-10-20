@@ -128,7 +128,9 @@ describe("daemon spawn loop", () => {
           },
         ]),
       })
-      .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
+      .on(["gh", "pr", "view"], {
+        stdout: JSON.stringify({ state: "OPEN", baseRefName: "release/w1" }),
+      });
     fake.on(["git", "-C", repo, "fetch"], () =>
       fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {},
     );

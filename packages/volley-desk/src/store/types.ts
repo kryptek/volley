@@ -155,7 +155,7 @@ export interface WaveStatePayload {
   owner: string | null;
   repo: string;
   release_branch: string;
-  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.17). */
+  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.18). */
   status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped" | "archived";
   tasks: WaveTask[];
   open_decisions: string[];
@@ -189,6 +189,7 @@ export const DECISION_KINDS = [
   "spawn_budget_exhausted",
   "account_limit",
   "machine_down",
+  "merge_refused",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

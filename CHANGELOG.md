@@ -51,6 +51,23 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Added
 
+- **volleyd: autopilot merging, behind the fence.** volleyd can merge a gated PR itself, exactly
+  at the head its evidence describes: the gate mints a `MergeToken` for `{ wave, task, pr, head,
+  release_branch }` after writing the evidence package, and the authority fence allows exactly
+  `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` with a token for that PR
+  and head (never `--admin`, `--auto`, `--merge` or `--rebase`; `git merge`, `push` and `rebase`
+  stay denied). A merge is journaled `merged_by_supervisor { task, pr, head, merge_sha, by }`,
+  then `artifact_verified { role: "merged", via: "supervisor" }` and `done`. A merge GitHub
+  refuses (head moved, checks required, branch protection) raises `merge_refused` and the PR is
+  re-read; after `autopilot.merge_retry_max` (2) refusals decision `merge_refused` asks `retry`,
+  `manual` or `cancel`. New wave-file key `merge: auto | manual` (default: the new tunable
+  `autopilot.merge`, default `auto`); under `manual` nothing changes. For now volleyd merges only
+  in a wave of one task (the merge queue that orders merges across tasks comes next). The
+  evidence package says who merges. Before the gate and again right before `gh pr merge` the PR
+  is re-read: a PR retargeted away from the release branch, or whose head moved, is never
+  merged. **Behaviour change:** a one-task wave with no `merge:` key is now merged by volleyd
+  after upgrading; set `merge: manual` in the wave file (or `autopilot.merge: manual`) to keep
+  merging by hand. (#198)
 - **volleyd: archive ended waves.** `volleyd archive <wave> [--yes]` retires a stopped or
   complete wave: its open decisions close as `archived`, `wave_archived { by, reason,
   closed_decisions }` is journaled, its state is published once with `status: "archived"` and
@@ -59,7 +76,7 @@ All workspace packages share one version. Dates are release-tag dates.
   id. An admin may archive any ended wave through its account-op topic. New tunables
   `archive_ended_after_h` (default 24; 0: never) and `archive_on_ack` (default true) archive
   ended waves automatically. A retained index, `volley/_waves/_archive` (`archive.schema.json`),
-  lists archived waves (SPEC §4.6.17). On upgrade, the first tick archives every wave that
+  lists archived waves (SPEC §4.6.18). On upgrade, the first tick archives every wave that
   ended more than 24 h ago in one pass; set `archive_ended_after_h: 0` first to keep them. (#192)
 - **Desk: archived waves leave every Desk.** The coordinators window and the canvas drop an
   archived wave for every client, not just the browser that dismissed it, and the window's footer

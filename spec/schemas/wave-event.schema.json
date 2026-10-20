@@ -67,6 +67,7 @@
             "ci_green",
             "pr_head_moved",
             "merged_by_operator",
+            "merged_by_supervisor",
             "agent_force_retired",
             "alarm_cleared",
             "wave_account_moved",

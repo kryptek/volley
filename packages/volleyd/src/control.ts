@@ -23,7 +23,7 @@ import type { PathError } from "./schemas";
 export const DAEMON_AGENT_ID = "volleyd";
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
-/** The retained index of archived waves (SPEC §4.6.17); `_` keeps it out of the wave id space. */
+/** The retained index of archived waves (SPEC §4.6.18); `_` keeps it out of the wave id space. */
 export const ARCHIVE_TOPIC = "volley/_waves/_archive";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;

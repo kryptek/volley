@@ -387,7 +387,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           return x !== undefined && x.task === d.task && parksTask(x);
         });
         const parked = task !== undefined && task.stage === "awaiting_decision";
-        // An archive's close (SPEC §4.6.17) leaves the task parked: its wave has ended for good.
+        // An archive's close (SPEC §4.6.18) leaves the task parked: its wave has ended for good.
         const archiveClose =
           d.resolved.answer === ARCHIVED_ANSWER &&
           (state.status === "stopped" || state.status === "complete");

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-state.schema.json",
   "title": "Volley Wave State",
-  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. An archived wave (status archived) is published once and then its retained state is cleared. See spec sections 4.6.1 and 4.6.17.",
+  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. An archived wave (status archived) is published once and then its retained state is cleared. See spec sections 4.6.1 and 4.6.18.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -39,7 +39,7 @@
             "release_branch": { "type": "string", "minLength": 1 },
             "status": {
               "enum": ["running", "paused", "awaiting_decision", "complete", "stopped", "archived"],
-              "description": "archived: an ended wave retired (spec section 4.6.17), published once with its open decisions closed, then cleared."
+              "description": "archived: an ended wave retired (spec section 4.6.18), published once with its open decisions closed, then cleared."
             },
             "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
             "open_decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionId" } },
@@ -101,7 +101,7 @@
                 "by": { "type": "string", "minLength": 1 },
                 "reason": { "type": "string" }
               },
-              "description": "When, by whom and why the wave was archived (spec section 4.6.17). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
+              "description": "When, by whom and why the wave was archived (spec section 4.6.18). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
             },
             "updated_at": { "type": "string", "format": "date-time" }
           }
