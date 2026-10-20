@@ -4,7 +4,13 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { claimVerdict, detectOwner, guardMutation, resolveCaller } from "../src/ownership";
+import {
+  bindOwner,
+  claimVerdict,
+  detectOwner,
+  guardMutation,
+  resolveCaller,
+} from "../src/ownership";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 
@@ -442,5 +448,129 @@ describe("ownership (pure)", () => {
       id: "coord-a",
       auto: true,
     });
+  });
+});
+
+describe("coordinator names (pure)", () => {
+  const now = Date.parse("2026-10-18T12:00:00.000Z");
+  const fresh = "2026-10-18T11:59:00.000Z";
+  const stale = "2026-10-18T10:00:00.000Z";
+  const named = (agent_id: string, started_at: string, coordinator = "coord-main") => ({
+    agent_id,
+    parent_id: null,
+    cwd: "/repo",
+    started_at,
+    coordinator,
+  });
+
+  it("bindOwner: the newest non-terminal entry carrying the name", () => {
+    const entries = [
+      named("coordinator-a1", "2026-10-18T09:00:00Z"),
+      named("coordinator-b2", "2026-10-18T10:00:00Z"),
+      named("coordinator-c3", "2026-10-18T11:00:00Z"),
+      named("other-x", "2026-10-18T11:30:00Z", "coord-other"),
+      { agent_id: "plain", parent_id: null, cwd: "/repo", started_at: "2026-10-18T11:45:00Z" },
+    ];
+    expect(bindOwner(entries, new Map(), "coord-main")).toBe("coordinator-c3");
+    expect(bindOwner(entries, new Map([["coordinator-c3", "reaped"]]), "coord-main")).toBe(
+      "coordinator-b2",
+    );
+    expect(
+      bindOwner(
+        entries,
+        new Map([
+          ["coordinator-a1", "done"],
+          ["coordinator-b2", "failed"],
+          ["coordinator-c3", "reaped"],
+        ]),
+        "coord-main",
+      ),
+    ).toBeNull();
+    expect(bindOwner(entries, new Map(), "coord-none")).toBeNull();
+  });
+
+  it("guardMutation: the agent bound to the owner name may act; an unbound one is refused", () => {
+    const bindings = new Map([
+      ["coord-main", { agent_id: "coordinator-b2", since: fresh, status: "working" }],
+    ]);
+    const state = { wave: "w", owner: "coord-main" };
+    expect(guardMutation(state, "coordinator-b2", "pause", bindings)).toBeNull();
+    expect(guardMutation(state, "coord-main", "pause", bindings)).toBeNull();
+    const refused = guardMutation(state, "coordinator-a1", "pause", bindings);
+    expect(refused).toContain("owned by coord-main");
+    expect(refused).toContain("coordinator-b2");
+    expect(guardMutation(state, "coordinator-b2", "pause")).toContain("owned by coord-main");
+  });
+
+  it("claimVerdict: a bound live agent keeps the name; a binding gone past claim_after_s frees it", () => {
+    const base = {
+      owner: "coord-main",
+      by: "coord-other",
+      now,
+      claimAfterS: 1800,
+      ownedSince: stale,
+      bound: "coordinator-b2",
+    };
+    const live = claimVerdict({
+      ...base,
+      status: { type: "working", at: fresh },
+      registryAt: fresh,
+      heartbeatAt: null,
+    });
+    expect(live.ok).toBe(false);
+    expect(live.ok === false && live.reason).toContain("coordinator-b2");
+    // The bound agent just went away: it may reconnect, so the name is not free at once.
+    expect(
+      claimVerdict({
+        ...base,
+        status: { type: "reaped", at: fresh },
+        registryAt: stale,
+        heartbeatAt: null,
+      }).ok,
+    ).toBe(false);
+    expect(
+      claimVerdict({
+        ...base,
+        status: { type: "reaped", at: stale },
+        registryAt: stale,
+        heartbeatAt: null,
+      }).ok,
+    ).toBe(true);
+    // The bound agent itself already owns it.
+    expect(
+      claimVerdict({
+        ...base,
+        by: "coordinator-b2",
+        status: { type: "working", at: fresh },
+        registryAt: fresh,
+        heartbeatAt: null,
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("detectOwner and resolveCaller return the session's coordinator name when it has one", async () => {
+    const entries = [named("coordinator-c7d9", "2026-10-18T10:00:00Z")];
+    expect(detectOwner(entries, { cwd: "/repo/sub" })).toBe("coord-main");
+    expect(detectOwner(entries, { agentId: "coordinator-c7d9", cwd: "/x" })).toBe("coord-main");
+    const reg = JSON.stringify(
+      buildEnvelope({
+        agentId: "coordinator-c7d9",
+        parentId: null,
+        channel: "_system/registry",
+        type: "registered",
+        payload: { cwd: "/repo", started_at: "2026-10-18T09:00:00Z", coordinator: "coord-main" },
+      }),
+    );
+    const fake = {
+      readRegistry: async () => [reg],
+      readStatuses: async () => new Map<string, string>(),
+    };
+    expect(await resolveCaller(fake, undefined, {}, "/repo")).toEqual({
+      id: "coord-main",
+      auto: true,
+    });
+    expect(await resolveCaller(fake, undefined, { VOLLEY_COORDINATOR: "coord-env" }, "/x")).toEqual(
+      { id: "coord-env", auto: true },
+    );
   });
 });
