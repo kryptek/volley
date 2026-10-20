@@ -101,11 +101,19 @@ export interface Tunables {
    * the user's own servers (plugins, connectors) too, with volleyd's `volley` taking that name.
    */
   agent_mcp: AgentMcp;
+  /**
+   * What the reviewers flag as public hygiene: `auto` (P1 for a public repository or one whose
+   * visibility could not be read, P3 for a private one), `on` (always P1), `off` (never).
+   */
+  public_hygiene: PublicHygiene;
   hosts: Record<string, RemoteHostConfig>;
 }
 
 export type BranchUpdate = "rebase" | "merge";
 export type AgentMcp = "strict" | "inherit";
+export type PublicHygiene = "auto" | "on" | "off";
+/** `gh repo view --json visibility`, lowercased; `unknown` when it could not be read. */
+export type RepoVisibility = "public" | "private" | "internal" | "unknown";
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
 export type TunablesPatch = {
@@ -244,6 +252,10 @@ export interface WaveState {
   effective_config?: TunablesPatch;
   /** The brief preface the current plan version's agents get (null: none). */
   brief_preface?: { path: string; sha256: string; bytes: number } | null;
+  /** The repository's visibility as journaled for this version (null: set by config, not read). */
+  repo_visibility?: RepoVisibility | null;
+  /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
+  hygiene_level?: "p1" | "p3" | "off";
   updated_at: string;
 }
 
@@ -330,6 +342,8 @@ export const WAVE_EVENT_TYPES = [
   "peer_invited",
   "peer_joined",
   "peer_removed",
+  // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
+  "repo_visibility_detected",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

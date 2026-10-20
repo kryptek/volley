@@ -38,6 +38,9 @@ export interface BriefVars {
   worktree: string;
   /** Repo-specific notes (`<repo>/.volley/brief-extra.md`), rendered as their own section. */
   extra: string;
+  /** Reviewer briefs: the hygiene check line and its contract bullet (reviews.ts hygieneText). */
+  hygiene_rule: string;
+  hygiene_contract: string;
 }
 
 /**

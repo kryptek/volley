@@ -157,6 +157,7 @@ import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
 import { type SpawnFailure, type WaveRecord, latestSpawnFailure } from "./reducer";
+import { readRepoVisibility } from "./repo-visibility";
 import {
   type Admission,
   activeTasks,
@@ -173,6 +174,8 @@ import type {
   CoordinatorAttention,
   JournalEvent,
   NewEvent,
+  PublicHygiene,
+  RepoVisibility,
   TaskAgents,
   TaskId,
   Tunables,
@@ -406,6 +409,13 @@ export interface SpawnerOptions {
   remoteHost?: (spec: RemoteHostSpec) => RemoteHost;
   /** The exec remote hosts and their tunnels run with (default: the fenced exec). */
   remoteExec?: ExecFn;
+}
+
+/** `repo_visibility_detected` data: the repo's visibility for a wave version, and why. */
+interface VisibilityFacts {
+  visibility: RepoVisibility | null;
+  source: "gh" | "config";
+  public_hygiene: PublicHygiene;
 }
 
 /** How the pipeline (or an account move) starts a spawn (startSpawn). */
@@ -1984,6 +1994,7 @@ export class Daemon {
         attempt,
         ...rest,
         account: { id: account.id, dir: account.dir },
+        hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
       };
       if (remote !== undefined) {
@@ -2978,6 +2989,7 @@ export class Daemon {
       journal: (ev) => this.append(wave, ev),
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
       branchUpdate: () => this.config.effective(wave).branch_update,
+      hygiene: () => log.record.state?.hygiene_level ?? "p1",
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -4823,29 +4835,73 @@ export class Daemon {
     if ("refusal" in preface) return preface.refusal;
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
-    if (first.existing !== undefined) {
-      return this.resubmit(first.existing, first.wave, p.wave_yaml as string, preface);
-    }
     const text = p.wave_yaml as string;
-    if (this.opts.issueBody === undefined)
-      return this.commitSubmit(first.wave, first.owner, {}, text, preface);
-    // Fetching issue bodies can take seconds: do it off the serial queue (control ops and ticks,
-    // the kill switch included, keep running), then commit inside it, re-checking what may have
-    // changed meanwhile (the kill switch, a racing submit of the same wave id).
+    const fetchFiles = first.existing === undefined && this.opts.issueBody !== undefined;
+    if (!fetchFiles && !this.readsVisibility(first.wave)) {
+      const visibility = await this.repoVisibility(first.wave);
+      return first.existing !== undefined
+        ? this.resubmit(first.existing, first.wave, text, preface, visibility)
+        : this.commitSubmit(first.wave, first.owner, {}, text, preface, visibility);
+    }
+    // Fetching issue bodies and the repo's visibility can take seconds: do it off the serial
+    // queue (control ops and ticks, the kill switch included, keep running), then commit inside
+    // it, re-checking what may have changed meanwhile (the kill switch, a racing submit of the
+    // same wave id).
     return {
       ok: true,
-      defer: this.fetchIssueFiles(first.wave).then((files) =>
+      defer: Promise.all([
+        fetchFiles ? this.fetchIssueFiles(first.wave) : {},
+        this.repoVisibility(first.wave),
+      ]).then(([files, visibility]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
           if (again.existing !== undefined)
-            return this.resubmit(again.existing, again.wave, text, preface);
-          return this.commitSubmit(again.wave, again.owner, files, text, preface);
+            return this.resubmit(again.existing, again.wave, text, preface, visibility);
+          return this.commitSubmit(again.wave, again.owner, files, text, preface, visibility);
         }),
       ),
     };
+  }
+
+  /** The wave's `public_hygiene` as submitted: its `config:` override, else the global value. */
+  private publicHygiene(wave: Wave): PublicHygiene {
+    return wave.config.public_hygiene ?? this.config.effective().public_hygiene;
+  }
+
+  /**
+   * Whether submitting `wave` runs `gh repo view`: under `public_hygiene: auto`, on a daemon that
+   * spawns agents (one that spawns none writes no reviewer briefs).
+   */
+  private readsVisibility(wave: Wave): boolean {
+    return this.opts.spawner !== undefined && this.publicHygiene(wave) === "auto";
+  }
+
+  /**
+   * The `repo_visibility_detected` facts for a wave version: under `auto` read with `gh repo
+   * view` (`unknown` on any failure), under `on` / `off` from config. Null: not recorded (a
+   * daemon without a spawner); the wave's hygiene level is then p1.
+   */
+  private async repoVisibility(wave: Wave): Promise<VisibilityFacts | null> {
+    if (this.opts.spawner === undefined) return null;
+    const mode = this.publicHygiene(wave);
+    if (mode !== "auto") return { visibility: null, source: "config", public_hygiene: mode };
+    const visibility = await readRepoVisibility(this.host.exec, expandHome(wave.repo));
+    return { visibility, source: "gh", public_hygiene: mode };
+  }
+
+  /** Journal a wave version's visibility, and the alarm when it could not be read. */
+  private async journalVisibility(wave: WaveId, facts: VisibilityFacts | null): Promise<void> {
+    if (facts === null) return;
+    await this.append(wave, { type: "repo_visibility_detected", data: { ...facts } });
+    if (facts.visibility === "unknown") {
+      await this.append(wave, {
+        type: "alarm_raised",
+        data: { alarm: "repo_visibility_unknown" },
+      });
+    }
   }
 
   /**
@@ -4944,6 +5000,7 @@ export class Daemon {
     issueFiles: Record<TaskId, string[]>,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
+    visibility: VisibilityFacts | null,
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
     const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
@@ -4956,6 +5013,7 @@ export class Daemon {
       type: "wave_submitted",
       data: { wave, owner, brief_preface: preface.info },
     });
+    await this.journalVisibility(wave.wave, visibility);
     if (preface.info === null) {
       await this.append(wave.wave, {
         type: "alarm_raised",
@@ -5595,6 +5653,7 @@ export class Daemon {
     wave: Wave,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
+    visibility: VisibilityFacts | null,
   ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
@@ -5648,6 +5707,7 @@ export class Daemon {
         });
       }
     }
+    await this.journalVisibility(wave.wave, visibility);
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
       if (d.op === "resolve") {

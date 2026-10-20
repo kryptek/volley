@@ -4,10 +4,13 @@ import { describe, expect, it } from "vitest";
 import { BRIEFS_DIR, ROLES, loadTemplate, renderBrief } from "../src/brief";
 import {
   HYGIENE_CHECK,
+  type HygieneLevel,
   type ReviewResult,
   disagreementDecision,
   findDisagreements,
   fixupItems,
+  hygieneLevel,
+  hygieneText,
   parseFixupResult,
   parseReviewResult,
   renderFindingsMd,
@@ -152,17 +155,97 @@ describe("public hygiene (reviewer backstop)", () => {
     extra: "",
   };
 
-  it("both reviewer briefs carry the fixed hygiene check line, with no preface and no extras", () => {
+  const P3_RULE =
+    "Hygiene (private repository): note as P3 any person name, local username, machine path, private hostname or IP in the diff, commit messages or PR text; it will not block the merge.";
+  const render = (role: (typeof ROLES)[number], level: HygieneLevel) => {
+    const t = hygieneText(level);
+    return renderBrief(loadTemplate(role, BRIEFS_DIR), {
+      ...VARS,
+      role,
+      hygiene_rule: t.rule,
+      hygiene_contract: t.contract,
+    });
+  };
+
+  it("hygieneText: p1 is the 0.3.1 line, p3 a non-blocking note, off nothing", () => {
     expect(HYGIENE_CHECK).toBe(
       "Public hygiene: flag as P1 any person name, local username, machine path (home directories, temp paths), private hostname or IP in the diff, commit messages or PR text.",
     );
+    expect(hygieneText("p1").rule).toBe(HYGIENE_CHECK);
+    expect(hygieneText("p3").rule).toBe(P3_RULE);
+    expect(hygieneText("p3").rule).toContain("P3");
+    expect(hygieneText("p3").rule).not.toContain("P1");
+    expect(hygieneText("off")).toEqual({ rule: "", contract: "" });
+  });
+
+  it("hygieneLevel: on → p1, off → off, auto by visibility (unknown is public)", () => {
+    expect(hygieneLevel("on", "private")).toBe("p1");
+    expect(hygieneLevel("off", "public")).toBe("off");
+    expect(hygieneLevel("auto", "public")).toBe("p1");
+    expect(hygieneLevel("auto", "unknown")).toBe("p1");
+    expect(hygieneLevel("auto", null)).toBe("p1");
+    expect(hygieneLevel("auto", "private")).toBe("p3");
+    expect(hygieneLevel("auto", "internal")).toBe("p3");
+  });
+
+  it("the reviewer briefs carry the level's rule and contract; other roles never do", () => {
     for (const role of ROLES) {
-      const brief = renderBrief(loadTemplate(role, BRIEFS_DIR), { ...VARS, role });
-      if (role === "spec_reviewer" || role === "quality_reviewer") {
-        expect(brief).toContain(HYGIENE_CHECK);
-        expect(brief).toContain('"hygiene": { "checked": true, "findings": [');
-      } else expect(brief).not.toContain(HYGIENE_CHECK);
+      const reviewer = role === "spec_reviewer" || role === "quality_reviewer";
+      const p1 = render(role, "p1");
+      const p3 = render(role, "p3");
+      const off = render(role, "off");
+      if (reviewer) {
+        expect(p1).toContain(HYGIENE_CHECK);
+        expect(p1).toContain('"hygiene": { "checked": true, "findings": [');
+        expect(p1).toContain("A result without it is not accepted");
+        expect(p3).toContain(P3_RULE);
+        expect(p3).not.toContain(HYGIENE_CHECK);
+        expect(p3).toMatch(/`hygiene` is optional/);
+        expect(p3).not.toContain("A result without it is not accepted");
+        expect(off).not.toContain("hygiene");
+        expect(off).not.toContain("Public hygiene");
+        expect(off).not.toContain('"hygiene":');
+      }
+      for (const brief of reviewer ? [] : [p1, p3, off]) {
+        expect(brief).not.toContain(HYGIENE_CHECK);
+        expect(brief).not.toContain(P3_RULE);
+        expect(brief).not.toContain('"hygiene":');
+      }
     }
+  });
+
+  it("parsing by level: p1 needs the block and promotes hits; p3 keeps them P3; off ignores it", () => {
+    expect(parseReviewResult(fixture("no-hygiene"), "p1")).toBeNull();
+    expect(parseReviewResult(fixture("no-hygiene"), "p3")).toEqual({
+      findings: [],
+      verdict: "approve",
+    });
+    expect(parseReviewResult(fixture("no-hygiene"), "off")).toEqual({
+      findings: [],
+      verdict: "approve",
+    });
+    const hit = { severity: "P3" as const, file: "docs/ops.md", line: 4, text: "a hostname" };
+    const payload = {
+      findings: [],
+      verdict: "approve",
+      hygiene: { checked: true, findings: [hit] },
+    };
+    const p3 = parseReviewResult(payload, "p3") as ReviewResult;
+    expect(p3.findings).toEqual([hit]);
+    expect(p3.hygiene?.findings).toEqual([hit]);
+    // A P1 a reviewer gave anyway is still folded in as the P3 the level allows.
+    const high = parseReviewResult(
+      { ...payload, hygiene: { checked: true, findings: [{ ...hit, severity: "P1" }] } },
+      "p3",
+    ) as ReviewResult;
+    expect(high.findings).toEqual([hit]);
+    const p1 = parseReviewResult(payload, "p1") as ReviewResult;
+    expect(p1.findings).toEqual([{ ...hit, severity: "P1" }]);
+    const off = parseReviewResult(payload, "off") as ReviewResult;
+    expect(off.findings).toEqual([]);
+    expect(off.hygiene).toBeUndefined();
+    // The default is p1 (0.3.1 behaviour).
+    expect(parseReviewResult(fixture("no-hygiene"))).toBeNull();
   });
 
   it("a review without hygiene.checked is unparseable", () => {

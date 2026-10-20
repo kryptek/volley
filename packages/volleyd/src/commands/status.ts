@@ -124,6 +124,7 @@ export function formatWave(
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
+  const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -140,5 +141,14 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + preface + rows.join("") + decisions.join("");
+  return header + preface + hygiene + rows.join("") + decisions.join("");
+}
+
+/**
+ * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
+ * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
+ */
+function formatHygiene(s: WaveState): string {
+  if (s.hygiene_level === "off") return "hygiene: off";
+  return `hygiene: ${s.hygiene_level === "p3" ? "P3" : "P1"} (${s.repo_visibility ?? "forced"})`;
 }

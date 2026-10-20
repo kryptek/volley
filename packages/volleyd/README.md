@@ -694,6 +694,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -1479,14 +1480,33 @@ first stage, `spec_review`) and the state adds `stage_label: "review (spec + qua
 prints the label and one line per role.
 
 **Reviews.** Reviewers publish `vol_publish(channel="result", type="review", payload={ findings:
-[{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene: { checked: true, findings } })`
-(`review-result.schema.json`). Both reviewer briefs carry a fixed public-hygiene line, whatever
-the repo's preface says: "flag as P1 any person name, local username, machine path (home
-directories, temp paths), private hostname or IP in the diff, commit messages or PR text".
-`hygiene.findings` lists those hits; volleyd folds them into the review's findings, so the
-fixup gets them. A result without `hygiene.checked` is not a parseable result. A `done`
-without a parseable result is steered once, then `agent_blocked` (`respawn` / `skip`). The
-spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
+[{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene?: { checked: true, findings } })`
+(`review-result.schema.json`). Both reviewer briefs carry a hygiene line, whatever the repo's
+preface says, at the wave's hygiene level:
+
+- **P1** (a public repository, one whose visibility could not be read, or `public_hygiene: on`):
+  "flag as P1 any person name, local username, machine path (home directories, temp paths),
+  private hostname or IP in the diff, commit messages or PR text". The `hygiene` block is
+  required: a result without `hygiene.checked` is not a parseable result, and every hit in
+  `hygiene.findings` is a P1, whatever severity the reviewer gave it.
+- **P3** (a private or internal repository under `auto`): the same check as a non-blocking note.
+  The block is optional; its hits are P3s, never promoted.
+- **off** (`public_hygiene: off`): no hygiene line, no block; a block a reviewer sends anyway is
+  ignored.
+
+volleyd folds the hits into the review's findings, so the fixup gets them. **`public_hygiene:
+auto | on | off`** (a tunable: `config.yaml`, `config_set` or a wave file's `config:`; default
+`auto`) picks the level. Under `auto` the daemon reads the repository's visibility once per wave
+version, at `run` (off the serial queue, beside the issue fetches), with `gh repo view --json
+visibility` in the repo (bounded by `repo_visibility_ms`), and journals `repo_visibility_detected
+{ visibility: public|private|internal|unknown, source: "gh", public_hygiene }`; `on` and `off`
+skip `gh` and journal `visibility: null, source: "config"`. A failed or timed-out read is
+`unknown` plus `alarm_raised { alarm: "repo_visibility_unknown" }`, and is treated as public. The
+wave state carries `repo_visibility` and `hygiene_level`, and `volleyd status` prints
+`hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)`, `P1 (forced)` or `off` under the
+header. A daemon that spawns no agents reads and journals nothing (the level is then P1). A
+`done` without a parseable result (at that level) is steered once with the level's contract,
+then `agent_blocked` (`respawn` / `skip`). The spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
 `ISSUE.md` in its worktree). A P1 from
 one reviewer that the other rated P3 on the same hunk (same file, lines within
 `review_hunk_lines`) opens `reviewers_disagree` (`blocker` / `fine`; `fine` hands it to the fixup
@@ -1642,7 +1662,7 @@ ALLOW (program by bare name only — never a path):
     (in any case); fetch takes a remote name or a
     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
     write refs/remotes/…
-  gh issue view · gh pr view | list | checks · gh run list | view | watch ·
+  gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)
   cmux — exact argv shapes only, because cmux types into an agent's shell:

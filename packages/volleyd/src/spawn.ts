@@ -37,6 +37,7 @@ import {
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { reapAndRevoke, retainedTopics } from "./retire";
+import { type HygieneLevel, hygieneText } from "./reviews";
 import { classifyScreen, lastOutput, lastOutputNote } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
@@ -93,6 +94,8 @@ export interface SpawnRequest {
    * the merge one (`briefs/rebase-merge.md.tmpl`). Absent: rebase.
    */
   branch_update?: BranchUpdate;
+  /** The reviewer briefs' hygiene level (reviews.ts hygieneLevel). Absent: `p1`. */
+  hygiene?: HygieneLevel;
   /**
    * The agent's MCP servers, when they must be the earlier agent's (a respawn of a moved or
    * vanished agent, from its `agent_spawned` record), not the tunable's current value.
@@ -414,6 +417,7 @@ async function launchAttempt(
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
   const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const hygiene = hygieneText(req.hygiene ?? "p1", req.wave.release_branch);
   const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,
     namespace: ctx.namespace,
@@ -432,6 +436,8 @@ async function launchAttempt(
       host.readFile !== undefined
         ? briefExtraFrom(await host.readFile(briefExtraPath(ctx.root)))
         : briefExtra(ctx.root),
+    hygiene_rule: hygiene.rule,
+    hygiene_contract: hygiene.contract,
   });
   const brief = withPreface(preface, rendered);
   await host.writeFile(

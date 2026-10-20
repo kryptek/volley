@@ -2,6 +2,18 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- **Reviewer hygiene follows the repository's visibility** (`public_hygiene: auto | on | off`, tunable, default `auto`). Under
+  `auto` volleyd reads the repository's visibility once per wave version (`gh repo view`, journaled as
+  `repo_visibility_detected`): a public repository, or one whose visibility cannot be read (`repo_visibility_unknown` alarm),
+  keeps the P1 hygiene check and the required `hygiene` block; a private or internal one gets a non-blocking P3 note and an
+  optional block. `on` forces P1, `off` drops the check. The wave state carries `repo_visibility` and `hygiene_level`;
+  `volleyd status` prints `hygiene: P1 (public)` / `P3 (private)` / `off`. `review-result.schema.json` no longer lists
+  `hygiene` as required (SPEC §4.6.4, §4.6.8). (#178)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a

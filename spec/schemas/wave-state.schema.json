@@ -55,6 +55,17 @@
               "oneOf": [{ "$ref": "#/$defs/briefPreface" }, { "type": "null" }],
               "description": "The brief preface every agent of the current plan version gets (spec section 4.6.9), or null when the wave has none."
             },
+            "repo_visibility": {
+              "oneOf": [
+                { "enum": ["public", "private", "internal", "unknown"] },
+                { "type": "null" }
+              ],
+              "description": "The repository's visibility as the supervisor read it for the current plan version (spec section 4.6.8): unknown when it could not be read, null when the public_hygiene setting (on or off) made reading it unnecessary. Absent: not recorded (a supervisor that predates it)."
+            },
+            "hygiene_level": {
+              "enum": ["p1", "p3", "off"],
+              "description": "How the reviewers treat public hygiene for the current plan version (spec section 4.6.8): p1 (every hit blocks the merge; public, or visibility unknown), p3 (non-blocking notes; private or internal) or off. Absent: not recorded, which a supervisor treats as p1."
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
