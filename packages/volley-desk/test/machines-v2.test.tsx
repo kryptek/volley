@@ -54,8 +54,10 @@ function setup(props: Partial<MachinesProps> = {}) {
     now: NOW,
     ...props,
   };
-  render(<Machines {...base} />);
-  return { ops: (props.ops as typeof ops | undefined) ?? ops, config };
+  const view = render(<Machines {...base} />);
+  const rerender = (next: Partial<MachinesProps>) =>
+    view.rerender(<Machines {...base} {...next} />);
+  return { ops: (props.ops as typeof ops | undefined) ?? ops, config, rerender };
 }
 
 const card = (name: string) => within(screen.getByRole("article", { name }));
@@ -433,6 +435,21 @@ describe("Machines focus (the agent window's machine chip)", () => {
       });
       expect(spy).toHaveBeenCalledTimes(1);
       expect(seen[0]).toBe(screen.getByRole("article", { name: "box-b" }));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("a second click on the same machine's chip (a new focusSeq) scrolls to its card again", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      const { rerender } = setup({ focus: "box-a", focusSeq: 1 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      rerender({ focus: "box-a", focusSeq: 1 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      rerender({ focus: "box-a", focusSeq: 2 });
+      expect(spy).toHaveBeenCalledTimes(2);
     } finally {
       Reflect.deleteProperty(Element.prototype, "scrollIntoView");
     }

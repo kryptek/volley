@@ -361,9 +361,10 @@ export default function App() {
     takeFirstRun() ? "setup" : null,
   );
   /** The machine an agent window's machine chip asked Settings › Machines to show. */
-  const [focusMachine, setFocusMachine] = useState<string | null>(null);
+  const [focusMachine, setFocusMachine] = useState<{ name: string; seq: number } | null>(null);
   const openMachine = useCallback((name: string) => {
-    setFocusMachine(name);
+    // A new seq per click: clicking the same machine's chip again re-opens and re-scrolls it.
+    setFocusMachine((f) => ({ name, seq: (f?.seq ?? 0) + 1 }));
     setDeskSettings("machines");
   }, []);
   useEffect(() => {
@@ -1217,7 +1218,8 @@ export default function App() {
             host: sshHost(brokerUrl),
             readiness: state.readiness ?? {},
             localName: state.config?.fleet?.local_name,
-            focus: focusMachine ?? undefined,
+            focus: focusMachine?.name,
+            focusSeq: focusMachine?.seq,
             configTransport,
             accounts: state.claudeAccounts ?? {},
             agentsOn: agentsOnMachines(
