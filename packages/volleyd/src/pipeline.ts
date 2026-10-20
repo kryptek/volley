@@ -1020,7 +1020,7 @@ function onMovedCi(
     ...(merge !== undefined ? { release_merge: merge } : {}),
   };
   const accept = acceptable
-    ? `accept: the move is a merge of ${v.release_branch} only (files: ${merge.moved_files.join(", ") || "none"}), so the reviews of ${at(m.from)} hold; the gate again at ${at(m.to)}; `
+    ? `accept: the move is a merge of ${v.release_branch} only (files: ${merge.moved_files.join(", ") || "none"}; they may carry content resolved by hand, which no reviewer saw), so the reviews of ${at(m.from)} hold; the gate again at ${at(m.to)}; `
     : "";
   return [
     {

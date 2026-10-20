@@ -399,6 +399,7 @@ describe("PR head moved by a merge of the release branch only", () => {
     expect(d?.options).toEqual(["rereview", "fixup", "accept", "cancel"]);
     expect(d?.question).toContain("a merge of release/w1 only");
     expect(d?.question).toContain("CHANGELOG.md");
+    expect(d?.question).toContain("may carry content resolved by hand");
     await h.resolve(d?.decision_id as string, "accept", "owner");
     const verified = h.events
       .filter((e) => e.type === "artifact_verified" && e.data.adopted)

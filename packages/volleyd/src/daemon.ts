@@ -4522,6 +4522,8 @@ export class Daemon {
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
       // A PR merged on GitHub settles every open question about its task (already on the queue).
+      // resolveNow only enqueues the pipeline's decision_resolved, so it runs after the task is
+      // done and onResolved returns [] for it: a superseded decision is never asked again.
       resolveOpen: async (task, answer, rationale) => {
         for (const d of openDecisions(log.record)) {
           if (d.task !== task) continue;
