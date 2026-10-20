@@ -705,3 +705,110 @@
   font-size: 12.5px;
   color: #ff8f86;
 }
+
+/* Settings › Sound: theme cards with their audition chips, the per-event play buttons. */
+.s-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: #6ee7f9;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.snd-themes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.snd-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+.snd-card.on {
+  border-color: #ff2d55;
+  background: rgba(255, 45, 85, 0.1);
+}
+.snd-pick {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  border: 0;
+  padding: 2px 2px 6px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.snd-load {
+  appearance: none;
+  border: 0;
+  width: auto;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #ff2d55, transparent);
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: snd-load 1s linear infinite;
+}
+.snd-load::-webkit-progress-bar,
+.snd-load::-moz-progress-bar {
+  background: transparent;
+}
+@keyframes snd-load {
+  from {
+    background-position: -50% 0;
+  }
+  to {
+    background-position: 150% 0;
+  }
+}
+.snd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.snd-chip {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--mute);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.snd-chip:hover,
+.snd-chip:focus-visible {
+  color: var(--ink);
+  border-color: #ff2d55;
+}
+.snd-time {
+  width: 92px;
+}
+@media (max-width: 699.98px) {
+  .snd-themes {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .snd-load {
+    animation: none;
+    background: #ff2d55;
+    opacity: 0.6;
+  }
+}

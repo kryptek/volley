@@ -1114,6 +1114,14 @@ export default function App() {
           setLook={setLook}
           notify={notify}
           setNotify={setNotify}
+          sound={{
+            sound,
+            setSound,
+            loadTheme: sounds.loadTheme,
+            audition: sounds.audition,
+            disposeAudition: sounds.disposeAudition,
+            canVibrate: sounds.player.canVibrate(),
+          }}
           webgl={webgl}
           identity={identity}
           demo={demo}

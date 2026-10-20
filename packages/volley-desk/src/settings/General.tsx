@@ -2,8 +2,9 @@
  * Settings › General: the canvas (auto-arrange with "Arrange & fit now", the
  * window layout's Reset layout, which clears every window pin (C12),
  * finished agents shown or hidden and the grace before they leave), the
- * notifications (the sound and the browser notifications, the same settings
- * as the top bar's toggles) and the agent windows' narration effect. The
+ * notifications (the attention sound, a pointer to Settings › Sound where
+ * the rest of the sounds live, and the browser notifications: the same
+ * settings as the top bar's toggles) and the agent windows' narration effect. The
  * look's keys persist through `useLook`, the notification ones through
  * `useNotifySettings` (sound is `notify.sound` in `volley-dash:notify`, shared
  * with the top bar, not a look key); the switch is `useNotifyToggle`.
@@ -54,6 +55,7 @@ export function General({
   setNotify,
   onArrange,
   onResetLayout,
+  onOpenSound,
 }: {
   look: Look;
   setLook: (change: Partial<Look>) => void;
@@ -62,6 +64,8 @@ export function General({
   onArrange: () => void;
   /** Clear every window pin (pinned in place, anchored to the screen) in this browser (the desktop and phone layouts both). */
   onResetLayout?: () => void;
+  /** Switch to Settings › Sound. */
+  onOpenSound?: () => void;
 }) {
   const { toggle: toggleNotify, blocked } = useNotifyToggle(setNotify);
   return (
@@ -109,7 +113,22 @@ export function General({
         </Row>
       </Group>
       <Group title="Notifications">
-        <Row label="Sound when something needs you">
+        <Row
+          label="Sound when something needs you"
+          hint={
+            <>
+              Sounds are in Settings › Sound
+              {onOpenSound && (
+                <>
+                  {" · "}
+                  <button type="button" className="s-link" onClick={onOpenSound}>
+                    Open Sound
+                  </button>
+                </>
+              )}
+            </>
+          }
+        >
           <Toggle
             label="Sound when something needs you"
             on={notify.sound}
