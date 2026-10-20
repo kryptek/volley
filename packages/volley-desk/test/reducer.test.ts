@@ -11,8 +11,10 @@ import {
   reduce,
   reduceAll,
   resync,
+  routeTopic,
 } from "../src/store/reducer";
 import { type DeskMessage, type DeskState, type Envelope, ROLES } from "../src/store/types";
+import { machineMsg, machineRecord, readiness, readinessMsg } from "./helpers/desk-msgs";
 
 const EXAMPLES = path.resolve(__dirname, "../../../spec/examples/valid");
 
@@ -463,5 +465,42 @@ describe("reducer — signs of life", () => {
     );
     expect(s.agents["impl-x"]?.lastProgress).toEqual({ type: "idle", at: 2_000 });
     expect(apply(registryFor("impl-y")).agents["impl-y"]?.lastProgress).toBeUndefined();
+  });
+});
+
+describe("reducer — Fleet readiness (SPEC §4.6.15)", () => {
+  it("routes a machine's readiness topic apart from its record", () => {
+    expect(routeTopic("volley/_system/machines/box-a/readiness")).toEqual({
+      kind: "readiness",
+      name: "box-a",
+    });
+    expect(routeTopic("volley/_system/machines/box-a")).toEqual({ kind: "machine", name: "box-a" });
+  });
+
+  it("keeps volleyd's verdict by machine name and forgets a cleared one", () => {
+    const s = apply(readinessMsg(readiness()), readinessMsg(readiness({ name: "box-b" })));
+    expect(Object.keys(s.readiness ?? {})).toEqual(["box-a", "box-b"]);
+    expect(s.readiness?.["box-a"]?.placed).toBe(2);
+    const cleared = reduce(s, readinessMsg(null, "box-a"));
+    expect(Object.keys(cleared.readiness ?? {})).toEqual(["box-b"]);
+  });
+
+  it("takes a verdict only from volleyd, and only for its topic's machine", () => {
+    const s = apply(
+      readinessMsg(readiness(), "box-a", "box-a"),
+      readinessMsg(readiness({ name: "box-z" }), "box-a"),
+    );
+    expect(s.readiness ?? {}).toEqual({});
+  });
+
+  it("keeps the supervisor's own record (kind supervisor, tunnel local), published by volleyd", () => {
+    const own = machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" });
+    const s = apply(machineMsg(own, "hub", "volleyd"));
+    expect(s.machines?.hub).toEqual(own);
+  });
+
+  it("a resync forgets every verdict until the replay brings them back", () => {
+    const s = resync(apply(readinessMsg(readiness())));
+    expect(s.readiness).toEqual({});
   });
 });

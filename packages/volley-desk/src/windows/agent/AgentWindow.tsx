@@ -372,6 +372,8 @@ export function AgentWindow({
   );
 
   const work = agent.work;
+  // Its task's machine (SPEC §4.6.15): placement names the supervisor's own one too.
+  const host = task?.placement?.host ?? task?.host;
   const footer = (
     <div className="agent-foot">
       {session ? (
@@ -406,6 +408,11 @@ export function AgentWindow({
       <span className={`hb${hbStale ? " hb--stale" : ""}`} title="Hook heartbeat">
         <i /> {hbAge === null ? "—" : age(hbAge)}
       </span>
+      {host && (
+        <span className="mono dim ell" title="The machine this agent runs on">
+          on {host}
+        </span>
+      )}
       <span
         className="mono dim ell"
         title={agent.registry?.model_source ? `model: ${agent.registry.model_source}` : undefined}

@@ -812,3 +812,42 @@
     opacity: 0.6;
   }
 }
+
+/* Settings › Supervisor › Lease pools: holders by host (SPEC §4.6.5). */
+.lease-pools {
+  margin-bottom: 14px;
+}
+.lease-pool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 12.5px;
+}
+.lease-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+.lease-host {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+.lease-host-name {
+  min-width: 96px;
+  color: var(--mute);
+}
+.lease-holder + .lease-holder::before {
+  content: " · ";
+  color: var(--dim);
+}
+.lease-reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

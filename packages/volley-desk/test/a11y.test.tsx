@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fireEvent, render, renderHook, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
@@ -8,10 +8,13 @@ import { REDUCED_MOTION_QUERY, useReducedMotion } from "../src/a11y/motion";
 import { CHROMES } from "../src/look/options";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { BrokerAccounts } from "../src/settings/BrokerAccounts";
+import { Machines } from "../src/settings/Machines";
 import { Setup } from "../src/settings/Setup";
 import { SetupWizard } from "../src/settings/SetupWizard";
 import { DeskStoreProvider } from "../src/store/context";
 import { PLAN, fakeOps } from "./helpers/auth-ops";
+import { machineRecord, readiness } from "./helpers/desk-msgs";
+import { fakePeerOps } from "./helpers/peer-ops";
 
 const renderApp = () =>
   render(
@@ -52,6 +55,71 @@ async function violations(): Promise<string[]> {
     (v) => `${v.id}: ${v.help}\n  ${v.nodes.map((n) => n.target.join(" ")).join("\n  ")}`,
   );
 }
+
+describe("Machines v2: rows and sheets", () => {
+  const renderMachines = () => {
+    const ops = fakePeerOps({
+      known: vi.fn(() => "admin" as const),
+      doctor: vi.fn(async () => ({
+        ok: true as const,
+        checks: [],
+        plan: [
+          { id: "hooks", ok: false, severity: "warn" as const, detail: "no hooks", fix: "x" },
+          {
+            id: "gh.auth",
+            ok: false,
+            severity: "block" as const,
+            detail: "no gh",
+            fix: "gh auth login",
+          },
+        ],
+      })),
+    });
+    const failing = machineRecord({
+      checks: [
+        { id: "tool.git", ok: true, severity: "block", detail: "git 2.47.0" },
+        { id: "gh.auth", ok: false, severity: "block", detail: "gh is not signed in" },
+      ],
+    });
+    // In a landmark, as the Settings window has it.
+    render(
+      <main>
+        <Machines
+          machines={{ "box-a": failing }}
+          readiness={{ "box-a": readiness() }}
+          hosts={["box-a"]}
+          hubUp
+          ops={ops}
+          configTransport={{ identity: "owner-desk", send: vi.fn() }}
+        />
+      </main>,
+    );
+  };
+
+  it("every check row has a name, and the card has no violations", async () => {
+    renderMachines();
+    await act(async () => {});
+    for (const li of screen.getAllByRole("listitem")) expect(li).toHaveAccessibleName();
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
+  it("the Repair sheet traps focus and has no violations", async () => {
+    renderMachines();
+    await act(async () => {});
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Repair…" }));
+    });
+    const dialog = screen.getByRole("dialog", { name: "Repair box-a" });
+    expect(dialog).toHaveFocus();
+    const inside = within(dialog).getAllByRole("button");
+    const last = inside[inside.length - 1] as HTMLElement;
+    last.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(last);
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+});
 
 describe("axe (jsdom)", () => {
   it("reports no violations on the demo canvas", async () => {

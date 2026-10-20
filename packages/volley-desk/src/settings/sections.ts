@@ -69,7 +69,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: ServerStack01Icon,
     tint: "#30b0c7",
     group: 1,
-    keywords: "ceiling leases admission memory escalate heartbeat claim model",
+    keywords:
+      "ceiling leases lease pools per machine admission memory escalate heartbeat claim model",
   },
   {
     key: "claude",
@@ -93,7 +94,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: ComputerIcon,
     tint: "#34c759",
     group: 1,
-    keywords: "peer pair add machine tunnel host",
+    keywords:
+      "peer pair add machine tunnel host fleet ready readiness doctor repair re-pair drain remove max agents cap",
   },
   {
     key: "setup",

@@ -12,7 +12,12 @@
  * and enters the dependent from the top (or, below the first row, from the
  * side through its own gutter), so it never crosses another node. Without one
  * (the desktop) it is one band in a horizontally scrolling container.
+ *
+ * `HostChips` lists, under the graph, the machine each placed task runs on
+ * and why (SPEC §4.6.15 `tasks[].placement`).
  */
+import { useState } from "react";
+import type { TaskPlacement, WaveTask } from "../../store/types";
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
 export interface DagNode {
@@ -196,5 +201,70 @@ export function Dag({
         ))}
       </svg>
     </div>
+  );
+}
+
+/** The rule that put a task where it is (SPEC §4.6.15 `placement.by`). */
+export function placementRule(p: TaskPlacement): string {
+  if (p.by === "wave_file") return "pinned by the wave file";
+  if (p.by === "decision") return `re-placed by owner on ${p.decided_at.slice(0, 10)}`;
+  return "placed automatically at admission";
+}
+
+/**
+ * One chip per placed task under the graph: its host, and, on click or tap, a popover with
+ * why it is there: the rule that applied, volleyd's candidate lines verbatim (best first, as
+ * volleyd lists them; the Desk never scores machines itself) and the commit it was cut from.
+ */
+export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const placed = tasks.filter((t): t is WaveTask & { placement: TaskPlacement } => !!t.placement);
+  if (placed.length === 0) return null;
+  return (
+    <ul className="host-chips" aria-label="Where tasks run">
+      {placed.map((t) => {
+        const p = t.placement;
+        const shown = open === t.id;
+        return (
+          <li
+            key={t.id}
+            // Focus stays on the chip when it opens, so Escape is caught here, around both.
+            onKeyDown={(e) => {
+              if (e.key !== "Escape" || !shown) return;
+              e.stopPropagation();
+              setOpen(null);
+            }}
+          >
+            <button
+              type="button"
+              className="chip host-chip"
+              aria-label={`${t.id} on ${p.host}: why here`}
+              aria-expanded={shown}
+              onClick={() => setOpen(shown ? null : t.id)}
+            >
+              <span className="mono">{t.id}</span> · {p.host}
+            </button>
+            {shown && (
+              <div
+                className="host-pop"
+                // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
+                role="dialog"
+                aria-label={`Why ${t.id} runs on ${p.host}`}
+              >
+                <p className="host-rule">{placementRule(p)}</p>
+                <ol className="host-lines">
+                  {p.candidates.map((c) => (
+                    <li key={c.host} className={c.score === null ? "dim" : undefined}>
+                      {c.line}
+                    </li>
+                  ))}
+                </ol>
+                {t.base_sha && <p className="mono dim">cut from {t.base_sha.slice(0, 7)}</p>}
+              </div>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
