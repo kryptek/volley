@@ -960,6 +960,8 @@ export class Daemon {
   >();
   /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
   private readonly namedEntries = new Map<string, RegistryEntry>();
+  /** The workspace each registered session's entry names: whose screen a ref is (`carryInboxAnswer`). */
+  private readonly registryWorkspaces = new Map<string, string>();
   /**
    * Coordinator name → the agent bound to it (`bindOwner`); `gone_at` (daemon ms) once that agent
    * went away with no other bound, which starts `autopilot.reconnect_grace_s`.
@@ -1720,6 +1722,9 @@ export class Daemon {
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
+        if (entry?.workspace !== undefined && entry.agent_id === id)
+          this.registryWorkspaces.set(id, entry.workspace);
+        else this.registryWorkspaces.delete(id);
         if (entry?.coordinator !== undefined && entry.agent_id === id) {
           this.namedEntries.set(id, entry);
         } else {
@@ -6742,7 +6747,9 @@ export class Daemon {
 
   /**
    * Answer an inbox item through the referee: the first answer at the item's current version wins;
-   * a decision's answer resolves it, any other kind's goes to its `inboxHandlers` entry.
+   * a decision's answer resolves it, any other kind's goes to its `inboxHandlers` entry. The
+   * screen carry stays on the queue (a slow remote holds it for its bounded duration) so a
+   * terminal pick or prompt arriving meanwhile only confirms it: carry and record are one step.
    */
   answerInboxItem(
     id: string,
@@ -6889,7 +6896,8 @@ export class Daemon {
         // A picker interrupted with Esc / Ctrl-C ends no turn: the next prompt is past it.
         await this.closeOpenItems(agent, "picker", "dismissed in its terminal");
       });
-    } else if (env.type === "idle") {
+    } else if (env.type === "idle" && p.hook_event === "Stop") {
+      // Only a turn's end: a Notification's idle (agent_completed) is a background subagent.
       void this.enqueue(() => this.closeOpenItems(agent, "picker", "dismissed in its terminal"));
     }
   }
@@ -6949,9 +6957,13 @@ export class Daemon {
   ): Promise<string | null> {
     const a = this.supervised.get(item.agent_id);
     const source = typeof item.source.workspace === "string" ? item.source.workspace : undefined;
-    const workspace = a?.workspace ?? source;
+    const workspace = a?.workspace ?? this.registryWorkspaces.get(item.agent_id) ?? source;
     if (workspace === undefined)
       return "volleyd cannot see this session's screen: answer it in its terminal";
+    if (a === undefined) {
+      const holder = this.workspaceHolder(workspace, item.agent_id);
+      if (holder !== null) return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s`;
+    }
     const host = a?.host ?? this.host;
     return carry(
       {
@@ -6963,6 +6975,24 @@ export class Daemon {
       item,
       req.answer,
     );
+  }
+
+  /**
+   * Who else's screen `workspace` on this machine is: a supervised agent's, or the one another
+   * session's registry entry names; null when no one's. An unsupervised session names its own
+   * workspace, so it must not name someone else's and have its answer typed there.
+   */
+  private workspaceHolder(workspace: string, agent: string): string | null {
+    for (const [id, a] of this.supervised) {
+      if (a.host.name === LOCAL_HOST && a.workspace === workspace) return id;
+    }
+    for (const [id, ws] of this.registryWorkspaces) {
+      // Registry entries outlive their sessions: a gone session's workspace is free again.
+      const status = this.statusOf.get(id)?.type;
+      if (id !== agent && ws === workspace && (status === undefined || !OWNER_GONE.has(status)))
+        return id;
+    }
+    return null;
   }
 
   /** The referee accepted an answer: journal `inbox_answered`, keep and publish the record. */

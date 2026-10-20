@@ -809,13 +809,23 @@ through its host adapter (cmux on this machine, tmux on a paired one), **before*
   on each row to toggle, the `Submit` row and `Enter`, then `Enter` again on the review screen
   that opens. A multi-select answer is the labels joined with `, `, as Claude Code reports them.
 - *handoff*: read the screen; refuse `prompt not idle` unless it shows the empty input box with no
-  turn running; then type the reply and press `Enter`.
+  turn running; then type the reply and press `Enter`. The input box must be empty: when Claude
+  Code shows placeholder or suggestion text after `❯`, the answer is refused `prompt not idle`
+  (fail safe; answer in the terminal).
 
 `Up`, `Down`, `Space` and the typed text pass the fence only with a `PickerToken` /
 `HandoffToken` minted for exactly that item version and answer (the text is typed once, one line,
 never starting with `/` or `!`). A refused answer leaves the item open, still answerable in the
 terminal, whose hook event then closes it. A picker with several questions, and a session whose
-workspace volleyd does not know, are answered in their terminal.
+workspace volleyd does not know, are answered in their terminal. A session volleyd does not
+supervise is typed into only in its own workspace: one that is a supervised agent's, or that
+another live session's registry entry names, is refused.
+
+The carry runs on the daemon's serial queue, like every other answer: reading the screen, pressing
+the keys and recording the answer are one step, so a terminal pick (`picker_answered`) or the next
+prompt can only confirm it, never race it. The cost is that a slow carry (a multi-select on a paired
+machine, one ssh round trip per key) holds the queue for its duration, bounded by the screen-read
+timeout and `picker_review_reads`.
 
 **What the screen looks like** (the spike, `scripts/spike-picker.ts`, against Claude Code 2.1;
 the captures are `test/fixtures/screens/picker-*.txt`): the highlighted row starts with `❯`, the

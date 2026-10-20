@@ -145,6 +145,30 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
     ]);
   });
 
+  it("multi-select: no review screen after Submit refuses the answer; the hook then closes it in the terminal", async () => {
+    s = await makeSupervisedEnv();
+    const item = await opened("toolu_01Top", [TOPPINGS]);
+    s.host.screens = [screen("picker-multi"), screen("picker-gone")];
+    const r = await answer(item.id, "Cheese");
+    expect(r).toMatchObject({
+      ok: false,
+      error:
+        "could not carry out the answer: the picker's review screen did not appear after Submit",
+    });
+    // Submit was pressed: nothing is recorded from the Desk, the item stays open for the hook.
+    expect(s.host.keys.at(-1)?.key).toBe("Enter");
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+    await hook("picker_answered", {
+      tool_use_id: "toolu_01Top",
+      answers: { "Which toppings do you want?": "Cheese" },
+    });
+    await s.event((e) => e.type === "inbox_answered");
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject({
+      by: AGENT,
+      where: { kind: "terminal" },
+    });
+  });
+
   it("a screen without that picker refuses `picker not on screen`; the item stays open; the hook closes it", async () => {
     s = await makeSupervisedEnv();
     const item = await opened("toolu_01Fruit", [FRUIT]);
@@ -209,6 +233,20 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
       answer: "dismissed in its terminal",
       where: { kind: "terminal" },
     });
+  });
+
+  it("a Notification's idle (agent_completed: a background subagent finished) leaves the picker open", async () => {
+    s = await makeSupervisedEnv();
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    await s.pub(
+      buildTopic(NS, AGENT, "progress"),
+      "idle",
+      "progress",
+      { completed: true, source: "harness-hook", seq: ++seq, hook_event: "Notification" },
+      false,
+    );
+    await s.consumed();
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
   });
 
   it("picker_answered arriving while a Desk answer is being carried: one inbox_answered, on the Desk", async () => {

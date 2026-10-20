@@ -223,6 +223,43 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.daemon.inboxItem(id)?.answered).toMatchObject({ by: COORD, where: phone });
   });
 
+  it("refuses a workspace that is a supervised agent's screen: nothing is typed there", async () => {
+    s = await makeSupervisedEnv();
+    // The supervised wave agent is in workspace:1; this session names it as its own.
+    const item = await handoff(30, "workspace:1");
+    s.host.screens = [screen("picker-gone")];
+    const r = await answer(item.id, "go");
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("workspace:1 is w1-t1-implementer-1's screen");
+    expect(s.host.keys).toEqual([]);
+    expect(s.host.texts).toEqual([]);
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  });
+
+  it("refuses a workspace another registered session's entry names", async () => {
+    s = await makeSupervisedEnv();
+    await s.agent.publish(
+      registryTopic("coord-other"),
+      JSON.stringify({
+        ...buildEnvelope({
+          agentId: "coord-other",
+          parentId: null,
+          channel: "_system/registry",
+          type: "registered",
+          payload: { cwd: "/repo", started_at: new Date().toISOString(), workspace: "workspace:7" },
+        }),
+        namespace: NS,
+      }),
+      { qos: 1, retain: true },
+    );
+    const item = await handoff(31, "workspace:7");
+    s.host.screens = [screen("picker-gone")];
+    const r = await answer(item.id, "go");
+    expect(r.error).toContain("workspace:7 is coord-other's screen");
+    expect(s.host.keys).toEqual([]);
+    expect(s.host.texts).toEqual([]);
+  });
+
   it("the next prompt, or the session ending, closes an open picker too", async () => {
     s = await makeSupervisedEnv();
     const picker = (t: string, seq: number) =>
