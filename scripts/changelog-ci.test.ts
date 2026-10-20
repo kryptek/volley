@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { changelogTouched, fragmentCheck, main, needsFragment, parseLog } from "./changelog-ci";
+import {
+  changelogTouched,
+  fragmentCheck,
+  main,
+  needsFragment,
+  parseLog,
+  untouchedCheck,
+} from "./changelog-ci";
 import { tempDir } from "./helpers/tmp";
 
 describe("needsFragment", () => {
@@ -150,5 +157,16 @@ describe("main", () => {
     const { cwd, base } = repo();
     expect(run(["fragment", "--head", base], cwd).code).toBe(2);
     expect(run(["bogus", "--base", base, "--head", base], cwd).code).toBe(2);
+  });
+});
+
+describe("untouchedCheck: the PR's net change decides", () => {
+  const edited = [{ subject: "feat(x): y (#1)", files: ["CHANGELOG.md"] }];
+  test("passes when the net diff leaves CHANGELOG.md alone, even if an older commit edited it", () => {
+    expect(untouchedCheck({ netFiles: [], commits: () => edited })).toEqual({ ok: true });
+  });
+  test("applies the commit rule when the net diff changes CHANGELOG.md", () => {
+    const r = untouchedCheck({ netFiles: ["CHANGELOG.md"], commits: () => edited });
+    expect(r.ok).toBe(false);
   });
 });
