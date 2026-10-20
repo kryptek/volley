@@ -19,8 +19,32 @@ describe("redactSecrets", () => {
     ["mysql --password=hunter2 db", "mysql --password=*** db"],
     ["gh auth login --token ghp_abc123", "gh auth login --token ***"],
     ["gh auth login --token=ghp_abc123", "gh auth login --token=***"],
-    ["mysql -p hunter2 -u root", "mysql -p *** -u root"],
+    // -p is a credential only glued to mysql / mariadb (`-pSECRET`); a spaced -p prompts
     ["mysql -phunter2 -u root", "mysql -p*** -u root"],
+    ["mariadb -u root -p'two words' db", "mariadb -u root -p*** db"],
+    ["mysql -p -u root", "mysql -p -u root"],
+    // mosquitto_pub / mosquitto_sub take the password as -P
+    [
+      "mosquitto_pub -h h -u desk -P s3cret -t t -m m",
+      "mosquitto_pub -h h -u desk -P *** -t t -m m",
+    ],
+    ["mosquitto_sub -P 's3 cret' -t '#'", "mosquitto_sub -P *** -t '#'"],
+    ["--secret abc mycli", "--secret *** mycli"],
+    // -p / -P elsewhere is not a credential: the work log keeps common commands readable
+    ["mkdir -p dir", "mkdir -p dir"],
+    ["git log -p", "git log -p"],
+    ["git log -p src/x.ts", "git log -p src/x.ts"],
+    ["cp -p a b", "cp -p a b"],
+    ["ssh -p 22 host", "ssh -p 22 host"],
+    ["docker run -p 8080:80 img", "docker run -p 8080:80 img"],
+    ["rsync -P a b", "rsync -P a b"],
+    // header-style words: only key / token / secret / password / authorization, never a suffix
+    ["monkey: banana", "monkey: banana"],
+    ["hotkey: ctrl+k", "hotkey: ctrl+k"],
+    ["apikey: abc", "apikey: abc"],
+    ["X-Api-Key: abc123", "X-Api-Key: ***"],
+    ["token: abc", "token: ***"],
+    ["monkey=banana make", "monkey=banana make"],
     // find's -print / -perm / -path / -prune are words, not -p plus a value
     ["find . -name x -print", "find . -name x -print"],
     ["git log --format='Author: %an'", "git log --format='Author: %an'"],

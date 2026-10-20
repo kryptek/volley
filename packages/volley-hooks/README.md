@@ -179,23 +179,26 @@ work log for them: `progress/activity` (SPEC §4.3; qos 0, not retained, with th
     (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_…`, `github_pat_…`), `sk-…` API keys (`sk-ant-…`,
     `sk-proj-…`), Slack tokens (`xoxb-…`), JWTs (`eyJ….….…`) and PEM private keys (from
     `-----BEGIN … PRIVATE KEY-----` to its footer, or the end of the line);
-  - the value of any `--…password` / `--…passwd` / `--…token` / `--…secret` / `--…key` flag
-    (`--password`, `--token`, `--api-key`, `--client-secret`, `--access-token`; as
-    `--flag value` or `--flag=value`), and of `-p` (`-p value`, `-pvalue`);
+  - the value of a credential flag, as `--flag value` or `--flag=value`: one whose last part is
+    `password`, `passwd`, `token`, `secret` or `key` (`--password`, `--token`, `--secret`,
+    `--api-key`, `--client-secret`, `--access-token`); mysql / mariadb's glued `-pSECRET`; and
+    mosquitto_pub / mosquitto_sub's `-P value`. `-p` / `-P` anywhere else is left alone
+    (`mkdir -p`, `git log -p`, `cp -p`, `ssh -p 22`, `docker run -p 8080:80`, `rsync -P`);
   - the password of curl's `-u` / `--user user:pass` (`-u admin:***`);
   - credential headers and keys: `Authorization: …` and `Bearer …` (an auth scheme word such as
-    `Basic` is kept), `Cookie: …` (the whole value), and any `name: value` whose name ends in
-    `key`, `token`, `secret`, `password`, or that is `auth` / `auth-…` / `auth_…` (`X-Api-Key: …`,
-    `X-Auth-Token: …`, `"api_key": "…"`);
-  - assignments and query parameters named `token`, `password`, `secret`, `api_key`, `apikey`,
-    or any name ending in `TOKEN`, `PASSWORD`, `SECRET` or `KEY` (`GH_TOKEN=… cmd`,
-    `PASSWORD=…`, `?token=…`);
+    `Basic` is kept), `Cookie: …` (the whole value), and any `name: value` whose name's last `-` / `_`
+    part is `key`, `token`, `secret`, `password` or `authorization` (`X-Api-Key: …`,
+    `X-Auth-Token: …`, `"api_key": "…"`; never a suffix match: `monkey: x`, `hotkey: x` and
+    `Author: x` are left alone);
+  - assignments and query parameters whose name's last part is `token`, `password`, `secret`,
+    `key` or `apikey` (`GH_TOKEN=… cmd`, `PASSWORD=…`, `api_key=…`, `?token=…`; not
+    `monkey=…`);
   - a credential name and its value after `set` / `config` / `configure`
     (`aws configure set aws_secret_access_key …`, `git config user.signingkey …`);
   - URL userinfo (`https://user:pass@host` → `https://***@host`).
 
-  It errs on the side of masking (`mkdir -p dir` publishes `mkdir -p ***`); ordinary commands
-  such as `git commit -m "fix key handling"` or `ls ~/.ssh` are left alone. Only the first line
+  Ordinary commands stay readable: `mkdir -p dir`, `git log -p`, `ssh -p 22 host`,
+  `git commit -m "fix key handling"` and `ls ~/.ssh` are published as they are. Only the first line
   of a command is considered at all.
 - **Rate limit.** At most one `activity` publish per 5 s per session; the newest line in a
   window is published at the next slot. `work-log.json` in the state directory holds

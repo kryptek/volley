@@ -28,6 +28,11 @@ const ASSIGNED = `(?:'[^']*'|"[^"]*"|[^\\s'"&]+)`;
 const END = "(?![A-Za-z0-9_-])";
 /** Name endings that mark a credential. */
 const SECRET_NAME = "(?:token|password|passwd|secret|key)";
+/**
+ * A credential name: the last `-` / `_` part of the name is one of the words, never a suffix
+ * of a longer word (`X-Api-Key`, `GH_TOKEN`, `--client-secret`; not `monkey`, `hotkey`).
+ */
+const NAMED = (words: string) => `(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[-_])*${words}(?![A-Za-z0-9])`;
 /** An HTTP auth scheme word, kept in front of a masked header value. */
 const AUTH_SCHEME = "(?:Bearer|Basic|Digest|Token|Negotiate)";
 
@@ -58,22 +63,27 @@ const RULES: [RegExp, string][] = [
   // Proxy-Authorization: Basic v (an auth scheme word is kept)
   [
     new RegExp(
-      `\\b([\\w-]*(?:${SECRET_NAME}|auth(?:orization|[-_][\\w-]*)?)["']?[ \\t]*:[ \\t]*["']?)(${AUTH_SCHEME}[ \\t]+)?(?!${AUTH_SCHEME}\\b)[^\\s'"]+`,
+      `(${NAMED("(?:key|token|secret|password|passwd|authorization)")}["']?[ \\t]*:[ \\t]*["']?)(${AUTH_SCHEME}[ \\t]+)?(?!${AUTH_SCHEME}\\b)[^\\s'"]+`,
       "gi",
     ),
     `$1$2${MASK}`,
   ],
   // --password <v>, --token=<v>, --api-key <v>, --client-secret <v>, --access-token=<v>, …
-  [new RegExp(`(--[\\w-]*${SECRET_NAME}(?:=|\\s+))(?!-)${VALUE}`, "gi"), `$1${MASK}`],
+  [new RegExp(`(--${NAMED(SECRET_NAME)}(?:=|\\s+))(?!-)${VALUE}`, "gi"), `$1${MASK}`],
   // curl -u user:pass, --user user:pass, --user=user:pass: the password part
   [/(^|\s)(-u[ \t]*|--user(?:=|[ \t]+))(['"])([^:'"]+):[^'"]*\3/g, `$1$2$3$4:${MASK}$3`],
   [/(^|\s)(-u[ \t]*|--user(?:=|[ \t]+))([^\s:'"]+):[^\s'"]+/g, `$1$2$3:${MASK}`],
-  // -p <v>, -p<v> (mysql and friends); a following flag is not a value, and find's
-  // -print / -printf / -print0 / -perm / -path / -prune are whole words, not -p<v>
+  // -p is a credential only glued to mysql / mariadb (`-pSECRET`; a spaced `-p` prompts for
+  // it). Anywhere else -p is not (`mkdir -p`, `git log -p`, `ssh -p 22`, `docker run -p 80:80`).
   [
-    new RegExp(`(^|\\s)-p(\\s+|(?!(?:rint0?|rintf|erm|ath|rune)(?:\\s|$)))(?!-)${VALUE}`, "g"),
-    `$1-p$2${MASK}`,
+    new RegExp(
+      `(\\b(?:mysql|mariadb|mysqldump|mysqladmin|mariadb-dump)\\b[^|;&]*?\\s-p)(?=[^\\s-])${VALUE}`,
+      "g",
+    ),
+    `$1${MASK}`,
   ],
+  // mosquitto_pub / mosquitto_sub take the password as -P <v>
+  [new RegExp(`(\\bmosquitto_(?:pub|sub)\\b[^|;&]*?\\s-P\\s+)(?!-)${VALUE}`, "g"), `$1${MASK}`],
   // A credential name and its value after a set / config command:
   // `aws configure set aws_secret_access_key <v>`, `git config user.signingkey <v>`
   [
@@ -84,7 +94,10 @@ const RULES: [RegExp, string][] = [
     `$1${MASK}`,
   ],
   // token=, password=, secret=, api_key=, apikey=, GH_TOKEN=, DB_PASSWORD=, AWS_SECRET=, *_KEY=
-  [new RegExp(`(?<![\\w-])([\\w-]*${SECRET_NAME})=${ASSIGNED}`, "gi"), `$1=${MASK}`],
+  [
+    new RegExp(`(${NAMED("(?:token|password|passwd|secret|key|apikey)")})=${ASSIGNED}`, "gi"),
+    `$1=${MASK}`,
+  ],
 ];
 
 /**
@@ -92,11 +105,13 @@ const RULES: [RegExp, string][] = [
  * wherever they appear: AWS access key ids (`AKIA…` / `ASIA…`), GitHub tokens (`ghp_…`,
  * `gho_…`, `github_pat_…`), `sk-…` API keys, Slack `xox?-…` tokens, JWTs and PEM private keys.
  * In context: credential flags (`--password`, `--token`, `--api-key`, any `--*secret` /
- * `--*token` / `--*key`, `-p`), curl's `-u` / `--user user:pass`, credential headers and keys
- * (`Authorization`, `Bearer`, `Cookie`, `X-Api-Key:`, `X-Auth-Token:`, `"api_key": …`),
- * `token=` / `password=` style assignments and query parameters (any name ending in TOKEN,
- * PASSWORD, SECRET or KEY), a credential name and value after `set` / `config`
- * (`aws configure set aws_secret_access_key …`) and URL userinfo. Errs on the side of masking.
+ * `--*token` / `--*key` part, mysql's glued `-pSECRET`, mosquitto's `-P`), curl's `-u` / `--user user:pass`, credential headers and keys
+ * (`Authorization`, `Bearer`, `Cookie`, `X-Api-Key:`, `X-Auth-Token:`, `"api_key": …`: the
+ * name's last part is key, token, secret, password or authorization, never a suffix such as
+ * `monkey`), `token=` / `password=` style assignments and query parameters (a last name part
+ * TOKEN, PASSWORD, SECRET, KEY or APIKEY), a credential name and value after `set` / `config`
+ * (`aws configure set aws_secret_access_key …`) and URL userinfo. Common commands stay
+ * readable: `-p` / `-P` outside those tools and words that merely end in "key" are not masked.
  */
 export function redactSecrets(text: string): string {
   let out = text;
