@@ -2,7 +2,7 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-10-20
 
 The Fleet release: volleyd judges which machines can run an agent, places a wave's tasks across
 them and says why, and asks the owner before anything is re-placed when a machine goes down,
