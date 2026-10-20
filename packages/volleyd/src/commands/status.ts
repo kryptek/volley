@@ -10,8 +10,8 @@ import { formatDecision } from "./decisions";
 const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
 
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
-decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
-else the session registered for this directory).
+decisions and a "needs you" count on the waves the caller owns (--by, else
+VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR).
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.
@@ -131,16 +131,25 @@ function parseStatus(argv: string[]) {
 /**
  * Human-readable wave summary: a header line, then one line per task, then its open decisions.
  * The header shows `plan vN`, with `(K tasks pending decision)` when open plan_change decisions
- * (in `ctx.decisions`) wait on K tasks, gains `needs you: N` when `caller` owns the wave and N
- * decisions are open, and ends with `alarms: N`, the tasks whose spawn failed and is unrecovered.
+ * (in `ctx.decisions`) wait on K tasks, names the agent a coordinator-name owner acts through
+ * (`owner: coord-main (via coordinator-c7d9)`), gains `needs you: N` when `caller` owns the wave
+ * (or is that agent) and N decisions are open, and ends with `alarms: N`, the tasks whose spawn
+ * failed and is unrecovered.
  */
 export function formatWave(
   s: WaveState,
   ctx: { caller?: string | null; decisions?: DecisionPayload[] } = {},
 ): string {
   const open = s.open_decisions.length;
-  const needs =
-    open > 0 && s.owner !== null && s.owner === ctx.caller ? `  needs you: ${open}` : "";
+  // A coordinator-name owner acts through the agent bound to it (SPEC §4.6.1).
+  const via =
+    s.owner !== null && s.coordinator !== undefined && s.coordinator.agent_id !== s.owner
+      ? s.coordinator.agent_id
+      : undefined;
+  const mine = ctx.caller != null && (ctx.caller === s.owner || ctx.caller === via);
+  const needs = open > 0 && mine ? `  needs you: ${open}` : "";
+  const away = s.coordinator?.state === "reconnecting" ? ", reconnecting" : "";
+  const owner = via !== undefined ? `${s.owner} (via ${via}${away})` : (s.owner ?? "-");
   const pending = new Set(
     (ctx.decisions ?? [])
       .filter(
@@ -161,7 +170,7 @@ export function formatWave(
     (t) => t.last_error !== undefined || (t.alarms ?? []).length > 0,
   ).length;
   const header =
-    `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
+    `${s.wave}  ${s.status}  ${version}  owner: ${owner}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";

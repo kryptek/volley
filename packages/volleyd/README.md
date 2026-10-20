@@ -738,23 +738,47 @@ autopilot: on
 
 ## Ownership and claim
 
-Every wave has one **owner**, the coordinator agent id that submitted it — the single writer. It
-comes from `volleyd run --owner <id>`, else is auto-detected (`VOLLEY_AGENT_ID`, else the session
-registered for the caller's directory; printed as `owner: … (auto)`), else `null` (unowned).
-`resolve`, `pause`, `resume`, `stop`, `steer` and re-running the wave id require `by == owner`;
-anyone else is refused with the owner's id. An unowned wave accepts anyone.
+Every wave has one **owner**, the coordinator that submitted it — the single writer. It comes
+from `volleyd run --owner <name|id>`, else is auto-detected (`VOLLEY_AGENT_ID`, else
+the session registered for the caller's directory — its coordinator name when it has one — else
+`VOLLEY_COORDINATOR`; printed as `owner: … (auto)`), else `null` (unowned). The exported name comes
+last so a supervised worker whose shell inherited it acts as itself: the MCP server also ignores
+`VOLLEY_COORDINATOR` under a `.volley/agent.json` identity, and `launch.sh` unsets it. `resolve`, `pause`,
+`resume`, `stop`, `steer` and re-running the wave id require `by == owner` (or the agent bound to
+it, below); anyone else is refused with the owner's id. An unowned wave accepts anyone.
+
+**Coordinator names.** The MCP server appends a fresh suffix to `VOLLEY_AGENT_ID` at every start,
+so an owner that is an agent id is lost when the session's MCP server restarts. Set a stable
+**coordinator name** once in the MCP registration's `env` block instead —
+`"VOLLEY_COORDINATOR": "coord-main"` (agent-id grammar: `[a-z0-9][a-z0-9_-]{0,62}`) — and submit
+with `--owner "$VOLLEY_COORDINATOR"`. The server publishes the name in its registry entry
+(`coordinator`) and `vol_register` returns it beside `agent_id`. volleyd watches the registry and
+binds each name to the newest live entry carrying it (status not `reaped`/`done`/`failed`): that
+agent may do everything the owner may, any other is refused. When a new agent binds to a name
+that owns waves, volleyd journals `owner_reconnected { owner, agent_id, previous_agent_id }` in
+each unfinished one and re-publishes their state — nothing is claimed, ownership does not move, so one
+session keeps all its waves across restarts. The wave state's `coordinator.agent_id` is the bound
+agent; when it goes away (terminal status, or its LWT) with no other agent binding the name,
+`coordinator.state` is `reconnecting` for `autopilot.reconnect_grace_s` (default 900), then
+`gone`. Until another agent binds the name, the binding stays on that departed agent id (that is
+what lets the state read `reconnecting`), but its id is no longer accepted for the name: only the
+name itself, or the next agent to bind it, may act. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
 
 `volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
 is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,
 any event on its `progress` channel (heartbeats) — for `claim_after_s` (config, read at claim
 time, so a `volleyd config set claim_after_s …` applies to the next claim). Otherwise the claim
 is refused, naming the owner. A claim is journaled as `owner_claimed { owner, previous, why }`.
+For a coordinator-name owner, liveness is the newest binding's — never an agent id the name has
+left — and a bound agent that went away frees the wave only after `claim_after_s`, since it may
+come back under a new id. The two timers are independent: with `claim_after_s` shorter than
+`autopilot.reconnect_grace_s`, a wave still shown `reconnecting` can already be claimed.
 
 Silence is never measured from before the owner got the wave (its `wave_submitted` or latest
 `owner_claimed`) or from before the daemon started, because heartbeats are remembered in memory
 only: an owner the broker has never seen, or one the daemon has not heard from since a restart,
 becomes claimable only after a full `claim_after_s`. A claim must name a stable identity (`--by`,
-`VOLLEY_AGENT_ID` or a registered session); the CLI's own per-invocation id is never used.
+`VOLLEY_AGENT_ID`, a registered session or `VOLLEY_COORDINATOR`); the CLI's own per-invocation id is never used.
 
 ## Pause, stop and the kill switch
 
@@ -874,6 +898,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
+| `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |

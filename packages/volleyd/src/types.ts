@@ -164,6 +164,11 @@ export interface AutopilotConfig {
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
   merge_retry_max: number;
+  /**
+   * How long a wave owned by a coordinator name reads `reconnecting` after the agent bound to
+   * the name went away, before `gone` (SPEC §4.6.1).
+   */
+  reconnect_grace_s: number;
 }
 
 /** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
@@ -401,10 +406,14 @@ export interface AutopilotState {
   budgets: Record<string, { used: number; max: number }>;
 }
 
-/** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
+/**
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
+ * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
+ * agent went away less than `autopilot.reconnect_grace_s` ago.
+ */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "gone";
+  state: "working" | "awaiting_input" | "reconnecting" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;
@@ -424,6 +433,7 @@ export const WAVE_EVENT_TYPES = [
   "wave_stopped",
   "wave_complete",
   "owner_claimed",
+  "owner_reconnected",
   "task_queued",
   "task_admitted",
   "task_cancelled",

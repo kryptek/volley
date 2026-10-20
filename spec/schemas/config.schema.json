@@ -525,6 +525,13 @@
               "maximum": 10,
               "default": 2,
               "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
+            },
+            "reconnect_grace_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
             }
           }
         }
