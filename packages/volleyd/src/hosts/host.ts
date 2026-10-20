@@ -50,6 +50,15 @@ export interface LaunchSpec {
   launch?: LaunchToken;
 }
 
+/** What ending a retired agent's session did (SPEC §4.6.4, journaled `agent_session_closed`). */
+export interface SessionEnd {
+  /** The workspace was closed. */
+  closed: boolean;
+  /** Processes still running under the agent's worktree that were stopped (local host only). */
+  pids: number[];
+  how: "close-workspace" | "kill-session" | "signal" | "none";
+}
+
 /**
  * A machine agents run on. `local-cmux` (this package) runs them in cmux workspaces on the
  * daemon's own host; a remote host (ssh + tmux) implements the same interface. Every child
@@ -88,6 +97,16 @@ export interface Host {
    * retire's for the retired agent's own workspace.
    */
   close(workspace: string, consent: ConsentToken): Promise<void>;
+  /**
+   * End a retired agent's session (a retire's own consent): close its workspace (null: its ref
+   * is not known) and, on the local host, stop the processes still running under `worktree`
+   * (procs.ts). Never rejects: what did not happen is reported as not done.
+   */
+  endSession(
+    workspace: string | null,
+    worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
   readonly screenSource?: string;
   /**

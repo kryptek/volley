@@ -129,6 +129,14 @@ cannot even send any — an unreadable or malformed `agent.json` or `coordinator
 - exits **1**: a non-blocking error, so Claude Code shows the stderr line to the operator. Never 2
   (that would block the tool call) and never 0 (that would look like success).
 
+**A retired agent's hooks are quiet.** When volleyd retires an agent it writes
+`.volley/retired.json` `{ "agent_id", "status", "at" }` before deleting the agent's login. A hook
+whose own agent id is named there returns before any broker connect: it prints nothing, exits 0
+and writes `hooks-error.json` `{ "code": "RETIRED", "at", "hook_event", "agent_id" }` once (a
+later hook leaves it as it is). The refused login is the intended outcome, so the `AUTH_FAILED`
+advice is never shown for it. A marker naming another agent id (a worktree reused by the next
+attempt) is ignored, and for a live agent everything above is unchanged.
+
 The next successful connect removes `hooks-error.json`. The lease wrapper (`volley lease run`)
 resolves its own credentials the same way: agent mode passes `--project-dir` (the identity file,
 then `VOLLEY_AUTH_*`), coordinator mode passes `--coordinator` (`VOLLEY_AUTH_*`, then

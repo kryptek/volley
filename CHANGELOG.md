@@ -6,6 +6,19 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Fixed
 
+- **volleyd: a retire ends the agent's session, and cleanup stops its process.** After a retire
+  volleyd closes the agent's workspace (cmux `close-workspace`, now bounded by a 15 s timeout, or
+  tmux `kill-session`) and, on this machine, stops any `claude` process still running under the
+  agent's worktree (matched by its `--mcp-config=` argv; SIGTERM, a grace, SIGKILL), journaled as
+  `agent_session_closed`. After a daemon restart the workspace is re-found by its title. The new
+  `retire_close_session` tunable (default `true`) keeps finished sessions open when `false`.
+  Before deleting the agent's login the retire writes `<worktree>/.volley/retired.json`.
+  `volleyd cleanup <wave> --yes` also stops the retired agents' processes still running under
+  their worktrees (the dry run lists them). (#194)
+- volley-hooks: the hooks of a retired agent (a `.volley/retired.json` naming their own agent id)
+  exit 0 quietly, before any broker connect, with a one-time `{ code: "RETIRED" }` note in
+  `hooks-error.json`, instead of printing the `AUTH_FAILED` advice for a login volleyd deleted on
+  purpose. (#194)
 - **volleyd: a launch whose outcome is unknown is reconciled before any retry.** A `cmux
   new-workspace` that timed out (on the cmux side, or volleyd's new `launch_timeout_ms` bound)
   could still have started the agent, and the retry then ran a second session under the same
@@ -32,6 +45,9 @@ All workspace packages share one version. Dates are release-tag dates.
   the task's open decisions are resolved `superseded_by_merge`, its live agents retired, and it
   becomes `done` with `merged_unverified_head`, releasing its dependents. Before, a merged task
   waited on its decision and could only be recorded as `cancelled`. (#195)
+- volley-desk: Arrange & fit and the first fit framed only the arranged (unpinned) windows, so a
+  window pinned in place could be left off-screen; the view now frames the pinned windows with
+  the rest, and the layout is chosen to fit beside them. (#221)
 
 ### Added
 
