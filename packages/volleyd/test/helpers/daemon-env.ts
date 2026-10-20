@@ -1,4 +1,5 @@
 import { VolleyBroker } from "volley-mcp/broker";
+import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import { Daemon, type DaemonOptions, type PressureSource } from "../../src/daemon";
 import { type TestBroker, startTestBroker } from "./aedes-broker";
 import { tempDir } from "./tmp";
@@ -10,6 +11,17 @@ export const NS = "volleyd-test";
  * read the machine, so a loaded one holds admission.
  */
 export const NO_PRESSURE: PressureSource = async () => ({ samples: {}, ci: {} });
+
+/**
+ * The defaults a test daemon starts from: the built-in ones with autopilot off, so a decision
+ * waits for the answer the test gives it (the owner's path). Tests of autopilot itself start with
+ * `AUTOPILOT_ON`.
+ */
+export const OWNER_DECIDES = {
+  ...CONFIG_DEFAULTS,
+  autopilot: { ...CONFIG_DEFAULTS.autopilot, enabled: false },
+};
+export const AUTOPILOT_ON: Partial<DaemonOptions> = { configDefaults: CONFIG_DEFAULTS };
 
 /** An Aedes broker, a temp $VOLLEYD_HOME, and helpers to start daemons and read topics. */
 export interface DaemonEnv {
@@ -44,6 +56,7 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     tickMs: 0,
     protocolVersion: 4,
     pressure: NO_PRESSURE,
+    configDefaults: OWNER_DECIDES,
     ...extra,
     // The own machine's record never reads the load or memory of the machine running the test.
     fleet: { os: CALM_OS, ...extra.fleet },

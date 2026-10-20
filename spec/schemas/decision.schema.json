@@ -44,7 +44,8 @@
                 "pr_head_moved",
                 "spawn_budget_exhausted",
                 "account_limit",
-                "machine_down"
+                "machine_down",
+                "merge_refused"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
