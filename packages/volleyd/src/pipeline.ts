@@ -3026,13 +3026,10 @@ export class PipelineDriver {
     task: TaskId,
     by: string,
   ): Promise<{ ok: true; merge_sha: string | null } | { ok: false; error: string }> {
-    let prep: { v: PipelineView; token: MergeToken; branch: string; own: boolean } | string =
-      "volleyd is stopping"; // stays so only when the queue dropped the check (the daemon stopped)
-    await this.deps.enqueue(async () => {
-      prep = await this.mergeNowPrep(task);
-    });
+    // undefined only when the queue dropped the check (the daemon stopped)
+    const prep = (await this.onQueue(() => this.mergeNowPrep(task))) ?? "volleyd is stopping";
     if (typeof prep === "string") return { ok: false, error: prep };
-    const { v, token, branch, own } = prep as Exclude<typeof prep, string>;
+    const { v, token, branch, own } = prep;
     let ev: PipelineEvent;
     try {
       ev = (await this.merge(v, token, by)) as PipelineEvent;
@@ -3055,6 +3052,15 @@ export class PipelineDriver {
       ok: false,
       error: `not merged: ${ev.kind === "merge_refused" ? ev.stderr : ev.kind === "io_failed" ? ev.message : ev.kind}`,
     };
+  }
+
+  /** Run `fn` on the queue and hand back its value (undefined when the queue dropped it). */
+  private async onQueue<T>(fn: () => Promise<T>): Promise<T | undefined> {
+    let out: T | undefined;
+    await this.deps.enqueue(async () => {
+      out = await fn();
+    });
+    return out;
   }
 
   /** mergeNow's checks, on the queue: the task, its gate, the release branch and the token. */
