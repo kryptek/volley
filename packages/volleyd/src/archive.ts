@@ -92,7 +92,9 @@ export function archivable(
     return { ok: true, reason: "wave_complete acknowledged (archive_on_ack)" };
   if (cfg.archive_ended_after_h <= 0) return { ok: false, why: "archive_ended_after_h is 0" };
   if (f.endedAt === null) return { ok: false, why: "end time unknown" };
-  const hours = Math.floor((now - Date.parse(f.endedAt)) / 3_600_000);
+  const ended = Date.parse(f.endedAt);
+  if (!Number.isFinite(ended)) return { ok: false, why: `end time '${f.endedAt}' is unparsable` };
+  const hours = Math.floor((now - ended) / 3_600_000);
   if (hours < cfg.archive_ended_after_h)
     return { ok: false, why: `ended ${hours} h ago (< ${cfg.archive_ended_after_h} h)` };
   return { ok: true, reason: `ended ${hours} h ago (archive_ended_after_h)` };

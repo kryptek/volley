@@ -243,6 +243,11 @@ export class ConfigStore {
     this.waves.delete(wave);
   }
 
+  /** The global tunables with `overrides` applied (an archived wave's, no longer registered). */
+  effectiveWith(overrides: TunablesPatch): Tunables {
+    return merge(this.global, overrides);
+  }
+
   /** The full effective tunables: global, or global with `wave`'s overrides applied. */
   effective(wave?: WaveId): Tunables {
     const over = wave !== undefined ? this.waves.get(wave) : undefined;

@@ -1,3 +1,4 @@
+import { ARCHIVED_ANSWER } from "./archive";
 import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
@@ -381,7 +382,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           return x !== undefined && x.task === d.task && parksTask(x);
         });
         const parked = task !== undefined && task.stage === "awaiting_decision";
-        if (task !== undefined && parked && parksTask(d) && !stillOpen) {
+        // An archive's close (SPEC §4.6.16) leaves the task parked: its wave has ended for good.
+        const archiveClose =
+          d.resolved.answer === ARCHIVED_ANSWER &&
+          (state.status === "stopped" || state.status === "complete");
+        if (task !== undefined && parked && parksTask(d) && !stillOpen && !archiveClose) {
           task.stage = d.resume_stage ?? "queued";
         }
       }

@@ -1451,6 +1451,13 @@ export class Daemon {
 
     await this.publishConfig();
     await this.publishArchiveIndex();
+    // An archived wave's retained topics, in case a crash came between journaling wave_archived
+    // and clearing them (a clear is not a re-publish, SPEC §4.6.16).
+    for (const [wave, log] of this.archived) {
+      await this.clearRetained(waveStateTopic(wave));
+      for (const id of Object.keys(log.record.decisions))
+        await this.clearRetained(decisionTopic(wave, id));
+    }
     for (const [wave, log] of this.waves) {
       await this.publishState(wave);
       // Re-publish open decisions; clear resolved ones, in case a crash came between journaling
@@ -3095,7 +3102,7 @@ export class Daemon {
     const rec = this.archived.get(wave)?.record;
     if (rec?.state == null) return null;
     const state = structuredClone(rec.state);
-    state.effective_config = this.config.effective(wave);
+    state.effective_config = this.config.effectiveWith(rec.overrides);
     if (rec.archived !== undefined) {
       const { at, by, reason } = rec.archived;
       state.archived = { at, by, reason };

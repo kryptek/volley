@@ -178,6 +178,59 @@ describe("volleyd archive (control op)", () => {
     const index = (await t.retained(ARCHIVE_TOPIC)) as { payload: { archived: unknown[] } };
     expect(index.payload.archived).toHaveLength(1);
   });
+
+  it("a restart clears what a crash between journaling and clearing left retained", async () => {
+    const id = await stopWithDecision();
+    expect((await req("archive", { wave: WAVE, by: OWNER })).ok).toBe(true);
+    await client.close();
+    await daemon.stop();
+    // The crash window: wave_archived is journaled, the retained topics are not yet cleared.
+    const tap = new VolleyBroker();
+    await tap.connect({ url: t.broker.url, agentId: "test-tap" });
+    try {
+      for (const topic of [waveStateTopic(WAVE), decisionTopic(WAVE, id)])
+        await tap.publish(topic, JSON.stringify({ stale: true }), { qos: 1, retain: true });
+    } finally {
+      await tap.disconnect();
+    }
+    daemon = await start();
+    client = await ControlClient.connect(t.broker.url, NS);
+    expect(await t.retained(waveStateTopic(WAVE))).toBeNull();
+    expect(await t.retained(decisionTopic(WAVE, id))).toBeNull();
+  });
+
+  it("status of an archived wave reports the config it ran with, across a restart", async () => {
+    const w = "w-arch-cfg";
+    const run = await req("run", {
+      wave_yaml: `${yaml(w)}config: { archive_ended_after_h: 48 }\n`,
+      owner: OWNER,
+    });
+    expect(run.error).toBeUndefined();
+    expect((await req("stop", { wave: w, by: OWNER })).ok).toBe(true);
+    expect((await req("archive", { wave: w, by: OWNER })).ok).toBe(true);
+    const cfgOf = async () =>
+      (await statusWaves(true)).find((s) => s.wave === w)?.effective_config?.archive_ended_after_h;
+    expect(await cfgOf()).toBe(48);
+    await client.close();
+    await daemon.stop();
+    daemon = await start();
+    client = await ControlClient.connect(t.broker.url, NS);
+    expect(await cfgOf()).toBe(48);
+  });
+
+  it("refuses a stopped wave whose agents are still in their stop grace", async () => {
+    await daemon.tick();
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "implementer", agent_id: "agent-a1" },
+    });
+    expect((await req("stop", { wave: WAVE, by: OWNER })).ok).toBe(true);
+    const r = await req("archive", { wave: WAVE, by: OWNER });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("stop grace");
+    expect(types()).not.toContain("wave_archived");
+  });
 });
 
 describe("auto-archive", () => {

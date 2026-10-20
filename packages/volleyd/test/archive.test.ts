@@ -88,6 +88,8 @@ describe("archiveEvents", () => {
     const base = journal(submitted, queued, blocked, stopped);
     const rec = replay(base);
     expect(rec.state?.open_decisions).toEqual(["d-blocked"]);
+    const stageOfA = (r: typeof rec) => r.state?.tasks.find((t) => t.id === "A")?.stage;
+    expect(stageOfA(rec)).toBe("awaiting_decision");
     const at = new Date("2026-10-21T00:00:00.000Z");
     const evs = archiveEvents(rec, "coord-a", "volleyd archive", at);
     expect(evs).toEqual([
@@ -111,6 +113,8 @@ describe("archiveEvents", () => {
     expect(after.state?.open_decisions).toEqual([]);
     expect(after.decisions["d-blocked"]?.resolved?.answer).toBe("archived");
     expect(after.state?.status).toBe("archived");
+    // An archive close leaves a parked task parked: the wave is over, the task is not queued.
+    expect(stageOfA(after)).toBe("awaiting_decision");
     expect(after.archived).toEqual({
       at: all.at(-1)?.at,
       by: "coord-a",
@@ -154,6 +158,12 @@ describe("endedAt and the auto-archive verdict", () => {
     expect(due).toEqual({ ok: true, reason: "ended 24 h ago (archive_ended_after_h)" });
     const never = { ...CFG, archive_ended_after_h: 0 };
     expect(archivable(facts, ended + 1000 * H, never).ok).toBe(false);
+  });
+
+  it("an unparsable end time fails safe: not archived", () => {
+    const facts = archiveFacts(replay(journal(submitted, queued, stopped)));
+    const v = archivable({ ...facts, endedAt: "not a time" }, Date.parse(T0) + 1000 * H, CFG);
+    expect(v).toMatchObject({ ok: false, why: expect.stringContaining("unparsable") });
   });
 
   it("a running wave is never archivable, whatever the time", () => {
