@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T14:02:11.000Z",
+  "channel": "_waves/events",
+  "type": "steering_queued",
+  "payload": {
+    "wave": "w1",
+    "seq": 21,
+    "at": "2026-10-20T14:02:11.000Z",
+    "task": "T1",
+    "data": {
+      "role": "fixup",
+      "message_id": "5f0c8a52-3d1e-4b7a-9c2f-6a1e0d4b8c31",
+      "seq": 2,
+      "supersedes": "0b7e4d21-8a3c-4f5e-b9d6-2c1a7e3f9d40",
+      "text": "use the shared table",
+      "by": "coordinator-ab12"
+    }
+  }
+}

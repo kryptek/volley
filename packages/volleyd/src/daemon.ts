@@ -178,6 +178,7 @@ import type {
   RepoVisibility,
   TaskAgents,
   TaskId,
+  TaskStage,
   Tunables,
   TunablesPatch,
   Wave,
@@ -565,6 +566,9 @@ const retiredAgents = (log: WaveLog): Set<string> =>
       .filter((e) => e.type === "agent_retired")
       .map((e) => e.data.agent_id as string),
   );
+
+/** Task stages a steer is refused in: nothing will ever read it. */
+const UNSTEERABLE: ReadonlySet<TaskStage> = new Set(["done", "cancelled", "blocked"]);
 
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
@@ -2831,6 +2835,8 @@ export class Daemon {
     };
     watch.onStatus(check);
     if (watch.state.status !== null) check(watch.state.status.type);
+    if (outcome.kind === "registered")
+      void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
   }
 
   /**
@@ -4079,7 +4085,32 @@ export class Daemon {
   private async append(wave: WaveId, ev: NewEvent): Promise<JournalEvent> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    return this.track(this.publishAppended(wave, log.append(ev, dateOf(this.time))));
+    const queued = log.record.queued_steers;
+    const event = log.append(ev, dateOf(this.time));
+    const published = this.track(this.publishAppended(wave, event));
+    // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
+    const ended =
+      event.type === "wave_stopped"
+        ? Object.keys(queued)
+        : event.task !== undefined &&
+            (event.type === "task_cancelled" ||
+              (event.type === "stage_entered" && event.data.stage === "done"))
+          ? [event.task]
+          : [];
+    for (const task of ended) {
+      const ids = (queued[task] ?? []).map((q) => q.message_id);
+      if (ids.length === 0) continue;
+      const reason =
+        event.type === "wave_stopped"
+          ? "wave stopped"
+          : `task ${event.type === "task_cancelled" ? "cancelled" : "done"}`;
+      await this.append(wave, {
+        type: "steering_dropped",
+        task,
+        data: { message_ids: ids, reason },
+      });
+    }
+    return published;
   }
 
   /** An appended event's `/events` mirror, then the wave state it changed. */
@@ -5523,9 +5554,10 @@ export class Daemon {
     by: string,
     messageId: string,
     extra: Record<string, unknown> = {},
+    numbered?: { seq: number; supersedes?: string },
   ): Promise<void> {
     const log = this.waves.get(wave) as WaveLog;
-    const { seq, supersedes } = nextSteer(log.record, task);
+    const { seq, supersedes } = numbered ?? nextSteer(log.record, task);
     await this.publish(
       buildTopic(target.namespace, target.agent_id, "mailbox"),
       this.envelope(
@@ -5561,6 +5593,65 @@ export class Daemon {
     });
   }
 
+  /** Journal a steer for `task`'s next agent (of `role`, when given); the steer op's answer. */
+  private async queueSteer(
+    wave: WaveId,
+    task: TaskId,
+    text: string,
+    by: string,
+    role: keyof TaskAgents | undefined,
+  ): Promise<Record<string, unknown>> {
+    const log = this.waves.get(wave) as WaveLog;
+    const { seq, supersedes } = nextSteer(log.record, task);
+    const messageId = randomUUID();
+    await this.append(wave, {
+      type: "steering_queued",
+      task,
+      data: {
+        ...(role !== undefined ? { role } : {}),
+        message_id: messageId,
+        seq,
+        ...(supersedes !== undefined ? { supersedes } : {}),
+        text,
+        by,
+      },
+    });
+    this.log(`steer ${wave}/${task} #${seq} queued for its next ${role ?? "agent"} by ${by}`);
+    return {
+      wave,
+      task,
+      message_id: messageId,
+      seq,
+      ...(supersedes !== undefined ? { supersedes } : {}),
+      delivery: "queued",
+      queued_for: role ?? "next agent",
+      received: false,
+      acked: false,
+    };
+  }
+
+  /**
+   * A new agent of `task` registered (its hooks drain the mailbox): every steer queued for the
+   * task's next agent, or for its role, goes to it in order, with the id and seq it was queued with.
+   */
+  private async deliverQueued(wave: WaveId, task: TaskId, role: Role, agentId: string) {
+    const a = this.supervised.get(agentId);
+    const queue = this.waves.get(wave)?.record.queued_steers[task] ?? [];
+    if (a === undefined) return;
+    for (const q of queue.filter((x) => x.role === undefined || x.role === role)) {
+      await this.deliverSteer(
+        wave,
+        task,
+        { role, agent_id: agentId, namespace: a.namespace },
+        q.text,
+        q.by,
+        q.message_id,
+        { queued: true, queued_at: q.at },
+        { seq: q.seq, ...(q.supersedes !== undefined ? { supersedes: q.supersedes } : {}) },
+      );
+    }
+  }
+
   /**
    * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
    * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
@@ -5583,14 +5674,19 @@ export class Daemon {
         error: `unknown role '${String(p.role)}' (one of ${TASK_ROLES.join(", ")})`,
       };
     const role = p.role;
-    const target = steerTarget(w.log.record, p.task, role);
+    const t = w.log.record.state?.tasks.find((x) => x.id === p.task);
+    if (t === undefined)
+      return { ok: false, error: `unknown task '${p.task}' in wave '${w.wave}'` };
+    if (UNSTEERABLE.has(t.stage)) return { ok: false, error: `task '${p.task}' is ${t.stage}` };
+    const target = steerTarget(w.log.record, p.task, retiredAgents(w.log), role);
     if (target === null) {
-      return {
-        ok: false,
-        error: w.log.record.state?.tasks.some((t) => t.id === p.task)
-          ? `task '${p.task}' has no agent${role !== undefined ? ` in role ${role}` : ""} to steer`
-          : `unknown task '${p.task}' in wave '${w.wave}'`,
-      };
+      // No live agent (between stages, or not spawned yet): held for the task's next one.
+      if (urgent) return { ok: false, error: "no live agent to interrupt" };
+      if (typeof p.text !== "string") return { ok: false, error: "steer requires payload.text" };
+      const status = w.log.record.state?.status;
+      if (status === "stopped" || status === "complete")
+        return { ok: false, error: `wave '${w.wave}' is ${status}: task '${p.task}' has no agent` };
+      return { ok: true, result: await this.queueSteer(w.wave, p.task, p.text, by, role) };
     }
     // Urgent: interrupt (Escape) before delivering, so the message lands in a stopped session.
     const interrupted = urgent ? await this.tryInterrupt(target.agent_id) : undefined;
