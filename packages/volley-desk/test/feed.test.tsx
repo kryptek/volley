@@ -193,3 +193,34 @@ describe("Feed control traffic", () => {
     expect(isControlTraffic(peerAck.envelope, AGENT)).toBe(false);
   });
 });
+
+describe("Feed rows are copyable (owner report: text selection)", () => {
+  const rowOf = () => screen.getByRole("button", { name: /Matrix written/ });
+
+  it("is not a <button>, whose text a browser will not select, but still a keyboard button", () => {
+    render(<Feed feed={[working, narr]} />);
+    const row = rowOf();
+    expect(row.tagName).toBe("DIV");
+    expect(row).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(row, { key: " " });
+    expect(row).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("a click that ends selecting the row's text does not toggle it", () => {
+    render(<Feed feed={[working, narr]} />);
+    const row = rowOf();
+    const text = row.querySelector(".env-msg")?.firstChild as Node;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 6);
+    getSelection()?.removeAllRanges();
+    getSelection()?.addRange(range);
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "false");
+    getSelection()?.removeAllRanges();
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "true");
+  });
+});

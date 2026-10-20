@@ -73,6 +73,16 @@ code {
 .app {
   position: fixed;
   inset: 0;
+  /* A drag on the canvas or a window's chrome (title, tabs, toolbars, the dock) never
+     starts a text selection; only panel content is selectable (below). */
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Panel content: narration, feed rows (and their JSON), the wave file, the terminal; plus
+   anything typed or meant to be copied (fields, code). */
+.app :is(.narr-txt, .feed .env-row, .env-json, .yaml, .term, input, textarea, code, pre) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 .bg-layer {
   position: absolute;
@@ -473,12 +483,11 @@ input.recessed:focus {
   font-family: var(--f-mono);
   white-space: nowrap;
 }
-.sup-pill i,
-.coord--sup .coord-dot {
+/* The coordinators row shows health as a chip; its bar stays neutral (attention.css). */
+.sup-pill i {
   background: var(--ok);
 }
-.sup-pill.chip--hot i,
-.coord--sup.st-gone .coord-dot {
+.sup-pill.chip--hot i {
   background: var(--hot);
 }
 .a-nosignal {

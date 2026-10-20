@@ -65,6 +65,7 @@ export interface DeskMqttClient {
   /** Drop the socket and connect again now (a resumed page probing for a dead socket). */
   reconnect?(): void;
   onMessage(handler: MessageHandler): () => void;
+  /** Each (re)connect, once its subscriptions are granted: just before the retained replay. */
   onConnect(handler: VoidHandler): () => void;
   onDisconnect(handler: VoidHandler): () => void;
   onError(handler: ErrorHandler): () => void;
@@ -92,8 +93,8 @@ export const DESK_SUBSCRIPTIONS = [
 
 /**
  * The filter `reconnect()` subscribes to (and unsubscribes from) as a probe. It is
- * this client's own: mqtt.js answers a SUBSCRIBE to a filter it already holds from
- * its resubscribe cache without sending anything, so a Desk filter would probe nothing.
+ * this client's own: a SUBSCRIBE to a Desk filter would make the broker replay every
+ * retained topic under it again.
  * Nothing publishes there; the global `read volley/#` grant covers it.
  */
 const probeFilter = (clientId: string) => `volley/_system/desk-probe/${clientId}`;
@@ -142,11 +143,14 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
 
   let client: MqttClient | null = null;
 
-  const subscribe = (instance: MqttClient): Promise<void> =>
+  // `onGranted` runs in the SUBACK callback itself, before the broker's retained replay
+  // (sent after the SUBACK) is handled: a promise continuation could run after it.
+  const subscribe = (instance: MqttClient, onGranted: () => void): Promise<void> =>
     new Promise((resolve, reject) => {
       instance.subscribe([...DESK_SUBSCRIPTIONS], { qos: 1 }, (err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) return reject(err);
+        onGranted();
+        resolve();
       });
     });
 
@@ -165,6 +169,8 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         const connectOptions: IClientOptions = {
           clientId,
           reconnectPeriod: options.reconnectPeriod ?? 2000,
+          // Every connect subscribes itself (below), so its handlers run at the SUBACK.
+          resubscribe: false,
           ...(options.auth
             ? { username: options.auth.username, password: options.auth.password }
             : {}),
@@ -190,23 +196,22 @@ export function createMqttClient(options: CreateMqttClientOptions): DeskMqttClie
         instance.on("close", () => {
           for (const h of disconnectHandlers) h();
         });
-        // mqtt.js re-subscribes on reconnect (`resubscribe` defaults on) the
-        // filters that were granted, so we subscribe explicitly until one
-        // SUBSCRIBE succeeds. Connect handlers run on every (re)connect after
-        // that; each reconnect is followed by a replay of every retained topic.
-        let subscribed = false;
+        // Every (re)connect subscribes explicitly (mqtt.js's own resubscribe is off)
+        // and runs the connect handlers in the SUBACK callback: the broker's retained
+        // replay follows the SUBACK, so the handlers always run just before it (the
+        // store holds it, C11), never a round trip early at the CONNACK. A SUBACK
+        // from a connection that has since dropped is ignored; the next connect
+        // subscribes again.
+        let attempt = 0;
         instance.on("connect", () => {
-          if (subscribed) {
+          const mine = ++attempt;
+          subscribe(instance, () => {
+            if (mine !== attempt || !instance.connected) return;
             for (const h of connectHandlers) h();
-            return;
-          }
-          subscribe(instance)
-            .then(() => {
-              subscribed = true;
-              for (const h of connectHandlers) h();
-              resolve();
-            })
+          })
+            .then(() => resolve())
             .catch((err: Error) => {
+              if (mine !== attempt) return;
               for (const h of errorHandlers) h(err);
               reject(err);
             });

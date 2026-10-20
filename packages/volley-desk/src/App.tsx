@@ -79,6 +79,7 @@ import {
   supervisorHealth,
   supervisorList,
   supervisorNamespace,
+  unclassifiedAgents,
 } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
@@ -211,6 +212,32 @@ function liveAgentCount(state: DeskState): number {
   ).length;
 }
 
+/** localStorage key for the ended waves dismissed from this Desk (wave ids). */
+export const DISMISSED_WAVES_KEY = "volley-desk:dismissed-waves";
+
+function readDismissed(): ReadonlySet<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]") as unknown;
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Ended waves dismissed from this Desk: Desk-side only, kept in this browser. */
+function useDismissedWaves() {
+  const [dismissed, set] = useState<ReadonlySet<string>>(readDismissed);
+  const update = (next: ReadonlySet<string>) => {
+    set(next);
+    try {
+      localStorage.setItem(DISMISSED_WAVES_KEY, JSON.stringify([...next]));
+    } catch {
+      // A blocked localStorage only forgets the dismissal on reload.
+    }
+  };
+  return [dismissed, update] as const;
+}
+
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
@@ -221,6 +248,11 @@ export default function App() {
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  /** Ended waves put back on the canvas one by one (the coordinators window's Show). */
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
+  const [dismissed, setDismissed] = useDismissedWaves();
+  /** An ended wave just shown: the viewport fits to it once it has a place on the canvas. */
+  const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
   const steering = useSteering(state, writer, identity);
@@ -287,19 +319,33 @@ export default function App() {
   };
 
   const allGroups = agentsByWave(state);
-  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
-  const finished = finishedAgents(state, now, look.finishedGraceMin * 60_000);
+  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on,
+  // and so do old records with no status that nothing live has been heard from.
+  const graceMs = look.finishedGraceMin * 60_000;
+  const unclassified = unclassifiedAgents(state, now, graceMs);
+  const finished = finishedAgents(state, now, graceMs);
+  for (const id of unclassified.stale) finished.add(id);
   const finishedCount = Object.values(allGroups).reduce(
     (n, l) => n + l.filter((a) => finished.has(a.id)).length,
     0,
   );
   const finishedHidden = look.showFinished ? 0 : finishedCount;
+  // While the Desk (re)syncs, an agent with no status (its registry entry replayed ahead of
+  // it, or a reconnect's resync) may be finished: it is not laid out until its status says
+  // which (C11). One already on the canvas keeps its place. Once synced, an agent that still
+  // has none is shown, with its "no signal" mark.
+  const onCanvas = useRef<ReadonlySet<string>>(new Set());
+  const classifying = settling || syncing;
+  const offCanvas = (a: AgentView) =>
+    (classifying && unclassified.all.has(a.id) && !onCanvas.current.has(a.id)) ||
+    (finishedHidden > 0 && finished.has(a.id));
   const groups =
-    finishedHidden === 0
+    finishedHidden === 0 && (!classifying || unclassified.all.size === 0)
       ? allGroups
       : Object.fromEntries(
-          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !finished.has(a.id))]),
+          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !offCanvas(a))]),
         );
+  onCanvas.current = new Set(Object.values(groups).flatMap((l) => l.map((a) => a.id)));
   const firstStart = useRef<Record<string, number>>({});
   const startedAt = (id: string): number | null => {
     const t = waveStartedAt(allGroups[id] ?? []);
@@ -307,17 +353,27 @@ export default function App() {
     if (t !== null && (prev === undefined || t < prev)) firstStart.current[id] = t;
     return firstStart.current[id] ?? null;
   };
+  // A dismissed wave leaves the Desk while it stays ended. A dismissal ends once its wave is
+  // seen running: a reused id that runs (and ends) again is back. An id that is only missing
+  // is kept, since on a slow link a wave's retained state can arrive after the replay settles.
+  const ended = endedWaves(state);
+  const gone = (id: string) => ended.has(id) && dismissed.has(id);
+  const rerun = [...dismissed].filter((id) => state.waves[id] !== undefined && !ended.has(id));
+  useEffect(() => {
+    if (rerun.length > 0) setDismissed(new Set([...dismissed].filter((id) => !rerun.includes(id))));
+  });
+  /** An ended wave is on the canvas under "Show finished" or once shown on its own. */
+  const endedShown = (id: string) => look.showFinished || revealed.has(id);
   const waveIds = [
-    ...Object.keys(state.waves),
+    ...Object.keys(state.waves).filter((id) => !gone(id)),
     ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
   ];
   /** A window's rendered width: the prototype width, clamped on a phone. */
   const clampW = (w: number) => clampWindowWidth(w, vw);
   // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is
   // on; a folded wave takes no slot in the layout, so it leaves no gap.
-  const ended = endedWaves(state);
   const layout = placeholderLayout(
-    waveIds.filter((id) => look.showFinished || !ended.has(id)),
+    waveIds.filter((id) => !ended.has(id) || endedShown(id)),
     groups,
     clampW,
   );
@@ -374,9 +430,10 @@ export default function App() {
     rectOf(id, WAVE_W, WAVE_H),
     ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
   ];
-  const endedHidden = look.showFinished ? 0 : ended.size;
-  const visible = waveIds.filter((id) => !hidden.has(id) && (look.showFinished || !ended.has(id)));
-  const waveList = Object.values(state.waves).filter((w) => w.state !== null);
+  const endedHidden = waveIds.filter((id) => ended.has(id) && !endedShown(id)).length;
+  // Only what is shown takes part in a fit or an arrange: a folded or hidden wave is not on the canvas.
+  const visible = waveIds.filter((id) => !hidden.has(id) && (!ended.has(id) || endedShown(id)));
+  const waveList = Object.values(state.waves).filter((w) => w.state !== null && !gone(w.id));
   // The coordinators window's supervisor row; the demo has no volleyd to report as absent.
   const supervisors = demo ? undefined : supervisorList(state);
   // One clock for both, so the pill and the row show the same age.
@@ -423,7 +480,22 @@ export default function App() {
     if (!r) return;
     setAnimating(true);
     setMoved((m) => ({ ...m, ...r.place }));
-    setView(r.view);
+    // An ended wave just shown: fit to it in its new place rather than to everything.
+    const shown = fitPending.current;
+    fitPending.current = null;
+    const fitRects = shown
+      ? [
+          { id: shown, w: WAVE_W, h: WAVE_H },
+          ...(groups[shown] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
+        ].flatMap((b) => {
+          const at = r.place[b.id];
+          if (!at) return [];
+          const { w, h } = sizeOf(b.id, b.w, b.h);
+          return [{ ...at, w, h }];
+        })
+      : [];
+    if (fitRects.length > 0) fitTo(fitRects);
+    else setView(r.view);
     clearTimeout(animEnd.current);
     animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
   };
@@ -443,6 +515,42 @@ export default function App() {
     arrange,
     hold: settling && settledOnce.current,
   });
+
+  // Without auto-arrange nothing re-lays the canvas: fit to the shown wave once it is rendered.
+  useEffect(() => {
+    const id = fitPending.current;
+    if (id === null || autoArrange || !visible.includes(id)) return;
+    fitPending.current = null;
+    fitTo(clusterOf(id));
+    focus(id);
+  });
+  const showEnded = (id: string) => {
+    if (visible.includes(id)) {
+      // Already on the canvas: fit to it now.
+      fitTo(clusterOf(id));
+      focus(id);
+      return;
+    }
+    fitPending.current = id;
+    setRevealed((r) => new Set(r).add(id));
+    setHidden((h) => {
+      if (!h.has(id)) return h;
+      const next = new Set(h);
+      next.delete(id);
+      return next;
+    });
+    focus(id);
+  };
+  const dismiss = (id: string) => {
+    setDismissed(new Set(dismissed).add(id));
+    setRevealed((r) => {
+      if (!r.has(id)) return r;
+      const next = new Set(r);
+      next.delete(id);
+      return next;
+    });
+  };
+  const dismissedCount = [...ended].filter((id) => dismissed.has(id)).length;
 
   const place = (id: string, attn?: Attention) => ({
     pos: pos(id),
@@ -587,6 +695,14 @@ export default function App() {
               fitTo={fitTo}
               clusterOf={clusterOf}
               onClose={() => setCoordsOpen(false)}
+              shownEnded={new Set([...ended].filter(endedShown))}
+              onShowEnded={showEnded}
+              onDismiss={dismiss}
+              dismissed={{
+                count: dismissedCount,
+                onRestore: () =>
+                  setDismissed(new Set([...dismissed].filter((id) => !ended.has(id)))),
+              }}
               {...(supervisors ? { supervisors } : {})}
               now={supNow}
               finished={{

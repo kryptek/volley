@@ -150,6 +150,7 @@ describe("CoordinatorsWindow", () => {
         "old-b": { id: "coord-2", state: "gone" },
       },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Ended · 2" }));
     expect(within(row("old-a")).getByText("Complete")).toBeInTheDocument();
     expect(within(row("old-b")).getByText("Stopped")).toBeInTheDocument();
     expect(screen.queryByText("No coordinator · claim it")).toBeNull();
@@ -169,5 +170,71 @@ describe("CoordinatorsWindow supervisor row", () => {
     setup();
     expect(screen.queryByRole("listitem", { name: /^Supervisor/ })).toBeNull();
     expect(screen.getAllByRole("listitem")[0]).toHaveAccessibleName("status-chip");
+  });
+});
+
+describe("CoordinatorsWindow status chips and the Ended group", () => {
+  const ended = (id: string, status: "complete" | "stopped"): WaveView => {
+    const w = wave(id, "coord-9");
+    return { ...w, state: w.state && { ...w.state, status } };
+  };
+  const mixed = () =>
+    setup({
+      waves: [ended("old-a", "complete"), WAVES[0] as WaveView, ended("old-b", "stopped")],
+      coordinators: {
+        ...coordinators,
+        "old-a": { id: "coord-9", state: "gone" },
+        "old-b": { id: "coord-9", state: "gone" },
+      },
+      shownEnded: new Set(["old-b"]),
+      onShowEnded: vi.fn(),
+      onDismiss: vi.fn(),
+    });
+
+  it("gives every row a status chip apart from its identity bar", () => {
+    setup({ supervisors: [] });
+    const chip = (id: string) => row(id).querySelector(".st-chip");
+    expect(chip("status-chip")).toHaveTextContent("needs you");
+    expect(chip("status-chip")).toHaveClass("st-chip--needs");
+    expect(chip("ci-speed")).toHaveTextContent("working");
+    expect(chip("leaderboard")).toHaveTextContent("needs you");
+    // The supervisor's health is a chip too, and its bar carries no wave colour.
+    const sup = screen.getByRole("listitem", { name: "Supervisor volleyd" });
+    expect(sup.querySelector(".st-chip")).toHaveTextContent("down");
+    expect(sup.querySelector(".coord-dot")).toHaveClass("coord-dot--neutral");
+  });
+
+  it("lists active waves first and folds ended ones into a collapsed 'Ended · N' group", () => {
+    mixed();
+    const names = screen.getAllByRole("listitem").map((li) => li.getAttribute("aria-label"));
+    expect(names).toEqual(["status-chip", "Ended waves"]);
+    const head = screen.getByRole("button", { name: "Ended · 2" });
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(head);
+    expect(head).toHaveAttribute("aria-expanded", "true");
+    expect(within(row("old-a")).getByText("completed")).toHaveClass("st-chip--completed");
+    expect(within(row("old-b")).getByText("stopped")).toHaveClass("st-chip--stopped");
+    // Folded off the canvas reads as hidden; one already shown does not.
+    expect(row("old-a")).toHaveTextContent("· hidden");
+    expect(row("old-b")).not.toHaveTextContent("· hidden");
+  });
+
+  it("an ended wave offers Show and Dismiss, not claim or go-to", () => {
+    const p = mixed();
+    fireEvent.click(screen.getByRole("button", { name: "Ended · 2" }));
+    expect(within(row("old-a")).queryByRole("button", { name: /Go to/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show old-a on the canvas" }));
+    expect(p.onShowEnded).toHaveBeenCalledWith("old-a");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss old-b from the Desk" }));
+    expect(p.onDismiss).toHaveBeenCalledWith("old-b");
+  });
+
+  it("says how many waves are dismissed and brings them back", () => {
+    const onRestore = vi.fn();
+    setup({ dismissed: { count: 2, onRestore } });
+    fireEvent.click(screen.getByRole("button", { name: "Ended · 0" }));
+    expect(screen.getByText(/2 dismissed waves/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Bring back" }));
+    expect(onRestore).toHaveBeenCalled();
   });
 });

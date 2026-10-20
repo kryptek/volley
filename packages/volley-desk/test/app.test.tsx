@@ -3,7 +3,7 @@ import path from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { ARRANGE_ANIM_MS } from "../src/layout/useAutoArrange";
+import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
 import { DeskStoreProvider } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
@@ -328,7 +328,9 @@ describe("App attention (live store)", () => {
     expect(container.querySelector(".needs-you")).toBeNull();
     expect(container.querySelector(".topbar .ny-pill")).toBeNull();
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    fireEvent.click(within(coords).getByRole("button", { name: "Ended · 1" }));
     expect(within(coords).getByText("Complete")).toBeInTheDocument();
+    expect(within(coords).getByText("completed")).toHaveClass("st-chip--completed");
     expect(within(coords).queryByText(/claim it/)).toBeNull();
   });
 });
@@ -369,7 +371,8 @@ describe("App auto-arrange (live store)", () => {
     const world = () => container.querySelector(".world") as HTMLElement;
     await c.deliver(retained());
     await settle();
-    await wait(ARRANGE_ANIM_MS);
+    // The held replay reaches the canvas in one batch; the first arrange follows it (C11).
+    await wait(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
     expect(world()).not.toHaveClass("world--anim");
     const bar = screen.getByRole("region", { name: "w1" }).querySelector(".win-bar") as Element;
     fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
