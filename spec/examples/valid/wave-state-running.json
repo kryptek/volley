@@ -10,6 +10,10 @@
     "owner": "coordinator-ab12",
     "repo": "example-org/example-repo",
     "release_branch": "release/2026-10-18-example",
+    "github": {
+      "slug": "example-org/example-repo",
+      "url": "https://github.com/example-org/example-repo"
+    },
     "status": "running",
     "tasks": [
       {

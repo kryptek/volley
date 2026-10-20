@@ -323,3 +323,52 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
   });
 });
+
+describe("repo_visibility_detected github (SPEC §4.6.1)", () => {
+  const wave = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+  );
+  const AT = "2026-10-19T10:00:00.000Z";
+  const GITHUB = {
+    slug: "example-org/example-repo",
+    url: "https://github.com/example-org/example-repo",
+  };
+  const detected = (seq: number, github?: unknown): JournalEvent => ({
+    seq,
+    at: AT,
+    type: "repo_visibility_detected",
+    data: {
+      visibility: "public",
+      source: "gh",
+      public_hygiene: "auto",
+      ...(github !== undefined ? { github } : {}),
+    },
+  });
+  const submitted: JournalEvent = { seq: 1, at: AT, type: "wave_submitted", data: { wave } };
+
+  it("sets state.github, schema-valid", () => {
+    const state = reduce([submitted, detected(2, GITHUB)]);
+    expect(state.github).toEqual(GITHUB);
+    expect(state.repo).toBe("/srv/repo");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
+  it("a later read without github removes the key", () => {
+    const state = reduce([submitted, detected(2, GITHUB), detected(3)]);
+    expect(state).not.toHaveProperty("github");
+  });
+
+  it("a malformed slug or url leaves it unset", () => {
+    expect(reduce([submitted, detected(2, { ...GITHUB, slug: "owner" })])).not.toHaveProperty(
+      "github",
+    );
+    expect(
+      reduce([submitted, detected(2, { ...GITHUB, url: "ftp://example.com/x" })]),
+    ).not.toHaveProperty("github");
+    expect(reduce([submitted, detected(2, "example-org/example-repo")])).not.toHaveProperty(
+      "github",
+    );
+  });
+});

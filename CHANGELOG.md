@@ -32,6 +32,10 @@ All workspace packages share one version. Dates are release-tag dates.
   a why-here and load tooltip on hover or focus, and opens Settings › Machines at that machine's
   card; it replaces the footer's `on <host>`, and the body's purpose line now shows only when the
   headline does not already. (#220)
+- volleyd: the wave state carries `github: { slug, url }`, the repository's `owner/repo` name and
+  URL from the `gh repo view` volleyd already runs per wave version (now
+  `--json nameWithOwner,url,visibility`, under every `public_hygiene` level); absent when it
+  could not be read. `volleyd status` prints `github: owner/repo`. (#225)
 - volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
   wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
   `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)

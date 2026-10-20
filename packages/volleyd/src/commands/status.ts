@@ -144,7 +144,9 @@ export function formatWave(
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
-  const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  const hygiene =
+    (s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "") +
+    (s.github !== undefined ? `  github: ${s.github.slug}\n` : "");
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";

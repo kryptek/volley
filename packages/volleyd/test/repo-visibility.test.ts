@@ -13,6 +13,11 @@ import { journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 
 const P3_RULE = hygieneText("p3").rule;
+const VIEW_ARGV = ["gh", "repo", "view", "--json", "nameWithOwner,url,visibility"];
+const GITHUB = {
+  slug: "example-org/example-repo",
+  url: "https://github.com/example-org/example-repo",
+};
 
 describe("public hygiene: the repository's visibility, read at submit", () => {
   let env: DaemonEnv;
@@ -88,12 +93,16 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
 
   it("auto on a private repository: journaled once, P3 wording, state shows it", async () => {
     const brief = await submitAndReview({ repoView: "gh-repo-view-private.json" });
-    expect(repoViews()).toEqual([["gh", "repo", "view", "--json", "visibility"]]);
+    expect(repoViews()).toEqual([VIEW_ARGV]);
     expect(fake.calls.find((c) => c.argv[1] === "repo")?.opts.cwd).toBe(repo);
     expect(detected().map((e) => e.data)).toEqual([
-      { visibility: "private", source: "gh", public_hygiene: "auto" },
+      { visibility: "private", source: "gh", public_hygiene: "auto", github: GITHUB },
     ]);
-    expect(await state()).toMatchObject({ repo_visibility: "private", hygiene_level: "p3" });
+    expect(await state()).toMatchObject({
+      repo_visibility: "private",
+      hygiene_level: "p3",
+      github: GITHUB,
+    });
     expect(brief).toContain(P3_RULE);
     expect(brief).not.toContain(HYGIENE_CHECK);
     const status = await runCli(["status", "w1"], env.env);
@@ -102,22 +111,35 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
 
   it("auto on a public repository: the P1 line", async () => {
     const brief = await submitAndReview({ repoView: "gh-repo-view-public.json" });
+    expect(repoViews()).toEqual([VIEW_ARGV]);
     expect(detected().map((e) => e.data.visibility)).toEqual(["public"]);
-    expect(await state()).toMatchObject({ repo_visibility: "public", hygiene_level: "p1" });
+    expect(detected()[0]?.data.github).toEqual(GITHUB);
+    expect(await state()).toMatchObject({
+      repo_visibility: "public",
+      hygiene_level: "p1",
+      github: GITHUB,
+    });
     expect(brief).toContain(HYGIENE_CHECK);
     expect(brief).toContain('"hygiene": { "checked": true, "findings": [] }');
-    expect((await runCli(["status", "w1"], env.env)).stdout).toContain("hygiene: P1 (public)");
+    const status = (await runCli(["status", "w1"], env.env)).stdout;
+    expect(status).toContain("hygiene: P1 (public)");
+    expect(status).toContain("github: example-org/example-repo");
   });
 
-  it("public_hygiene: on never runs gh and forces P1 on a private repository", async () => {
+  it("public_hygiene: on reads only the GitHub name and forces P1 on a private repository", async () => {
     const brief = await submitAndReview({
       repoView: "gh-repo-view-private.json",
       config: "public_hygiene: on",
     });
-    expect(repoViews()).toEqual([]);
+    expect(repoViews()).toEqual([VIEW_ARGV]);
     expect(detected().map((e) => e.data)).toEqual([
-      { visibility: null, source: "config", public_hygiene: "on" },
+      { visibility: null, source: "config", public_hygiene: "on", github: GITHUB },
     ]);
+    expect(await state()).toMatchObject({
+      repo_visibility: null,
+      hygiene_level: "p1",
+      github: GITHUB,
+    });
     expect(brief).toContain(HYGIENE_CHECK);
   });
 
@@ -126,8 +148,15 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
       repoView: "gh-repo-view-public.json",
       config: "public_hygiene: off",
     });
-    expect(repoViews()).toEqual([]);
-    expect(await state()).toMatchObject({ repo_visibility: null, hygiene_level: "off" });
+    expect(repoViews()).toEqual([VIEW_ARGV]);
+    expect(detected().map((e) => e.data)).toEqual([
+      { visibility: null, source: "config", public_hygiene: "off", github: GITHUB },
+    ]);
+    expect(await state()).toMatchObject({
+      repo_visibility: null,
+      hygiene_level: "off",
+      github: GITHUB,
+    });
     expect(brief).not.toContain(HYGIENE_CHECK);
     expect(brief).not.toContain(P3_RULE);
     expect(brief).not.toContain('"hygiene":');
@@ -147,7 +176,7 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
       ["private", "gh"],
       [null, "config"],
     ]);
-    expect(repoViews()).toHaveLength(1);
+    expect(repoViews()).toHaveLength(2);
     expect(await state()).toMatchObject({
       version: 2,
       repo_visibility: null,
@@ -166,6 +195,16 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
       ),
     ).toBe(true);
     expect(await state()).toMatchObject({ repo_visibility: "unknown", hygiene_level: "p1" });
+    expect(await state()).not.toHaveProperty("github");
     expect(brief).toContain(HYGIENE_CHECK);
+    expect((await runCli(["status", "w1"], env.env)).stdout).not.toContain("github:");
+  });
+
+  it("a read without a url records the visibility but no github", async () => {
+    await submitAndReview({ repoView: "gh-repo-view-no-url.json" });
+    expect(detected().map((e) => e.data)).toEqual([
+      { visibility: "public", source: "gh", public_hygiene: "auto" },
+    ]);
+    expect(await state()).not.toHaveProperty("github");
   });
 });
