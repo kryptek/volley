@@ -59,6 +59,16 @@ All workspace packages share one version. Dates are release-tag dates.
 - volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
   wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
   `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)
+- Stable coordinator identity. Set `VOLLEY_COORDINATOR` (e.g. `coord-main`) in the MCP
+  registration's `env` and submit with `volleyd run --owner "$VOLLEY_COORDINATOR"`: the wave is
+  owned by the name, which volleyd binds to the newest live registry entry carrying it (the MCP
+  server publishes it as the registry entry's `coordinator`; `vol_register` returns it). A session
+  whose MCP server restarts under a new agent id keeps its waves: volleyd journals
+  `owner_reconnected { owner, agent_id, previous_agent_id }`, nothing is claimed, and the wave
+  state's `coordinator.state` reads `reconnecting` (new) while the session is away, for
+  `autopilot.reconnect_grace_s` (default 900), then `gone`. `volleyd status` prints
+  `owner: coord-main (via coordinator-c7d9)`; the CLI picks the name up from `VOLLEY_COORDINATOR`
+  or the session's registry entry. (#199)
 
 ## 0.4.0 — 2026-10-20
 
