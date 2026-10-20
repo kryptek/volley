@@ -796,7 +796,8 @@ stages:
   (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
   owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,
   decision_id }` and the wave is `complete`; `hold` (or any other answer) keeps it `releasing`
-  and asks again (the new decision carries `class: held`). volleyd never deploys to production
+  and asks again at once (the new decision carries `class: held`), so a held
+  `release_go` is straight back in the inbox. volleyd never deploys to production
   on its own: a deploy-shaped stage says `gate: owner`.
 - **Without a playbook** (or with autopilot off) nothing changes: the wave completes, and its
   `wave_complete` decision is auto-acknowledged under autopilot. A playbook that stopped

@@ -200,10 +200,8 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}
-${note}${localPinWarnings(wave, env)}${prefaceLine}
-${playbookLine}
-${placement}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n` +
+        `${note}${localPinWarnings(wave, env)}${prefaceLine}\n${playbookLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {

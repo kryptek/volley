@@ -328,6 +328,18 @@ describe("without a release train", () => {
     expect(question).not.toContain(repo);
     expect((await retainedState()).status).toBe("complete");
   });
+  it("an invalid playbook is logged once per wave, however often a tick reads it", async () => {
+    const lines: string[] = [];
+    await start({ ...AUTOPILOT_ON, log: (line) => lines.push(line) });
+    await submit();
+    writeFileSync(
+      join(repo, ".volley", "release.yaml"),
+      "version: 1\nstages:\n  - { name: smoke, brief: a, gate: later }\n",
+    );
+    const read = (daemon as unknown as { releasePlaybook: (w: string) => unknown }).releasePlaybook;
+    for (let i = 0; i < 3; i++) expect(typeof read.call(daemon, WAVE)).toBe("string");
+    expect(lines.filter((l) => l.includes("release playbook not run"))).toHaveLength(1);
+  });
 });
 
 describe("a releasing wave holds admission and new versions", () => {

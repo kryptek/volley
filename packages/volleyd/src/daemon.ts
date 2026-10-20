@@ -916,6 +916,8 @@ export class Daemon {
   readonly inboxHandlers = new Map<InboxKind, (item: InboxItem) => Promise<void>>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
+  /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
+  private readonly playbookNotRun = new Map<WaveId, string>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
@@ -3243,7 +3245,10 @@ export class Daemon {
       return wavePlaybook(plan);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.log(`wave ${wave}: release playbook not run: ${msg}`);
+      if (this.playbookNotRun.get(wave) !== msg) {
+        this.playbookNotRun.set(wave, msg);
+        this.log(`wave ${wave}: release playbook not run: ${msg}`);
+      }
       const path = playbookPath(plan.repo, plan.playbook);
       const named = path === null ? msg : msg.replace(path, plan.playbook ?? DEFAULT_PLAYBOOK);
       return named.replace(/:\n\s*/, ": ").replace(/\n\s*/g, "; ");
