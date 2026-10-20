@@ -39,6 +39,7 @@ coordinator session.
 - [Accounts and one-time tokens](#accounts-and-one-time-tokens)
 - [Claude accounts](#claude-accounts)
 - [Decisions](#decisions)
+- [Autopilot](#autopilot)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
 - [Steering](#steering)
@@ -141,6 +142,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered). `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
 | `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>]` | Answer a decision (owner only). |
+| `volleyd policy [wave] [--json]` | Autopilot's effective policy table: the decisions volleyd answers itself, with each budget ([Autopilot](#autopilot)). `--json` prints `{ rules, config }`. |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
@@ -611,8 +613,9 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   task that is already `done`, `merge_ready` or `cancelled` cannot be parked (its dependents have
   moved on); open a wave-level decision instead. While a task is parked, a `stage_entered` for it
   does not un-park it: it only changes the stage it resumes in.
-- **Notify bridge**: every open also publishes a `blocked`-typed progress envelope on the
-  daemon's own topic, so an existing `volley notify` rings with no new surface:
+- **Notify bridge**: every open that stays open (one [Autopilot](#autopilot) did not answer)
+  also publishes a `blocked`-typed progress envelope on the daemon's own topic, so an existing
+  `volley notify` rings with no new surface:
 
   ```sh
   volley notify --pattern 'volley/+/volleyd/progress'      # default --on includes blocked
@@ -644,6 +647,92 @@ The agent is never retired while the question is open: SPEC §5.2 lets a blocked
 waiting for mailbox guidance, so it keeps its lock and login. The decision carries the status's
 `wall_time` (`status_at`), so the same retained status re-delivered after a restart is not asked
 about twice.
+
+## Autopilot
+
+Most decisions have one obvious answer: retry, relaunch once, treat a disputed P1 as a blocker,
+nudge once more, raise the spawn budget by what the wave needs. volleyd gives those answers itself
+(SPEC §4.6.16), from a policy table that is data in one module (`src/autopilot/policy.ts`, pure),
+within per-wave remediation budgets, and journals every answer. What the table cannot answer is
+left for you, with one push.
+
+- **Answered**: when a decision opens, in the same serial turn, volleyd journals
+  `decision_auto_resolved { decision_id, kind, policy, answer, rationale, evidence, budget? }`
+  and then the ordinary `decision_resolved { by: "volleyd" }`, once the answer is accepted (a
+  refused answer journals neither and spends no budget). The retained decision is published
+  resolved and cleared like any other; the notify bridge does **not** ring for it. A decision a
+  launch opens while it is being verified is answered only once that agent is supervised, so a
+  relaunch never retires an agent volleyd is not yet watching.
+- **Escalated**: a decision no rule answers (`no_policy`), one whose kind is in
+  `autopilot.owner_only` (`owner_only`), one whose budget is spent (`budget_exhausted`), or one
+  whose answer could not be applied (`unattended_safety`, e.g. an account move the account
+  registry refuses) stays open. volleyd journals `decision_escalated { decision_id, kind, why,
+  budget? }`, its retained `question` starts with `Autopilot could not resolve this (<why>): `,
+  and only then does the notify bridge ring.
+- **Never an answer the decision does not offer**: a rule whose answer is not in the decision's
+  `options` escalates `no_policy` (a free-text decision, `agent_question`, offers none and takes
+  any answer).
+- **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
+  `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` per task,
+  and `budget_raise_max`, a multiple of the wave's derived spawn budget that `raise by <n>`
+  answers may reach. Each is reduced from the journal's `decision_auto_resolved` events, so a
+  restart keeps them.
+- **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
+  enabled: false } }`) takes effect at the next decision: nothing is answered or escalated, and
+  every decision waits for you as before.
+
+`volleyd status` prints `autopilot: on · N auto-resolved · M escalated` under each wave header,
+and the wave state carries `autopilot: { enabled, auto_resolved, escalated, budgets: { <key>: {
+used, max } } }`. The table, as `volleyd policy` prints it with the default config (rules are
+tried in order; the first whose kind and condition match wins):
+
+```text
+autopilot: on
+  plan_change, repo_untrusted, model_switch, release_go, stage_go · always · escalate owner_only · no budget
+    owner_only: autopilot.owner_only: only the owner answers these
+  spawn_failed · next_retry_at !== null (the daemon still retries) · retry now · no budget
+    spawn_failed/retrying: the daemon retries with backoff; the question is informational
+  spawn_failed · retries stopped (next_retry_at === null) · escalate budget_exhausted · no budget
+    spawn_failed/retries-stopped: spawn_retry_max is the budget
+  hooks_auth_failed, mcp_not_registered, unknown_screen · pipeline.on === "relaunch" · relaunch · relaunch_max per <task>/<role> · max 1
+    relaunch/bad-launch: one relaunch fixes a bad launch; a second needs eyes
+  unknown_screen · class: hooks_silent or screen_static (liveness) · keep running · no budget
+    unknown_screen/alive: the agent is alive; the LWT or its status has the last word
+  reviewers_disagree · always · blocker · no budget
+    reviewers_disagree/blocker: the fixup applies it; the P1 reviewer's view costs one fixup, never a bad merge
+  agent_stalled · asked === 1 · nudge again · nudge_max per <task>/<role>/<attempt> · max 1
+    agent_stalled/nudge: one more nudge
+  agent_stalled · asked > 1 · respawn · respawn_max per <task>/<role> · max 1
+    agent_stalled/respawn: a second stall needs a fresh agent (escalated no_policy while the decision does not offer respawn)
+  agent_blocked · pipeline.on === "agent_failed" or class: respawn_needed · respawn · respawn_max per <task>/<role> · max 1
+    agent_blocked/respawn-failed: a fresh agent picks the work up where the failed one left it
+  agent_blocked · pipeline.on === "review_result" or "fixup_result" · respawn · respawn_max per <task>/<role> · max 1
+    agent_blocked/respawn-result: a fresh agent publishes the result; skip would lose a review
+  agent_blocked · pipeline.on === "merge_ready_invariant" · rereview · rereview_max per <task> · max 2
+    agent_blocked/rereview-stale: a re-review is the safe way past a stale review
+  agent_question · within question_max per run · Proceed with your best judgement and the issue as written; you are running unattended. If you truly cannot continue, publish blocked with the reason. · question_max per <task>/<role>/<attempt> · max 1
+    agent_question/unattended: what a hand coordinator answered
+  spawn_budget_exhausted · used + n <= derived budget × budget_raise_max · raise by <n> (n from the option) · budget_raise_max (× derived budget) · max 2
+    spawn_budget_exhausted/raise: retries are the normal cost of a long wave
+  machine_down · re-place queued tasks offered · re-place queued tasks · no budget
+    machine_down/re-place: nothing is lost by re-placing a queued task
+  account_limit · suggested !== null · move wave <wave> to <suggested> · no budget
+    account_limit/move: the daemon suggested a healthy account
+  account_limit · suggested === null · not now · no budget
+    account_limit/wait: no account has headroom: wait for the window to reset
+  pr_head_moved · a green merge of the release branch only (accept offered) · accept · no budget
+    pr_head_moved/accept: a release-branch merge into the PR is not new code
+  pr_head_moved · otherwise (rereview offered) · rereview · rereview_max per <task> · max 2
+    pr_head_moved/rereview: nobody reviewed the new head
+  wave_complete · always · acknowledged · no budget
+    wave_complete/acknowledge: the end of a wave needs no answer; the owner reads its outcome
+  ci_failed · always (ci_none included) · escalate no_policy · no budget
+    ci_failed/owner: a CI fixup and the flake route need pipeline work; a repository without workflows is the owner's
+  pr_closed, remote_repo_missing, merge_conflict · always · escalate no_policy · no budget
+    pr/owner: where the work went, or a clone that is missing, is the owner's call
+```
+
+---
 
 ## Ownership and claim
 

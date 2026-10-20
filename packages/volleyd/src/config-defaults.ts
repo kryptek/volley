@@ -58,6 +58,17 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
   fleet: { local_name: null, local_agents: null, fallback: { max_agents: 3, per_machine: {} } },
+  // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16) ---
+  autopilot: {
+    enabled: true,
+    owner_only: ["plan_change", "repo_untrusted", "model_switch", "release_go", "stage_go"],
+    relaunch_max: 1,
+    nudge_max: 1,
+    respawn_max: 1,
+    rereview_max: 2,
+    question_max: 1,
+    budget_raise_max: 2,
+  },
 };
 
 /**

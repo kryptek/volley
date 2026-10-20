@@ -118,3 +118,16 @@
 #     max_agents: 3              # agents on it at most (hard_ceiling still caps the total)
 #     per_machine: {}            # per heavy pool, its slots, e.g. { js-suite: 1, backend-it: 0 };
 #                                # a pool not named gets 1 when it sets per_machine
+
+# --- Autopilot: decisions volleyd answers itself (README "Autopilot", `volleyd policy`) ---
+# autopilot:
+#   enabled: true                # false: every decision waits for the owner (next decision on)
+#   owner_only: [plan_change, repo_untrusted, model_switch, release_go, stage_go]
+#                                # kinds only the owner answers: always escalated
+#   relaunch_max: 1              # relaunches of one <task>/<role> after a bad launch
+#   nudge_max: 1                 # extra nudges of one stalled run (<task>/<role>/<attempt>)
+#   respawn_max: 1               # respawns of one <task>/<role>
+#   rereview_max: 2              # re-reviews of one task (moved head, stale review at the gate)
+#   question_max: 1              # agent questions answered for one run
+#   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
+#                                # multiple of the wave's derived budget

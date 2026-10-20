@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T02:31:40.000Z",
+  "channel": "_waves/events",
+  "type": "decision_escalated",
+  "payload": {
+    "wave": "w1",
+    "seq": 57,
+    "at": "2026-10-20T02:31:40.000Z",
+    "task": "T1",
+    "data": { "decision_id": "d-1a2b3c4d", "kind": "plan_change", "why": "felt_like_it" }
+  }
+}

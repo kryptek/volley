@@ -48,6 +48,8 @@ function expectedLeaves(s: Record<string, JsonSchema>, prefix = ""): string[] {
   return Object.entries(s).flatMap(([k, v]) => {
     const p = `${prefix}${k}`;
     if (isRecordMap(v)) return [];
+    // A list (`autopilot.owner_only`) has no row.
+    if (v.type === "array") return [];
     if (v.properties) return expectedLeaves(v.properties as Record<string, JsonSchema>, `${p}.`);
     if (v.additionalProperties) {
       // A top-level map is `lease_pools` (a capacity row per pool); a nested map of integers
@@ -81,6 +83,8 @@ describe("schemaRows", () => {
           Object.entries(o).flatMap(([k, v]) =>
             v.properties
               ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
+              : v.type === "array"
+                ? []
               : v.additionalProperties
                 ? heavyPools.map((pool) => [
                     `${pre}${k}.${pool}`,
@@ -223,6 +227,15 @@ describe("schemaRows", () => {
     expect(Object.keys(props)).toContain("hosts");
     expect(rows.some((r) => r.path.startsWith("hosts"))).toBe(false);
     expect(schemaRows(schema, null).some((r) => r.path.startsWith("hosts"))).toBe(false);
+  });
+
+  it("gives autopilot a row per bounded leaf and none for its owner_only list", () => {
+    expect(at.get("autopilot.enabled")).toMatchObject({ control: { kind: "toggle" } });
+    expect(at.get("autopilot.relaunch_max")).toMatchObject({
+      control: { kind: "slider", min: 0, max: 10, step: 1 },
+    });
+    expect(at.get("autopilot.budget_raise_max")?.control).toMatchObject({ kind: "slider", min: 1 });
+    expect(at.has("autopilot.owner_only")).toBe(false);
   });
 
   it("has no lease rows when no pools are configured", () => {
