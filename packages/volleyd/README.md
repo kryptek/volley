@@ -11,7 +11,7 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release (v0.3.1).** This package has the wave file, journal, reducer, scheduler,
+> **Status: pre-release (v0.4.0).** This package has the wave file, journal, reducer, scheduler,
 > fence, config store, daemon, CLI and service (launchd on macOS; `volley setup` installs a
 > systemd user unit on Linux), plus decisions, wave ownership, pause/stop
 > and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
@@ -21,7 +21,9 @@ coordinator session.
 > publishes screen tails, and can run agents on a second machine over ssh + tmux. Since v0.3.0 it
 > also answers the Desk's setup wizard and account ops (`setup_plan` / `setup_apply`, one-time
 > sign-in links and admin tokens), pairs machines (`volley peer`) and runs agents under several
-> Claude accounts (`volley claude`).
+> Claude accounts (`volley claude`). Since v0.4.0 (the Fleet) it judges which machines can run
+> an agent, places tasks across them with a "why here" line, and asks before re-placing anything
+> when a machine goes down, gets busy or leaves (see Fleet below).
 
 ---
 
@@ -43,8 +45,10 @@ coordinator session.
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
-- [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
-- [Fleet: placement](#fleet-placement)
+- [Fleet](#fleet)
+  - [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
+  - [Fleet: placement](#fleet-placement)
+  - [Fleet: down, overload, drain, remove](#fleet-down-overload-drain-remove)
 - [Recovery](#recovery)
 - [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The pipeline and the merge-ready gate](#the-pipeline-and-the-merge-ready-gate)
@@ -1401,6 +1405,25 @@ instead of refusing the configured name, and journals `peer_joined { ..., replac
 machine rewrites `~/.volley/peer.json` and restarts its service. An ordinary code for a configured
 name is still refused, `replace` or not; a `--for` code joins under its own name only; neither
 refusal uses the code up. A name whose account is not a `peer` is never replaced.
+
+## Fleet
+
+The Fleet (v0.4.0, SPEC §4.6.15) is volleyd running agents on more than one machine and choosing
+where. The pieces, in the order a machine meets them:
+
+| Piece | What it does | Where |
+|---|---|---|
+| Pairing | one code gives a machine its own broker account, an ssh tunnel service and a heartbeat | [Paired machines](#paired-machines-volley-peer) |
+| Doctor and Repair | `volley peer doctor` checks the machine; the admin op `peer_doctor` (the Desk's **Repair…**) runs it, with `--fix`, over ssh | [readiness](#fleet-readiness-the-supervisors-card-repair), the volley-cli README |
+| Remote sign-in | `claude_signin { acct: "primary@<name>" }` runs `claude auth login` on the machine and forwards its localhost callback for the length of the sign-in | [Claude accounts](#claude-accounts) |
+| Readiness | a retained verdict per machine: ready, eligible, and why not, in plain words | [readiness](#fleet-readiness-the-supervisors-card-repair) |
+| Placement | `placement: auto` scores the eligible machines and writes a "why here" line for each | [placement](#fleet-placement) |
+| Leases per machine | a pool's `per_machine` caps the holders on one machine; each holder carries its host | [Leases](#leases) |
+| Down, overload, drain, remove | the owner decides every re-placement; a running agent is never moved | [down, overload, drain, remove](#fleet-down-overload-drain-remove) |
+| The fence | the doctor's argv, the PATH probe and the sign-in's `ssh -N -L` forward are the only Fleet commands volleyd may run | [The authority fence](#the-authority-fence) |
+
+The owner's end-to-end check on a real second machine is `SMOKE.md` Plan 12 at the repository
+root.
 
 ## Fleet: readiness, the supervisor's card, Repair
 

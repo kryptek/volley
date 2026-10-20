@@ -305,18 +305,44 @@ You go from "ten issues sitting in the backlog" to "ten merged PRs on a release 
 
 ### 2. One pane of glass across machines
 
-Your Claude Code is running here. Your overnight Codex job is running on your desktop. A nightly shell script is running on a VPS in Europe. Point all three at the same MQTT broker (mosquitto over TLS, or any cloud MQTT service). Run `/volley list --all-namespaces` from any machine, see everyone:
+You have a Mac and a Linux box under the desk. volleyd runs on the Mac; you want a wave's agents
+on both, wherever there is room, without deciding by hand.
 
-```
-AGENT_ID                NAMESPACE      STATUS        LAST_SEEN
-coordinator-a3f1        default        🔄 working    2m ago
-codex-overnight-9d2e    default        ✅ done       17m ago
-backup-script-1c8f      ops            🔄 working    14s ago
-```
+1. **Pair it.** In the Desk, Settings › Machines › **+ Add a machine** shows a one-time
+   `volley peer join <code> --to <you@mac>` to run on the box. The box gets its own broker
+   account, an ssh tunnel to the broker and a heartbeat, and shows up as a card.
+2. **Doctor and Repair.** The card lists the box's checks (tools, the PATH an agent gets over
+   ssh, the volley checkout, the repo, GitHub, Claude, memory and disk), each with its fix.
+   **Repair…** shows what it would change, then runs `volley peer doctor --fix` there; the rest
+   it gives you as commands to copy. From a terminal: `volley peer doctor` on the box.
+3. **Sign it in to Claude from the Mac.** **Sign in on box-a** runs Claude Code's own login on
+   the box and opens the sign-in in the Mac's browser; from a phone, type the code into a
+   terminal on the box. Volley never sees a credential.
+4. **Let the wave place itself.** `placement: auto` in the wave file:
 
-Crash detection comes for free — if any of those processes dies hard, MQTT's Last-Will-and-Testament fires within 60–90 seconds and the registry flips that agent to `reaped`.
+   ```
+   $ volleyd run fleet.yaml
+   if admitted now: T1 → box-a (0.85), T2 → mac (0.58)
+   $ volleyd status
+     T1  #101   implement
+       on box-a (auto, 0.81)
+         box-a    0.81  load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%
+         mac      0.63  load 6.0 on 8 cores · 2/12 agents · 40% mem · usage 34%
+   ```
 
-For volleyd's waves, a second machine is one pairing code away: `volley peer invite` on the supervisor's machine (as an admin account: `volley auth add <name> --role admin`), `volley peer join <code> --to <that machine>` on the new one. It gets its own broker account, an ssh tunnel to the broker and a health heartbeat; a wave task with `host: <name>` then runs there, and `volley peer remove <name>` revokes it.
+   The Desk shows the same "why here" lines on each task's host chip.
+5. **When a machine goes away.** Its spawns park; after 5 minutes the Desk asks whether to wait,
+   re-place the queued tasks elsewhere, or cancel. An overloaded machine takes no new agents
+   until it calms down. `volley peer remove box-a --drain` lets its agents finish first. A
+   running agent is never moved.
+
+The details: the volleyd README's [Fleet](packages/volleyd/README.md#fleet) section and the
+owner's run on real hardware, [`SMOKE.md`](SMOKE.md) Plan 12.
+
+Agents that volleyd does not supervise join the same view by pointing at the same broker: your
+Claude Code here, a Codex job on the desktop, a nightly script on a VPS. `/volley list
+--all-namespaces` from any machine lists them all, and if one dies hard, MQTT's
+Last-Will-and-Testament flips it to `reaped` within 60–90 seconds.
 
 ### 3. Cross-vendor coordination
 
