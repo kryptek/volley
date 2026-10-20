@@ -53,17 +53,22 @@ function repoOf(v: unknown): string | null {
 }
 
 /**
- * A registered link's accessible name. One rule for every purpose link: `on GitHub` when the
+ * A purpose link's accessible name. One rule for every purpose link: `on GitHub` when the
  * link is known to open on GitHub, else `on <host>`; bare when unlinked. A wave's links are
- * known to be GitHub (the supervisor read the repository with gh, an Enterprise host included);
+ * known to be GitHub (`onGitHub`: the supervisor read the repository with gh, an Enterprise host included);
  * a registered URL is known to be GitHub only on github.com, so any other host is named.
  */
-function labelOf(kind: "issue" | "pr", n: string | null, href: string | null): string {
+function labelOf(
+  kind: "issue" | "pr",
+  n: string | null,
+  href: string | null,
+  onGitHub = false,
+): string {
   const what = kind === "pr" ? "PR" : "Issue";
   const name = n ? `${what} #${n}` : what;
   if (href === null) return name;
   const host = new URL(href).hostname;
-  if (host === "github.com" || host.endsWith(".github.com"))
+  if (onGitHub || host === "github.com" || host.endsWith(".github.com"))
     return n ? (kind === "pr" ? prLabel(n) : issueLabel(n)) : `${name} on GitHub`;
   return `${name} on ${host}`;
 }
@@ -125,16 +130,16 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
       if (isIssueNumber(issue)) {
         const href = issueHref(s.github, issue);
         // The wave's own repository is on GitHub (an Enterprise host included).
-        links.push({
-          text: `#${issue}`,
-          href,
-          label: href ? issueLabel(issue) : `Issue #${issue}`,
-        });
+        links.push({ text: `#${issue}`, href, label: labelOf("issue", String(issue), href, true) });
       }
       const pr = task?.pr?.number;
       const prUrl = prHref(task);
       if (isIssueNumber(pr))
-        links.push({ text: `PR #${pr}`, href: prUrl, label: prUrl ? prLabel(pr) : `PR #${pr}` });
+        links.push({
+          text: `PR #${pr}`,
+          href: prUrl,
+          label: labelOf("pr", String(pr), prUrl, true),
+        });
       return make(`${a.task} · ${title}`, "wave", links);
     }
   }
