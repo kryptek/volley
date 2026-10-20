@@ -173,7 +173,10 @@
           }
         },
         {
-          "if": { "properties": { "type": { "const": "owner_reconnected" } }, "required": ["type"] },
+          "if": {
+            "properties": { "type": { "const": "owner_reconnected" } },
+            "required": ["type"]
+          },
           "then": {
             "properties": {
               "payload": {

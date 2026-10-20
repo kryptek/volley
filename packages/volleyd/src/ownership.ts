@@ -91,8 +91,7 @@ export function claimVerdict(
   if (c.owner === c.by) return { ok: true, why: `${c.by} already owns it` };
   if (c.bound !== undefined && c.bound !== null && c.bound === c.by)
     return { ok: true, why: `${c.by} already owns it as ${c.owner}` };
-  const owner =
-    c.bound !== undefined && c.bound !== null ? `${c.owner} (via ${c.bound})` : c.owner;
+  const owner = c.bound !== undefined && c.bound !== null ? `${c.owner} (via ${c.bound})` : c.owner;
   if (c.bound === undefined && c.status !== null && GONE.has(c.status.type))
     return { ok: true, why: `owner ${c.owner} is ${c.status.type}` };
   const seen = [

@@ -61,9 +61,10 @@ export interface WaveRecord {
   budget_raised?: number;
   /**
    * The agent last journaled as bound to the wave's coordinator-name owner (`owner_reconnected`),
-   * so a daemon restart replaying the registry does not journal the same reconnect again.
+   * so a daemon restart replaying the registry does not journal the same reconnect again; null
+   * once a claim gave the wave another owner.
    */
-  owner_agent?: string;
+  owner_agent?: string | null;
 }
 
 /** A steer journaled while its task had no live agent: delivered to the next one to register. */
@@ -436,7 +437,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
-      delete next.owner_agent;
+      next.owner_agent = null;
       break;
     case "owner_reconnected":
       next.owner_agent = ev.data.agent_id as string;

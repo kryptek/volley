@@ -90,7 +90,9 @@ describe("a wave owned by a coordinator name", () => {
     expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");
-    await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "working" }));
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "working" }),
+    );
 
     // The bound agent acts for the name.
     const d = await daemon.openDecision(WAVE, {
@@ -122,7 +124,9 @@ describe("a wave owned by a coordinator name", () => {
       agent_id: "coordinator-b2",
       previous_agent_id: "coordinator-a1",
     });
-    await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2", state: "working" }));
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2", state: "working" }),
+    );
     expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
     expect(daemon.journalEvents(WAVE).some((e) => e.type === "owner_claimed")).toBe(false);
 
@@ -152,7 +156,9 @@ describe("a wave owned by a coordinator name", () => {
     await clock.advance(899_000);
     expect(coordinator()?.state).toBe("reconnecting");
     await clock.advance(2_000);
-    await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }));
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+    );
     expect(reconnects()).toHaveLength(0);
   });
 
