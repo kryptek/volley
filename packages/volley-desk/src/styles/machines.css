@@ -342,3 +342,12 @@
     border-radius: 0;
   }
 }
+
+/* Sign in on <machine>: the phone disclosure. */
+.m-phone {
+  margin-top: 10px;
+}
+
+.m-phone summary {
+  cursor: pointer;
+}

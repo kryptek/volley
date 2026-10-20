@@ -557,7 +557,7 @@ export function Machines(p: MachinesProps) {
       agents={p.agentsOn?.[m.name]}
       host={p.host}
       onRemoved={setNotice}
-      signIn={p.signIn?.(m.name)}
+      signIn={self ? undefined : p.signIn?.(m.name)}
       onCountdown={onCountdown}
     />
   );

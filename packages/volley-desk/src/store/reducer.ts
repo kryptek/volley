@@ -290,6 +290,7 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
     ...optional("url", str(p.url) ?? prev?.url),
     ...optional("flow", str(p.flow) ?? prev?.flow),
     ...optional("attach", str(p.attach) ?? prev?.attach),
+    ...optional("manual_url", str(p.manual_url) ?? prev?.manual_url),
     ...optional("plan", str(p.plan)),
     ...optional("reason", str(p.reason)),
   };
