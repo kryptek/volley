@@ -14,6 +14,8 @@ When it opens with **Directive: CI failed on your head**, CI failed on the head 
 
 volleyd then verifies the push, the PR and CI on the new head before anything moves on.
 
+When a fix changes user-visible behaviour, amend the task's changelog fragment, `changes/{{issue}}.<type>.md` (or add one; see `changes/README.md`); never edit `CHANGELOG.md`.
+
 ## Rules
 
 - Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the reviewed PR head named in `.volley/findings.md`).
