@@ -268,7 +268,7 @@ export function renderEvidenceMd(j: EvidenceJson): string {
         m.accepted_by === undefined
           ? ""
           : m.how === "release_merge"
-            ? ` Accepted by ${m.accepted_by}: a merge of the release branch only (touched: ${m.touched.join(", ") || "(nothing)"}).`
+            ? ` Accepted by ${m.accepted_by}: a merge of the release branch only (touched: ${m.touched.join(", ") || "(nothing)"}; they may carry content resolved by hand, which no reviewer saw).`
             : ` Accepted without a re-review by ${m.accepted_by} (fixup).`;
       out.push(
         `- \`${m.from}\` → \`${m.to}\`: pushed outside the pipeline after verification; CI re-verified on the new head, the reviews above stay at the heads they name; touched: ${m.touched.length > 0 ? m.touched.join(", ") : "(nothing)"}.${owner}`,

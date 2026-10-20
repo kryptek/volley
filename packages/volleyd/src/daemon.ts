@@ -242,7 +242,13 @@ import type {
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
-import { PipelineDriver, type SpawnStart, blockedReason, roleSpawnHold } from "./pipeline";
+import {
+  PipelineDriver,
+  SUPERSEDED_BY_MERGE,
+  type SpawnStart,
+  blockedReason,
+  roleSpawnHold,
+} from "./pipeline";
 
 import {
   type BriefPrefaceInfo,
@@ -5273,6 +5279,8 @@ export class Daemon {
     if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
     const { answer, by } = d.resolved;
     if (by === agentId) return;
+    // Closed because the PR merged: not an answer for the agent, whose run the merge retires.
+    if (by === DAEMON_AGENT_ID && answer === SUPERSEDED_BY_MERGE) return;
     const why = `${by} stopped the task (decision ${d.decision_id})`;
     if (cls === "respawn_needed") {
       const a = answer.trim().toLowerCase();

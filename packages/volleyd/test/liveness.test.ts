@@ -511,6 +511,21 @@ describe("daemon: hook-signal liveness", () => {
     expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBeUndefined();
   });
 
+  it("a question superseded by its PR's merge is closed, never sent to the agent as an answer", async () => {
+    s = await makeSupervisedEnv();
+    await s.hook("awaiting-permission-prompt.json");
+    const d = await opened("agent_question");
+    await s.settled();
+    await s.daemon.resolveDecision("w1", d?.data.decision_id as string, {
+      answer: "superseded_by_merge",
+      by: "volleyd",
+      rationale: "PR #7 merged into release/w1 at 5a5a5a5",
+    });
+    await s.settled();
+    expect(s.journal().filter((e) => e.type === "decision_resolved")).toHaveLength(1);
+    expect(s.journal().some((e) => e.type === "steering_sent")).toBe(false);
+  });
+
   it("resumed before anyone answers closes the question itself", async () => {
     s = await makeSupervisedEnv();
     await s.hook("awaiting-permission-prompt.json");

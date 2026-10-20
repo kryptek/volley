@@ -198,7 +198,7 @@ describe("merge-ready evidence package", () => {
     });
     expect(j.moves[0]).toMatchObject({ how: "release_merge", accepted_by: "owner" });
     expect(renderEvidenceMd(j)).toContain(
-      "Accepted by owner: a merge of the release branch only (touched: CHANGELOG.md).",
+      "Accepted by owner: a merge of the release branch only (touched: CHANGELOG.md; they may carry content resolved by hand, which no reviewer saw).",
     );
   });
 

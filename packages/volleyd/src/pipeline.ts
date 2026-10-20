@@ -271,6 +271,9 @@ const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
 ]);
 
 /** Answers are free text: only an exact option (case and surrounding space aside) counts. */
+/** The answer volleyd closes a task's open decisions with when its PR is seen merged. */
+export const SUPERSEDED_BY_MERGE = "superseded_by_merge";
+
 export const isAnswer = (answer: string, option: string): boolean =>
   answer.trim().toLowerCase() === option;
 
@@ -1795,7 +1798,16 @@ function acceptReleaseMerge(
   const to = m.head ?? dir?.to;
   const role = headRole(v.p) ?? lastPublisher(v.p);
   const run = role !== undefined ? v.p.runs[role] : undefined;
-  if (merge === undefined || from === undefined || to === undefined || run === undefined) return [];
+  // Without who accepted, the reducer would record a move that voids the reviews at the gate.
+  const by = d.resolved?.by;
+  if (
+    merge === undefined ||
+    from === undefined ||
+    to === undefined ||
+    run === undefined ||
+    by === undefined
+  )
+    return [];
   return [
     {
       kind: "journal",
@@ -1811,7 +1823,7 @@ function acceptReleaseMerge(
           ci_runs: dir?.runs ?? [],
           ...(dir?.superseded !== undefined ? { ci_superseded: dir.superseded } : {}),
           adopted: true,
-          accepted_by: d.resolved?.by,
+          accepted_by: by,
           move: {
             from,
             to,
@@ -2727,7 +2739,7 @@ export class PipelineDriver {
     const at = ev.view.mergeCommit?.oid?.slice(0, 7) ?? "an unknown commit";
     await this.deps.resolveOpen(
       task,
-      "superseded_by_merge",
+      SUPERSEDED_BY_MERGE,
       `PR #${v.p.pr.number} merged into ${v.release_branch} at ${at}`,
     );
   }
