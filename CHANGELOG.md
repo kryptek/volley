@@ -2,6 +2,21 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- volleyd: an agent's `blocked` status was never journaled or decided, whatever its role, so a
+  stuck task (a rebase agent, on a downstream wave) stayed silently in its stage. Every role's
+  `blocked` now opens an `agent_blocked` decision with the agent's reason (`continue | respawn |
+  cancel`); the agent is not retired while it is open (SPEC §5.2). (#196)
+
+### Added
+
+- volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
+  wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
+  `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)
+
 ## 0.4.0 — 2026-10-20
 
 The Fleet release: volleyd judges which machines can run an agent, places a wave's tasks across
