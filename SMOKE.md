@@ -285,9 +285,11 @@ on GitHub with one small open issue and a pushed release branch
    **Pass:** the Desk opens signed in, the sidebar says *Admin · manages accounts and setup*, and
    Setup & Security shows both listeners refusing anonymous clients and no pending Security
    change. Paste the same link into another private window: *already used*. Settings › Broker
-   accounts lists every `admin-<id>` device sign-in; one not seen for over a day is flagged
-   **stale**, and *Revoke the N stale sign-ins…* (after a confirm) removes them all at once
-   (the next day, the ones a headless browser left are flagged).
+   accounts lists every `admin-<id>` device sign-in; one volleyd has not seen for over a day
+   (counted from volleyd's start at the earliest) is flagged **stale**, and *Revoke the N stale
+   sign-ins…* (after a confirm) removes them all at once (the next day, the ones a headless
+   browser left are flagged; a Desk window still open is not, nor is any right after a volleyd
+   restart).
 6. **Keychain** (never tested on a real Mac before). `security find-generic-password -s
    volley-broker -a coordinator -w` prints the same password as `coordinator.json` in the auth
    dir that setup named (`/opt/homebrew/etc/mosquitto/volley/` on Apple Silicon).

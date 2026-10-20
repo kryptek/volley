@@ -189,7 +189,11 @@ describe("Settings › Broker accounts", () => {
     ];
     let list = [...STALE];
     const { ops, calls } = fakeOps({
-      account_list: () => ({ ok: true, result: { accounts: list } }),
+      // volleyd has been up (keeping auth requests) for days.
+      account_list: () => ({
+        ok: true,
+        result: { accounts: list, seen_since: "2026-10-01T00:00:00Z" },
+      }),
       account_revoke: (f) => {
         list = list.filter((a) => a.name !== f.name);
         return { ok: true, result: { name: f.name } };
@@ -214,6 +218,26 @@ describe("Settings › Broker accounts", () => {
     ]);
     expect(screen.getByRole("status")).toHaveTextContent(/Revoked 2 stale sign-ins/);
     expect(screen.queryByText(/admin sign-ins on devices/)).not.toBeInTheDocument();
+  });
+
+  it("never flags a device admin volleyd cannot have seen yet (restarted within the day, or an older volleyd)", async () => {
+    const OLD: BrokerAccount[] = [
+      ...ACCOUNTS,
+      // Created two days ago, in use since, but volleyd restarted an hour ago.
+      { name: "admin-0000dddd", role: "admin", kind: "device", created: "2026-10-17T09:00:00Z" },
+    ];
+    for (const result of [
+      { accounts: OLD, seen_since: new Date(NOW - 3_600_000).toISOString() },
+      // A volleyd that does not say since when: only a last_seen counts.
+      { accounts: OLD },
+    ]) {
+      const { ops } = fakeOps({ account_list: () => ({ ok: true, result }) });
+      const { unmount } = section(ops, true);
+      await screen.findByText("admin-0000dddd");
+      expect(rowOf("admin-0000dddd").queryByText(/stale/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/admin sign-ins? on devices/)).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
   it("shows volleyd's refusal and keeps the row", async () => {

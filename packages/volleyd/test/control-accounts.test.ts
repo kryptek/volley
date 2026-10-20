@@ -336,6 +336,16 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(typeof accounts.find((a) => a.name === "admin-1")?.last_seen).toBe("string");
   });
 
+  it("account_list says since when volleyd has kept auth requests (seen_since: its start)", async () => {
+    await daemon.stop();
+    const clock = fakeClock();
+    const t0 = new Date(clock.now()).toISOString();
+    daemon = await startDaemon({ clock });
+    await clock.advance(3_600_000);
+    const list = await op("admin-1", { op: "account_list" });
+    expect((list?.result as { seen_since?: string }).seen_since).toBe(t0);
+  });
+
   it("account_list's last_seen also takes the account's newer retained status", async () => {
     const w = new VolleyBroker();
     await w.connect({
