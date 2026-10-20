@@ -26,7 +26,7 @@
  * leave room for it; collapsed to its title bar at phone width), saved per
  * window key and device class; Settings, General, Reset layout clears them.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDeskKeys } from "./a11y/keys";
 import {
@@ -115,6 +115,7 @@ import {
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
+import { machineFor } from "./windows/agent/machine";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
 import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import { useTerminalPopouts } from "./windows/agent/useTerminalPopouts";
@@ -359,6 +360,15 @@ export default function App() {
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,
   );
+  /** The machine an agent window's machine chip asked Settings › Machines to show. */
+  const [focusMachine, setFocusMachine] = useState<string | null>(null);
+  const openMachine = useCallback((name: string) => {
+    setFocusMachine(name);
+    setDeskSettings("machines");
+  }, []);
+  useEffect(() => {
+    if (deskSettings === null) setFocusMachine(null);
+  }, [deskSettings]);
   /** volleyd's admin channel (account and setup ops); the Desk's own account must be an admin. */
   const authOps = useMemo(
     () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
@@ -1058,6 +1068,8 @@ export default function App() {
                   stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
                   usage={state.usage?.[a.id] ?? null}
                   accounts={choices}
+                  machine={machineFor(a, state.waves[a.wave], state)}
+                  onOpenMachine={openMachine}
                   {...(control
                     ? {
                         onMoveAccount: (acct: string) =>
@@ -1205,6 +1217,7 @@ export default function App() {
             host: sshHost(brokerUrl),
             readiness: state.readiness ?? {},
             localName: state.config?.fleet?.local_name,
+            focus: focusMachine ?? undefined,
             configTransport,
             accounts: state.claudeAccounts ?? {},
             agentsOn: agentsOnMachines(
