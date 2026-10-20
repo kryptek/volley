@@ -70,6 +70,11 @@ describe("classify", () => {
       "flake",
     ],
     ["PR files unreadable: own_change (the conservative route)", { pr_files: null }, "own_change"],
+    [
+      "no failing tests anywhere, release red: no test to fix, so own_change",
+      { failing_tests: [], release: { state: "red", failing_tests: [] } },
+      "own_change",
+    ],
   ])("%s → %s", (_name, over, want) => {
     expect(classify({ ...base, ...over }).classification).toBe(want);
   });

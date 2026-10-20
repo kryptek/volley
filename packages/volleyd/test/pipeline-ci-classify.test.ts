@@ -241,6 +241,35 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     expect(roles).toEqual(["quality_reviewer", "spec_reviewer"]);
   });
 
+  it("infra incident: the owner's (continue, respawn or cancel); no CI hold, no policy answer", async () => {
+    h = pipelineHarness({ statusPage: INCIDENT });
+    await h.start();
+    h.openPr(H1);
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    await h.block("implementer", "test/clock.test.ts is red on CI, not in my change");
+    const [d] = h.openDecisions();
+    expect(facts(d).pipeline).toMatchObject({ on: "agent_blocked_ci", head: H1 });
+    expect(facts(d).classification).toBe("infra_incident");
+    expect(d?.options).toEqual(["continue", "respawn", "cancel"]);
+    expect(events("ci_pending")).toEqual([]);
+    expect(events("remediation_requested")).toEqual([]);
+  });
+
+  it("a PR list entry without a number or url: the plain agent_blocked decision", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    for (const pr of h.world.prs) (pr as { url?: unknown }).url = undefined;
+    await h.block("implementer", "test/clock.test.ts is red on CI, not in my change");
+    expect(facts(h.openDecisions()[0]).pipeline).toEqual({
+      on: "agent_blocked",
+      role: "implementer",
+    });
+  });
+
   it("no worktree to read the PR head from: still the plain agent_blocked decision", async () => {
     h = pipelineHarness();
     await h.start();

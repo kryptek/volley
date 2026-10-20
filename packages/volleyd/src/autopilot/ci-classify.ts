@@ -99,7 +99,9 @@ export function classify(i: ClassifyInput): ClassifyResult {
   const unmapped = i.failing_tests.filter((t, n) => files[n] === null && !onRelease(t));
   if (i.failing_tests.length === 0 ? !releaseRed : unmapped.length > 0 && !releaseRed) return own;
   const tests = i.failing_tests.length > 0 ? i.failing_tests : i.release.failing_tests;
-  const test = tests.find(onRelease) ?? tests[0] ?? "unknown";
+  const test = tests.find(onRelease) ?? tests[0];
+  // No test to name anywhere: nothing for a flake's fixer to fix.
+  if (test === undefined) return own;
   return {
     classification: "flake",
     evidence,

@@ -3511,7 +3511,14 @@ export class PipelineDriver {
       if (Array.isArray(parsed)) list = parsed;
     } catch {}
     const pr = list.find((p) => p.headRefName === branch);
-    if (pr === undefined || typeof pr.headRefOid !== "string" || pr.headRefOid === "") return null;
+    if (
+      pr === undefined ||
+      typeof pr.number !== "number" ||
+      typeof pr.url !== "string" ||
+      typeof pr.headRefOid !== "string" ||
+      pr.headRefOid === ""
+    )
+      return null;
     const ci = await redHeadCi(exec, cwd, pr.headRefOid);
     return {
       kind: "ok",
