@@ -81,9 +81,11 @@ import {
   whereLabel,
 } from "./autopilot/inbox";
 import {
+  DEFAULT_PLAYBOOK,
   PlaybookError,
   type WavePlaybook,
   allVerified,
+  playbookPath,
   releaseGoInput,
   wavePlaybook,
 } from "./autopilot/playbook";
@@ -3209,7 +3211,8 @@ export class Daemon {
   /**
    * The playbook a settled wave releases with (SPEC §4.6.19): null when it has none or autopilot
    * is off for it; a string saying why when it no longer validates (the wave completes as
-   * without one, and its wave_complete question says so).
+   * without one, and its wave_complete question says so on one line, naming the playbook as the
+   * wave file does).
    */
   private releasePlaybook(wave: WaveId): WavePlaybook | string | null {
     const plan = this.waves.get(wave)?.record.wave;
@@ -3219,7 +3222,9 @@ export class Daemon {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log(`wave ${wave}: release playbook not run: ${msg}`);
-      return msg;
+      const path = playbookPath(plan.repo, plan.playbook);
+      const named = path === null ? msg : msg.replace(path, plan.playbook ?? DEFAULT_PLAYBOOK);
+      return named.replace(/:\n\s*/, ": ").replace(/\n\s*/g, "; ");
     }
   }
 

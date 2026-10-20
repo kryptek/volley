@@ -223,6 +223,25 @@ describe("a settled wave whose repo has a playbook", () => {
     expect((await retainedState()).status).toBe("complete");
   });
 
+  it("release_go answered go but release_done not journaled: the next tick journals it", async () => {
+    await start();
+    await submit();
+    await settle();
+    await verify("smoke");
+    await verify("notes");
+    const id = waveDecisionId("release_go", WAVE);
+    // The resolution journaled by hand: the append of release_done that follows it is dropped.
+    await daemon.recordEvent(WAVE, {
+      type: "decision_resolved",
+      data: { decision_id: id, answer: "go", by: "coord-a", at: "2026-10-20T00:00:00.000Z" },
+    });
+    expect(ofType("release_done")).toHaveLength(0);
+    await daemon.tick();
+    expect(ofType("release_done").map((e) => e.data)).toEqual([{ by: "coord-a", decision_id: id }]);
+    expect((await retainedState()).status).toBe("complete");
+    expect(ofType("decision_opened")).toHaveLength(1);
+  });
+
   it("a stopped releasing wave asks nothing", async () => {
     await start();
     await submit();
@@ -289,6 +308,25 @@ describe("without a release train", () => {
     const state = await retainedState();
     expect(state.status).toBe("complete");
     expect(state.open_decisions).toEqual([waveDecisionId("wave_complete", WAVE)]);
+  });
+  it("a playbook that stops validating before the wave settles: complete, and the question says why on one line", async () => {
+    await start();
+    await submit();
+    writeFileSync(
+      join(repo, ".volley", "release.yaml"),
+      "version: 1\nstages:\n  - { name: smoke, brief: a, gate: later }\n  - { name: notes }\n",
+    );
+    await settle();
+    expect(ofType("release_started")).toHaveLength(0);
+    expect(ofType("wave_complete")).toHaveLength(1);
+    const question = ofType("decision_opened")[0]?.data.question as string;
+    expect(question).toContain(
+      " Its release playbook was not run: RELEASE_PLAYBOOK_INVALID: .volley/release.yaml: invalid release playbook: stages[0].gate: ",
+    );
+    expect(question).toContain("; stages[1]");
+    expect(question).not.toContain("\n");
+    expect(question).not.toContain(repo);
+    expect((await retainedState()).status).toBe("complete");
   });
 });
 
