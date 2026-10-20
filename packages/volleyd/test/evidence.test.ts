@@ -135,6 +135,7 @@ describe("merge-ready evidence package", () => {
       fixups: [],
       rebases: [],
       release: { release_sha: sha(9), merge_base: sha(8), behind: 3 },
+      merge: "manual",
       generated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(j.unresolved_p1).toEqual(["S1"]);
@@ -161,6 +162,7 @@ describe("merge-ready evidence package", () => {
       rebases: [],
       base_sha: base,
       release: { release_sha: sha(9), merge_base: sha(8), behind: 2 },
+      merge: "manual",
       generated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(j).toMatchObject({ base_sha: base, behind_by: 2, current_with_release_branch: false });
@@ -194,6 +196,7 @@ describe("merge-ready evidence package", () => {
         },
       ],
       release: { release_sha: sha(9), merge_base: sha(9), behind: 0 },
+      merge: "manual",
       generated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(j.moves[0]).toMatchObject({ how: "release_merge", accepted_by: "owner" });

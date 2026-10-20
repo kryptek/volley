@@ -60,6 +60,8 @@ export interface EvidenceInput {
   base_sha?: string;
   /** The release-branch check the gate passed. */
   release: RebaseCheck;
+  /** Who merges: volleyd itself (`auto`, SPEC §4.6.17) or a human (`manual`). */
+  merge: "auto" | "manual";
   generated_at: string;
 }
 
@@ -105,6 +107,8 @@ export interface EvidenceJson {
   release_sha: string;
   /** The release-branch commit the task's worktree was cut from (absent when unknown). */
   base_sha?: string;
+  /** Who merges (absent in a package written before autopilot merging: manual). */
+  merge?: "auto" | "manual";
   generated_at: string;
 }
 
@@ -181,6 +185,7 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
     behind_by: e.release.behind,
     release_sha: e.release.release_sha,
     ...(e.base_sha !== undefined ? { base_sha: e.base_sha } : {}),
+    merge: e.merge,
     generated_at: e.generated_at,
   };
 }
@@ -219,7 +224,9 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     ),
     `- Branch current with release branch: ${releaseLine(j)} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
     "",
-    "volleyd never merges. A human merges this PR after reading the above.",
+    j.merge === "auto"
+      ? "volleyd merges this PR itself (merge: auto) at exactly this head; the merge is journaled as merged_by_supervisor."
+      : "volleyd never merges. A human merges this PR after reading the above.",
     "",
     "## Reviews",
   ];
