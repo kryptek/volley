@@ -521,6 +521,13 @@
               "maximum": 86400,
               "default": 900,
               "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
+            },
+            "incident_wait_max_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 14400,
+              "description": "How long a red head classified as an infra incident (an infra-shaped run, or GitHub's status page reporting an Actions or API incident) is held in CI and re-checked every poll before the supervisor opens its ci_failed decision, escalated budget_exhausted."
             }
           }
         }

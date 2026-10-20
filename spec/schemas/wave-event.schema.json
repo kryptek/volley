@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-event.schema.json",
   "title": "Volley Wave Event",
-  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. Event data is free-form except for the event types constrained below. See spec sections 4.6.3 and 4.6.15.",
+  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. Event data is free-form except for the event types constrained below. See spec sections 4.6.3, 4.6.15 and 4.6.16.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -86,7 +86,8 @@
             "decision_auto_resolved",
             "decision_escalated",
             "inbox_opened",
-            "inbox_answered"
+            "inbox_answered",
+            "remediation_requested"
           ]
         },
         "payload": {
@@ -328,6 +329,50 @@
                       "by": { "type": "string", "minLength": 1 },
                       "where": { "$ref": "inbox-item.schema.json#/$defs/where" },
                       "version": { "type": "integer", "minimum": 2 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "remediation_requested" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["kind", "test", "test_file", "head", "run_urls", "for"],
+                    "properties": {
+                      "kind": {
+                        "enum": ["fix_flake"],
+                        "description": "fix_flake: a red head's failing test the PR does not touch (spec section 4.6.16); a dedicated fixer is requested, never a re-run."
+                      },
+                      "test": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The failing test id the fixer is for (its dedupe key)."
+                      },
+                      "test_file": {
+                        "type": ["string", "null"],
+                        "description": "The test's file, null when its id names none."
+                      },
+                      "tests": { "type": "array", "items": { "type": "string" } },
+                      "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "run_urls": { "type": "array", "items": { "type": "string" } },
+                      "for": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$",
+                        "description": "The task whose red head it is."
+                      },
+                      "role": { "type": "string" },
+                      "release_ci": { "enum": ["green", "red", "running", "none", "unknown"] }
                     }
                   }
                 }

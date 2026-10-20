@@ -72,6 +72,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     merge: "auto",
     merge_retry_max: 2,
     reconnect_grace_s: 900,
+    incident_wait_max_s: 14_400,
   },
 };
 
@@ -224,6 +225,10 @@ export const DAEMON_DEFAULTS = {
   ci_log_max_chars: 4_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
   pipeline_io_ms: 30_000,
+  /** Hard bound on one read of GitHub's status page (a red head's classification). */
+  status_page_timeout_ms: 5_000,
+  /** How long one read of GitHub's status page is reused. */
+  status_page_cache_ms: 60_000,
   /** How often the screen publisher checks which agents are due a capture. */
   screen_tick_ms: 1_000,
   /** Lines read per screen-tail capture (`cmux read-screen --lines`), before the chrome is cut. */

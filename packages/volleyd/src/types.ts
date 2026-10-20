@@ -168,6 +168,11 @@ export interface AutopilotConfig {
    * the name went away, before `gone` (SPEC §4.6.1).
    */
   reconnect_grace_s: number;
+  /**
+   * How long a red head classified as an infra incident is held and re-checked before the owner
+   * is asked (`ci_failed`, escalated `budget_exhausted`).
+   */
+  incident_wait_max_s: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -323,6 +328,8 @@ export interface TaskState {
   queued_steers?: number;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
+  /** A remediation requested for the task's red head that still holds (a flake awaiting its fixer). */
+  remediation?: { kind: "fix_flake"; test: string; since: string };
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
   last_error?: { code: string; message: string; at: string };
@@ -508,6 +515,8 @@ export const WAVE_EVENT_TYPES = [
   // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
   "inbox_opened",
   "inbox_answered",
+  // Self-healing CI (SPEC §4.6.16): a remediation for a classified red head (a flake's fixer).
+  "remediation_requested",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

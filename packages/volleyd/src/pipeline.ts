@@ -1,4 +1,5 @@
 import {
+  type ArtifactOutcome,
   type ArtifactReport,
   type CiRun,
   type CiState,
@@ -13,11 +14,16 @@ import {
   ciStateOf,
   failedRuns,
   landed,
+  prFiles,
   probeLanded,
   probeMovedHead,
+  probeReleaseCi,
+  redHeadCi,
   verifyArtifacts,
   verifyOperatorMerge,
 } from "./artifacts";
+import { type ClassifyResult, classify } from "./autopilot/ci-classify";
+import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
 import { mergePr } from "./autopilot/merge";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
@@ -199,6 +205,18 @@ export interface TaskPipeline {
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
   merge_manual?: boolean;
+  /** A remediation requested for the task's red head (a flake's fixer), until the head moves on. */
+  remediation?: Remediation | undefined;
+}
+
+/** A `remediation_requested` that still holds: a flake on `role`'s red `head` awaits its fixer. */
+export interface Remediation {
+  kind: "fix_flake";
+  test: string;
+  test_file: string | null;
+  head: string;
+  role: Role;
+  since: string;
 }
 
 export interface MovedHead {
@@ -239,6 +257,10 @@ export interface CiHold {
   checks: { done: number; total: number };
   next_poll_at: string;
   pr?: { number: number; url: string };
+  /** An infra incident hold (a red head classified `infra_incident`): what it is and since when. */
+  reason?: "infra_incident";
+  incident?: string;
+  since?: string;
 }
 
 export type SteerReason = "artifacts" | "result" | "merge_nudge";
@@ -260,6 +282,7 @@ export interface PipelineMarker {
     | "fixup_result"
     | "agent_failed"
     | "agent_blocked"
+    | "agent_blocked_ci"
     | "reviewers_disagree"
     | "merge_ready_invariant"
     | "relaunch"
@@ -348,6 +371,7 @@ export function reducePipeline(
         if (typeof d.review_round === "number") p.round = d.review_round;
         if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
         for (const r of p.roles) delete p.runs[r];
+        p.remediation = undefined;
       } else if (d.stage === "implement") {
         // Journaled by the spawn itself, after its agent_spawned: keep that run.
         const i = ctx.stages.findIndex((g) => g.includes("implement"));
@@ -371,6 +395,7 @@ export function reducePipeline(
     }
     case "artifact_verified": {
       if (p.ci_hold?.role === role) p.ci_hold = undefined;
+      if (p.remediation?.role === role) p.remediation = undefined;
       if (role === "merged") {
         // Where the release branch moved to; never the PR head (a squash or rebase merge is not it).
         const sha = [d.merge_sha, d.sha].find((x) => typeof x === "string");
@@ -488,6 +513,24 @@ export function reducePipeline(
           checks: d.checks as CiHold["checks"],
           next_poll_at: String(d.next_poll_at),
           ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
+          ...(d.reason === "infra_incident"
+            ? {
+                reason: "infra_incident" as const,
+                ...(typeof d.incident === "string" ? { incident: d.incident } : {}),
+                ...(typeof d.since === "string" ? { since: d.since } : {}),
+              }
+            : {}),
+        };
+      break;
+    case "remediation_requested":
+      if (d.kind === "fix_flake" && isRole(role) && typeof d.head === "string")
+        p.remediation = {
+          kind: "fix_flake",
+          test: String(d.test),
+          test_file: typeof d.test_file === "string" ? d.test_file : null,
+          head: d.head,
+          role,
+          since: ev.at,
         };
       break;
     case "ci_green":
@@ -495,7 +538,10 @@ export function reducePipeline(
     case "task_cancelled":
       // Settled, or someone is asked about it: the hold is over.
       p.ci_hold = undefined;
-      if (ev.type === "task_cancelled") p.moved = undefined;
+      if (ev.type === "task_cancelled") {
+        p.moved = undefined;
+        p.remediation = undefined;
+      }
       if (
         ev.type === "decision_opened" &&
         p.moved !== undefined &&
@@ -623,7 +669,20 @@ export interface PipelineView {
   merge_token?: MergeToken;
   /** `autopilot.merge_retry_max`: refusals before the owner is asked (absent: the default). */
   merge_retry_max?: number;
+  /** `autopilot.incident_wait_max_s`: how long an infra incident is waited out (absent: the default). */
+  incident_wait_max_s?: number;
 }
+
+/** A blocked agent's status, while its red PR head is classified (onBlocked). */
+export interface BlockedStatus {
+  reason: string;
+  payload: unknown;
+  /** The status envelope's `wall_time`. */
+  status_at?: string;
+}
+
+/** A verification report that found the PR (`ok`). */
+export type OkReport = Extract<ArtifactReport, { kind: "ok" }>;
 
 export type PipelineEvent =
   /** Re-evaluate: a step's roles may all be accepted, a spawn may need retrying. */
@@ -701,13 +760,27 @@ export type PipelineEvent =
         | "watch_head"
         | "check_landed"
         | "moved_ci"
-        | "merge";
+        | "merge"
+        | "classify";
       role?: Role;
       agent_id?: string;
       message: string;
       timed_out: boolean;
     }
   | { kind: "decision_resolved"; decision: DecisionRecord }
+  /**
+   * A red head classified (ci-classify.ts): `report` is the red head's (null: a blocked agent's PR
+   * head is not red, or has no PR, and `result` is null too); `blocked`, for a blocked agent's.
+   */
+  | {
+      kind: "ci_classified";
+      role: Role;
+      agent_id: string;
+      report: OkReport | null;
+      result: ClassifyResult | null;
+      at: number;
+      blocked?: BlockedStatus;
+    }
   /** Autopilot merging: GitHub merged `head` (the token's) as `sha` (null: not read back). */
   | { kind: "supervisor_merged"; sha: string | null; head: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
@@ -741,6 +814,18 @@ export type PipelineAction =
       branch_update?: "merge";
     }
   | { kind: "verify"; role: Role; result?: FixupResult }
+  /**
+   * Classify a red head before anyone is asked: the PR's files, the release branch's CI, GitHub's
+   * status page (`report`: the red verification; `blocked`: a blocked agent's, whose PR head the
+   * driver reads itself).
+   */
+  | {
+      kind: "classify_ci";
+      role: Role;
+      agent_id: string;
+      report?: OkReport;
+      blocked?: BlockedStatus;
+    }
   /** Journal an alarm once per driver (`key`): repeats of the same condition stay quiet. */
   | { kind: "alarm"; key: string; event: NewEvent }
   | { kind: "steer"; role: Role; agent_id: string; reason: SteerReason; text: string }
@@ -814,6 +899,8 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onIoFailed(v, ev);
     case "decision_resolved":
       return onResolved(v, ev.decision);
+    case "ci_classified":
+      return onClassified(v, ev);
     case "supervisor_merged":
       return onSupervisorMerged(v, ev);
     case "merge_refused":
@@ -1599,19 +1686,19 @@ function onVerified(
       ];
     }
     case "ci_failed":
+      // Classified before anyone is asked (onClassified): own change, flake or infra incident.
       return [
         ...retireIfLive(run),
-        {
-          kind: "decide",
-          marker: {
-            on: "ci_failed",
-            role: ev.role,
-            agent_id: run.agent_id,
-            ...(head !== undefined ? { head } : {}),
-          },
-          decision: out.decision,
-          data: out.data,
-        },
+        ...(ev.report.kind === "ok"
+          ? [
+              {
+                kind: "classify_ci" as const,
+                role: ev.role,
+                agent_id: run.agent_id,
+                report: ev.report,
+              },
+            ]
+          : []),
       ];
     case "ci_pending": {
       const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
@@ -1697,6 +1784,7 @@ function holdFor(
   if (
     hold?.role === role &&
     hold.sha === head &&
+    hold.reason === undefined &&
     hold.checks.done === checks.done &&
     hold.checks.total === checks.total
   )
@@ -1716,6 +1804,217 @@ function holdFor(
             : {}),
           pr,
         },
+      },
+    },
+  ];
+}
+
+/** The answer that takes a flake's dedicated fixer: never a re-run. */
+export const FIX_FLAKE = "fix flake";
+
+/**
+ * A red head classified (SPEC §4.6.16). `own_change`: the ci_failed decision (fixup first). `flake`:
+ * `remediation_requested { kind: fix_flake }`, then ci_failed offering `fix flake` first.
+ * `infra_incident`: a CI hold (`ci_pending { reason: infra_incident }`) re-checked every
+ * ci_poll_ms, until `autopilot.incident_wait_max_s` has passed: then ci_failed. A blocked agent's
+ * red PR head is routed the same way (`agent_blocked_ci`).
+ */
+function onClassified(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "ci_classified" }>,
+): PipelineAction[] {
+  const run = v.p.runs[ev.role];
+  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted) return [];
+  if (v.stage === "cancelled" || v.stage === "done") return [];
+  if (ev.blocked !== undefined) {
+    // It ended meanwhile: its status is handled as usual.
+    if (run.retired !== undefined) return [];
+    return ev.report === null || ev.result === null
+      ? blockedDecision(v, ev.role, ev.agent_id, ev.blocked)
+      : blockedCi(v, ev.role, ev.agent_id, ev.blocked, ev.report, ev.result);
+  }
+  // Someone is asked about the task already: a later re-check classifies the head again.
+  if (v.stage === "awaiting_decision" || ev.report === null || ev.result === null) return [];
+  const out = artifactOutcome(v.task, ev.role, ev.report);
+  if (out.kind !== "ci_failed") return [];
+  const r = ev.result;
+  const head = ev.report.head;
+  const marker: PipelineMarker = { on: "ci_failed", role: ev.role, agent_id: ev.agent_id, head };
+  const data = { ...out.data, classification: r.classification, evidence: r.evidence };
+  switch (r.classification) {
+    case "own_change":
+      return [{ kind: "decide", marker, decision: out.decision, data }];
+    case "flake":
+      return [
+        ...flakeRequest(v, ev.role, head, r, out.data),
+        {
+          kind: "decide",
+          marker,
+          decision: {
+            ...out.decision,
+            question: flakeQuestion(v, ev.report, r, out.data),
+            options: [FIX_FLAKE, "fixup", "re-verify", "cancel"],
+          },
+          data,
+        },
+      ];
+    case "infra_incident":
+      return infraHold(v, ev, ev.report, r, out, marker, data);
+  }
+}
+
+/** Run URLs on a ci_failed decision's facts. */
+const runUrls = (data: Record<string, unknown>): string[] =>
+  Array.isArray(data.run_urls) ? (data.run_urls as string[]) : [];
+
+/** Journal `remediation_requested { kind: fix_flake }` for a flake (once per head and test). */
+function flakeRequest(
+  v: PipelineView,
+  role: Role,
+  head: string,
+  r: ClassifyResult,
+  data: Record<string, unknown>,
+): PipelineAction[] {
+  const f = r.flake;
+  if (f === undefined) return [];
+  const had = v.p.remediation;
+  if (had?.head === head && had.test === f.test) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "remediation_requested",
+        task: v.task,
+        data: {
+          kind: "fix_flake",
+          test: f.test,
+          test_file: f.test_file,
+          tests: f.tests,
+          head,
+          run_urls: runUrls(data),
+          for: v.task,
+          role,
+          release_ci: r.evidence.release_ci.state,
+        },
+      },
+    },
+  ];
+}
+
+function flakeQuestion(
+  v: PipelineView,
+  report: OkReport,
+  r: ClassifyResult,
+  data: Record<string, unknown>,
+): string {
+  const at = report.head.slice(0, 12);
+  const test = r.flake?.test ?? "a test";
+  const file = r.flake?.test_file ?? "its file";
+  const release =
+    r.evidence.release_ci.state === "red" ? `; ${v.release_branch} is red on it too` : "";
+  return `CI failed on ${at} (PR #${report.pr.number}): ${runUrls(data).join(" ")} — ${test} fails, and the PR does not touch ${file}${release}: a flake. volleyd never re-runs CI. fix flake: a dedicated fixer for the test (requested); fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: you fixed it; or cancel?`;
+}
+
+/** An infra incident: hold the task in CI and re-check; past the wait budget, ask. */
+function infraHold(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "ci_classified" }>,
+  report: OkReport,
+  r: ClassifyResult,
+  out: Extract<ArtifactOutcome, { kind: "ci_failed" }>,
+  marker: PipelineMarker,
+  data: Record<string, unknown>,
+): PipelineAction[] {
+  const head = report.head;
+  const hold = v.p.ci_hold;
+  const same = hold?.reason === "infra_incident" && hold.role === ev.role && hold.sha === head;
+  const since = same && hold.since !== undefined ? hold.since : new Date(ev.at).toISOString();
+  const maxS = v.incident_wait_max_s ?? CONFIG_DEFAULTS.autopilot.incident_wait_max_s;
+  const waited = ev.at - Date.parse(since);
+  const incident = r.incident ?? "infra-shaped failure";
+  if (waited >= maxS * 1000) {
+    const at = head.slice(0, 12);
+    return [
+      {
+        kind: "decide",
+        marker,
+        decision: {
+          ...out.decision,
+          question: `CI on ${at} (PR #${report.pr.number}) has been red with an infra incident (${incident}) for ${Math.round(waited / 60_000)} min: ${runUrls(out.data).join(" ")}. volleyd never re-runs CI. fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: it cleared, or you re-ran it; or cancel?`,
+          options: ["fixup", "re-verify", "cancel"],
+        },
+        data: { ...data, incident, incident_since: since },
+      },
+    ];
+  }
+  if (same && hold.incident === incident) return [];
+  const runs = report.ci.runs;
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "ci_pending",
+        task: v.task,
+        data: {
+          role: ev.role,
+          sha: head,
+          checks: {
+            done: runs.filter((x) => x.status === "completed").length,
+            total: runs.length,
+          },
+          next_poll_at: new Date(ev.at + DAEMON_DEFAULTS.ci_poll_ms).toISOString(),
+          pr: { number: report.pr.number, url: report.pr.url },
+          reason: "infra_incident",
+          incident,
+          since,
+        },
+      },
+    },
+  ];
+}
+
+/** A blocked agent whose PR head is red: its decision, routed like a ci_failed (`agent_blocked_ci`). */
+function blockedCi(
+  v: PipelineView,
+  role: Role,
+  agentId: string,
+  b: BlockedStatus,
+  report: OkReport,
+  r: ClassifyResult,
+): PipelineAction[] {
+  const out = artifactOutcome(v.task, role, report);
+  if (out.kind !== "ci_failed") return blockedDecision(v, role, agentId, b);
+  const label = roleLabel(v.p, role);
+  const at = report.head.slice(0, 12);
+  const flake = r.classification === "flake";
+  const what =
+    r.classification === "own_change"
+      ? "the PR's own change (fixup: a fixup agent at the red head, this agent stopped)"
+      : flake
+        ? `a flake in ${r.flake?.test ?? "a test"} the PR does not touch (fix flake: a dedicated fixer, requested)`
+        : `an infra incident (${r.incident ?? "infra-shaped failure"}): wait for it to clear`;
+  const options = flake
+    ? [FIX_FLAKE, "fixup", "continue", "respawn", "cancel"]
+    : r.classification === "own_change"
+      ? ["fixup", "continue", "respawn", "cancel"]
+      : ["continue", "respawn", "cancel"];
+  return [
+    ...(flake ? flakeRequest(v, role, report.head, r, out.data) : []),
+    {
+      kind: "decide",
+      marker: { on: "agent_blocked_ci", role, head: report.head, agent_id: agentId },
+      decision: {
+        kind: "agent_blocked",
+        task: v.task,
+        question: `${agentId} (${label}) is blocked: ${clipReason(b.reason)}. CI on its PR head ${at} (PR #${report.pr.number}) is red: ${runUrls(out.data).join(" ")} — ${what}. volleyd never re-runs CI. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
+        pointers: { pr: report.pr.url },
+        options,
+      },
+      data: {
+        ...out.data,
+        classification: r.classification,
+        evidence: r.evidence,
+        ...blockedFacts(agentId, b),
       },
     },
   ];
@@ -1773,30 +2072,57 @@ function onBlocked(
   const run = v.p.runs[ev.role];
   if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
     return [];
-  const label = roleLabel(v.p, ev.role);
-  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
-  // By code point, so a clip never splits a surrogate pair.
-  const chars = Array.from(ev.reason);
-  const reason = chars.length > max ? `${chars.slice(0, max).join("")}…` : ev.reason;
+  const blocked: BlockedStatus = {
+    reason: ev.reason,
+    payload: ev.payload,
+    ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+  };
+  // About a failing test, with a PR branch to look at: is its head red, and whose is it?
+  if (CI_REASON.test(ev.reason) && v.p.branch !== undefined)
+    return [{ kind: "classify_ci", role: ev.role, agent_id: ev.agent_id, blocked }];
+  return blockedDecision(v, ev.role, ev.agent_id, blocked);
+}
+
+/** A blocked agent's reason that is about a failing test or CI (its PR head is classified first). */
+const CI_REASON = /\b(tests?|specs?)\b|\.(test|spec)\.[cm]?[jt]sx?\b|\bCI\b|\bflak(e|y)\b/i;
+
+/** The plain `agent_blocked` decision: continue, respawn or cancel. */
+function blockedDecision(
+  v: PipelineView,
+  role: Role,
+  agentId: string,
+  b: BlockedStatus,
+): PipelineAction[] {
+  const label = roleLabel(v.p, role);
   return [
     {
       kind: "decide",
-      marker: { on: "agent_blocked", role: ev.role },
+      marker: { on: "agent_blocked", role },
       decision: {
         kind: "agent_blocked",
         task: v.task,
-        question: `${ev.agent_id} (${label}) is blocked: ${reason}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
+        question: `${agentId} (${label}) is blocked: ${clipReason(b.reason)}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
         options: ["continue", "respawn", "cancel"],
       },
-      data: {
-        agent_id: ev.agent_id,
-        reason: ev.reason,
-        payload: ev.payload,
-        ...(ev.at !== undefined ? { status_at: ev.at } : {}),
-      },
+      data: blockedFacts(agentId, b),
     },
   ];
 }
+
+/** A blocked agent's reason clipped for a question, by code point (never splits a surrogate pair). */
+function clipReason(reason: string): string {
+  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
+  const chars = Array.from(reason);
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : reason;
+}
+
+/** What a blocked agent's decision keeps (`status_at`: a re-delivered status is not re-asked). */
+const blockedFacts = (agentId: string, b: BlockedStatus): Record<string, unknown> => ({
+  agent_id: agentId,
+  reason: b.reason,
+  payload: b.payload,
+  ...(b.status_at !== undefined ? { status_at: b.status_at } : {}),
+});
 
 /** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
 const roleLabel = (p: TaskPipeline, role: Role): string =>
@@ -1816,7 +2142,10 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   // types anything else (a free-text `cancel` too) to the agent, which stays live.
   if (isAnswer(answer, "cancel") && m.on !== "liveness") {
     // A blocked agent is still live (SPEC §5.2): it is stopped with the task.
-    const blocked = m.on === "agent_blocked" && m.role !== undefined ? v.p.runs[m.role] : undefined;
+    const blocked =
+      (m.on === "agent_blocked" || m.on === "agent_blocked_ci") && m.role !== undefined
+        ? v.p.runs[m.role]
+        : undefined;
     const agent = (d as { agent_id?: unknown }).agent_id;
     return [
       ...(blocked !== undefined && blocked.agent_id === agent && blocked.retired === undefined
@@ -1865,6 +2194,8 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "ci_failed":
       if (role !== undefined && isAnswer(answer, "fixup") && (d.options ?? []).includes("fixup"))
         return ciFixup(v, d, m);
+      // The flake's fixer was requested (remediation_requested): the task waits for it.
+      if (isAnswer(answer, FIX_FLAKE) && (d.options ?? []).includes(FIX_FLAKE)) return [];
       // Anything but cancel re-verifies: the non-destructive default.
       return role !== undefined ? [{ kind: "verify", role }] : [];
     case "ci_none":
@@ -1918,18 +2249,25 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
       return isRespawnAnswer(answer, d.options) ? [] : reask();
-    case "agent_blocked": {
-      // continue: the owner steered it by hand; its next status is handled as usual.
-      if (isAnswer(answer, "continue")) return [];
+    case "agent_blocked_ci": {
+      // Routed like a ci_failed: a CI fixup at the red head (the blocked agent is stopped first),
+      // or the flake's fixer; continue / respawn as for any blocked agent.
+      const offered = d.options ?? [];
       const agent = (d as { agent_id?: unknown }).agent_id;
-      if (role === undefined || typeof agent !== "string") return [];
-      if (isAnswer(answer, "respawn")) {
-        // Ended meanwhile (its status is handled as usual): nothing to replace.
-        if (run !== undefined && run.agent_id === agent && run.retired !== undefined) return [];
-        return respawnRun(v, role, agent);
+      if (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE)) return [];
+      if (role !== undefined && isAnswer(answer, "fixup") && offered.includes("fixup")) {
+        const fix = ciFixup(v, d, m);
+        if (fix.length === 0) return [];
+        const live = run !== undefined && run.agent_id === agent && run.retired === undefined;
+        return [
+          ...(live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : []),
+          ...fix,
+        ];
       }
-      return reask();
+      return blockedAnswer(v, d, role, run, answer, reask);
     }
+    case "agent_blocked":
+      return blockedAnswer(v, d, role, run, answer, reask);
     case "pr_head_moved": {
       // The reducer moved the task's head to the new one and kept the directive.
       const live = REVIEWER_ROLES.flatMap((r) => {
@@ -2007,6 +2345,27 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/** A blocked agent's decision answered: continue (steered by hand), respawn, else asked again. */
+function blockedAnswer(
+  v: PipelineView,
+  d: DecisionRecord,
+  role: Role | undefined,
+  run: RoleRun | undefined,
+  answer: string,
+  reask: () => PipelineAction[],
+): PipelineAction[] {
+  // continue: the owner steered it by hand; its next status is handled as usual.
+  if (isAnswer(answer, "continue")) return [];
+  const agent = (d as { agent_id?: unknown }).agent_id;
+  if (role === undefined || typeof agent !== "string") return [];
+  if (isAnswer(answer, "respawn")) {
+    // Ended meanwhile (its status is handled as usual): nothing to replace.
+    if (run !== undefined && run.agent_id === agent && run.retired !== undefined) return [];
+    return respawnRun(v, role, agent);
+  }
+  return reask();
 }
 
 /**
@@ -2302,8 +2661,14 @@ function advance(v: PipelineView): PipelineAction[] {
     const run = p.runs[r];
     // A spawn that has not happened yet (budget, admission, a refused launch): retry it.
     if (run === undefined) pending.push(spawnFor(v, r));
-    // Retired without being accepted: its CI was pending. Re-check (the driver rate-limits).
-    else if (!run.accepted && run.retired === "done" && PUBLISHING_ROLES.has(r))
+    // Retired without being accepted: its CI was pending. Re-check (the driver rate-limits);
+    // a red head awaiting its flake's fixer is the fixer's, not a re-check's.
+    else if (
+      !run.accepted &&
+      run.retired === "done" &&
+      PUBLISHING_ROLES.has(r) &&
+      p.remediation?.role !== r
+    )
       pending.push({ kind: "verify", role: r });
   }
   if (pending.length > 0 || p.roles.some((r) => p.runs[r]?.accepted !== true))
@@ -2603,6 +2968,10 @@ export interface PipelineDeps {
   mergeMode?: () => "auto" | "manual";
   /** The wave's `autopilot.merge_retry_max` (default: the config default). */
   mergeRetryMax?: () => number;
+  /** The wave's `autopilot.incident_wait_max_s` (default: the config default). */
+  incidentWaitMaxS?: () => number;
+  /** GitHub's status page, cached (github-status.ts); absent: not read (unknown, never an incident). */
+  statusPage?: () => Promise<GithubStatus>;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -2695,6 +3064,9 @@ export class PipelineDriver {
       ...(token !== undefined ? { merge_token: token } : {}),
       ...(this.deps.mergeRetryMax !== undefined
         ? { merge_retry_max: this.deps.mergeRetryMax() }
+        : {}),
+      ...(this.deps.incidentWaitMaxS !== undefined
+        ? { incident_wait_max_s: this.deps.incidentWaitMaxS() }
         : {}),
     };
   }
@@ -2885,6 +3257,14 @@ export class PipelineDriver {
           );
           break;
         }
+        case "classify_ci": {
+          // Event-driven (a verification or a blocked status just found it); one per task at once.
+          const key = `${task}/classify`;
+          this.beside(task, key, { what: "classify", role: a.role, agent_id: a.agent_id }, () =>
+            this.classifyCi(task, a),
+          );
+          break;
+        }
         case "check_rebase": {
           const v = this.view(task);
           const key = `${task}/check_rebase`;
@@ -3050,6 +3430,93 @@ export class PipelineDriver {
       ...(result !== undefined ? { result } : {}),
       ...(waited !== undefined ? { waited_ms: waited } : {}),
       at: this.now(),
+    };
+  }
+
+  /**
+   * Beside the queue: classify a red head (ci-classify.ts) from the PR's changed files, the release
+   * branch's latest CI and GitHub's status page. A blocked agent's PR head is read here first (its
+   * open PR, CI on its head): not red, or no PR, comes back with a null result.
+   */
+  private async classifyCi(
+    task: TaskId,
+    a: Extract<PipelineAction, { kind: "classify_ci" }>,
+  ): Promise<PipelineEvent | null> {
+    const v = this.view(task);
+    if (v === null) return null;
+    const exec = this.io(task);
+    const cwd = v.p.runs[a.role]?.worktree ?? this.headCwd(task);
+    if (cwd === undefined) return null;
+    const base = { kind: "ci_classified" as const, role: a.role, agent_id: a.agent_id };
+    const blocked = a.blocked !== undefined ? { blocked: a.blocked } : {};
+    const unclassified = (): PipelineEvent => ({
+      ...base,
+      report: null,
+      result: null,
+      at: this.now(),
+      ...blocked,
+    });
+    // A blocked agent is asked about whatever happens here: a failed read is the plain question.
+    if (a.blocked !== undefined)
+      return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked).catch(unclassified);
+    return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked);
+  }
+
+  private async classifyRed(
+    exec: ExecFn,
+    cwd: string,
+    v: PipelineView,
+    base: { kind: "ci_classified"; role: Role; agent_id: string },
+    given: OkReport | null,
+    blocked: { blocked?: BlockedStatus },
+  ): Promise<PipelineEvent> {
+    const report = given ?? (await this.blockedHead(exec, cwd, v));
+    if (report === null || report.ci.state !== "red")
+      return { ...base, report: null, result: null, at: this.now(), ...blocked };
+    const files = await prFiles(exec, cwd, report.pr.number);
+    const release = await probeReleaseCi(exec, { cwd, release_branch: v.release_branch });
+    const status = (await this.deps.statusPage?.()) ?? STATUS_UNKNOWN;
+    const result = classify({
+      failing_tests: report.ci.failing_tests ?? [],
+      pr_files: files,
+      release,
+      infra: report.ci.infra,
+      status_page: status,
+    });
+    return { ...base, report, result, at: this.now(), ...blocked };
+  }
+
+  /** A blocked agent's PR (the task's open PR from its branch) and CI on its head, read-only. */
+  private async blockedHead(exec: ExecFn, cwd: string, v: PipelineView): Promise<OkReport | null> {
+    const branch = v.p.branch;
+    if (branch === undefined) return null;
+    const r = await exec(
+      [
+        "gh",
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        "number,url,headRefName,baseRefName,headRefOid",
+      ],
+      { cwd },
+    );
+    let list: { number: number; url: string; headRefName: string; headRefOid: string }[] = [];
+    try {
+      list = r.code === 0 ? JSON.parse(r.stdout) : [];
+    } catch {}
+    const pr = list.find((p) => p.headRefName === branch);
+    if (pr === undefined || typeof pr.headRefOid !== "string" || pr.headRefOid === "") return null;
+    const ci = await redHeadCi(exec, cwd, pr.headRefOid);
+    return {
+      kind: "ok",
+      head: pr.headRefOid,
+      branch,
+      pr: { number: pr.number, url: pr.url, head_sha: pr.headRefOid, base: v.release_branch },
+      ci,
     };
   }
 

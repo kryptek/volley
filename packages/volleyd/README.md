@@ -725,13 +725,39 @@ autopilot: on
     pr_head_moved/rereview: nobody reviewed the new head
   wave_complete · always · acknowledged · no budget
     wave_complete/acknowledge: the end of a wave needs no answer; the owner reads its outcome
-  ci_failed · pipeline.on === "ci_failed" and classification: own_change (unclassified: infra === false) · fixup · ci_fixup_max per <task> · max 2
+  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: own_change (unclassified ci_failed: infra === false) · fixup · ci_fixup_max per <task> · max 2
     ci_failed/fixup-own-change: a fixup agent with the CI result as its directive is what a person would do
+  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake · fix flake · no budget
+    ci_failed/fix-flake: a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope
+  ci_failed · classification: infra_incident (asked only once autopilot.incident_wait_max_s passed) · escalate budget_exhausted · no budget
+    ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
   ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
-    ci_failed/owner: an infra-shaped red head and a repository without workflows are the owner's
+    ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
   pr_closed, remote_repo_missing, merge_conflict · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
+
+### Self-healing CI
+
+A red head is classified before anyone is asked (`src/autopilot/ci-classify.ts`, pure; SPEC
+§4.6.16), from the failing tests in the failed runs' logs, the PR's changed files (`gh pr view
+--json files`), the release branch's latest CI (`gh run list --branch <release>`, the latest run
+per workflow, and the tests failing there) and GitHub's status page
+(`githubstatus.com/api/v2/components.json`, cached for a minute, read through the daemon's
+injected `fetch`; an unreachable page is unknown and never holds a wave):
+
+| Classification | When | What volleyd does |
+|---|---|---|
+| `infra_incident` | the run is infra-shaped (never started; runner, checkout or network steps; cancelled with nothing replacing it), or the status page reports an Actions / API incident and no failing test is in the PR | holds the task in CI (`why_waiting: CI infra incident: <what>; re-checking`, `ci_pending { reason: infra_incident }`), re-verifies every CI poll, and after `autopilot.incident_wait_max_s` (default 14400) opens `ci_failed`, escalated `budget_exhausted` |
+| `own_change` | a failing test's file is in the PR (this wins over a status-page incident), or the ids name no file and the release branch is not red | `ci_failed`, `fixup` first: autopilot answers it within `ci_fixup_max` |
+| `flake` | no failing test's file is in the PR (and, for ids that name no file, the release branch is red) | journals `remediation_requested { kind: fix_flake, test, test_file, head, run_urls, for }` and opens `ci_failed` offering `fix flake` first; autopilot answers it and the task waits for the flake's fixer (`tasks[].remediation`, `why_waiting: CI flake in <test>: fixer pending`) |
+
+Every `ci_failed` carries `classification` and `evidence: { failing_tests, test_files, pr_files,
+release_ci, status_page }`. An agent that publishes `blocked` with a reason about a failing test
+or CI while its PR head is red gets the same treatment: its `agent_blocked` decision is marked
+`pipeline.on: agent_blocked_ci`, carries the classification and offers `fixup` (the blocked agent
+is stopped and a CI fixup starts at the red head) or `fix flake`, which autopilot answers like a
+`ci_failed`. Nothing re-runs CI, for any classification: the fence denies `gh run rerun`.
 
 ---
 
@@ -945,6 +971,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
 | `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
+| `autopilot.incident_wait_max_s` | the next re-check of a red head held for an infra incident | a hold already running keeps its start |
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |

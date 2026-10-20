@@ -216,6 +216,17 @@
             }
           }
         },
+        "remediation": {
+          "type": "object",
+          "required": ["kind", "test", "since"],
+          "additionalProperties": false,
+          "description": "A remediation requested for the task's red head that still holds (spec section 4.6.16): fix_flake, a failing test the PR does not touch awaiting its dedicated fixer. Gone once the head is verified, a new step starts, or the task is cancelled.",
+          "properties": {
+            "kind": { "enum": ["fix_flake"] },
+            "test": { "type": "string", "minLength": 1 },
+            "since": { "type": "string", "format": "date-time" }
+          }
+        },
         "evidence_path": { "type": "string", "minLength": 1 },
         "last_error": {
           "type": "object",
