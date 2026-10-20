@@ -91,7 +91,7 @@ export type ArtifactReport =
 
 const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid";
 const RUN_FIELDS =
-  "databaseId,name,workflowName,status,conclusion,url,headSha,attempt,event,createdAt,workflowDatabaseId";
+  "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
 
 /** Run conclusions that fail a head. */
 const FAILED = new Set(["failure", "cancelled", "timed_out", "startup_failure", "action_required"]);

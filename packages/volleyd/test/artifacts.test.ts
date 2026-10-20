@@ -94,7 +94,7 @@ describe("artifact verification", () => {
       "--commit",
       HEAD,
       "--json",
-      "databaseId,name,workflowName,status,conclusion,url,headSha,attempt,event,createdAt,workflowDatabaseId",
+      "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId",
     ]);
     expect(report).toMatchObject({ kind: "ok", ci: { state: "red", failed_jobs: ["CI / test"] } });
     const out = artifactOutcome("T1", "implementer", report);
