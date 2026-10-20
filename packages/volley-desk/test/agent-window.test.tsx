@@ -72,11 +72,13 @@ describe("AgentWindow", () => {
     expect(container.querySelector(".win")).toHaveStyle({ width: "460px" });
   });
 
-  it("shows the task title from the wave spec as the purpose line and the latest narration", () => {
+  it("shows the task title from the wave spec once, in the headline row, and the latest narration", () => {
     const { container } = renderAgent(stateWith(), FIXUP);
-    expect(container.querySelector(".a-purpose-text")).toHaveTextContent(
+    expect(container.querySelector(".win-sub .t-name")).toHaveTextContent(
       "T1 · Chip mapper + null-case handling",
     );
+    expect(container.querySelector(".win-title .t-name")).toBeNull();
+    expect(container.querySelector(".a-purpose")).toBeNull();
     expect(container.querySelector(".narr")).toHaveTextContent(
       "Addressing quality P1: legacy CLSD alias falls through to the raw enum",
     );
