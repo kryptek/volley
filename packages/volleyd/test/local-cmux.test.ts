@@ -286,6 +286,16 @@ describe("parseWorkspaceList", () => {
     expect(parseWorkspaceList("", "w1 T1")).toBeNull();
   });
 
+  it("throws when more than one workspace carries the name: which one is this launch's is unknown", () => {
+    const lines = "  workspace:7  w1 T1 fixup\n* workspace:9  w1 T1 fixup  [selected]\n";
+    expect(() => parseWorkspaceList(lines, "w1 T1 fixup")).toThrow(/2 workspaces/);
+    const json = JSON.stringify([
+      { ref: "workspace:3", name: "w1 T1 fixup" },
+      { ref: "workspace:4", title: "w1 T1 fixup" },
+    ]);
+    expect(() => parseWorkspaceList(json, "w1 T1 fixup")).toThrow(/2 workspaces/);
+  });
+
   it("reads a JSON array or a { workspaces } object", () => {
     expect(
       parseWorkspaceList(

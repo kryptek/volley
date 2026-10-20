@@ -13,8 +13,10 @@ All workspace packages share one version. Dates are release-tag dates.
   (`unknown`); for an unknown one volleyd looks the workspace up by name and waits
   `launch_reconcile_ms` for the agent's registration, then adopts it (`spawn_adopted`), closes
   the empty workspace (`launch_orphan_closed`) or, when the host cannot be asked, burns the
-  attempt (`spawn_identity_burned`) so the retry takes the next agent id. Launches are
-  serialized per host. (#193)
+  attempt (`spawn_identity_burned`) so the retry takes the next agent id. A workspace title now
+  carries the attempt after the first (`<wave> <task> <role> 2`), so the lookup never finds an
+  earlier attempt's workspace; two workspaces with the same title burn the attempt too. Launches
+  are serialized per host. (#193)
 
 ## 0.4.0 — 2026-10-20
 

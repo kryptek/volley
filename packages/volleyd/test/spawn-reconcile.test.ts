@@ -118,6 +118,21 @@ describe("a launch whose outcome is unknown is reconciled before any retry", () 
     expect(eventOf(env, "spawn_identity_burned")?.data).toMatchObject({ agent_id: ID });
   });
 
+  it("each attempt titles its workspace apart, so a reconcile never finds an earlier attempt's", async () => {
+    const env = await silentEnv();
+    // An earlier attempt's workspace is still open under the role's plain title.
+    const open = new Map([[NAME, "workspace:9"]]);
+    env.host.findWorkspace = async (name) => {
+      env.host.finds.push({ name });
+      return open.get(name) ?? null;
+    };
+    await spawnAgent(env.request({ attempt: 2 }), env.deps).catch(() => undefined);
+    expect(env.host.launches.map((l) => l.name)).toEqual([`${NAME} 2`]);
+    expect(env.host.finds.map((f) => f.name)).toEqual([`${NAME} 2`, `${NAME} 2`]);
+    expect(env.host.closed).toEqual([]);
+    expect(types(env)).not.toContain("launch_orphan_closed");
+  });
+
   it("a refused launch is not reconciled: no lookup, no new events", async () => {
     const env = await makeSpawnEnv();
     env.host.launchOutcome = "refused";

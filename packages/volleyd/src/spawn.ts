@@ -607,7 +607,7 @@ async function launchAttempt(
       } else {
         ({ workspace } = await host.launch({
           cwd: ctx.worktree,
-          name: launchName(req),
+          name: launchName(req, attempt),
           command: LAUNCH_COMMAND,
           launch,
         }));
@@ -688,7 +688,7 @@ async function reconcileLaunch(
   const { req, deps } = ctx;
   const { host } = deps;
   const { agentId, attempt, watch } = launch;
-  const name = launchName(req);
+  const name = launchName(req, attempt);
   const candidate = launch.error instanceof SpawnError ? launch.error.detail.candidate : undefined;
   const find = () =>
     host.findWorkspace(name, typeof candidate === "string" ? candidate : undefined).then(
@@ -744,8 +744,13 @@ async function reconcileLaunch(
   return null;
 }
 
-/** The workspace title a launch gives its terminal: `<wave> <task> <role>`. */
-const launchName = (req: SpawnRequest) => `${req.wave.wave} ${req.task} ${req.role}`;
+/**
+ * The workspace title a launch gives its terminal: `<wave> <task> <role>`, with the attempt
+ * appended after the first (`… fixup 2`). One title per agent id, so a reconcile looking it up
+ * never finds the workspace an earlier attempt left open.
+ */
+const launchName = (req: SpawnRequest, attempt: number) =>
+  `${req.wave.wave} ${req.task} ${req.role}${attempt > 1 ? ` ${attempt}` : ""}`;
 
 /**
  * Step 6: verify through the hook signals. On an update prompt: press Enter, and relaunch once

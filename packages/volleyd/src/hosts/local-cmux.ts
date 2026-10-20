@@ -171,7 +171,8 @@ export function parseWorkspaceRef(stdout: string): string | null {
 /**
  * The ref of the workspace titled exactly `name` in `cmux list-workspaces` output: its lines
  * (`[*] workspace:<n>  <title>  [[selected]]`), or JSON (an array, or `{ workspaces }`, of
- * `{ ref | workspace_ref | id, name | title | custom_title }`). Null when none has that title.
+ * `{ ref | workspace_ref | id, name | title | custom_title }`). Null when none has that title;
+ * throws when more than one has it (which one a launch opened cannot be told, spawn.ts burns it).
  */
 export function parseWorkspaceList(stdout: string, name: string): string | null {
   const want = name.trim();
@@ -181,17 +182,31 @@ export function parseWorkspaceList(stdout: string, name: string): string | null 
     if (Array.isArray(list)) {
       const pick = (o: Record<string, unknown>, keys: string[]) =>
         keys.map((k) => o[k]).find((v): v is string => typeof v === "string" && v !== "");
-      for (const w of list as Record<string, unknown>[]) {
-        if (pick(w, ["name", "title", "custom_title"])?.trim() !== want) continue;
-        const ref = pick(w, ["ref", "workspace_ref", "id"]);
-        if (ref !== undefined) return ref;
-      }
-      return null;
+      const refs = (list as Record<string, unknown>[])
+        .filter((w) => pick(w, ["name", "title", "custom_title"])?.trim() === want)
+        .map((w) => pick(w, ["ref", "workspace_ref", "id"]))
+        .filter((ref): ref is string => ref !== undefined);
+      return onlyOne(refs, want);
     }
-  } catch {}
+  } catch (e) {
+    if (e instanceof AmbiguousWorkspace) throw e;
+  }
+  const refs: string[] = [];
   for (const line of stdout.split("\n")) {
     const m = /^\s*\*?\s*(workspace:[A-Za-z0-9-]+)\s+(.*?)\s*(?:\[selected\])?\s*$/.exec(line);
-    if (m !== null && m[2] === want) return m[1] as string;
+    if (m !== null && m[2] === want) refs.push(m[1] as string);
   }
-  return null;
+  return onlyOne(refs, want);
+}
+
+class AmbiguousWorkspace extends Error {}
+
+/** The one ref carrying the name; more than one cannot be told apart, so the lookup fails. */
+function onlyOne(refs: string[], name: string): string | null {
+  if (refs.length > 1) {
+    throw new AmbiguousWorkspace(
+      `${refs.length} workspaces are named "${name}": ${refs.join(", ")}`,
+    );
+  }
+  return refs[0] ?? null;
 }
