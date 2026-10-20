@@ -87,6 +87,8 @@ const SKIP = new Set([
  * The newest file mtime under `root`, breadth first, so the shallow files (logs, reports) are
  * seen first. Returns at the first file written within `freshMs` of `now`; null when more than
  * `maxEntries` entries would be visited, or the tree cannot be read (vanished). Never throws.
+ * Files volleyd writes outside `.volley` (ISSUE.md at spawn) count as agent writes too: right
+ * after a spawn they can hold the first nudge back by up to `freshMs`, which is bounded.
  */
 export async function newestWrite(
   root: string,
