@@ -238,6 +238,34 @@ describe("PR head moved at merge_ready", () => {
     expect(evidence()).toMatchObject({ head_sha: B, head_history: [A, B] });
   });
 
+  it("an accepted moved head's evidence keeps the runs superseded on it", async () => {
+    await gatedAtA();
+    pushB();
+    h.world.ciRuns[B] = [
+      { status: "completed", conclusion: "cancelled", id: 1301, workflow: "CI" },
+      { status: "completed", conclusion: "success", id: 1302, workflow: "CI" },
+    ];
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.kind).toBe("pr_head_moved");
+    await h.resolve(d?.decision_id as string, "rereview");
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(h.task()?.stage).toBe("merge_ready");
+    expect(evidence().ci).toEqual({
+      status: "green",
+      runs: [expect.objectContaining({ id: 1302 })],
+      superseded: [
+        {
+          id: 1301,
+          url: "https://github.com/example/repo/actions/runs/1301",
+          conclusion: "cancelled",
+        },
+      ],
+    });
+  });
+
   it("cancel cancels the task", async () => {
     await gatedAtA();
     pushB("green");

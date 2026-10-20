@@ -187,6 +187,8 @@ export interface Directive {
   log: string;
   diffstat: string;
   runs: CiRun[];
+  /** Runs on `to` that a newer run of the same workflow and event replaced (evidence only). */
+  superseded?: SupersededRun[];
   /** The owner chose `fixup`: the fixup works from this directive only (no review findings). */
   only?: boolean;
 }
@@ -469,7 +471,7 @@ export function reducePipeline(
             p.directive = { ...dir, ...(fixup ? { only: true } : {}) };
             p.ci = dir.ci === "none" ? "none" : "green";
             p.ci_runs = dir.runs;
-            p.ci_superseded = undefined;
+            p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
         } else if (isAnswer(answer, "cancel")) p.moved = undefined;
@@ -938,6 +940,7 @@ function onMovedCi(
     log: ev.facts.log,
     diffstat: ev.facts.diffstat,
     runs: ci.runs,
+    ...(ci.superseded.length > 0 ? { superseded: ci.superseded } : {}),
   };
   return [
     {

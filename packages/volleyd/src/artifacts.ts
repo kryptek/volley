@@ -608,7 +608,13 @@ export function failingTests(log: string): string[] {
 
 /** What a moved PR head brings: CI on it (and, when red, the failing tests), and the diff. */
 export interface MovedHeadFacts {
-  ci: { state: CiState; runs: CiRun[]; failed_jobs: string[]; failing_tests: string[] };
+  ci: {
+    state: CiState;
+    runs: CiRun[];
+    superseded: SupersededRun[];
+    failed_jobs: string[];
+    failing_tests: string[];
+  };
   /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
   log: string;
   diffstat: string;
@@ -633,7 +639,13 @@ export async function probeMovedHead(
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
   const stat = await git("diff", "--stat", o.from, o.to);
   return {
-    ci: { state: ci.state, runs: ci.runs, failed_jobs: ci.failed_jobs, failing_tests: tests },
+    ci: {
+      state: ci.state,
+      runs: ci.runs,
+      superseded: ci.superseded,
+      failed_jobs: ci.failed_jobs,
+      failing_tests: tests,
+    },
     log: log.code === 0 ? log.stdout.trim() : "",
     diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",
   };
