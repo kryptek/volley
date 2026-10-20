@@ -1105,6 +1105,7 @@ export default function App() {
           demo={demo}
           config={state.config}
           transport={configTransport}
+          leases={state.leases}
           claude={{
             accounts: state.claudeAccounts ?? {},
             signins: state.signins ?? {},

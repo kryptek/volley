@@ -15,6 +15,12 @@ describe("matchSections", () => {
     expect(keys("")).toHaveLength(8);
     expect(keys("zzz")).toEqual([]);
   });
+
+  it("finds the Fleet's controls: Machines for repair and drain, Supervisor for lease pools", () => {
+    expect(keys("repair")).toEqual(["machines"]);
+    expect(keys("drain")).toEqual(["machines"]);
+    expect(keys("lease pools")).toEqual(["supervisor"]);
+  });
 });
 
 describe("the sidebar search", () => {
