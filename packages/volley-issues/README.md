@@ -110,7 +110,8 @@ The [`parity-report.md`](./parity-report.md) committed at tag time records
 the measured wake-latency comparison vs. the legacy claude-peers polling
 loop. The parity test runs with every `bun run test` but only rewrites the
 report when asked: `bun run parity:update` (at tag time). See [`SMOKE.md`](./SMOKE.md) for the manual downstream-repo validation
-procedure run before each release.
+procedure run before each release. After the tag, `volley deploy v<X.Y.Z>` moves the supervisor's
+machine to it (Desk rebuilt, both services restarted, rolled back on failure).
 
 ## License
 

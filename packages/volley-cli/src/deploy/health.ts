@@ -40,7 +40,7 @@ export async function deskHealthy(
   return poll(wait, async (remaining) => {
     const get = (path: string) =>
       fetch(`${base}${path}`, {
-        signal: AbortSignal.timeout(Math.min(remaining, wait.pollMs * 5)),
+        signal: AbortSignal.timeout(Math.max(500, Math.min(remaining, wait.pollMs * 5))),
       });
     try {
       const index = await get("/");
