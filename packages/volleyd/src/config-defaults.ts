@@ -56,7 +56,8 @@ export const CONFIG_DEFAULTS: Tunables = {
     down_decision_after_s: 300,
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
-  fleet: { local_name: null },
+  // local_agents null: fallback once any hosts.<name> is configured, else always.
+  fleet: { local_name: null, local_agents: null, fallback: { max_agents: 3, per_machine: {} } },
   // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,

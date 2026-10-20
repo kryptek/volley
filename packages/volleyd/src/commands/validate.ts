@@ -11,9 +11,11 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
 import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
 import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
+import { LOCAL_HOST } from "../fleet-name";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { MACHINES_FILTER, type MachineRecord, parseMachine } from "../machines";
 import {
+  AUTO_HOST,
   type VerdictView,
   needsPlacement,
   preview as placementPreview,
@@ -63,6 +65,35 @@ function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base
   } catch {
     return fallback;
   }
+}
+
+/**
+ * `warning: T1 pins host: local while fleet.local_agents is never …`, one line per task of a
+ * `placement: auto` wave that names the own machine while the wave's `config:` or config.yaml
+ * sets `never` (SPEC §4.6.15): the wave file is explicit, so the task still runs there. Empty
+ * otherwise.
+ */
+export function localPinWarnings(wave: Wave, env: CommandArgs["env"]): string {
+  if (wave.placement !== AUTO_HOST) return "";
+  const file = join(volleydHome(env), "config.yaml");
+  // The wave's own `config:` layer wins over config.yaml, as it does in effective config.
+  let mode: unknown = (wave.config as { fleet?: { local_agents?: unknown } }).fleet?.local_agents;
+  try {
+    mode ??= existsSync(file)
+      ? (parse(readFileSync(file, "utf-8")) as { fleet?: { local_agents?: unknown } } | null)?.fleet
+          ?.local_agents
+      : undefined;
+  } catch {
+    return "";
+  }
+  if (mode !== "never") return "";
+  return wave.task_order
+    .filter((id) => wave.tasks[id]?.host === LOCAL_HOST)
+    .map(
+      (id) =>
+        `warning: ${id} pins host: local while fleet.local_agents is never; it still runs there (the wave file is explicit)\n`,
+    )
+    .join("");
 }
 
 /** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
@@ -161,7 +192,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n${placement}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${localPinWarnings(wave, env)}${prefaceLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {
@@ -238,6 +269,9 @@ export async function previewPlacement(wave: Wave, target: ControlTarget): Promi
         cfg.claude?.warn_at_pct ??
         CONFIG_DEFAULTS.claude.warn_at_pct,
       localName,
+      // The retained config carries the resolved mode; a supervisor that predates it: always.
+      local_agents: cfg.fleet?.local_agents ?? "always",
+      fallback: cfg.fleet?.fallback ?? CONFIG_DEFAULTS.fleet.fallback,
     });
     return line === null
       ? ""
