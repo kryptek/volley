@@ -76,6 +76,29 @@
               },
               "description": "The repository on GitHub as the supervisor read it for the current plan version (spec section 4.6.1): slug is owner/repo, url its canonical URL, so a client links issue n as <url>/issues/<n>. Absent when it could not be read; never derived from repo or a remote."
             },
+            "autopilot": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "auto_resolved", "escalated", "budgets"],
+              "description": "What the supervisor's autopilot did in this wave (spec section 4.6.16): whether it is on for the wave, the decisions it answered itself and those it left for the owner, and each remediation budget it answered under. Absent: a supervisor that predates autopilot.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "auto_resolved": { "type": "integer", "minimum": 0 },
+                "escalated": { "type": "integer", "minimum": 0 },
+                "budgets": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["used", "max"],
+                    "properties": {
+                      "used": { "type": "number", "minimum": 0 },
+                      "max": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }

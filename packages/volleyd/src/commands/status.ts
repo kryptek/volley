@@ -146,6 +146,12 @@ export function formatWave(
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
   const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
+  // What autopilot did in the wave (absent: a state from before autopilot).
+  const ap = s.autopilot;
+  const autopilot =
+    ap !== undefined
+      ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
+      : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -163,7 +169,7 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + preface + hygiene + github + rows.join("") + decisions.join("");
+  return header + autopilot + preface + hygiene + github + rows.join("") + decisions.join("");
 }
 
 /**
