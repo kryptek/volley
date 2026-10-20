@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { writeCmuxPassword } from "volley-cli/setup/cmux";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { FenceError, mintConsentToken, mintModelSwitchToken, sealLaunchScript } from "../src/fence";
-import { LocalCmuxHost, parseWorkspaceRef } from "../src/hosts/local-cmux";
+import { LocalCmuxHost, parseWorkspaceList, parseWorkspaceRef } from "../src/hosts/local-cmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
 import { fakeExec } from "./helpers/fake-exec";
@@ -93,6 +93,94 @@ describe("LocalCmuxHost", () => {
       .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") })
       .catch((e: unknown) => e);
     expect((err as SpawnError).code).toBe("LAUNCH_FAILED");
+  });
+
+  it("bounds the launch by launch_timeout_ms", async () => {
+    const fake = fakeExec().on(["cmux", "new-workspace"], { stdout: "OK workspace:12\n" });
+    await new LocalCmuxHost(fake.exec).launch({
+      cwd: "/wt/x",
+      name: "n",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt/x"),
+    });
+    expect(fake.calls[0]?.opts.timeoutMs).toBe(DAEMON_DEFAULTS.launch_timeout_ms);
+  });
+
+  it("classifies a failed launch: refused when cmux created nothing, unknown when it may have", async () => {
+    const outcome = async (reply: Parameters<ReturnType<typeof fakeExec>["on"]>[1]) => {
+      const fake = fakeExec().on(["cmux", "new-workspace"], reply);
+      const err = (await new LocalCmuxHost(fake.exec, tempDir("volleyd-cmux-"), {})
+        .launch({ cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") })
+        .catch((e: unknown) => e)) as SpawnError;
+      expect(err.code).toBe("LAUNCH_FAILED");
+      return err.detail.outcome;
+    };
+    // The cmux CLI gave up on its own: the workspace may exist and its agent be starting.
+    expect(await outcome({ code: 1, stderr: "Error: Command timed out" })).toBe("unknown");
+    // volleyd's own bound fired.
+    expect(await outcome({ code: 1, timedOut: true })).toBe("unknown");
+    // A non-zero exit cmux did not explain, or an exit 0 with no ref in it.
+    expect(await outcome({ code: 1, stderr: "something odd" })).toBe("unknown");
+    expect(await outcome({ code: 0, stdout: "" })).toBe("unknown");
+    // cmux answered and refused, is not running, or is not installed: nothing was created.
+    expect(
+      await outcome({ code: 1, stderr: "Access denied - only processes started inside cmux" }),
+    ).toBe("refused");
+    expect(await outcome({ code: 1, stderr: "connection refused" })).toBe("refused");
+    expect(await outcome({ code: 127, stderr: "command not found" })).toBe("refused");
+  });
+
+  it("serializes launches: one new-workspace in flight at a time", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let n = 0;
+    const fake = fakeExec().on(["cmux", "new-workspace"], async () => {
+      n += 1;
+      if (n === 1) await gate;
+      return { stdout: `OK workspace:${n}\n` };
+    });
+    const host = new LocalCmuxHost(fake.exec);
+    const spec = { cwd: "/wt/x", name: "n", command: LAUNCH_COMMAND, launch: sealed("/wt/x") };
+    const first = host.launch(spec);
+    const second = host.launch(spec);
+    // Let every pending step run: the second launch must still be waiting on the first.
+    for (let i = 0; i < 200; i++) await Promise.resolve();
+    expect(fake.argvs(["cmux", "new-workspace"])).toHaveLength(1);
+    release();
+    expect(await first).toEqual({ workspace: "workspace:1" });
+    expect(await second).toEqual({ workspace: "workspace:2" });
+    expect(fake.argvs(["cmux", "new-workspace"])).toHaveLength(2);
+    // A failed launch does not wedge the chain.
+    fake.on(["cmux", "new-workspace"], { code: 1, stderr: "connection refused" });
+    await expect(host.launch(spec)).rejects.toThrow("LAUNCH_FAILED");
+    fake.on(["cmux", "new-workspace"], { stdout: "OK workspace:9\n" });
+    expect(await host.launch(spec)).toEqual({ workspace: "workspace:9" });
+  });
+
+  it("findWorkspace looks a workspace up by the exact name volleyd gave it", async () => {
+    // Shapes from live `cmux list-workspaces`: a `--name` title stays listed while the agent
+    // sets its terminal title; only a workspace with no custom title lists `✳ <process title>`.
+    const lines = [
+      "  workspace:1621  w0 T9 rebase",
+      "* workspace:880  ✳ something else  [selected]",
+      "  workspace:1635  w1 T1 fixup",
+      "  workspace:1636  w1 T1 fixup reviewer",
+    ].join("\n");
+    const fake = fakeExec().on(["cmux", "list-workspaces"], { stdout: `${lines}\n` });
+    const host = new LocalCmuxHost(fake.exec);
+    expect(await host.findWorkspace("w1 T1 fixup")).toBe("workspace:1635");
+    expect(await host.findWorkspace("w1 T2 fixup")).toBeNull();
+    expect(fake.argvs()).toEqual([
+      ["cmux", "list-workspaces"],
+      ["cmux", "list-workspaces"],
+    ]);
+    // cmux failing to answer is undecidable: the caller burns the attempt.
+    fake.on(["cmux", "list-workspaces"], { code: 1, stderr: "connection refused" });
+    await expect(host.findWorkspace("w1 T1 fixup")).rejects.toThrow();
+    fake.on(["cmux", "list-workspaces"], { timedOut: true, code: 1 });
+    await expect(host.findWorkspace("w1 T1 fixup")).rejects.toThrow();
   });
 
   it("a launch cmux refuses (volleyd runs outside cmux) says what to do, not the raw error", async () => {
@@ -187,5 +275,45 @@ describe("parseWorkspaceRef", () => {
       "0f8fad5b-d9cb-469f-a165-70867728950e",
     );
     expect(parseWorkspaceRef("")).toBeNull();
+  });
+});
+
+describe("parseWorkspaceList", () => {
+  it("finds the exact name in cmux's line form", () => {
+    const out =
+      "* workspace:7  w1 T1 implementer  [selected]\n  workspace:8  w1 T1 implementer 2\n";
+    expect(parseWorkspaceList(out, "w1 T1 implementer")).toBe("workspace:7");
+    expect(parseWorkspaceList(out, "w1 T1 implementer 2")).toBe("workspace:8");
+    expect(parseWorkspaceList(out, "w1 T1")).toBeNull();
+    expect(parseWorkspaceList("", "w1 T1")).toBeNull();
+  });
+
+  it("throws when more than one workspace carries the name: which one is this launch's is unknown", () => {
+    const lines = "  workspace:7  w1 T1 fixup\n* workspace:9  w1 T1 fixup  [selected]\n";
+    expect(() => parseWorkspaceList(lines, "w1 T1 fixup")).toThrow(/2 workspaces/);
+    const json = JSON.stringify([
+      { ref: "workspace:3", name: "w1 T1 fixup" },
+      { ref: "workspace:4", title: "w1 T1 fixup" },
+    ]);
+    expect(() => parseWorkspaceList(json, "w1 T1 fixup")).toThrow(/2 workspaces/);
+  });
+
+  it("reads a JSON array or a { workspaces } object", () => {
+    expect(
+      parseWorkspaceList(
+        JSON.stringify([
+          { ref: "workspace:3", name: "other" },
+          { workspace_ref: "workspace:4", title: "w1 T1 fixup" },
+        ]),
+        "w1 T1 fixup",
+      ),
+    ).toBe("workspace:4");
+    expect(
+      parseWorkspaceList(
+        JSON.stringify({ workspaces: [{ ref: "workspace:5", custom_title: "w1 T1 fixup" }] }),
+        "w1 T1 fixup",
+      ),
+    ).toBe("workspace:5");
+    expect(parseWorkspaceList("[]", "w1 T1 fixup")).toBeNull();
   });
 });
