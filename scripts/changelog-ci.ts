@@ -22,9 +22,10 @@ const RELEASE_SUBJECT = /^(release:|chore\(release\):)/;
 
 /**
  * The one non-release commit allowed to change CHANGELOG.md: #231's, which moved its `## Unreleased`
- * section into changes/ fragments (squash-merged, so the subject carries `(#231)`).
+ * section into changes/ fragments. Pinned to that commit's subject, so a later commit that merely
+ * names #231 is not exempt.
  */
-const MIGRATION_SUBJECT = /\(#231\)/;
+const MIGRATION_SUBJECT = /^feat\(changelog\): per-PR fragments in changes\/.*\(#231\)/;
 
 export type CheckResult = { ok: true } | { ok: false; message: string };
 

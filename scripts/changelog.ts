@@ -184,13 +184,14 @@ export function main(argv: string[], deps: MainDeps = {}): number {
   }
 
   const dir = join(root, "changes");
-  const names = readdirSync(dir)
-    .filter((n) => n !== "README.md")
-    .sort();
+  let names: string[];
   let fragments: Fragment[];
   let changelog: string;
   let next: string;
   try {
+    names = readdirSync(dir)
+      .filter((n) => n !== "README.md")
+      .sort();
     fragments = names.map((n) => parseFragment(`changes/${n}`, readFileSync(join(dir, n), "utf8")));
     const section = assemble(fragments, { version, date });
     changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");

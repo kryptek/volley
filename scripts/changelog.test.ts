@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -198,6 +199,14 @@ describe("main", () => {
     expect(r.out).toContain("- volleyd: x. (#194)");
     expect(readFileSync(join(root, "CHANGELOG.md"), "utf8")).toBe(CHANGELOG);
     expect(existsSync(join(root, "changes", "194.fixed.md"))).toBe(true);
+  });
+
+  test("a missing changes/ directory exits 1 with a message", () => {
+    const root = repo({});
+    rmSync(join(root, "changes"), { recursive: true });
+    const r = run(ARGS, root);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("changes");
   });
 
   test("--check exits 1 on a malformed fragment, naming its path", () => {

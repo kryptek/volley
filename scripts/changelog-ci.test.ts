@@ -65,10 +65,16 @@ describe("changelogTouched", () => {
   });
 
   test("the migration to fragments (#231) is the one exempt non-release commit", () => {
-    expect(changelogTouched([touch("feat(changelog): per-PR fragments (#231) (#240)")]).ok).toBe(
-      true,
-    );
+    expect(
+      changelogTouched([touch("feat(changelog): per-PR fragments in changes/ (#231) (#240)")]).ok,
+    ).toBe(true);
     expect(changelogTouched([touch("feat(changelog): more (#2310)")]).ok).toBe(false);
+    // Pinned to the migration's own subject: a later follow-up that names #231 is not exempt.
+    expect(changelogTouched([touch("fix(changelog): follow-up (#231)")]).ok).toBe(false);
+    expect(
+      changelogTouched([touch("feat(changelog): per-PR fragments in changes/, more (#231) (#235)")])
+        .ok,
+    ).toBe(true);
   });
 });
 
