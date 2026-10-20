@@ -186,6 +186,29 @@ const WAVES: WaveDef[] = [
 
 /** Where the demo's placed tasks run, and why (SPEC §4.6.15 `tasks[].placement`). */
 function placed(wave: string, task: string, now: number) {
+  // An agent window's machine chip: a running task placed on the supervisor's own machine.
+  if (wave === "ci-speed" && task === "T3b") {
+    return {
+      placement: {
+        host: LOCAL_MACHINE,
+        by: "auto" as const,
+        score: 0.66,
+        decided_at: iso(now - 40 * 60_000),
+        candidates: [
+          {
+            host: LOCAL_MACHINE,
+            score: 0.66,
+            line: `${LOCAL_MACHINE}: 0.66 (cpu 0.7, slots 0.67, mem 0.6, usage 0.58)`,
+          },
+          {
+            host: "box-a",
+            score: 0.52,
+            line: "box-a: 0.52 (cpu 0.83, slots 0.17, mem 0.71, usage 0.58)",
+          },
+        ],
+      },
+    };
+  }
   if (wave !== "ci-speed" || task !== "T6") return {};
   return {
     host: "box-a",

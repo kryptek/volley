@@ -142,6 +142,29 @@ describe("SettingsWindow", () => {
     );
   });
 
+  it("an open window follows a new section it is given (a machine chip asks for Machines)", () => {
+    const { rerender } = render(<Harness initial="general" />);
+    open("About Volley");
+    rerender(
+      <Harness
+        initial="machines"
+        machines={{ machines: {}, hubUp: true, ops: null, focus: "box-a" }}
+      />,
+    );
+    expect(heading()).toHaveTextContent("Machines");
+  });
+
+  it("a second click on the same machine's chip (a new focusSeq) brings Machines back", () => {
+    const machines = { machines: {}, hubUp: true, ops: null, focus: "box-a" };
+    const { rerender } = render(
+      <Harness initial="machines" machines={{ ...machines, focusSeq: 1 }} />,
+    );
+    open("About Volley");
+    expect(heading()).toHaveTextContent("About Volley");
+    rerender(<Harness initial="machines" machines={{ ...machines, focusSeq: 2 }} />);
+    expect(heading()).toHaveTextContent("Machines");
+  });
+
   it("closes on Escape, the close button and a scrim click", () => {
     const onClose = vi.fn();
     render(<Harness onClose={onClose} />);
