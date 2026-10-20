@@ -301,7 +301,7 @@ describe("the live count is never set back by a stale sweep", () => {
       reap: async () => false,
       journal: () => {},
       graceMs: () => 0,
-      now: () => Date.now(),
+      now: () => 0,
     });
     const sweep = sweeper.sweep();
     await new Promise((r) => setImmediate(r));
