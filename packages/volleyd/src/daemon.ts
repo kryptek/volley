@@ -1642,12 +1642,21 @@ export class Daemon {
     const last_seen = new Date(seen ?? this.now()).toISOString();
     if (status !== undefined && OWNER_GONE.has(status.type)) {
       // Not yet stamped: the status was just seen and its rebind is still queued.
-      const away = binding?.gone_at ?? this.now();
+      const away = binding?.gone_at ?? this.wentAwayAt(status.at);
       const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
       const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
       return { agent_id: agent, state, last_seen };
     }
     return { agent_id: agent, ...(attention ?? { state: "working" }), last_seen };
+  }
+
+  /**
+   * When a bound agent went away: its terminal status's own time (a restart replays a long-past
+   * `done` as if fresh), never later than now; now when unknown.
+   */
+  private wentAwayAt(at: string | undefined): number {
+    const t = at !== undefined ? Date.parse(at) : Number.NaN;
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
   }
 
   /** Every agent's registry entry: the coordinator names they carry feed `bindings`. */
@@ -1672,9 +1681,10 @@ export class Daemon {
 
   /**
    * Re-bind coordinator name `name` to its newest live registry entry (`bindOwner`). A new agent
-   * on a name that already had one is a reconnect: journaled `owner_reconnected` in each wave the
-   * name owns (once: a replayed registry after a restart finds it journaled). With no live entry
-   * the binding stays on its last agent, marked away, so its waves read `reconnecting` until
+   * on a name that already had one is a reconnect: journaled `owner_reconnected` in each unfinished
+   * wave the name owns (once: a replayed registry after a restart finds it journaled). With no live
+   * entry the binding stays on its last agent, marked away (it no longer acts for the name), so
+   * its waves read `reconnecting` until
    * `autopilot.reconnect_grace_s` passes. Runs on the queue.
    */
   private async rebind(name: string): Promise<void> {
@@ -1710,8 +1720,11 @@ export class Daemon {
         (left === undefined ||
           (OWNER_GONE.has(left.type) && Date.parse(left.at) < Date.parse(prev.since)));
       for (const [wave, log] of owned) {
+        const waveStatus = log.record.state?.status;
         if (
           prev === undefined ||
+          waveStatus === "complete" ||
+          waveStatus === "stopped" ||
           log.record.owner_agent === next ||
           (provisional && log.record.owner_agent !== prev.agent_id)
         ) {
@@ -1730,13 +1743,11 @@ export class Daemon {
     const status = statuses.get(prev.agent_id) ?? null;
     const away = OWNER_GONE.has(status ?? "");
     const { gone_at, ...binding } = prev;
-    this.bindings.set(name, {
-      ...binding,
-      status,
-      ...(away ? { gone_at: gone_at ?? this.now() } : {}),
-    });
+    const awayAt = gone_at ?? this.wentAwayAt(this.statusOf.get(prev.agent_id)?.at);
+    this.bindings.set(name, { ...binding, status, ...(away ? { gone_at: awayAt } : {}) });
     if (away && gone_at === undefined) {
       const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
+      const left = Math.max(0, grace - (this.now() - awayAt));
       this.reconnectTimers.set(
         name,
         this.time.setTimeout(() => {
@@ -1744,7 +1755,7 @@ export class Daemon {
           for (const [wave, log] of this.waves) {
             if (log.record.state?.owner === name) void this.enqueue(() => this.publishState(wave));
           }
-        }, grace),
+        }, left),
       );
     } else if (!away) {
       this.time.clearTimeout(this.reconnectTimers.get(name));
@@ -2108,7 +2119,8 @@ export class Daemon {
         if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
           const prev = this.statusOf.get(holder)?.type;
           const name = this.namedEntries.get(holder)?.coordinator;
-          // A session carrying a coordinator name keeps its status: `bindOwner` needs it.
+          // A session carrying a coordinator name keeps its status: `bindOwner` needs it. Each
+          // coordinator restart adds one; registry reaping (clearing `namedEntries`) bounds them.
           if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder) && name === undefined) {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);

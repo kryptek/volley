@@ -502,6 +502,19 @@ describe("coordinator names (pure)", () => {
     expect(guardMutation(state, "coordinator-b2", "pause")).toContain("owned by coord-main");
   });
 
+  it("guardMutation: a bound agent that went away no longer acts for the name; the name still does", () => {
+    const state = { wave: "w", owner: "coord-main" };
+    for (const status of ["reaped", "done", "failed"]) {
+      const bindings = new Map([
+        ["coord-main", { agent_id: "coordinator-a1", since: fresh, status }],
+      ]);
+      expect(guardMutation(state, "coordinator-a1", "pause", bindings)).toContain(
+        "owned by coord-main",
+      );
+      expect(guardMutation(state, "coord-main", "pause", bindings)).toBeNull();
+    }
+  });
+
   it("claimVerdict: a bound live agent keeps the name; a binding gone past claim_after_s frees it", () => {
     const base = {
       owner: "coord-main",

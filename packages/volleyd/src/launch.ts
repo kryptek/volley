@@ -111,8 +111,9 @@ export interface LaunchScriptVars {
  * `--mcp-config=<worktree>/.volley/mcp.json`. The `=` form gives the variadic option exactly one
  * value and `--` ends option parsing, so the prompt (last) is never swallowed as a config. The
  * brief is read from `.volley/brief.md` at launch, so it never appears in any argv volleyd
- * builds. It unsets `VOLLEY_COORDINATOR` (a worker is never the coordinator). Identity comes from `.volley/agent.json`; `env` exports (remote hosts) are for tooling
- * that reads env only — the identity file wins. Under a Claude account profile it exports
+ * builds. It unsets `VOLLEY_COORDINATOR` (a worker is never the coordinator). Identity comes
+ * from `.volley/agent.json`; `env` exports (remote hosts) are for tooling that reads env only —
+ * the identity file wins. Under a Claude account profile it exports
  * `CLAUDE_CONFIG_DIR` and unsets every credential variable, so the profile's own login is the one
  * claude uses.
  */

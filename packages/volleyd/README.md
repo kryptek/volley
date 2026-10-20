@@ -747,13 +747,13 @@ with `--owner "$VOLLEY_COORDINATOR"`. The server publishes the name in its regis
 binds each name to the newest live entry carrying it (status not `reaped`/`done`/`failed`): that
 agent may do everything the owner may, any other is refused. When a new agent binds to a name
 that owns waves, volleyd journals `owner_reconnected { owner, agent_id, previous_agent_id }` in
-each of them and re-publishes their state — nothing is claimed, ownership does not move, so one
+each unfinished one and re-publishes their state — nothing is claimed, ownership does not move, so one
 session keeps all its waves across restarts. The wave state's `coordinator.agent_id` is the bound
 agent; when it goes away (terminal status, or its LWT) with no other agent binding the name,
 `coordinator.state` is `reconnecting` for `autopilot.reconnect_grace_s` (default 900), then
 `gone`. Until another agent binds the name, the binding stays on that departed agent id (that is
-what lets the state read `reconnecting`), so its id is still accepted for the name; a reaped
-session cannot send, so this opens nothing. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
+what lets the state read `reconnecting`), but its id is no longer accepted for the name: only the
+name itself, or the next agent to bind it, may act. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
 
 `volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
 is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,

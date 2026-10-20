@@ -48,8 +48,10 @@ export function guardMutation(
   bindings: Bindings = new Map(),
 ): string | null {
   if (state.owner === null || state.owner === by) return null;
-  const bound = bindings.get(state.owner)?.agent_id;
-  if (bound === by) return null;
+  const binding = bindings.get(state.owner);
+  const bound = binding?.agent_id;
+  // A bound agent that went away keeps the binding (for `reconnecting`) but no longer acts.
+  if (bound === by && !GONE.has(binding?.status ?? "")) return null;
   const owner = bound !== undefined ? `${state.owner} (via ${bound})` : state.owner;
   return `wave '${state.wave}' is owned by ${owner}; '${op}' as ${by} is refused (claim it with \`volleyd claim ${state.wave}\` once ${state.owner} is gone)`;
 }
@@ -147,11 +149,11 @@ export function parseRegistryEntry(raw: string): RegistryEntry | null {
 
 /**
  * Who is calling, as a wave owner: the session's coordinator name when its registry entry has
- * one, else its agent id. The session is `VOLLEY_AGENT_ID` when set, else the top-level (no parent) session registered
- * for the caller's cwd (in the caller's namespace, when given) or the closest parent directory of
- * it — newest first among equally close ones — skipping the daemon itself and sessions whose
- * retained status (`statuses`, by agent id) is terminal, since registry entries outlive their
- * sessions (SPEC §6). Else null.
+ * one, else its agent id. The session is `VOLLEY_AGENT_ID` when set, else the top-level (no
+ * parent) session registered for the caller's cwd (in the caller's namespace, when given) or the
+ * closest parent directory of it — newest first among equally close ones — skipping the daemon
+ * itself and sessions whose retained status (`statuses`, by agent id) is terminal, since
+ * registry entries outlive their sessions (SPEC §6). Else null.
  */
 export function detectOwner(
   entries: RegistryEntry[],
@@ -195,8 +197,9 @@ function sessionsIn(
 /**
  * The CLI caller's identity: `--by`/`--owner` flag, else `VOLLEY_AGENT_ID`, else the registry
  * session for the caller's cwd (its coordinator name when it has one; a supervised worker's own
- * id), else `VOLLEY_COORDINATOR`, else null. The exported name comes last: a supervised worker whose shell inherited it is its
- * own session, never the coordinator. `auto` is true when it was detected, not given.
+ * id), else `VOLLEY_COORDINATOR`, else null. The exported name comes last: a supervised worker
+ * whose shell inherited it is its own session, never the coordinator. `auto` is true when it was
+ * detected, not given.
  * `warning` is set when `VOLLEY_AGENT_ID` names an agent with no registry entry, or when
  * `VOLLEY_COORDINATOR` is not in the agent-id grammar (it is then ignored).
  */

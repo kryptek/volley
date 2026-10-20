@@ -206,3 +206,31 @@ describe("a wave owned by a coordinator name", () => {
     expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
   });
 });
+
+describe("a coordinator name across a daemon restart", () => {
+  it("a bound agent that ended long before the restart reads gone at once", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.state).toBe("working"));
+    await daemon.stop();
+    await status("coordinator-a1", "done");
+    clock.sleepHost(3_600_000);
+    daemon = await t.start({ clock });
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+    );
+  });
+
+  it("a reconnect journals nothing in a stopped wave", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.agent_id).toBe("coordinator-a1"));
+    expect((await client.request("stop", { wave: WAVE, by: "coordinator-a1" })).ok).toBe(true);
+    await until(() => expect(daemon.snapshot(WAVE)?.status).toBe("stopped"));
+    await status("coordinator-a1", "reaped");
+    clock.sleepHost(60_000);
+    await registry("coordinator-b2");
+    await until(() => expect(coordinator()?.agent_id).toBe("coordinator-b2"));
+    expect(reconnects()).toHaveLength(0);
+  });
+});
