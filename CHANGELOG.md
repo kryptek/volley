@@ -2,6 +2,15 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- `volleyd steer` to a task between stages no longer goes to the retired agent's mailbox, where it was lost. With no live agent
+  the steer is queued (`steering_queued`), the CLI says so, and the task's next agent (of the `--role`, when given) gets it when
+  it registers, with the same `seq` / `supersedes` chain. `volleyd status` shows `steer queued (n)`; a cancelled or done task,
+  or a stopped wave, drops the queue (`steering_dropped`). `--urgent` with no live agent is an error (SPEC §4.4, §4.6.3). (#179)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a

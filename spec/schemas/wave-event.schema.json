@@ -30,6 +30,8 @@
             "stage_entered",
             "artifact_verified",
             "steering_sent",
+            "steering_queued",
+            "steering_dropped",
             "decision_opened",
             "decision_resolved",
             "lease_requested",
