@@ -279,3 +279,11 @@ describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)"
     }
   });
 });
+
+describe("VOLLEY_COORDINATOR", () => {
+  it("is carried verbatim as the stable coordinator name; unset or blank is none", () => {
+    expect(loadConfig({ VOLLEY_COORDINATOR: "coord-main" }, "/x").coordinator).toBe("coord-main");
+    expect(loadConfig({}, "/x")).not.toHaveProperty("coordinator");
+    expect(loadConfig({ VOLLEY_COORDINATOR: "" }, "/x")).not.toHaveProperty("coordinator");
+  });
+});
