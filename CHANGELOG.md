@@ -12,6 +12,10 @@ All workspace packages share one version. Dates are release-tag dates.
   repeated `agent_stalled` decisions of one idle back off (each waits twice as long, capped by the new
   `stall_backoff_max_s`); the new `background_wait_max_s` bounds how long any of that evidence holds off the nudge, counted
   from the start of the idle (SPEC §4.3, §4.6.4). (#177)
+- `volleyd steer` to a task between stages no longer goes to the retired agent's mailbox, where it was lost. With no live agent
+  the steer is queued (`steering_queued`), the CLI says so, and the task's next agent (of the `--role`, when given) gets it when
+  it registers, with the same `seq` / `supersedes` chain. `volleyd status` shows `steer queued (n)`; a cancelled or done task,
+  or a stopped wave, drops the queue (`steering_dropped`). `--urgent` with no live agent is an error (SPEC §4.4, §4.6.3). (#179)
 
 ## 0.3.1 — 2026-10-20
 

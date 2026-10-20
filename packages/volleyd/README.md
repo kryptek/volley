@@ -133,7 +133,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
-| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's agent; reports `acked`, `received` or `delivered`. |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent; reports `acked`, `received` or `delivered`, or `queued` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
@@ -629,6 +629,21 @@ names the previous steer, so the recipient can drop stale guidance. The steer is
 - `delivered`: neither arrived in time.
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).
+
+A steer never goes to a retired agent (`task.agents` keeps the last agent per role after it is
+retired, and nobody drains its mailbox). When the task has no live agent, between stages or before
+its next agent is up (with `--role`, none in that role), the steer is **queued**: journaled as
+`steering_queued` (same `seq` / `supersedes` numbering), answered at once with
+`delivery: "queued"` and `queued_for` (the role, else `next agent`), with no ack wait. The wave
+state's `tasks[].queued_steers` counts them and `volleyd status` prints `steer queued (n)`. The
+next agent of the task to register (of that role, when one was named) gets every matching queued
+steer in order, with the id and `seq` it was queued with, journaled as `steering_sent` with
+`queued: true`. A steer sent after the next agent is spawned but before it registers goes to it
+directly, so it can arrive ahead of the queued ones; its `seq` is still the higher one, so order
+by `seq`. A task that is cancelled or done, or a wave that stops, drops its queue
+(`steering_dropped { message_ids, reason }`); the journal keeps it across a restart. `urgent` /
+`escape_only` with no live agent is an error (`no live agent to interrupt`), a task that is
+done, cancelled or blocked cannot be steered, and a stopped or complete wave queues nothing.
 
 `urgent: true` interrupts the agent's session (the same interrupt as `stop`: the configured
 hook, else Escape into the spawned agent's workspace) **before** the steering message is published, and the answer adds `interrupted`.

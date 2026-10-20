@@ -211,6 +211,8 @@ export interface TaskState {
     agent_id?: string;
     state: "pending" | "running" | "done" | "retired";
   }[];
+  /** Steers held for the task's next agent (none live when they were sent); absent when 0. */
+  queued_steers?: number;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
   evidence_path?: string;
@@ -286,6 +288,9 @@ export const WAVE_EVENT_TYPES = [
   "stage_entered",
   "artifact_verified",
   "steering_sent",
+  // A steer to a task with no live agent: held for its next agent (or role), or dropped with it.
+  "steering_queued",
+  "steering_dropped",
   "decision_opened",
   "decision_resolved",
   "lease_requested",
