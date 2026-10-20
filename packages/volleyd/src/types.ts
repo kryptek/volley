@@ -128,9 +128,12 @@ export interface Tunables {
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
-  /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16). */
+  /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16), and autopilot merging (SPEC §4.6.17). */
   autopilot: AutopilotConfig;
 }
+
+/** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
+export type MergeMode = "auto" | "manual";
 
 /**
  * Config `autopilot` (SPEC §4.6.16): whether volleyd answers routine decisions itself, the kinds
@@ -152,6 +155,10 @@ export interface AutopilotConfig {
   question_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
   budget_raise_max: number;
+  /** The merge mode for a wave file without `merge:` (SPEC §4.6.17). */
+  merge: MergeMode;
+  /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
+  merge_retry_max: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -257,6 +264,8 @@ export interface Wave {
   /** Machines placement ranks first, and uses only when nothing else is eligible. */
   placement_prefer?: string[];
   placement_avoid?: string[];
+  /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
+  merge?: MergeMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +462,8 @@ export const WAVE_EVENT_TYPES = [
   "ci_green",
   "pr_head_moved",
   "merged_by_operator",
+  // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
+  "merged_by_supervisor",
   "agent_force_retired",
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.

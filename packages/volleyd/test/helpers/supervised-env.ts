@@ -81,6 +81,11 @@ export interface SupervisedEnvOptions {
   tasks?: string[];
   /** The wave's pipeline (default `[implement]`). */
   pipeline?: string;
+  /**
+   * The wave file's `merge:` (default `manual`: a human merges, as these tests' worlds expect;
+   * null: no key, so the `autopilot.merge` tunable decides).
+   */
+  merge?: "auto" | "manual" | null;
   /** Extra top-level wave-file lines (e.g. `spawn_budget: 1`). */
   waveExtra?: string;
   /** How launches end (fake-host.ts `launchOutcome`; default ok). */
@@ -179,7 +184,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   const waveFile = join(env.home, "w1.yaml");
   writeFileSync(
     waveFile,
-    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\n${(o.tasks ?? []).map((t) => `  ${t}\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+    `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.merge === null ? "" : `merge: ${o.merge ?? "manual"}\n`}${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\n${(o.tasks ?? []).map((t) => `  ${t}\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
   const r = await runCli(["run", waveFile], env.env);
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);
@@ -272,7 +277,10 @@ export const ARTIFACTS_OK: NonNullable<SupervisedEnvOptions["exec"]> = [
       ]),
     },
   ],
-  [["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD }) }],
+  [
+    ["gh", "pr", "view"],
+    { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD, baseRefName: "release/w1" }) },
+  ],
 ];
 
 /** The `_system` journal of an env. */
