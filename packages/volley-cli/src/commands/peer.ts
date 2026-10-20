@@ -23,7 +23,7 @@ import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { reloadLaunchd, unloadLaunchd } from "../setup/launchd";
+import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
 
@@ -670,6 +670,11 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
       `${missingToolsFix(redeemed.stderr, target, deps)} Nothing was redeemed: the code is still valid.`,
     );
   }
+  if (redeemed.code === NO_PROBE) {
+    return fail(
+      `${host} could not check ${AGENT_TOOLS.join(", ").replace(/, ([^,]*)$/, " and $1")} on ${target}'s ssh PATH: ${redeemed.stderr.trim()}. Nothing was redeemed: the code is still valid.`,
+    );
+  }
   if (redeemed.code === 127) {
     // The shell found no such command: nothing ran on the host, so the code was not used.
     return fail(
@@ -808,14 +813,17 @@ export function defaultName(hostname: string): string {
 const NO_SSH_BACK = 3;
 /** Exit status of the redeem script when this machine's ssh PATH lacks what agents need. */
 const NO_TOOLS = 4;
+/** Exit status of the redeem script when the PATH check itself failed (ssh worked). */
+const NO_PROBE = 5;
 
 /** What an agent session on this machine runs: Claude Code, bun (its MCP server, hooks), tmux. */
 export const AGENT_TOOLS = ["claude", "bun", "tmux"] as const;
 
 /**
- * Run over the host's ssh to this machine, as volleyd's spawns run: by the login shell, not
- * interactive, so only its non-interactive startup file sets PATH. Prints the missing tools and
- * the login shell's name.
+ * Run over the host's ssh to this machine, as volleyd's spawns run: from the login shell, not
+ * interactive, so only its non-interactive startup file sets PATH. Run through `sh -c` (as
+ * volleyd runs its steps through bash), so a login shell that is not POSIX (fish) still runs it
+ * with its own PATH. Prints the missing tools and the login shell's name.
  */
 const TOOLS_PROBE = `missing=; for c in ${AGENT_TOOLS.join(" ")}; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done; echo "volley-peer-missing:$missing"; echo "volley-peer-shell: \${SHELL##*/}"`;
 
@@ -834,7 +842,10 @@ export function redeemScript(request: RedeemRequest, remoteVolley: string): stri
     `  echo "the supervisor's machine cannot ssh to "${t} >&2`,
     `  exit ${NO_SSH_BACK}`,
     "fi",
-    `tools=$(${ssh} ${sq(TOOLS_PROBE)}) || { echo "the supervisor's machine cannot ssh to "${t} >&2; exit ${NO_SSH_BACK}; }`,
+    `tools=$(${ssh} ${sq(`sh -c ${sq(TOOLS_PROBE)}`)}); rc=$?`,
+    // 255: ssh's own failure. Anything else: ssh worked and the check did not.
+    `if [ "$rc" -eq 255 ]; then echo "the supervisor's machine cannot ssh to "${t} >&2; exit ${NO_SSH_BACK}; fi`,
+    `if [ "$rc" -ne 0 ]; then echo "the PATH check exited $rc" >&2; exit ${NO_PROBE}; fi`,
     `case "$tools" in *"volley-peer-missing: "*) printf '%s\\n' "$tools" >&2; exit ${NO_TOOLS};; esac`,
     `printf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${remoteVolley} peer redeem`,
     "",
@@ -923,13 +934,19 @@ async function installService(
   if (deps.platform === "darwin") {
     const plist = join(deps.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     mkdirSync(dirname(plist), { recursive: true });
-    writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
     // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
-    // user/<uid>. A service from an earlier join is replaced (bootout fails harmlessly).
+    // user/<uid>. A service from an earlier join is replaced, and put back when the new plist
+    // will not load, so a failed re-join never leaves this machine without its tunnel.
     // Each bootout is waited out (setup/launchd.ts): a bootstrap while launchd is still letting
     // the old job go fails with EIO.
     const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
     const ld = { exec: (argv: string[]) => deps.exec(argv), sleep: (ms: number) => deps.sleep(ms) };
+    const previous = existsSync(plist) ? readFileSync(plist, "utf-8") : null;
+    let wasIn: string | undefined;
+    for (const d of domains) {
+      if (wasIn === undefined && (await isLoaded(ld, `${d}/${LAUNCHD_LABEL}`))) wasIn = d;
+    }
+    writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
     for (const d of domains) await unloadLaunchd(ld, d, LAUNCHD_LABEL);
     const errors: string[] = [];
     for (const domain of domains) {
@@ -937,7 +954,16 @@ async function installService(
       if (r.ok) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
       errors.push(`${domain}: ${r.error}`);
     }
-    return { ok: false, error: `launchctl bootstrap failed (${errors.join("; ")})` };
+    const failed = `launchctl bootstrap failed (${errors.join("; ")})`;
+    if (previous === null || wasIn === undefined) return { ok: false, error: failed };
+    writeFileSync(plist, previous);
+    const back = await reloadLaunchd(ld, wasIn, LAUNCHD_LABEL, plist);
+    return {
+      ok: false,
+      error: back.ok
+        ? `${failed}. Restored the previous ${plist} and loaded it again (domain ${wasIn}), so the tunnel service is up.`
+        : `${failed}. Restored the previous ${plist}, but it did not load either (${back.error}): the tunnel is down until \`launchctl bootstrap ${wasIn} ${plist}\` succeeds.`,
+    };
   }
   return {
     ok: false,

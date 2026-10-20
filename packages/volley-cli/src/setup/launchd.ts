@@ -53,9 +53,11 @@ export async function reloadLaunchd(
   for (let i = 0; i < LAUNCHD_RELOAD.bootstrap_attempts; i++) {
     last = await d.exec(["launchctl", "bootstrap", domain, plist]);
     if (last.code === 0) return { ok: true };
-    if (!isBusy(last)) break;
+    // EIO is also launchctl's catch-all (bad permissions, a disabled service): retry only while
+    // the old job is still there, the race this loop exists for.
+    if (!isBusy(last) || !(await isLoaded(d, `${domain}/${label}`))) break;
+    if (i === LAUNCHD_RELOAD.bootstrap_attempts - 1) break;
     await d.sleep(LAUNCHD_RELOAD.retry_ms);
-    // Still loaded (the bootout had not landed): unload again before the next try.
     await unloadLaunchd(d, domain, label);
   }
   return {

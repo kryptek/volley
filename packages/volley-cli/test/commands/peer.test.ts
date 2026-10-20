@@ -7,11 +7,12 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -373,6 +374,40 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stdout).toContain("(domain gui/501)");
   });
 
+  it("a re-join whose new plist will not load puts the previous one back, loads it, and says so", async () => {
+    const plist = join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+    mkdirSync(dirname(plist), { recursive: true });
+    writeFileSync(plist, "<plist>previous</plist>");
+    let loaded = true;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") return { code: gui && loaded ? 0 : 113 };
+      if (c.argv[1] === "bootout") {
+        loaded = false;
+        return {};
+      }
+      if (c.argv[1] === "bootstrap") {
+        // launchd refuses the new plist anywhere, and takes the previous one back.
+        if (readFileSync(plist, "utf-8") !== "<plist>previous</plist>") {
+          return { code: 1, stderr: "Bootstrap failed: 122: Path had bad ownership/permissions" };
+        }
+        loaded = gui;
+        return {};
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).not.toBe(0);
+    expect(readFileSync(plist, "utf-8")).toBe("<plist>previous</plist>");
+    expect(loaded).toBe(true);
+    expect(r.stderr).toContain("bad ownership/permissions");
+    expect(r.stderr).toContain("Restored the previous");
+  });
+
   it("on a Mac with nobody at the console, falls back to the user/<uid> domain and says so", async () => {
     const f = fakeExec((c) =>
       c.argv[0] === "launchctl" && c.argv[1] === "bootstrap" && c.argv[2] === "gui/501"
@@ -457,8 +492,10 @@ describe("volley peer join (on the machine to pair)", () => {
       mkdirSync(join(box, "tools"));
       write(
         join(box, "bin", "ssh"),
-        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/bin/zsh /bin/sh -c "$*"\n',
+        // The login shell is fish, which cannot parse POSIX `for … do`: only `sh -c` gets through.
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\ncase "$*" in true|"sh -c "*) ;; *) echo "fish: Unknown command" >&2; exit 127;; esac\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/usr/bin/fish /bin/sh -c "$*"\n',
       );
+      symlinkSync("/bin/sh", join(box, "tools", "sh"));
       write(join(box, "tools", "bun"), "#!/bin/sh\n");
       write(join(box, "tools", "tmux"), "#!/bin/sh\n");
       write(join(box, "volley"), `#!/bin/sh\ntouch ${join(box, "redeemed")}\n`);
@@ -473,7 +510,7 @@ describe("volley peer join (on the machine to pair)", () => {
       });
       expect(r.status).toBe(4);
       expect(r.stderr).toContain("volley-peer-missing: claude");
-      expect(r.stderr).toContain("volley-peer-shell: zsh");
+      expect(r.stderr).toContain("volley-peer-shell: fish");
       expect(existsSync(join(box, "redeemed"))).toBe(false);
       // With claude there too, the code is redeemed.
       write(join(box, "tools", "claude"), "#!/bin/sh\n");
@@ -487,6 +524,20 @@ describe("volley peer join (on the machine to pair)", () => {
     } finally {
       rmSync(box, { recursive: true, force: true });
     }
+  });
+
+  it("a PATH check that fails on its own is not reported as the host failing to ssh", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 5, stderr: "sh: 1: Syntax error: end of file unexpected\n" }),
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("cannot ssh to");
+    expect(r.stderr).toContain(
+      "dev@host could not check claude, bun and tmux on dev@Box-A.lan's ssh PATH",
+    );
+    expect(r.stderr).toContain("Syntax error");
+    expect(r.stderr).toContain("the code is still valid");
   });
 
   it("names the missing tools and the exact line for the login shell's file", async () => {

@@ -5,7 +5,9 @@ import { LAUNCHD_RELOAD, type LaunchdDeps, reloadLaunchd } from "../../src/setup
  * A launchd whose bootout is asynchronous, like the real one: the job stays loaded for
  * `teardown` more `print`s after a bootout, and a bootstrap meanwhile fails with EIO.
  */
-function fakeLaunchd(opts: { loaded?: boolean; teardown?: number; refuse?: string } = {}) {
+function fakeLaunchd(
+  opts: { loaded?: boolean; teardown?: number; refuse?: string; refuseCode?: number } = {},
+) {
   let loaded = opts.loaded ?? false;
   let goingAway = 0;
   const calls: string[] = [];
@@ -25,7 +27,9 @@ function fakeLaunchd(opts: { loaded?: boolean; teardown?: number; refuse?: strin
         if (goingAway === 0) loaded = false;
         return { code: 0, stdout: "", stderr: "" };
       }
-      if (opts.refuse !== undefined) return { code: 1, stdout: "", stderr: opts.refuse };
+      if (opts.refuse !== undefined) {
+        return { code: opts.refuseCode ?? 1, stdout: "", stderr: opts.refuse };
+      }
       if (loaded) return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
       loaded = true;
       return { code: 0, stdout: "", stderr: "" };
@@ -71,5 +75,26 @@ describe("launchd reload", () => {
     });
     // Not EIO: no point retrying.
     expect(f.calls.filter((c) => c === "bootstrap")).toHaveLength(1);
+  });
+
+  it("does not retry an EIO once nothing is loaded (launchctl's catch-all, not the race)", async () => {
+    const f = fakeLaunchd({ refuse: "Bootstrap failed: 5: Input/output error", refuseCode: 5 });
+    const r = await reloadLaunchd(f.d, "gui/501", "x", "/p/x.plist");
+    expect(r.ok).toBe(false);
+    expect(f.calls.filter((c) => c === "bootstrap")).toHaveLength(1);
+    expect(f.slept()).toBe(0);
+  });
+
+  it("does not sleep after its last attempt", async () => {
+    // Never torn down: every bootstrap meets the old job.
+    const f = fakeLaunchd({ loaded: true, teardown: 1_000_000 });
+    const r = await reloadLaunchd(f.d, "gui/501", "x", "/p/x.plist");
+    expect(r.ok).toBe(false);
+    const n = LAUNCHD_RELOAD.bootstrap_attempts;
+    expect(f.calls.filter((c) => c === "bootstrap")).toHaveLength(n);
+    const unloads = n; // the first unload, then one before each retry
+    expect(f.slept()).toBe(
+      unloads * LAUNCHD_RELOAD.unload_wait_ms + (n - 1) * LAUNCHD_RELOAD.retry_ms,
+    );
   });
 });
