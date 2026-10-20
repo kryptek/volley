@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,6 +8,7 @@ import { findOverlaps, parseFilesSection } from "../src/overlap";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { flushMicrotasks } from "./helpers/fake-clock";
+import { tempDir } from "./helpers/tmp";
 
 const body = (name: string) =>
   readFileSync(
@@ -105,7 +105,7 @@ tasks:
 
   beforeEach(async () => {
     broker = await startTestBroker();
-    home = mkdtempSync(join(tmpdir(), "volleyd-overlap-"));
+    home = tempDir("volleyd-overlap-");
     daemon = await Daemon.start({
       brokerUrl: broker.url,
       namespace: NS,
@@ -122,7 +122,6 @@ tasks:
     await client.close();
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   it("journals one overlap warning and returns a line for the run output", async () => {

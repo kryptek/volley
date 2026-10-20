@@ -1,10 +1,10 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { Journal, WaveLog, readJournalFile } from "../src/journal";
 import { replay } from "../src/reducer";
 import type { JournalEvent, NewEvent } from "../src/types";
+import { tempDir } from "./helpers/tmp";
 
 const fixture: JournalEvent[] = readFileSync(
   new URL("./fixtures/journal.jsonl", import.meta.url),
@@ -25,10 +25,7 @@ const fresh: NewEvent[] = fixture.map(({ seq: _s, at, ...rest }) => ({ ...rest, 
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "volleyd-journal-"));
-});
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  dir = tempDir("volleyd-journal-");
 });
 
 describe("Journal", () => {

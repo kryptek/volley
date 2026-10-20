@@ -1,14 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { BRIEF_TITLE_MAX, briefTitle } from "../scripts/brief-title";
+import { tempDirForAll } from "./helpers/tmp";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/brief-title.ts", import.meta.url));
-const tmp = mkdtempSync(join(tmpdir(), "brief-title-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = tempDirForAll("volley-brief-title-");
 
 /** Run the helper the way SKILL.md does: the raw title on stdin, never on the command line. */
 function run(args: string[], stdin: string): { code: number | null; out: string; err: string } {
@@ -105,20 +104,20 @@ describe("brief-title.ts (CLI)", () => {
     // The same shape as SKILL.md's cmux line: a double-quoted --command whose
     // value holds a single-quoted prompt, plus a double-quoted --name.
     const shell = `printf '%s|' "Issue-9: ${title}"; bash -c "printf '%s' 'prefix title=\\"${title}\\" suffix'"`;
-    const sh = spawnSync("bash", ["-c", shell], { cwd: tmp, encoding: "utf-8" });
+    const sh = spawnSync("bash", ["-c", shell], { cwd: tmp(), encoding: "utf-8" });
     expect(sh.status).toBe(0);
     expect(sh.stdout).toBe(`Issue-9: ${title}|prefix title="${title}" suffix`);
     expect(title).toBe(
       `#9 cant quote touch ${marker} (touch ${marker}) {HOME} backslash next line — implementer`,
     );
-    expect(existsSync(join(tmp, marker))).toBe(false);
+    expect(existsSync(join(tmp(), marker))).toBe(false);
   });
 
   it("control: the same shell line with the RAW title does run the injected command", () => {
     const marker = "control-marker";
     const raw = `can't $(touch ${marker})`;
     const shell = `bash -c "printf '%s' 'prefix ${raw} suffix'"`;
-    spawnSync("bash", ["-c", shell], { cwd: tmp, encoding: "utf-8" });
-    expect(existsSync(join(tmp, marker))).toBe(true);
+    spawnSync("bash", ["-c", shell], { cwd: tmp(), encoding: "utf-8" });
+    expect(existsSync(join(tmp(), marker))).toBe(true);
   });
 });

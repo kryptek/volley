@@ -2,14 +2,12 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "../../src/auth/config";
@@ -20,6 +18,7 @@ import { makeBufferIO } from "../../src/io";
 import { encodeQr, renderQr } from "../../src/setup/qr";
 import { type TestDeps, fakeDeps } from "../helpers/auth-deps";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
+import { tempDir } from "../helpers/tmp";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
@@ -29,7 +28,7 @@ describe("volley auth", () => {
   let layout: Layout;
   let authDir: string;
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-auth-cli-"));
+    dir = tempDir("volley-auth-cli-");
     fake = await startFakeDynsec();
     authDir = join(dir, "auth");
     layout = {
@@ -41,7 +40,6 @@ describe("volley auth", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const run = async (

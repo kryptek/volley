@@ -1,13 +1,4 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "../../src/auth/config";
@@ -16,6 +7,7 @@ import { auth } from "../../src/commands/auth";
 import { makeBufferIO } from "../../src/io";
 import { type TestDeps, fakeDeps } from "../helpers/auth-deps";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
+import { tempDir } from "../helpers/tmp";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const AGENTS = ["w1-t1-implementer-1", "w1-t2-reviewer-1"];
@@ -31,7 +23,7 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     join(worktrees, "w1", id.replace(/^w1-/, "").replace(/-1$/, ""), ".volley", "agent.json");
 
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-migrate-"));
+    dir = tempDir("volley-migrate-");
     fake = await startFakeDynsec();
     authDir = join(dir, "etc", "volley");
     worktrees = join(dir, "worktrees");
@@ -111,7 +103,6 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const run = async (argv: string[], deps: TestDeps) => {

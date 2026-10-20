@@ -1,6 +1,5 @@
 import { constants, generateKeyPairSync, privateDecrypt, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -16,6 +15,7 @@ import type { NewEvent, RemoteHostConfig } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { type DaemonEnv, NO_PRESSURE, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
+import { tempDir } from "./helpers/tmp";
 
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const REPLY_KEY = publicKey.export({ format: "jwk" });
@@ -121,7 +121,7 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
   });
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "volleyd-peers-"));
+    dir = tempDir("volleyd-peers-");
     auth = fakeAuth();
     now = Date.parse("2026-10-19T09:00:00.000Z");
     hosts = {};
@@ -131,7 +131,6 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
     machines = [];
     peers = make();
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("codes are XXXX-XXXX; normalisation accepts lower case and a missing dash", () => {
     expect(isPairingCode("ABCD-EF23")).toBe(true);
@@ -416,7 +415,7 @@ describe("peer admin ops on the account-op topic (SPEC §4.6.14)", () => {
       users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
       canPublish,
     });
-    home = mkdtempSync(join(tmpdir(), "volleyd-peer-ops-"));
+    home = tempDir("volleyd-peer-ops-");
     auth = fakeAuth();
     auth.accounts.set("steer-1", "steer");
     daemon = await Daemon.start({
@@ -438,7 +437,6 @@ describe("peer admin ops on the account-op topic (SPEC §4.6.14)", () => {
     }
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   /** One request as `user` on `topic`, answered on the account-op reply topic (or null). */

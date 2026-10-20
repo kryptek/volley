@@ -1,7 +1,6 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -13,6 +12,7 @@ import {
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
+import { tempDirForAll } from "./helpers/tmp";
 
 /** The one local argv a remote command runs as. */
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
@@ -617,11 +617,12 @@ describe("renderRemoteScript", () => {
 });
 
 describe("exec + the remote fence", () => {
+  const tmp = tempDirForAll("volleyd-remote-fence-");
   let dir: string;
   let marker: string;
   let env: Record<string, string>;
   beforeAll(() => {
-    dir = mkdtempSync(join(tmpdir(), "volleyd-remote-fence-"));
+    dir = tmp();
     marker = join(dir, "ssh-ran");
     // A stand-in `ssh` on PATH: records that it ran and the script it was given on stdin.
     const fake = join(dir, "ssh");
@@ -629,7 +630,6 @@ describe("exec + the remote fence", () => {
     chmodSync(fake, 0o755);
     env = { PATH: `${dir}:/usr/bin:/bin` };
   });
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
   // Each case starts with no record of ssh running (an allowed script leaves one behind).
   beforeEach(() => rmSync(marker, { force: true }));
 

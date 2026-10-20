@@ -1,13 +1,4 @@
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import type { ConsentToken } from "../../src/fence";
@@ -18,6 +9,7 @@ import type { AgentWatch, SignalState } from "../../src/verify";
 import { parseWaveFile } from "../../src/wave-file";
 import { type MemoryCredentials, memoryCredentials } from "./fake-dynsec";
 import { type FakeExec, fakeExec } from "./fake-exec";
+import { tempDir } from "./tmp";
 
 export interface FakeHost extends Host {
   fake: FakeExec;
@@ -157,13 +149,14 @@ export interface SpawnEnv {
   request: (over?: Partial<SpawnRequest>) => SpawnRequest;
   /** The worktree a T1 implementer spawn uses. */
   worktree: string;
+  /** @deprecated Nothing to release: the dir is a tempDir, removed when the test ends. */
   cleanup: () => Promise<void>;
 }
 
 export const FIXTURES = new URL("../fixtures/", import.meta.url).pathname;
 
 export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-spawn-")));
+  const dir = realpathSync(tempDir("volleyd-spawn-"));
   const home = join(dir, "home");
   const repo = join(dir, "repo");
   mkdirSync(home, { recursive: true });
@@ -251,6 +244,6 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     creds,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),
     worktree: join(dir, "wt", "w1", "T1-implementer"),
-    cleanup: async () => rmSync(dir, { recursive: true, force: true }),
+    cleanup: async () => {},
   };
 }

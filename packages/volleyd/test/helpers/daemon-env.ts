@@ -1,9 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { Daemon, type DaemonOptions, type PressureSource } from "../../src/daemon";
 import { type TestBroker, startTestBroker } from "./aedes-broker";
+import { tempDir } from "./tmp";
 
 export const NS = "volleyd-test";
 
@@ -37,7 +35,7 @@ export interface DaemonEnv {
 
 export async function makeDaemonEnv(): Promise<DaemonEnv> {
   const broker = await startTestBroker();
-  const home = mkdtempSync(join(tmpdir(), "volleyd-home-"));
+  const home = tempDir("volleyd-home-");
   const daemons: Daemon[] = [];
   const options = (extra: Partial<DaemonOptions> = {}): DaemonOptions => ({
     brokerUrl: broker.url,
@@ -73,7 +71,6 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
       for (const d of daemons) await d.stop().catch(() => {});
       await reader.disconnect();
       await broker.close();
-      rmSync(home, { recursive: true, force: true });
     },
   };
 }

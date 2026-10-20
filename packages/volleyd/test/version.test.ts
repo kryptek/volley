@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DynsecSession,
@@ -18,6 +15,7 @@ import { DynsecControl, brokerControl } from "../src/dynsec";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { type FakeDynsec, startFakeDynsec } from "./helpers/fake-dynsec";
+import { tempDir } from "./helpers/tmp";
 
 describe("volleyd refuses a broker older than 2.1 (control-connection open)", () => {
   let fake: FakeDynsec;
@@ -80,11 +78,10 @@ describe("Daemon.start with a dynsec admin login", () => {
   let fake: FakeDynsec;
   let home: string;
   beforeEach(async () => {
-    home = mkdtempSync(join(tmpdir(), "volleyd-version-"));
+    home = tempDir("volleyd-version-");
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   async function bootstrap(): Promise<void> {

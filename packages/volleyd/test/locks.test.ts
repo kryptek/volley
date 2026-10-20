@@ -1,7 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   type AgentProbe,
   type LockInfo,
@@ -11,6 +9,7 @@ import {
   readLock,
 } from "../src/locks";
 import { SpawnError } from "../src/spawn-error";
+import { tempDir } from "./helpers/tmp";
 
 const MIN = 60_000;
 const DEAD_PID = 2 ** 22 + 12345; // above any default pid_max
@@ -102,9 +101,8 @@ describe("acquireLock", () => {
   const wt = "/wt/w1/T1-implementer";
   const opts = { staleAfterMs: 10 * MIN };
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "volleyd-locks-"));
+    home = tempDir("volleyd-locks-");
   });
-  afterEach(() => rmSync(home, { recursive: true, force: true }));
 
   it("creates the lock exclusively with {wave, task, role, attempt, pid, at}", async () => {
     const lock = await acquireLock(lockPath(home, wt), info(), probe(null), opts);

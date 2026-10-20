@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -11,6 +10,7 @@ import {
   settleWorkLog,
   toolSummary,
 } from "../src/lib/work-log";
+import { tempDir } from "./helpers/tmp";
 
 describe("redactSecrets", () => {
   it.each([
@@ -103,7 +103,7 @@ describe("toolSummary", () => {
 });
 
 describe("recordActivity (work-log.json)", () => {
-  const stateDir = () => mkdtempSync(join(tmpdir(), "volley-hooks-worklog-"));
+  const stateDir = () => tempDir("volley-hooks-worklog-");
 
   it("publishes the first tick, rate-limits the next 5 s as pending (newest wins), then publishes again", async () => {
     const dir = stateDir();

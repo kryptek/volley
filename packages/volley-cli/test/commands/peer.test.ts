@@ -1,17 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { constants, type JsonWebKeyInput, createPublicKey, publicEncrypt } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -37,6 +27,7 @@ import {
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
+import { tempDir } from "../helpers/tmp";
 
 const NS = "test";
 
@@ -139,11 +130,10 @@ let tb: TestBroker;
 let home: string;
 beforeEach(async () => {
   tb = await startTestBroker();
-  home = mkdtempSync(join(tmpdir(), "volley-peer-home-"));
+  home = tempDir("volley-peer-home-");
 });
 afterEach(async () => {
   await tb.close();
-  rmSync(home, { recursive: true, force: true });
 });
 
 function deps(exec: PeerExec, over: Partial<PeerDeps> = {}): PeerDeps {
@@ -482,53 +472,49 @@ describe("volley peer join (on the machine to pair)", () => {
   it("checks claude, bun and tmux on this machine's non-interactive ssh PATH before redeeming", () => {
     // Run the real script under bash: a stub `ssh` runs its command with a PATH that has bun
     // and tmux but no claude, as a zsh login shell without ~/.zshenv would.
-    const box = mkdtempSync(join(tmpdir(), "volley-peer-redeem-"));
-    try {
-      const write = (p: string, text: string) => {
-        writeFileSync(p, text);
-        chmodSync(p, 0o755);
-      };
-      mkdirSync(join(box, "bin"));
-      mkdirSync(join(box, "tools"));
-      write(
-        join(box, "bin", "ssh"),
-        // The login shell is fish, which cannot parse POSIX `for … do`: only `sh -c` gets through.
-        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\ncase "$*" in true|"sh -c "*) ;; *) echo "fish: Unknown command" >&2; exit 127;; esac\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/usr/bin/fish /bin/sh -c "$*"\n',
-      );
-      symlinkSync("/bin/sh", join(box, "tools", "sh"));
-      write(join(box, "tools", "bun"), "#!/bin/sh\n");
-      write(join(box, "tools", "tmux"), "#!/bin/sh\n");
-      // Like `volley peer redeem`, it reads the whole request from stdin (a stub that does not
-      // could exit first, and base64 then dies of SIGPIPE: exit 141 under pipefail).
-      write(join(box, "volley"), `#!/bin/sh\ncat > ${join(box, "redeemed")}\n`);
-      const script = redeemScript(
-        { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
-        join(box, "volley"),
-      );
-      const r = spawnSync("bash", ["-s"], {
-        input: script,
-        encoding: "utf-8",
-        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
-      });
-      expect(r.status).toBe(4);
-      expect(r.stderr).toContain("volley-peer-missing: claude");
-      expect(r.stderr).toContain("volley-peer-shell: fish");
-      expect(existsSync(join(box, "redeemed"))).toBe(false);
-      // With claude there too, the code is redeemed.
-      write(join(box, "tools", "claude"), "#!/bin/sh\n");
-      const ok = spawnSync("bash", ["-s"], {
-        input: script,
-        encoding: "utf-8",
-        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
-      });
-      expect(ok.status, ok.stderr).toBe(0);
-      expect(JSON.parse(readFileSync(join(box, "redeemed"), "utf-8"))).toMatchObject({
-        code: "ABCD-EFGH",
-        target: "dev@box-a",
-      });
-    } finally {
-      rmSync(box, { recursive: true, force: true });
-    }
+    const box = tempDir("volley-peer-redeem-");
+    const write = (p: string, text: string) => {
+      writeFileSync(p, text);
+      chmodSync(p, 0o755);
+    };
+    mkdirSync(join(box, "bin"));
+    mkdirSync(join(box, "tools"));
+    write(
+      join(box, "bin", "ssh"),
+      // The login shell is fish, which cannot parse POSIX `for … do`: only `sh -c` gets through.
+      '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\ncase "$*" in true|"sh -c "*) ;; *) echo "fish: Unknown command" >&2; exit 127;; esac\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/usr/bin/fish /bin/sh -c "$*"\n',
+    );
+    symlinkSync("/bin/sh", join(box, "tools", "sh"));
+    write(join(box, "tools", "bun"), "#!/bin/sh\n");
+    write(join(box, "tools", "tmux"), "#!/bin/sh\n");
+    // Like `volley peer redeem`, it reads the whole request from stdin (a stub that does not
+    // could exit first, and base64 then dies of SIGPIPE: exit 141 under pipefail).
+    write(join(box, "volley"), `#!/bin/sh\ncat > ${join(box, "redeemed")}\n`);
+    const script = redeemScript(
+      { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+      join(box, "volley"),
+    );
+    const r = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+    });
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain("volley-peer-missing: claude");
+    expect(r.stderr).toContain("volley-peer-shell: fish");
+    expect(existsSync(join(box, "redeemed"))).toBe(false);
+    // With claude there too, the code is redeemed.
+    write(join(box, "tools", "claude"), "#!/bin/sh\n");
+    const ok = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+    });
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(box, "redeemed"), "utf-8"))).toMatchObject({
+      code: "ABCD-EFGH",
+      target: "dev@box-a",
+    });
   });
 
   it("a PATH check that fails on its own is not reported as the host failing to ssh", async () => {

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,6 +15,7 @@ import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const EXAMPLE = fileURLToPath(new URL("./fixtures/example.yaml", import.meta.url));
 const WAVE = "2026-10-20-example";
@@ -132,16 +132,12 @@ describe("volleyd daemon + control channel", () => {
 
   it("refuses a second daemon on another home while one is live on the broker", async () => {
     await t.start();
-    const other = mkdtempSync(join(tmpdir(), "volleyd-home2-"));
-    try {
-      await expect(Daemon.start(t.options({ home: other }))).rejects.toThrow(
-        /already running \(retained/,
-      );
-      // The refused daemon did not take over the live one's session.
-      expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
-    } finally {
-      rmSync(other, { recursive: true, force: true });
-    }
+    const other = tempDir("volleyd-home2-");
+    await expect(Daemon.start(t.options({ home: other }))).rejects.toThrow(
+      /already running \(retained/,
+    );
+    // The refused daemon did not take over the live one's session.
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
   });
 
   it("replaces a stale home lock left by a dead process", async () => {

@@ -1,13 +1,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { BROKER_FILE } from "../../src/broker-auth";
 import { ControlClient } from "../../src/control";
+import { tempDir } from "../helpers/tmp";
 
 /**
  * `volleyd daemon` against real mosquitto 2.1 with `allow_anonymous false` and Volley's shared
@@ -59,12 +59,7 @@ function startDaemon(home: string, extraEnv: Record<string, string> = {}): Run {
 
 describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", () => {
   let observer: VolleyBroker;
-  const homes: string[] = [];
-  const newHome = () => {
-    const h = mkdtempSync(join(tmpdir(), "volleyd-auth-it-"));
-    homes.push(h);
-    return h;
-  };
+  const newHome = () => tempDir("volleyd-auth-it-");
 
   const status = async (): Promise<string | null> => {
     const raw = await observer.queryRetained(`volley/${NS}/volleyd/status`, 500);
@@ -89,7 +84,6 @@ describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", (
       }
       await observer.disconnect();
     }
-    for (const h of homes) rmSync(h, { recursive: true, force: true });
   });
 
   it("without credentials it exits 1 with AUTH_FAILED", async () => {

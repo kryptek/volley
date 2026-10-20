@@ -1,14 +1,5 @@
 import { constants, generateKeyPairSync, privateDecrypt, randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "volley-cli/auth/config";
@@ -36,6 +27,7 @@ import { NO_PRESSURE } from "./helpers/daemon-env";
 import { type FakeDynsec, startFakeDynsec } from "./helpers/fake-dynsec";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const NS = "setup-ops-test";
 const pw = (u: string) => `${u}-pw`;
@@ -240,7 +232,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     fake = await startFakeDynsec({ version: "2.1.2" });
     platform = "darwin";
     present = new Set();
-    root = mkdtempSync(join(tmpdir(), "volleyd-setup-ops-"));
+    root = tempDir("volleyd-setup-ops-");
     m = machine(root);
     secured(m, fake);
   });
@@ -250,7 +242,6 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     daemon = undefined;
     await fake.close();
     await broker.close();
-    rmSync(root, { recursive: true, force: true });
   });
 
   /** The setup ops as the daemon builds them, without the daemon (no MQTT in between). */

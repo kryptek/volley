@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { type Server, type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,7 @@ import {
 } from "../src/lib/identity";
 import { startTestBroker } from "./helpers/aedes-broker";
 import { HOOK_NAMES, fixture, hookEnv, makeWorkdir, runHook } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 /** A TCP listener standing in for the broker: it only counts connection attempts. */
 let server: Server;
@@ -190,7 +191,7 @@ describe("coordinator identity", () => {
   });
   const setup = () => {
     const dir = makeWorkdir();
-    const env = { VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")) };
+    const env = { VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-") };
     return { dir, env };
   };
 
@@ -282,7 +283,7 @@ describe("coordinator identity", () => {
       const env = {
         VOLLEY_HOOKS_COORDINATOR: "1",
         VOLLEY_BROKER_URL: broker.url,
-        VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+        VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
       };
       for (let i = 0; i < 2; i++) {
         const run = await runHook("post-tool-use", fixture("post-tool-use.json", dir), {

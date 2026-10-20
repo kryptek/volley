@@ -1,5 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -18,6 +17,7 @@ import {
   runHook,
   tick,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const NS = "ns";
@@ -238,7 +238,7 @@ describe("session-start workspace_title (coordinator registry only)", () => {
     env = {
       VOLLEY_HOOKS_COORDINATOR: "1",
       VOLLEY_BROKER_URL: broker.url,
-      VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
     };
     await publishRegistry(client, COORD, "default", {
       capabilities: [],
@@ -264,7 +264,7 @@ describe("session-start workspace_title (coordinator registry only)", () => {
   });
 
   it("else asks cmux list-workspaces for the session's workspace title", async () => {
-    const bin = join(mkdtempSync(join(tmpdir(), "volley-hooks-cmux-")), "cmux");
+    const bin = join(tempDir("volley-hooks-cmux-"), "cmux");
     const list = JSON.stringify({
       workspaces: [
         { ref: "workspace:1", id: "aaaa-1", index: 0, title: "other", selected: false },
@@ -290,7 +290,7 @@ esac
   });
 
   it("with the real cmux shape, the prompt fields never reach any published message", async () => {
-    const bin = join(mkdtempSync(join(tmpdir(), "volley-hooks-cmux-")), "cmux");
+    const bin = join(tempDir("volley-hooks-cmux-"), "cmux");
     const list = join(__dirname, "fixtures", "cmux-list-workspaces.json");
     writeFileSync(
       bin,

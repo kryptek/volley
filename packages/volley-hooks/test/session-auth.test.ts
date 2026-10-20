@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -25,6 +24,7 @@ import {
   runHook,
   tick,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const NS = "ns";
@@ -138,13 +138,13 @@ describe("hooks against an authenticating broker — refused", () => {
   it("anonymous (no broker block, no env) rejects with AUTH_FAILED", async () => {
     const dir = makeWorkdir({ agent_id: AGENT, namespace: NS, broker_url: broker.url });
     await rejectsAuth(openSession(agentIdentity(dir), "Stop", {}));
-    const authDir = mkdtempSync(join(tmpdir(), "volley-hooks-noauth-"));
+    const authDir = tempDir("volley-hooks-noauth-");
     mkdirSync(authDir, { recursive: true });
     await rejectsAuth(lookupRegistry(broker.url, makeWorkdir(), { VOLLEY_AUTH_DIR: authDir }));
   });
 
   it("coordinator lookup uses $VOLLEY_AUTH_DIR/coordinator.json", async () => {
-    const authDir = mkdtempSync(join(tmpdir(), "volley-hooks-authdir-"));
+    const authDir = tempDir("volley-hooks-authdir-");
     writeFileSync(
       join(authDir, "coordinator.json"),
       JSON.stringify({ username: AGENT, password: PASSWORD }),

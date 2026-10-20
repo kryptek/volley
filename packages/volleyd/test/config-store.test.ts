@@ -1,12 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-defaults";
 import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
 import { Journal, readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
 import { envelope, schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 let home: string;
 const now = () => new Date("2026-10-18T12:00:00.000Z");
@@ -14,10 +14,7 @@ const open = () =>
   ConfigStore.load({ home, system: Journal.open(join(home, "waves", SYSTEM_WAVE)), now });
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-config-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-config-");
 });
 
 describe("volleydHome", () => {

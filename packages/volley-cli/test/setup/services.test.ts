@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -10,7 +9,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -24,6 +22,7 @@ import {
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HOOKED_SETTINGS, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 /** The change that puts `volley` and `volleyd` on a PATH (volleyd runs `volley auth`). */
 const LINK_SUMMARY = (m: FakeMachine) =>
@@ -51,12 +50,11 @@ describe("setup: services", () => {
     return out;
   };
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-services-"));
+    dir = tempDir("volley-setup-services-");
     fake = await startFakeDynsec();
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   describe("macOS (launchd)", () => {
