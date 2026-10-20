@@ -2921,7 +2921,8 @@ export class Daemon {
   /**
    * Why machine `host` should not take a respawn now: closed to new agents (draining, being
    * removed, removed: `closed`), down, or not eligible (readiness and placement's filter); null
-   * when it may.
+   * when it may. The own machine is judged as a candidate like any (`local_agents: always`):
+   * its `fleet.local_agents` mode steers where new work goes, it is no trouble with the machine.
    */
   private hostTrouble(host: string): { why: string; closed: boolean } | null {
     const closed = this.closedMachine(host);
@@ -2936,12 +2937,14 @@ export class Daemon {
     const cfg = this.config.effective();
     const local = this.config.localName();
     if (host !== local && !Object.hasOwn(cfg.hosts, host)) return null;
+    const eff: Tunables =
+      host === local ? { ...cfg, fleet: { ...cfg.fleet, local_agents: "always" } } : cfg;
     const v = this.machineState(
       host,
       host === local,
       cfg,
       this.requirementsExtra(),
-      cfg,
+      eff,
       this.pressure(GLOBAL),
     ).verdict;
     return v.eligible

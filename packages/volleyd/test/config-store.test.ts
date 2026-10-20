@@ -513,6 +513,23 @@ describe("fleet.local_agents and lease_pools.<pool>.per_machine_overrides (SPEC 
     });
   });
 
+  it("the supervisor's machine name set explicitly wins over `local` (what the Desk shows is in force)", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  js:\n    capacity: 4\n    per_machine_overrides: { local: 2 }\n",
+    );
+    const c = openAs("laptop");
+    expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 2 });
+    // The Desk writes the resolved name.
+    expect(
+      c.applyPatch(
+        { lease_pools: { js: { capacity: 4, per_machine_overrides: { laptop: 3 } } } },
+        "admin-1",
+      ).applied,
+    ).toBe(true);
+    expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 3 });
+  });
+
   it("local_agents null resolves to always with no hosts and fallback once a host exists", () => {
     const c = openAs("laptop");
     expect(c.effective().fleet.local_agents).toBe("always");

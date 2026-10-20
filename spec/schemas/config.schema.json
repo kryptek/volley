@@ -398,7 +398,7 @@
             "local_agents": {
               "oneOf": [{ "enum": ["always", "fallback", "never"] }, { "type": "null" }],
               "default": null,
-              "description": "How the supervisor's own machine takes auto-placed tasks (spec section 4.6.15). always: a candidate like any peer. fallback: only while no paired machine is eligible, under fleet.fallback. never: not a candidate (a task pinned to local still runs there). null: fallback when any hosts.<name> is configured, else always; the retained effective config carries the resolved value."
+              "description": "How the supervisor's own machine takes auto-placed tasks (spec section 4.6.15). always: a candidate like any peer. fallback: only while no paired machine is eligible, under fleet.fallback. never: not a candidate (a task pinned to local still runs there). null: fallback when any hosts.<name> is configured, else always; the retained effective config carries the resolved value. A value chosen in the Desk is set explicitly; volleyd config set fleet.local_agents null derives it again."
             },
             "fallback": {
               "type": "object",
@@ -416,7 +416,7 @@
                   "type": "object",
                   "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
                   "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
-                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it sets per_machine. 0 keeps heavy tasks off it."
+                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it sets per_machine. 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
                 }
               }
             }

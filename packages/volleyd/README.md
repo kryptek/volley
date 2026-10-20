@@ -238,7 +238,8 @@ wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#voll
 - **Per-machine overrides**: `per_machine_overrides: { <machine>: n }` caps one machine's
   holders in place of `per_machine` (0 to `capacity`; 0: none there), so a laptop and a large
   server take different shares of one pool. `<machine>` is a `hosts.<name>` key, this machine's
-  `fleet.local_name`, or `local` (resolved to this machine's name in the effective config). An
+  `fleet.local_name`, or `local` (resolved to this machine's name in the effective config; when
+  the name is set too, it wins). An
   override alone, without `per_machine`, caps only the machine it names. An override above
   `capacity` is refused with its path (`lease_pools.js-suite.per_machine_overrides.box-a: 5 is
   over capacity 3`). The queue line names the cap in force (`queued l-2: 1/1 js-suite leases held

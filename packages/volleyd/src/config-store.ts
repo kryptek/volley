@@ -121,7 +121,8 @@ export function resolveLocalAgents(t: Pick<Tunables, "fleet" | "hosts">): LocalA
 
 /**
  * `t` as clients and subsystems read it: `fleet.local_agents` resolved, and each pool's
- * `per_machine_overrides.local` under the supervisor's machine name `local`.
+ * `per_machine_overrides.local` under the supervisor's machine name `local` (unless that name is
+ * set too: then it is the one in force).
  */
 function resolved(t: Tunables, local: string): Tunables {
   const pools = Object.fromEntries(
@@ -129,7 +130,8 @@ function resolved(t: Tunables, local: string): Tunables {
       const o = p.per_machine_overrides;
       if (o === undefined || !Object.hasOwn(o, LOCAL_HOST)) return [name, p];
       const { [LOCAL_HOST]: own, ...rest } = o;
-      return [name, { ...p, per_machine_overrides: { ...rest, [local]: own as number } }];
+      // The machine's own name, set explicitly (as the Desk writes it), wins over the alias.
+      return [name, { ...p, per_machine_overrides: { [local]: own as number, ...rest } }];
     }),
   );
   return {
