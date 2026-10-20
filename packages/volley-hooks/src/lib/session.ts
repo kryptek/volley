@@ -270,9 +270,9 @@ export async function ensureHarnessModel(
 /**
  * The cmux workspace ref of the pane this hook runs in (`cmux identify`), if any.
  *
- * The one child process the hooks start. It runs outside volleyd's authority fence on purpose:
- * the hooks are the agent's own harness (not the supervisor), the call is read-only, and its
- * binary is cmux's own CMUX_BUNDLED_CLI_PATH (set by cmux in the pane's environment) or `cmux`
+ * One of the two child processes the hooks start (the other is `cmuxWorkspaceTitle`). Both run
+ * outside volleyd's authority fence on purpose: the hooks are the agent's own harness (not the
+ * supervisor), the calls are read-only, and the binary is cmux's own CMUX_BUNDLED_CLI_PATH (set by cmux in the pane's environment) or `cmux`
  * on PATH. Bounded by a 1 s timeout; any failure just leaves the workspace unknown.
  */
 function cmuxWorkspace(env: Env): string | undefined {
@@ -288,6 +288,74 @@ function cmuxWorkspace(env: Env): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The longest `workspace_title` published. */
+const WORKSPACE_TITLE_MAX = 120;
+
+function boundTitle(title: unknown): string | undefined {
+  if (typeof title !== "string") return undefined;
+  const t = title.trim();
+  return t === "" ? undefined : t.slice(0, WORKSPACE_TITLE_MAX);
+}
+
+/**
+ * The title of this session's workspace in `cmux list-workspaces --json` output: a list of
+ * `{ ref: "workspace:1", id: "<uuid>", index, title, selected }` (top level, or under
+ * `workspaces`), matched on `ref` or `id`. Trimmed, cut to 120 characters; anything else is
+ * no title.
+ */
+export function workspaceTitleFrom(
+  json: unknown,
+  match: { ref?: string; id?: string },
+): string | undefined {
+  const list = Array.isArray(json)
+    ? json
+    : typeof json === "object" && json !== null
+      ? (json as { workspaces?: unknown }).workspaces
+      : undefined;
+  if (!Array.isArray(list)) return undefined;
+  const ws = list.find((w): w is Record<string, unknown> => {
+    if (typeof w !== "object" || w === null) return false;
+    const r = w as Record<string, unknown>;
+    return (
+      (match.ref !== undefined && r.ref === match.ref) ||
+      (match.id !== undefined && r.id === match.id)
+    );
+  });
+  return boundTitle(ws?.title);
+}
+
+/** `cmux list-workspaces --json`: same binary, timeout and failure handling as `cmuxWorkspace`. */
+function cmuxWorkspaceTitle(env: Env, ref: string | undefined): string | undefined {
+  const id = env.CMUX_WORKSPACE_ID;
+  if (id === undefined) return undefined;
+  try {
+    const out = execFileSync(env.CMUX_BUNDLED_CLI_PATH ?? "cmux", ["list-workspaces", "--json"], {
+      encoding: "utf-8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return workspaceTitleFrom(JSON.parse(out), { ...(ref !== undefined ? { ref } : {}), id });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The coordinator registry fields SessionStart re-publishes: the attention fields below plus
+ * `workspace_title` (`VOLLEY_WORKSPACE_TITLE`, else the cmux workspace's title), so the Desk
+ * can say what an interactive session is for. Not on the awaiting_input events, and empty in
+ * agent mode.
+ */
+export function registryFields(
+  identity: HookIdentity,
+  env: Env,
+): { session_url?: string; workspace?: string; workspace_title?: string } {
+  const fields = coordinatorFields(identity, env);
+  if (identity.mode !== "coordinator") return fields;
+  const title = boundTitle(env.VOLLEY_WORKSPACE_TITLE) ?? cmuxWorkspaceTitle(env, fields.workspace);
+  return title === undefined ? fields : { ...fields, workspace_title: title };
 }
 
 /**

@@ -44,6 +44,11 @@ describe("scripts/install.sh", () => {
     const stop = merged.hooks.Stop?.[1]?.hooks[0]?.command;
     expect(stop).toBe(`VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/stop.ts"`);
     expect(merged.hooks.PostToolUse?.[0]?.matcher).toBe("");
+    // PreToolUse: the Bash lease hook, then the activity hook on every tool.
+    expect(merged.hooks.PreToolUse?.map((g) => g.matcher)).toEqual(["Bash", ""]);
+    expect(merged.hooks.PreToolUse?.[1]?.hooks[0]?.command).toBe(
+      `VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/pre-tool-use.ts"`,
+    );
     expect(readdirSync(dir).some((f) => f.startsWith("settings.json.bak-"))).toBe(true);
 
     // Idempotent, and --uninstall restores the user's own hooks only.

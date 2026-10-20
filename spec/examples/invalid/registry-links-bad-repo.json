@@ -7,10 +7,15 @@
   "channel": "_system/registry",
   "type": "registered",
   "payload": {
-    "capabilities": ["implements-issue"],
+    "capabilities": [
+      "implements-issue"
+    ],
     "cwd": "/private/tmp/example-issue-42",
     "model": "claude-opus-4-7",
-    "title": "#42: Fix the login redirect loop",
+    "title": "#42 T3 fix the login redirect loop \u2014 spec review",
+    "links": {
+      "repo": "not a repo"
+    },
     "started_at": "2026-05-14T02:11:23.000Z"
   }
 }

@@ -4,7 +4,8 @@
  * the registry entry with the harness-reported `model` (`model_source: "harness-hook"`, or
  * `"unknown"` keeping the last known model when the input has none — non-interactive `-p`
  * sessions omit it), flip a `spawning`/`registered` status (or none at all) to `working`,
- * heartbeat. The model is remembered in `model.json` so drain hooks can restore it after the MCP
+ * heartbeat. A coordinator's entry also carries `session_url`, `workspace` and `workspace_title`.
+ * The model is remembered in `model.json` so drain hooks can restore it after the MCP
  * server's own register overwrites the entry. On `source` compact or resume, re-inject the live steering
  * directives already delivered, for context only: `cancel`/`nudge`/`query` were one-shot and
  * are not repeated, and nothing asks for a new acknowledgement. Directives never delivered
@@ -14,7 +15,7 @@ import { join } from "node:path";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { deliverAfterEmit, formatSteering, openDrainSession, processMail } from "../lib/drain";
 import { type HookContext, runHook } from "../lib/hook-io";
-import { coordinatorFields, writeHarnessModel } from "../lib/session";
+import { registryFields, writeHarnessModel } from "../lib/session";
 import { liveDirectives } from "../lib/steering-file";
 
 const REINJECT_SOURCES = new Set(["compact", "resume"]);
@@ -65,7 +66,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
       handedOff = true;
     }
 
-    await session.republishRegistry(model, coordinatorFields(identity, ctx.env));
+    await session.republishRegistry(model, registryFields(identity, ctx.env));
 
     const statusTopic = session.topic("status");
     const raw = await session.broker.queryRetained(statusTopic, 300);

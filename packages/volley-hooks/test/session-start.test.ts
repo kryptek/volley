@@ -1,4 +1,5 @@
-import { writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -224,5 +225,82 @@ describe("post-model-switch", () => {
       model_source: "harness-hook",
       started_at: "2026-10-18T10:00:00.000Z",
     });
+  });
+});
+
+describe("session-start workspace_title (coordinator registry only)", () => {
+  const COORD = "coordinator-ab12";
+  let cdir: string;
+  let env: Record<string, string>;
+
+  beforeEach(async () => {
+    cdir = makeWorkdir();
+    env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+    };
+    await publishRegistry(client, COORD, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: new Date().toISOString(),
+    });
+  });
+
+  const start = (extra: Record<string, string>) =>
+    runHook("session-start", fixture("session-start-startup.json", cdir), {
+      cwd: cdir,
+      env: { ...env, ...extra },
+    });
+
+  it("takes VOLLEY_WORKSPACE_TITLE when set", async () => {
+    const run = await start({ VOLLEY_WORKSPACE_TITLE: "  #169 C14 desk purpose  " });
+    expect(run.exitCode).toBe(0);
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace_title: "#169 C14 desk purpose",
+      model_source: "harness-hook",
+    });
+  });
+
+  it("else asks cmux list-workspaces for the session's workspace title", async () => {
+    const bin = join(mkdtempSync(join(tmpdir(), "volley-hooks-cmux-")), "cmux");
+    const list = JSON.stringify({
+      workspaces: [
+        { ref: "workspace:1", id: "aaaa-1", index: 0, title: "other", selected: false },
+        { ref: "workspace:2", id: "bbbb-2", index: 1, title: "issue 169 work", selected: true },
+      ],
+    });
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+case "$1" in
+  identify) echo '{"caller":{"workspace_ref":"workspace:2"}}' ;;
+  list-workspaces) echo '${list}' ;;
+esac
+`,
+    );
+    chmodSync(bin, 0o755);
+    await start({ CMUX_WORKSPACE_ID: "bbbb-2", CMUX_BUNDLED_CLI_PATH: bin });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace: "workspace:2",
+      workspace_title: "issue 169 work",
+    });
+  });
+
+  it("no title source: no workspace_title", async () => {
+    await start({ VOLLEY_WORKSPACE_TITLE: "" });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).not.toHaveProperty("workspace_title");
+  });
+
+  it("agent mode never carries workspace_title", async () => {
+    await runHook("session-start", fixture("session-start-startup.json", dir), {
+      cwd: dir,
+      env: { VOLLEY_WORKSPACE_TITLE: "should not appear" },
+    });
+    const reg = await retainedEnvelope(client, registryTopic(AGENT));
+    expect(reg.payload).not.toHaveProperty("workspace_title");
   });
 });

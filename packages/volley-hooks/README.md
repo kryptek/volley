@@ -9,6 +9,7 @@ compacted away, or the agent is sitting at a prompt:
 - steering **survives compaction** (`.volley/STEERING.md`, re-injected on `SessionStart`),
 - **idle / awaiting-input / resumed** are published from native hook events,
 - every hook publishes a **heartbeat** (no heartbeat means the hooks are broken, not that the agent is idle),
+- a **work log**: a rate-limited one-line `activity` tick per tool call or prompt, so a session that publishes nothing itself still shows what it is doing,
 - the **statusLine publisher** reports the session's context fill and its Claude account's 5-hour and weekly usage.
 
 Each hook is a small Bun script that reads the hook's JSON from stdin and exits fast. In agent mode
@@ -26,6 +27,7 @@ global settings file cheaply. On a broker that requires authentication the hooks
 - [Identity](#identity)
 - [Broker credentials](#broker-credentials)
 - [What each hook publishes](#what-each-hook-publishes)
+- [Work log (activity ticks)](#work-log-activity-ticks)
 - [Usage statusLine](#usage-statusline)
 - [Mailbox drain](#mailbox-drain)
 - [Coordinator sessions](#coordinator-sessions)
@@ -48,7 +50,9 @@ VOLLEY_HOOKS_DIR=/path/to/volley/packages/volley-hooks \
 
 The template's commands are `bun run "$VOLLEY_HOOKS_DIR/src/hooks/<hook>.ts"`, so either export
 `VOLLEY_HOOKS_DIR` for the session or substitute the path into a copy of the template. CI checks that
-every command in the template resolves to a file (`bun run check:template`).
+every command in the template resolves to a file (`bun run check:template`). `PreToolUse` has two
+entries: the lease hook (matcher `Bash`) and the work-log hook `pre-tool-use.ts` (matcher `""`,
+every tool); `PostToolUse` runs on every tool.
 
 **Coordinator sessions** (your own interactive sessions):
 
@@ -121,16 +125,19 @@ runs unleased on an auth error.
 ## What each hook publishes
 
 All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq` and the
-`hook_event` that fired (SPEC §4.3). Every hook ends with `progress/heartbeat`.
+`hook_event` that fired (SPEC §4.3). Every hook except the two `PreToolUse` hooks ends with
+`progress/heartbeat` (`PostToolUse` heartbeats after every tool call anyway).
 
 | Hook | Publishes | Injects |
 |---|---|---|
-| `SessionStart` | registry entry (retained) with `model` from the input and `model_source: "harness-hook"`; without `model`, the last known model with `model_source: "unknown"`. Remembers the model in `model.json`. Flips a retained `spawning`/`registered` status to `working`. Bootstraps the persistent drain session and drains. | on `source` `compact` / `resume`: the live, already-delivered `steering` directives (newest 20), for context only; plus anything drained or never delivered |
+| `SessionStart` | registry entry (retained) with `model` from the input and `model_source: "harness-hook"`; without `model`, the last known model with `model_source: "unknown"`. Every other field of the entry (`title`, `links`, …) is kept. A coordinator's entry also gets `session_url`, `workspace` and `workspace_title` (see [Coordinator sessions](#coordinator-sessions)). Remembers the model in `model.json`. Flips a retained `spawning`/`registered` status to `working`. Bootstraps the persistent drain session and drains. | on `source` `compact` / `resume`: the live, already-delivered `steering` directives (newest 20), for context only; plus anything drained or never delivered |
 | `PostModelSwitch` | registry entry with `to_model` (also remembered in `model.json`) | — |
-| `UserPromptSubmit`, `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model | drained mail |
-| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
+| `UserPromptSubmit` | as `PostToolUse`, plus an `activity` tick `prompt received` ([work log](#work-log-activity-ticks)); never any of the prompt text | drained mail |
+| `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model | drained mail |
+| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars) and `tool_calls` (the [work log](#work-log-activity-ticks)'s count; its pending tick is dropped). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
 | `Notification` | `agent_needs_input` / `idle_prompt` / `permission_prompt` → `awaiting_input` (`notification_type`, `text`); `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`; `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only | — |
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
+| `PreToolUse` (all tools) | `activity` tick with a one-line summary of the call and `tool_calls`, at most once per 5 s ([work log](#work-log-activity-ticks)) | — |
 | `PreToolUse` (`Bash`) | — (rewrites the command: see [Heavy-operation leases](#heavy-operation-leases)) | `command queued for a <pool> lease` when it wraps |
 
 Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not compliance**: the
@@ -138,6 +145,40 @@ Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not 
 model to reply `acknowledged: …` and publish `progress/steering_acked` with `correlation_id` set to
 the message id once it has acted on it; that envelope is what a dashboard shows as "agent
 acknowledged", and reviewers check the prose.
+
+## Work log (activity ticks)
+
+Interactive sessions (and agents that publish little progress of their own) would otherwise show
+on a dashboard as registered and `working` for hours with nothing else. The hooks publish a
+work log for them: `progress/activity` (SPEC §4.3; qos 0, not retained, with the usual
+`source`, `seq` and `hook_event`):
+
+```json
+{ "msg": "Bash: gh pr checks 153", "tool_calls": 42, "source": "harness-hook", "seq": 311, "hook_event": "PreToolUse" }
+```
+
+- **`msg`** is one line of at most 120 characters (cut with `…`). `PreToolUse`
+  (`src/hooks/pre-tool-use.ts`, matcher `""`) summarises the call: `Bash: <first line of the
+  command>`, `Edit:` / `MultiEdit:` / `Write:` / `Read: <file_path>` (relative to the project dir
+  when inside it), `NotebookEdit: <notebook_path>`, `Task: <description>` (also for `Agent`),
+  `Grep:` / `Glob: <pattern>`, `WebFetch: <host>`, `WebSearch: <query>`; any other tool is its
+  name, an MCP tool `mcp__<server>__<tool>` just `<tool>`. `UserPromptSubmit` publishes exactly
+  `prompt received`: **no prompt text is ever published**.
+- **`tool_calls`** counts every `PreToolUse` of the session, rate-limited ones included.
+- **Redaction.** Before publishing, the summary is masked (`***`, `redactSecrets` in
+  `src/lib/work-log.ts`): values after `--password` / `--token` (as `--flag value` or
+  `--flag=value`) and `-p` (`-p value`, `-pvalue`); assignments and query parameters named
+  `token`, `password`, `secret`, `api_key`, `apikey`, or any name ending in `TOKEN`,
+  `PASSWORD`, `SECRET` or `KEY` (`GH_TOKEN=… cmd`, `?token=…`); `Bearer …` and `Authorization: …`
+  values; URL userinfo (`https://user:pass@host` → `https://***@host`). It errs on the side of
+  masking (`mkdir -p dir` publishes `mkdir -p ***`). Only the first line of a command is
+  considered at all.
+- **Rate limit.** At most one `activity` publish per 5 s per agent. `work-log.json` in the state
+  directory holds `{ "tool_calls", "last_published_at" (epoch ms), "pending"? }`, updated under
+  `work-log.lock` so parallel tool calls count correctly. A tick inside the window opens no
+  connection: it only records its summary as `pending` (newest wins). The next tick allowed to
+  publish publishes its own summary (the pending one is superseded), and `Stop` drops it and
+  reports the count on `idle` as `tool_calls`.
 
 ## Usage statusLine
 
@@ -241,7 +282,12 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
   `background_tasks` shape counts: a list of task objects, one whose `status` is over
   (`completed`, `failed`, `killed`, …) not counting.
 - the next `UserPromptSubmit` / `PostToolUse` → `resumed` (and clears the background wait).
-- `SessionStart` adds `session_url` / `workspace` to the registry entry.
+- `SessionStart` adds `session_url` / `workspace` to the registry entry, and `workspace_title`:
+  `VOLLEY_WORKSPACE_TITLE` when set and non-empty, else (inside cmux, `CMUX_WORKSPACE_ID` set) the
+  `title` of this session's workspace from `cmux list-workspaces --json` (matched on its `ref`
+  or on `CMUX_WORKSPACE_ID`; same binary and 1 s timeout as `cmux identify`), trimmed and cut to
+  120 characters. Any failure leaves it out. It is on the registry entry only, never on
+  `awaiting_input`, and never in agent mode.
 
 `session_url` comes from `VOLLEY_SESSION_URL` (a hook cannot derive it, see below); `workspace` from
 `VOLLEY_WORKSPACE`, else `cmux identify` (`caller.workspace_ref`) when running inside cmux. The
@@ -304,6 +350,7 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_HOOKS_MQTT_VERSION` | `5` | `4` for a broker without MQTT 5 (expiry is then the broker's policy). |
 | `VOLLEY_SESSION_URL` | — | Coordinator: the session's URL, published as `session_url`. |
 | `VOLLEY_WORKSPACE` | `cmux identify` | Coordinator: the terminal workspace ref, published as `workspace`. |
+| `VOLLEY_WORKSPACE_TITLE` | `cmux list-workspaces --json` | Coordinator: the workspace's title, published as `workspace_title` on the registry entry. |
 | `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root; also where `statusline-chain.json` lives. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
@@ -321,7 +368,8 @@ connections only (SPEC §4.4).
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
 `resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model),
-`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published) and, for
+`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published),
+`work-log.json` + `work-log.lock` (the [work log](#work-log-activity-ticks)'s tool-call count and rate limit) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests
@@ -379,4 +427,6 @@ Observed with Claude Code 2.1 on 2026-10-18, hooks writing their stdin to files 
   from `VOLLEY_SESSION_URL`, set by whoever launches the session.
 - **cmux workspace:** hook processes inherit `CMUX_WORKSPACE_ID` (a UUID) and `CMUX_SURFACE_ID`;
   `cmux identify` run from a session's child process reports `caller.workspace_ref`
-  (`workspace:<n>`).
+  (`workspace:<n>`). The `cmux list-workspaces --json` shape used for `workspace_title`
+  (`{ ref, id, index, title, selected }` objects) is taken from cmux's documentation, not observed
+  here.

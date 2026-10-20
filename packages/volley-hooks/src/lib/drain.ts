@@ -246,12 +246,19 @@ export function drainsFor(ctx: Pick<HookContext, "event" | "input" | "env">): bo
   }
 }
 
-/** UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat. */
-export async function drainHook(ctx: HookContext): Promise<string | null> {
+/**
+ * UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat. `extra`
+ * publishes anything else the hook adds on the same session (UserPromptSubmit's activity tick).
+ */
+export async function drainHook(
+  ctx: HookContext,
+  extra?: (session: HookSession) => Promise<void>,
+): Promise<string | null> {
   const { session, drained, release } = await openDrainSession(ctx.identity, ctx, drainsFor(ctx));
   let handedOff = false;
   try {
     await markWorking(session);
+    if (extra !== undefined) await extra(session);
     await ensureHarnessModel(session);
     const mail = drained === null ? null : await processMail(session, drained);
     await session.heartbeat();

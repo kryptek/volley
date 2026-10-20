@@ -1,10 +1,15 @@
 /**
  * The agent window, ported from the prototype `AgentWindow`: a React Bits
  * `StatusMark` (status + progress), `task #issue`, the wave chip in the wave
- * accent and the role chip in the title; the purpose line (`agentPurpose`: the
- * task title from the wave `spec`, else the title the agent registered, SPEC
- * §6.2), in full, wrapping; the agent id is secondary (a dim line under a wave
- * task's purpose; dim in the title of a task-less agent that has one); the pipeline; the latest narration (`payload.msg`, with the look's
+ * accent and the role chip in the title; the purpose line (`purpose.ts`: the
+ * wave task's title, the title the agent registered, a session's workspace,
+ * else a fallback; one line, the whole text on hover and on tap) with its issue
+ * and PR links. When the purpose names the window, the title shows it and the
+ * agent id moves to a small secondary line. A session (`isSession`) gets a
+ * `session` chip, its hooks' work log as its narration and, in place of a
+ * progress bar, `N tool calls · last 12s ago` and `working` / `idle · 3m`. A
+ * dispatched agent with no progress of its own for 10 minutes gets an amber
+ * badge (`attention.ts` `staleProgressFor`); the pipeline; the latest narration (`payload.msg`, with the look's
  * narration effect, D7); attention-line (D3) and steering-panel (D4) slots; the Volley
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
@@ -26,6 +31,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import { type NoSignal, SYNCING_LABEL } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
+import { plural } from "../../lib/plural";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
 import { type AccountChoice, fiveHourLabel } from "../../store/claude";
@@ -35,6 +41,7 @@ import { Feed, feedChannel } from "./Feed";
 import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
+import { isSession, namesWindow, purposeOf } from "./purpose";
 import "../../styles/agent.css";
 
 export const AGENT_WIDTH = 460;
@@ -89,6 +96,8 @@ export interface AgentWindowProps {
   accounts?: readonly AccountChoice[];
   /** `agent_move_account` to the picked account; absent = read-only (picker disabled). */
   onMoveAccount?: (acct: string) => Promise<{ ok: boolean; error?: string }> | undefined;
+  /** The amber `no progress reported for N m` badge, when the agent has gone that long. */
+  stale?: string | null;
 }
 
 /** Context meter tones: compaction risk as the window fills. */
@@ -212,20 +221,6 @@ export function age(ms: number): string {
 
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 
-/**
- * What the agent is working on: its wave task's title (`spec.tasks.<id>.title`),
- * else the `title` it registered (SPEC §6.2), else `null`. An agent id says
- * nothing about purpose, so the window leads with this and shows the id second.
- */
-export function agentPurpose(
-  agent: Pick<AgentView, "task" | "registry">,
-  wave: WaveView | undefined,
-): string | null {
-  const spec = agent.task ? wave?.state?.spec?.tasks[agent.task] : undefined;
-  const registered = agent.registry?.title;
-  return str(spec?.title?.trim()) ?? str(typeof registered === "string" ? registered.trim() : null);
-}
-
 const Icon = ({ i, s = 15 }: { i: typeof BubbleChatIcon; s?: number }) => (
   <HugeiconsIcon icon={i} size={s} strokeWidth={1.8} />
 );
@@ -234,6 +229,27 @@ const AGENT_TABS = [
   { key: "feed", label: "Volley feed", icon: <Icon i={ListViewIcon} s={13} /> },
   { key: "term", label: "Terminal", icon: <Icon i={TerminalIcon} s={13} /> },
 ] as const;
+
+/** The footer's progress bar and percentage (a session has none: it reports no %). */
+function ProgressBar({ name, progress }: { name: string; progress: number | null }) {
+  return (
+    <>
+      {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a read-only status, not a control */}
+      <div
+        className="bar"
+        role="progressbar"
+        aria-label={`${name} progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        // No value yet: an indeterminate progressbar.
+        aria-valuenow={progress ?? undefined}
+      >
+        <span style={{ width: `${progress ?? 0}%` }} />
+      </div>
+      <span className="mono">{progress === null ? "—" : `${progress}%`}</span>
+    </>
+  );
+}
 
 function useNow(fixed: number | undefined): number {
   const [now, setNow] = useState(() => fixed ?? Date.now());
@@ -262,6 +278,7 @@ export function AgentWindow({
   usage = null,
   accounts = [],
   onMoveAccount,
+  stale = null,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -271,9 +288,12 @@ export function AgentWindow({
   const task = agent.task ? ws?.tasks.find((t) => t.id === agent.task) : undefined;
   const spec = agent.task ? ws?.spec?.tasks[agent.task] : undefined;
   const issue = task?.issue ?? spec?.issue;
-  const purpose = agentPurpose(agent, wave);
-  // The id is secondary once a purpose says what the agent does: dimmed in a task-less title.
-  const idSecondary = agent.task === null && purpose !== null;
+  const purpose = purposeOf(agent, wave);
+  const named = namesWindow(purpose);
+  const session = isSession(agent);
+  const [purposeOpen, setPurposeOpen] = useState(false);
+  // The title's name: the purpose when it names the window, else the task (or the id) as before.
+  const headline = named ? purpose.label : (agent.task ?? agent.id);
   const progress = agent.progress === null ? null : Math.max(0, Math.min(100, agent.progress));
   const status = markStatus(agent);
   const hbAge = agent.heartbeat === null ? null : now - agent.heartbeat;
@@ -297,27 +317,33 @@ export function AgentWindow({
           size={18}
         />
       )}
-      <span className={`t-name ell min0${idSecondary ? " t-name--id mono dim" : ""}`}>
-        {agent.task ?? agent.id}
-        {issue !== undefined && <span className="dim"> #{issue}</span>}
+      <span className="t-name ell min0" title={named ? purpose.full : undefined}>
+        {headline}
+        {!named && issue !== undefined && <span className="dim"> #{issue}</span>}
       </span>
-      <span className="chip chip--wave" title={`Linked to wave ${agent.wave}`}>
-        <i style={{ background: accent }} />
-        {agent.wave}
-      </span>
+      {session ? (
+        <span className="chip chip--session" title="An interactive Claude Code session">
+          session
+        </span>
+      ) : (
+        <span className="chip chip--wave" title={`Linked to wave ${agent.wave}`}>
+          <i style={{ background: accent }} />
+          {agent.wave}
+        </span>
+      )}
       {agent.role && <span className="chip chip--role">{ROLE_LABEL[agent.role]}</span>}
       {stageChip && <span className="chip chip--stage">{stageChip}</span>}
     </>
   );
 
-  // The window's accessible name: its wave, task and role (or its purpose, else the agent id).
+  // The window's accessible name: its wave, task and role (or its title's name).
   const name = [
-    agent.task ? `${agent.wave} · ${agent.task}` : (purpose ?? agent.id),
+    agent.task ? `${agent.wave} · ${agent.task}` : headline,
     agent.role && ROLE_LABEL[agent.role],
   ]
     .filter(Boolean)
     .join(" · ");
-  const label = `Message ${[agent.task ?? agent.id, agent.role && ROLE_LABEL[agent.role]]
+  const label = `Message ${[agent.task ?? headline, agent.role && ROLE_LABEL[agent.role]]
     .filter(Boolean)
     .join(" ")}`;
   const ctx = contextMeter(usage);
@@ -326,7 +352,7 @@ export function AgentWindow({
     <>
       {accounts.length > 0 && (
         <AccountPicker
-          name={agent.task ?? agent.id}
+          name={agent.task ?? headline}
           current={account}
           accounts={accounts}
           onMove={onMoveAccount}
@@ -344,21 +370,22 @@ export function AgentWindow({
     </>
   );
 
+  const work = agent.work;
   const footer = (
     <div className="agent-foot">
-      {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a read-only status, not a control */}
-      <div
-        className="bar"
-        role="progressbar"
-        aria-label={`${name} progress`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        // No value yet: an indeterminate progressbar.
-        aria-valuenow={progress ?? undefined}
-      >
-        <span style={{ width: `${progress ?? 0}%` }} />
-      </div>
-      <span className="mono">{progress === null ? "—" : `${progress}%`}</span>
+      {session ? (
+        <span className="work mono" title="From this session's hooks: no progress % is reported">
+          <span className={`work-state work-state--${work?.state ?? "working"}`}>
+            {work?.state === "idle" ? `idle · ${age(now - work.since)}` : "working"}
+          </span>
+          {" · "}
+          {work && work.toolCalls > 0
+            ? `${plural(work.toolCalls, "tool call")}${work.lastToolAt === null ? "" : ` · last ${age(now - work.lastToolAt)} ago`}`
+            : "no tool calls yet"}
+        </span>
+      ) : (
+        <ProgressBar name={name} progress={progress} />
+      )}
       {ctx && (
         <span
           className={`ctx ctx--${ctx.tone}`}
@@ -394,14 +421,44 @@ export function AgentWindow({
       actions={actions}
       footer={footer}
     >
-      {purpose && <div className="a-title">{purpose}</div>}
-      {agent.task !== null && purpose && (
+      {purpose.source !== "id" && (
+        <div className={`a-purpose${purposeOpen ? " a-purpose--open" : ""}`}>
+          {/* A button so a tap unwraps it: touch has no hover for the `title`. */}
+          <button
+            type="button"
+            className="a-purpose-text ell"
+            title={purpose.full}
+            aria-expanded={purposeOpen}
+            onClick={() => setPurposeOpen((o) => !o)}
+          >
+            {purpose.label}
+          </button>
+          {purpose.links.map((l) =>
+            l.href ? (
+              <a key={l.text} className="a-link" href={l.href} target="_blank" rel="noreferrer">
+                {l.text}
+              </a>
+            ) : (
+              <span key={l.text} className="a-link dim">
+                {l.text}
+              </span>
+            ),
+          )}
+        </div>
+      )}
+      {headline !== agent.id && (
         <div className="a-id mono dim ell" title="Agent id">
           {agent.id}
         </div>
       )}
+      {stale && (
+        <div className="a-stale" title="It has not published progress of its own for this long">
+          <span className="chip chip--stale">{stale}</span>
+        </div>
+      )}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
-      <Narration text={agent.narration} fx={narrationFx} />
+      {/* A session narrates through its hooks' work log. */}
+      <Narration text={agent.narration ?? work?.last ?? null} fx={narrationFx} />
       {asOf && (
         <div className="narr-asof dim" title="Restored from this browser's session">
           as of {asOf}
@@ -444,6 +501,7 @@ export function AgentWindow({
             screen={agent.screen}
             stale={task?.screen_stale === true}
             noSignal={mcpMissing}
+            selfRegistered={agent.wave === UNASSIGNED || !agent.task}
           />
         )}
       </div>

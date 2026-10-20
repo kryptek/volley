@@ -33,6 +33,11 @@
  * state is `working` and the wave is info `idle — waiting on wave events`
  * unless a decision or gate is open. A `permission_prompt` always needs you.
  *
+ * **No progress reported**: a dispatched agent (not a session) that has been
+ * `working` for `STALE_PROGRESS_MS` (10 min) without a `progress` message of
+ * its own (its hooks' work log does not count) gets an amber badge and an info
+ * item, and so does whoever runs it: its wave, else its parent session.
+ *
  * **Ended waves** (`stopped`, `complete`) and their agents get no attention.
  * **Syncing**: during the grace window after a (re)connect or the page coming
  * back to the foreground (`AttentionCtx.syncing`), nothing is judged quiet or
@@ -62,6 +67,7 @@ import type {
   WaveTask,
   WaveView,
 } from "./store/types";
+import { isSession, purposeOf } from "./windows/agent/purpose";
 
 export type Tier = "you" | "coordinator" | "info" | "none";
 
@@ -79,6 +85,8 @@ export const IDLE_WAIT_REASON = "idle — waiting on wave events";
 const GENERIC_IDLE_PROMPT = /^claude is waiting for your input\.?$/i;
 /** Shown instead of any liveness judgement during the reconnect / resume grace window. */
 export const SYNCING_LABEL = "syncing…";
+/** A dispatched agent working this long with no progress of its own is flagged. */
+export const STALE_PROGRESS_MS = 10 * 60_000;
 
 export interface AttentionCtx {
   now: number;
@@ -301,6 +309,11 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   if (top) return handled(top.reason, top.since, w, ctx);
   if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
   const agentIds = s.tasks.flatMap((t) => Object.values(t.agents)).filter((x): x is string => !!x);
+  for (const id of agentIds) {
+    const a = ctx.agents?.[id];
+    const stale = a && staleProgressFor(a, w, ctx);
+    if (stale) return { tier: "info", reason: `${a.task ?? a.id}: ${stale.label}` };
+  }
   return infoFor(s.tasks, agentIds, ctx);
 }
 
@@ -366,8 +379,39 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
     const theirs = live && a.role === "implementer" && stage === "implement";
     return theirs ? handled(ns.reason, ns.since, w, ctx) : { tier: "info", reason: ns.reason };
   }
+  const stale = staleProgressFor(a, w, ctx);
+  if (stale) return { tier: "info", reason: stale.label };
+  // Whoever launched an ad-hoc agent hears about it going silent (a wave hears through its window).
+  for (const child of Object.values(ctx.agents ?? {})) {
+    if (child.parentId !== a.id || child.wave !== UNASSIGNED) continue;
+    const s2 = staleProgressFor(child, undefined, ctx);
+    if (s2) return { tier: "info", reason: `${purposeOf(child, undefined).label}: ${s2.label}` };
+  }
   const tasks = s?.tasks.filter((t) => t.id === task) ?? [];
   return infoFor(tasks, [a.id], ctx);
+}
+
+/**
+ * A dispatched agent `working` for `STALE_PROGRESS_MS` with no `progress` of its own
+ * (`reportedAt`; else since it went `working`), over connected time: the badge text.
+ * Null for a session, an agent not working or waiting on a person, an ended wave, or
+ * while the Desk is syncing.
+ */
+export function staleProgressFor(
+  a: AgentView,
+  w: WaveView | undefined,
+  ctx: AttentionCtx,
+): { label: string; since: number } | null {
+  if (ctx.syncing || isEndedWave(w) || isSession(a)) return null;
+  if (a.status?.type !== "working" || a.attention) return null;
+  const since = a.reportedAt ?? a.status.seenAt ?? a.status.at;
+  if (!Number.isFinite(since)) return null;
+  const silent = connectedSilence(since, ctx.now, ctx.offline);
+  if (silent < STALE_PROGRESS_MS) return null;
+  return {
+    label: `no progress reported for ${Math.floor(silent / 60_000)} m`,
+    since: since + STALE_PROGRESS_MS,
+  };
 }
 
 /** An agent's no-signal or quiet state: the window's label and tooltip, and its attention reason. */

@@ -2,22 +2,9 @@
  * Agent window rules, ported from the prototype's styles.css (agent window
  * section): task title, pipeline, narration, tabs, Volley feed envelopes,
  * Terminal, footer with heartbeat. The D2 additions (unassigned id line,
- * held pipeline step, empty placeholders, stale screen marker) are at the end.
+ * held pipeline step, empty placeholders, stale screen marker) are at the end,
+ * then the purpose line, session and stale-progress rules (C14).
  */
-.a-title {
-  font-weight: 500;
-  font-size: 14px;
-}
-/* The agent id, secondary to the purpose line above it. */
-.a-id {
-  font-size: 11px;
-  margin-top: -4px;
-}
-/* A task-less agent's id in its title, secondary to the purpose line below. */
-.t-name.t-name--id {
-  font-weight: 400;
-  font-size: 12px;
-}
 .pipe {
   display: flex;
   gap: 4px;
@@ -321,4 +308,57 @@
 }
 .ctx--warn .mono {
   color: #ffd60a;
+}
+
+/* The purpose line: one bold line under the title; a tap unwraps it (touch has no hover). */
+.a-purpose {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.a-purpose-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.a-purpose--open .a-purpose-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.a-link {
+  flex: none;
+  font-size: 12px;
+  color: var(--acc);
+  text-decoration: none;
+}
+a.a-link:hover {
+  text-decoration: underline;
+}
+/* The agent id, secondary once the purpose names the window: small, selectable. */
+.a-id {
+  margin-top: -6px;
+  font-size: 11px;
+  user-select: text;
+}
+.chip--session {
+  color: var(--ink);
+  border-style: dashed;
+}
+/* No progress of its own for 10 minutes: amber, like a coordinator-handling item. */
+.chip--stale {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.work-state--idle {
+  color: var(--mute);
 }

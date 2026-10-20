@@ -54,6 +54,7 @@ import {
   type UsagePayload,
   type WaveStatePayload,
   type WaveView,
+  type WorkLog,
 } from "./types";
 
 /** Pseudo-wave for agents no wave state references (legacy dispatches, ad-hoc agents). */
@@ -485,7 +486,10 @@ function reduceAgent(
   if (channel === "progress" && !replay && at >= (prev.lastProgress?.at ?? at)) {
     next.lastProgress = { type: env.type, at };
   }
-  const narration = str(payload.msg);
+  const hook = channel === "progress" && payload.source === "harness-hook";
+  if (channel === "progress" && !hook && !replay) next.reportedAt = at;
+  // A hook's work-log line is the session's, not the agent's own narration: kept in `work`.
+  const narration = env.type === "activity" && hook ? undefined : str(payload.msg);
   // Live traffic is the newest by definition; only a replay can be older than what is shown
   // (and its `wall_time` is the sender's clock, which may run ahead of ours).
   if (narration !== undefined && (!m.retained || at >= (prev.narrationAt ?? at))) {
@@ -526,8 +530,45 @@ function reduceAgent(
     next.attentionObserved = true;
     next.attention = null;
   }
+  if (hook) {
+    const work = workLog(prev.work, env.type, payload, at);
+    if (work) next.work = work;
+  }
   return putAgent(state, next);
 }
+
+/**
+ * Fold one hook tick into the work log: `activity` (a tool call or a new prompt) and
+ * `resumed` mean working, `idle` / `awaiting_input` mean the turn ended. Anything else
+ * (a heartbeat) changes nothing. `tool_calls` only grows.
+ */
+export function workLog(
+  prev: WorkLog | undefined,
+  type: string,
+  payload: Record<string, unknown>,
+  at: number,
+): WorkLog | undefined {
+  const state =
+    type === "activity" || type === "resumed"
+      ? "working"
+      : type === "idle" || type === "awaiting_input"
+        ? "idle"
+        : null;
+  if (state === null) return prev;
+  const reported = typeof payload.tool_calls === "number" ? payload.tool_calls : 0;
+  const msg = type === "activity" ? str(payload.msg) : undefined;
+  const base: WorkLog = prev ?? { toolCalls: 0, lastToolAt: null, last: null, state, since: at };
+  return {
+    toolCalls: Math.max(base.toolCalls, reported),
+    lastToolAt: msg !== undefined && msg !== PROMPT_RECEIVED ? at : base.lastToolAt,
+    last: msg ?? base.last,
+    state,
+    since: prev && prev.state === state ? prev.since : at,
+  };
+}
+
+/** The `activity` line the hooks send for a new prompt (never its text). */
+export const PROMPT_RECEIVED = "prompt received";
 
 // ------------------------------------------------------------- supervisors
 

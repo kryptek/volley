@@ -48,11 +48,11 @@ Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — you 
 
 | Tool | Purpose |
 |---|---|
-| `vol_register` | Publish this agent's retained registry entry. Idempotent — call again to update capabilities/model/cwd/title. Optional `title` (≤ 200 characters): one line saying what the agent is working on, which the Desk shows on the agent's window. **Auto-fired on connect** with empty capabilities. |
+| `vol_register` | Publish this agent's retained registry entry. Idempotent — call again to update capabilities/model/cwd/title/links. Optional `title` (one line, ≤ 120 characters): what the agent is working on, which the Desk shows as the agent window's name; optional `links` (`{ repo: "owner/name", issue, pr }`, each a number in `repo` or an http(s) URL), which the Desk renders as links. **Auto-fired on connect** with empty capabilities. |
 | `vol_publish` | Publish one envelope to one of this agent's channels (`status`, `progress`, `result`, `_user/*`, etc.). |
 | `vol_query` | Fetch the current retained value at an exact topic. |
 | `vol_subscribe` | Block until N messages arrive on a topic pattern, or timeout. The synchronous wait primitive. |
-| `vol_list_agents` | Enumerate registered agents from `volley/_system/registry/+`. Filterable by namespace; `reaped` agents excluded by default. |
+| `vol_list_agents` | Enumerate registered agents from `volley/_system/registry/+`. Filterable by namespace; `reaped` agents excluded by default. Each entry carries the registered `title` (or `null`). |
 | `vol_tap` | Wildcard subscription with debug-tuned defaults (longer timeout, larger collect cap). For "what's flying past on the broker?" introspection. |
 | `vol_send_mailbox` | Deliver a `mailbox` message to another agent. Type one of `steering | cancel | nudge | query | ack`. Returns `message_id`, which is the envelope's `correlation_id` (generated unless you pass one; required for `ack`). Optional `payload.seq` / `payload.supersedes`. With `wait_ack_ms`, it also waits for the recipient's `ack` and returns `acked` / `acked_by`. `delivered` only means the broker sent PUBACK. |
 
@@ -108,7 +108,7 @@ When Claude Code spawns this MCP server, in order:
 4. **Auto-register** — publishes the registry entry at `volley/_system/registry/<id>` with `capabilities=[]` and `cwd=process.cwd()`, then flips the status topic to `registered`. This makes the server SPEC §6.3-compliant by default — nothing can publish on other channels until the registry entry exists.
 5. **Bind MCP tools** — wires the seven tools onto an `McpServer` instance and connects to stdio transport.
 
-After step 4 the agent is fully visible in `vol_list_agents` everywhere. No manual `vol_register` is required for casual use; call it later only when you want to update `capabilities`, `model`, `cwd` or `title`.
+After step 4 the agent is fully visible in `vol_list_agents` everywhere. No manual `vol_register` is required for casual use; call it later only when you want to update `capabilities`, `model`, `cwd`, `title` or `links`.
 
 On clean shutdown (SIGINT/SIGTERM): publishes a terminal `done` status, then `DISCONNECT`s — which suppresses the LWT.
 

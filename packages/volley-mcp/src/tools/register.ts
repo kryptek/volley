@@ -10,6 +10,14 @@ export interface RegisterInput {
   cwd?: string;
   /** What the agent is working on, one line (SPEC §6.2); blank is no title. */
   title?: string;
+  /** References for that purpose (SPEC §6.2): a number is an issue / PR in `repo`. */
+  links?: RegisterLinks;
+}
+
+export interface RegisterLinks {
+  repo?: string;
+  issue?: number | string;
+  pr?: number | string;
 }
 
 export interface RegisterResult {
@@ -20,7 +28,7 @@ export interface RegisterResult {
 /**
  * vol_register — publish this agent's retained registry entry (SPEC.md §6) and a retained
  * status: registered, then flip state.registered. Idempotent: re-callable to republish
- * with updated capabilities/model/cwd/title.
+ * with updated capabilities/model/cwd/title/links.
  */
 export async function volRegister(
   state: ServerState,
@@ -35,7 +43,10 @@ export async function volRegister(
     );
   }
 
-  const title = input.title?.trim();
+  // One line: a direct caller's line breaks become spaces (the MCP boundary refuses them).
+  const title = input.title?.replace(/[\r\n]+/g, " ").trim();
+  const links =
+    input.links !== undefined && Object.keys(input.links).length > 0 ? input.links : undefined;
   const registryEnvelope = {
     ...buildEnvelope({
       agentId: config.agentId,
@@ -47,6 +58,7 @@ export async function volRegister(
         cwd: input.cwd,
         model: input.model,
         ...(title ? { title } : {}),
+        ...(links !== undefined ? { links } : {}),
         started_at: new Date().toISOString(),
         ...(config.claudeAccount !== undefined ? { claude_account: config.claudeAccount } : {}),
       },

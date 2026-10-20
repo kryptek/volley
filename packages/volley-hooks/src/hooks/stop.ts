@@ -7,7 +7,8 @@
  * `volley wait` armed in the background) and the turn did not end in a question, `idle`
  * carries `background_wait: true` and it is recorded in `activity.json` for the idle
  * notification that follows: the session waits on events, not on a person. A question is
- * always one, background task or not. Heartbeat.
+ * always one, background task or not. `idle` also carries `tool_calls` (the work log's count,
+ * whose pending tick is dropped). Heartbeat.
  */
 import { type HookContext, clip, questionOf, runHook } from "../lib/hook-io";
 import {
@@ -16,6 +17,7 @@ import {
   openSession,
   writeActivity,
 } from "../lib/session";
+import { readWorkLog, settleWorkLog } from "../lib/work-log";
 
 export async function handle(ctx: HookContext): Promise<string | null> {
   const message = ctx.input.last_assistant_message;
@@ -26,9 +28,15 @@ export async function handle(ctx: HookContext): Promise<string | null> {
     question === null && hasLiveBackgroundTask(ctx.input.background_tasks)
       ? { background_wait: true as const }
       : {};
+  const { stateDir } = ctx.identity;
+  const tool_calls = await settleWorkLog(stateDir).catch(() => readWorkLog(stateDir).tool_calls);
   const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
-    await session.progress("idle", { ...(text !== undefined ? { text } : {}), ...wait });
+    await session.progress("idle", {
+      ...(text !== undefined ? { text } : {}),
+      ...wait,
+      tool_calls,
+    });
     if (question !== null) {
       await session.progress("awaiting_input", {
         question,

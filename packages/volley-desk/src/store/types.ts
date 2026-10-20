@@ -43,6 +43,10 @@ export interface RegistryPayload {
   model_source?: "self-reported" | "harness-hook" | "unknown";
   /** What the agent says it is working on (SPEC §6.2); unchecked, so read it with `typeof`. */
   title?: unknown;
+  /** `{ repo?, issue?, pr? }` for that purpose (SPEC §6.2); unchecked. */
+  links?: unknown;
+  /** A session's terminal workspace title, from its hooks (SPEC §4.3); unchecked. */
+  workspace_title?: unknown;
   session_url?: string;
   workspace?: string;
   [key: string]: unknown;
@@ -321,6 +325,20 @@ export interface AgentAttention {
   notificationType?: string;
 }
 
+/** What the hooks' `activity` / `idle` / `resumed` ticks say a session is doing (SPEC §4.3). */
+export interface WorkLog {
+  /** Tool calls so far (`payload.tool_calls`). */
+  toolCalls: number;
+  /** ms of the last tool call, when one has been reported. */
+  lastToolAt: number | null;
+  /** The last activity line (`Bash: …`, `prompt received`). */
+  last: string | null;
+  /** Working since the last activity / resumed; idle since the turn ended. */
+  state: "working" | "idle";
+  /** ms the state began. */
+  since: number;
+}
+
 export interface AgentView {
   id: string;
   namespace: string | null;
@@ -351,6 +369,10 @@ export interface AgentView {
   lastProgress?: { type: string; at: number };
   /** ms of the last message on any of the agent's topics. */
   lastSeen: number;
+  /** ms of the last `progress` the agent itself sent (not its hooks): "no progress reported" is timed from it. */
+  reportedAt?: number;
+  /** The hooks' work log (SPEC §4.3 `activity` / `idle`), once one arrived. */
+  work?: WorkLog;
   /** Set when an `awaiting_input` is outstanding; cleared by `resumed` (SPEC §4.3). */
   attention: AgentAttention | null;
   /** True once the agent has published `resumed` (or `awaiting_input`) — i.e. its hooks report attention. */

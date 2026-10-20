@@ -4,7 +4,9 @@
  * caret and `tl-cmd` / `tl-ok` / `tl-bad` line classes; a capture the
  * supervisor has flagged `screen_stale` in the wave state carries a `stale`
  * marker. A new capture scrolls to the bottom only while the reader is there.
- * An agent with no signal says so in the empty state.
+ * An agent with no signal says so in the empty state. Only agents volleyd
+ * spawned have a screen: for one that registered on its own (no wave task)
+ * the empty state says why, instead of a `no screen yet` that never comes.
  */
 import type { ScreenPayload } from "../../store/types";
 import { useFollow } from "./Feed";
@@ -17,11 +19,22 @@ export function lineClass(line: string): string {
   return "";
 }
 
+/** The empty Terminal of an agent volleyd did not launch: its screen is never published. */
+export const NO_TERMINAL =
+  "No terminal for this agent: it wasn't launched by volleyd, so its screen isn't published. Live output is in the Volley feed.";
+
 export function Terminal({
   screen,
   stale,
   noSignal = false,
-}: { screen: ScreenPayload | null; stale: boolean; noSignal?: boolean }) {
+  selfRegistered = false,
+}: {
+  screen: ScreenPayload | null;
+  stale: boolean;
+  noSignal?: boolean;
+  /** No wave task: volleyd did not launch it, so no screen will come. */
+  selfRegistered?: boolean;
+}) {
   const { ref, onScroll } = useFollow<HTMLDivElement>(screen);
 
   return (
@@ -33,7 +46,8 @@ export function Terminal({
       )}
       {screen === null ? (
         <div className="term-empty dim">
-          no screen yet{noSignal ? " · no signal from this agent on this broker" : ""}
+          {selfRegistered ? NO_TERMINAL : "no screen yet"}
+          {noSignal ? " · no signal from this agent on this broker" : ""}
         </div>
       ) : (
         <>

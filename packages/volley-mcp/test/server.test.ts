@@ -60,19 +60,45 @@ describe("createServer (MCP wiring)", () => {
     expect(state.registered).toBe(true);
   });
 
-  it("vol_register takes a title and refuses one longer than 200 characters", async () => {
+  it("vol_register takes a title of up to 120 characters and links", async () => {
     const ok = await client.callTool({
       name: "vol_register",
-      arguments: { capabilities: [], title: "Fix the login redirect" },
+      arguments: {
+        capabilities: [],
+        title: "x".repeat(120),
+        links: { repo: "example-org/example-repo", issue: 42 },
+      },
     });
     expect(ok.isError).toBeFalsy();
     const got = await state.broker.queryRetained("volley/_system/registry/srv-aaaa", 1000);
-    expect(JSON.parse(got ?? "{}").payload.title).toBe("Fix the login redirect");
-    const long = await client.callTool({
+    const payload = JSON.parse(got ?? "{}").payload;
+    expect(payload.title).toBe("x".repeat(120));
+    expect(payload.links).toEqual({ repo: "example-org/example-repo", issue: 42 });
+  });
+
+  it("vol_register refuses a 121-character title, a multi-line one and malformed links", async () => {
+    for (const args of [
+      { title: "x".repeat(121) },
+      { title: "first line\nsecond line" },
+      { links: { issue: true } },
+      { links: { repo: "not a repo" } },
+      { links: { pr: "javascript:alert(1)" } },
+      { links: { extra: 1 } },
+    ]) {
+      const res = await client.callTool({
+        name: "vol_register",
+        arguments: { capabilities: [], ...args },
+      });
+      expect(res.isError, JSON.stringify(args)).toBe(true);
+    }
+  });
+
+  it("vol_register accepts a padded title whose trimmed length fits", async () => {
+    const res = await client.callTool({
       name: "vol_register",
-      arguments: { capabilities: [], title: "x".repeat(201) },
+      arguments: { capabilities: [], title: `  ${"x".repeat(119)}  ` },
     });
-    expect(long.isError).toBe(true);
+    expect(res.isError).toBeFalsy();
   });
 
   it("returns a thrown VolleyError as isError with a structured code", async () => {

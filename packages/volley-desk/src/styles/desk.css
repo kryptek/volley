@@ -517,3 +517,13 @@ input.recessed:focus {
 .win--collapsed .win-foot[hidden] {
   display: none;
 }
+
+/* The unassigned / Sessions cards list their agents by purpose (C14). */
+.loose-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+}

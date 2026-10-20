@@ -18,7 +18,8 @@ export type HookName =
   | "stop"
   | "notification"
   | "pre-compact"
-  | "pre-tool-use-lease";
+  | "pre-tool-use-lease"
+  | "pre-tool-use";
 
 export const HOOK_NAMES: HookName[] = [
   "session-start",
@@ -29,6 +30,7 @@ export const HOOK_NAMES: HookName[] = [
   "notification",
   "pre-compact",
   "pre-tool-use-lease",
+  "pre-tool-use",
 ];
 
 /** A hook stdin sample from test/fixtures with `cwd` pointed at `cwd`. */
