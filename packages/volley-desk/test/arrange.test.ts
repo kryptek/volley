@@ -10,6 +10,7 @@ import {
   type Screen,
   arrange,
   candidates,
+  fitArea,
   layoutCluster,
 } from "../src/layout/arrange";
 
@@ -352,10 +353,11 @@ describe("pinned windows (C12)", () => {
   /** A world rect, mapped through the view, lies inside the fit area. */
   const onScreen = (r: { view: { x: number; y: number; s: number } }, rect: R) => {
     const { x, y, s } = r.view;
-    expect(x + rect.x * s).toBeGreaterThanOrEqual(24 - 0.5);
-    expect(x + (rect.x + rect.w) * s).toBeLessThanOrEqual(24 + 1552 + 0.5);
-    expect(y + rect.y * s).toBeGreaterThanOrEqual(64 - 0.5);
-    expect(y + (rect.y + rect.h) * s).toBeLessThanOrEqual(64 + 826 + 0.5);
+    const a = fitArea(screen);
+    expect(x + rect.x * s).toBeGreaterThanOrEqual(a.x - 0.5);
+    expect(x + (rect.x + rect.w) * s).toBeLessThanOrEqual(a.x + a.w + 0.5);
+    expect(y + rect.y * s).toBeGreaterThanOrEqual(a.y - 0.5);
+    expect(y + (rect.y + rect.h) * s).toBeLessThanOrEqual(a.y + a.h + 0.5);
   };
 
   it("the view frames the pinned windows with the arranged ones", () => {
@@ -370,6 +372,19 @@ describe("pinned windows (C12)", () => {
       for (const rect of rectsOf(r.place)) onScreen(r, rect);
       for (const p of Object.values(pinned)) onScreen(r, p);
     }
+  });
+
+  it("a pin too far to frame clamps the zoom to the minimum, centring the union", () => {
+    const pinned = { coordinators: { x: -200_000, y: 0, w: 430, h: 360 } };
+    const r = arrange([waveA, waveB], screen, { pinned });
+    if (!r) throw new Error("no arrangement");
+    expect(r.view.s).toBe(ARRANGE_MIN_SCALE);
+    // the union's horizontal centre lands on the fit area's centre
+    const all = [...rectsOf(r.place), pinned.coordinators];
+    const left = Math.min(...all.map((q) => q.x));
+    const right = Math.max(...all.map((q) => q.x + q.w));
+    const a = fitArea(screen);
+    expect(r.view.x + ((left + right) / 2) * r.view.s).toBeCloseTo(a.x + a.w / 2, 6);
   });
 
   it("a pinned wave window keeps its place; its agents are still arranged", () => {
