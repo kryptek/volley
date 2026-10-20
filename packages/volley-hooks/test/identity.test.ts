@@ -7,6 +7,7 @@ import { handle as notification } from "../src/hooks/notification";
 import { handle as postModelSwitch } from "../src/hooks/post-model-switch";
 import { handle as postToolUse } from "../src/hooks/post-tool-use";
 import { handle as preCompact } from "../src/hooks/pre-compact";
+import { handle as preToolUse } from "../src/hooks/pre-tool-use";
 import { handle as preToolUseLease } from "../src/hooks/pre-tool-use-lease";
 import { handle as sessionStart } from "../src/hooks/session-start";
 import { handle as stop } from "../src/hooks/stop";
@@ -53,6 +54,7 @@ const FIXTURE_FOR: Record<string, string> = {
   notification: "notification-agent-needs-input.json",
   "pre-compact": "pre-compact.json",
   "pre-tool-use-lease": "pre-tool-use-bash.json",
+  "pre-tool-use": "pre-tool-use-bash.json",
 };
 
 describe("no .volley/agent.json → silent no-op", () => {
@@ -69,18 +71,19 @@ describe("no .volley/agent.json → silent no-op", () => {
     expect(connections).toBe(before);
   });
 
-  const handlers = {
-    SessionStart: sessionStart,
-    PostModelSwitch: postModelSwitch,
-    UserPromptSubmit: userPromptSubmit,
-    PostToolUse: postToolUse,
-    Stop: stop,
-    Notification: notification,
-    PreCompact: preCompact,
-    PreToolUse: preToolUseLease,
-  };
+  const handlers: [string, string, Parameters<typeof invokeHook>[1]][] = [
+    ["SessionStart", "SessionStart", sessionStart],
+    ["PostModelSwitch", "PostModelSwitch", postModelSwitch],
+    ["UserPromptSubmit", "UserPromptSubmit", userPromptSubmit],
+    ["PostToolUse", "PostToolUse", postToolUse],
+    ["Stop", "Stop", stop],
+    ["Notification", "Notification", notification],
+    ["PreCompact", "PreCompact", preCompact],
+    ["PreToolUse (lease)", "PreToolUse", preToolUseLease],
+    ["PreToolUse (activity)", "PreToolUse", preToolUse],
+  ];
 
-  it.each(Object.entries(handlers))("%s handler returns within 50 ms", async (event, handler) => {
+  it.each(handlers)("%s handler returns within 50 ms", async (_label, event, handler) => {
     const dir = makeWorkdir();
     const before = connections;
     const started = performance.now();

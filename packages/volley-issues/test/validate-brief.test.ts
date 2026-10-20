@@ -15,11 +15,11 @@ const VOLLEYD_BRIEFS = fileURLToPath(new URL("../../volleyd/briefs/", import.met
 
 const tmp = tempDirForAll("validate-brief-");
 
-function gate(brief: string): { code: number | null; out: string } {
+function gate(brief: string): { code: number | null; out: string; err: string } {
   const file = join(tmp(), `brief-${Math.random().toString(36).slice(2)}.md`);
   writeFileSync(file, brief);
   const r = spawnSync("bash", [GATE, file], { encoding: "utf-8" });
-  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+  return { code: r.status, out: `${r.stdout}${r.stderr}`, err: r.stderr };
 }
 
 /** Fill every `{{name}}` the way volleyd's renderBrief does, with sample values. */
@@ -62,6 +62,34 @@ describe("validate-brief.sh", () => {
   it("passes a hand-written brief with vol_register and the narration block", () => {
     const brief = `Implement #5.\n\n1. vol_register with capabilities=["implements-issue"].\n\n${NARRATION_BLOCK}`;
     expect(gate(brief).code).toBe(0);
+  });
+
+  it("warns (but passes) when a hand-written brief's vol_register carries no title", () => {
+    const brief = `Implement #5.\n\n1. vol_register with capabilities=["implements-issue"].\n\n${NARRATION_BLOCK}`;
+    const r = gate(brief);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("validate-brief: OK");
+    expect(r.err).toContain("WARNING: vol_register without title");
+  });
+
+  it("does not warn when the vol_register step carries a title", () => {
+    const brief = `Implement #5.\n\n1. Call vol_register with capabilities=[\\"implements-issue\\"], title=\\"#5 Cache prefetch — implementer\\", links={ repo: \\"example/repo\\", issue: 5 }.\n\n${NARRATION_BLOCK}`;
+    const r = gate(brief);
+    expect(r.code).toBe(0);
+    expect(r.err).not.toContain("WARNING");
+  });
+
+  it("does not warn when the vol_register call spreads its title over the next lines", () => {
+    const brief = `Implement #5.\n\n1. Call vol_register with\n   capabilities=[\\"implements-issue\\"],\n   title=\\"#5 Cache prefetch — implementer\\".\n\n${NARRATION_BLOCK}`;
+    const r = gate(brief);
+    expect(r.code).toBe(0);
+    expect(r.err).not.toContain("WARNING");
+  });
+
+  it.each(templates)("does not warn about a title on volleyd's rendered %s", (t) => {
+    const r = gate(render(readFileSync(join(VOLLEYD_BRIEFS, t), "utf-8")));
+    expect(r.code).toBe(0);
+    expect(r.err).not.toContain("WARNING: vol_register without title");
   });
 
   it("fails a hand-written brief missing the narration contract", () => {

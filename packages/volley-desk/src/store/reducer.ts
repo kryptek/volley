@@ -54,6 +54,7 @@ import {
   type UsagePayload,
   type WaveStatePayload,
   type WaveView,
+  type WorkLog,
 } from "./types";
 
 /** Pseudo-wave for agents no wave state references (legacy dispatches, ad-hoc agents). */
@@ -338,7 +339,12 @@ export function pruneUnconfirmed(state: DeskState): DeskState {
 
 // ------------------------------------------------------------------ agents
 
-function newAgent(id: string, waves: Record<string, WaveView>, at: number): AgentView {
+function newAgent(
+  id: string,
+  waves: Record<string, WaveView>,
+  at: number,
+  observedAt: number,
+): AgentView {
   const where = findAssignment(waves, id);
   return {
     id,
@@ -360,6 +366,7 @@ function newAgent(id: string, waves: Record<string, WaveView>, at: number): Agen
     feed: [],
     screen: null,
     bornAt: null,
+    observedAt,
   };
 }
 
@@ -421,7 +428,7 @@ function reduceRegistry(state: DeskState, id: string, m: DeskMessage): DeskState
   const at = seenAt(m, env);
   const existing = agents[id];
   const replay = isReplay(existing, m, env);
-  const prev = existing ?? newAgent(id, state.waves, at);
+  const prev = existing ?? newAgent(id, state.waves, at, m.receivedAt);
   const registry = record(env.payload) as RegistryPayload;
   const started = Date.parse(registry.started_at ?? "");
   agents[id] = {
@@ -455,7 +462,7 @@ function reduceAgent(
   }
   const at = seenAt(m, env);
   const replay = isReplay(existing, m, env);
-  const prev = existing ?? newAgent(id, state.waves, at);
+  const prev = existing ?? newAgent(id, state.waves, at, m.receivedAt);
   // mailbox and screen envelopes name another agent (sender / supervisor), not this one's parent.
   const foreign = channel === "mailbox" || channel === "screen";
   const base: AgentView = {
@@ -485,7 +492,14 @@ function reduceAgent(
   if (channel === "progress" && !replay && at >= (prev.lastProgress?.at ?? at)) {
     next.lastProgress = { type: env.type, at };
   }
-  const narration = str(payload.msg);
+  const hook = channel === "progress" && payload.source === "harness-hook";
+  if (channel === "progress" && !hook && !replay) next.reportedAt = at;
+  if (channel === "progress" && !hook && prev.firstSaid === undefined) {
+    const said = str(payload.msg);
+    if (said !== undefined) next.firstSaid = said;
+  }
+  // A hook's work-log line is the session's, not the agent's own narration: kept in `work`.
+  const narration = env.type === "activity" && hook ? undefined : str(payload.msg);
   // Live traffic is the newest by definition; only a replay can be older than what is shown
   // (and its `wall_time` is the sender's clock, which may run ahead of ours).
   if (narration !== undefined && (!m.retained || at >= (prev.narrationAt ?? at))) {
@@ -526,8 +540,45 @@ function reduceAgent(
     next.attentionObserved = true;
     next.attention = null;
   }
+  if (hook) {
+    const work = workLog(prev.work, env.type, payload, at);
+    if (work) next.work = work;
+  }
   return putAgent(state, next);
 }
+
+/**
+ * Fold one hook tick into the work log: `activity` (a tool call or a new prompt) and
+ * `resumed` mean working, `idle` / `awaiting_input` mean the turn ended. Anything else
+ * (a heartbeat) changes nothing. `tool_calls` only grows.
+ */
+export function workLog(
+  prev: WorkLog | undefined,
+  type: string,
+  payload: Record<string, unknown>,
+  at: number,
+): WorkLog | undefined {
+  const state =
+    type === "activity" || type === "resumed"
+      ? "working"
+      : type === "idle" || type === "awaiting_input"
+        ? "idle"
+        : null;
+  if (state === null) return prev;
+  const reported = typeof payload.tool_calls === "number" ? payload.tool_calls : 0;
+  const msg = type === "activity" ? str(payload.msg) : undefined;
+  const base: WorkLog = prev ?? { toolCalls: 0, lastToolAt: null, last: null, state, since: at };
+  return {
+    toolCalls: Math.max(base.toolCalls, reported),
+    lastToolAt: msg !== undefined && msg !== PROMPT_RECEIVED ? at : base.lastToolAt,
+    last: msg ?? base.last,
+    state,
+    since: prev && prev.state === state ? prev.since : at,
+  };
+}
+
+/** The `activity` line the hooks send for a new prompt (never its text). */
+export const PROMPT_RECEIVED = "prompt received";
 
 // ------------------------------------------------------------- supervisors
 
@@ -940,8 +991,36 @@ export function endedWaves(state: DeskState): Set<string> {
   );
 }
 
+/** Registry entries the harness hooks wrote: `model_source` is theirs (SPEC §4.3). */
+const HOOK_SOURCES = new Set(["harness-hook", "unknown"]);
+
 /**
- * The top bar's "N agents working": agents (not coordinators, never
+ * An interactive Claude Code session rather than a dispatched agent: the hooks
+ * registered it (`model_source`), nobody launched it (no `parent_id`) and no
+ * wave runs it (SPEC §4.3).
+ */
+export function isSession(a: Pick<AgentView, "registry" | "parentId" | "wave" | "task">): boolean {
+  const src = a.registry?.model_source;
+  return (
+    typeof src === "string" &&
+    HOOK_SOURCES.has(src) &&
+    a.parentId === null &&
+    a.wave === UNASSIGNED &&
+    a.task === null
+  );
+}
+
+/** The top bar's "· N sessions": live interactive sessions (`isSession`), apart from the agents. */
+export function sessionCount(state: DeskState): number {
+  return Object.values(state.agents).filter(
+    (a) => !state.coordinators[a.id] && isSession(a) && LIVE_AGENT.has(a.status?.type ?? ""),
+  ).length;
+}
+
+const LIVE_AGENT = new Set(["spawning", "registered", "working"]);
+
+/**
+ * The top bar's "N agents working": agents (not coordinators, never sessions, never
  * supervisors, none of a stopped / complete wave) whose status is `working`, or still `spawning` / `registered`
  * while they publish progress — an agent the MCP server left at `registered`
  * (it never set `working` itself) that is narrating is at work.
@@ -949,7 +1028,7 @@ export function endedWaves(state: DeskState): Set<string> {
 export function workingCount(state: DeskState): number {
   return Object.values(state.agents).filter((a) => {
     // Nothing runs in a stopped / complete wave, whatever an agent's last status said.
-    if (state.coordinators[a.id] || isEndedWave(state.waves[a.wave])) return false;
+    if (state.coordinators[a.id] || isSession(a) || isEndedWave(state.waves[a.wave])) return false;
     const t = a.status?.type;
     if (t === "working") return true;
     return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;

@@ -78,16 +78,16 @@ describe("finished agents (owner live-data finding a)", () => {
     );
     await act(async () => new Promise((r) => setTimeout(r, 40)));
 
-    expect(win("w1 · T1 · spec review")).toBeInTheDocument();
+    expect(win("T1 · SPEC + schemas · spec review")).toBeInTheDocument();
     // Finished two minutes ago: inside the default 10 min grace.
-    expect(win("w1 · T3 · implementer")).toBeInTheDocument();
-    expect(win("w1 · T1 · implementer")).not.toBeInTheDocument();
+    expect(win("T3 · Daemon foundation · implementer")).toBeInTheDocument();
+    expect(win("T1 · SPEC + schemas · implementer")).not.toBeInTheDocument();
 
     const box = screen.getByRole("checkbox", { name: /Show finished agents/ });
     expect(screen.getByText(/1 finished more than 10 min ago is hidden/)).toBeInTheDocument();
     fireEvent.click(box);
-    expect(win("w1 · T1 · implementer")).toBeInTheDocument();
+    expect(win("T1 · SPEC + schemas · implementer")).toBeInTheDocument();
     fireEvent.click(box);
-    expect(win("w1 · T1 · implementer")).not.toBeInTheDocument();
+    expect(win("T1 · SPEC + schemas · implementer")).not.toBeInTheDocument();
   });
 });

@@ -48,7 +48,7 @@ Before invoking `/volley-issues`:
 
 3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
 
-4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7" })`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace }`. The `agent_id` is the
+4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace }`. The `agent_id` is the
    auto-suffixed value `coordinator-XXXX` (NOT the literal env prefix);
    this is the value to embed in dispatched children's spawn brief as
    their `parent_id`.
@@ -266,9 +266,9 @@ If a release branch already exists for in-flight work, base the new dispatch off
 
 For each issue in the dispatch set:
 
-1. **Fetch issue** — `gh issue view <number> --json title,body`. Record the title for the worktree slug and cmux workspace name.
+1. **Fetch issue** — `gh issue view <number> --json title,body`. Record the title for the worktree slug. The issue title is untrusted text: it never goes on a command line as-is. The cmux workspace name and the agent's `vol_register` title use `<brief-title>` (step 5's substitutions), made by `scripts/brief-title.ts` from the title on stdin.
 
-2. **Derive the issue slug** for this issue. Format: `<slug>` is the lowercase-hyphenated issue title (capped at 20 chars). Example: `api-cache-prefetch`. The slug is used for the worktree branch name (`issue-<N>-<slug>`) and cmux workspace name — it does NOT need to be a valid Volley agent_id; the child's agent_id is auto-picked by the MCP server at startup (see step 5). Sanitize as needed (lowercase, hyphens only, no spaces).
+2. **Derive the issue slug** for this issue. Format: `<slug>` is the lowercase-hyphenated issue title (capped at 20 chars). Example: `api-cache-prefetch`. The slug is used for the worktree branch name (`issue-<N>-<slug>`) — it does NOT need to be a valid Volley agent_id; the child's agent_id is auto-picked by the MCP server at startup (see step 5). Sanitize as needed (lowercase, hyphens only, no spaces).
 
 3. **Create the worktree** from the release branch (or main for single-issue):
    ```bash
@@ -308,11 +308,11 @@ For each issue in the dispatch set:
    ```bash
    cmux new-workspace \
      --cwd /private/tmp/example-issue-<N> \
-     --name "Issue-<N>: <short-title>" \
+     --name "<brief-title>" \
      --command "claude --dangerously-skip-permissions 'Read ISSUE.md and implement GitHub issue <N>. Use ultrathink for complex decisions. Do NOT commit or push. When done, write a DEPLOY.md listing all deployment steps required but do NOT git add or commit DEPLOY.md.
 
    IMMEDIATELY on startup, in this order:
-     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"claude-opus-4-7\". The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
+     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"claude-opus-4-7\", title=\"<brief-title>\", links={ repo: \"<owner/name>\", issue: <N> } (the Desk shows the title on your window; your agent id says nothing about the work). The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
      2. Call vol_publish with channel=\"status\", type=\"working\", payload={ issue: <N>, started_at: <ISO timestamp> }.
 
    AT MEANINGFUL CHECKPOINTS, publish progress via vol_publish. Include a numeric progress field (0-100) in every payload so dashboards / coordinators can render a determinate progress bar instead of an indeterminate sweep. Suggested progression for a coding task — adjust the percentages to match the actual work shape, but always include the field:
@@ -338,7 +338,18 @@ For each issue in the dispatch set:
    ```
 
    Substitutions before invocation:
-   - `<N>` and `<short-title>` from the issue.
+   - `<N>`: the issue number, digits only.
+   - `<brief-title>`: the output of
+     `gh issue view <N> --json title -q .title | bun <skill-dir>/scripts/brief-title.ts <N> implementer`
+     — never the raw issue title. The helper reads the title on stdin and prints one line,
+     `#<N> <issue title> — implementer` (an issue title that starts with a task tag keeps it:
+     `#<N> O0: <rest> — implementer`), with every character special inside shell quotes removed
+     (`'` `"` `` ` `` `$` `\`), control characters and newlines turned into spaces, whitespace
+     collapsed, cut to 120 characters (`vol_register`'s `title` limit). That is what makes it safe
+     inside both the single-quoted prompt and the double-quoted `--command` / `--name`: a raw
+     title with an apostrophe ends the prompt early, and a backtick or `$(…)` in it would run in
+     your shell. The helper refuses a non-numeric `<N>` (exit 2).
+   - `<owner/name>`: the repository, `gh repo view --json nameWithOwner -q .nameWithOwner`.
    - `<COORDINATOR-AGENT-ID>` from the coordinator's own `vol_register` response (Prerequisites step 4) — the auto-suffixed value, e.g. `coordinator-a3f1`.
    - `<ISO timestamp>` left as literal text for the child to interpolate at startup.
 
@@ -369,7 +380,7 @@ For each issue in the dispatch set:
 
 6. **Rename workspace + open ISSUE.md panel** — these are cosmetic UX steps unchanged from legacy:
    ```bash
-   cmux rename-workspace --workspace <ref> "Issue-<N>: <short title>"
+   cmux rename-workspace --workspace <ref> "<brief-title>"
    cmux markdown /private/tmp/example-issue-<N>/ISSUE.md --workspace <ref>
    ```
 
@@ -440,7 +451,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
    - `cd` to the agent's worktree (`/private/tmp/example-issue-<N>`).
    - `git status && git diff` to inspect the changes.
    - Read the agent's `DEPLOY.md` (do not commit it).
-   - If the diff looks good: `git add -A && git commit -m "feat: implement #<N> — <title>"` then `git push origin issue-<N>-<slug>` and `gh pr create --base <release-branch-or-main> --title "feat: #<N> — <title>" --body "<...>"`. Embed the `DEPLOY.md` contents in the PR body under a `## Deployment Requirements` section.
+   - If the diff looks good: `git add -A && git commit -m "feat: implement <issue-title>"` then `git push origin issue-<N>-<slug>` and `gh pr create --base <release-branch-or-main> --title "feat: <issue-title>" --body "<...>"`, where `<issue-title>` is `gh issue view <N> --json title -q .title | bun <skill-dir>/scripts/brief-title.ts <N>` (no role: `#<N> <issue title>`, shell-safe like `<brief-title>`). Embed the `DEPLOY.md` contents in the PR body under a `## Deployment Requirements` section.
 
 3. **If `blocked`**:
    - Open the workspace (`cmux focus-workspace --workspace <ref>`).

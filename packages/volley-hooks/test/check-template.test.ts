@@ -11,6 +11,7 @@ describe("settings template", () => {
     expect(result.missing).toEqual([]);
     expect(result.commands.length).toBeGreaterThanOrEqual(7);
     expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/statusline/publish.ts"');
+    expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/hooks/pre-tool-use.ts"');
   });
 
   it("reports a statusLine command whose script does not exist", () => {

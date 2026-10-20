@@ -336,8 +336,10 @@ describe("Desk steering end to end (live store)", () => {
       </DeskStoreProvider>,
     );
     expect(b.auths[0]).toEqual({ username: "desk", password: "pw" });
-    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
-    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Message T1 · SPEC + schemas implementer" }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Message T1 · SPEC + schemas · implementer" });
     fireEvent.click(within(panel).getByRole("button", { name: "Post a progress update now" }));
 
     await waitFor(() => expect(b.published).toHaveLength(1));
@@ -442,8 +444,10 @@ describe("Desk steering end to end (live store)", () => {
   it("credentials that never connect leave the panel read-only", async () => {
     const b = fakeBroker({ connects: false });
     signedIn(b);
-    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
-    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Message T1 · SPEC + schemas implementer" }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Message T1 · SPEC + schemas · implementer" });
     expect(within(panel).getByText(/Read-only/)).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "Post a progress update now" }));
     expect(b.published).toHaveLength(0);
@@ -460,8 +464,10 @@ describe("Desk steering end to end (live store)", () => {
   it("/stop on the agent holding its slot asks volleyd to interrupt exactly that role", async () => {
     const b = fakeBroker();
     signedIn(b);
-    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
-    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Message T1 · SPEC + schemas implementer" }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Message T1 · SPEC + schemas · implementer" });
     await waitFor(() => expect(within(panel).queryByText(/Read-only/)).toBeNull());
     stop(panel);
     await waitFor(() => expect(b.published).toHaveLength(1));
@@ -478,7 +484,9 @@ describe("Desk steering end to end (live store)", () => {
   it("/stop on an agent whose role slot moved on interrupts nobody and says why (stale target)", async () => {
     const b = fakeBroker();
     signedIn(b);
-    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Message T1 · SPEC + schemas implementer" }),
+    );
     // A fixup round / model switch: the implementer slot now belongs to a new agent.
     const p = waveState.payload as WaveStatePayload;
     const moved = {
@@ -495,7 +503,7 @@ describe("Desk steering end to end (live store)", () => {
     );
     // Let the store apply the new state (it batches deliveries).
     await act(async () => new Promise((r) => setTimeout(r, 40)));
-    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    const panel = screen.getByRole("dialog", { name: "Message T1 · SPEC + schemas · implementer" });
     await waitFor(() => expect(within(panel).queryByText(/Read-only/)).toBeNull());
     stop(panel);
     // No escape_only query reaches volleyd: it would press Escape in implementer-2.
@@ -528,8 +536,10 @@ describe("Desk steering end to end (live store)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Message T1 implementer" }));
-    const panel = screen.getByRole("dialog", { name: "Message T1 · implementer" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Message T1 · SPEC + schemas implementer" }),
+    );
+    const panel = screen.getByRole("dialog", { name: "Message T1 · SPEC + schemas · implementer" });
     expect(within(panel).getByText(/Read-only/)).toBeInTheDocument();
     // The command names the agent's role, so it reaches this agent and not the stage's (P2-7).
     expect(
@@ -550,8 +560,12 @@ describe("Desk steering (demo mode)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Message T2 implementer" }));
-    const panel = screen.getByRole("dialog", { name: "Message T2 · implementer" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Message T2 · Status column in the table implementer" }),
+    );
+    const panel = screen.getByRole("dialog", {
+      name: "Message T2 · Status column in the table · implementer",
+    });
     fireEvent.click(within(panel).getByRole("button", { name: "Keep the rename out of this PR" }));
     const lit = () =>
       [...within(panel).getByRole("list", { name: "Delivery" }).querySelectorAll("li.on")].length;

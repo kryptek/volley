@@ -9,6 +9,7 @@ compacted away, or the agent is sitting at a prompt:
 - steering **survives compaction** (`.volley/STEERING.md`, re-injected on `SessionStart`),
 - **idle / awaiting-input / resumed** are published from native hook events,
 - every hook publishes a **heartbeat** (no heartbeat means the hooks are broken, not that the agent is idle),
+- a **work log**: a rate-limited one-line `activity` tick per tool call or prompt, so a session that publishes nothing itself still shows what it is doing,
 - the **statusLine publisher** reports the session's context fill and its Claude account's 5-hour and weekly usage.
 
 Each hook is a small Bun script that reads the hook's JSON from stdin and exits fast. In agent mode
@@ -26,6 +27,7 @@ global settings file cheaply. On a broker that requires authentication the hooks
 - [Identity](#identity)
 - [Broker credentials](#broker-credentials)
 - [What each hook publishes](#what-each-hook-publishes)
+- [Work log (activity ticks)](#work-log-activity-ticks)
 - [Usage statusLine](#usage-statusline)
 - [Mailbox drain](#mailbox-drain)
 - [Coordinator sessions](#coordinator-sessions)
@@ -48,7 +50,9 @@ VOLLEY_HOOKS_DIR=/path/to/volley/packages/volley-hooks \
 
 The template's commands are `bun run "$VOLLEY_HOOKS_DIR/src/hooks/<hook>.ts"`, so either export
 `VOLLEY_HOOKS_DIR` for the session or substitute the path into a copy of the template. CI checks that
-every command in the template resolves to a file (`bun run check:template`).
+every command in the template resolves to a file (`bun run check:template`). `PreToolUse` has two
+entries: the lease hook (matcher `Bash`) and the work-log hook `pre-tool-use.ts` (matcher `""`,
+every tool); `PostToolUse` runs on every tool.
 
 **Coordinator sessions** (your own interactive sessions):
 
@@ -121,16 +125,19 @@ runs unleased on an auth error.
 ## What each hook publishes
 
 All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq` and the
-`hook_event` that fired (SPEC §4.3). Every hook ends with `progress/heartbeat`.
+`hook_event` that fired (SPEC §4.3). Every hook except the two `PreToolUse` hooks ends with
+`progress/heartbeat` (`PostToolUse` heartbeats after every tool call anyway).
 
 | Hook | Publishes | Injects |
 |---|---|---|
-| `SessionStart` | registry entry (retained) with `model` from the input and `model_source: "harness-hook"`; without `model`, the last known model with `model_source: "unknown"`. Remembers the model in `model.json`. Flips a retained `spawning`/`registered` status to `working`. Bootstraps the persistent drain session and drains. | on `source` `compact` / `resume`: the live, already-delivered `steering` directives (newest 20), for context only; plus anything drained or never delivered |
+| `SessionStart` | registry entry (retained) with `model` from the input and `model_source: "harness-hook"`; without `model`, the last known model with `model_source: "unknown"`. Every other field of the entry (`title`, `links`, …) is kept. A coordinator's entry also gets `session_url`, `workspace` and `workspace_title` (see [Coordinator sessions](#coordinator-sessions)). Remembers the model in `model.json` and the coordinator fields in `registry-fields.json`. Flips a retained `spawning`/`registered` status to `working`. Bootstraps the persistent drain session and drains. | on `source` `compact` / `resume`: the live, already-delivered `steering` directives (newest 20), for context only; plus anything drained or never delivered |
 | `PostModelSwitch` | registry entry with `to_model` (also remembered in `model.json`) | — |
-| `UserPromptSubmit`, `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model | drained mail |
-| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
+| `UserPromptSubmit` | as `PostToolUse`, then an `activity` tick `prompt received` ([work log](#work-log-activity-ticks)), after the drained mail is stored and acked; never any of the prompt text | drained mail |
+| `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model or dropped a field SessionStart remembered (`session_url`, `workspace`, `workspace_title`); the [work log](#work-log-activity-ticks)'s held-back tick once its 5 s window is over | drained mail |
+| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars) and `tool_calls` (this session's [work log](#work-log-activity-ticks) count; its pending tick is dropped). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
 | `Notification` | `agent_needs_input` / `idle_prompt` / `permission_prompt` → `awaiting_input` (`notification_type`, `text`); `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`; `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only | — |
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
+| `PreToolUse` (all tools) | `activity` tick with a one-line summary of the call and `tool_calls`, at most once per 5 s per session; the newest line in a window is published at the next slot ([work log](#work-log-activity-ticks)) | — |
 | `PreToolUse` (`Bash`) | — (rewrites the command: see [Heavy-operation leases](#heavy-operation-leases)) | `command queued for a <pool> lease` when it wraps |
 
 Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not compliance**: the
@@ -138,6 +145,76 @@ Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not 
 model to reply `acknowledged: …` and publish `progress/steering_acked` with `correlation_id` set to
 the message id once it has acted on it; that envelope is what a dashboard shows as "agent
 acknowledged", and reviewers check the prose.
+
+## Work log (activity ticks)
+
+Interactive sessions (and agents that publish little progress of their own) would otherwise show
+on a dashboard as registered and `working` for hours with nothing else. The hooks publish a
+work log for them: `progress/activity` (SPEC §4.3; qos 0, not retained, with the usual
+`source`, `seq` and `hook_event`):
+
+```json
+{ "msg": "Bash: gh pr checks 153", "tool_calls": 42, "source": "harness-hook", "seq": 311, "hook_event": "PreToolUse" }
+```
+
+- **`msg`** is one line of at most 120 characters (cut with `…`). `PreToolUse`
+  (`src/hooks/pre-tool-use.ts`, matcher `""`) summarises the call: `Bash: <first line of the
+  command>`, `Edit:` / `MultiEdit:` / `Write:` / `Read: <file_path>` (relative to the project dir
+  when inside it, `~/…` when under `$HOME` outside it, so the home directory and the user name
+  in it are never published; a `$HOME/…` path inside a command is written `~/…` too),
+  `NotebookEdit: <notebook_path>`, `Task: <description>` (also for `Agent`),
+  `Grep:` / `Glob: <pattern>`, `WebFetch: <host>`, `WebSearch: <query>`; any other tool is its
+  name, an MCP tool `mcp__<server>__<tool>` just `<tool>`. `UserPromptSubmit` publishes exactly
+  `prompt received`: **no prompt text is ever published**.
+- **`tool_calls`** counts every `PreToolUse` of the Claude Code session, rate-limited ones
+  included. The state directory is shared by every session run in the same directory
+  (coordinator) or worktree (agent), so the count is keyed by the hook input's `session_id`
+  (the agent id when absent): a new session starts at 0 and gets a fresh rate-limit window;
+  `compact` and `resume` keep the session id, and the count. Each session has its own entry, so
+  two sessions running at once in the same state directory keep separate counts and windows;
+  entries untouched for a week are dropped (at most 16 are kept).
+- **Redaction.** Before publishing, the summary is masked (`***`, `redactSecrets` in
+  `src/lib/work-log.ts`; one test case per rule in `test/work-log.test.ts`):
+  - token shapes, wherever they appear: AWS access key ids (`AKIA…`, `ASIA…`), GitHub tokens
+    (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_…`, `github_pat_…`), `sk-…` API keys (`sk-ant-…`,
+    `sk-proj-…`), Slack tokens (`xoxb-…`), JWTs (`eyJ….….…`) and PEM private keys (from
+    `-----BEGIN … PRIVATE KEY-----` to its footer, or the end of the line);
+  - the value of a credential flag, as `--flag value` or `--flag=value`: one whose last part is
+    `password`, `passwd`, `token`, `secret` or `key` (`--password`, `--token`, `--secret`,
+    `--api-key`, `--client-secret`, `--access-token`); mysql / mariadb's glued `-pSECRET`; and
+    mosquitto_pub / mosquitto_sub's `-P value`. `-p` / `-P` anywhere else is left alone
+    (`mkdir -p`, `git log -p`, `cp -p`, `ssh -p 22`, `docker run -p 8080:80`, `rsync -P`);
+  - the password of curl's `-u` / `--user user:pass` (`-u admin:***`);
+  - credential headers and keys: `Authorization: …` and `Bearer …` (an auth scheme word such as
+    `Basic` is kept), `Cookie: …` (the whole value), and any `name: value` whose name's last `-` / `_`
+    part is `key`, `token`, `secret`, `password` or `authorization` (`X-Api-Key: …`,
+    `X-Auth-Token: …`, `"api_key": "…"`; never a suffix match: `monkey: x`, `hotkey: x` and
+    `Author: x` are left alone);
+  - assignments and query parameters whose name's last part is `token`, `password`, `secret`,
+    `key` or `apikey` (`GH_TOKEN=… cmd`, `PASSWORD=…`, `api_key=…`, `?token=…`; not
+    `monkey=…`);
+  - a credential name and its value after `set` / `config` / `configure`
+    (`aws configure set aws_secret_access_key …`, `git config user.signingkey …`);
+  - URL userinfo (`https://user:pass@host` → `https://***@host`).
+
+  Ordinary commands stay readable: `mkdir -p dir`, `git log -p`, `ssh -p 22 host`,
+  `git commit -m "fix key handling"` and `ls ~/.ssh` are published as they are. Only the first line
+  of a command is considered at all.
+- **Rate limit.** At most one `activity` publish per 5 s per session; the newest line in a
+  window is published at the next slot. `work-log.json` in the state directory holds
+  `{ "sessions": { "<session_id>": { "tool_calls", "last_published_at" (epoch ms), "pending"?,
+  "touched_at" } } }`, updated under
+  `work-log.lock` so parallel tool calls count correctly. A tick inside the window opens no
+  connection: it only records its summary as `pending` (newest wins). The next slot publishes it:
+  a later `PreToolUse` / `UserPromptSubmit` tick allowed to publish publishes its own (newer)
+  summary instead, and `PostToolUse`, which already has a broker session open for its
+  heartbeat, publishes the pending summary with the current `tool_calls` once the window is
+  over, then clears it and restarts the window. `Stop` drops it and reports the count on
+  `idle` as `tool_calls`.
+- **Fail soft.** The work log is cosmetic: a failure in it (say `work-log.lock` held by a hook
+  that died) is ignored. It never changes a hook's exit status or its other output; on
+  `UserPromptSubmit` the tick runs only after the drained mail is in `STEERING.md` and acked,
+  so it can never cost a steering message. `Stop` then reads the count without the lock.
 
 ## Usage statusLine
 
@@ -241,7 +318,17 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
   `background_tasks` shape counts: a list of task objects, one whose `status` is over
   (`completed`, `failed`, `killed`, …) not counting.
 - the next `UserPromptSubmit` / `PostToolUse` → `resumed` (and clears the background wait).
-- `SessionStart` adds `session_url` / `workspace` to the registry entry.
+- `SessionStart` adds `session_url` / `workspace` to the registry entry, and `workspace_title`:
+  `VOLLEY_WORKSPACE_TITLE` when set and non-empty, else (inside cmux, `CMUX_WORKSPACE_ID` set) the
+  `title` of this session's workspace from `cmux list-workspaces --json` (matched on its `ref`
+  or on `CMUX_WORKSPACE_ID`; same binary and 1 s timeout as `cmux identify`), trimmed and cut to
+  120 characters. Any failure leaves it out. It is on the registry entry only, never on
+  `awaiting_input`, and never in agent mode.
+- The MCP server's own register (startup auto-register, `vol_register`) replaces the whole
+  registry entry. SessionStart remembers `session_url`, `workspace` and `workspace_title` in
+  `registry-fields.json`; at most every 30 s a drain hook (`UserPromptSubmit` / `PostToolUse`)
+  re-publishes the entry when it lacks the harness model or any of them, keeping the rest of
+  the MCP server's entry.
 
 `session_url` comes from `VOLLEY_SESSION_URL` (a hook cannot derive it, see below); `workspace` from
 `VOLLEY_WORKSPACE`, else `cmux identify` (`caller.workspace_ref`) when running inside cmux. The
@@ -304,6 +391,7 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_HOOKS_MQTT_VERSION` | `5` | `4` for a broker without MQTT 5 (expiry is then the broker's policy). |
 | `VOLLEY_SESSION_URL` | — | Coordinator: the session's URL, published as `session_url`. |
 | `VOLLEY_WORKSPACE` | `cmux identify` | Coordinator: the terminal workspace ref, published as `workspace`. |
+| `VOLLEY_WORKSPACE_TITLE` | `cmux list-workspaces --json` | Coordinator: the workspace's title, published as `workspace_title` on the registry entry. |
 | `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root; also where `statusline-chain.json` lives. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
@@ -320,8 +408,9 @@ connections only (SPEC §4.4).
 
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
-`resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model),
-`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published) and, for
+`resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model), `registry-fields.json` (`{ "fields": { "session_url"?, "workspace"?, "workspace_title"? }, "checked_at"? }`: SessionStart's registry fields and the drain hooks' last registry check),
+`hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published),
+`work-log.json` + `work-log.lock` (the [work log](#work-log-activity-ticks)'s session, tool-call count and rate limit) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests
@@ -379,4 +468,10 @@ Observed with Claude Code 2.1 on 2026-10-18, hooks writing their stdin to files 
   from `VOLLEY_SESSION_URL`, set by whoever launches the session.
 - **cmux workspace:** hook processes inherit `CMUX_WORKSPACE_ID` (a UUID) and `CMUX_SURFACE_ID`;
   `cmux identify` run from a session's child process reports `caller.workspace_ref`
-  (`workspace:<n>`).
+  (`workspace:<n>`). `cmux list-workspaces --json` was observed on a Mac
+  (`test/fixtures/cmux-list-workspaces.json` holds that shape, values replaced):
+  `{ window_ref, workspaces: [{ ref, id, index, title, custom_title, current_directory,
+  selected, latest_submitted_message, latest_conversation_message, … }] }`. The hook matches the
+  workspace on `ref` (or `id` = `CMUX_WORKSPACE_ID`) and reads only `title`: the
+  `latest_submitted_message` / `latest_conversation_message` fields (the session's prompt and
+  reply text) are never read or published.

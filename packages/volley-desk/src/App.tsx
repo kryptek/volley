@@ -37,6 +37,7 @@ import {
   needsYouTargets,
   noSignalFor,
   openDecisions,
+  staleProgressFor,
   waveAttention,
 } from "./attention";
 import { SignInPreview } from "./auth/SignInGate";
@@ -96,6 +97,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isSession,
   isSupervisorId,
   localAgentCount,
   stageChip,
@@ -107,6 +109,7 @@ import {
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
+import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import {
   COORDS_ID,
   COORDS_W,
@@ -129,7 +132,12 @@ const ATTN_TICK_MS = 15_000;
 /** The supervisor's age (top-bar pill, coordinators row) ticks this often while one is shown. */
 const SUPERVISOR_TICK_MS = 2000;
 
-const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
+/** The group of interactive sessions (`isSession`): its own card, apart from `unassigned`. */
+export const SESSIONS = "_sessions";
+/** The groups that are not waves: a card listing their agents, a side cluster. */
+const isLooseGroup = (id: string) => id === UNASSIGNED || id === SESSIONS;
+
+const accentOf = (wave: string) => (isLooseGroup(wave) ? NEUTRAL_ACCENT : accentFor(wave));
 
 /**
  * Earliest start among a wave's agents (registry `started_at`, else first
@@ -355,6 +363,12 @@ export default function App() {
   };
 
   const allGroups = agentsByWave(state);
+  // Interactive sessions leave the unassigned agents for a Sessions group of their own.
+  {
+    const loose = allGroups[UNASSIGNED] ?? [];
+    allGroups[SESSIONS] = loose.filter(isSession);
+    allGroups[UNASSIGNED] = loose.filter((a) => !isSession(a));
+  }
   // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on,
   // and so do old records with no status that nothing live has been heard from.
   const graceMs = look.finishedGraceMin * 60_000;
@@ -402,7 +416,7 @@ export default function App() {
   const endedShown = (id: string) => look.showFinished || revealed.has(id);
   const waveIds = [
     ...Object.keys(state.waves).filter((id) => !gone(id)),
-    ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
+    ...[UNASSIGNED, SESSIONS].filter((id) => (groups[id]?.length ?? 0) > 0),
   ];
   /** A window's rendered width: the prototype width, clamped on a phone. */
   const clampW = (w: number) => clampWindowWidth(w, vw);
@@ -605,7 +619,7 @@ export default function App() {
       ...visible.map((id) => ({
         main: sizeOf(id, WAVE_W, WAVE_H),
         kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
-        ...(id === UNASSIGNED ? { side: true } : {}),
+        ...(isLooseGroup(id) ? { side: true } : {}),
       })),
       ...(coordsShown
         ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
@@ -814,7 +828,7 @@ export default function App() {
       .map((a) => ({
         key: `agent:${a.id}`,
         tier: agentAttn[a.id]?.tier ?? "none",
-        title: `${a.task ? `${a.wave} · ${a.task}` : a.id} needs you`,
+        title: `${purposeOf(a, state.waves[a.wave]).label} needs you`,
         body: agentAttn[a.id]?.reason ?? "",
       })),
   ];
@@ -909,9 +923,26 @@ export default function App() {
           {visible.map((id) => {
             const wave = state.waves[id];
             if (!wave) {
+              const members = groups[id] ?? [];
+              const sessions = id === SESSIONS;
               return (
-                <Frame key={id} {...frame(id, NEUTRAL_ACCENT, WAVE_W)} title={id}>
-                  <div className="dim">{plural(groups[id]?.length ?? 0, "agent")} with no wave</div>
+                <Frame
+                  key={id}
+                  {...frame(id, NEUTRAL_ACCENT, WAVE_W)}
+                  title={sessions ? "Sessions" : id}
+                >
+                  <div className="dim">
+                    {sessions
+                      ? plural(members.length, "interactive session")
+                      : `${plural(members.length, "agent")} with no wave`}
+                  </div>
+                  <ul className="loose-list">
+                    {members.map((a) => (
+                      <li key={a.id} className="ell" title={a.id}>
+                        {purposeOf(a, undefined).label}
+                      </li>
+                    ))}
+                  </ul>
                 </Frame>
               );
             }
@@ -978,6 +1009,7 @@ export default function App() {
                   narrationFx={look.narr}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
+                  stale={staleProgressFor(a, state.waves[a.wave], ctx)?.label ?? null}
                   syncing={syncing && !ended.has(a.wave)}
                   stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
                   usage={state.usage?.[a.id] ?? null}
@@ -1007,7 +1039,10 @@ export default function App() {
                         ...(a.role ? { role: a.role } : {}),
                         ...(blocked !== undefined ? { noInterrupt: blocked } : {}),
                       },
-                      label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
+                      // The window's own name, as its title bar and chat button say it.
+                      label: [headlineOf(a, state.waves[a.wave]), a.role && ROLE_LABEL[a.role]]
+                        .filter(Boolean)
+                        .join(" · "),
                       coordinator: false,
                       // `volleyd steer` resolves the same slot, so a stale agent gets no command.
                       copy:

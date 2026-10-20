@@ -56,6 +56,45 @@ describe("vol_register", () => {
     expect(JSON.parse(got ?? "{}").payload.claude_account).toBe("work");
   });
 
+  it("title and links round-trip into the retained registry payload", async () => {
+    const links = {
+      repo: "example-org/example-repo",
+      issue: 42,
+      pr: "https://github.com/example-org/example-repo/pull/57",
+    };
+    await volRegister(state, {
+      capabilities: [],
+      title: "#42 T3 fix the login redirect — spec review",
+      links,
+    });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    const payload = JSON.parse(got ?? "{}").payload;
+    expect(payload.title).toBe("#42 T3 fix the login redirect — spec review");
+    expect(payload.links).toEqual(links);
+  });
+
+  it("trims the title; a blank title is none", async () => {
+    await volRegister(state, { capabilities: [], title: "  Desk agent purpose line  " });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.title).toBe("Desk agent purpose line");
+    await volRegister(state, { capabilities: [], title: "   " });
+    const blank = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(blank ?? "{}").payload).not.toHaveProperty("title");
+  });
+
+  it("a direct caller's over-long title is cut to SPEC's 120 characters", async () => {
+    await volRegister(state, { capabilities: [], title: "y".repeat(300) });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.title).toBe("y".repeat(120));
+  });
+
+  it("without title or links the payload has neither key (byte-identical to before)", async () => {
+    await volRegister(state, { capabilities: ["a"], cwd: "/tmp/x", model: "m" });
+    const raw = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    const payload = JSON.parse(raw ?? "{}").payload;
+    expect(Object.keys(payload).sort()).toEqual(["capabilities", "cwd", "model", "started_at"]);
+  });
+
   it("publishes a retained status: registered", async () => {
     await volRegister(state, { capabilities: [] });
     const got = await state.broker.queryRetained("volley/test/reg-aaaa/status", 1000);

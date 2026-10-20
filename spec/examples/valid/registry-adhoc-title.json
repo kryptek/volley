@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-7b9c",
+  "parent_id": "coordinator-abcd",
+  "namespace": "example-dispatch",
+  "wall_time": "2026-05-14T02:11:23.000Z",
+  "channel": "_system/registry",
+  "type": "registered",
+  "payload": {
+    "capabilities": [
+      "implements-issue"
+    ],
+    "cwd": "/private/tmp/example-issue-42",
+    "model": "claude-opus-4-7",
+    "title": "#42 T3 fix the login redirect loop \u2014 spec review",
+    "links": {
+      "repo": "example-org/example-repo",
+      "issue": 42,
+      "pr": "https://github.com/example-org/example-repo/pull/57"
+    },
+    "started_at": "2026-05-14T02:11:23.000Z"
+  }
+}

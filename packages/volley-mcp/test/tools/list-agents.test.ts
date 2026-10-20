@@ -29,7 +29,12 @@ describe("vol_list_agents", () => {
       agentId: "agent-one",
       parentId: "viewer-aaaa",
     });
-    await volRegister(a, { capabilities: ["x"], model: "m1", cwd: "/tmp/one" });
+    await volRegister(a, {
+      capabilities: ["x"],
+      model: "m1",
+      cwd: "/tmp/one",
+      title: "#42 fix the login redirect",
+    });
     const b = await startLifecycle({
       brokerUrl: tb.url,
       namespace: "test",
@@ -47,6 +52,8 @@ describe("vol_list_agents", () => {
     expect(one?.capabilities).toEqual(["x"]);
     expect(one?.model).toBe("m1");
     expect(one?.cwd).toBe("/tmp/one");
+    expect(one?.title).toBe("#42 fix the login redirect");
+    expect(res.agents.find((x) => x.agent_id === "agent-two")?.title).toBeNull();
 
     await a.broker.disconnect();
     await b.broker.disconnect();

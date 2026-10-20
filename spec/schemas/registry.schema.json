@@ -3,6 +3,14 @@
   "$id": "https://volley.systems/schemas/0.1/registry.schema.json",
   "title": "Volley Registry Entry",
   "description": "Retained registry entry published to volley/_system/registry/<agent_id>. See spec section 6.",
+  "$defs": {
+    "ref": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "string", "format": "uri", "pattern": "^https?://" }
+      ]
+    }
+  },
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -21,6 +29,27 @@
             "capabilities": { "type": "array", "items": { "type": "string" } },
             "cwd": { "type": "string" },
             "model": { "type": "string" },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[^\\r\\n]*$",
+              "description": "One line saying what the agent is working on (spec section 6.2)."
+            },
+            "links": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "References for the agent's purpose (spec section 6.2): a number is an issue or PR in `repo`.",
+              "properties": {
+                "repo": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+                "issue": { "$ref": "#/$defs/ref" },
+                "pr": { "$ref": "#/$defs/ref" }
+              }
+            },
+            "workspace_title": {
+              "type": "string",
+              "description": "A coordinator session's terminal workspace title, from its harness hooks (spec section 4.3)."
+            },
             "claude_account": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
