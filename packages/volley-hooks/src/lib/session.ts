@@ -215,15 +215,26 @@ export function writeActivity(stateDir: string, activity: Activity): void {
   writeFileAtomic(join(stateDir, "activity.json"), `${JSON.stringify(activity)}\n`);
 }
 
-/** How often a drain hook checks that the registry still carries the harness model. */
-const MODEL_CHECK_MS = 30_000;
+/** How often a drain hook checks that the registry still carries the harness fields. */
+export const MODEL_CHECK_MS = 30_000;
 
 interface HarnessModel {
   model: string;
   checked_at?: number;
 }
 
+/** The registry fields only SessionStart can compute (`registryFields`). */
+export type RegistryFields = { session_url?: string; workspace?: string; workspace_title?: string };
+
+/** `<stateDir>/registry-fields.json`: SessionStart's fields, and the drain hooks' last check. */
+interface StoredRegistryFields {
+  fields: RegistryFields;
+  checked_at?: number;
+}
+
 const modelPath = (stateDir: string) => join(stateDir, "model.json");
+const fieldsPath = (stateDir: string) => join(stateDir, "registry-fields.json");
+const FIELD_NAMES = ["session_url", "workspace", "workspace_title"] as const;
 
 /** Remember the harness-reported model (SessionStart / PostModelSwitch), or forget it. */
 export function writeHarnessModel(stateDir: string, model: string | undefined): void {
@@ -244,9 +255,47 @@ function readHarnessModel(stateDir: string): HarnessModel | null {
 }
 
 /**
+ * Remember SessionStart's registry fields (`session_url`, `workspace`, `workspace_title`) so
+ * the drain hooks can put them back after the MCP server's own register drops them. Written
+ * on every SessionStart, empty included, so an earlier session's fields never outlive it.
+ */
+export function writeRegistryFields(stateDir: string, fields: RegistryFields): void {
+  writeStoredFields(stateDir, { fields });
+}
+
+function writeStoredFields(stateDir: string, stored: StoredRegistryFields): void {
+  writeFileAtomic(fieldsPath(stateDir), `${JSON.stringify(stored)}\n`);
+}
+
+export function readRegistryFields(stateDir: string): StoredRegistryFields {
+  try {
+    const raw = JSON.parse(readFileSync(fieldsPath(stateDir), "utf-8")) as {
+      fields?: Record<string, unknown>;
+      checked_at?: unknown;
+    };
+    const fields: RegistryFields = {};
+    for (const k of FIELD_NAMES) {
+      const v = raw.fields?.[k];
+      if (typeof v === "string" && v !== "") fields[k] = v;
+    }
+    return {
+      fields,
+      ...(typeof raw.checked_at === "number" && Number.isFinite(raw.checked_at)
+        ? { checked_at: raw.checked_at }
+        : {}),
+    };
+  } catch {
+    return { fields: {} };
+  }
+}
+
+/**
  * The MCP server's own register (its startup auto-register, or the agent's `vol_register`)
- * replaces the whole registry entry and drops the harness model. At most every 30 s, put it
- * back when the retained entry no longer carries it.
+ * replaces the whole registry entry: it drops the harness model and SessionStart's fields
+ * (`session_url`, `workspace`, `workspace_title`). At most every 30 s, a drain hook puts them
+ * back when the retained entry no longer carries the model (`model_source: "harness-hook"`) or
+ * any remembered field. With no model known, the fields are restored alone (`model_source`
+ * then says `unknown`, as SessionStart published it).
  */
 export async function ensureHarnessModel(
   session: HookSession,
@@ -254,17 +303,18 @@ export async function ensureHarnessModel(
 ): Promise<void> {
   const { stateDir } = session.identity;
   const known = readHarnessModel(stateDir);
-  if (known === null) return;
-  if (known.checked_at !== undefined && now() - known.checked_at < MODEL_CHECK_MS) return;
+  const stored = readRegistryFields(stateDir);
+  const fields = stored.fields;
+  if (known === null && Object.keys(fields).length === 0) return;
+  const checkedAt = stored.checked_at ?? known?.checked_at;
+  if (checkedAt !== undefined && now() - checkedAt < MODEL_CHECK_MS && now() >= checkedAt) return;
   const raw = await session.broker.queryRetained(registryTopic(session.identity.agentId), 300);
   const p = (raw === null ? null : parseEnvelope(raw)?.payload) as Record<string, unknown> | null;
-  if (p?.model !== known.model || p?.model_source !== "harness-hook") {
-    await session.republishRegistry(known.model);
-  }
-  writeFileAtomic(
-    modelPath(stateDir),
-    `${JSON.stringify({ model: known.model, checked_at: now() } satisfies HarnessModel)}\n`,
-  );
+  const modelLost =
+    known !== null && (p?.model !== known.model || p?.model_source !== "harness-hook");
+  const fieldLost = FIELD_NAMES.some((k) => fields[k] !== undefined && p?.[k] !== fields[k]);
+  if (modelLost || fieldLost) await session.republishRegistry(known?.model, fields);
+  writeStoredFields(stateDir, { fields, checked_at: now() });
 }
 
 /**
@@ -348,10 +398,7 @@ function cmuxWorkspaceTitle(env: Env, ref: string | undefined): string | undefin
  * can say what an interactive session is for. Not on the awaiting_input events, and empty in
  * agent mode.
  */
-export function registryFields(
-  identity: HookIdentity,
-  env: Env,
-): { session_url?: string; workspace?: string; workspace_title?: string } {
+export function registryFields(identity: HookIdentity, env: Env): RegistryFields {
   const fields = coordinatorFields(identity, env);
   if (identity.mode !== "coordinator") return fields;
   const title = boundTitle(env.VOLLEY_WORKSPACE_TITLE) ?? cmuxWorkspaceTitle(env, fields.workspace);

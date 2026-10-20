@@ -248,7 +248,9 @@ export function drainsFor(ctx: Pick<HookContext, "event" | "input" | "env">): bo
 
 /**
  * UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat. `extra`
- * publishes anything else the hook adds on the same session (UserPromptSubmit's activity tick).
+ * publishes anything else the hook adds on the same session (the work log's activity tick);
+ * it runs last, once the drained mail is in STEERING.md and acked, and it fails soft: an
+ * error there never changes the hook's output, so it can never lose drained steering.
  */
 export async function drainHook(
   ctx: HookContext,
@@ -258,10 +260,16 @@ export async function drainHook(
   let handedOff = false;
   try {
     await markWorking(session);
-    if (extra !== undefined) await extra(session);
     await ensureHarnessModel(session);
     const mail = drained === null ? null : await processMail(session, drained);
     await session.heartbeat();
+    if (extra !== undefined) {
+      try {
+        await extra(session);
+      } catch {
+        // cosmetic (the work log): never at the cost of the steering above
+      }
+    }
     if (mail !== null) {
       deliverAfterEmit(ctx, ctx.identity.stateDir, mail.ids, release);
       handedOff = true;

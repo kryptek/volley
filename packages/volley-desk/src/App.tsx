@@ -97,6 +97,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isSession,
   isSupervisorId,
   localAgentCount,
   stageChip,
@@ -108,7 +109,7 @@ import {
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
-import { isSession, purposeOf } from "./windows/agent/purpose";
+import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import {
   COORDS_ID,
   COORDS_W,
@@ -1038,10 +1039,10 @@ export default function App() {
                         ...(a.role ? { role: a.role } : {}),
                         ...(blocked !== undefined ? { noInterrupt: blocked } : {}),
                       },
-                      label:
-                        a.task && a.role
-                          ? `${a.task} · ${ROLE_LABEL[a.role]}`
-                          : purposeOf(a, state.waves[a.wave]).label,
+                      // The window's own name, as its title bar and chat button say it.
+                      label: [headlineOf(a, state.waves[a.wave]), a.role && ROLE_LABEL[a.role]]
+                        .filter(Boolean)
+                        .join(" · "),
                       coordinator: false,
                       // `volleyd steer` resolves the same slot, so a stale agent gets no command.
                       copy:

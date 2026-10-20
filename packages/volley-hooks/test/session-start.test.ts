@@ -325,6 +325,50 @@ esac
     }
   });
 
+  it("a drain hook restores workspace_title and model_source after the MCP server re-registers", async () => {
+    await start({
+      VOLLEY_WORKSPACE_TITLE: "release triage",
+      VOLLEY_SESSION_URL: "https://claude.example.test/session/1",
+      VOLLEY_WORKSPACE: "workspace:7",
+    });
+    // The MCP server's own register replaces the whole entry.
+    await publishRegistry(client, COORD, "default", {
+      capabilities: ["coordinates"],
+      cwd: cdir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    const run = await runHook("post-tool-use", fixture("post-tool-use.json", cdir), {
+      cwd: cdir,
+      env,
+    });
+    expect(run.exitCode).toBe(0);
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      capabilities: ["coordinates"],
+      started_at: "2026-10-18T10:00:00.000Z",
+      model: "claude-opus-5-5",
+      model_source: "harness-hook",
+      workspace_title: "release triage",
+      session_url: "https://claude.example.test/session/1",
+      workspace: "workspace:7",
+    });
+  });
+
+  it("restores the persisted fields even when the model is unknown", async () => {
+    await runHook("session-start", fixture("session-start-no-model.json", cdir), {
+      cwd: cdir,
+      env: { ...env, VOLLEY_WORKSPACE_TITLE: "no model here" },
+    });
+    await publishRegistry(client, COORD, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    await runHook("post-tool-use", fixture("post-tool-use.json", cdir), { cwd: cdir, env });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({ workspace_title: "no model here" });
+  });
+
   it("no title source: no workspace_title", async () => {
     await start({ VOLLEY_WORKSPACE_TITLE: "" });
     const reg = await retainedEnvelope(client, registryTopic(COORD));

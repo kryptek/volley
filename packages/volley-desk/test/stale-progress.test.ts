@@ -6,8 +6,8 @@ import {
   staleProgressFor,
   waveAttention,
 } from "../src/attention";
-import { UNASSIGNED } from "../src/store/reducer";
-import type { AgentView, WaveStatePayload, WaveView } from "../src/store/types";
+import { UNASSIGNED, initialState, reduceAll } from "../src/store/reducer";
+import type { AgentView, DeskMessage, WaveStatePayload, WaveView } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const MIN = 60_000;
@@ -147,6 +147,77 @@ describe("no progress reported for 10 m", () => {
     const w = wave();
     const a = agent("w1-t1-impl-1", { wave: "w1", task: "T1", role: "implementer" });
     const c = ctx({ [a.id]: a }, { coordinators: {} });
+    expect(waveAttention(w, c)).toEqual({
+      tier: "info",
+      reason: "T1: no progress reported for 30 m",
+    });
+  });
+
+  it("no badge on a cold load: the clock starts when this page first heard of the agent", () => {
+    // A retained `working` from 2 h ago, replayed into a Desk that loaded a minute ago.
+    const at = NOW - 120 * MIN;
+    const env = (channel: string, type: string, payload: object) => ({
+      schema_version: "0.1",
+      agent_id: "coordinator-8fb2",
+      parent_id: "coordinator-ab12",
+      wall_time: new Date(at).toISOString(),
+      channel,
+      type,
+      payload,
+    });
+    const replay: DeskMessage[] = [
+      {
+        topic: "volley/_system/registry/coordinator-8fb2",
+        envelope: env("_system/registry", "registered", {
+          capabilities: [],
+          started_at: new Date(at).toISOString(),
+        }),
+        receivedAt: NOW - MIN,
+        retained: true,
+      },
+      {
+        topic: "volley/default/coordinator-8fb2/status",
+        envelope: env("status", "working", {}),
+        receivedAt: NOW - MIN,
+        retained: true,
+      },
+    ];
+    const s = reduceAll(initialState(), replay);
+    const a = s.agents["coordinator-8fb2"];
+    if (!a) throw new Error("no agent");
+    expect(a.observedAt).toBe(NOW - MIN);
+    expect(staleProgressFor(a, undefined, ctx({ [a.id]: a }))).toBeNull();
+    // Ten minutes after the page first heard of it, still nothing: now it is flagged.
+    const later = ctx({ [a.id]: a }, { now: NOW + 10 * MIN });
+    expect(staleProgressFor(a, undefined, later)?.label).toBe("no progress reported for 11 m");
+  });
+
+  it("no badge while its hooks say the turn ended (idle)", () => {
+    const a = agent("coordinator-8fb2", { lastProgress: { type: "idle", at: NOW - 20 * MIN } });
+    expect(staleProgressFor(a, undefined, ctx({ [a.id]: a }))).toBeNull();
+    const b = agent("coordinator-9c1d", {
+      work: {
+        toolCalls: 4,
+        lastToolAt: NOW - 25 * MIN,
+        last: "Bash: x",
+        state: "idle",
+        since: NOW - 20 * MIN,
+      },
+    });
+    expect(staleProgressFor(b, undefined, ctx({ [b.id]: b }))).toBeNull();
+  });
+
+  it("the wave's item shows while its coordinator waits on wave events", () => {
+    const w = wave();
+    const a = agent("w1-t1-impl-1", { wave: "w1", task: "T1", role: "implementer" });
+    const c = ctx(
+      { [a.id]: a },
+      {
+        coordinators: {
+          "coord-1": { id: "coord-1", waves: ["w1"], state: "working", waitingOnEvents: true },
+        },
+      },
+    );
     expect(waveAttention(w, c)).toEqual({
       tier: "info",
       reason: "T1: no progress reported for 30 m",

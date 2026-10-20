@@ -371,6 +371,13 @@ export interface AgentView {
   lastSeen: number;
   /** ms of the last `progress` the agent itself sent (not its hooks): "no progress reported" is timed from it. */
   reportedAt?: number;
+  /**
+   * Local receipt time (ms) of the first message this page heard about the agent, retained or
+   * live: "no progress reported" never counts time before the Desk could see the agent.
+   */
+  observedAt?: number;
+  /** The first progress message the agent itself sent (kept: the feed is bounded). */
+  firstSaid?: string;
   /** The hooks' work log (SPEC §4.3 `activity` / `idle`), once one arrived. */
   work?: WorkLog;
   /** Set when an `awaiting_input` is outstanding; cleared by `resumed` (SPEC §4.3). */

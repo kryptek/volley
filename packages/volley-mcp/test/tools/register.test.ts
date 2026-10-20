@@ -82,6 +82,12 @@ describe("vol_register", () => {
     expect(JSON.parse(blank ?? "{}").payload).not.toHaveProperty("title");
   });
 
+  it("a direct caller's over-long title is cut to SPEC's 120 characters", async () => {
+    await volRegister(state, { capabilities: [], title: "y".repeat(300) });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.title).toBe("y".repeat(120));
+  });
+
   it("without title or links the payload has neither key (byte-identical to before)", async () => {
     await volRegister(state, { capabilities: ["a"], cwd: "/tmp/x", model: "m" });
     const raw = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);

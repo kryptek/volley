@@ -339,7 +339,12 @@ export function pruneUnconfirmed(state: DeskState): DeskState {
 
 // ------------------------------------------------------------------ agents
 
-function newAgent(id: string, waves: Record<string, WaveView>, at: number): AgentView {
+function newAgent(
+  id: string,
+  waves: Record<string, WaveView>,
+  at: number,
+  observedAt: number,
+): AgentView {
   const where = findAssignment(waves, id);
   return {
     id,
@@ -361,6 +366,7 @@ function newAgent(id: string, waves: Record<string, WaveView>, at: number): Agen
     feed: [],
     screen: null,
     bornAt: null,
+    observedAt,
   };
 }
 
@@ -422,7 +428,7 @@ function reduceRegistry(state: DeskState, id: string, m: DeskMessage): DeskState
   const at = seenAt(m, env);
   const existing = agents[id];
   const replay = isReplay(existing, m, env);
-  const prev = existing ?? newAgent(id, state.waves, at);
+  const prev = existing ?? newAgent(id, state.waves, at, m.receivedAt);
   const registry = record(env.payload) as RegistryPayload;
   const started = Date.parse(registry.started_at ?? "");
   agents[id] = {
@@ -456,7 +462,7 @@ function reduceAgent(
   }
   const at = seenAt(m, env);
   const replay = isReplay(existing, m, env);
-  const prev = existing ?? newAgent(id, state.waves, at);
+  const prev = existing ?? newAgent(id, state.waves, at, m.receivedAt);
   // mailbox and screen envelopes name another agent (sender / supervisor), not this one's parent.
   const foreign = channel === "mailbox" || channel === "screen";
   const base: AgentView = {
@@ -488,6 +494,10 @@ function reduceAgent(
   }
   const hook = channel === "progress" && payload.source === "harness-hook";
   if (channel === "progress" && !hook && !replay) next.reportedAt = at;
+  if (channel === "progress" && !hook && prev.firstSaid === undefined) {
+    const said = str(payload.msg);
+    if (said !== undefined) next.firstSaid = said;
+  }
   // A hook's work-log line is the session's, not the agent's own narration: kept in `work`.
   const narration = env.type === "activity" && hook ? undefined : str(payload.msg);
   // Live traffic is the newest by definition; only a replay can be older than what is shown

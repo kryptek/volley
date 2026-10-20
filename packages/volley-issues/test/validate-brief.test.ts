@@ -79,6 +79,13 @@ describe("validate-brief.sh", () => {
     expect(r.err).not.toContain("WARNING");
   });
 
+  it("does not warn when the vol_register call spreads its title over the next lines", () => {
+    const brief = `Implement #5.\n\n1. Call vol_register with\n   capabilities=[\\"implements-issue\\"],\n   title=\\"#5 Cache prefetch — implementer\\".\n\n${NARRATION_BLOCK}`;
+    const r = gate(brief);
+    expect(r.code).toBe(0);
+    expect(r.err).not.toContain("WARNING");
+  });
+
   it.each(templates)("does not warn about a title on volleyd's rendered %s", (t) => {
     const r = gate(render(readFileSync(join(VOLLEYD_BRIEFS, t), "utf-8")));
     expect(r.code).toBe(0);

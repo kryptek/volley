@@ -214,6 +214,13 @@ describe("sessions", () => {
     expect(c2.querySelector(".work-state")).toHaveTextContent("working");
   });
 
+  it("before any hook tick (a cold load), the footer claims neither working nor idle", () => {
+    const { container } = renderAgent(stateWith(...session()), ID);
+    const foot = container.querySelector(".agent-foot") as HTMLElement;
+    expect(foot).toHaveTextContent("no activity seen yet");
+    expect(foot).not.toHaveTextContent("working");
+  });
+
   it("a hook activity line never replaces a dispatched agent's own narration", () => {
     const id = "coordinator-8fb2";
     const state = stateWith(

@@ -18,8 +18,6 @@
  * Needs-you notification all use the same `label`.
  */
 import { isSession } from "../../store/reducer";
-
-export { isSession };
 import type { AgentView, WaveView } from "../../store/types";
 
 export type PurposeSource = "wave" | "registered" | "session" | "cwd" | "narration" | "id";
@@ -76,7 +74,9 @@ export function basename(p: unknown): string | null {
 }
 
 /** The earliest `progress` message the agent itself sent (not its hooks). */
-function firstNarration(a: Pick<AgentView, "feed">): string | null {
+function firstNarration(a: Pick<AgentView, "feed" | "firstSaid">): string | null {
+  const kept = oneLine(a.firstSaid);
+  if (kept) return kept;
   for (const e of a.feed) {
     if (e.envelope.channel !== "progress") continue;
     const p = e.envelope.payload as Record<string, unknown> | null;
@@ -133,4 +133,14 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
 /** Sources that name the window: its header shows the label and the id moves to a line below. */
 export function namesWindow(p: Purpose): boolean {
   return p.source === "wave" || p.source === "registered" || p.source === "session";
+}
+
+/**
+ * The window's name: the purpose label when it names the window, else the task (or the id),
+ * as the title bar shows it. The accessible name, the chat button and the steering panel add
+ * the role chip's text.
+ */
+export function headlineOf(a: AgentView, wave: WaveView | undefined): string {
+  const p = purposeOf(a, wave);
+  return namesWindow(p) ? p.label : (a.task ?? a.id);
 }

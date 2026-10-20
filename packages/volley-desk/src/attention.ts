@@ -36,7 +36,9 @@
  * **No progress reported**: a dispatched agent (not a session) that has been
  * `working` for `STALE_PROGRESS_MS` (10 min) without a `progress` message of
  * its own (its hooks' work log does not count) gets an amber badge and an info
- * item, and so does whoever runs it: its wave, else its parent session.
+ * item, and so does whoever runs it: its wave, else its parent session. The
+ * clock starts no earlier than this page first heard of the agent, and stops
+ * while its hooks say its turn ended (`idle`).
  *
  * **Ended waves** (`stopped`, `complete`) and their agents get no attention.
  * **Syncing**: during the grace window after a (re)connect or the page coming
@@ -53,7 +55,7 @@
  * and settled: while the Desk is offline nothing can refresh `lastSeen`, so
  * offline spans (`AttentionCtx.offline`) do not count towards `claim_after_s`.
  */
-import { UNASSIGNED, isEndedWave, waitsOnPerson } from "./store/reducer";
+import { UNASSIGNED, isEndedWave, isSession, waitsOnPerson } from "./store/reducer";
 import type {
   AgentView,
   ConfigPayload,
@@ -67,7 +69,7 @@ import type {
   WaveTask,
   WaveView,
 } from "./store/types";
-import { isSession, purposeOf } from "./windows/agent/purpose";
+import { purposeOf } from "./windows/agent/purpose";
 
 export type Tier = "you" | "coordinator" | "info" | "none";
 
@@ -307,13 +309,14 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   ];
   const top = oldest(items);
   if (top) return handled(top.reason, top.since, w, ctx);
-  if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
   const agentIds = s.tasks.flatMap((t) => Object.values(t.agents)).filter((x): x is string => !!x);
+  // Ahead of the coordinator's own idle wait: that is its normal state while agents work.
   for (const id of agentIds) {
     const a = ctx.agents?.[id];
     const stale = a && staleProgressFor(a, w, ctx);
     if (stale) return { tier: "info", reason: `${a.task ?? a.id}: ${stale.label}` };
   }
+  if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
   return infoFor(s.tasks, agentIds, ctx);
 }
 
@@ -393,9 +396,9 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
 
 /**
  * A dispatched agent `working` for `STALE_PROGRESS_MS` with no `progress` of its own
- * (`reportedAt`; else since it went `working`), over connected time: the badge text.
- * Null for a session, an agent not working or waiting on a person, an ended wave, or
- * while the Desk is syncing.
+ * (`reportedAt`; else since it went `working`; never before `observedAt`), over connected
+ * time: the badge text. Null for a session, an agent not working, waiting on a person or
+ * idle by its hooks, an ended wave, or while the Desk is syncing.
  */
 export function staleProgressFor(
   a: AgentView,
@@ -404,7 +407,11 @@ export function staleProgressFor(
 ): { label: string; since: number } | null {
   if (ctx.syncing || isEndedWave(w) || isSession(a)) return null;
   if (a.status?.type !== "working" || a.attention) return null;
-  const since = a.reportedAt ?? a.status.seenAt ?? a.status.at;
+  // Its turn ended (the hooks said so): quiet on purpose, like `noSignalFor`.
+  if (a.lastProgress?.type === "idle" || a.work?.state === "idle") return null;
+  // Never time before this page could see the agent: a cold load replays only retained
+  // timestamps, and progress (not retained) has had no chance to arrive.
+  const since = Math.max(a.reportedAt ?? a.status.seenAt ?? a.status.at, a.observedAt ?? 0);
   if (!Number.isFinite(since)) return null;
   const silent = connectedSilence(since, ctx.now, ctx.offline);
   if (silent < STALE_PROGRESS_MS) return null;

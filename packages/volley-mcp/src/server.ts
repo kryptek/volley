@@ -60,7 +60,7 @@ export function createServer(state: ServerState): McpServer {
     "vol_register",
     {
       description:
-        'Register this agent in the Volley registry and flip status to `registered`. `title`: one line saying what this agent is working on (the Desk shows it on the agent\'s window); call again to change it. `links`: `{ repo: "owner/name", issue, pr }`, each a number or an http(s) URL.',
+        'Register this agent in the Volley registry and flip status to `registered`. `title`: one line (at most 120 characters; blank is no title) saying what this agent is working on (the Desk shows it on the agent\'s window); call again to change it. `links`: `{ repo: "owner/name", issue, pr }`, each a number or an http(s) URL.',
       inputSchema: {
         capabilities: z.array(z.string()),
         parent_id: z.string().nullable().optional(),

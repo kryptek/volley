@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -26,9 +26,30 @@ afterEach(async () => {
 });
 
 const activities = (envs: Envelope[]) => envs.filter((e) => e.type === "activity");
-const workLog = () => JSON.parse(readFileSync(join(dir, ".volley", "work-log.json"), "utf-8"));
+/** The session the other fixtures (post-tool-use, stop, user-prompt-submit) were recorded in. */
+const SESSION = "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa";
+const workLogFile = () => JSON.parse(readFileSync(join(dir, ".volley", "work-log.json"), "utf-8"));
+/** `SESSION`'s entry in the work log. */
+const workLog = () => workLogFile().sessions[SESSION];
 const preToolUse = (overrides: Record<string, unknown> = {}) =>
-  runHook("pre-tool-use", fixture("pre-tool-use-bash.json", dir, overrides), { cwd: dir });
+  runHook(
+    "pre-tool-use",
+    fixture("pre-tool-use-bash.json", dir, { session_id: SESSION, ...overrides }),
+    { cwd: dir },
+  );
+const postToolUse = () =>
+  runHook("post-tool-use", fixture("post-tool-use.json", dir), { cwd: dir });
+/** Move the work log's window back, as if `ms` had passed since its last publish. */
+function ageWindow(ms: number): void {
+  const file = workLogFile();
+  file.sessions[SESSION].last_published_at -= ms;
+  writeFileSync(join(dir, ".volley", "work-log.json"), JSON.stringify(file));
+}
+/** Hold `<stateDir>/<name>` as a live hook would (fresh mtime), so `withLock` times out. */
+function holdLock(name: string): void {
+  mkdirSync(join(dir, ".volley"), { recursive: true });
+  writeFileSync(join(dir, ".volley", name), "4242.held-by-a-dead-hook");
+}
 
 describe("pre-tool-use activity ticks", () => {
   it("publishes an activity tick with a one-line tool summary and the tool-call count", async () => {
@@ -90,6 +111,109 @@ describe("pre-tool-use activity ticks", () => {
     );
     for (const r of await Promise.all(runs)) expect(r.exitCode).toBe(0);
     expect(workLog().tool_calls).toBe(8);
+  });
+});
+
+describe("tool_calls is per Claude Code session", () => {
+  it("a new session_id in the same state dir starts its own count", async () => {
+    for (const c of ["a1", "a2", "a3"]) {
+      await preToolUse({ session_id: "session-a", tool_input: { command: c } });
+    }
+    expect(workLogFile().sessions["session-a"]).toMatchObject({ tool_calls: 3 });
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await preToolUse({ session_id: "session-b", tool_input: { command: "b1" } });
+    await tick(150);
+    // Session B's first tick publishes (its own window) and counts only its own call.
+    expect(activities(progress.envelopes).map((e) => e.payload)).toEqual([
+      expect.objectContaining({ msg: "Bash: b1", tool_calls: 1 }),
+    ]);
+    // A's count is untouched: both sessions may still be running.
+    expect(workLogFile().sessions["session-a"]).toMatchObject({ tool_calls: 3 });
+    await progress.stop();
+  });
+
+  it("the same session keeps counting (compact / resume keep the session_id)", async () => {
+    await preToolUse({ tool_input: { command: "one" } });
+    await preToolUse({ tool_input: { command: "two" } });
+    ageWindow(10_000);
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await preToolUse({ tool_input: { command: "three" } });
+    await tick(150);
+    expect(activities(progress.envelopes)[0]?.payload).toMatchObject({
+      msg: "Bash: three",
+      tool_calls: 3,
+    });
+    await progress.stop();
+  });
+});
+
+describe("a coalesced tick is published at the next slot", () => {
+  it("PostToolUse after the window publishes the burst's newest line with the current count", async () => {
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await preToolUse({ tool_input: { command: "first" } });
+    await preToolUse({ tool_input: { command: "second" } });
+    await preToolUse({ tool_input: { command: "third" } });
+    expect(workLog()).toMatchObject({ pending: "Bash: third" });
+    ageWindow(10_000);
+    const run = await postToolUse();
+    expect(run.exitCode).toBe(0);
+    await tick(150);
+    expect(activities(progress.envelopes).map((e) => e.payload)).toEqual([
+      expect.objectContaining({ msg: "Bash: first", tool_calls: 1, hook_event: "PreToolUse" }),
+      expect.objectContaining({ msg: "Bash: third", tool_calls: 3, hook_event: "PostToolUse" }),
+    ]);
+    expect(workLog()).not.toHaveProperty("pending");
+    await progress.stop();
+  });
+
+  it("PostToolUse inside the window publishes nothing and keeps the pending line", async () => {
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await preToolUse({ tool_input: { command: "first" } });
+    await preToolUse({ tool_input: { command: "second" } });
+    await postToolUse();
+    await tick(150);
+    expect(activities(progress.envelopes)).toHaveLength(1);
+    expect(workLog()).toMatchObject({ pending: "Bash: second" });
+    await progress.stop();
+  });
+});
+
+describe("a work-log failure is cosmetic: it never changes a hook's other output", () => {
+  it("pre-tool-use with work-log.lock held: exit 0, empty output, nothing published", async () => {
+    holdLock("work-log.lock");
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    const run = await preToolUse();
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("");
+    await tick(100);
+    expect(activities(progress.envelopes)).toHaveLength(0);
+    await progress.stop();
+  });
+
+  it("post-tool-use with work-log.lock held still heartbeats", async () => {
+    await preToolUse({ tool_input: { command: "one" } });
+    await preToolUse({ tool_input: { command: "two" } });
+    ageWindow(10_000);
+    holdLock("work-log.lock");
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    const run = await postToolUse();
+    expect(run.exitCode).toBe(0);
+    await tick(150);
+    expect(progress.envelopes.map((e) => e.type)).toContain("heartbeat");
+    await progress.stop();
+  });
+
+  it("stop with work-log.lock held still publishes idle with the count", async () => {
+    await preToolUse({ tool_input: { command: "one" } });
+    holdLock("work-log.lock");
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    const run = await runHook("stop", fixture("stop.json", dir), { cwd: dir });
+    expect(run.exitCode).toBe(0);
+    await tick(150);
+    expect(progress.envelopes.find((e) => e.type === "idle")?.payload).toMatchObject({
+      tool_calls: 1,
+    });
+    await progress.stop();
   });
 });
 

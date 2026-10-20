@@ -182,7 +182,9 @@ describe("AgentWindow", () => {
   it("the chat glyph emits a callback with the agent id", () => {
     const onChat = vi.fn();
     renderAgent(stateWith(), FIXUP, { onChat });
-    fireEvent.click(screen.getByRole("button", { name: "Message T1 fixup" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Message T1 · Chip mapper + null-case handling fixup" }),
+    );
     expect(onChat).toHaveBeenCalledWith(FIXUP);
   });
 

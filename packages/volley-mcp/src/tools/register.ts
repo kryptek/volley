@@ -14,6 +14,9 @@ export interface RegisterInput {
   links?: RegisterLinks;
 }
 
+/** SPEC §6.2: a `title` is at most this many characters. */
+export const TITLE_MAX = 120;
+
 export interface RegisterLinks {
   repo?: string;
   issue?: number | string;
@@ -44,7 +47,11 @@ export async function volRegister(
   }
 
   // One line: a direct caller's line breaks become spaces (the MCP boundary refuses them).
-  const title = input.title?.replace(/[\r\n]+/g, " ").trim();
+  // SPEC §6.2's cap: a direct caller's longer title is cut (the MCP boundary refuses it).
+  const title = input.title
+    ?.replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, TITLE_MAX);
   const links =
     input.links !== undefined && Object.keys(input.links).length > 0 ? input.links : undefined;
   const registryEnvelope = {

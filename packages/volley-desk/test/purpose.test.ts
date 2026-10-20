@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { UNASSIGNED } from "../src/store/reducer";
+import { UNASSIGNED, isSession } from "../src/store/reducer";
 import type { AgentView, FeedEntry, WaveView } from "../src/store/types";
-import { isSession, purposeOf } from "../src/windows/agent/purpose";
+import { purposeOf } from "../src/windows/agent/purpose";
 
 function agent(over: Partial<AgentView> = {}): AgentView {
   return {
@@ -186,6 +186,11 @@ describe("isSession", () => {
     expect(isSession(agent({ parentId: null, wave: "w1", task: "T3", registry: hookReg }))).toBe(
       false,
     );
+  });
+  it("a self-reported model_source is not a hook's: not a session", () => {
+    expect(
+      isSession(agent({ parentId: null, registry: reg({ model_source: "self-reported" }) })),
+    ).toBe(false);
   });
   it("an agent that registered itself (no model_source) is not", () => {
     expect(isSession(agent({ parentId: null, registry: reg({}) }))).toBe(false);

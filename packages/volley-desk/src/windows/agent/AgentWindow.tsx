@@ -35,13 +35,13 @@ import { plural } from "../../lib/plural";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
 import { type AccountChoice, fiveHourLabel } from "../../store/claude";
-import { UNASSIGNED } from "../../store/reducer";
+import { UNASSIGNED, isSession } from "../../store/reducer";
 import type { AgentView, FeedEntry, Role, UsagePayload, WaveView } from "../../store/types";
 import { Feed, feedChannel } from "./Feed";
 import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
-import { isSession, namesWindow, purposeOf } from "./purpose";
+import { namesWindow, purposeOf } from "./purpose";
 import "../../styles/agent.css";
 
 export const AGENT_WIDTH = 460;
@@ -337,13 +337,14 @@ export function AgentWindow({
   );
 
   // The window's accessible name: its wave, task and role (or its title's name).
+  // A window named by its purpose is named by it everywhere; an unnamed task keeps `<wave> · <task>`.
   const name = [
-    agent.task ? `${agent.wave} · ${agent.task}` : headline,
+    named || !agent.task ? headline : `${agent.wave} · ${agent.task}`,
     agent.role && ROLE_LABEL[agent.role],
   ]
     .filter(Boolean)
     .join(" · ");
-  const label = `Message ${[agent.task ?? headline, agent.role && ROLE_LABEL[agent.role]]
+  const label = `Message ${[headline, agent.role && ROLE_LABEL[agent.role]]
     .filter(Boolean)
     .join(" ")}`;
   const ctx = contextMeter(usage);
@@ -375,9 +376,14 @@ export function AgentWindow({
     <div className="agent-foot">
       {session ? (
         <span className="work mono" title="From this session's hooks: no progress % is reported">
-          <span className={`work-state work-state--${work?.state ?? "working"}`}>
-            {work?.state === "idle" ? `idle · ${age(now - work.since)}` : "working"}
-          </span>
+          {/* Nothing heard from its hooks yet (a cold load): no claim either way. */}
+          {work ? (
+            <span className={`work-state work-state--${work.state}`}>
+              {work.state === "idle" ? `idle · ${age(now - work.since)}` : "working"}
+            </span>
+          ) : (
+            <span className="work-state dim">no activity seen yet</span>
+          )}
           {" · "}
           {work && work.toolCalls > 0
             ? `${plural(work.toolCalls, "tool call")}${work.lastToolAt === null ? "" : ` · last ${age(now - work.lastToolAt)} ago`}`
