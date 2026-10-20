@@ -107,6 +107,8 @@ tasks:
 # placement: auto            # place every task without a host: across machines (see Fleet: placement)
 # placement_prefer: [box-a]  # machines placement ranks first
 # placement_avoid: [box-c]   # machines placement uses only when nothing else is eligible
+# merge: manual              # who merges a gated PR: auto (volleyd, at exactly the gated head) or
+#                            # manual (a human); default: the autopilot.merge tunable (auto)
 ```
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run:
@@ -880,6 +882,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
+| `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
+| `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
@@ -2297,7 +2301,9 @@ push under "Pushes outside the pipeline" (the reviews keep the heads they name).
 evidence_path }` and `stage_entered merge_ready`: the task appears in the wave state's `gates`
 with its `evidence_path`.
 
-**volleyd never merges.** A human merges the PR. The pipeline polls every task's PR read-only
+**Who merges.** Under `merge: manual` volleyd never merges: a human merges the PR. Under
+`merge: auto` volleyd merges it itself, exactly at the gated head ([autopilot
+merging](#autopilot-merging), below). Either way, the pipeline polls every task's PR read-only
 (`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`),
 in any stage short of `done` and `cancelled` — at `merge_ready`, and also while the task waits
 on a decision, while the reviews run or during a fixup. Once it is `MERGED` into the release
@@ -2372,13 +2378,52 @@ directive: CI on the new head, and when it is red its failed jobs and the failin
 from `gh run view <id> --log-failed`, plus the diff since the gated head. A red CI on a moved
 head is routed there, not into a `ci_failed` dead end, and a fixup is never skipped while that
 CI is red; a green CI still asks (the reviews saw another head). The gate is re-entered through
-the normal machinery and its evidence regenerated with every head in `head_history`. The fence denies `gh pr merge`, `git merge`,
-`git push` and `gh workflow run` anyway; `test/no-merge.test.ts` also holds the source and a full
-pipeline run (on an unfenced fake exec) to never build one.
+the normal machinery and its evidence regenerated with every head in `head_history`. The fence denies `git merge`,
+`git push` and `gh workflow run` anyway, and `gh pr merge` but for the one gated PR at its gated
+head ([autopilot merging](#autopilot-merging)); `test/no-merge.test.ts` also holds the source
+(only `src/autopilot/merge.ts` builds a `gh pr merge`) and two full pipeline runs on an unfenced
+fake exec: under `merge: manual` no merge, push or CI re-run at all, under `merge: auto` exactly
+one `gh pr merge <n> --squash --match-head-commit <gated head>` and nothing else.
 
 Role spawns go through the same lock, launch and verification as the implementer's, under T5's
 admission verdict, within the wave's spawn budget and only while the wave is running
 (`roleSpawnHold`); a held spawn is retried on the next tick.
+
+### Autopilot merging
+
+In an unattended wave the gate is where work stalls: every merge waited for a person. Under
+`merge: auto` (the wave file's `merge:` key; without it the `autopilot.merge` tunable, default
+`auto`) volleyd merges a gated PR itself, under the same evidence it already produces:
+
+- **Only the gated head.** When `gate()` has written the evidence package it mints a
+  `MergeToken` over `{ wave, task, pr, head, release_branch }` (`src/fence.ts`, checked by
+  identity like a consent token). The fence allows exactly `gh pr merge <n> --squash
+  --match-head-commit <head> [--delete-branch]` with a token whose `pr` and `head` are that
+  argv's, and nothing else new: never `--admin`, `--auto`, `--merge` or `--rebase`, and `git
+  merge`, `push` and `rebase` stay denied. `--match-head-commit` makes GitHub refuse a PR whose
+  head moved since the gate. The token lives in the driver's memory only; after a restart the
+  next tick re-runs the gate's checks (the rebase check, then the gate, which rewrites the
+  evidence) to mint it again.
+- **Beside the queue.** The `merge` action runs `gh pr merge` like every pipeline call (hard
+  timeout `pipeline_io_ms`, at most once per `ci_poll_ms`), then reads the merge commit back
+  (`gh pr view <n> --json mergeCommit,state`). Merged: `merged_by_supervisor { task, pr, head,
+  merge_sha, by: "volleyd" }`, then what any merge gets: the task's open decisions resolved
+  (`superseded_by_merge`), `artifact_verified { role: "merged", via: "supervisor" }`,
+  `stage_entered done` and the merge nudge.
+- **Refused, never forced.** `gh` exiting non-zero (the head moved, required checks, branch
+  protection) journals `alarm_raised { alarm: "merge_refused", pr, head, stderr, attempt }` and
+  reads the PR at once as any gate does (someone else may have merged it; a moved head
+  invalidates the gate). After `autopilot.merge_retry_max` (default 2) refusals at one gated
+  head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
+  attempt, at once), `manual` (this task goes back to the gate and a human merges it) or
+  `cancel`. A new gated head starts the count again.
+- **One task at a time, for now.** The merge queue that orders merges across a wave's tasks is
+  not here yet, so volleyd merges only in a wave of one task; every other wave's gates wait for
+  a human, as under `manual` (and their evidence says so).
+
+The evidence package names who merges: `volleyd merges this PR itself (merge: auto) at exactly
+this head; the merge is journaled as merged_by_supervisor.`, or under `manual` the old `volleyd
+never merges. A human merges this PR after reading the above.`
 
 ---
 
@@ -2392,11 +2437,19 @@ verbatim from `src/fence.ts`:
 ```
 DENY (never, consent or not):
   git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
-  gh pr merge | gh workflow run | gh repo delete | gh api with any method other than GET
+  gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
+    other than GET
   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
     ansible, ansible-playbook, eksctl, doctl, flyctl
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+
+MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
+  evidence package is written, checked by identity like consent tokens): exactly
+    gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+  with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+  moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
+  else (git merge, push and rebase stay denied).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
@@ -2552,8 +2605,9 @@ the fence and the tool always agree on where an option starts. `gh api` counts a
 it sends fields (`-f`) without an explicit `-X GET`. The wave-file schema also forbids a leading
 `-` in `repo` and `release_branch`, so neither can ever be read as an option.
 
-volleyd never merges, never pushes, never touches infrastructure: it stops at merge-ready and a
-human merges.
+volleyd never pushes and never touches infrastructure. It merges only under `merge: auto`, only
+the gated PR at exactly its gated head, with the gate's MergeToken ([autopilot
+merging](#autopilot-merging)); under `merge: manual` it stops at merge-ready and a human merges.
 
 ---
 

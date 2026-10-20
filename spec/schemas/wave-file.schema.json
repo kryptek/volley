@@ -52,6 +52,10 @@
       "items": { "$ref": "#/$defs/id" },
       "description": "Lease pools (config lease_pools keys) this wave's heavy operations draw from."
     },
+    "merge": {
+      "enum": ["auto", "manual"],
+      "description": "Who merges a gated PR (spec section 4.6.17): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."
+    },
     "placement": {
       "enum": ["auto", "local"],
       "default": "local",

@@ -119,7 +119,7 @@
 #     per_machine: {}            # per heavy pool, its slots, e.g. { js-suite: 1, backend-it: 0 };
 #                                # a pool not named gets 1 when it sets per_machine
 
-# --- Autopilot: decisions volleyd answers itself (README "Autopilot", `volleyd policy`) ---
+# --- Autopilot: decisions volleyd answers itself, and merging (README "Autopilot") ---
 # autopilot:
 #   enabled: true                # false: every decision waits for the owner (next decision on)
 #   owner_only: [plan_change, repo_untrusted, model_switch, release_go, stage_go]
@@ -131,3 +131,8 @@
 #   question_max: 1              # agent questions answered for one run
 #   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
 #                                # multiple of the wave's derived budget
+#   merge: auto                  # who merges a gated PR when the wave file has no merge: key:
+#                                # auto (volleyd squash-merges exactly the gated head, behind the
+#                                # fence; merged_by_supervisor) or manual (a human merges)
+#   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
+#                                # (decision merge_refused: retry, manual or cancel)

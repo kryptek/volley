@@ -235,6 +235,7 @@ import type {
   AgentMcp,
   CoordinatorAttention,
   JournalEvent,
+  MergeMode,
   NewEvent,
   NudgeOnMerge,
   PublicHygiene,
@@ -4681,7 +4682,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
@@ -4733,6 +4734,10 @@ export class Daemon {
       },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
+      // --- Autopilot merging (SPEC §4.6.17): the wave file's merge:, else autopilot.merge. ---
+      mergeMode: () =>
+        log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
+      mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
