@@ -1687,18 +1687,15 @@ function onVerified(
     }
     case "ci_failed":
       // Classified before anyone is asked (onClassified): own change, flake or infra incident.
+      // artifactOutcome yields ci_failed only for an ok report (a missing artifact is `missing`).
       return [
         ...retireIfLive(run),
-        ...(ev.report.kind === "ok"
-          ? [
-              {
-                kind: "classify_ci" as const,
-                role: ev.role,
-                agent_id: run.agent_id,
-                report: ev.report,
-              },
-            ]
-          : []),
+        {
+          kind: "classify_ci" as const,
+          role: ev.role,
+          agent_id: run.agent_id,
+          report: ev.report as OkReport,
+        },
       ];
     case "ci_pending": {
       const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
@@ -2250,15 +2247,16 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "agent_failed":
       return isRespawnAnswer(answer, d.options) ? [] : reask();
     case "agent_blocked_ci": {
-      // Routed like a ci_failed: a CI fixup at the red head (the blocked agent is stopped first),
-      // or the flake's fixer; continue / respawn as for any blocked agent.
+      // Routed like a ci_failed: a CI fixup at the red head, or the flake's fixer (the task parks
+      // for it); either way the blocked agent is stopped. continue / respawn as for any blocked agent.
       const offered = d.options ?? [];
       const agent = (d as { agent_id?: unknown }).agent_id;
-      if (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE)) return [];
+      const live = run !== undefined && run.agent_id === agent && run.retired === undefined;
+      if (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE))
+        return live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : [];
       if (role !== undefined && isAnswer(answer, "fixup") && offered.includes("fixup")) {
         const fix = ciFixup(v, d, m);
         if (fix.length === 0) return [];
-        const live = run !== undefined && run.agent_id === agent && run.retired === undefined;
         return [
           ...(live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : []),
           ...fix,
@@ -3258,8 +3256,10 @@ export class PipelineDriver {
           break;
         }
         case "classify_ci": {
-          // Event-driven (a verification or a blocked status just found it); one per task at once.
-          const key = `${task}/classify`;
+          // Event-driven (a verification or a blocked status just found it): one per task for a
+          // red head, one per blocked agent (never dropped behind another).
+          const key =
+            a.blocked !== undefined ? `${task}/classify/blocked/${a.agent_id}` : `${task}/classify`;
           this.beside(task, key, { what: "classify", role: a.role, agent_id: a.agent_id }, () =>
             this.classifyCi(task, a),
           );
@@ -3446,7 +3446,6 @@ export class PipelineDriver {
     if (v === null) return null;
     const exec = this.io(task);
     const cwd = v.p.runs[a.role]?.worktree ?? this.headCwd(task);
-    if (cwd === undefined) return null;
     const base = { kind: "ci_classified" as const, role: a.role, agent_id: a.agent_id };
     const blocked = a.blocked !== undefined ? { blocked: a.blocked } : {};
     const unclassified = (): PipelineEvent => ({
@@ -3456,7 +3455,9 @@ export class PipelineDriver {
       at: this.now(),
       ...blocked,
     });
-    // A blocked agent is asked about whatever happens here: a failed read is the plain question.
+    // A blocked agent is asked about whatever happens here: no worktree to read from, or a failed
+    // read, is the plain question.
+    if (cwd === undefined) return a.blocked !== undefined ? unclassified() : null;
     if (a.blocked !== undefined)
       return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked).catch(unclassified);
     return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked);
@@ -3506,7 +3507,8 @@ export class PipelineDriver {
     );
     let list: { number: number; url: string; headRefName: string; headRefOid: string }[] = [];
     try {
-      list = r.code === 0 ? JSON.parse(r.stdout) : [];
+      const parsed: unknown = r.code === 0 ? JSON.parse(r.stdout) : [];
+      if (Array.isArray(parsed)) list = parsed;
     } catch {}
     const pr = list.find((p) => p.headRefName === branch);
     if (pr === undefined || typeof pr.headRefOid !== "string" || pr.headRefOid === "") return null;

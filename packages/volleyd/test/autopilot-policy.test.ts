@@ -193,6 +193,17 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(none, ctx()))).toBe("no_policy");
   });
 
+  it("ci_failed classified infra_incident (asked past incident_wait_max_s): escalates budget_exhausted", () => {
+    const d = rec("ci_failed", ["fixup", "re-verify", "cancel"], {
+      pipeline: { on: "ci_failed", role: "implementer", head: "a".repeat(40) },
+      classification: "infra_incident",
+      infra: true,
+    });
+    const v = evaluate(d, ctx());
+    expect(v).toMatchObject({ policy: "ci_failed/infra-incident" });
+    expect(whyOf(v)).toBe("budget_exhausted");
+  });
+
   it("agent_blocked by a failed agent: respawn, under respawn_max per task/role", () => {
     const d = rec("agent_blocked", ["respawn", "cancel"], {
       pipeline: { on: "agent_failed", role: "implementer" },

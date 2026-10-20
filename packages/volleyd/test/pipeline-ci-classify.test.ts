@@ -194,6 +194,78 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     expect(h.spawns.at(-1)?.start).toEqual({ ref: H1, detach: false });
   });
 
+  it("flake: `fix flake` stops the blocked agent; the task parks for the fixer", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    const agent = h.run("implementer")?.agent_id;
+    await h.block("implementer", "test/clock.test.ts is red on CI, not in my change");
+    const [d] = h.openDecisions();
+    await h.resolve(d?.decision_id as string, "fix flake");
+    expect(h.retired).toContainEqual({ agent_id: agent, status: "stopped" });
+    expect(h.task()?.why_waiting).toBe(`CI flake in ${FLAKE}: fixer pending`);
+    const spawned = h.spawns.length;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.spawns.length).toBe(spawned);
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("two agents blocked on a red head at once: each gets its own decision", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    const block = (role: "spec_reviewer" | "quality_reviewer") => {
+      const reason = "test/clock.test.ts is red on CI";
+      const agent_id = h.run(role)?.agent_id as string;
+      return h.driver.handle("T1", {
+        kind: "agent_blocked",
+        role,
+        agent_id,
+        reason,
+        payload: { reason },
+      });
+    };
+    await Promise.all([block("spec_reviewer"), block("quality_reviewer")]);
+    await h.driver.settled();
+    const roles = h
+      .openDecisions()
+      .filter((d) => d.kind === "agent_blocked")
+      .map((d) => (facts(d).pipeline as { role: string }).role)
+      .sort();
+    expect(roles).toEqual(["quality_reviewer", "spec_reviewer"]);
+  });
+
+  it("no worktree to read the PR head from: still the plain agent_blocked decision", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ci[H1] = "red";
+    // The run's worktree is unknown (an agent_spawned without one).
+    await h.journal({
+      type: "agent_spawned",
+      task: "T1",
+      data: { agent_id: "w1-t1-implementer-9", role: "implementer", attempt: 9 },
+    });
+    await h.driver.handle("T1", {
+      kind: "agent_blocked",
+      role: "implementer",
+      agent_id: "w1-t1-implementer-9",
+      reason: "test/clock.test.ts is red on CI",
+      payload: {},
+    });
+    await h.driver.settled();
+    expect(facts(h.openDecisions()[0]).pipeline).toEqual({
+      on: "agent_blocked",
+      role: "implementer",
+    });
+  });
+
   it("a PR head that is not red, or a reason about something else: the plain agent_blocked decision", async () => {
     h = pipelineHarness();
     await h.start();
