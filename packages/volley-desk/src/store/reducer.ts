@@ -870,17 +870,35 @@ export function finishedAgents(state: DeskState, now: number, graceMs: number): 
   return out;
 }
 
+const REGISTRY_PREFIX = "volley/_system/registry/";
+
 /**
- * Agents with no status yet (a registry entry, or a resync, ahead of the status):
- * not classified as live or finished, so the Desk keeps them off the canvas until
- * their status arrives (C11).
+ * Agents with no status: their registry entry replayed ahead of it, a reconnect's
+ * resync cleared it, or a session whose hooks reach this broker but whose MCP server
+ * does not (the "no signal" case, which never gets one). `stale` are those whose
+ * registry entry started at least `graceMs` ago and from which nothing but that
+ * entry has been heard: an old record, which the Desk hides with the finished agents (C11).
  */
-export function unclassifiedAgents(state: DeskState): Set<string> {
-  return new Set(
-    Object.values(state.agents)
-      .filter((a) => !a.status)
-      .map((a) => a.id),
-  );
+export function unclassifiedAgents(
+  state: DeskState,
+  now: number,
+  graceMs: number,
+): { all: Set<string>; stale: Set<string> } {
+  const all = new Set<string>();
+  const stale = new Set<string>();
+  for (const a of Object.values(state.agents)) {
+    if (a.status) continue;
+    all.add(a.id);
+    const started = Date.parse(a.registry?.started_at ?? "");
+    if (
+      !Number.isNaN(started) &&
+      now - started >= graceMs &&
+      a.feed.every((f) => f.topic.startsWith(REGISTRY_PREFIX))
+    ) {
+      stale.add(a.id);
+    }
+  }
+  return { all, stale };
 }
 
 /**

@@ -3,6 +3,7 @@
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { NO_SIGNAL_LABEL } from "../src/attention";
 import { DeskStoreProvider } from "../src/store/context";
 import type { DeskMessage } from "../src/store/types";
 import { FINISHED_PREFIX, LIVE_PREFIX, liveIds, retainedBurst } from "./fixtures/retained-burst";
@@ -40,7 +41,7 @@ function mount() {
       fn();
       vi.advanceTimersByTime(ms);
     });
-  return { f, windows, step };
+  return { f, view, windows, step };
 }
 
 describe("first load with ~300 retained finished agents (C11)", () => {
@@ -106,6 +107,9 @@ describe("first load with ~300 retained finished agents (C11)", () => {
     step(() => {
       f.drop();
       f.up();
+    }, 250); // a replay slower than the hold's quiet window: the resync applies first
+    expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+    step(() => {
       for (const m of replay("registry")) f.emit(m);
     }, 30);
     expect(windows(FINISHED_PREFIX)).toEqual([]);
@@ -118,5 +122,53 @@ describe("first load with ~300 retained finished agents (C11)", () => {
     step(() => {}, 5000);
     expect(windows(FINISHED_PREFIX)).toEqual([]);
     expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+  });
+
+  it("a reconnect whose resync applies before the replay still keeps the live agents in place", () => {
+    const { f, windows, step } = mount();
+    step(() => {
+      f.up();
+      for (const m of [...replay("registry"), ...replay("status")]) f.emit(m);
+    }, 5000);
+    // Nothing replayed until the hold's bound has released the resync on its own.
+    step(() => {
+      f.drop();
+      f.up();
+    }, 2000);
+    expect(windows(FINISHED_PREFIX)).toEqual([]);
+    expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+    step(() => {
+      for (const m of [...replay("registry"), ...replay("status")]) f.emit(m);
+    }, 5000);
+    expect(windows(FINISHED_PREFIX)).toEqual([]);
+    expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+  });
+});
+
+describe("an agent registered here that never publishes a status", () => {
+  const [registry] = replay("registry").filter((m) => m.envelope?.agent_id === liveIds()[0]);
+  const fresh = registry as DeskMessage;
+
+  it("gets its window with the no-signal mark once the Desk has synced", () => {
+    const { f, windows, step } = mount();
+    step(() => {
+      f.up();
+      f.emit(fresh);
+    }, 5000);
+    expect(windows(LIVE_PREFIX)).toEqual([]); // its status may still be on its way
+    step(() => {}, 35_000); // past the syncing grace, which judges no signal
+    expect(windows(LIVE_PREFIX)).toEqual([liveIds()[0]]);
+    expect(document.body.textContent).toContain(NO_SIGNAL_LABEL);
+  });
+
+  it("is hidden with the finished agents when its record is old and nothing live is heard from it", () => {
+    const { f, windows, step, view } = mount();
+    step(() => {
+      f.up();
+      for (const m of replay("registry")) f.emit(m); // 300 old records, 3 fresh ones
+    }, 40_000);
+    expect(windows(FINISHED_PREFIX)).toEqual([]);
+    expect(windows(LIVE_PREFIX).sort()).toEqual(liveIds());
+    expect(view.container.textContent).toMatch(/300 finished/);
   });
 });

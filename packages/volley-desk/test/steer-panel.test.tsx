@@ -258,8 +258,9 @@ describe("Desk steering end to end (live store)", () => {
       payload: { capabilities: [], started_at: "2026-10-18T14:00:00.000Z" },
     },
   };
-  // A registered agent always has a status too (SPEC: vol_register publishes one); without
-  // it the Desk keeps the agent off the canvas while the replay settles (C11).
+  // An MCP-registered agent has a retained status too (its server publishes one at
+  // register). Without one the Desk keeps it off the canvas until the post-connect sync
+  // grace ends (C11; first-load.test.tsx covers that "no signal" case).
   const status: DeskMessage = {
     topic: `volley/default/${AGENT}/status`,
     receivedAt: 1,
@@ -291,9 +292,16 @@ describe("Desk steering end to end (live store)", () => {
         connect: async () => {
           setTimeout(() => {
             if (connects) connected();
-            deliver({ topic: "volley/_waves/w1/state", envelope: state, receivedAt: 1 });
-            deliver(registry);
-            deliver(status);
+            // The broker's retained replay, which follows the connect.
+            const retained = { retained: true };
+            deliver({
+              topic: "volley/_waves/w1/state",
+              envelope: state,
+              receivedAt: 1,
+              ...retained,
+            });
+            deliver({ ...registry, ...retained });
+            deliver({ ...status, ...retained });
           }, 0);
         },
         disconnect: async () => {},

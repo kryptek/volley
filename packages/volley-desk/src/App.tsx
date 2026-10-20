@@ -319,25 +319,33 @@ export default function App() {
   };
 
   const allGroups = agentsByWave(state);
-  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
-  const finished = finishedAgents(state, now, look.finishedGraceMin * 60_000);
+  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on,
+  // and so do old records with no status that nothing live has been heard from.
+  const graceMs = look.finishedGraceMin * 60_000;
+  const unclassified = unclassifiedAgents(state, now, graceMs);
+  const finished = finishedAgents(state, now, graceMs);
+  for (const id of unclassified.stale) finished.add(id);
   const finishedCount = Object.values(allGroups).reduce(
     (n, l) => n + l.filter((a) => finished.has(a.id)).length,
     0,
   );
   const finishedHidden = look.showFinished ? 0 : finishedCount;
-  // An agent with no status yet (its registry entry replayed ahead of it, or a reconnect's
-  // resync) is not known to be live: it stays off the canvas, never laid out, until its
-  // retained status (SPEC: always the agent's current state) says which it is (C11).
-  const unclassified = unclassifiedAgents(state);
+  // While the Desk (re)syncs, an agent with no status (its registry entry replayed ahead of
+  // it, or a reconnect's resync) may be finished: it is not laid out until its status says
+  // which (C11). One already on the canvas keeps its place. Once synced, an agent that still
+  // has none is shown, with its "no signal" mark.
+  const onCanvas = useRef<ReadonlySet<string>>(new Set());
+  const classifying = settling || syncing;
   const offCanvas = (a: AgentView) =>
-    unclassified.has(a.id) || (finishedHidden > 0 && finished.has(a.id));
+    (classifying && unclassified.all.has(a.id) && !onCanvas.current.has(a.id)) ||
+    (finishedHidden > 0 && finished.has(a.id));
   const groups =
-    finishedHidden === 0 && unclassified.size === 0
+    finishedHidden === 0 && (!classifying || unclassified.all.size === 0)
       ? allGroups
       : Object.fromEntries(
           Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !offCanvas(a))]),
         );
+  onCanvas.current = new Set(Object.values(groups).flatMap((l) => l.map((a) => a.id)));
   const firstStart = useRef<Record<string, number>>({});
   const startedAt = (id: string): number | null => {
     const t = waveStartedAt(allGroups[id] ?? []);
@@ -345,9 +353,15 @@ export default function App() {
     if (t !== null && (prev === undefined || t < prev)) firstStart.current[id] = t;
     return firstStart.current[id] ?? null;
   };
-  // A dismissed wave leaves the Desk while it stays ended (a reused id that runs again is back).
+  // A dismissed wave leaves the Desk while it stays ended. A dismissal ends once its wave is
+  // seen running: a reused id that runs (and ends) again is back. An id that is only missing
+  // is kept, since on a slow link a wave's retained state can arrive after the replay settles.
   const ended = endedWaves(state);
   const gone = (id: string) => ended.has(id) && dismissed.has(id);
+  const rerun = [...dismissed].filter((id) => state.waves[id] !== undefined && !ended.has(id));
+  useEffect(() => {
+    if (rerun.length > 0) setDismissed(new Set([...dismissed].filter((id) => !rerun.includes(id))));
+  });
   /** An ended wave is on the canvas under "Show finished" or once shown on its own. */
   const endedShown = (id: string) => look.showFinished || revealed.has(id);
   const waveIds = [
@@ -475,7 +489,9 @@ export default function App() {
           ...(groups[shown] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
         ].flatMap((b) => {
           const at = r.place[b.id];
-          return at ? [{ ...at, w: sizeOf(b.id, b.w, b.h).w, h: sizeOf(b.id, b.w, b.h).h }] : [];
+          if (!at) return [];
+          const { w, h } = sizeOf(b.id, b.w, b.h);
+          return [{ ...at, w, h }];
         })
       : [];
     if (fitRects.length > 0) fitTo(fitRects);
