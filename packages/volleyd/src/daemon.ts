@@ -6725,7 +6725,8 @@ export class Daemon {
         return { refused: `inbox item '${id}' names no open decision` };
       // The owner check `resolve` applies: the inbox is no way around it.
       const state = this.waves.get(wave)?.record.state;
-      const refused = state != null ? guardMutation(state, req.by, "inbox_answer") : null;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
       if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;

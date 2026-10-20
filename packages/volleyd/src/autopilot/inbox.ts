@@ -81,7 +81,8 @@ const humanize = (kind: string): string => {
 };
 
 /**
- * The inbox item mirroring a decision (its payload, the escalation prefix already applied).
+ * The inbox item mirroring a decision, built from its payload when it opens: an escalation
+ * journaled later does not refresh it, so an escalated decision's item lacks that prefix.
  * `owner_only` is the decision kind's place in `autopilot.owner_only`; a decision always takes a
  * free-text answer besides its options.
  */

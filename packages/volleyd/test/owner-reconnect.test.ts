@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
+import { decisionItemId } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { eventually } from "./helpers/broker-wait";
@@ -161,6 +162,36 @@ describe("a wave owned by a coordinator name", () => {
     daemon = await t.start({ clock });
     await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2" }));
     expect(reconnects()).toHaveLength(1);
+  });
+
+  it("the bound agent answers the name's decision through inbox_answer, as through resolve", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1" }));
+    const d = await daemon.openDecision(WAVE, {
+      kind: "plan_change",
+      task: "A",
+      question: "Split A?",
+      pointers: {},
+    });
+    const id = decisionItemId(WAVE, d.decision_id);
+    const stranger = await client.request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "no",
+      where: { kind: "desk", device: "phone" },
+      by: "someone-else",
+    });
+    expect(stranger.error).toContain(`is owned by ${NAME}`);
+    const answered = await client.request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "no",
+      where: { kind: "desk", device: "phone" },
+      by: "coordinator-a1",
+    });
+    expect(answered.error).toBeUndefined();
+    expect(daemon.record(WAVE)?.decisions[d.decision_id]?.resolved?.answer).toBe("no");
   });
 
   it("a restart replaying a stale entry before the live one journals no reconnect", async () => {
