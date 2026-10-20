@@ -48,6 +48,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
     ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
     ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
+    ...(opts.forward !== undefined ? { forward: opts.forward } : {}),
     ...(opts.setup !== undefined ? { setup: opts.setup } : {}),
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
   });

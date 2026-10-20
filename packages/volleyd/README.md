@@ -474,6 +474,32 @@ is never used: it prints a bearer token Volley would have to carry. The `_system
 `claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
 
+**Signing a paired machine in.** `claude_signin { acct: "primary@<name>" }` (the Desk's **Sign in
+on <machine>**) signs a paired machine's own default profile in, with Claude Code's own flow on
+that machine (`src/claude/remote-signin.ts`; every step a fenced REMOTE step over ssh). volleyd
+reads the box's `$HOME`, writes the sealed `signin.sh` (no `CLAUDE_CONFIG_DIR`: the box's default
+profile; the credential env unset) and `browser.sh` to `~/.volley/signin/primary/` there, and
+starts `bash signin.sh` in the box's tmux session `volley-signin-primary`. It polls the url file
+and the session's screen every `claude_signin_poll_ms`. For the localhost-callback URL's port *p*
+it holds a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>` (`src/claude/forward.ts`):
+the same port on this machine's loopback as on the box's, because the OAuth redirect must match
+verbatim. Only then does it publish `claude_signin_url { acct, url, flow: "browser_callback",
+manual_url, attach: "ssh <target> -t tmux attach -t volley-signin-primary" }`: `url` opens in a
+browser on **this** machine and the forward carries the callback to `claude` on the box (an opaque
+encrypted pipe; no byte of it is read or logged). `manual_url`, the URL Claude Code printed, is for
+a phone: its page shows a code, typed into the terminal `attach` reaches, never into Volley. A
+forward that exits within `signin_forward_settle_ms` because the port is taken here (or a port a
+broker tunnel uses, which is never forwarded) restarts the sign-in once (Claude Code picks a fresh
+port), then fails naming the port. The box's `claude auth status` reporting `loggedIn` ends it with
+`claude_signin_done { acct, plan }`. The timeout, the login exiting, the daemon stopping, ssh
+failing or a box without tmux (the reason gives `ssh <target> -t claude auth login` to run by
+hand) end it with `claude_signin_failed`. Every end kills the session (no consent: it holds no
+agent's work) and the forward. A newer sign-in for the same machine supersedes it: its forward goes
+at once and nothing more of it is published. A machine whose `claude auth status` already reports
+`loggedIn` is refused (log it out with `ssh <target> claude auth logout` first). While it waits,
+`claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
+manual_url? }]` for a late client.
+
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
 `claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
 signed-in account with the lowest 5-hour usage (see "Usage metering"), or the primary while no
@@ -2131,12 +2157,17 @@ TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal
                      minted when an approved model_switch decision is acted on); <id> is a
                      MODEL_ID, the wave-file schema's `model` pattern
 
-SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
+SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
     every step is checked against the REMOTE allow-list below and the script `exec` sends on
     stdin is `renderRemoteScript` of exactly those steps; a raw stdin script is refused, as is
     any `ssh <target> '<command>'` string (zsh login shells word-split it differently).
   ssh -N -R <port>:<host>:<port> [-o <Opt>=<v>]… <target>   the reverse broker tunnel.
+  ssh -N -L 127.0.0.1:<p>:127.0.0.1:<p> -o BatchMode=yes -o ExitOnForwardFailure=yes
+    -o ConnectTimeout=<s> <target>   a paired machine's Claude sign-in forward
+    (src/claude/forward.ts), exactly that argv, only with the SigninForwardToken a remote
+    sign-in minted for exactly (<target>, <p>): the same port on both ends, p in 1024..65535,
+    never a broker tunnel's port (`mintSigninForwardToken`). Its bytes are never read.
   -o takes only BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax,
   ExitOnForwardFailure (never ProxyCommand, LocalCommand, …); a target never starts with '-'.
 
@@ -2144,15 +2175,20 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
   gh issue view
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
-    the LaunchToken sealed for <dir>) | capture-pane | has-session |
+    the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+    'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
+    `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
-    kill-session = CONSENT; no other tmux global option
+    kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
+    work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port> · printenv PATH
+    nc -z 127.0.0.1 <port> · printenv PATH | HOME
+  claude auth status (exactly: the box's login state and plan, never a credential; a login
+    runs only from a sealed signin.sh)
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
-    `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
+    `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
@@ -2162,7 +2198,10 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     (what the tmux session runs) is written whole, never appended, and its content must be
     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
+    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+    a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
+    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
+    login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
   volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
     the `peer_doctor` op); no other volley argv runs on a box

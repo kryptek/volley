@@ -1,9 +1,10 @@
 import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
-import type { ConsentToken } from "../../src/fence";
+import type { ExecFn, ExecOptions, ExecResult } from "../../src/exec";
+import { type ConsentToken, type RemoteStep, assertAllowed } from "../../src/fence";
 import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "../../src/hosts/host";
-import type { RemoteHost, RemoteHostSpec } from "../../src/hosts/ssh-tmux";
+import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hosts/ssh-tmux";
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
@@ -306,6 +307,12 @@ export function fakeRemoteHost(
     answers,
     probes: 0,
     doctorRuns: [],
+    // The box's steps as the local `ssh -T … bash -s` (the fake exec checks the fence).
+    run: (steps: RemoteStep[], opts: RemoteRunOptions = {}) =>
+      local.fake.exec(["ssh", "-T", "-o", "BatchMode=yes", spec.target, "bash", "-s"], {
+        ...opts,
+        remote: { steps },
+      }),
     probePath: async () => {
       h.probes++;
       const a = h.answers.path ?? { claude: true, bun: true };
@@ -320,4 +327,104 @@ export function fakeRemoteHost(
     },
   });
   return h;
+}
+
+// ---------------------------------------------------------------------------------------------
+// A paired machine's Claude sign-in (F8): the box's tmux / claude / files, and the forward.
+// ---------------------------------------------------------------------------------------------
+
+const claudeFixture = (name: string) =>
+  readFileSync(new URL(`../fixtures/claude/${name}`, import.meta.url), "utf-8");
+/** What a box's sign-in session shows: the printed (manual-code) URL. */
+export const SIGNIN_TRANSCRIPT = claudeFixture("auth-login-tmux.txt");
+/** What Claude Code handed `$BROWSER`: the localhost-callback URL, port 51051. */
+export const SIGNIN_CALLBACK = claudeFixture("browser-url.txt").trim();
+/** What ssh prints when the forward's local port is taken. */
+const FORWARD_BUSY =
+  "bind [127.0.0.1]:51051: Address already in use\nchannel_setup_fwd_listener_tcpip: cannot listen to port: 51051\nCould not request local forwarding.\n";
+
+export interface SigninBoxOptions {
+  /** `claude auth status` reports loggedIn from this call on (never: undefined). */
+  signInAfter?: number;
+  /** Claude Code calls `$BROWSER` (default true). */
+  browser?: boolean;
+  /** The callback URL of each start, in turn (default SIGNIN_CALLBACK every time). */
+  callbacks?: string[];
+  /** How many forwards exit at once with the port taken. */
+  busy?: number;
+  noTmux?: boolean;
+  /** The box's HOME (default /home/dev). */
+  home?: string;
+}
+
+/**
+ * The local exec of a supervisor whose `ssh -T … bash -s` reaches a fake box (its sign-in tmux
+ * session, url file and `claude auth status`), and whose `ssh -N -L` forwards run until aborted
+ * (or exit at once, `busy`). Every argv passes the real fence.
+ */
+export function fakeSigninBox(o: SigninBoxOptions = {}) {
+  const fx = fakeExec();
+  const home = o.home ?? "/home/dev";
+  const box = { files: new Map<string, string>(), session: false, starts: 0, polls: 0 };
+  const scripts: string[][][] = [];
+  fx.on(["ssh", "-T"], (_argv, opts) => {
+    const steps = opts.remote?.steps ?? [];
+    scripts.push(steps.map((s) => s.argv));
+    let out = "";
+    for (const s of steps) {
+      const [p, ...a] = s.argv;
+      if (s.stdout !== undefined) {
+        box.files.set(s.stdout, Buffer.from(s.stdin ?? "", "base64").toString("utf-8"));
+      } else if (p === "printenv") out += `${home}\n`;
+      else if (p === "tmux" && a[0] === "new-session") {
+        if (o.noTmux === true)
+          return { code: 127, stderr: "bash: line 3: tmux: command not found\n" };
+        box.session = true;
+        const url = o.callbacks?.[box.starts] ?? SIGNIN_CALLBACK;
+        box.starts++;
+        if (o.browser !== false) box.files.set(`${a[5]}/url`, `${url}\n`);
+      } else if (p === "tmux" && a[0] === "kill-session") {
+        const had = box.session;
+        box.session = false;
+        if (!had) return { code: 1, stderr: "can't find session\n" };
+      } else if (p === "tmux" && a[0] === "has-session") {
+        if (!box.session) return { code: 1 };
+      } else if (p === "tmux" && a[0] === "capture-pane") {
+        if (!box.session) return { code: 1 };
+        out += SIGNIN_TRANSCRIPT;
+      } else if (p === "cat") {
+        const f = box.files.get(a[0] as string);
+        if (f === undefined) return { code: 1 };
+        out += f;
+      } else if (p === "claude") {
+        box.polls++;
+        return o.signInAfter !== undefined && box.polls >= o.signInAfter
+          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+          : { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
+      }
+    }
+    return { stdout: out };
+  });
+  const forwards: { argv: string[]; stopped: boolean }[] = [];
+  let busy = o.busy ?? 0;
+  const exec: ExecFn = async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
+    if (argv[0] === "ssh" && argv[1] === "-N" && argv[2] === "-L") {
+      assertAllowed(argv, opts);
+      const f = { argv: [...argv], stopped: false };
+      forwards.push(f);
+      if (busy > 0) {
+        busy--;
+        return { code: 255, stdout: "", stderr: FORWARD_BUSY, timedOut: false };
+      }
+      await new Promise((r) => opts.signal?.addEventListener("abort", r, { once: true }));
+      f.stopped = true;
+      return { code: 255, stdout: "", stderr: "", timedOut: false };
+    }
+    return fx.exec(argv, opts);
+  };
+  /** Every remote argv, flattened, in order. */
+  const steps = () => scripts.flat();
+  const ran = (...prefix: string[]) =>
+    steps().filter((argv) => prefix.every((p, i) => argv[i] === p));
+  return { exec, fake: fx, box, forwards, steps, ran };
 }
