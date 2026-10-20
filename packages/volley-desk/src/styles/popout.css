@@ -1,0 +1,160 @@
+/*
+ * The Terminal popout (TerminalPopout.tsx): a screen-space layer above the dock
+ * (5–6) and below the Settings window (20) and the modal sheets (60); each
+ * popout is built like a Desk window (the lift shadow, the solid panel, a
+ * 1 px edge) with a macOS title bar. Its terminal never wraps and scrolls
+ * both ways; the window resizes from its corner. At phone width it is a
+ * full-screen sheet.
+ */
+.popout-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+.popout {
+  pointer-events: auto;
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 320px;
+  min-height: 160px;
+  height: 60vh;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  resize: both;
+  overflow: hidden;
+  /* The width is set in `ch` of the terminal's font at its text size. */
+  font-family: var(--f-term);
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--win-shadow);
+  animation: popout-in 140ms ease-out;
+}
+.popout:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ink) 55%, transparent);
+  outline-offset: 2px;
+}
+.popout-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 6px 8px 6px 12px;
+  font: 12px var(--f-ui);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.01));
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.popout-bar:active {
+  cursor: grabbing;
+}
+.popout--sheet .popout-bar {
+  cursor: default;
+}
+.popout-lights {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.popout-light {
+  display: block;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.35);
+}
+.popout-light--close {
+  background: #ff5f57;
+  cursor: pointer;
+}
+.popout-light--close:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.popout-light--min {
+  background: #febc2e;
+}
+.popout-light--zoom {
+  background: #28c840;
+}
+.popout-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.popout-title b {
+  font: 600 12px var(--f-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.popout-size {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 11px;
+}
+.popout-size .icon-btn {
+  width: 24px;
+  height: 24px;
+  font: 14px var(--f-ui);
+}
+.term--popout {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 8px;
+  overflow: auto;
+  /* Counted in POPOUT_CHROME_PX, so a line as long as the width never scrolls sideways. */
+  scrollbar-gutter: stable;
+  font-family: var(--f-term);
+  white-space: pre;
+  word-break: normal;
+}
+
+/* `popout--sheet` is set below NARROW_PX at mount; the query covers a viewport narrowed later. */
+@media (max-width: 699.98px) {
+  .popout {
+    position: fixed;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    min-width: 0;
+    border-radius: 0;
+    resize: none;
+  }
+}
+.popout--sheet {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  min-width: 0;
+  border-radius: 0;
+  resize: none;
+}
+
+@keyframes popout-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .popout {
+    animation: none;
+  }
+}

@@ -24,7 +24,8 @@
  * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65), and the title an
  * account picker listing the Claude accounts with their 5-hour usage: picking
  * another asks to confirm (the agent restarts with a resume note) and then
- * calls `agent_move_account`.
+ * calls `agent_move_account`. The Terminal tab's ⤢ (`onPopout`) opens the
+ * agent's screen in a floating window (`TerminalPopout`).
  */
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -98,6 +99,27 @@ export interface AgentWindowProps {
   onMoveAccount?: (acct: string) => Promise<{ ok: boolean; error?: string }> | undefined;
   /** The amber `no progress reported for N m` badge, when the agent has gone that long. */
   stale?: string | null;
+  /** The Terminal tab's ⤢: opens the agent's screen in a floating window; absent, no ⤢. */
+  onPopout?: (agentId: string) => void;
+}
+
+/**
+ * What the Terminal shows for `agent`, on the card and in the popout alike: the
+ * supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`),
+ * and an agent with no wave task was not launched by volleyd, so it has no screen.
+ */
+export function terminalProps(
+  agent: AgentView,
+  wave: WaveView | undefined,
+  noSignal: NoSignal | null,
+): { screen: AgentView["screen"]; stale: boolean; noSignal: boolean; selfRegistered: boolean } {
+  const task = agent.task ? wave?.state?.tasks.find((t) => t.id === agent.task) : undefined;
+  return {
+    screen: agent.screen,
+    stale: task?.screen_stale === true,
+    noSignal: noSignal?.kind === "mcp",
+    selfRegistered: agent.wave === UNASSIGNED || !agent.task,
+  };
 }
 
 /** Context meter tones: compaction risk as the window fills. */
@@ -279,6 +301,7 @@ export function AgentWindow({
   accounts = [],
   onMoveAccount,
   stale = null,
+  onPopout,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -509,13 +532,22 @@ export function AgentWindow({
             now={now}
           />
         ) : (
-          // The supervisor flags a backed-off capture per task (SPEC §4.6.1 `tasks[].screen_stale`).
-          <Terminal
-            screen={agent.screen}
-            stale={task?.screen_stale === true}
-            noSignal={mcpMissing}
-            selfRegistered={agent.wave === UNASSIGNED || !agent.task}
-          />
+          <>
+            {onPopout && (
+              <div className="term-tools">
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Open terminal in a window"
+                  title="Open in a window"
+                  onClick={() => onPopout(agent.id)}
+                >
+                  ⤢
+                </button>
+              </div>
+            )}
+            <Terminal {...terminalProps(agent, wave, noSignal)} />
+          </>
         )}
       </div>
       {steer}
