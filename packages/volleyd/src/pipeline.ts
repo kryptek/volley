@@ -1602,7 +1602,12 @@ function onVerified(
         ...retireIfLive(run),
         {
           kind: "decide",
-          marker: { on: "ci_failed", role: ev.role, ...(head !== undefined ? { head } : {}) },
+          marker: {
+            on: "ci_failed",
+            role: ev.role,
+            agent_id: run.agent_id,
+            ...(head !== undefined ? { head } : {}),
+          },
           decision: out.decision,
           data: out.data,
         },
@@ -2025,8 +2030,11 @@ function ciFixup(v: PipelineView, d: DecisionRecord, m: PipelineMarker): Pipelin
   const x = d as unknown as Record<string, unknown>;
   const role = m.role;
   const head = m.head;
-  // Verified meanwhile (a re-run turned it green): the red head is no longer the task's.
-  if (role === undefined || head === undefined || v.p.runs[role]?.accepted === true) return [];
+  const run = role !== undefined ? v.p.runs[role] : undefined;
+  // Verified meanwhile (a re-run turned it green), or the role relaunched (a new run): the red
+  // head is no longer the task's.
+  if (role === undefined || head === undefined || run?.accepted === true) return [];
+  if (m.agent_id !== undefined && run?.agent_id !== m.agent_id) return [];
   const strings = (k: string): string[] =>
     Array.isArray(x[k])
       ? (x[k] as unknown[]).filter((s): s is string => typeof s === "string")

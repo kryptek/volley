@@ -133,6 +133,19 @@ describe("artifact verification", () => {
     expect(out.data.ci_runs).toEqual(report.kind === "ok" ? report.ci.runs : []);
   });
 
+  it("CI red on two runs: each run's log is headed by its name", async () => {
+    const [one] = JSON.parse(fx("gh-run-list-red.json")) as Record<string, unknown>[];
+    const two = { ...one, databaseId: 503, name: "Lint", workflowName: "Lint" };
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: JSON.stringify([one, two]) })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: "first log\n" })
+      .on(["gh", "run", "view", "503", "--log-failed"], { stdout: "second log\n" });
+    const out = artifactOutcome("T1", "implementer", await verifyArtifacts(fake.exec, SPEC));
+    const log = out.kind === "ci_failed" ? String(out.data.log) : "";
+    expect(log).toBe("== CI (run 502) ==\nfirst log\n== Lint (run 503) ==\nsecond log");
+  });
+
   it("a red report's log is clipped to its tail; a green report reads no log and is unchanged", async () => {
     const long = `${"x".repeat(DAEMON_DEFAULTS.ci_log_max_chars)}\nthe last line\n`;
     const red = allGood()

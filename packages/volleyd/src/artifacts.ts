@@ -330,7 +330,8 @@ export type ArtifactOutcome =
 
 /**
  * `gh run view <id> --log-failed` of each failed run: the failing tests (failingTests) and the
- * logs' tail, clipped to `ci_log_max_chars`. A log that cannot be read is skipped.
+ * logs' tail (each log headed `== <name> (run <id>) ==`), clipped to `ci_log_max_chars`. A log
+ * that cannot be read is skipped.
  */
 async function failedLogs(
   exec: ExecFn,
@@ -342,7 +343,7 @@ async function failedLogs(
   for (const run of failedRuns(runs)) {
     const r = await exec(["gh", "run", "view", String(run.id), "--log-failed"], { cwd });
     if (r.code !== 0) continue;
-    logs.push(r.stdout.trimEnd());
+    logs.push(`== ${run.name} (run ${run.id}) ==\n${r.stdout.trimEnd()}`);
     for (const t of failingTests(r.stdout)) if (!tests.includes(t)) tests.push(t);
   }
   const log = logs.join("\n");
