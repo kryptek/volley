@@ -1,3 +1,4 @@
+import { checkCoordinator } from "../config";
 import { buildEnvelope } from "../envelope";
 import { VolleyError } from "../errors";
 import type { ServerState } from "../state";
@@ -26,6 +27,8 @@ export interface RegisterLinks {
 export interface RegisterResult {
   agent_id: string;
   namespace: string;
+  /** The stable coordinator name (`VOLLEY_COORDINATOR`), when set. */
+  coordinator?: string;
 }
 
 /**
@@ -45,6 +48,9 @@ export async function volRegister(
       `parent_id "${parentId}" does not match the agent id grammar`,
     );
   }
+
+  const coordinator =
+    config.coordinator !== undefined ? checkCoordinator(config.coordinator) : undefined;
 
   // One line: a direct caller's line breaks become spaces (the MCP boundary refuses them).
   // SPEC §6.2's cap: a direct caller's longer title is cut (the MCP boundary refuses it).
@@ -68,6 +74,7 @@ export async function volRegister(
         ...(links !== undefined ? { links } : {}),
         started_at: new Date().toISOString(),
         ...(config.claudeAccount !== undefined ? { claude_account: config.claudeAccount } : {}),
+        ...(coordinator !== undefined ? { coordinator } : {}),
       },
     }),
     namespace: config.namespace,
@@ -91,5 +98,9 @@ export async function volRegister(
   );
 
   state.registered = true;
-  return { agent_id: config.agentId, namespace: config.namespace };
+  return {
+    agent_id: config.agentId,
+    namespace: config.namespace,
+    ...(coordinator !== undefined ? { coordinator } : {}),
+  };
 }
