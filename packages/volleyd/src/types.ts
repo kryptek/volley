@@ -152,6 +152,8 @@ export interface AutopilotConfig {
   question_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
   budget_raise_max: number;
+  /** How long an answered inbox item stays retained (with `answered`) before it is cleared. */
+  inbox_answered_ttl_s: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -480,6 +482,9 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // The needs-you inbox (SPEC §4.6.17): an item opened, and the answer its referee accepted.
+  "inbox_opened",
+  "inbox_answered",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

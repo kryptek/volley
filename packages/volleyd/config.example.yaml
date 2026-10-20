@@ -121,3 +121,4 @@
 #   question_max: 1              # agent questions answered for one run
 #   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
 #                                # multiple of the wave's derived budget
+#   inbox_answered_ttl_s: 600    # an answered needs-you inbox item stays retained this long

@@ -83,7 +83,14 @@ const operator: RoleAcl[] = [
   send("volley/_system/registry/+"),
 ];
 
-/** Every role's ACLs. Order is the order the broker gets them; priorities decide evaluation. */
+/**
+ * Every role's ACLs. Order is the order the broker gets them; priorities decide evaluation.
+ *
+ * The needs-you inbox (`volley/_inbox/<id>`, SPEC §4.6.17) needs no rows of its own: every
+ * account reads it through `volley/#`, no account or agent grant reaches it (their writes are
+ * four levels deep, or under `_system`), and only `volleyd` and `supervisor` write it, through
+ * `volley/#`. An answer is a mailbox request to volleyd, so any login that may steer answers.
+ */
 export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   // The supervisor daemon: the whole tree, including `_waves/*`, `_waves/_config`, the screen
   // channel it publishes on each agent's behalf, and the one-time token topics under volley-auth/.

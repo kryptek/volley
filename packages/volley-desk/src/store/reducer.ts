@@ -43,6 +43,7 @@ import {
   type DeskMessage,
   type DeskState,
   type Envelope,
+  type InboxItem,
   type LeasePoolPayload,
   type MachinePayload,
   ROLES,
@@ -99,13 +100,15 @@ export type Route =
   | { kind: "signin"; acct: string }
   | { kind: "usage"; agentId: string }
   | { kind: "machine"; name: string }
-  | { kind: "readiness"; name: string };
+  | { kind: "readiness"; name: string }
+  | { kind: "inbox"; id: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
   const p = topic.split("/");
   if (p[0] !== "volley" || p.some((s) => s === "")) return null;
   const [, a, b, c, d] = p;
+  if (a === "_inbox") return p.length === 3 && b ? { kind: "inbox", id: b } : null;
   if (a === "_system") {
     if (p.length === 4 && b === "registry" && c) return { kind: "registry", agentId: c };
     if (p.length === 4 && b === "leases" && c) return { kind: "lease", pool: c };
@@ -210,7 +213,22 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceMachine(state, route.name, m);
     case "readiness":
       return reduceReadiness(state, route.name, m);
+    case "inbox":
+      return reduceInbox(state, route.id, m);
   }
+}
+
+/**
+ * A needs-you inbox item (SPEC §4.6.17): taken only from volleyd (the broker lets no one else
+ * write it; the id is a sanity check) and only when it names its topic's id; a cleared topic
+ * forgets it. An answered item stays (with `answered`) until volleyd clears it.
+ */
+function reduceInbox(state: DeskState, id: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, inbox: keyed(state.inbox, id, undefined) };
+  const p = env.payload as Partial<InboxItem> | undefined;
+  if (env.agent_id !== "volleyd" || p?.id !== id) return state;
+  return { ...state, inbox: keyed(state.inbox, id, p as InboxItem) };
 }
 
 /**
@@ -343,6 +361,7 @@ export function resync(state: DeskState): DeskState {
     usage: {},
     machines: {},
     readiness: {},
+    inbox: {},
     unconfirmed: [...unconfirmed],
   };
 }

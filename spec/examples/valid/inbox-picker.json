@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T12:05:00.000Z",
+  "channel": "_inbox",
+  "type": "inbox_item",
+  "payload": {
+    "id": "p-coord-a1b2c3-toolu_01AbCdEf",
+    "kind": "picker",
+    "version": 1,
+    "owner_only": false,
+    "agent_id": "coord-a1b2c3",
+    "title": "Pick a storage backend",
+    "question": "Which backend should the cache use?",
+    "options": [
+      { "label": "SQLite", "description": "One file, no server" },
+      { "label": "Redis", "description": "Shared across machines" }
+    ],
+    "allow_other": true,
+    "multi": false,
+    "pointers": {},
+    "opened_at": "2026-10-20T12:05:00.000Z",
+    "source": { "tool_use_id": "toolu_01AbCdEf", "machine": "athena" }
+  }
+}

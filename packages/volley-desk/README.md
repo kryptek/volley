@@ -205,7 +205,7 @@ scripts/sync-react-bits-backgrounds.ts
 
 ### Subscriptions
 
-`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen,usage}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`, `volley/_system/claude-accounts/+`, `volley/_system/claude/+/signin`, `volley/_system/machines/#` (each machine's record and volleyd's readiness verdict under it), `volley/_system/auth/replies/+` (volleyd's answers to account ops; secrets in them are sealed to the requesting browser).
+`volley/_system/registry/+`, `volley/+/+/{status,progress,result,mailbox,screen,usage}`, `volley/_waves/+/state`, `volley/_waves/+/decisions/+`, `volley/_waves/_config`, `volley/_system/leases/+`, `volley/_system/admission`, `volley/_system/claude-accounts/+`, `volley/_system/claude/+/signin`, `volley/_system/machines/#` (each machine's record and volleyd's readiness verdict under it), `volley/_inbox/+` (the needs-you inbox, SPEC §4.6.17: the store keeps volleyd's items in `state.inbox` by id; its window is still to come), `volley/_system/auth/replies/+` (volleyd's answers to account ops; secrets in them are sealed to the requesting browser).
 
 ### Store semantics
 
