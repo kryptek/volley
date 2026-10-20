@@ -114,6 +114,8 @@
   max-height: none;
   margin: 8px;
   overflow: auto;
+  /* Counted in POPOUT_CHROME_PX, so a line as long as the width never scrolls sideways. */
+  scrollbar-gutter: stable;
   font-family: var(--f-term);
   white-space: pre;
   word-break: normal;

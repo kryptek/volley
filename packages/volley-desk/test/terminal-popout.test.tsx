@@ -11,6 +11,7 @@ import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 import { demoMessages } from "../src/store/fixtures";
 import type { DeskMessage, WaveStatePayload } from "../src/store/types";
+import { POPOUT_CHROME_PX, popoutWidth } from "../src/windows/agent/TerminalPopout";
 import {
   TERMINAL_FONT_KEY,
   TERMINAL_FONT_MAX,
@@ -189,6 +190,62 @@ describe("terminal popout", () => {
     expect(dialog).toHaveClass("popout--sheet");
     expect(dialog.querySelector("[data-drag-handle]")).toBeNull();
     expect(screen.getByRole("button", { name: "Close terminal window" })).toBeInTheDocument();
+  });
+
+  it("follows the viewport across the phone breakpoint after it opened", () => {
+    renderDemo();
+    popOut(FIXUP);
+    const dialog = dialogFor(FIXUP);
+    const resize = (w: number) =>
+      act(() => {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: w });
+        window.dispatchEvent(new Event("resize"));
+      });
+    resize(390);
+    expect(dialog).toHaveClass("popout--sheet");
+    resize(1440);
+    expect(dialog).not.toHaveClass("popout--sheet");
+    expect(dialog.querySelector("[data-drag-handle]")).not.toBeNull();
+  });
+
+  it("Escape closes a modal opened over a popout before the popout", () => {
+    renderDemo();
+    popOut(FIXUP);
+    fireEvent.click(
+      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+        name: "Settings",
+      }),
+    );
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    pressEscape();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(dialogFor(FIXUP)).toBeInTheDocument();
+    pressEscape();
+    expect(screen.queryByRole("dialog", { name: new RegExp(FIXUP) })).toBeNull();
+  });
+
+  it("canvas keys (f, +, -) do nothing while focus is inside a popout", () => {
+    renderDemo();
+    popOut(FIXUP);
+    const dialog = dialogFor(FIXUP);
+    for (const key of ["f", "+", "-"]) {
+      // fireEvent returns false when a handler called preventDefault (the canvas acted).
+      expect(fireEvent.keyDown(dialog, { key })).toBe(true);
+    }
+  });
+});
+
+describe("popoutWidth", () => {
+  it("adds the whole chrome around the text: borders, margin, padding and a scrollbar gutter", () => {
+    // popout border 2 + .term--popout margin 16 + .recessed border 2 + .term padding 20 + gutter 16.
+    expect(POPOUT_CHROME_PX).toBe(56);
+    expect(popoutWidth(120)).toBe("min(calc(100vw - 32px), calc(120ch + 56px))");
+  });
+
+  it("reserves the scrollbar gutter on the popout's terminal", () => {
+    const css = readFileSync(path.resolve(__dirname, "../src/styles/popout.css"), "utf8");
+    const at = css.indexOf(".term--popout {");
+    expect(css.slice(at, css.indexOf("}", at))).toMatch(/scrollbar-gutter: stable;/);
   });
 });
 

@@ -323,10 +323,11 @@ export default function App() {
   // Terminal popouts (the Terminal tab's ⤢): bottom → top; Escape closes the topmost first.
   const popouts = useTerminalPopouts();
   // A popout's agent left the store (pruned, or its retained topics cleared): close it.
-  const goneTerm = popouts.open.filter((id) => !state.agents[id]);
+  const goneTerm = popouts.open.filter((id) => !state.agents[id]).join(" ");
+  const closePopout = popouts.close;
   useEffect(() => {
-    for (const id of goneTerm) popouts.close(id);
-  });
+    for (const id of goneTerm.split(" ").filter(Boolean)) closePopout(id);
+  }, [goneTerm, closePopout]);
   const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
@@ -879,12 +880,13 @@ export default function App() {
     panBy,
     zoomAt: (f) => zoomAt(f),
     arrange,
+    // Top first: the modal sheets and the Settings windows sit above the popout layer.
     closeTop: () => {
-      if (popouts.closeTop()) return true;
       if (preview) setPreview(false);
       else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
+      else if (popouts.closeTop()) return true;
       else if (steerOpen !== null) setSteerOpen(null);
       else return false;
       return true;

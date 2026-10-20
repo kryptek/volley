@@ -1,7 +1,7 @@
 # Third-party notices: volley-desk
 
 The Volley Desk is licensed under Apache-2.0 (see the repository-root `LICENSE`), **except** for
-the third-party code and assets listed here, which keep its own licence.
+the third-party code and assets listed here, which keep their own licence.
 
 ## React Bits (`src/rb/`)
 

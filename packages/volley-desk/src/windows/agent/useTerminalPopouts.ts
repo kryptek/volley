@@ -3,7 +3,7 @@
  * (the last is the topmost, the one Escape closes), and the text size every
  * popout shares, remembered in this browser (`TERMINAL_FONT_KEY`).
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 /** localStorage key for the popout's text size, in px. */
 export const TERMINAL_FONT_KEY = "volley-desk:terminal-font-px";
@@ -40,7 +40,7 @@ export function useTerminalPopouts(): TerminalPopouts {
   const [fontPx, setFont] = useState(readFontPx);
   const raise = (id: string) =>
     setOpen((o) => (o[o.length - 1] === id ? o : [...o.filter((x) => x !== id), id]));
-  const close = (id: string) => setOpen((o) => o.filter((x) => x !== id));
+  const close = useCallback((id: string) => setOpen((o) => o.filter((x) => x !== id)), []);
   return {
     open,
     openFor: raise,

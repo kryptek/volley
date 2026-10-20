@@ -30,6 +30,16 @@ const ORIGIN = { x: 24, y: 64 };
 const KEEP_PX = 80;
 /** The narrowest terminal it opens at, in columns. */
 const MIN_COLS = 80;
+/**
+ * Everything across the window that is not text: the popout's border (2), the
+ * terminal's margin (16), its recessed border (2) and padding (20), and the
+ * scrollbar gutter `.term--popout` reserves (16).
+ */
+export const POPOUT_CHROME_PX = 56;
+
+/** The window's CSS width: the terminal's columns plus its chrome, capped by the viewport. */
+export const popoutWidth = (cols: number): string =>
+  `min(calc(100vw - 32px), calc(${cols}ch + ${POPOUT_CHROME_PX}px))`;
 
 /** The screen's widest line in code points (a powerline glyph is one column), at least 80. */
 export function columns(lines: readonly string[] | undefined): number {
@@ -122,7 +132,7 @@ export function TerminalPopout({
               left: `${pos.x}px`,
               top: `${pos.y}px`,
               fontSize: `${fontPx}px`,
-              width: `min(calc(100vw - 32px), calc(${cols}ch + 28px))`,
+              width: popoutWidth(cols),
             }
       }
       onPointerDownCapture={onRaise}
