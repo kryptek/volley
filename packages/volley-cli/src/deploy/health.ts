@@ -4,9 +4,9 @@ import { openClient } from "../connect";
 
 /**
  * `volley deploy`'s health check after the restart, each bounded by a wait (`DEPLOY`): the Desk
- * answers and serves the release's bundle, and volleyd's retained status is live and was
- * published after the restart (the new process registered: the status carries no version, and
- * the self-check already proved the checkout's).
+ * answers and serves the release's bundle, and volleyd's retained status is `working` and was
+ * published after the restart (the new process got through its start: the status carries no
+ * version, and the self-check already proved the checkout's).
  */
 
 export interface Wait {
@@ -65,12 +65,10 @@ export async function deskHealthy(
   });
 }
 
-/** Statuses after which volleyd is not running (`volley wait`'s terminal statuses). */
-const TERMINAL = new Set(["done", "blocked", "failed", "reaped"]);
-
 /**
- * volleyd's retained status in `namespace` is live and was published at or after `since` (the
- * restart); null when healthy, else why not.
+ * volleyd's retained status in `namespace` is `working` and was published at or after `since`
+ * (the restart); null when healthy, else why not. `spawning` and `registered` come before its
+ * subscriptions and reconcile, so a daemon that dies in its start never passes.
  */
 export async function volleydHealthy(
   opts: { brokerUrl: string; auth: BrokerAuth | null; namespace: string; since: Date } & Wait,
@@ -78,15 +76,21 @@ export async function volleydHealthy(
   const topic = buildTopic(opts.namespace, "volleyd", "status");
   return poll(opts, async (remaining) => {
     let broker: Awaited<ReturnType<typeof openClient>>;
+    const connecting = openClient(opts.brokerUrl, opts.auth);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       broker = await Promise.race([
-        openClient(opts.brokerUrl, opts.auth),
-        sleep(remaining).then(() => {
-          throw new Error("timed out connecting");
+        connecting,
+        new Promise<never>((_, fail) => {
+          timer = setTimeout(() => fail(new Error("timed out connecting")), remaining);
         }),
       ]);
     } catch (e) {
+      // A client that connects after the timeout is closed, not leaked.
+      void connecting.then((late) => late.disconnect()).catch(() => {});
       return `the broker at ${opts.brokerUrl} is unreachable (${e instanceof Error ? e.message : String(e)})`;
+    } finally {
+      clearTimeout(timer);
     }
     try {
       const raw = await broker.queryRetained(topic, Math.max(500, Math.min(remaining, 1_000)));
@@ -98,13 +102,13 @@ export async function volleydHealthy(
         return `volleyd's status at ${topic} is not JSON`;
       }
       const type = typeof env.type === "string" ? env.type : "unknown";
-      if (TERMINAL.has(type)) return `volleyd's status is ${type}`;
       const at = typeof env.wall_time === "string" ? Date.parse(env.wall_time) : Number.NaN;
       if (!(at >= opts.since.getTime())) {
         return `volleyd has not re-registered since the restart (its status is from ${
           Number.isNaN(at) ? "an unknown time" : new Date(at).toISOString()
         })`;
       }
+      if (type !== "working") return `volleyd's status is ${type}, not working`;
       return null;
     } finally {
       await broker.disconnect().catch(() => {});

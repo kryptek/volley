@@ -109,10 +109,18 @@ describe("volleydHealthy", () => {
     expect(await check(since)).toMatch(/reaped/);
   });
 
-  it("is healthy once the new process registers within the wait", async () => {
+  it("is not healthy while the new process has only started (spawning or registered)", async () => {
+    const since = new Date(Date.now() - 1_000);
+    await retain("spawning", new Date());
+    expect(await check(since)).toMatch(/spawning/);
+    await retain("registered", new Date());
+    expect(await check(since)).toMatch(/registered/);
+  });
+
+  it("is healthy once the new process is working within the wait", async () => {
     const since = new Date();
-    await retain("registered", new Date(since.getTime() - 60_000));
-    setTimeout(() => void retain("registered", new Date()), 100);
+    await retain("working", new Date(since.getTime() - 60_000));
+    setTimeout(() => void retain("working", new Date()), 100);
     expect(await check(since)).toBeNull();
   });
 

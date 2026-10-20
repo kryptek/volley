@@ -66,7 +66,13 @@ const lastLine = (r: { stdout: string; stderr: string }, argv: readonly string[]
 
 const shell = (c: Command) => `${c.cwd !== undefined ? `cd ${c.cwd} && ` : ""}${c.argv.join(" ")}`;
 
-/** Run `steps`; the first failure, or null. `version`: what the checkout must report (null: any). */
+/** A failed step as the result reports it. */
+const failure = ({ step, why }: { step: string; why: string }) => ({ step, why });
+
+/**
+ * Run `steps`; the first failure, or null. `version`: what the checkout must report (null: any).
+ * A step that throws (the fence refusing an argv) fails like any other.
+ */
 async function runSteps(
   ctx: PlanContext,
   steps: PlanStep[],
@@ -74,18 +80,23 @@ async function runSteps(
   deps: ApplyDeps,
   out: StepOutcome[],
   prefix: string,
-): Promise<{ step: string; why: string } | null> {
+): Promise<{ id: PlanStep["id"]; step: string; why: string } | null> {
   let restartedAt: Date | null = null;
   for (const step of steps) {
-    const why = await runStep(ctx, step, version, deps, () => {
-      restartedAt ??= deps.now();
-      return restartedAt;
-    });
+    let why: string | null;
+    try {
+      why = await runStep(ctx, step, version, deps, () => {
+        restartedAt ??= deps.now();
+        return restartedAt;
+      });
+    } catch (e) {
+      why = e instanceof Error ? e.message : String(e);
+    }
     out.push({ title: step.title, ok: why === null, ...(why !== null ? { why } : {}) });
     deps.report(
       why === null ? `ok      ${prefix}${step.title}` : `FAILED  ${prefix}${step.title}: ${why}`,
     );
-    if (why !== null) return { step: step.title, why };
+    if (why !== null) return { id: step.id, step: step.title, why };
   }
   return null;
 }
@@ -178,7 +189,7 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
   const prep = deployPlan(prepPlan).filter((s) => s.id === "stash" || s.id === "fetch");
   const prepFailed = await runSteps(prepPlan, prep, { cli: null, bundle: null }, deps, steps, "");
   if (prepFailed !== null) {
-    return result({ ok: false, to: requested, failed: prepFailed, rolledBack: false });
+    return result({ ok: false, to: requested, failed: failure(prepFailed), rolledBack: false });
   }
   const resolveTitle = `resolve ${requested === "latest" ? "the newest tag" : requested}`;
   const listed = await deps.exec(git(base.repo, "tag", "--list", "v*"));
@@ -205,7 +216,7 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
 
   const forward: PlanContext = { ...base, target: { kind: "tag", name: tag }, fetch: false };
   const version = tag.replace(/^v/, "");
-  const failed = await runSteps(
+  const forwardFailed = await runSteps(
     forward,
     deployPlan(forward),
     { cli: version, bundle: version },
@@ -213,11 +224,11 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
     steps,
     "",
   );
-  if (failed === null) return result({ ok: true, to: tag, rolledBack: false });
+  if (forwardFailed === null) return result({ ok: true, to: tag, rolledBack: false });
+  const failed = failure(forwardFailed);
   // The checkout itself failed: HEAD never moved, so there is nothing to roll back.
-  if (steps.at(-1)?.title === deployPlan(forward).find((s) => s.id === "checkout")?.title) {
+  if (forwardFailed.id === "checkout")
     return result({ ok: false, to: tag, failed, rolledBack: false });
-  }
 
   deps.report(`rolling back to ${refLabel(from)}`);
   const back: PlanContext = { ...base, target: from, fetch: false };
@@ -252,7 +263,7 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
     failed,
     rolledBack: false,
     rollbackFailed: {
-      ...backFailed,
+      ...failure(backFailed),
       byHand: backSteps
         .filter((s) => s.id !== "self-check" && s.id !== "health")
         .flatMap((s) => s.commands.map(shell)),

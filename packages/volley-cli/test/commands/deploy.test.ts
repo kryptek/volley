@@ -143,6 +143,7 @@ describe("volley deploy --dry-run", () => {
     expect(await m.run(["-x"])).toBe(2);
     expect(await m.run(["v-1"])).toBe(2);
     expect(await m.run(["v0.5.0", "--desk-port", "http"])).toBe(2);
+    expect(await m.run(["v0.5.0", "--desk-port", "0"])).toBe(2);
     expect(m.f.ran).toEqual([]);
     const noLock = tempDir("volley-deploy-nolock-");
     expect(await m.run(["v0.5.0", "--repo", noLock])).toBe(2);
@@ -229,6 +230,14 @@ describe("volley deploy", () => {
     expect(err).toContain("the rollback to v0.4.0 failed too at restart systems.volley.desk");
     expect(err).toContain(`  git -C ${m.f.repo} checkout --detach v0.4.0`);
     expect(err).toContain("  launchctl kickstart -k gui/501/systems.volley.desk");
+  });
+
+  it("takes a non-release tag on HEAD as no tag, so the rollback goes back to the branch", async () => {
+    const m = machine({ head: { tag: "smoke-ok", branch: "main" } });
+    m.health.volleyd.push("volleyd's status is failed");
+    expect(await m.run(["v0.5.0"])).toBe(1);
+    expect(m.io.readStderr().trim().split("\n").at(-1)).toMatch(/rolled back to main$/);
+    expect(m.f.lines()).toContain(`git -C ${m.f.repo} checkout main`);
   });
 
   it("--force-clean stashes first and names the stash", async () => {

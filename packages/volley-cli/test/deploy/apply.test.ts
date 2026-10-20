@@ -252,4 +252,22 @@ describe("applyDeploy", () => {
     ]);
     expect(lines).toContain("FAILED  rollback: restart systems.volley.volleyd: launchctl failed");
   });
+
+  it("turns an exec that throws (the fence refusing) into a failed step, so the by-hand path is reached", async () => {
+    const { f, deps, lines, run } = setup({ head: { tag: "v0.4.0" } });
+    f.fail("launchctl kickstart -k gui/501/systems.volley.desk");
+    const exec = deps.exec;
+    deps.exec = async (argv, o) => {
+      if (argv.join(" ") === checkout(f.repo, "v0.4.0")) {
+        throw new Error(`volley deploy does not run \`${argv.join(" ")}\``);
+      }
+      return exec(argv, o);
+    };
+    const r = await run();
+    expect(r.failed?.step).toBe("restart systems.volley.desk");
+    expect(r.rollbackFailed?.step).toBe("checkout v0.4.0 (detached)");
+    expect(r.rollbackFailed?.why).toMatch(/does not run/);
+    expect(r.rollbackFailed?.byHand[0]).toBe(checkout(f.repo, "v0.4.0"));
+    expect(lines.some((l) => l.startsWith("FAILED  rollback: checkout v0.4.0"))).toBe(true);
+  });
 });

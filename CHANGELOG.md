@@ -10,7 +10,7 @@ All workspace packages share one version. Dates are release-tag dates.
   machine's volleyd and Desk services run from (read from volleyd's installed launchd plist or
   systemd unit; `--repo` overrides) to a release tag: fetch tags, check the tag out detached,
   `bun install --frozen-lockfile`, build the Desk (and write setup's `dist/.volley-build` stamp),
-  self-check, restart both services and health-check them (volleyd re-registered, the Desk serves
+  self-check, restart both services and health-check them (volleyd is `working` again, the Desk serves
   the tag's `version.json`). A failure after the checkout repeats those steps at the previous
   ref and exits 1; a failed rollback prints the commands to run by hand. A checkout with local
   changes exits 3 unless `--force-clean` stashes them (never discards). Every command goes

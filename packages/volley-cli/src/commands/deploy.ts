@@ -12,6 +12,7 @@ import {
   DEPLOY,
   type Ref,
   type ServicesInstall,
+  TAG_RE,
   deployPlan,
   git,
   normaliseTag,
@@ -145,8 +146,11 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
     }
   }
   const portText = str("desk-port");
-  if (portText !== undefined && (!/^\d+$/.test(portText) || Number(portText) > 65_535)) {
-    return usage("--desk-port must be a port number (0..65535)");
+  if (
+    portText !== undefined &&
+    (!/^\d+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65_535)
+  ) {
+    return usage("--desk-port must be a port number (1..65535)");
   }
   let brokerUrl: string;
   let auth: BrokerAuth | null;
@@ -316,10 +320,14 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
   return EXIT.ERROR;
 }
 
-/** The tag HEAD is exactly at, else its branch, else the commit. */
+/**
+ * The release tag HEAD is exactly at, else its branch, else the commit. Another tag on HEAD
+ * (`smoke-ok`) is passed over: the rollback may check out only a release tag.
+ */
 async function currentRef(exec: SetupExec, repo: string): Promise<Ref | null> {
   const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
-  if (tag.code === 0 && tag.stdout.trim() !== "") return { kind: "tag", name: tag.stdout.trim() };
+  const t = tag.stdout.trim();
+  if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };
   const branch = await exec(git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
   const b = branch.stdout.trim();
   if (branch.code === 0 && b !== "" && b !== "HEAD") return { kind: "branch", name: b };
