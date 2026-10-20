@@ -11,7 +11,7 @@ const hooks: DoctorCheck = {
   ok: false,
   severity: "warn",
   detail: "the Volley hooks are not installed",
-  fix: "env HOME=/home/agent bash install-hooks.sh",
+  fix: "env HOME=/path/to/home bash install-hooks.sh",
 };
 const gh: DoctorCheck = {
   id: "gh.auth",
