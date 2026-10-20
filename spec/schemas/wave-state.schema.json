@@ -72,7 +72,7 @@
               "additionalProperties": false,
               "properties": {
                 "slug": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
-                "url": { "type": "string", "format": "uri", "pattern": "^https?://" }
+                "url": { "type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://" }
               },
               "description": "The repository on GitHub as the supervisor read it for the current plan version (spec section 4.6.1): slug is owner/repo, url its canonical URL, so a client links issue n as <url>/issues/<n>. Absent when it could not be read; never derived from repo or a remote."
             },

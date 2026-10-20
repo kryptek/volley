@@ -229,6 +229,10 @@ describe("CoordinatorsWindow repo chips", () => {
     expect(within(supRow()).queryByRole("link")).toBeNull();
     const many = within(supRow()).getByText("3 repositories");
     expect(many).toHaveAttribute("title", "example-org/a\nexample-org/b\nexample-org/c");
+    expect(many).toHaveAttribute(
+      "aria-label",
+      "3 repositories: example-org/a, example-org/b, example-org/c",
+    );
   });
 
   it("the Supervisor row has no chips when no wave has github", () => {

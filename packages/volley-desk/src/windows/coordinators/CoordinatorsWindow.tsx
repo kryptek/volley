@@ -147,12 +147,17 @@ function reposOf(waves: readonly WaveView[]): GitHubRepo[] {
   return [...seen.values()];
 }
 
-/** Up to two repo chips; more read `N repositories`, the slugs in its tooltip. */
+/** Up to two repo chips; more read `N repositories`, the slugs in its tooltip and accessible name. */
 function RepoChips({ repos }: { repos: readonly GitHubRepo[] }) {
   if (repos.length === 0) return null;
   if (repos.length > 2)
     return (
-      <span className="chip" title={repos.map((r) => r.slug).join("\n")}>
+      <span
+        className="chip"
+        role="note"
+        title={repos.map((r) => r.slug).join("\n")}
+        aria-label={`${repos.length} repositories: ${repos.map((r) => r.slug).join(", ")}`}
+      >
         {repos.length} repositories
       </span>
     );
@@ -231,6 +236,7 @@ function WaveRow({
   const accent = accentFor(w.id);
   const mine = isMine(w.state?.owner, p.me, p.identity);
   const ended = ENDED_LABEL[w.state?.status ?? ""];
+  const github = githubOf(w.state?.github);
   return (
     <li
       aria-label={w.id}
@@ -252,9 +258,9 @@ function WaveRow({
                 : STATE_LABEL[c.state])}
           </span>
           {ended && hidden && <span className="dim"> · hidden</span>}
-          {githubOf(w.state?.github) && (
+          {github && (
             <span className="coord-repos">
-              <RepoChip github={w.state?.github} />
+              <RepoChip github={github} />
             </span>
           )}
         </div>

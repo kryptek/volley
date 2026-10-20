@@ -391,6 +391,15 @@ describe("repo_visibility_detected github (SPEC §4.6.1)", () => {
     ).toEqual([]);
   });
 
+  it("an any-case scheme url (asGitHubRepo accepts it) is schema-valid too", () => {
+    const upper = { ...GITHUB, url: "HTTPS://github.com/example-org/example-repo" };
+    const state = reduce([submitted, detected(2, upper)]);
+    expect(state.github).toEqual(upper);
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
   it("a later read without github removes the key", () => {
     const state = reduce([submitted, detected(2, GITHUB), detected(3)]);
     expect(state).not.toHaveProperty("github");

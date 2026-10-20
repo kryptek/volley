@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../src/store/types";
 import { WaveWindow, type WaveWindowProps } from "../src/windows/wave/WaveWindow";
@@ -258,7 +258,10 @@ describe("WaveWindow: GitHub", () => {
       wave: { ...w, state: { ...(w.state as WaveStatePayload), github } },
     });
     const chip = screen.getByRole("link", { name: "example-org/example-repo on GitHub" });
-    expect(container.querySelector(".win-title")?.contains(chip)).toBe(true);
+    const title = container.querySelector(".win-title");
+    expect(title?.contains(chip)).toBe(true);
+    const owner = within(title as HTMLElement).getByText("coordinator-desk1");
+    expect(owner.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole("link", { name: "Issue #101 on GitHub" })).toHaveAttribute(
       "href",
       "https://github.com/example-org/example-repo/issues/101",
