@@ -1512,7 +1512,9 @@ function onBlocked(
     return [];
   const label = roleLabel(v.p, ev.role);
   const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
-  const reason = ev.reason.length > max ? `${ev.reason.slice(0, max)}…` : ev.reason;
+  // By code point, so a clip never splits a surrogate pair.
+  const chars = Array.from(ev.reason);
+  const reason = chars.length > max ? `${chars.slice(0, max).join("")}…` : ev.reason;
   return [
     {
       kind: "decide",
@@ -1644,11 +1646,15 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       if (isAnswer(answer, "continue")) return [];
       const agent = (d as { agent_id?: unknown }).agent_id;
       if (role === undefined || typeof agent !== "string") return [];
-      if (isAnswer(answer, "respawn"))
+      if (isAnswer(answer, "respawn")) {
+        // It went on and was accepted before the answer (steered by hand): keep that work.
+        if (run !== undefined && run.agent_id === agent)
+          return run.accepted || run.retired !== undefined
+            ? []
+            : [{ kind: "relaunch", role, agent_id: agent }];
         // A newer run of the role already replaced it: only make sure the old agent is gone.
-        return run !== undefined && run.agent_id === agent
-          ? [{ kind: "relaunch", role, agent_id: agent }]
-          : [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+        return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+      }
       return reask();
     }
     case "pr_head_moved": {

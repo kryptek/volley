@@ -132,6 +132,24 @@ describe("pipeline: blocked edge cases", () => {
     expect(blockedDecisions()).toHaveLength(0);
   });
 
+  it("respawn after the agent finished by hand and was accepted relaunches nothing", async () => {
+    await runningRole("implementer");
+    const agent = h.run("implementer")?.agent_id as string;
+    await h.block("implementer", "stuck");
+    const id = h.openDecisions()[0]?.decision_id as string;
+    // The owner steered it by hand; it pushed and reported done before anyone answered.
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.run("implementer")?.accepted).toBe(true);
+    const spawns = h.spawns.filter((s) => s.role === "implementer").length;
+    await h.resolve(id, "respawn");
+    expect(h.events.some((e) => e.type === "relaunched")).toBe(false);
+    expect(h.retired).not.toContainEqual({ agent_id: agent, status: "relaunched" });
+    expect(h.spawns.filter((s) => s.role === "implementer")).toHaveLength(spawns);
+    expect(h.run("implementer")?.agent_id).toBe(agent);
+    expect(h.run("implementer")?.accepted).toBe(true);
+  });
+
   it("any other answer is asked again", async () => {
     await runningRole("implementer");
     await h.block("implementer", "stuck");

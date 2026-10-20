@@ -4610,7 +4610,8 @@ export class Daemon {
   /**
    * A supervised agent's `blocked` status: the pipeline opens its `agent_blocked` decision. The
    * agent is not retired. A status a decision already names (a re-delivery after a restart) is
-   * not asked about twice.
+   * not asked about twice. Nothing is journaled while the agent is moving (or, in the pipeline,
+   * for an accepted or stale run): the terminal-status watchdog's alarm is the intended backstop.
    */
   private async onBlocked(agentId: string): Promise<void> {
     const a = this.supervised.get(agentId);
@@ -4677,7 +4678,12 @@ export class Daemon {
     for (const u of late) {
       const t = this.terminals.get(u.agent_id);
       const key = `${u.agent_id}@${u.since}`;
-      if (t === undefined || this.terminalAlarmed.has(key) || !this.waves.has(t.wave)) continue;
+      if (t === undefined || this.terminalAlarmed.has(key)) continue;
+      if (!this.waves.has(t.wave)) {
+        // The wave is gone: nothing will ever journal it, so stop watching.
+        this.terminals.delete(u.agent_id);
+        continue;
+      }
       this.terminalAlarmed.add(key);
       this.log(
         `watchdog: ${u.agent_id} ${u.status} unjournaled for ${Math.round((this.now() - t.seen_at) / 1000)}s`,
