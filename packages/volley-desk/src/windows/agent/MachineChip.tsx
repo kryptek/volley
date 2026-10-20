@@ -83,7 +83,7 @@ export function MachineChip({
         onClick={() => onOpen?.(name)}
       >
         {dot !== "unknown" && <i className={`m-dot m-dot--${dot}`} />}
-        <span className="ell">{label}</span>
+        {label}
       </button>
       <div role="tooltip" id={tipId} className="host-pop m-tip">
         <p className="host-rule">
