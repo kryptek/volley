@@ -16,6 +16,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
 import { PrimaryAction } from "../look/PrimaryAction";
 import PromptBar from "../rb/PromptBar/PromptBar";
+import { usePanelSound } from "../sounds/usePanelSound";
 import "../styles/steer.css";
 import { type AckState, ackLabels, ackStep } from "./ackState";
 import { STEER_COMMANDS, type SteerTransport, copySteerCommand } from "./transport";
@@ -78,6 +79,7 @@ export function SteerPanel({
 }: SteerPanelProps) {
   const quick = coordinator ? COORDINATOR_QUICK : AGENT_QUICK;
   const [draft, setDraft] = useState("");
+  usePanelSound();
   return (
     // biome-ignore lint/a11y/useSemanticElements: an inline panel inside the window (as in the prototype), not a modal <dialog>
     <div className="steer" role="dialog" aria-label={`Message ${target}`}>

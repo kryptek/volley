@@ -86,6 +86,9 @@ import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import type { SectionKey } from "./settings/sections";
+import { emitSound } from "./sounds/emit";
+import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
+import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
@@ -297,6 +300,12 @@ export default function App() {
   const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
+  // Sound themes: the manager plays what the store and the Desk's controls do.
+  const [sound, setSound] = useSoundSettings();
+  const sounds = useSoundManager({ state, settling, connection, settings: sound });
+  useNotifyMirror(sound, setSound, notify.sound, (on) =>
+    setNotify((prev) => ({ ...prev, sound: on })),
+  );
   const steering = useSteering(state, writer, identity);
   // volleyd's control channel for the Claude account ops; demo mode has no daemon to answer them.
   const control = demo ? null : (steering.transport?.control ?? null);
@@ -332,6 +341,7 @@ export default function App() {
   const webgl = useWebGL();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl);
+  useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,
@@ -1060,6 +1070,11 @@ export default function App() {
       </div>
 
       <div className="hud" ref={setHud} />
+
+      {/* A coalesced burst of sounds, read out: "12 agents completed". */}
+      <output className="sr-only" aria-live="polite">
+        {sounds.announcement}
+      </output>
 
       <TopBar
         state={state}

@@ -1069,6 +1069,7 @@ export default function Dock({
               itemRefs.current[index] = node;
             }}
             type="button"
+            data-sound="click" // Desk: the sound manager's click
             className={`dock-item${item.className ? ` ${item.className}` : ''}`}
             aria-label={item.label}
             aria-haspopup={item.menu?.length ? 'menu' : undefined}

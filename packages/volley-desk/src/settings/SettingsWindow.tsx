@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
+import { usePanelSound } from "../sounds/usePanelSound";
 import type { AuthOps } from "../store/control";
 import type { AdminStatus } from "../store/peerOps";
 import type { ConfigPayload } from "../store/types";
@@ -113,6 +114,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
   const admin = authAdmin || peerAdmin === "admin";
 
   useFocusTrap(dialog);
+  usePanelSound();
   // Focus moves into the window so Escape works at once; it goes back on close.
   useEffect(() => {
     const opener = document.activeElement;

@@ -3,11 +3,13 @@
  * over the store's writer (none when read-only), and `panel()`, which renders
  * the steering panel for one target with its last message's delivery state.
  */
-import { type ReactNode, useMemo, useReducer, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useReducer, useRef } from "react";
+import { emitSound } from "../sounds/emit";
+import type { SoundEventId } from "../sounds/events";
 import { supervisorNamespace } from "../store/reducer";
 import type { DeskState } from "../store/types";
 import { SteerPanel } from "./SteerPanel";
-import { ackStateOf, steerLog } from "./ackState";
+import { type SentSteer, ackStateOf, ackStep, steerLog } from "./ackState";
 import {
   DAEMON_AGENT_ID,
   type SteerClient,
@@ -50,6 +52,27 @@ export function waveChatTarget(
   return { agentId: coordinator.id };
 }
 
+/**
+ * The steering sounds since `heard` (each message's highest step already
+ * sounded, updated in place): `steering_sent` at the PUBACK, then
+ * `steering_delivered` at the first of delivered or acked (only that one
+ * when both arrive together).
+ */
+export function steerSounds(
+  log: readonly SentSteer[],
+  desk: DeskState,
+  heard: Map<string, number>,
+): SoundEventId[] {
+  const out: SoundEventId[] = [];
+  for (const m of log) {
+    const step = Math.min(2, ackStep(ackStateOf(m, log, desk)));
+    if (step <= (heard.get(m.id) ?? 0)) continue;
+    heard.set(m.id, step);
+    out.push(step >= 2 ? "steering_delivered" : "steering_sent");
+  }
+  return out;
+}
+
 export function useSteering(
   desk: DeskState,
   writer: SteerClient | null,
@@ -69,6 +92,11 @@ export function useSteering(
         : null,
     [writer, identity],
   );
+
+  const heard = useRef(new Map<string, number>());
+  useEffect(() => {
+    for (const id of steerSounds(log, desk, heard.current)) emitSound(id);
+  }, [log, desk]);
 
   const panel = ({ target, label, coordinator, copy, readOnlyReason, onClose }: PanelSpec) => {
     const last = target ? [...log].reverse().find((m) => m.target === target.agentId) : undefined;

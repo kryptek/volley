@@ -54,6 +54,7 @@ import ElectricBorder from "../rb/ElectricBorder/ElectricBorder";
 import GlassSurface from "../rb/GlassSurface/GlassSurface";
 import SpotlightCard from "../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../rb/StarBorder/StarBorder";
+import { emitSound } from "../sounds/emit";
 import { NARROW_PX } from "./useViewport";
 
 export type { AttnStyle, Chrome } from "../look/options";
@@ -228,6 +229,7 @@ export function Frame(p: FrameProps) {
     start.current = last.current;
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     p.onDrag?.(true);
+    emitSound("ui_drag_start");
   };
   const move = (e: React.PointerEvent) => {
     if (!last.current) return;
@@ -241,6 +243,7 @@ export function Frame(p: FrameProps) {
     start.current = null;
     hovered.current = null;
     p.onDrag?.(false);
+    emitSound("ui_drop");
     const tap =
       s0 !== null &&
       e.type === "pointerup" &&

@@ -7,7 +7,7 @@
  * save mirrors `!muted && events.attention_needed` into it (its other keys
  * kept), and a first load with no sound entry seeds `attention_needed` from it.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NOTIFY_STORAGE_KEY } from "../notify/use-notify-settings";
 import { SOUND_EVENTS, SOUND_EVENT_IDS, type SoundEventId } from "./events";
 import { DEFAULT_THEME, type ThemeId, isThemeId } from "./themes";
@@ -154,4 +154,32 @@ export function useSoundSettings(): [SoundSettings, (change: SoundChange) => voi
     });
   }, []);
   return [settings, setSound];
+}
+
+/**
+ * Keeps `notify.sound` (the top bar's speaker, the legacy dashboard) and the
+ * sound settings in step: a sound change writes `!muted && attention_needed`
+ * into it, and a change to it from elsewhere switches `attention_needed`
+ * (turning it on also unmutes, or the attention sound would stay silent).
+ */
+export function useNotifyMirror(
+  sound: SoundSettings,
+  setSound: (change: SoundChange) => void,
+  notifySound: boolean,
+  setNotifySound: (on: boolean) => void,
+): void {
+  const mirrored = !sound.muted && sound.events.attention_needed;
+  const last = useRef({ mirrored, notifySound });
+  useEffect(() => {
+    const was = last.current;
+    last.current = { mirrored, notifySound };
+    if (mirrored === notifySound) return;
+    if (notifySound !== was.notifySound)
+      setSound(
+        notifySound
+          ? { muted: false, events: { attention_needed: true } }
+          : { events: { attention_needed: false } },
+      );
+    else setNotifySound(mirrored);
+  }, [mirrored, notifySound, setSound, setNotifySound]);
 }
