@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T02:14:09.000Z",
+  "channel": "_waves/events",
+  "type": "decision_auto_resolved",
+  "payload": {
+    "wave": "w1",
+    "seq": 42,
+    "at": "2026-10-20T02:14:09.000Z",
+    "task": "T1",
+    "data": {
+      "decision_id": "hooks_auth_failed-3f2a9c1d0b7e",
+      "kind": "hooks_auth_failed",
+      "policy": "relaunch/bad-launch",
+      "answer": "relaunch",
+      "rationale": "one relaunch fixes a bad launch; a second needs eyes",
+      "evidence": { "on": "relaunch", "role": "implementer", "attempt": 1 },
+      "budget": { "key": "relaunch_max:T1/implementer", "used": 1, "max": 1 }
+    }
+  }
+}

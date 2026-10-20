@@ -421,6 +421,112 @@
               }
             }
           }
+        },
+        "autopilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Decisions the supervisor answers itself from its policy table, and its remediation budgets (spec section 4.6.16), and who merges a gated PR (spec section 4.6.17). Each maximum counts automatic answers per wave under one budget key. Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "false: every decision waits for the owner, as before autopilot; takes effect at the next decision."
+            },
+            "owner_only": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "reviewers_disagree",
+                  "merge_conflict",
+                  "agent_blocked",
+                  "agent_question",
+                  "agent_stalled",
+                  "unknown_screen",
+                  "hooks_auth_failed",
+                  "mcp_not_registered",
+                  "spawn_failed",
+                  "model_switch",
+                  "repo_untrusted",
+                  "remote_repo_missing",
+                  "ci_failed",
+                  "wave_complete",
+                  "plan_change",
+                  "pr_closed",
+                  "pr_head_moved",
+                  "spawn_budget_exhausted",
+                  "account_limit",
+                  "machine_down",
+                  "merge_refused",
+                  "release_go",
+                  "stage_go"
+                ]
+              },
+              "default": [
+                "plan_change",
+                "repo_untrusted",
+                "model_switch",
+                "release_go",
+                "stage_go"
+              ],
+              "description": "Decision kinds the supervisor never answers itself: it escalates them to the owner (owner_only)."
+            },
+            "relaunch_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic relaunches of one task's role after a bad launch (hooks_auth_failed, mcp_not_registered, unknown_screen)."
+            },
+            "nudge_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic extra nudges of one stalled run (agent_stalled)."
+            },
+            "respawn_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic respawns of one task's role (agent_blocked)."
+            },
+            "rereview_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 2,
+              "description": "Automatic re-reviews of one task (pr_head_moved, a stale review at the gate)."
+            },
+            "question_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Agent questions answered automatically for one run (agent_question)."
+            },
+            "budget_raise_max": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "spawn_budget_exhausted: automatic raise by <n> answers may take the wave's spawn budget up to this multiple of its derived budget."
+            },
+            "merge": {
+              "type": "string",
+              "enum": ["auto", "manual"],
+              "default": "auto",
+              "description": "Who merges a gated PR when the wave file has no merge: key: auto (the supervisor squash-merges exactly the gated head, journaled merged_by_supervisor) or manual (a human merges; the supervisor only observes the merge)."
+            },
+            "merge_retry_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
+            }
+          }
         }
       }
     },

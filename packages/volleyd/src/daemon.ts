@@ -61,6 +61,14 @@ import {
   machineReasons,
   summaryPayload,
 } from "./admission";
+import { budgetUsed } from "./autopilot/budgets";
+import {
+  type Budget,
+  type EscalateWhy,
+  POLICY_TABLE,
+  evaluate,
+  renderPolicyTable,
+} from "./autopilot/policy";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
@@ -227,6 +235,7 @@ import type {
   AgentMcp,
   CoordinatorAttention,
   JournalEvent,
+  MergeMode,
   NewEvent,
   NudgeOnMerge,
   PublicHygiene,
@@ -979,6 +988,8 @@ export class Daemon {
   // --- Fleet (F6): down, drain and remove-now ---
   /** Agents launched and still being verified (not supervised yet), by id. */
   private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
+  /** Decisions a launch's verification opened, settled once that launch is supervised. */
+  private readonly unsettled = new Map<string, Array<{ wave: WaveId; id: string }>>();
   /** A remove-now's agents told to stop, by id: when (their grace counts from it). */
   private readonly evicted = new Map<string, number>();
   /** Since when a configured host has been seen draining (`hosts.<name>.drain`). */
@@ -3139,10 +3150,12 @@ export class Daemon {
             // decision's answer (relaunch / cancel) replaces or retires it.
             if (outcome.kind === "decision" && outcome.decision === "hooks_auth_failed")
               void this.enqueue(() => this.pauseAuthFailed(outcome.agentId));
+            this.settleLaunch(res.agentId);
           },
           (e: unknown) => {
             this.launching.delete(res.agentId);
             this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`);
+            this.settleLaunch(res.agentId);
           },
         );
         // Best effort, after supervision is attached: the agent is launched whatever it says.
@@ -3500,6 +3513,8 @@ export class Daemon {
   /**
    * Open a spawn's decision through the decision store (outside the serial queue: spawns run
    * beside it). A base id already used by a resolved decision is re-opened as `<id>-<n>`.
+   * Autopilot's answer (and the publish) runs on the queue, and for a launch still being
+   * verified only once it is supervised, so a relaunch never retires an agent not yet watched.
    */
   private async openSpawnDecision(wave: WaveId, d: SpawnDecision): Promise<string> {
     const decisions = this.waves.get(wave)?.record.decisions ?? {};
@@ -3516,8 +3531,22 @@ export class Daemon {
         id,
       },
       d.data,
+      false,
     );
+    const agent = d.data.agent_id;
+    if (typeof agent === "string" && this.launching.has(agent)) {
+      const pending = this.unsettled.get(agent) ?? [];
+      pending.push({ wave, id: rec.decision_id });
+      this.unsettled.set(agent, pending);
+    } else void this.enqueue(() => this.settleDecision(wave, rec.decision_id));
     return rec.decision_id;
+  }
+
+  /** Settle, on the queue, the decisions a launch opened while it was verified. */
+  private settleLaunch(agentId: string): void {
+    const pending = this.unsettled.get(agentId) ?? [];
+    this.unsettled.delete(agentId);
+    for (const p of pending) void this.enqueue(() => this.settleDecision(p.wave, p.id));
   }
 
   private spawnDeps(wave: WaveId): SpawnDeps {
@@ -4653,7 +4682,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
@@ -4705,6 +4734,10 @@ export class Daemon {
       },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
+      // --- Autopilot merging (SPEC §4.6.17): the wave file's merge:, else autopilot.merge. ---
+      mergeMode: () =>
+        log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
+      mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
@@ -5175,10 +5208,11 @@ export class Daemon {
       data: Record<string, unknown>,
     ): Promise<void> => {
       try {
-        note(
-          slot,
-          (await this.openDecisionNow(wave, input, { agent_id: agentId, ...data })).decision_id,
-        );
+        const d = await this.openDecisionNow(wave, input, { agent_id: agentId, ...data });
+        note(slot, d.decision_id);
+        // Answered by autopilot before the slot was noted: free it as onRecoveryResolved would.
+        if (d.resolved !== undefined)
+          a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
       } catch (e) {
         note(slot, null);
         throw e;
@@ -6005,6 +6039,13 @@ export class Daemon {
     if (rec?.state == null) return null;
     const state = structuredClone(rec.state);
     state.effective_config = this.config.effective(wave);
+    const ap = rec.autopilot ?? { resolved: 0, escalated: 0, budgets: {} };
+    state.autopilot = {
+      enabled: state.effective_config.autopilot?.enabled ?? true,
+      auto_resolved: ap.resolved,
+      escalated: ap.escalated,
+      budgets: structuredClone(ap.budgets),
+    };
     const held = this.heldBack.get(wave) ?? [];
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
@@ -6108,11 +6149,15 @@ export class Daemon {
     return this.serial(() => this.openDecisionNow(wave, input));
   }
 
-  /** `openDecision` without the queue; `extra` facts are kept on the decision (journal + topic). */
+  /**
+   * `openDecision` without the queue; `extra` facts are kept on the decision (journal + topic).
+   * `settle: false` only journals it: the caller settles it (`settleDecision`) later.
+   */
   private async openDecisionNow(
     wave: WaveId,
     input: DecisionInput,
     extra: Record<string, unknown> = {},
+    settle = true,
   ): Promise<DecisionRecord> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
@@ -6123,16 +6168,112 @@ export class Daemon {
     );
     if ("error" in r) throw new Error(r.error);
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
-    const d = log.record.decisions[r.id] as DecisionRecord;
+    this.log(`opened ${describeDecision(log.record.decisions[r.id] as DecisionRecord)}`);
+    if (settle) await this.settleDecision(wave, r.id);
+    return log.record.decisions[r.id] as DecisionRecord;
+  }
+
+  /**
+   * Autopilot answers a just-opened decision (resolveNow publishes and clears its topic), or
+   * journals why it is the owner's; only a decision still open is published and rings.
+   */
+  private async settleDecision(wave: WaveId, id: string): Promise<void> {
+    const log = this.waves.get(wave);
+    const opened = log?.record.decisions[id];
+    if (log === undefined || opened === undefined) return;
+    if (!(await this.autopilot(wave, opened))) return;
+    const d = log.record.decisions[id] as DecisionRecord;
     await this.publishDecision(wave, d);
     // SPEC §4.1: progress is QoS 0, not retained.
     await this.broker.publish(
       buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
-      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
+      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(decisionPayload(d)))),
       { qos: 0, retain: false },
     );
-    this.log(`opened ${describeDecision(d)}`);
-    return d;
+  }
+
+  /**
+   * Autopilot (SPEC §4.6.16): answer a just-opened decision from the policy table (journal
+   * `decision_auto_resolved`, then resolve it as volleyd), or journal `decision_escalated` with
+   * why it is the owner's. Returns whether the decision is still open. Disabled for the wave:
+   * nothing is journaled and the decision waits, as before autopilot. A decision a resolution
+   * opens (a re-ask) comes back through here, bounded by its budget.
+   */
+  private async autopilot(wave: WaveId, d: DecisionRecord): Promise<boolean> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || d.resolved !== undefined) return d.resolved === undefined;
+    const eff = this.config.effective(wave);
+    const v = evaluate(d, {
+      autopilot: eff.autopilot,
+      used: (key) => budgetUsed(rec, key),
+      task: d.task !== null ? rec.state?.tasks.find((t) => t.id === d.task) : undefined,
+      derived_budget:
+        rec.wave != null ? spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0) : undefined,
+    });
+    if ("off" in v) return true;
+    if ("escalate" in v) return this.escalate(wave, d, v.escalate, v.budget);
+    // Journaled once the answer is accepted, immediately before its decision_resolved: a refused
+    // answer leaves no decision_auto_resolved and spends no budget.
+    const answered = () =>
+      this.append(wave, {
+        type: "decision_auto_resolved",
+        ...(d.task !== null ? { task: d.task } : {}),
+        data: {
+          decision_id: d.decision_id,
+          kind: d.kind,
+          policy: v.policy,
+          answer: v.answer,
+          rationale: v.rationale,
+          evidence: v.evidence,
+          ...(v.budget !== undefined ? { budget: v.budget } : {}),
+        },
+      }).then(() => undefined);
+    try {
+      await this.resolveNow(
+        wave,
+        d.decision_id,
+        {
+          answer: v.answer,
+          by: DAEMON_AGENT_ID,
+          rationale: `autopilot ${v.policy}: ${v.rationale}`,
+        },
+        answered,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Resolved, then a later step failed: the answer stands, the decision is not reopened.
+      if (this.waves.get(wave)?.record.decisions[d.decision_id]?.resolved !== undefined) {
+        this.log(`autopilot answered ${d.decision_id}, but after it: ${msg}`);
+        return false;
+      }
+      // The answer was refused (an account that cannot take the wave, …): the owner's, now.
+      // Nothing was spent, so no budget is journaled.
+      this.log(`autopilot ${d.decision_id}: ${msg}`);
+      return this.escalate(wave, d, "unattended_safety", undefined);
+    }
+    this.log(`autopilot answered ${d.decision_id} (${v.policy}): ${v.answer}`);
+    return false;
+  }
+
+  /** Journal `decision_escalated`: the decision stays open, its question says why. */
+  private async escalate(
+    wave: WaveId,
+    d: DecisionRecord,
+    why: EscalateWhy,
+    budget: Budget | undefined,
+  ): Promise<boolean> {
+    await this.append(wave, {
+      type: "decision_escalated",
+      ...(d.task !== null ? { task: d.task } : {}),
+      data: {
+        decision_id: d.decision_id,
+        kind: d.kind,
+        why,
+        ...(budget !== undefined ? { budget } : {}),
+      },
+    });
+    this.log(`autopilot left ${d.decision_id} (${d.kind}) for the owner: ${why}`);
+    return true;
   }
 
   /** Resolve a decision (no ownership check — the control op does that). Idempotent. */
@@ -6148,6 +6289,7 @@ export class Daemon {
     wave: WaveId,
     id: string,
     r: { answer: string; by: string; rationale?: string },
+    beforeResolved?: () => Promise<void>,
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
@@ -6174,6 +6316,8 @@ export class Daemon {
       ev = again;
     }
     const move = this.accountLimitMove(wave, log.record.decisions[id], r.answer);
+    // The answer is accepted: what must come right before decision_resolved (autopilot's event).
+    await beforeResolved?.();
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
     if (move !== null) {
@@ -6663,6 +6807,8 @@ export class Daemon {
     switch (op) {
       case "decisions":
         return this.listDecisions(p);
+      case "policy":
+        return this.policyOp(p);
       case "resolve":
         return this.resolveOp(p, by);
       case "claim":
@@ -7096,6 +7242,22 @@ export class Daemon {
       )
       .map(decisionPayload);
     return { ok: true, result: { decisions } };
+  }
+
+  /** `policy`: autopilot's effective table, for the global config or one wave's (SPEC §4.6.16). */
+  private policyOp(p: Record<string, unknown>): HandlerResult {
+    const wave = typeof p.wave === "string" ? p.wave : undefined;
+    if (wave !== undefined && !this.waves.has(wave))
+      return { ok: false, error: `unknown wave '${wave}'` };
+    const config = this.config.effective(wave).autopilot;
+    return {
+      ok: true,
+      result: {
+        ...(wave !== undefined ? { wave } : {}),
+        config,
+        rules: renderPolicyTable(POLICY_TABLE, config),
+      },
+    };
   }
 
   /** `resolve`: owner-only; finds the decision's wave when none is given. */

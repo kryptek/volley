@@ -4,7 +4,7 @@
  * hand-maintained list of tunables. Each leaf of `$defs/tunableProperties`
  * becomes one row: a bounded number is a stepped slider, a boolean a switch, a
  * string enum a choice, a string (or string-or-null) a text field, a nested
- * object one row per leaf, and the `lease_pools` map gets one capacity row per
+ * object one row per leaf (a list leaf none), and the `lease_pools` map gets one capacity row per
  * configured pool. A string enum that may also be null (`fleet.local_agents`,
  * which the retained config carries resolved) is a choice of its strings, and a
  * nested map of integers (`fleet.fallback.per_machine`) gets one stepped row per
@@ -197,6 +197,8 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
               default: FALLBACK_PER_MACHINE_DEFAULT,
             }));
           }
+          // A list (`autopilot.owner_only`) has no row control: set it in config.yaml.
+          if (leaf.type === "array") return [];
           return [row(`${path}.${sub}`, section, sentence(words + w.words), w.unit, leaf)];
         });
       return leaves(key, prefix, def);
