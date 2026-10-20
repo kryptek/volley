@@ -11,7 +11,7 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release (v0.3.1).** This package has the wave file, journal, reducer, scheduler,
+> **Status: pre-release (v0.4.0).** This package has the wave file, journal, reducer, scheduler,
 > fence, config store, daemon, CLI and service (launchd on macOS; `volley setup` installs a
 > systemd user unit on Linux), plus decisions, wave ownership, pause/stop
 > and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
@@ -21,7 +21,9 @@ coordinator session.
 > publishes screen tails, and can run agents on a second machine over ssh + tmux. Since v0.3.0 it
 > also answers the Desk's setup wizard and account ops (`setup_plan` / `setup_apply`, one-time
 > sign-in links and admin tokens), pairs machines (`volley peer`) and runs agents under several
-> Claude accounts (`volley claude`).
+> Claude accounts (`volley claude`). Since v0.4.0 (the Fleet) it judges which machines can run
+> an agent, places tasks across them with a "why here" line, and asks before re-placing anything
+> when a machine goes down, gets busy or leaves (see Fleet below).
 
 ---
 
@@ -43,8 +45,10 @@ coordinator session.
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
-- [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
-- [Fleet: placement](#fleet-placement)
+- [Fleet](#fleet)
+  - [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
+  - [Fleet: placement](#fleet-placement)
+  - [Fleet: down, overload, drain, remove](#fleet-down-overload-drain-remove)
 - [Recovery](#recovery)
 - [Plan changes (versioned wave files)](#plan-changes-versioned-wave-files)
 - [The pipeline and the merge-ready gate](#the-pipeline-and-the-merge-ready-gate)
@@ -473,6 +477,32 @@ sign-in terminal (`tmux attach -t volley-signin-<acct>`), never into the Desk. `
 is never used: it prints a bearer token Volley would have to carry. The `_system` journal records
 `claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
+
+**Signing a paired machine in.** `claude_signin { acct: "primary@<name>" }` (the Desk's **Sign in
+on <machine>**) signs a paired machine's own default profile in, with Claude Code's own flow on
+that machine (`src/claude/remote-signin.ts`; every step a fenced REMOTE step over ssh). volleyd
+reads the box's `$HOME`, writes the sealed `signin.sh` (no `CLAUDE_CONFIG_DIR`: the box's default
+profile; the credential env unset) and `browser.sh` to `~/.volley/signin/primary/` there, and
+starts `bash signin.sh` in the box's tmux session `volley-signin-primary`. It polls the url file
+and the session's screen every `claude_signin_poll_ms`. For the localhost-callback URL's port *p*
+it holds a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>` (`src/claude/forward.ts`):
+the same port on this machine's loopback as on the box's, because the OAuth redirect must match
+verbatim. Only then does it publish `claude_signin_url { acct, url, flow: "browser_callback",
+manual_url, attach: "ssh <target> -t tmux attach -t volley-signin-primary" }`: `url` opens in a
+browser on **this** machine and the forward carries the callback to `claude` on the box (an opaque
+encrypted pipe; no byte of it is read or logged). `manual_url`, the URL Claude Code printed, is for
+a phone: its page shows a code, typed into the terminal `attach` reaches, never into Volley. A
+forward that exits within `signin_forward_settle_ms` because the port is taken here (or a port a
+broker tunnel uses, which is never forwarded) restarts the sign-in once (Claude Code picks a fresh
+port), then fails naming the port. The box's `claude auth status` reporting `loggedIn` ends it with
+`claude_signin_done { acct, plan }`. The timeout, the login exiting, the daemon stopping, ssh
+failing or a box without tmux (the reason gives `ssh <target> -t claude auth login` to run by
+hand) end it with `claude_signin_failed`. Every end kills the session (no consent: it holds no
+agent's work) and the forward. A newer sign-in for the same machine supersedes it: its forward goes
+at once and nothing more of it is published. A machine whose `claude auth status` already reports
+`loggedIn` is refused (log it out with `ssh <target> claude auth logout` first). While it waits,
+`claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
+manual_url? }]` for a late client.
 
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
 `claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
@@ -1376,6 +1406,25 @@ machine rewrites `~/.volley/peer.json` and restarts its service. An ordinary cod
 name is still refused, `replace` or not; a `--for` code joins under its own name only; neither
 refusal uses the code up. A name whose account is not a `peer` is never replaced.
 
+## Fleet
+
+The Fleet (v0.4.0, SPEC §4.6.15) is volleyd running agents on more than one machine and choosing
+where. The pieces, in the order a machine meets them:
+
+| Piece | What it does | Where |
+|---|---|---|
+| Pairing | one code gives a machine its own broker account, an ssh tunnel service and a heartbeat | [Paired machines](#paired-machines-volley-peer) |
+| Doctor and Repair | `volley peer doctor` checks the machine; the admin op `peer_doctor` (the Desk's **Repair…**) runs it, with `--fix`, over ssh | [readiness](#fleet-readiness-the-supervisors-card-repair), the volley-cli README |
+| Remote sign-in | `claude_signin { acct: "primary@<name>" }` runs `claude auth login` on the machine and forwards its localhost callback for the length of the sign-in | [Claude accounts](#claude-accounts) |
+| Readiness | a retained verdict per machine: ready, eligible, and why not, in plain words | [readiness](#fleet-readiness-the-supervisors-card-repair) |
+| Placement | `placement: auto` scores the eligible machines and writes a "why here" line for each | [placement](#fleet-placement) |
+| Leases per machine | a pool's `per_machine` caps the holders on one machine; each holder carries its host | [Leases](#leases) |
+| Down, overload, drain, remove | the owner decides every re-placement; a running agent is never moved | [down, overload, drain, remove](#fleet-down-overload-drain-remove) |
+| The fence | the doctor's argv, the PATH probe and the sign-in's `ssh -N -L` forward are the only Fleet commands volleyd may run | [The authority fence](#the-authority-fence) |
+
+The owner's end-to-end check on a real second machine is `SMOKE.md` Plan 12 at the repository
+root.
+
 ## Fleet: readiness, the supervisor's card, Repair
 
 The Fleet (SPEC §4.6.15) lets volleyd judge where an agent can run. This section covers what it
@@ -1464,9 +1513,12 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
 `{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
-`--fix --yes` with `fix: true` and `--clone` with `clone: true` (which needs `fix`), in the box's
-`volley_dir` as one fenced remote step; the fence allows exactly those argv on a box and no other
-`volley` command. The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
+`--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
+in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
+and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
+read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
+fence admits no credentials, port or other form); while no wave runs, or its origin has a port,
+`clone: true` is refused before ssh (`the wave repo's origin is not known …`). The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
 `fix` it also carries `plan`, each failing check with its fix, so the sheet shows what a fix would
 do before anyone runs it. An ssh failure answers `ok: false` with ssh's reason. The run (up to
 `peer_doctor_timeout_ms`, 15 min, for a `--fix`) happens outside volleyd's serial queue, so ticks
@@ -2131,12 +2183,17 @@ TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal
                      minted when an approved model_switch decision is acted on); <id> is a
                      MODEL_ID, the wave-file schema's `model` pattern
 
-SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
+SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
     every step is checked against the REMOTE allow-list below and the script `exec` sends on
     stdin is `renderRemoteScript` of exactly those steps; a raw stdin script is refused, as is
     any `ssh <target> '<command>'` string (zsh login shells word-split it differently).
   ssh -N -R <port>:<host>:<port> [-o <Opt>=<v>]… <target>   the reverse broker tunnel.
+  ssh -N -L 127.0.0.1:<p>:127.0.0.1:<p> -o BatchMode=yes -o ExitOnForwardFailure=yes
+    -o ConnectTimeout=<s> <target>   a paired machine's Claude sign-in forward
+    (src/claude/forward.ts), exactly that argv, only with the SigninForwardToken a remote
+    sign-in minted for exactly (<target>, <p>): the same port on both ends, p in 1024..65535,
+    never a broker tunnel's port (`mintSigninForwardToken`). Its bytes are never read.
   -o takes only BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax,
   ExitOnForwardFailure (never ProxyCommand, LocalCommand, …); a target never starts with '-'.
 
@@ -2144,15 +2201,20 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
   gh issue view
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
-    the LaunchToken sealed for <dir>) | capture-pane | has-session |
+    the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+    'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
+    `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
-    kill-session = CONSENT; no other tmux global option
+    kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
+    work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port> · printenv PATH
+    nc -z 127.0.0.1 <port> · printenv PATH | HOME
+  claude auth status (exactly: the box's login state and plan, never a credential; a login
+    runs only from a sealed signin.sh)
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
-    `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
+    `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
@@ -2162,10 +2224,14 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     (what the tmux session runs) is written whole, never appended, and its content must be
     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
+    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+    a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
+    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
+    login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
-    the `peer_doctor` op); no other volley argv runs on a box
+  volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+    (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
+    credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json

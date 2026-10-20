@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CREDENTIAL_ENV } from "../src/claude/signin-script";
+import { CREDENTIAL_ENV, renderSigninScript } from "../src/claude/signin-script";
 
 /**
  * Grep-guard: volleyd never reads, stores or forwards a Claude credential (the accounts spike,
@@ -73,6 +73,25 @@ describe("no Claude credential handling in volleyd", () => {
       ]),
     );
     expect(files.flatMap(offenders)).toEqual([]);
+  });
+
+  it("a paired machine's sign-in (remote-signin, forward) names none and unsets the credential env there", () => {
+    const files = sourceFiles(join(SRC, "claude")).filter((f) =>
+      /\/(remote-signin|forward|signin-script)\.ts$/.test(f),
+    );
+    expect(files.map((f) => relative(SRC, f)).sort()).toEqual([
+      "claude/forward.ts",
+      "claude/remote-signin.ts",
+      "claude/signin-script.ts",
+    ]);
+    const listed = new Set(CREDENTIAL_ENV.map((k) => `claude/signin-script.ts: "${k}",`));
+    expect(files.flatMap(offenders).filter((o) => !listed.has(o.replace(/:\d+:/, ":")))).toEqual(
+      [],
+    );
+    // The box's script (no profile dir) still unsets every credential variable.
+    const script = renderSigninScript({ signinDir: "/home/dev/.volley/signin/primary" });
+    expect(script).toContain(`unset ${CREDENTIAL_ENV.join(" ")}`);
+    expect(script).not.toMatch(/setup-token|CLAUDE_CONFIG_DIR/);
   });
 
   it("src/ names no token location; the credential env lives only in CREDENTIAL_ENV", () => {

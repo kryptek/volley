@@ -454,6 +454,8 @@ export interface DaemonOptions {
     exec?: ExecFn;
     signinPollMs?: number;
     signinTimeoutMs?: number;
+    /** How long a paired machine's sign-in forward must stay up (default: config-defaults). */
+    forwardSettleMs?: number;
   };
 }
 
@@ -1090,6 +1092,17 @@ export class Daemon {
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
       onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
+      // --- Fleet (F8): a paired machine's sign-in (`primary@<name>`) and its forward ---
+      remote: (name) => this.remoteFor(name),
+      reservedPorts: () => [
+        brokerAddress(opts.brokerUrl).port,
+        ...Object.values(this.config.effective().hosts).map(
+          (h) => h.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
+        ),
+      ],
+      ...(opts.claude?.forwardSettleMs !== undefined
+        ? { forwardSettleMs: opts.claude.forwardSettleMs }
+        : {}),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -3911,8 +3924,7 @@ export class Daemon {
               Object.hasOwn(this.peers.removals(), name),
           },
       hostVersion: this.version,
-      hostOrigin:
-        typeof this.localDoctorRepo === "string" ? (this.localReport?.repo?.origin ?? null) : null,
+      hostOrigin: this.waveOrigin(),
       ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -3943,6 +3955,18 @@ export class Daemon {
       ...extra,
       checkedAt: dateOf(this.time),
     };
+  }
+
+  /**
+   * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
+   * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
+   * wave runs, or no run has checked its clone yet (a failed run keeps an earlier wave's report).
+   */
+  private waveOrigin(): string | null {
+    const repo = this.localDoctorRepo;
+    return typeof repo === "string" && repo === this.waveRepo()
+      ? (this.localReport?.repo?.origin ?? null)
+      : null;
   }
 
   /**
@@ -4037,7 +4061,7 @@ export class Daemon {
    * PATH is probed again, and `peer_doctor_run` is journaled.
    */
   private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
-    const req = this.peers.doctorRequest(p);
+    const req = this.peers.doctorRequest(p, this.waveOrigin());
     if (!("host" in req)) return { reply: authReply("peer_doctor", req) };
     if (this.doctoring.has(req.name)) {
       return {

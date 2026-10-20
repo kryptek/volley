@@ -23,9 +23,15 @@ export const SIGNIN_URL_FILE = "url";
 export const SIGNIN_COMMAND = `bash ${SIGNIN_SCRIPT}`;
 
 export interface SigninScriptVars {
-  /** The profile's `CLAUDE_CONFIG_DIR`. */
-  configDir: string;
-  /** `<root>/.signin/<acct>`: the session's cwd, holding the helper and the url file. */
+  /**
+   * The profile's `CLAUDE_CONFIG_DIR`; absent for a paired machine's own default profile
+   * (remote-signin.ts), which runs with none.
+   */
+  configDir?: string;
+  /**
+   * The session's cwd, holding the helper and the url file: `<root>/.signin/<acct>`, or
+   * `<home>/.volley/signin/<acct>` on a paired machine.
+   */
   signinDir: string;
 }
 
@@ -40,7 +46,7 @@ export function renderSigninScript(v: SigninScriptVars): string {
     "#!/usr/bin/env bash",
     "# Written by volleyd for one Claude sign-in. Do not edit.",
     "set -euo pipefail",
-    `export CLAUDE_CONFIG_DIR=${shq(v.configDir)}`,
+    ...(v.configDir !== undefined ? [`export CLAUDE_CONFIG_DIR=${shq(v.configDir)}`] : []),
     `export BROWSER=${shq(join(v.signinDir, BROWSER_HELPER))}`,
     `unset ${CREDENTIAL_ENV.join(" ")}`,
     "exec claude auth login",

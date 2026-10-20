@@ -72,6 +72,8 @@ export function resolveRemoteHost(
 /** What the daemon needs from a remote host beyond `Host` (SshTmuxHost; fakes in tests). */
 export interface RemoteHost extends Host {
   readonly spec: RemoteHostSpec;
+  /** Run fenced steps on the box as one `bash -s` script (claude/remote-signin.ts). */
+  run(steps: RemoteStep[], opts?: RemoteRunOptions): Promise<ExecResult>;
   /** `$VOLLEY_HOOKS_DIR` on the box. */
   readonly hooksDir: string;
   /** The box's volley-mcp entry point (its `.volley/mcp.json` server). */
@@ -93,11 +95,18 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json [--fix --yes] [--clone]` on the box, in its volley checkout: the
-   * parsed report. Throws when ssh fails or the doctor printed no report.
+   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
+   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
    */
-  runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport>;
+  runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
 }
+
+/** The fence tokens and bound a `run` may carry. */
+export type RemoteRunOptions = Pick<
+  ExecOptions,
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin"
+>;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
 const SSH_FAILED = 255;
@@ -155,10 +164,7 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   /** Run steps on the box as one fenced `bash -s` script. */
-  run(
-    steps: RemoteStep[],
-    opts: Pick<ExecOptions, "consent" | "timeoutMs" | "launch" | "modelSwitch"> = {},
-  ): Promise<ExecResult> {
+  run(steps: RemoteStep[], opts: RemoteRunOptions = {}): Promise<ExecResult> {
     return this.localExec(
       [
         "ssh",
@@ -177,6 +183,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
+        ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
   }
@@ -454,14 +461,14 @@ export class SshTmuxHost implements RemoteHost {
     return parsePathProbe(r.stdout);
   }
 
-  async runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport> {
+  async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
     const argv = [
       "volley",
       "peer",
       "doctor",
       "--json",
       ...(opts.fix ? ["--fix", "--yes"] : []),
-      ...(opts.fix && opts.clone ? ["--clone"] : []),
+      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
     ];
     // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
     const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {

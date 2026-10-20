@@ -250,6 +250,11 @@ export const DAEMON_DEFAULTS = {
   claude_signin_timeout_ms: 900_000,
   /** Bound on one `claude auth status`. */
   claude_auth_status_timeout_ms: 15_000,
+  /**
+   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before its URL is
+   * published: an ssh that exits sooner (the local port is taken) restarts the sign-in once.
+   */
+  signin_forward_settle_ms: 3_000,
   /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
   claude_json_lock_attempts: 50,
   claude_json_lock_wait_ms: 20,

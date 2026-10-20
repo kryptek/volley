@@ -314,6 +314,8 @@ export interface ClaudeSignin {
   flow?: string;
   /** The tmux session to attach to for a `manual_code` sign-in. */
   attach?: string;
+  /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+  manual_url?: string;
   plan?: string;
   reason?: string;
   /** Local receipt time (ms). */

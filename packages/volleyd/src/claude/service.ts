@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
+import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { NewEvent } from "../types";
 import {
   type ClaudeAccount,
@@ -15,6 +16,7 @@ import {
   readRegistry,
   selectAccount,
 } from "./profiles";
+import { remoteAccountHost, runRemoteSignin } from "./remote-signin";
 import {
   type ShareResult,
   SharingError,
@@ -32,7 +34,8 @@ import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } 
  * profile preparation and account selection a spawn uses. The `_system` journal records the
  * registry changes and each sign-in's start and end — never its URL, which is published only on
  * the non-retained `volley/_system/claude/<acct>/signin` topic and kept in memory while the
- * sign-in runs (`claude_accounts` shows it to a client that attached late).
+ * sign-in runs (`claude_accounts` shows it to a client that attached late). `claude_signin` for
+ * `primary@<name>` signs a paired machine's own default profile in (remote-signin.ts).
  */
 
 export const signinTopic = (acct: string) => `volley/_system/claude/${acct}/signin`;
@@ -63,13 +66,29 @@ export interface ClaudeServiceDeps {
   headroom?: (candidates: readonly string[]) => string | null;
   /** The primary's plan changed (`claude_accounts` asked): its usage record is out of date. */
   onPrimaryPlan?: () => void;
+  /** A paired machine by name, or why it cannot be reached: `primary@<name>` sign-ins. */
+  remote?: (name: string) => RemoteHost | string;
+  /** Ports a sign-in forward never takes: the config's broker tunnels and the broker's own. */
+  reservedPorts?: () => number[];
+  /** How long a sign-in forward must stay up before its URL is published (tests). */
+  forwardSettleMs?: number;
+}
+
+/** What a sign-in run gets from the service: its stop signal, timers and publisher. */
+interface SigninRun {
+  signal: AbortSignal;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  pollMs: number;
+  timeoutMs: number;
+  publish: (e: SigninEvent) => Promise<void>;
 }
 
 type Reply = { ok: boolean; error?: string; result?: unknown };
 
 interface Pending {
   abort: AbortController;
-  url?: Extract<SigninEvent, { type: "claude_signin_url" }>;
+  url?: UrlEvent;
   /** Resolves with the URL event, or the terminal event if the sign-in ended first. */
   first: Promise<SigninEvent>;
   done: Promise<SigninEvent>;
@@ -190,6 +209,7 @@ export class ClaudeService {
           root: this.d.root,
           accounts,
           primary: this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {},
+          remote_signins: this.remoteSignins(),
           sharing: readSharing(this.d.root),
         },
       };
@@ -207,13 +227,15 @@ export class ClaudeService {
         ? a.signed_in_at !== undefined
           ? { state: "signed_in" }
           : { state: "signed_out" }
-        : {
-            state: "pending",
-            ...(p.url !== undefined
-              ? { url: p.url.url, flow: p.url.flow, attach: p.url.attach }
-              : {}),
-          };
+        : pendingSignin(p);
     return { ...a, dir: profileDir(this.d.root, a.id), signin };
+  }
+
+  /** Paired machines' sign-ins still waiting (`primary@<name>`: not in the registry). */
+  private remoteSignins() {
+    return [...this.signins]
+      .filter(([acct]) => remoteAccountHost(acct) !== null)
+      .map(([acct, p]) => ({ acct, ...pendingSignin(p) }));
   }
 
   /**
@@ -240,12 +262,19 @@ export class ClaudeService {
       type: "claude_account_added",
       data: { acct: acct.id, label: acct.label, machine: acct.machine, by },
     });
-    return this.answerSignin(acct.id, by, { account: acct });
+    return this.answerSignin(acct.id, by, { account: acct }, (r) =>
+      runSignin({ ...r, exec: this.d.exec, root: this.d.root, acct: acct.id }),
+    );
   }
 
-  /** `claude_signin { acct, by }`: sign an existing profile in (again). */
+  /**
+   * `claude_signin { acct, by }`: sign an existing profile in (again), or a paired machine's own
+   * default profile (`primary@<name>`).
+   */
   async signin(p: Record<string, unknown>, by: string): Promise<Reply> {
     const acct = typeof p.acct === "string" ? p.acct : "";
+    const machine = remoteAccountHost(acct);
+    if (machine !== null) return this.remoteSignin(acct, machine, by);
     if (!readRegistry(this.d.root).accounts.some((a) => a.id === acct))
       return { ok: false, error: `unknown Claude account '${acct}'` };
     // A signed-in profile would end the new sign-in at its first poll, before any login.
@@ -259,11 +288,47 @@ export class ClaudeService {
         ok: false,
         error: `Claude account '${acct}' is already signed in; to sign it in as another Claude account, run \`CLAUDE_CONFIG_DIR=${dir} claude auth logout\` first`,
       };
-    return this.answerSignin(acct, by, {});
+    return this.answerSignin(acct, by, {}, (r) =>
+      runSignin({ ...r, exec: this.d.exec, root: this.d.root, acct }),
+    );
   }
 
-  private async answerSignin(acct: string, by: string, extra: Record<string, unknown>) {
-    const first = await this.startSignin(acct, by).first;
+  /**
+   * `claude_signin { acct: "primary@<name>" }`: Claude Code's own login on the paired machine,
+   * its callback forwarded to this machine (remote-signin.ts). Refused for a machine that is not
+   * configured, or whose Claude Code is already signed in.
+   */
+  private async remoteSignin(acct: string, name: string, by: string): Promise<Reply> {
+    const host = this.d.remote?.(name) ?? `no paired machine '${name}'`;
+    if (typeof host === "string") return { ok: false, error: host };
+    const status = await host
+      .run([{ argv: ["claude", "auth", "status"] }], {
+        timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+      })
+      .catch(() => null);
+    if (parseAuthStatus(status?.stdout ?? "")?.loggedIn === true)
+      return {
+        ok: false,
+        error: `Claude Code on '${name}' is already signed in; to sign it in as another Claude account, run \`ssh ${host.spec.target} claude auth logout\` first`,
+      };
+    return this.answerSignin(acct, by, {}, (r) =>
+      runRemoteSignin({
+        ...r,
+        host,
+        exec: this.d.exec,
+        reservedPorts: this.d.reservedPorts?.() ?? [],
+        ...(this.d.forwardSettleMs !== undefined ? { settleMs: this.d.forwardSettleMs } : {}),
+      }),
+    );
+  }
+
+  private async answerSignin(
+    acct: string,
+    by: string,
+    extra: Record<string, unknown>,
+    run: (r: SigninRun) => Promise<SigninEvent>,
+  ) {
+    const first = await this.startSignin(acct, by, run).first;
     if (first.type === "claude_signin_failed") return { ok: false, error: first.reason };
     return {
       ok: true,
@@ -271,14 +336,16 @@ export class ClaudeService {
         ...extra,
         acct,
         topic: signinTopic(acct),
-        ...(first.type === "claude_signin_url"
-          ? { url: first.url, flow: first.flow, attach: first.attach }
-          : { signed_in: true }),
+        ...(first.type === "claude_signin_url" ? urlFields(first) : { signed_in: true }),
       },
     };
   }
 
-  private startSignin(acct: string, by: string): Pending {
+  private startSignin(
+    acct: string,
+    by: string,
+    run: (r: SigninRun) => Promise<SigninEvent>,
+  ): Pending {
     this.signins.get(acct)?.abort.abort(SUPERSEDED);
     const abort = new AbortController();
     let first!: (e: SigninEvent) => void;
@@ -295,10 +362,7 @@ export class ClaudeService {
       .catch((e: unknown) =>
         this.d.log(`claude sign-in ${acct}: ${e instanceof Error ? e.message : String(e)}`),
       );
-    pending.done = runSignin({
-      exec: this.d.exec,
-      root: this.d.root,
-      acct,
+    pending.done = run({
       signal: abort.signal,
       now: this.d.now ?? this.clock.now,
       // The daemon stopping ends a wait at once.
@@ -366,3 +430,19 @@ export class ClaudeService {
     await Promise.all(all.map((p) => p.done));
   }
 }
+
+type UrlEvent = Extract<SigninEvent, { type: "claude_signin_url" }>;
+
+/** The URL fields of a sign-in's URL event, as a reply or `claude_accounts` shows them. */
+const urlFields = (e: UrlEvent) => ({
+  url: e.url,
+  flow: e.flow,
+  attach: e.attach,
+  ...(e.manual_url !== undefined ? { manual_url: e.manual_url } : {}),
+});
+
+/** A running sign-in as `claude_accounts` shows it: pending, with its URL once known. */
+const pendingSignin = (p: Pending) => ({
+  state: "pending",
+  ...(p.url !== undefined ? urlFields(p.url) : {}),
+});

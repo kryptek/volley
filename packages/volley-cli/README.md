@@ -217,9 +217,11 @@ Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/vo
 Pairs a second machine with `volleyd`'s, so waves can run agents there (SPEC §4.6.14; the volleyd
 README's "Paired machines" has the whole walk-through). On the supervisor's machine, as an admin
 account: `volley peer invite` (a one-time code), `volley peer invite --for <name>` (a code that
-re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name>`. On the
-machine to pair: `volley peer join <code> --to <user@supervisor> --repo <clone>` (add
-`--name <name> --replace` with a `--for` code), then the `volley peer run` service it installs.
+re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name> [--drain |
+--now]`. On any machine, `volley peer doctor [--fix]` says whether it can run an agent and fixes
+what it safely can. On the machine to pair: `volley peer join <code> --to <user@supervisor> --repo
+<clone>` (add `--name <name> --replace` with a `--for` code), then the `volley peer run` service it
+installs.
 
 ### `volley peer remove`
 
