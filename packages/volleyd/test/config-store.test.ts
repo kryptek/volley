@@ -554,6 +554,20 @@ describe("fleet.local_agents and lease_pools.<pool>.per_machine_overrides (SPEC 
     expect(openAs("laptop").effective().fleet.local_agents).toBe("always");
   });
 
+  it("an explicit local_agents patch, or clearing it, journals exactly one change", () => {
+    const changes = () => journal().filter((e) => e.type === "config_changed");
+    const c = openAs("laptop");
+    const v0 = c.retainedPayload().version;
+    c.applyPatch({ fleet: { local_agents: "never" } }, "admin-1");
+    expect(changes()).toHaveLength(1);
+    expect(changes().at(-1)?.data).toMatchObject({ by: "admin-1" });
+    expect(c.retainedPayload()).toMatchObject({ version: v0 + 1, updated_by: "admin-1" });
+    c.applyPatch({ fleet: { local_agents: null } }, "admin-1");
+    expect(c.effective().fleet.local_agents).toBe("always");
+    expect(changes()).toHaveLength(2);
+    expect(c.retainedPayload()).toMatchObject({ version: v0 + 2, updated_by: "admin-1" });
+  });
+
   it("refuses an unknown mode and a fallback max_agents of 0", () => {
     const c = openAs("laptop");
     for (const [patch, path] of [

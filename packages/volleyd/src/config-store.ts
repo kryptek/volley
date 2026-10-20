@@ -397,6 +397,8 @@ export class ConfigStore {
     mkdirSync(join(this.file, ".."), { recursive: true });
     writeFileAtomic(this.file, stringify(nextLayer));
 
+    const derived =
+      this.global.fleet.local_agents === null && nextGlobal.fleet.local_agents === null;
     const mode = resolveLocalAgents(this.global);
     this.fileLayer = nextLayer;
     this.global = nextGlobal;
@@ -404,7 +406,7 @@ export class ConfigStore {
     // A derived `local_agents` (null) that the change flipped (the first host added, the last
     // removed) is journaled as the defaults' own change, so clients see the new mode.
     const next = resolveLocalAgents(nextGlobal);
-    if (next !== mode) {
+    if (derived && next !== mode) {
       this.record(
         { fleet: { local_agents: next } } as TunablesPatch,
         { fleet: { local_agents: mode } },
