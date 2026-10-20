@@ -10,6 +10,7 @@ import {
   machineView,
   parsePathProbe,
   readiness,
+  readinessKey,
   readinessTopic,
 } from "../src/readiness";
 import { envelope, schemaErrors } from "./helpers/schema";
@@ -335,6 +336,15 @@ describe("local_agents on the supervisor's own verdict (SPEC §4.6.15)", () => {
       ineligible_reason: "fallback: box-a may be back (down 40 s, grace 300 s)",
       local_agents: { mode: "fallback", active: false },
     });
+  });
+
+  it("the down counter ticking within the grace is no news: the key stays the same", () => {
+    const at40 = own([peer({ ...DOWN, downSince: NOW - 40_000 })]);
+    const at55 = own([peer({ ...DOWN, downSince: NOW - 55_000 })]);
+    expect(at55.ineligible_reason).toBe("fallback: box-a may be back (down 55 s, grace 300 s)");
+    expect(readinessKey(at55)).toBe(readinessKey(at40));
+    const past = own([peer({ ...DOWN, downSince: NOW - 400_000 })]);
+    expect(readinessKey(past)).not.toBe(readinessKey(at40));
   });
 
   it("a peer's verdict never has local_agents; always and never say so on the own", () => {

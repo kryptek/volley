@@ -700,6 +700,28 @@ describe("fleet.local_agents: the supervisor's own machine as a fallback (SPEC ย
     const r = place(task(), AUTO, snap(laptop(), peerUp()), { ...FB, exclude: ["box-a"] });
     expect(r.host).toBe(LOCAL);
   });
+
+  it("a peer eligible but with its heavy slots full keeps the laptop closed: the heavy task waits", () => {
+    // "No peer eligible" is the task-agnostic verdict (machineIneligible), so readiness and
+    // placement agree; full heavy slots on a peer do not open the laptop's fallback slot.
+    const heavy = wave(
+      "placement: auto\nheavy_pools: [js-suite]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2 }\n",
+    );
+    const s = snap(
+      laptop({ heavy: { "js-suite": { held: 0, per_machine: 3 } } }),
+      peerUp({ heavy: { "js-suite": { held: 3, per_machine: 3 } } }),
+    );
+    const r = place(task(heavy), heavy, s, FB);
+    expect(r.host).toBeNull();
+    expect(r.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: fallback: box-a is eligible",
+    );
+    expect(r.candidates.find((c) => c.host === "box-a")?.line).toBe(
+      "ineligible: heavy slots 0/3 free (js-suite)",
+    );
+    expect(place(task(heavy, "T2"), heavy, s, FB).host).toBe("box-a");
+  });
 });
 
 describe("per-machine lease overrides in placement (SPEC ยง4.6.5)", () => {

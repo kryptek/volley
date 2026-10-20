@@ -4276,7 +4276,9 @@ export class Daemon {
       ...(isLocal
         ? {
             // Its own agents alone, which its fallback profile counts (SPEC §4.6.15), and every
-            // peer, whose eligibility its `local_agents` mode weighs.
+            // peer, whose eligibility its `local_agents` mode weighs. Each peer's view is built
+            // again here (and placement's snapshot builds it once more): O(peers²) per tick,
+            // deliberate at fleet sizes of a handful, for one source of each peer's view.
             localAgents: this.placedOn(name) + this.reservedOn(name),
             peers: Object.keys(cfg.hosts)
               .filter((n) => n !== name)

@@ -192,7 +192,9 @@ const seconds = (ms: number) => Math.max(0, Math.round(ms / 1000));
  * The own machine's role under `fleet.local_agents` (SPEC §4.6.15). `always`: a candidate like
  * any peer. `never`: none. `fallback`: none while any peer is eligible, or a down peer is still
  * within `down_grace_ms` of going down (a tunnel blip never pulls work onto it); otherwise the
- * fallback profile is in force. Readiness and placement both read it, so they agree.
+ * fallback profile is in force. A peer's eligibility is task-agnostic (`machineIneligible`), so a
+ * peer with its heavy slots full still keeps the own machine closed to a heavy task. Readiness
+ * and placement both read it, so they agree.
  */
 export function localRole(snap: Snapshot, o: FilterOptions): LocalRole {
   const mode = o.local_agents ?? "always";

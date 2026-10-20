@@ -267,8 +267,11 @@ export function parsePathProbe(stdout: string): PathProbe {
   return { claude: found.has("claude"), bun: found.has("bun") };
 }
 
-/** A verdict without `checked_at`: what decides whether a re-publish carries news. */
+/**
+ * A verdict without `checked_at`, nor the live seconds of a peer that may be back (`down 40 s`):
+ * what decides whether a re-publish carries news.
+ */
 export function readinessKey(p: ReadinessPayload): string {
   const { checked_at: _at, ...rest } = p;
-  return JSON.stringify(rest);
+  return JSON.stringify(rest).replace(/may be back \(down \d+ s,/g, "may be back (down _ s,");
 }
