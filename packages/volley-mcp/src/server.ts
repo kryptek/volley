@@ -50,12 +50,14 @@ export function createServer(state: ServerState): McpServer {
   server.registerTool(
     "vol_register",
     {
-      description: "Register this agent in the Volley registry and flip status to `registered`.",
+      description:
+        "Register this agent in the Volley registry and flip status to `registered`. `title`: one line saying what this agent is working on (the Desk shows it on the agent's window); call again to change it.",
       inputSchema: {
         capabilities: z.array(z.string()),
         parent_id: z.string().nullable().optional(),
         model: z.string().optional(),
         cwd: z.string().optional(),
+        title: z.string().max(200).optional(),
       },
     },
     wrap(volRegister),

@@ -1,8 +1,10 @@
 /**
  * The agent window, ported from the prototype `AgentWindow`: a React Bits
  * `StatusMark` (status + progress), `task #issue`, the wave chip in the wave
- * accent and the role chip in the title; the task title from the wave `spec`;
- * the pipeline; the latest narration (`payload.msg`, with the look's
+ * accent and the role chip in the title; the purpose line (`agentPurpose`: the
+ * task title from the wave `spec`, else the title the agent registered, SPEC
+ * §6.2), in full, wrapping; the agent id is secondary (a dim line under a wave
+ * task's purpose; dim in the title of a task-less agent that has one); the pipeline; the latest narration (`payload.msg`, with the look's
  * narration effect, D7); attention-line (D3) and steering-panel (D4) slots; the Volley
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
@@ -210,6 +212,20 @@ export function age(ms: number): string {
 
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 
+/**
+ * What the agent is working on: its wave task's title (`spec.tasks.<id>.title`),
+ * else the `title` it registered (SPEC §6.2), else `null`. An agent id says
+ * nothing about purpose, so the window leads with this and shows the id second.
+ */
+export function agentPurpose(
+  agent: Pick<AgentView, "task" | "registry">,
+  wave: WaveView | undefined,
+): string | null {
+  const spec = agent.task ? wave?.state?.spec?.tasks[agent.task] : undefined;
+  const registered = agent.registry?.title;
+  return str(spec?.title?.trim()) ?? str(typeof registered === "string" ? registered.trim() : null);
+}
+
 const Icon = ({ i, s = 15 }: { i: typeof BubbleChatIcon; s?: number }) => (
   <HugeiconsIcon icon={i} size={s} strokeWidth={1.8} />
 );
@@ -255,6 +271,9 @@ export function AgentWindow({
   const task = agent.task ? ws?.tasks.find((t) => t.id === agent.task) : undefined;
   const spec = agent.task ? ws?.spec?.tasks[agent.task] : undefined;
   const issue = task?.issue ?? spec?.issue;
+  const purpose = agentPurpose(agent, wave);
+  // The id is secondary once a purpose says what the agent does: dimmed in a task-less title.
+  const idSecondary = agent.task === null && purpose !== null;
   const progress = agent.progress === null ? null : Math.max(0, Math.min(100, agent.progress));
   const status = markStatus(agent);
   const hbAge = agent.heartbeat === null ? null : now - agent.heartbeat;
@@ -278,7 +297,7 @@ export function AgentWindow({
           size={18}
         />
       )}
-      <span className="t-name ell min0">
+      <span className={`t-name ell min0${idSecondary ? " t-name--id mono dim" : ""}`}>
         {agent.task ?? agent.id}
         {issue !== undefined && <span className="dim"> #{issue}</span>}
       </span>
@@ -291,9 +310,9 @@ export function AgentWindow({
     </>
   );
 
-  // The window's accessible name: its wave, task and role (or the agent id).
+  // The window's accessible name: its wave, task and role (or its purpose, else the agent id).
   const name = [
-    agent.task ? `${agent.wave} · ${agent.task}` : agent.id,
+    agent.task ? `${agent.wave} · ${agent.task}` : (purpose ?? agent.id),
     agent.role && ROLE_LABEL[agent.role],
   ]
     .filter(Boolean)
@@ -375,7 +394,12 @@ export function AgentWindow({
       actions={actions}
       footer={footer}
     >
-      {spec?.title && <div className="a-title">{spec.title}</div>}
+      {purpose && <div className="a-title">{purpose}</div>}
+      {agent.task !== null && purpose && (
+        <div className="a-id mono dim ell" title="Agent id">
+          {agent.id}
+        </div>
+      )}
       {agent.task !== null && <Pipeline stage={task?.stage ?? null} agentRole={agent.role} />}
       <Narration text={agent.narration} fx={narrationFx} />
       {asOf && (

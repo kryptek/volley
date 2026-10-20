@@ -469,10 +469,12 @@ Agents register themselves on a reserved retained topic so observers can enumera
 
 An agent a supervisor launched under a Claude account profile (§4.6.11) adds `claude_account` (the account id, or `primary`), from its assigned identity (§6.5).
 
+An agent MAY add `title`: one line (at most 200 characters) saying what it is working on, such as the task or issue it was dispatched for. An agent id says nothing about purpose (a dispatched agent's id is often just its prefix and a random suffix), so a dashboard SHOULD show a wave task's own title (§4.6.1 `spec.tasks.<id>.title`) when the agent has one, else this `title`, with the agent id as a secondary detail. The reference MCP server takes it as `vol_register`'s `title` argument.
+
 ### 6.3 Requirements
 
 - Conforming agents MUST publish a registry entry retained, QoS 1, before publishing any channel other than the initial `spawning` status.
-- The registry entry MUST be re-published on any change to `capabilities`, `cwd`, or `model`.
+- The registry entry MUST be re-published on any change to `capabilities`, `cwd`, `model`, or `title`.
 - When the LWT fires, the broker publishes `reaped` to the agent's `status` topic but does NOT clear the registry topic — that allows tools to inspect the agent's last-known state after death. Observers SHOULD filter out reaped agents in default views.
 
 ### 6.4 Enumeration

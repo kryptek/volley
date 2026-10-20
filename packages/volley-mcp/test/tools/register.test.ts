@@ -56,6 +56,22 @@ describe("vol_register", () => {
     expect(JSON.parse(got ?? "{}").payload.claude_account).toBe("work");
   });
 
+  it("the registry entry carries the title the agent registers: what it is working on", async () => {
+    await volRegister(state, { capabilities: [], title: "  Desk agent purpose line  " });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.title).toBe("Desk agent purpose line");
+  });
+
+  it("a missing or blank title leaves the registry entry without one", async () => {
+    await volRegister(state, { capabilities: [], title: "Old purpose" });
+    await volRegister(state, { capabilities: [], title: "   " });
+    const blank = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(blank ?? "{}").payload).not.toHaveProperty("title");
+    await volRegister(state, { capabilities: [] });
+    const none = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    expect(JSON.parse(none ?? "{}").payload).not.toHaveProperty("title");
+  });
+
   it("publishes a retained status: registered", async () => {
     await volRegister(state, { capabilities: [] });
     const got = await state.broker.queryRetained("volley/test/reg-aaaa/status", 1000);

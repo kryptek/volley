@@ -21,6 +21,12 @@
             "capabilities": { "type": "array", "items": { "type": "string" } },
             "cwd": { "type": "string" },
             "model": { "type": "string" },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "One line saying what the agent is working on (spec section 6.2)."
+            },
             "claude_account": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",

@@ -8,6 +8,16 @@
   font-weight: 500;
   font-size: 14px;
 }
+/* The agent id, secondary to the purpose line above it. */
+.a-id {
+  font-size: 11px;
+  margin-top: -4px;
+}
+/* A task-less agent's id in its title, secondary to the purpose line below. */
+.t-name.t-name--id {
+  font-weight: 400;
+  font-size: 12px;
+}
 .pipe {
   display: flex;
   gap: 4px;

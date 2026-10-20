@@ -41,6 +41,8 @@ export interface RegistryPayload {
   cwd?: string;
   model?: string;
   model_source?: "self-reported" | "harness-hook" | "unknown";
+  /** What the agent says it is working on (SPEC §6.2); unchecked, so read it with `typeof`. */
+  title?: unknown;
   session_url?: string;
   workspace?: string;
   [key: string]: unknown;

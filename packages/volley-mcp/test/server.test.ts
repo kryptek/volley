@@ -60,6 +60,21 @@ describe("createServer (MCP wiring)", () => {
     expect(state.registered).toBe(true);
   });
 
+  it("vol_register takes a title and refuses one longer than 200 characters", async () => {
+    const ok = await client.callTool({
+      name: "vol_register",
+      arguments: { capabilities: [], title: "Fix the login redirect" },
+    });
+    expect(ok.isError).toBeFalsy();
+    const got = await state.broker.queryRetained("volley/_system/registry/srv-aaaa", 1000);
+    expect(JSON.parse(got ?? "{}").payload.title).toBe("Fix the login redirect");
+    const long = await client.callTool({
+      name: "vol_register",
+      arguments: { capabilities: [], title: "x".repeat(201) },
+    });
+    expect(long.isError).toBe(true);
+  });
+
   it("returns a thrown VolleyError as isError with a structured code", async () => {
     state.registered = false;
     const res = await client.callTool({
