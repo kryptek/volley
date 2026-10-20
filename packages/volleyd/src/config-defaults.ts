@@ -199,6 +199,10 @@ export const DAEMON_DEFAULTS = {
   ci_none_grace_ms: 900_000,
   /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */
   pipeline_max_advances: 8,
+  /** A blocked agent's reason is clipped to this many characters in its decision's question. */
+  blocked_reason_max_chars: 500,
+  /** A terminal status (done / blocked / failed) nothing in the journal names for this long alarms. */
+  terminal_unjournaled_alarm_ms: 60_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
   pipeline_io_ms: 30_000,
   /** How often the screen publisher checks which agents are due a capture. */

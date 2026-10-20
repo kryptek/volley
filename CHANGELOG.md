@@ -17,6 +17,16 @@ All workspace packages share one version. Dates are release-tag dates.
   carries the attempt after the first (`<wave> <task> <role> 2`), so the lookup never finds an
   earlier attempt's workspace; two workspaces with the same title burn the attempt too. Launches
   are serialized per host. (#193)
+- volleyd: an agent's `blocked` status was never journaled or decided, whatever its role, so a
+  stuck task (a rebase agent, on a downstream wave) stayed silently in its stage. Every role's
+  `blocked` now opens an `agent_blocked` decision with the agent's reason (`continue | respawn |
+  cancel`); the agent is not retired while it is open (SPEC §5.2). (#196)
+
+### Added
+
+- volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
+  wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
+  `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)
 
 ## 0.4.0 — 2026-10-20
 
