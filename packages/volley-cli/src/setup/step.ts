@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
-import { CMUX_CHECK_OUT, CMUX_CHECK_SCRIPT } from "./cmux";
+import { CMUX_CHECK_OUT, CMUX_CHECK_SCRIPT, type CmuxSocketMode } from "./cmux";
 import { lsofArgv, ssArgv } from "./desk-port";
 
 /**
@@ -112,6 +112,8 @@ export interface SetupContext {
    * stdout. volleyd sets it to seal the token to the Desk that asked (`setup_apply`).
    */
   deliverToken?: (t: IssuedToken) => void;
+  /** cmux's socket control mode as the Services step's check last found it (setup.json keeps it). */
+  cmuxSocketMode?: CmuxSocketMode;
 }
 
 /** A one-time admin token as `volley auth token --json` prints it. */

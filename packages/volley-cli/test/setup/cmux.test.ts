@@ -13,13 +13,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CMUX_AUTOMATION_STEPS,
   CMUX_CHECK_SCRIPT,
+  CMUX_MODE_LABEL,
   CMUX_PASSWORD_STEPS,
   classifyCmux,
   cmuxAdvice,
   cmuxCheckArgv,
   cmuxEnv,
+  cmuxModeOf,
   cmuxSaid,
+  parseCmuxCheck,
   readCmuxPassword,
   writeCmuxPassword,
 } from "../../src/setup/cmux";
@@ -30,6 +34,9 @@ import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, fakeMachine } from "../helpers/setup-machine";
 
 const DENIED = "Access denied - only processes started inside cmux can connect";
+const DENIED_PASSWORD = "ERROR: Authentication required — send auth <password> first";
+const REFUSED_SOCKET = "Failed to connect to /tmp/cmux.sock: Connection refused";
+const AUTOMATION_SUMMARY = "Make volleyd's service reach cmux (choose Automation mode";
 const CMUX_SUMMARY = "Give volleyd the cmux socket password";
 
 describe("setup: cmux", () => {
@@ -62,6 +69,30 @@ describe("setup: cmux", () => {
     expect(classifyCmux(r(1, "connect ENOENT /Users/x/.cmux/cmux.sock"))).toBe("not_running");
   });
 
+  it("checks what volleyd needs, not `cmux ping`, and reads the socket's mode", () => {
+    expect(CMUX_CHECK_SCRIPT).toContain("cmux capabilities --json");
+    expect(CMUX_CHECK_SCRIPT).toContain("cmux list-workspaces");
+    expect(CMUX_CHECK_SCRIPT).not.toContain("cmux ping");
+    const out = (caps: [number, string], list: [number, string]) =>
+      `${caps[1]}\nvolley-cmux-caps=${caps[0]}\n${list[1]}\nvolley-cmux-exit=${list[0]}\n`;
+    // ping-style success is not enough: capabilities answer, the workspace call is refused.
+    expect(
+      parseCmuxCheck(
+        out([0, '{"access_mode":"password","methods":[]}'], [1, "ERROR: Authentication required"]),
+      ),
+    ).toEqual({ access: "refused", output: "ERROR: Authentication required", mode: "password" });
+    expect(
+      parseCmuxCheck(out([0, '{"access_mode":"automation"}'], [0, "workspace:1 main"])),
+    ).toEqual({ access: "ok", output: "workspace:1 main", mode: "automation" });
+    expect(parseCmuxCheck(out([1, DENIED], [1, DENIED]))?.mode).toBe("cmuxOnly");
+    expect(parseCmuxCheck(out([1, "boom"], [1, "boom"]))?.mode).toBeNull();
+    expect(cmuxModeOf(0, '{"access_mode":"allow-all"}')).toBe("allowAll");
+    expect(cmuxModeOf(0, '{"access_mode":"something-new"}')).toBeNull();
+    // Not finished yet.
+    expect(parseCmuxCheck('{"access_mode":"automation"}\nvolley-cmux-caps=0\n')).toBeNull();
+    expect(CMUX_MODE_LABEL.automation).toBe("Automation mode");
+  });
+
   it("quotes the first thing cmux said", () => {
     expect(cmuxSaid("\n  ERROR: Invalid password\nmore")).toBe(
       " (cmux said: ERROR: Invalid password)",
@@ -74,6 +105,11 @@ describe("setup: cmux", () => {
     expect(cmuxAdvice("refused", false)).toContain("volley setup --repair");
     expect(CMUX_PASSWORD_STEPS).toContain("Settings… (⌘,) → Automation → Socket control mode");
     expect(CMUX_PASSWORD_STEPS).toContain("Password mode");
+    // Automation mode is the recommendation; Password mode stays an option.
+    expect(cmuxAdvice("refused", false)).toContain(CMUX_AUTOMATION_STEPS);
+    expect(cmuxAdvice("refused", false).indexOf(CMUX_AUTOMATION_STEPS)).toBeLessThan(
+      cmuxAdvice("refused", false).indexOf(CMUX_PASSWORD_STEPS),
+    );
     expect(cmuxAdvice("refused", true)).toContain("refused the socket password volleyd has");
     expect(cmuxAdvice("not_running", false)).toContain("open cmux");
     // cmux open with its socket off answers like a stopped cmux: the advice covers both.
@@ -122,6 +158,10 @@ describe("setup: cmux", () => {
     /** cmux's socket: null = the default (cmux's own processes only), else Password mode. */
     let cmuxPassword: string | null;
     let cmuxRunning: boolean;
+    /** cmux in Automation mode: any process of the user gets in. */
+    let automation: boolean;
+    /** cmux's socket mode when it lets the service in without a password. */
+    let openMode: "automation" | "allow-all";
     /** What cmux answers a wrong password with. */
     let wrongPassword: string;
     /** The env each service-like check ran with. */
@@ -139,6 +179,8 @@ describe("setup: cmux", () => {
       m = fakeMachine(fake, dir, { platform: "darwin" });
       cmuxPassword = null;
       cmuxRunning = true;
+      automation = false;
+      openMode = "automation";
       wrongPassword = "Access denied - invalid socket password";
       checks = [];
       // cmux installed in ~/Applications.
@@ -152,14 +194,20 @@ describe("setup: cmux", () => {
           m.execEnvs.push(o?.env);
           checks.push({ ...o?.env });
           const sent = o?.env?.CMUX_SOCKET_PASSWORD;
-          const [code, said] = !cmuxRunning
-            ? [1, "Failed to connect to /tmp/cmux.sock: Connection refused"]
-            : cmuxPassword === null
-              ? [1, DENIED]
-              : sent === cmuxPassword
-                ? [0, "PONG"]
-                : [1, wrongPassword];
-          writeFileSync(argv[4] as string, `${said}\nvolley-cmux-exit=${code}\n`);
+          // `cmux capabilities --json`, then `cmux list-workspaces`, as the check script runs them.
+          const [capsCode, caps, code, said] = !cmuxRunning
+            ? [1, REFUSED_SOCKET, 1, REFUSED_SOCKET]
+            : automation
+              ? [0, `{"access_mode":"${openMode}","methods":[]}`, 0, "workspace:1"]
+              : cmuxPassword === null
+                ? [1, DENIED, 1, DENIED]
+                : sent === cmuxPassword
+                  ? [0, '{"access_mode":"password","methods":[]}', 0, "workspace:1"]
+                  : [1, wrongPassword, 1, wrongPassword];
+          writeFileSync(
+            argv[4] as string,
+            `${caps}\nvolley-cmux-caps=${capsCode}\n${said}\nvolley-cmux-exit=${code}\n`,
+          );
           return { code: 0, stdout: "", stderr: "" } satisfies ExecResult;
         }
         if (argv[0] === "security" && argv.includes("volley-cmux")) {
@@ -178,21 +226,54 @@ describe("setup: cmux", () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
-    it("explains how to set a socket password in cmux and offers to store it", async () => {
+    it("recommends Automation mode, keeps Password mode optional, and records the mode", async () => {
       const p = await planServices(m.ctx);
       const found = p.found.join("\n");
       expect(found).toContain("cmux lets only programs started inside cmux use its socket");
-      expect(found).toContain(CMUX_PASSWORD_STEPS);
-      const c = cmuxChange(p);
-      expect(c?.summary).toContain("asked for now, hidden");
-      expect(c?.summary).toContain("service volley-cmux");
-      expect(c?.summary).toContain(join(m.ctx.volleydHome, "cmux.json"));
+      expect(found).toContain(CMUX_AUTOMATION_STEPS);
+      expect(found).toContain("cmux's socket control mode: cmux processes only");
+      expect(m.ctx.cmuxSocketMode).toBe("cmuxOnly");
+      expect(cmuxChange(p)).toBeUndefined();
+      const c = p.changes.find((x) => x.summary.startsWith(AUTOMATION_SUMMARY));
+      expect(c?.detail).toContain(CMUX_AUTOMATION_STEPS);
+      expect(c?.detail).toContain(`Password mode works too: ${CMUX_PASSWORD_STEPS}`);
       // Planning asks nothing and stores nothing; the check ran with the service's environment.
       expect(m.secretPrompts).toEqual([]);
       expect(existsSync(join(m.ctx.volleydHome, "cmux.json"))).toBe(false);
       expect(checks[0]?.VOLLEYD_HOME).toBe(m.ctx.volleydHome);
       expect(checks[0]?.PATH).toContain(join(m.ctx.home, ".volley", "bin"));
       expect(checks[0]?.CMUX_SOCKET_PASSWORD).toBeUndefined();
+      // Not switched yet: the change fails saying so.
+      await expect(c?.apply()).rejects.toThrow(/still does not let volleyd's service in/);
+      // Switched to Automation mode in cmux: the change passes, no password asked or stored.
+      automation = true;
+      expect(await c?.apply()).toEqual([
+        "volleyd's service reaches cmux now (cmux's socket control mode: Automation mode).",
+      ]);
+      expect(m.secretPrompts).toEqual([]);
+      expect(existsSync(join(m.ctx.volleydHome, "cmux.json"))).toBe(false);
+      const again = await planServices(m.ctx);
+      expect(
+        again.changes
+          .map((x) => x.summary)
+          .filter((x) => x.startsWith(AUTOMATION_SUMMARY) || x.startsWith(CMUX_SUMMARY)),
+      ).toEqual([]);
+      expect(again.found.join("\n")).toContain(
+        "cmux: volleyd's service reaches it (cmux's socket control mode: Automation mode) (`cmux capabilities` and `cmux list-workspaces`, run the way the service runs them)",
+      );
+      expect(m.ctx.cmuxSocketMode).toBe("automation");
+    });
+
+    it("the Automation change asks for the password when cmux was put in Password mode instead", async () => {
+      const c = (await planServices(m.ctx)).changes.find((x) =>
+        x.summary.startsWith(AUTOMATION_SUMMARY),
+      );
+      cmuxPassword = "pw";
+      m.secrets = ["pw"];
+      const out = await c?.apply();
+      expect(m.secretPrompts).toEqual(["cmux socket password (hidden): "]);
+      expect(out?.join("\n")).toContain("Stored the cmux socket password");
+      expect(readCmuxPassword(m.ctx.volleydHome)).toBe("pw");
     });
 
     it("asks for the password (hidden), checks it as the service would, then stores it", async () => {
@@ -219,9 +300,20 @@ describe("setup: cmux", () => {
       const again = await planServices(m.ctx);
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain(
-        "cmux: volleyd's service reaches it (`cmux ping`, run the way the service runs it, with the stored socket password)",
+        "cmux: volleyd's service reaches it (cmux's socket control mode: Password mode) (`cmux capabilities` and `cmux list-workspaces`, run the way the service runs them, with the stored socket password)",
       );
       expect(await again.verify?.()).toEqual([]);
+    });
+
+    it("names the stored password only in a mode that uses it", async () => {
+      writeCmuxPassword(m.ctx.volleydHome, "pw");
+      automation = true;
+      openMode = "allow-all";
+      const found = (await planServices(m.ctx)).found.join("\n");
+      expect(found).toContain(
+        "cmux: volleyd's service reaches it (cmux's socket control mode: Full open access)",
+      );
+      expect(found).not.toContain("with the stored socket password");
     });
 
     it("refuses a password cmux does not take, storing nothing", async () => {
@@ -286,17 +378,19 @@ describe("setup: cmux", () => {
     });
 
     it("without a terminal it asks nothing, and the step is not done: its change says where to enter the password", async () => {
+      cmuxPassword = "pw";
+      wrongPassword = DENIED_PASSWORD;
       m.deps.interactive = false;
       const p = await planServices(m.ctx);
       expect(p.found.join("\n")).toContain(
         "run `volley setup --step services` in a terminal on this machine to enter the socket password",
       );
-      expect(p.found.join("\n")).toContain(`(cmux said: ${DENIED})`);
+      expect(p.found.join("\n")).toContain(`(cmux said: ${DENIED_PASSWORD})`);
       const c = cmuxChange(p);
       expect(c?.summary).toContain("needs a terminal");
       // Applied last, after every other service change.
       expect(p.changes.at(-1)).toBe(c);
-      await expect(c?.apply()).rejects.toThrow(`(cmux said: ${DENIED})`);
+      await expect(c?.apply()).rejects.toThrow(`(cmux said: ${DENIED_PASSWORD})`);
       expect(m.secretPrompts).toEqual([]);
       // The Desk plans with no askSecret at all: the same.
       m.deps.interactive = true;

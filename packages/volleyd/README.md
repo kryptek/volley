@@ -807,7 +807,10 @@ random-suffixed coordinator is dropped, SPEC §4.4).
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
 (without `--strict-mcp-config` under `agent_mcp: inherit`, below).
-The hooks come in through `--settings`.
+The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
+session's `PATH`: if not it prints `volleyd: cannot start the agent: claude is not on this
+session's PATH (<PATH>)` with the fix and keeps the session open, so the screen volleyd reads
+(and the decision it opens) says why instead of an empty, dead session.
 
 **MCP wiring.** The agent's `volley` MCP server is volleyd's, not the user's: volleyd writes
 `.volley/mcp.json` = `{ "mcpServers": { "volley": { "command": "bun", "args": ["run",
@@ -939,7 +942,7 @@ captured to `$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
 | `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
-| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
+| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture; its question quotes the session's last output (its last non-blank lines, also in the journal's `decision_opened` event as `data.last_output`; not on the retained decision), or says the screen was empty and the session may have ended at once |
 
 After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
 signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
@@ -1127,12 +1130,17 @@ in), `gh` (authenticated, for `gh issue view`), `git`, `tmux`, `nc`, `base64`, `
 the wave repo at `repo` (its `origin` must have the release branch) and a volley checkout at
 `volley_dir` with `bun install` run. Two that are easy to miss:
 
-- `claude` must be on the `PATH` of a non-interactive ssh session (`ssh <target> bash -s` reads
-  no `~/.bashrc` or `~/.zshrc`), because the tmux session that runs `launch.sh` takes the
-  environment of the ssh session that created it. Claude Code's installer puts it in
-  `~/.local/bin`, which sshd's default `PATH` lacks: link it into `/usr/local/bin`, or set
-  `PATH` for ssh sessions (`SetEnv` in sshd_config, or `~/.ssh/environment` with
-  `PermitUserEnvironment`).
+- `claude` (and `bun`) must be on the `PATH` of a non-interactive ssh session
+  (`ssh <target> bash -s` reads no `~/.zshrc`, and bash stops early in `~/.bashrc`), because the
+  tmux session that runs `launch.sh` takes that environment. Claude Code's installer puts it in
+  `~/.local/bin`, which sshd's default `PATH` lacks: set it in `~/.zshenv` (zsh) or at the top of
+  `~/.bashrc` (bash), or link it into `/usr/local/bin`. `volley peer join` checks this before it
+  pairs and prints the exact line. A tmux server that was already running keeps the `PATH` it
+  started with, so before each launch volleyd adds the ssh session's own in front of it
+  (`printenv PATH` and `tmux show-environment -g PATH`, then `tmux set-environment -g PATH` with
+  the ssh session's directories first and every directory the server already had after them;
+  nothing to do when none is missing, or no server runs). volleyd uses tmux's default server, so
+  this may be your own: its PATH only ever gains directories.
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
@@ -1199,7 +1207,10 @@ agent runs.
 Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
 (SPEC §4.6.14). On the daemon's machine, as an admin account (`invite` and `remove` are admin
 ops: they go to volleyd on the admin's own `volley/_system/auth/ops/<username>` topic, never the
-mailbox, and volleyd checks the admin role as for the account ops):
+mailbox, and volleyd checks the admin role as for the account ops; the broker drops a
+non-admin's op without a word, so `volley peer` first checks the login against this machine's
+`accounts.json` and the fixed identities, and refuses a known non-admin at once instead of
+waiting out `--timeout`):
 
 ```sh
 VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
@@ -1213,9 +1224,14 @@ ssh to the daemon's machine):
 volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 ```
 
-`join` checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
-daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
-there needs it; if not, the join stops before the code is used) and then runs
+`join` checks ssh to `--to` (an untrusted host key is reported as such, with the one-time
+`ssh <host> true` to accept it, not as missing key-based ssh), then sends a script to
+`ssh <host> bash -s` that first checks the daemon's machine can ssh back to `--target`
+(`ssh -o BatchMode=yes <target> true`: every spawn there needs it; if not, the join stops before
+the code is used), then that `claude`, `bun` and `tmux` are on the PATH of that non-interactive
+ssh session (what an agent session gets there; if not, the join stops before the code is used,
+names what is missing and prints the line to add, with the directories this shell finds them in:
+`~/.zshenv` for zsh, the top of `~/.bashrc` for bash), and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
 ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
 `VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
@@ -1705,10 +1721,12 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   gh issue view
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
     the LaunchToken sealed for <dir>) | capture-pane | has-session |
-    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
-    kill-session = CONSENT; no tmux global options
+    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+    show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+    PATH, from printenv, then the server's own dirs) —
+    kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port>
+    nc -z 127.0.0.1 <port> · printenv PATH
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -1751,11 +1769,15 @@ human merges.
 ## Running as a service (launchd)
 
 ```sh
-volleyd install               # writes the plist and loads it
+volleyd install               # writes the plist and (re)loads it; safe to rerun
 volleyd install --dry-run     # print the plist instead
 launchctl kickstart -k gui/$UID/systems.volley.volleyd   # restart
 volleyd uninstall             # unload + remove the plist
 ```
+
+A rerun with volleyd loaded boots it out, waits until launchd has let it go and bootstraps the
+new plist (retrying launchd's EIO meanwhile); if the new plist will not load, the previous one is
+put back and loaded again and `install` exits non-zero, so volleyd is never left down.
 
 The plist (`launchd/systems.volley.volleyd.plist.tmpl`) runs `bun src/cli.ts daemon` with
 `RunAtLoad` and `KeepAlive`, logs to `$VOLLEYD_HOME/volleyd.log`, and captures `VOLLEYD_HOME`,

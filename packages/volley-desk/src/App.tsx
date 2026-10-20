@@ -67,7 +67,7 @@ import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
-import { createPeerOps } from "./store/peerOps";
+import { createPeerOps, keepAdminSeen } from "./store/peerOps";
 import {
   UNASSIGNED,
   agentsByWave,
@@ -304,10 +304,12 @@ export default function App() {
     () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
     [authOps],
   );
-  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
+  // an admin Desk then checks in with volleyd hourly, so Broker accounts never calls it stale.
   useEffect(() => {
-    void peerOps?.admin();
-  }, [peerOps]);
+    if (peerOps === null || authOps === null) return;
+    return keepAdminSeen(peerOps, authOps);
+  }, [peerOps, authOps]);
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
   /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */

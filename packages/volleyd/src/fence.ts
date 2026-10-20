@@ -116,10 +116,12 @@ import { AGENT_BRANCH } from "./worktree";
  *   gh issue view
  *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
  *     the LaunchToken sealed for <dir>) | capture-pane | has-session |
- *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
- *     kill-session = CONSENT; no tmux global options
+ *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     PATH, from printenv, then the server's own dirs) —
+ *     kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
- *     nc -z 127.0.0.1 <port>
+ *     nc -z 127.0.0.1 <port> · printenv PATH
  *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
  *     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -1335,7 +1337,8 @@ function isLaunchScript(content: string, worktree: string): boolean {
   // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
   const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
-  for (const line of lines.slice(profile !== null ? 7 : 5, -2)) {
+  // The exports end before launch.sh's claude check (the line before the exec).
+  for (const line of lines.slice(profile !== null ? 7 : 5, -3)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);
@@ -1445,6 +1448,9 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every(writablePath)
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
+    case "printenv":
+      // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch).
+      return sameArgv(args, ["PATH"]) ? ALLOW : deny("printenv (only PATH)");
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -1478,6 +1484,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
   if (sub === "kill-session") {
     const v = checkArgs("tmux kill-session", rest, { valued: ["-t"] });
     return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
+  }
+  if (sub === "show-environment") {
+    // Read-only: the server's global PATH, which set-environment then only adds to.
+    return sameArgv(rest, ["-g", "PATH"]) ? ALLOW : deny("tmux show-environment (only -g PATH)");
+  }
+  if (sub === "set-environment") {
+    // Only the global PATH, to an absolute directory list (the box's own, from `printenv PATH`).
+    const [g, name, value, ...more] = rest;
+    return g === "-g" &&
+      name === "PATH" &&
+      more.length === 0 &&
+      value !== undefined &&
+      value.split(":").every((d) => REMOTE_PATH.test(d))
+      ? ALLOW
+      : deny("tmux set-environment (only -g PATH <absolute dirs>)");
   }
   if (sub === "send-keys") {
     // `send-keys -t <target> <key>` (a named key) or `send-keys -t <target> -l -- <text>`:

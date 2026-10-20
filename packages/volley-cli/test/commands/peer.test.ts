@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { constants, type JsonWebKeyInput, createPublicKey, publicEncrypt } from "node:crypto";
 import {
   existsSync,
@@ -6,10 +7,12 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -22,8 +25,11 @@ import {
   SYSTEMD_UNIT,
   currentUser,
   defaultName,
+  hostKeyHint,
+  localNotAdmin,
   machineTopic,
   peerFile,
+  redeemScript,
   runPeer,
   runService,
   tunnelArgv,
@@ -122,7 +128,9 @@ function fakeExec(reply: (c: Call) => Partial<{ code: number; stdout: string; st
       await new Promise<void>((r) => opts.signal?.addEventListener("abort", () => r()));
       return { code: 143, stdout: "", stderr: "" };
     }
-    return { code: 0, stdout: "", stderr: "", ...reply(c) };
+    // launchd has no job loaded unless a test says so.
+    const base = argv[0] === "launchctl" && argv[1] === "print" ? 113 : 0;
+    return { code: base, stdout: "", stderr: "", ...reply(c) };
   };
   return { exec, calls };
 }
@@ -330,15 +338,74 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<string>peer</string>");
     expect(text).toContain("<string>run</string>");
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
-    expect(f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv)).toEqual([
-      ["launchctl", "bootout", `gui/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootout", `user/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootstrap", "gui/501", plist],
-    ]);
+    // Nothing loaded yet: nothing to boot out.
+    expect(
+      f.calls.filter((c) => c.argv[0] === "launchctl" && c.argv[1] !== "print").map((c) => c.argv),
+    ).toEqual([["launchctl", "bootstrap", "gui/501", plist]]);
     expect(r.stdout).toContain("(domain gui/501)");
     expect(r.stdout).toContain(`Claude Code trusts ${repo} on this machine.`);
     const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
     expect(redeemRequest(ssh[1]?.input as string).volley).toBe("/opt/bin/volley");
+  });
+
+  it("a re-join replaces the loaded agent: boots it out, waits until launchd lets it go, then loads it", async () => {
+    let loaded = true;
+    let teardown = 0;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") {
+        if (gui && teardown > 0 && --teardown === 0) loaded = false;
+        return { code: gui && loaded ? 0 : 113 };
+      }
+      if (c.argv[1] === "bootout" && gui) teardown = 3;
+      if (c.argv[1] === "bootstrap" && loaded) {
+        return { code: 5, stderr: "Bootstrap failed: 5: Input/output error" };
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).toBe(0);
+    const sub = f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv[1]);
+    expect(sub.filter((s) => s !== "print")).toEqual(["bootout", "bootstrap"]);
+    expect(r.stdout).toContain("(domain gui/501)");
+  });
+
+  it("a re-join whose new plist will not load puts the previous one back, loads it, and says so", async () => {
+    const plist = join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+    mkdirSync(dirname(plist), { recursive: true });
+    writeFileSync(plist, "<plist>previous</plist>");
+    let loaded = true;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") return { code: gui && loaded ? 0 : 113 };
+      if (c.argv[1] === "bootout") {
+        loaded = false;
+        return {};
+      }
+      if (c.argv[1] === "bootstrap") {
+        // launchd refuses the new plist anywhere, and takes the previous one back.
+        if (readFileSync(plist, "utf-8") !== "<plist>previous</plist>") {
+          return { code: 1, stderr: "Bootstrap failed: 122: Path had bad ownership/permissions" };
+        }
+        loaded = gui;
+        return {};
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).not.toBe(0);
+    expect(readFileSync(plist, "utf-8")).toBe("<plist>previous</plist>");
+    expect(loaded).toBe(true);
+    expect(r.stderr).toContain("bad ownership/permissions");
+    expect(r.stderr).toContain("Restored the previous");
   });
 
   it("on a Mac with nobody at the console, falls back to the user/<uid> domain and says so", async () => {
@@ -410,6 +477,120 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stderr).toContain("Permission denied (publickey)");
     expect(existsSync(peerFile(home))).toBe(false);
     expect(f.calls.some((c) => c.argv[0] === "systemctl")).toBe(false);
+  });
+
+  it("checks claude, bun and tmux on this machine's non-interactive ssh PATH before redeeming", () => {
+    // Run the real script under bash: a stub `ssh` runs its command with a PATH that has bun
+    // and tmux but no claude, as a zsh login shell without ~/.zshenv would.
+    const box = mkdtempSync(join(tmpdir(), "volley-peer-redeem-"));
+    try {
+      const write = (p: string, text: string) => {
+        writeFileSync(p, text);
+        chmodSync(p, 0o755);
+      };
+      mkdirSync(join(box, "bin"));
+      mkdirSync(join(box, "tools"));
+      write(
+        join(box, "bin", "ssh"),
+        // The login shell is fish, which cannot parse POSIX `for … do`: only `sh -c` gets through.
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\ncase "$*" in true|"sh -c "*) ;; *) echo "fish: Unknown command" >&2; exit 127;; esac\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/usr/bin/fish /bin/sh -c "$*"\n',
+      );
+      symlinkSync("/bin/sh", join(box, "tools", "sh"));
+      write(join(box, "tools", "bun"), "#!/bin/sh\n");
+      write(join(box, "tools", "tmux"), "#!/bin/sh\n");
+      // Like `volley peer redeem`, it reads the whole request from stdin (a stub that does not
+      // could exit first, and base64 then dies of SIGPIPE: exit 141 under pipefail).
+      write(join(box, "volley"), `#!/bin/sh\ncat > ${join(box, "redeemed")}\n`);
+      const script = redeemScript(
+        { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+        join(box, "volley"),
+      );
+      const r = spawnSync("bash", ["-s"], {
+        input: script,
+        encoding: "utf-8",
+        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+      });
+      expect(r.status).toBe(4);
+      expect(r.stderr).toContain("volley-peer-missing: claude");
+      expect(r.stderr).toContain("volley-peer-shell: fish");
+      expect(existsSync(join(box, "redeemed"))).toBe(false);
+      // With claude there too, the code is redeemed.
+      write(join(box, "tools", "claude"), "#!/bin/sh\n");
+      const ok = spawnSync("bash", ["-s"], {
+        input: script,
+        encoding: "utf-8",
+        env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+      });
+      expect(ok.status, ok.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(join(box, "redeemed"), "utf-8"))).toMatchObject({
+        code: "ABCD-EFGH",
+        target: "dev@box-a",
+      });
+    } finally {
+      rmSync(box, { recursive: true, force: true });
+    }
+  });
+
+  it("a PATH check that fails on its own is not reported as the host failing to ssh", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 5, stderr: "sh: 1: Syntax error: end of file unexpected\n" }),
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("cannot ssh to");
+    expect(r.stderr).toContain(
+      "dev@host could not check claude, bun and tmux on dev@Box-A.lan's ssh PATH",
+    );
+    expect(r.stderr).toContain("Syntax error");
+    expect(r.stderr).toContain("the code is still valid");
+  });
+
+  it("names the missing tools and the exact line for the login shell's file", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude bun\nvolley-peer-shell: zsh\n" }),
+    );
+    const which = (c: string) =>
+      c === "claude"
+        ? "/Users/dev/.local/bin/claude"
+        : c === "bun"
+          ? "/opt/homebrew/bin/bun"
+          : null;
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec, { which }));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
+    expect(r.stderr).toContain("~/.zshenv");
+    expect(r.stderr).toContain('export PATH="/Users/dev/.local/bin:/opt/homebrew/bin:$PATH"');
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+    // bash: the top of ~/.bashrc; a tool this shell cannot find either: install it.
+    const b = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude\nvolley-peer-shell: bash\n" }),
+    );
+    const rb = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host"],
+      deps(b.exec, { which: () => null }),
+    );
+    expect(rb.stderr).toContain("the top of ~/.bashrc");
+    expect(rb.stderr).toContain("Install claude on this machine");
+  });
+
+  it("an untrusted host key says so, with the one-time command, not 'set up key-based ssh'", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "ssh" ? { code: 255, stderr: "Host key verification failed.\n" } : {},
+    );
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("does not trust dev@host's host key yet");
+    expect(r.stderr).toContain("ssh dev@host true");
+    expect(r.stderr).not.toContain("key-based");
+    // The host's ssh back here, refused for the same reason: the command runs there.
+    expect(hostKeyHint("Host key verification failed.", "dev@box-a", "dev@host")).toContain(
+      "On dev@host, run once: ssh dev@box-a true",
+    );
+    expect(
+      hostKeyHint("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", "dev@host"),
+    ).toContain("ssh-keygen -R dev@host");
+    expect(hostKeyHint("Permission denied (publickey).", "dev@host")).toBeNull();
   });
 
   it("a repo trusted through a parent folder counts as trusted (T4's rule)", async () => {
@@ -715,6 +896,32 @@ describe("volley peer on the supervisor's machine", () => {
       expect(r.stderr).toContain("admin");
       expect(r.stderr).toContain("VOLLEY_AUTH_USERNAME");
     }
+  });
+
+  it("invite with a login this machine knows is not an admin refuses at once, without asking volleyd", async () => {
+    writeFileSync(
+      join(home, "accounts.json"),
+      JSON.stringify({
+        accounts: [
+          { name: "steer-1", role: "steer", kind: "device", created: "2026-10-19T00:00:00.000Z" },
+          { name: "boss", role: "admin", kind: "human", created: "2026-10-19T00:00:00.000Z" },
+        ],
+      }),
+    );
+    const started = Date.now();
+    const r = await run(["invite"], deps(fakeExec(() => ({})).exec), {
+      VOLLEY_AUTH_USERNAME: "steer-1",
+      VOLLEY_AUTH_PASSWORD: "s-pw",
+    });
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("steer-1 is a steer account, not an admin one");
+    expect(r.stderr).not.toContain("did not answer");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const env = { VOLLEY_AUTH_DIR: home };
+    expect(localNotAdmin("coordinator", env)).toContain("fixed identity");
+    expect(localNotAdmin("boss", env)).toBeNull();
+    // Not in this machine's registry (another install's admin): volleyd decides.
+    expect(localNotAdmin("someone-else", env)).toBeNull();
   });
 
   it("an unanswered admin op (the broker drops a non-admin's request) says it needs an admin", async () => {

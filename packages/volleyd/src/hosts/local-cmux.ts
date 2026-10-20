@@ -20,7 +20,8 @@ import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } 
  * The local host: worktrees on this machine, agents in cmux workspaces. Every command goes
  * through the fenced `exec`; closing a workspace needs a consent token (`cleanup --yes`, or a
  * retire for its agent's own workspace). volleyd runs as a service, outside cmux, so cmux lets it
- * in only with its socket password: every cmux call gets the one `volley setup` stored
+ * in only in Automation mode (what `volley setup` recommends), Password mode or full open access.
+ * For Password mode every cmux call gets the password `volley setup` stored
  * (`$VOLLEYD_HOME/cmux.json`, read each time) as `CMUX_SOCKET_PASSWORD` in its environment.
  */
 export class LocalCmuxHost implements Host {
