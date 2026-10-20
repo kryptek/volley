@@ -27,6 +27,7 @@
  * window key and device class; Settings, General, Reset layout clears them.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDeskKeys } from "./a11y/keys";
 import {
   type Attn,
@@ -114,7 +115,9 @@ import {
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
+import { TerminalPopout } from "./windows/agent/TerminalPopout";
 import { headlineOf, purposeOf } from "./windows/agent/purpose";
+import { useTerminalPopouts } from "./windows/agent/useTerminalPopouts";
 import {
   COORDS_ID,
   COORDS_W,
@@ -317,6 +320,13 @@ export default function App() {
   const choices = accountChoices(accounts);
   /** The window whose steering panel is open (a wave id or an agent id). */
   const [steerOpen, setSteerOpen] = useState<string | null>(null);
+  // Terminal popouts (the Terminal tab's ⤢): bottom → top; Escape closes the topmost first.
+  const popouts = useTerminalPopouts();
+  // A popout's agent left the store (pruned, or its retained topics cleared): close it.
+  const goneTerm = popouts.open.filter((id) => !state.agents[id]);
+  useEffect(() => {
+    for (const id of goneTerm) popouts.close(id);
+  });
   const toggleSteer = (id: string) => setSteerOpen((s) => (s === id ? null : id));
   const now = useNow(ATTN_TICK_MS);
   const gateSince = useGateSince(state, settling);
@@ -870,6 +880,7 @@ export default function App() {
     zoomAt: (f) => zoomAt(f),
     arrange,
     closeTop: () => {
+      if (popouts.closeTop()) return true;
       if (preview) setPreview(false);
       else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
@@ -1057,6 +1068,7 @@ export default function App() {
                       }
                     : {})}
                   onChat={toggleSteer}
+                  onPopout={popouts.openFor}
                   steerOpen={steerOpen === a.id}
                   steer={
                     steerOpen === a.id &&
@@ -1091,6 +1103,32 @@ export default function App() {
       </div>
 
       <div className="hud" ref={setHud} />
+
+      {popouts.open.length > 0 &&
+        createPortal(
+          <div className="popout-layer">
+            {/* A stable DOM order (by id) so raising one never re-parents it; the stack is `z`. */}
+            {[...popouts.open].sort().map((id) => {
+              const a = state.agents[id];
+              if (!a) return null;
+              return (
+                <TerminalPopout
+                  key={id}
+                  agent={a}
+                  wave={state.waves[a.wave]}
+                  noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
+                  z={popouts.open.indexOf(id) + 1}
+                  cascade={popouts.open.indexOf(id)}
+                  onClose={() => popouts.close(id)}
+                  onRaise={() => popouts.raise(id)}
+                  fontPx={popouts.fontPx}
+                  onFont={(d) => popouts.setFontPx(popouts.fontPx + d)}
+                />
+              );
+            })}
+          </div>,
+          document.body,
+        )}
 
       {/* A coalesced burst of sounds, read out: "12 agents completed". */}
       <output className="sr-only" aria-live="polite">
