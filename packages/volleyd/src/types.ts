@@ -476,10 +476,12 @@ export const WAVE_EVENT_TYPES = [
   "merged_by_operator",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
-  // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began.
+  // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,
+  // or ended without an outcome (timed out, failed to run, interrupted by a restart).
   "merge_queued",
   "merge_dequeued",
   "merge_started",
+  "merge_ended",
   "agent_force_retired",
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.

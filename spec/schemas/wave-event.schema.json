@@ -70,6 +70,7 @@
             "merge_queued",
             "merge_dequeued",
             "merge_started",
+            "merge_ended",
             "agent_force_retired",
             "alarm_cleared",
             "wave_account_moved",

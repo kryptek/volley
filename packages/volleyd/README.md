@@ -2386,7 +2386,12 @@ one at a time, in order, and brings each up to date just before its merge
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
   it) and keeps it until it merged, GitHub refused it, or it waits for an answer.
-  `merge_started { task, pr, head }` is journaled before each `gh pr merge`.
+  `merge_started { task, pr, head }` is journaled before each `gh pr merge`. A merge that ends
+  without an outcome (the hard timeout fired, `gh` could not run, or the daemon restarted while
+  it ran) is journaled `merge_ended { task, why: timed_out | failed | interrupted }`: the task is
+  queued again and takes the turn (or `volleyd merge`) as usual. A stopped wave gives its turn up
+  only once its running merge is back. Across waves on one release branch the lock goes to the
+  wave whose front task asks first (the daemon's tick order), not to the task queued earliest.
 - **Updated just before its merge.** At its turn the task is checked against the release branch
   at once (an event-driven rebase check, not delayed by `ci_poll_ms`). Up to date: the gate runs
   again (evidence rewritten, token re-minted) and it merges. Behind (a merge before it landed):

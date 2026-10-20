@@ -91,7 +91,8 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
  * The task that takes the merge turn next, per release branch (`<repo>#<release_branch>`): none
  * on a branch with a merge in flight. A branch's candidates are its gated entries; a refused one
  * only when no other waits. Across waves sharing a branch, each wave's first candidate competes
- * by readiness.
+ * by readiness. (Each pipeline driver passes its own wave only: across waves the release-branch
+ * lock goes to whichever wave asks first.)
  */
 export function nextToMerge(
   queues: Record<string, QueueEntry[]>,

@@ -192,6 +192,83 @@ describe("merge queue", () => {
     expect(held.get("/repo#release/w1")).toBe("w1/T2");
   });
 
+  it("a merge that timed out is not left in flight: the task takes the turn again", async () => {
+    await threeGated();
+    const isMerge = (a: string[]) => a[0] === "gh" && a[1] === "pr" && a[2] === "merge";
+    h.world.timeout = isMerge;
+    await h.tick();
+    expect(mergedPrs()).toEqual([7]);
+    expect(ofType("merge_ended").map((e) => e.data)).toEqual([{ task: "T1", why: "timed_out" }]);
+    expect(queue().find((e) => e.task === "T1")?.state).toBe("queued");
+
+    h.world.timeout = undefined;
+    h.elapse(60 * 60_000);
+    await h.tick();
+    await h.tick();
+    expect(mergedPrs()).toEqual([7, 7]);
+    expect(h.task("T1")?.stage).toBe("done");
+  });
+
+  it("a restart between merge_started and its outcome: the task takes the turn again", async () => {
+    await threeGated({ merge: "manual" });
+    // The daemon journaled the merge, then died before `gh pr merge` came back.
+    await h.journal({ type: "merge_started", task: "T1", data: { task: "T1", pr: 7, head: H.T1 } });
+    h.restart();
+    await h.tick();
+    expect(ofType("merge_ended").map((e) => e.data)).toEqual([{ task: "T1", why: "interrupted" }]);
+    const r = await h.driver.mergeNow("T1", "coord-1");
+    expect(r).toEqual({ ok: true, merge_sha: MERGED[7] });
+  });
+
+  it("a restart under merge: auto merges the interrupted task on its next turn", async () => {
+    await threeGated();
+    // The daemon journaled T1's merge, then died before `gh pr merge` came back (unmerged).
+    await h.journal({ type: "merge_started", task: "T1", data: { task: "T1", pr: 7, head: H.T1 } });
+    h.restart();
+    await h.tick();
+    await h.tick();
+    expect(mergedPrs()).toContain(7);
+    expect(h.task("T1")?.stage).toBe("done");
+  });
+
+  it("a stopped wave keeps the release branch while its merge is in flight", async () => {
+    const held = new Map<string, string>();
+    const lock = {
+      acquire: (branch: string, key: string) => {
+        const k = held.get(branch);
+        if (k !== undefined && k !== key) return false;
+        held.set(branch, key);
+        return true;
+      },
+      release: (branch: string, key: string) => {
+        if (held.get(branch) === key) held.delete(branch);
+      },
+    };
+    await threeGated({ releaseLock: lock });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((r) => {
+      entered = r;
+    });
+    h.world.gate = (a) => {
+      if (a[1] !== "pr" || a[2] !== "merge") return undefined;
+      entered?.();
+      return gate;
+    };
+    await h.driver.tick();
+    await started; // T1's `gh pr merge` is running, held
+    expect(ofType("merge_started").map((e) => e.data.task)).toEqual(["T1"]);
+    h.driver.releaseTurn();
+    expect(held.get("/repo#release/w1")).toBe("w1/T1");
+    release?.();
+    await h.driver.settled();
+    h.driver.releaseTurn();
+    expect(held.get("/repo#release/w1")).toBeUndefined();
+  });
+
   it("autopilot.delete_branch adds --delete-branch", async () => {
     await threeGated({ deleteBranch: true });
     await h.tick();

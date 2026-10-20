@@ -366,6 +366,7 @@ export function reducePipeline(
       p.merge_inflight = true;
       break;
     case "merged_by_supervisor":
+    case "merge_ended":
       p.merge_inflight = undefined;
       break;
     case "merge_nudge_sent":
@@ -1411,6 +1412,16 @@ function onIoFailed(
     // Not verified yet. The agent's claim stands; a later tick re-checks it.
     out.push(...retireIfLive(run));
   }
+  // volleyd's merge ended without an outcome (a timeout, or `gh` could not run): not in flight.
+  if (ev.what === "merge" && v.p.merge_inflight === true)
+    out.push({
+      kind: "journal",
+      event: {
+        type: "merge_ended",
+        task: v.task,
+        data: { task: v.task, why: ev.timed_out ? "timed_out" : "failed" },
+      },
+    });
   // A timeout is the network's problem and resolves itself; anything else is worth one alarm.
   if (!ev.timed_out) {
     out.push({
@@ -2634,6 +2645,8 @@ export class PipelineDriver {
    */
   private turn: { task: TaskId; branch: string; refusals: number; fresh: boolean } | undefined;
   private readonly lock: ReleaseLock;
+  /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
+  private readonly merging = new Set<TaskId>();
 
   constructor(
     private readonly wave: WaveId,
@@ -2747,6 +2760,15 @@ export class PipelineDriver {
   async mergeNext(): Promise<void> {
     const branch = this.branchKey();
     if (branch === null) return;
+    // A merge journaled as started that no driver here runs (the daemon restarted): it ended.
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      if (this.view(t.id)?.p.merge_inflight !== true || this.merging.has(t.id)) continue;
+      await this.deps.journal({
+        type: "merge_ended",
+        task: t.id,
+        data: { task: t.id, why: "interrupted" },
+      });
+    }
     for (const t of this.deps.record().state?.tasks ?? []) {
       const v = this.view(t.id);
       if (v === null || v.p.queued_at === undefined) continue;
@@ -2833,6 +2855,7 @@ export class PipelineDriver {
       };
     }
     await this.deps.enqueue(async () => {
+      this.merging.delete(task);
       await this.supersedeOnMerge(task, ev);
       await this.handle(task, ev);
       if (!own) this.lock.release(branch, `${this.wave}/${task}`);
@@ -2858,8 +2881,7 @@ export class PipelineDriver {
       v.p.gated.at(-1) !== head
     )
       return `task '${task}' is not merge_ready`;
-    if (v.p.merge_inflight === true || this.inflight.has(`${task}/merge`))
-      return `a merge of task '${task}' is already running`;
+    if (this.merging.has(task)) return `a merge of task '${task}' is already running`;
     const branch = this.branchKey() as string;
     const own = this.turn?.task === task;
     if (!this.lock.acquire(branch, `${this.wave}/${task}`))
@@ -2874,6 +2896,7 @@ export class PipelineDriver {
       return `no merge token can be minted for head ${head} (volleyd merges only an exact 40-hex head)`;
     }
     if (own && this.turn !== undefined) this.turn.fresh = false;
+    this.merging.add(task);
     await this.deps.journal({
       type: "merge_started",
       task,
@@ -2882,8 +2905,12 @@ export class PipelineDriver {
     return { v, token, branch, own };
   }
 
-  /** Give up this wave's merge turn (the wave stopped): the release branch is free again. */
+  /**
+   * Give up this wave's merge turn (the wave stopped): the release branch is free again, once
+   * no merge of this wave runs (the daemon calls it again on its next tick).
+   */
   releaseTurn(): void {
+    if (this.merging.size > 0) return;
     if (this.turn !== undefined)
       this.lock.release(this.turn.branch, `${this.wave}/${this.turn.task}`);
     this.turn = undefined;
@@ -3063,6 +3090,7 @@ export class PipelineDriver {
           if (v === null) break;
           // One attempt per up-to-date check: another needs the turn's rebase check again.
           if (this.turn?.task === task) this.turn.fresh = false;
+          this.merging.add(task);
           await this.deps.journal({
             type: "merge_started",
             task,
@@ -3074,7 +3102,10 @@ export class PipelineDriver {
             key,
             { what: "merge" },
             () => this.merge(v, a.token),
-            (ev) => this.supersedeOnMerge(task, ev),
+            (ev) => {
+              this.merging.delete(task);
+              return this.supersedeOnMerge(task, ev);
+            },
           );
           break;
         }

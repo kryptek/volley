@@ -78,6 +78,8 @@ export interface World {
   runLog: string;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
+  /** An argv this returns a promise for is answered only once it resolves. */
+  gate?: ((argv: string[]) => Promise<void> | undefined) | undefined;
   /** An argv this answers true for never returns (a hung network call). */
   hang?: ((argv: string[]) => boolean) | undefined;
   /** An argv this answers true for comes back `timedOut` (exec's hard timeout fired). */
@@ -201,6 +203,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     callOpts.push(opts);
     const a = [...argv];
     world.before?.(a);
+    const gate = world.gate?.(a);
+    if (gate !== undefined) await gate;
     if (world.hang?.(a)) return new Promise<ExecResult>(() => {});
     if (world.timeout?.(a)) return { ...out(""), code: 124, timedOut: true };
     if (world.fail?.(a)) throw new Error(`spawn ${a[0]} ENOENT`);
