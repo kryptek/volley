@@ -4,6 +4,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 
@@ -67,7 +68,16 @@ async function status(agentId: string, type: string) {
 }
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
 const reconnects = () => daemon.journalEvents(WAVE).filter((e) => e.type === "owner_reconnected");
-const until = (check: () => void) => vi.waitFor(check, { timeout: 5000, interval: 20 });
+// Not vi.waitFor: the bun test runner (one of CI's two runners) does not provide it.
+const until = (check: () => void) =>
+  eventually(() => {
+    try {
+      check();
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
 beforeEach(async () => {
   t = await makeDaemonEnv();
