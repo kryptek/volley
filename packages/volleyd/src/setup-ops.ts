@@ -13,6 +13,7 @@ import {
   appendSetupLog,
   lastSetup,
   readSetupInstall,
+  recordCmuxSocketMode,
   setupLogFile,
 } from "volley-cli/setup/journal";
 import { planServices } from "volley-cli/setup/services";
@@ -470,6 +471,8 @@ export class SetupOps {
       else if (c.summary.startsWith(RESTART)) restart = c;
       else now.push(c);
     }
+    // The mode the Services step's cmux check found, on record whatever the step does next.
+    if (name === "services") recordCmuxSocketMode(ctx);
     const lines: string[] = [];
     const applied: string[] = [];
     if (plan.changes.length === 0) {

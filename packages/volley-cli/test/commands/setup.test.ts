@@ -264,6 +264,31 @@ describe("volley setup", () => {
     expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
   });
 
+  it("a run that stops at cmux replaces an earlier run's cmux mode in setup.json", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    let answer = '{"access_mode":"automation"}\nvolley-cmux-caps=0\nok\nvolley-cmux-exit=0\n';
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(argv[4] as string, answer);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    m.deps.interactive = false;
+    const recorded = () =>
+      JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8")).cmux_socket_mode;
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    expect(recorded()).toBe("automation");
+    // cmux set back to Password mode: the rerun stops at cmux, and says so in setup.json too.
+    answer =
+      "ERROR: Invalid password\nvolley-cmux-caps=1\nERROR: Invalid password\nvolley-cmux-exit=1\n";
+    expect((await run(["--yes", "--step", "services"])).code).toBe(1);
+    expect(recorded()).toBe("password");
+  });
+
   it("prints the admin token as a link to the Desk it serves (its --desk-port)", async () => {
     const r = await run(["--yes", "--desk-port", "5288"]);
     expect(r.code).toBe(0);
@@ -299,8 +324,10 @@ describe("volley setup", () => {
     expect(r.stdout).toContain("(cmux said: ERROR: Invalid password)");
     expect(r.stderr).toContain("Give volleyd the cmux socket password");
     expect(r.stderr).toContain("volley setup --step services");
-    // The run stopped, so no setup.json yet; the mode is what the check found.
-    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
+    // The run stopped at cmux, and setup.json records the mode the check found.
+    const recorded = () =>
+      JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8")).cmux_socket_mode;
+    expect(recorded()).toBe("password");
     // Every other service is in place: only cmux is left.
     expect(
       existsSync(join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist")),

@@ -160,6 +160,8 @@ describe("setup: cmux", () => {
     let cmuxRunning: boolean;
     /** cmux in Automation mode: any process of the user gets in. */
     let automation: boolean;
+    /** cmux's socket mode when it lets the service in without a password. */
+    let openMode: "automation" | "allow-all";
     /** What cmux answers a wrong password with. */
     let wrongPassword: string;
     /** The env each service-like check ran with. */
@@ -178,6 +180,7 @@ describe("setup: cmux", () => {
       cmuxPassword = null;
       cmuxRunning = true;
       automation = false;
+      openMode = "automation";
       wrongPassword = "Access denied - invalid socket password";
       checks = [];
       // cmux installed in ~/Applications.
@@ -195,7 +198,7 @@ describe("setup: cmux", () => {
           const [capsCode, caps, code, said] = !cmuxRunning
             ? [1, REFUSED_SOCKET, 1, REFUSED_SOCKET]
             : automation
-              ? [0, '{"access_mode":"automation","methods":[]}', 0, "workspace:1"]
+              ? [0, `{"access_mode":"${openMode}","methods":[]}`, 0, "workspace:1"]
               : cmuxPassword === null
                 ? [1, DENIED, 1, DENIED]
                 : sent === cmuxPassword
@@ -300,6 +303,17 @@ describe("setup: cmux", () => {
         "cmux: volleyd's service reaches it (cmux's socket control mode: Password mode) (`cmux capabilities` and `cmux list-workspaces`, run the way the service runs them, with the stored socket password)",
       );
       expect(await again.verify?.()).toEqual([]);
+    });
+
+    it("names the stored password only in a mode that uses it", async () => {
+      writeCmuxPassword(m.ctx.volleydHome, "pw");
+      automation = true;
+      openMode = "allow-all";
+      const found = (await planServices(m.ctx)).found.join("\n");
+      expect(found).toContain(
+        "cmux: volleyd's service reaches it (cmux's socket control mode: Full open access)",
+      );
+      expect(found).not.toContain("with the stored socket password");
     });
 
     it("refuses a password cmux does not take, storing nothing", async () => {

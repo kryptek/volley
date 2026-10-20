@@ -315,10 +315,12 @@ export async function planCmux(
   const askSecret =
     ctx.deps.interactive && ctx.deps.askSecret !== undefined ? ctx.deps.askSecret : null;
   if (check.access === "ok") {
+    // The stored password matters only in Password mode (or a mode cmux did not name).
+    const usesPassword = stored !== null && (check.mode === null || check.mode === "password");
     found.push(
-      `cmux: volleyd's service reaches it${modeNote(check.mode)} (${HOW_CHECKED}${stored !== null && check.mode !== "automation" ? ", with the stored socket password" : ""})`,
+      `cmux: volleyd's service reaches it${modeNote(check.mode)} (${HOW_CHECKED}${usesPassword ? ", with the stored socket password" : ""})`,
     );
-    if (stored === null || (check.mode !== null && check.mode !== "password")) return null;
+    if (!usesPassword) return null;
     const loose = (statSync(file).mode & 0o077) !== 0;
     const k = await ctx.deps.exec(keychainRead).catch(() => null);
     // Exit 44: no such item. Anything else (no keychain to ask) is no change to offer.

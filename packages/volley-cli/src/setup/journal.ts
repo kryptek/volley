@@ -88,7 +88,6 @@ export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setu
 
 /** Record the install `ctx` runs against. A record, not a gate, like the journal. */
 export function writeSetupInstall(ctx: SetupContext): void {
-  const file = setupInstallFile(ctx.volleydHome);
   // A run that skipped the security step (`--step services`) keeps the LAN choice on record.
   const prior = readSetupInstall(ctx.volleydHome);
   const lan = ctx.lan ?? prior?.lan;
@@ -104,6 +103,23 @@ export function writeSetupInstall(ctx: SetupContext): void {
     ...(lan !== undefined ? { lan } : {}),
     ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
   };
+  saveInstall(ctx, install);
+}
+
+/**
+ * Record the cmux socket mode the Services step found in an existing setup.json (the Desk's
+ * Services runs; a terminal run that stops at cmux writes the whole record instead). No-op
+ * without a record or a checked mode.
+ */
+export function recordCmuxSocketMode(ctx: SetupContext): void {
+  const prior = readSetupInstall(ctx.volleydHome);
+  if (prior === null || ctx.cmuxSocketMode === undefined) return;
+  if (prior.cmux_socket_mode === ctx.cmuxSocketMode) return;
+  saveInstall(ctx, { ...prior, cmux_socket_mode: ctx.cmuxSocketMode });
+}
+
+function saveInstall(ctx: SetupContext, install: SetupInstall): void {
+  const file = setupInstallFile(ctx.volleydHome);
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
     const owner = typeof invoker === "object" ? invoker : null;
