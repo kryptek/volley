@@ -7,9 +7,10 @@ import { PS_ARGV } from "./fence";
 
 /**
  * Stopping a retired agent's `claude` process (retire's session end on the local host, and
- * `volleyd cleanup --yes`). The only module that sends a signal: it lists processes with the
- * fenced, read-only `ps -axo pid=,command=` and signals them with `process.kill`, so no child
- * process is spawned for it. A process counts only by its argv: the launch script passes
+ * `volleyd cleanup --yes`). The only module that signals a process volleyd did not spawn
+ * (exec.ts signals only its own children): it lists processes with the fenced, read-only
+ * `ps -axo pid=,command=` and signals them with `process.kill`, so no child process is spawned
+ * for it. A process counts only by its argv: the launch script passes
  * `--mcp-config=<worktree>/.volley/mcp.json`, and that worktree must lie under the given root.
  */
 

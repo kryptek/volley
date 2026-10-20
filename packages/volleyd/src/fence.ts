@@ -883,10 +883,10 @@ const DOCKER_DENY = new Set([
   "volume prune",
 ]);
 
-/** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
 /** The one process listing (procs.ts): read-only; signals are sent with `process.kill`, never a child. */
 export const PS_ARGV: readonly string[] = ["ps", "-axo", "pid=,command="];
 
+/** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
 const PRESSURE_READS: readonly (readonly string[])[] = [
   ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
   ["memory_pressure"],
