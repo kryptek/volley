@@ -237,6 +237,29 @@ describe("volleyd status formatting", () => {
     expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
   });
 
+  it("a releasing wave shows its release train: the current stage and how many are verified", () => {
+    const out = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: {
+        stage: "staging",
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "staging", state: "running" },
+          { name: "notes", state: "pending" },
+        ],
+      },
+    });
+    expect(out.split("\n")[0]).toContain("w1  releasing  plan v1");
+    expect(out.split("\n")[1]).toBe("  release: staging (1/3 verified)");
+    const idle = formatWave({
+      ...plain,
+      release: { stage: null, stages: [{ name: "bump", state: "verified" }] },
+    });
+    expect(idle.split("\n")[1]).toBe("  release: - (1/1 verified)");
+  });
+
   it("names the agent a coordinator-name owner acts through; it needs you when you are that agent", () => {
     const named = {
       ...plain,
@@ -302,6 +325,37 @@ describe("volleyd status formatting", () => {
       });
       expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
         `  brief preface: ${join(repo, ".volley", "brief-preface.md")} (`,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  });
+});
+
+describe("volleyd run: the release playbook (SPEC §4.6.19)", () => {
+  it("prints the playbook line; an invalid playbook fails before the daemon is asked", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      await env.start();
+      const repo = join(env.home, "repo");
+      mkdirSync(join(repo, ".volley"), { recursive: true });
+      const playbook = join(repo, ".volley", "release.yaml");
+      writeFileSync(playbook, "version: 1\nstages:\n  - { name: smoke, brief: Run it. }\n");
+      const file = join(env.home, "w1.yaml");
+      const yaml = (wave: string) =>
+        `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`;
+      writeFileSync(file, yaml("w1"));
+      const ok = await runCli(["run", file], env.env);
+      expect(ok.exitCode).toBe(0);
+      expect(ok.stdout).toContain(
+        "release playbook: .volley/release.yaml (1 stage, 0 owner-gated)\n",
+      );
+      writeFileSync(playbook, "version: 1\nstages: []\n");
+      writeFileSync(file, yaml("w2"));
+      const bad = await runCli(["run", file], env.env);
+      expect(bad.exitCode).toBe(1);
+      expect(bad.stderr).toContain(
+        `RELEASE_PLAYBOOK_INVALID: ${playbook}: invalid release playbook:`,
       );
     } finally {
       await env.cleanup();

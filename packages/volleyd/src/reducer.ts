@@ -1,4 +1,5 @@
 import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
+import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
@@ -166,6 +167,8 @@ const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   wave_resumed: "running",
   wave_stopped: "stopped",
   wave_complete: "complete",
+  release_started: "releasing",
+  release_done: "complete",
 };
 
 /**
@@ -469,8 +472,17 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       break;
     default: {
       const status = WAVE_STATUS[ev.type];
-      if (status !== undefined) state.status = status;
+      // A releasing wave that was paused resumes releasing (SPEC §4.6.19).
+      if (status !== undefined)
+        state.status =
+          status === "running" && state.release !== undefined && ev.type === "wave_resumed"
+            ? "releasing"
+            : status;
     }
+  }
+  if (state.release !== undefined || ev.type === "release_started") {
+    const release = stepRelease(state.release ?? null, ev);
+    if (release !== null) state.release = release;
   }
 
   if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {

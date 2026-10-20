@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "stages": [{ "name": "bump", "brief": "Bump the version.", "run": ["bun run changelog"] }]
+}

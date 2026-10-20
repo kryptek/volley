@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/release-playbook.schema.json",
+  "title": "Volley Release Playbook",
+  "description": "A repository's release playbook, <repo>/.volley/release.yaml (spec section 4.6.19): the stages a supervisor runs, in order, once a wave's tasks are all merged, before it asks the owner release_go. Authored as YAML; this schema validates the parsed document. Not an envelope. Generic hooks: each stage is a brief for the agent that runs it, the commands it runs, and the facts the supervisor checks afterwards. Stage names are unique (enforced by the supervisor's parser with a path-qualified error).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "stages"],
+  "properties": {
+    "version": { "const": 1, "description": "Playbook format version." },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/stage" },
+      "description": "The release stages, run in this order."
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "brief"],
+      "properties": {
+        "name": { "$ref": "#/$defs/id", "description": "Stage name, unique in the playbook." },
+        "brief": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "description": "What the stage's agent does, in prose."
+        },
+        "run": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "description": "Commands the stage's agent runs, each an argv array (never a shell line); shown in its brief verbatim."
+        },
+        "gate": {
+          "enum": ["auto", "owner"],
+          "default": "auto",
+          "description": "owner: the supervisor opens a stage_go decision and runs the stage only on go (how a deploy-shaped stage asks first). auto: it runs when the stage before it is verified."
+        },
+        "verify": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "description": "Facts the supervisor checks once the stage reports done; the stage is verified only when every one holds.",
+          "properties": {
+            "commits_on_release": {
+              "type": "boolean",
+              "description": "true: the stage pushed at least one commit to the release branch."
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "description": "A tag matching this glob exists at the release branch's head."
+            },
+            "files": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Paths that must exist on the release branch."
+            },
+            "result": {
+              "type": "object",
+              "additionalProperties": {
+                "type": ["string", "number", "boolean"]
+              },
+              "description": "Fields the stage's result payload must carry, each with exactly this value."
+            }
+          }
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "description": "How long the stage may run before it fails."
+        },
+        "heavy": {
+          "$ref": "#/$defs/id",
+          "description": "A lease pool (config lease_pools key) the stage holds a lease from while it runs."
+        }
+      }
+    }
+  }
+}
