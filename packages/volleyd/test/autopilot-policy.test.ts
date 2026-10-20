@@ -127,13 +127,70 @@ describe("evaluate: the policy table, row by row", () => {
     );
   });
 
-  it("agent_stalled asked again: respawn is not offered yet (A2), so no_policy", () => {
-    const d = rec("agent_stalled", ["nudge again", "stop task"], {
+  it("agent_stalled asked again: respawn, under respawn_max per task/role", () => {
+    const d = rec("agent_stalled", ["nudge again", "respawn", "stop task"], {
       class: "agent_stalled",
       asked: 2,
       agent_id: "w1-t1-implementer-1",
+      pipeline: { on: "liveness", role: "implementer", agent_id: "w1-t1-implementer-1" },
     });
-    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("respawn");
+    expect("budget" in v && v.budget).toEqual({
+      key: "respawn_max:T1/implementer",
+      used: 1,
+      max: 1,
+    });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/implementer": 1 })))).toBe(
+      "budget_exhausted",
+    );
+    // A stall decision from before respawn was offered: never an answer it does not offer.
+    expect(whyOf(evaluate({ ...d, options: ["nudge again", "stop task"] }, ctx()))).toBe(
+      "no_policy",
+    );
+  });
+
+  it("agent_blocked on verify (an unverifiable done): respawn, under respawn_max per task/role", () => {
+    const d = rec("agent_blocked", ["respawn", "re-verify", "cancel"], {
+      pipeline: { on: "verify", role: "fixup", agent_id: "w1-t1-fixup-1" },
+    });
+    const v = evaluate(d, ctx());
+    expect(v).toMatchObject({ answer: "respawn", policy: "agent_blocked/respawn-unverifiable" });
+    expect("budget" in v && v.budget).toEqual({ key: "respawn_max:T1/fixup", used: 1, max: 1 });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/fixup": 1 })))).toBe("budget_exhausted");
+  });
+
+  it("ci_failed on the role's own change: fixup, under ci_fixup_max per task", () => {
+    const own = { pipeline: { on: "ci_failed", role: "implementer", head: "a".repeat(40) } };
+    const opts = ["fixup", "re-verify", "cancel"];
+    // Until A3 classifies a red head, every red head that is not infra-shaped is the change's.
+    const d = rec("ci_failed", opts, { ...own, infra: false });
+    const v = evaluate(d, ctx());
+    expect(v).toMatchObject({ answer: "fixup", policy: "ci_failed/fixup-own-change" });
+    expect("budget" in v && v.budget).toEqual({ key: "ci_fixup_max:T1", used: 1, max: 2 });
+    expect(whyOf(evaluate(d, ctx({}, { "ci_fixup_max:T1": 2 })))).toBe("budget_exhausted");
+    expect(
+      answerOf(
+        evaluate(
+          rec("ci_failed", opts, { ...own, classification: "own_change", infra: true }),
+          ctx(),
+        ),
+      ),
+    ).toBe("fixup");
+    // Infra-shaped, or classified otherwise (A3): the owner's.
+    expect(whyOf(evaluate(rec("ci_failed", opts, { ...own, infra: true }), ctx()))).toBe(
+      "no_policy",
+    );
+    expect(
+      whyOf(
+        evaluate(rec("ci_failed", opts, { ...own, infra: false, classification: "flake" }), ctx()),
+      ),
+    ).toBe("no_policy");
+    // No CI run at all (ci_none) is never a fixup's job.
+    const none = rec("ci_failed", ["accept", "cancel"], {
+      pipeline: { on: "ci_none", role: "implementer" },
+    });
+    expect(whyOf(evaluate(none, ctx()))).toBe("no_policy");
   });
 
   it("agent_blocked by a failed agent: respawn, under respawn_max per task/role", () => {

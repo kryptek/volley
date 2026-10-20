@@ -5414,18 +5414,38 @@ export class Daemon {
         );
       case "steer":
         return this.steerAgent(agentId, a, x.text, { reason: "idle" });
-      case "agent_stalled":
+      case "agent_stalled": {
+        // A respawn is the pipeline's (its relaunch): offered where a pipeline spawns the role.
+        const respawn = this.opts.spawner !== undefined;
+        const attempt = this.spawnedRecord((e) => e.data.agent_id === agentId, wave)?.attempt;
         return open(
           "stalled",
           {
             kind: "agent_stalled",
             task,
-            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
-            options: ["nudge again", STOP_ANSWER],
+            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
+            options: respawn
+              ? ["nudge again", "respawn", STOP_ANSWER]
+              : ["nudge again", STOP_ANSWER],
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
-          { class: "agent_stalled", idle_s: x.idle_s, asked: x.asked },
+          {
+            class: "agent_stalled",
+            idle_s: x.idle_s,
+            asked: x.asked,
+            ...(respawn
+              ? {
+                  pipeline: {
+                    on: "liveness",
+                    role: a.role,
+                    agent_id: agentId,
+                    ...(typeof attempt === "number" ? { attempt } : {}),
+                  },
+                }
+              : {}),
+          },
         );
+      }
       case "credit_exhausted": {
         const now = this.now();
         const allowed = recoveryAllowed(creditOccurrences(this.journalEvents(wave), agentId, now));
@@ -5655,6 +5675,8 @@ export class Daemon {
           decision_id: d.decision_id,
         });
       case "agent_stalled":
+        // respawn: the pipeline relaunches the role (its liveness marker); nothing is typed.
+        if (isRespawnAnswer(answer, d.options)) return;
         return this.steerAgent(
           agentId,
           a,
