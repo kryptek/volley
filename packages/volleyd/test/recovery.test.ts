@@ -205,7 +205,7 @@ describe("daemon: a reaped agent on a down machine offers respawn on <best>", ()
       local: true,
     });
     await f.tick();
-    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer 2"]);
     // A fresh worktree there, on the branch the first attempt pushed (origin's copy), and the
     // brief names it and its open PR: no second branch, no second PR.
     const wt = f.local.worktrees.at(-1);

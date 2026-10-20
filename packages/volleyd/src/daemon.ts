@@ -3133,10 +3133,13 @@ export class Daemon {
     }
     const eff = this.config.effective(wave);
     // Failures count per spawn: this role's, for the agent attempt it is trying to launch.
+    // A failure that burned its attempt's identity moved the next one on: still the same run.
     const spawnAttempt = this.agentAttempt(wave, task, role);
     const prev = rec.spawnFailures[task]?.[role];
+    const prevAttempt = prev?.spawn_attempt ?? spawnAttempt;
     const n =
-      prev !== undefined && (prev.spawn_attempt ?? spawnAttempt) === spawnAttempt
+      prev !== undefined &&
+      (prevAttempt === spawnAttempt || this.burnedAttempts(wave, task, role).includes(prevAttempt))
         ? prev.attempt + 1
         : 1;
     const stopped = n >= eff.spawn_retry_max;
@@ -3250,12 +3253,25 @@ export class Daemon {
   private agentAttempt(wave: WaveId, task: TaskId, role: Role): number {
     const journal = this.waves.get(wave)?.journal;
     if (journal === undefined) return 1;
+    // A burned attempt (a launch whose outcome could not be decided) may still have a live
+    // session: its identity is never reused, so it counts like a spawned one.
     return (
       journal
         .readAll()
-        .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
-        .length + 1
+        .filter(
+          (e) =>
+            (e.type === "agent_spawned" || e.type === "spawn_identity_burned") &&
+            e.task === task &&
+            e.data.role === role,
+        ).length + 1
     );
+  }
+
+  /** The attempts of a task's role whose identity was burned (`spawn_identity_burned`). */
+  private burnedAttempts(wave: WaveId, task: TaskId, role: Role): number[] {
+    return (this.waves.get(wave)?.journal.readAll() ?? [])
+      .filter((e) => e.type === "spawn_identity_burned" && e.task === task && e.data.role === role)
+      .map((e) => Number(e.data.attempt));
   }
 
   /**

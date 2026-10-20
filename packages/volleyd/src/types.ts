@@ -363,6 +363,12 @@ export const WAVE_EVENT_TYPES = [
   "agent_retired",
   "spawn_failed",
   "spawn_recovered",
+  // A launch whose outcome was unknown (spawn.ts reconcileLaunch): its agent registered and was
+  // adopted; its workspace held no agent and was closed; or it could not be decided, so the
+  // attempt's identity is never reused.
+  "spawn_adopted",
+  "launch_orphan_closed",
+  "spawn_identity_burned",
   "verify_failed",
   "stage_entered",
   "artifact_verified",

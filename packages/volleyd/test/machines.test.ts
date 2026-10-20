@@ -1122,7 +1122,7 @@ describe("a machine that stays down: the machine_down decision (SPEC §4.6.15)",
     // Its respawn starts where it now is.
     await f.resolve("w1", blocked as string, "respawn");
     await f.tick();
-    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer 2"]);
   });
 
   it("re-place with no machine eligible: the task waits, then moves as soon as one is", async () => {
