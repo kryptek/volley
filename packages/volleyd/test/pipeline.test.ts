@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
 import type { HygieneLevel } from "../src/reviews";
@@ -15,6 +16,7 @@ const result = (name: string): unknown =>
 const H1 = sha(0x1001);
 const H2 = sha(0x1002);
 const H3 = sha(0x1003);
+const H4 = sha(0x1004);
 
 let h: Harness;
 afterEach(() => h?.cleanup());
@@ -1168,6 +1170,73 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     await h.resolve(ciFailed()?.decision_id as string, "re-verify");
     expect(h.spawns.map((s) => s.role)).toContain("spec_reviewer");
     expect(h.spawns.some((s) => s.role === "fixup")).toBe(false);
+
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "red" });
+    await h.resolve(ciFailed()?.decision_id as string, "cancel");
+    expect(stage()).toBe("cancelled");
+    expect(h.spawns.some((s) => s.role === "fixup")).toBe(false);
+  });
+
+  it("CI red on a rebase's head: a CI fixup, and its green head goes to the gate with no re-review", async () => {
+    await reviewed();
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    const rebase = h.spawns.find((s) => s.role === "rebase");
+    expect(rebase?.start).toEqual({ ref: H2, detach: false });
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    redOn(H3);
+    await h.finish("rebase", { head: H3, ci: "red" });
+    const d = ciFailed();
+    expect(d?.options).toEqual(["fixup", "re-verify", "cancel"]);
+    await h.resolve(d?.decision_id as string, "fixup");
+    const fixups = h.spawns.filter((s) => s.role === "fixup");
+    expect(fixups).toHaveLength(2);
+    expect(fixups[1]?.start).toEqual({ ref: H3, detach: false });
+    expect(fixups[1]?.files["findings.md"]).toMatch(/^# Directive: CI failed on your head/);
+    // The rebase head is chained like an accepted one.
+    expect(h.record().pipeline.T1?.rebases).toContainEqual(
+      expect.objectContaining({ from: H2, to: H3 }),
+    );
+
+    await h.finish("fixup", {
+      head: H4,
+      ci: "green",
+      result: { resolved: [{ finding: "CI", how: "fixed the test" }] },
+    });
+    // H4 ← CI fixup ← H3 ← rebase ← H2 ← fixup ← H1: the reviews of H1 hold.
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr).toMatchObject({ head_sha: H4, ci: "green" });
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    expect(h.spawns.filter((s) => s.role === "quality_reviewer")).toHaveLength(1);
+    expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+  });
+
+  it("a stale fixup answer after CI went green and the role verified does nothing", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "red" });
+    const stale = ciFailed();
+    expect(stale?.options?.[0]).toBe("fixup");
+    // A re-run turns it green; a second ci_failed answered re-verify accepts the role.
+    h.world.ci[H1] = "green";
+    await h.resolve(stale?.decision_id as string, "re-verify");
+    expect(h.run("implementer")?.accepted).toBe(true);
+    const before = stage();
+    const entered = h.events.filter((e) => e.type === "stage_entered").length;
+    // A late `fixup` answer to the red head's decision reaches the pipeline anyway.
+    const late = {
+      ...(h.record().decisions[stale?.decision_id as string] as DecisionRecord),
+      resolved: { answer: "fixup", by: "coord-1", at: new Date().toISOString() },
+    } as DecisionRecord;
+    await h.driver.handle("T1", { kind: "decision_resolved", decision: late });
+    await h.driver.settled();
+    expect(h.spawns.some((s) => s.role === "fixup")).toBe(false);
+    expect(stage()).toBe(before);
+    expect(h.events.filter((e) => e.type === "stage_entered")).toHaveLength(entered);
   });
 
   it("an unverifiable done answered respawn: relaunched at the next attempt, the implementer again", async () => {
@@ -1196,6 +1265,27 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     expect(impl[1]?.start).toBeUndefined();
     expect(h.run("implementer")?.agent_id).toBe("w1-t1-implementer-2");
     expect(h.retired).toContainEqual({ agent_id: first, status: "relaunched" });
+  });
+
+  it("a free-text cancel to a stall is the daemon's to steer: the pipeline does not cancel the task", async () => {
+    h = pipelineHarness();
+    await h.start();
+    const agent = h.run("implementer")?.agent_id as string;
+    const stalled = {
+      decision_id: "d-stalled",
+      kind: "agent_stalled",
+      task: "T1",
+      agent_id: agent,
+      question: "stalled",
+      options: ["nudge again", "respawn", "stop task"],
+      pipeline: { on: "liveness", role: "implementer", agent_id: agent, attempt: 1 },
+      resolved: { answer: "cancel", by: "coord-1", at: new Date().toISOString() },
+    } as unknown as DecisionRecord;
+    await h.driver.handle("T1", { kind: "decision_resolved", decision: stalled });
+    await h.driver.settled();
+    expect(types()).not.toContain("task_cancelled");
+    expect(stage()).not.toBe("cancelled");
+    expect(h.retired).toEqual([]);
   });
 
   it("an unverifiable done answered re-verify re-verifies (no respawn)", async () => {

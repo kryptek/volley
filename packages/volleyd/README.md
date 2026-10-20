@@ -665,9 +665,9 @@ left for you, with one push.
   any answer).
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
   `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
-  `ci_fixup_max` (CI fixups, default 2) per task, and `budget_raise_max`, a multiple of the wave's derived spawn budget that `raise by <n>`
-  answers may reach. Each is reduced from the journal's `decision_auto_resolved` events, so a
-  restart keeps them.
+  `ci_fixup_max` (CI fixups, default 2) per task, and `budget_raise_max`, a multiple of the
+  wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
+  journal's `decision_auto_resolved` events, so a restart keeps them.
 - **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
   enabled: false } }`) takes effect at the next decision: nothing is answered or escalated, and
   every decision waits for you as before.

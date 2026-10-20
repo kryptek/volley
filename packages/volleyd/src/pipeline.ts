@@ -1643,7 +1643,9 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   // Merged meanwhile (`volleyd merged`, GitHub): no answer brings a done task back.
   if (v.stage === "done") return [];
   if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
-  if (isAnswer(answer, "cancel")) {
+  // A stall's answers other than respawn are the daemon's: it stops the task on `stop task` and
+  // types anything else (a free-text `cancel` too) to the agent, which stays live.
+  if (isAnswer(answer, "cancel") && m.on !== "liveness") {
     // A blocked agent is still live (SPEC §5.2): it is stopped with the task.
     const blocked = m.on === "agent_blocked" && m.role !== undefined ? v.p.runs[m.role] : undefined;
     const agent = (d as { agent_id?: unknown }).agent_id;
@@ -1858,6 +1860,7 @@ function ciFixup(v: PipelineView, d: DecisionRecord, m: PipelineMarker): Pipelin
     failed_jobs: strings("failed_jobs"),
     failing_tests: strings("failing_tests"),
     log: typeof x.log === "string" ? x.log : "",
+    // No move to summarise: the red head is the role's own (renderCiDirectiveMd omits it).
     diffstat: "",
     runs: Array.isArray(x.ci_runs) ? (x.ci_runs as CiRun[]) : [],
     only: true,

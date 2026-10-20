@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { DecisionRecord } from "../src/decisions";
-import { AUTOPILOT_ON } from "./helpers/daemon-env";
+import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
+import { FIXTURES } from "./helpers/fake-host";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 /**
@@ -54,6 +57,48 @@ async function idle(): Promise<void> {
   await clock.advance(4 * MIN);
   await s.daemon.tick();
   await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
+  await s.settled();
+}
+
+/** As `idle`, for the respawned agent `id` (registered by its session first). */
+async function idleAs(id: string): Promise<void> {
+  const send = (channel: string, type: string, payload: Record<string, unknown>, retain = false) =>
+    s.agent.publish(
+      channel === "_system/registry" ? registryTopic(id) : buildTopic(NS, id, channel),
+      JSON.stringify({
+        ...buildEnvelope({ agentId: id, parentId: "volleyd", channel, type, payload }),
+        ...(channel === "_system/registry" ? { namespace: NS } : {}),
+      }),
+      { qos: 1, retain },
+    );
+  // Its session starts as supervised-env's launch does: MCP registers, SessionStart heartbeats.
+  await send("status", "spawning", {}, true);
+  await send(
+    "_system/registry",
+    "registered",
+    {
+      capabilities: [],
+      cwd: "/wt",
+      started_at: new Date().toISOString(),
+      model: "claude-opus-5-5",
+      model_source: "harness-hook",
+    },
+    true,
+  );
+  await send("status", "working", { source: "harness-hook" }, true);
+  await send("progress", "heartbeat", {
+    source: "harness-hook",
+    seq: 1,
+    hook_event: "SessionStart",
+  });
+  await s.event((x) => x.type === "agent_registered" && x.data.agent_id === id);
+  await s.consumed();
+  const e = JSON.parse(readFileSync(join(FIXTURES, "hooks", "idle-stop.json"), "utf-8"));
+  await send(e.channel, e.type, e.payload);
+  await s.consumed();
+  await clock.advance(4 * MIN);
+  await s.daemon.tick();
+  await s.event((x) => x.type === "steering_sent" && x.data.reason === "idle", 2);
   await s.settled();
 }
 
@@ -145,5 +190,21 @@ describe("agent_stalled: respawn", () => {
       to_agent: NEXT,
     });
     expect(stalls()).toHaveLength(2);
+    // The old decision's class slot is cleared (noteResolved): nothing left open for it.
+    expect(s.daemon.record("w1")?.state?.open_decisions ?? []).toEqual([]);
+
+    // The new agent stalls in turn: nudged once (its own first stall), then its next stall
+    // escalates, since respawn_max:T1/implementer is spent.
+    await idleAs(NEXT);
+    const third = await stallOnce(4 * MIN, 3);
+    expect(third.resolved).toMatchObject({ answer: "nudge again", by: "volleyd" });
+    const fourth = await stallOnce(7 * MIN, 4);
+    expect(fourth.resolved).toBeUndefined();
+    const esc = s.journal().filter((e) => e.type === "decision_escalated");
+    expect(esc.map((e) => e.data)).toEqual([
+      expect.objectContaining({ decision_id: fourth.decision_id, why: "budget_exhausted" }),
+    ]);
+    expect(s.daemon.record("w1")?.state?.open_decisions).toEqual([fourth.decision_id]);
+    expect(s.journal().filter((e) => e.type === "relaunched")).toHaveLength(1);
   });
 });
