@@ -395,6 +395,43 @@ export interface ReadinessPayload {
   checked_at: string;
 }
 
+/** inbox-item.schema.json payload.kind. */
+export const INBOX_KINDS = ["decision", "picker", "handoff", "release"] as const;
+export type InboxKind = (typeof INBOX_KINDS)[number];
+
+/** inbox-item.schema.json $defs.where.kind: where an answer was given. */
+export const INBOX_WHERE_KINDS = ["desk", "terminal", "cli", "autopilot"] as const;
+
+export interface InboxWhere {
+  kind: (typeof INBOX_WHERE_KINDS)[number];
+  device?: string;
+  machine?: string;
+}
+
+/**
+ * inbox-item.schema.json payload: one thing waiting for a person, on `volley/_inbox/<id>`
+ * (SPEC §4.6.18). Answer it with an `inbox_answer { id, version, answer, where }` request to
+ * volleyd, the referee: the first answer at the current `version` wins.
+ */
+export interface InboxItem {
+  id: string;
+  kind: InboxKind;
+  version: number;
+  owner_only: boolean;
+  wave?: string;
+  task?: string;
+  agent_id: string;
+  title: string;
+  question: string;
+  options?: { label: string; description?: string }[];
+  allow_other?: boolean;
+  multi?: boolean;
+  pointers: Record<string, string>;
+  opened_at: string;
+  source: Record<string, unknown>;
+  answered?: { answer: string; by: string; where: InboxWhere; at: string };
+}
+
 // ------------------------------------------------------------------- store
 
 export interface FeedEntry {
@@ -561,6 +598,8 @@ export interface DeskState {
   machines?: Record<string, MachinePayload>;
   /** volleyd's readiness verdicts, by machine name. */
   readiness?: Record<string, ReadinessPayload>;
+  /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
+  inbox?: Record<string, InboxItem>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

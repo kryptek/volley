@@ -17,6 +17,7 @@
  *   - `waveevent-*.json` -> wave-event.schema.json
  *   - `wavefile-*.json` -> wave-file.schema.json (a file, not an envelope)
  *   - `decision-*.json` -> decision.schema.json
+ *   - `inbox-*.json` -> inbox-item.schema.json
  *   - `lease-*.json` -> lease-pool.schema.json
  *   - `leasereq-*.json` -> lease-request.schema.json
  *   - `identity-*.json` -> agent-identity.schema.json (a file, not an envelope)
@@ -56,6 +57,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   waveevent: "wave-event.schema.json",
   wavefile: "wave-file.schema.json",
   decision: "decision.schema.json",
+  inbox: "inbox-item.schema.json",
   lease: "lease-pool.schema.json",
   leasereq: "lease-request.schema.json",
   identity: "agent-identity.schema.json",

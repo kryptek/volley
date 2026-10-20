@@ -215,6 +215,33 @@ describe.skipIf(!RUN)("Volley roles on mosquitto 2.1 Dynamic Security", () => {
     expect(await delivered(reply)).toBe(false);
   });
 
+  it("the needs-you inbox (SPEC §4.6.18): steer reads but cannot write; the supervisors write", async () => {
+    const topic = `volley/_inbox/d-${NS}-d-abc`;
+    const read: string[] = [];
+    const steer = await connectAs("steer-test");
+    clients.push(steer);
+    const stop = await steer.subscribeStream("volley/_inbox/+", (m) => read.push(m.payload));
+    const forged = probe("steer-forges-inbox");
+    const watchForged = probe("watch-forges-inbox");
+    const adminForged = probe("admin-forges-inbox");
+    const sup = probe("supervisor-inbox");
+    const daemon = probe("volleyd-inbox");
+    await attempt("steer-test", topic, forged);
+    await attempt("watch-test", topic, watchForged);
+    await attempt("admin-test", topic, adminForged);
+    await attempt("supervisor-test", topic, sup);
+    await attempt("volleyd", topic, daemon);
+    expect(await delivered(sup)).toBe(true);
+    expect(await delivered(daemon)).toBe(true);
+    expect(await delivered(forged)).toBe(false);
+    expect(await delivered(watchForged)).toBe(false);
+    expect(await delivered(adminForged)).toBe(false);
+    for (let i = 0; i < 20 && !read.includes(daemon); i++)
+      await new Promise((r) => setTimeout(r, 25));
+    await stop();
+    expect(read).toContain(daemon);
+  });
+
   it("readiness: a peer cannot forge a verdict; the supervisors write it (SPEC §4.6.15)", async () => {
     const record = probe("peer-own-record");
     const ownVerdict = probe("peer-forges-own-readiness");
