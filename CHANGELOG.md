@@ -12,6 +12,13 @@ All workspace packages share one version. Dates are release-tag dates.
   repeated `agent_stalled` decisions of one idle back off (each waits twice as long, capped by the new
   `stall_backoff_max_s`); the new `background_wait_max_s` bounds how long any of that evidence holds off the nudge, counted
   from the start of the idle (SPEC §4.3, §4.6.4). (#177)
+- **Reviewer hygiene follows the repository's visibility** (`public_hygiene: auto | on | off`, tunable, default `auto`). Under
+  `auto` volleyd reads the repository's visibility once per wave version (`gh repo view`, journaled as
+  `repo_visibility_detected`): a public repository, or one whose visibility cannot be read (`repo_visibility_unknown` alarm),
+  keeps the P1 hygiene check and the required `hygiene` block; a private or internal one gets a non-blocking P3 note and an
+  optional block. `on` forces P1, `off` drops the check. The wave state carries `repo_visibility` and `hygiene_level`;
+  `volleyd status` prints `hygiene: P1 (public)` / `P3 (private)` / `off`. `review-result.schema.json` no longer lists
+  `hygiene` as required (SPEC §4.6.4, §4.6.8). (#178)
 - `volleyd steer` to a task between stages no longer goes to the retired agent's mailbox, where it was lost. With no live agent
   the steer is queued (`steering_queued`), the CLI says so, and the task's next agent (of the `--role`, when given) gets it when
   it registers, with the same `seq` / `supersedes` chain. `volleyd status` shows `steer queued (n)`; a cancelled or done task,

@@ -37,7 +37,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     (in any case); fetch takes a remote name or a
  *     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
  *     write refs/remotes/…
- *   gh issue view · gh pr view | list | checks · gh run list | view | watch ·
+ *   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
@@ -678,6 +678,8 @@ const GH_OUTPUT = ["--json", "--jq", "-q", "--template", "-t", "--repo", "-R"];
 
 const GH_SPECS: Record<string, OptSpec> = {
   "issue view": { flags: ["--comments"], valued: GH_OUTPUT },
+  // The wave's repository visibility (public hygiene); no --web, --branch.
+  "repo view": { valued: GH_OUTPUT },
   "pr view": { flags: ["--comments"], valued: GH_OUTPUT },
   "pr list": {
     valued: [
