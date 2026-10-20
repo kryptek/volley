@@ -114,6 +114,14 @@ const initials = (name: string) =>
 
 export function SettingsWindow(p: SettingsWindowProps) {
   const [sec, setSec] = useState<SectionKey>(p.initial ?? "general");
+  // An open window follows a new section it is given (and each machine chip click, on Machines).
+  const { initial } = p;
+  const focusMachine = p.machines?.focus;
+  const focusSeq = p.machines?.focusSeq;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new chip click re-opens Machines
+  useEffect(() => {
+    if (initial) setSec(initial);
+  }, [initial, focusMachine, focusSeq]);
   const [q, setQ] = useState("");
   const dialog = useRef<HTMLDivElement>(null);
   const shown = matchSections(q);

@@ -1,11 +1,16 @@
 /**
- * The agent window, ported from the prototype `AgentWindow`: a React Bits
- * `StatusMark` (status + progress), `task #issue`, the wave chip in the wave
- * accent and the role chip in the title; the purpose line (`purpose.ts`: the
- * wave task's title, the title the agent registered, a session's workspace,
- * else a fallback; one line, the whole text on hover and on tap) with its issue
- * and PR links. When the purpose names the window, the title shows it and the
- * agent id moves to a small secondary line. A session (`isSession`) gets a
+ * The agent window, ported from the prototype `AgentWindow`. The title bar is
+ * two rows that never bunch: row 1 (the drag bar) has a React Bits `StatusMark`
+ * (status + progress), the wave chip in the wave accent, the role chip, the
+ * stage chip and the machine chip (`MachineChip`: where the agent runs, its
+ * dot, why here on hover / focus, a click opens Settings › Machines), then the
+ * actions; row 2 (Frame's `subtitle`) has the headline, `task #issue` or the
+ * purpose (`purpose.ts`: the wave task's title, the title the agent registered,
+ * a session's workspace; at most two lines, the whole text on hover and on
+ * tap) with its issue and PR links, and the account picker. When the purpose
+ * names the window the headline shows it and the agent id moves to a small
+ * secondary line; otherwise a purpose line in the body (a cwd basename, a
+ * narration) says what it is for. A session (`isSession`) gets a
  * `session` chip, its hooks' work log as its narration and, in place of a
  * progress bar, `N tool calls · last 12s ago` and `working` / `idle · 3m`. A
  * dispatched agent with no progress of its own for 10 minutes gets an amber
@@ -21,7 +26,7 @@
  * from this browser's session carries an `as of HH:MM` marker. A task whose
  * two reviewers run in parallel gets a `review (spec + quality)` stage chip.
  * From the agent's `usage` sample (SPEC §4.6.12) the footer gets a context
- * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65), and the title an
+ * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65), and row 2 an
  * account picker listing the Claude accounts with their 5-hour usage: picking
  * another asks to confirm (the agent restarts with a resume note) and then
  * calls `agent_move_account`. The Terminal tab's ⤢ (`onPopout`) opens the
@@ -39,9 +44,11 @@ import { type AccountChoice, fiveHourLabel } from "../../store/claude";
 import { UNASSIGNED, isSession } from "../../store/reducer";
 import type { AgentView, FeedEntry, Role, UsagePayload, WaveView } from "../../store/types";
 import { Feed, feedChannel } from "./Feed";
+import { MachineChip } from "./MachineChip";
 import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
+import type { AgentMachine } from "./machine";
 import { namesWindow, purposeOf } from "./purpose";
 import "../../styles/agent.css";
 
@@ -64,7 +71,7 @@ export const ROLE_LABEL: Record<Role, string> = {
 /** Frame props the App supplies; the window fills in the rest. */
 export type AgentFrameProps = Omit<
   FrameProps,
-  "id" | "title" | "accent" | "width" | "children" | "actions" | "footer" | "born"
+  "id" | "title" | "subtitle" | "accent" | "width" | "children" | "actions" | "footer" | "born"
 >;
 
 export interface AgentWindowProps {
@@ -101,6 +108,10 @@ export interface AgentWindowProps {
   stale?: string | null;
   /** The Terminal tab's ⤢: opens the agent's screen in a floating window; absent, no ⤢. */
   onPopout?: (agentId: string) => void;
+  /** Where the agent runs (`machineFor`); `null` / absent, no machine chip. */
+  machine?: AgentMachine | null;
+  /** The machine chip's click: opens Settings › Machines at that machine. */
+  onOpenMachine?: (name: string) => void;
 }
 
 /**
@@ -302,6 +313,8 @@ export function AgentWindow({
   onMoveAccount,
   stale = null,
   onPopout,
+  machine = null,
+  onOpenMachine,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -315,6 +328,7 @@ export function AgentWindow({
   const named = namesWindow(purpose);
   const session = isSession(agent);
   const [purposeOpen, setPurposeOpen] = useState(false);
+  const [nameOpen, setNameOpen] = useState(false);
   // The title's name: the purpose when it names the window, else the task (or the id) as before.
   const headline = named ? purpose.label : (agent.task ?? agent.id);
   const progress = agent.progress === null ? null : Math.max(0, Math.min(100, agent.progress));
@@ -340,10 +354,6 @@ export function AgentWindow({
           size={18}
         />
       )}
-      <span className="t-name ell min0" title={named ? purpose.full : undefined}>
-        {headline}
-        {!named && issue !== undefined && <span className="dim"> #{issue}</span>}
-      </span>
       {session ? (
         <span className="chip chip--session" title="An interactive Claude Code session">
           session
@@ -356,6 +366,7 @@ export function AgentWindow({
       )}
       {agent.role && <span className="chip chip--role">{ROLE_LABEL[agent.role]}</span>}
       {stageChip && <span className="chip chip--stage">{stageChip}</span>}
+      {machine && <MachineChip machine={machine} onOpen={onOpenMachine} />}
     </>
   );
 
@@ -372,8 +383,33 @@ export function AgentWindow({
     .join(" ")}`;
   const ctx = contextMeter(usage);
   const account = usage?.account ?? str(agent.registry?.claude_account);
-  const actions = (
+  const nameText = named ? purpose.full : `${headline}${issue !== undefined ? ` #${issue}` : ""}`;
+  const subtitle = (
     <>
+      <span className="t-head">
+        {/* A button so a tap unclamps it: touch has no hover for the `title`. */}
+        <button
+          type="button"
+          className={`t-name${nameOpen ? " t-name--open" : ""}`}
+          title={nameText}
+          aria-expanded={nameOpen}
+          onClick={() => setNameOpen((o) => !o)}
+        >
+          {headline}
+          {!named && issue !== undefined && <span className="dim"> #{issue}</span>}
+        </button>
+        {purpose.links.map((l) =>
+          l.href ? (
+            <a key={l.text} className="a-link" href={l.href} target="_blank" rel="noreferrer">
+              {l.text}
+            </a>
+          ) : (
+            <span key={l.text} className="a-link dim">
+              {l.text}
+            </span>
+          ),
+        )}
+      </span>
       {accounts.length > 0 && (
         <AccountPicker
           name={agent.task ?? headline}
@@ -382,6 +418,10 @@ export function AgentWindow({
           onMove={onMoveAccount}
         />
       )}
+    </>
+  );
+  const actions = (
+    <>
       <button
         type="button"
         className={`icon-btn${steerOpen ? " icon-btn--hot" : ""}`}
@@ -395,8 +435,6 @@ export function AgentWindow({
   );
 
   const work = agent.work;
-  // Its task's machine (SPEC §4.6.15): placement names the supervisor's own one too.
-  const host = task?.placement?.host ?? task?.host;
   const footer = (
     <div className="agent-foot">
       {session ? (
@@ -431,11 +469,6 @@ export function AgentWindow({
       <span className={`hb${hbStale ? " hb--stale" : ""}`} title="Hook heartbeat">
         <i /> {hbAge === null ? "—" : age(hbAge)}
       </span>
-      {host && (
-        <span className="mono dim ell" title="The machine this agent runs on">
-          on {host}
-        </span>
-      )}
       <span
         className="mono dim ell"
         title={agent.registry?.model_source ? `model: ${agent.registry.model_source}` : undefined}
@@ -450,6 +483,7 @@ export function AgentWindow({
       {...frame}
       id={agent.id}
       title={title}
+      subtitle={subtitle}
       label={name}
       accent={accent}
       width={AGENT_WIDTH}
@@ -457,7 +491,8 @@ export function AgentWindow({
       actions={actions}
       footer={footer}
     >
-      {purpose.source !== "id" && (
+      {/* Only a purpose that does not name the window: the headline already shows one that does. */}
+      {!named && purpose.source !== "id" && (
         <div className={`a-purpose${purposeOpen ? " a-purpose--open" : ""}`}>
           {/* A button so a tap unwraps it: touch has no hover for the `title`. */}
           <button
@@ -469,17 +504,6 @@ export function AgentWindow({
           >
             {purpose.label}
           </button>
-          {purpose.links.map((l) =>
-            l.href ? (
-              <a key={l.text} className="a-link" href={l.href} target="_blank" rel="noreferrer">
-                {l.text}
-              </a>
-            ) : (
-              <span key={l.text} className="a-link dim">
-                {l.text}
-              </span>
-            ),
-          )}
         </div>
       )}
       {headline !== agent.id && (

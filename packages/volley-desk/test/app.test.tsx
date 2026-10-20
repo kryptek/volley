@@ -582,3 +582,27 @@ describe("App purpose labels and sessions (live store)", () => {
     );
   });
 });
+
+describe("App machine chip (demo mode)", () => {
+  it("an agent window shows where it runs; its chip opens Settings › Machines at that machine", () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: vi.fn(),
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const win = screen.getByRole("region", { name: /^T3b · Split integration test shards/ });
+      const chip = within(win).getByRole("button", { name: "Runs on this machine: why here" });
+      fireEvent.click(chip);
+      const dialog = screen.getByRole("dialog", { name: "Settings" });
+      expect(within(dialog).getByRole("heading", { level: 2 })).toHaveTextContent("Machines");
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+});
