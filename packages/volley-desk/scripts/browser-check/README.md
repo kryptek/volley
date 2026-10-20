@@ -1,6 +1,6 @@
 # Desk browser checks
 
-Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, and how each window style draws. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
+Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, how each window style draws, and window pinning. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
 
 Use a **private** broker on ports of your own. Never point them at a shared or live broker.
 
@@ -25,6 +25,7 @@ export DESK_URL=http://127.0.0.1:31885/
 node $CHECKS/first-load.mjs <out dir>      # no finished agent ever in the DOM, desktop and phone
 node $CHECKS/coordinators.mjs <out dir>    # chips, the Ended group, Show and its fit, Dismiss across a reload
 node $CHECKS/selection.mjs <out dir>       # canvas and chrome drags select nothing; a feed row selects
+node $CHECKS/pinning.mjs <out dir>         # anchor the coordinators top-left: arrange, pan, resize, reload; pin a wave in place
 node $CHECKS/styles-audit.mjs <out dir>    # every window style: box, hover overflow, paint under the body
 node $CHECKS/sheet.mjs <out dir>           # the comparison sheet from the audit
 ```
