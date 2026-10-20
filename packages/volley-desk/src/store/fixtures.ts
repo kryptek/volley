@@ -754,7 +754,7 @@ function machines(now: number): DeskMessage[] {
       max_agents: 12,
       placed: 5,
       eligible: false,
-      ineligible_reason: `${LOCAL_MACHINE}: load 0.26 per core is fine; memory available 18% (min 20%)`,
+      ineligible_reason: "memory available 18% (min 20%)",
       usage: { account: "primary", five_hour_pct: 64 },
     }),
     verdict("box-a", { max_agents: 6, placed: 2 }),
