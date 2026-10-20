@@ -745,8 +745,9 @@ export type MergeReadyCheck =
  * current one descends from only through fixups that worked from that review's round or later
  * (they ran after it), rebases, and heads pushed outside the pipeline that the owner accepted
  * without a re-review (a `pr_head_moved` answered `fixup`, or `accept` for a merge of the release
- * branch only: `moves[].accepted_by`, kept in the evidence; SPEC §4.6.8). Any other outside push (`moves`) was reviewed by nobody. A pipeline
- * without review stages passes, as `skippedByPlan`: the wave file said so.
+ * branch only: `moves[].accepted_by`, kept in the evidence; SPEC §4.6.8). Any other outside
+ * push (`moves`) was reviewed by nobody. A pipeline without review stages passes, as
+ * `skippedByPlan`: the wave file said so.
  */
 export function mergeReadyCheck(stages: PipelineStage[][], p: TaskPipeline): MergeReadyCheck {
   const planned = REVIEWER_ROLES.filter((r) =>
