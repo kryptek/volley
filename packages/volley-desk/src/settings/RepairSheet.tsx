@@ -20,7 +20,7 @@ type Phase =
   | { k: "plan"; plan: DoctorCheck[] }
   | { k: "applying"; plan: DoctorCheck[] }
   | { k: "applied"; checks: DoctorCheck[] }
-  | { k: "failed"; error: string; plan?: DoctorCheck[] };
+  | { k: "failed"; error: string };
 
 export function RepairSheet({
   machine,
@@ -55,9 +55,7 @@ export function RepairSheet({
   const apply = async (items: DoctorCheck[]) => {
     setPhase({ k: "applying", plan: items });
     const a = await ops.doctor(machine, { fix: true, clone });
-    setPhase(
-      a.ok ? { k: "applied", checks: a.checks } : { k: "failed", error: a.error, plan: items },
-    );
+    setPhase(a.ok ? { k: "applied", checks: a.checks } : { k: "failed", error: a.error });
   };
 
   const items = phase.k === "plan" || phase.k === "applying" ? phase.plan : [];

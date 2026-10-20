@@ -3,7 +3,9 @@
  * there, what removing does, and two ways: **Drain, then remove**
  * (`drain: true`: nothing new starts there and volleyd removes it once they
  * finish) or **Remove now** (`now: true`, after a confirm: each agent is told
- * to cancel). With nothing running it removes at once.
+ * to cancel). With nothing running in the Desk's view it still sends
+ * `drain`: volleyd, which has the real count (spawns in flight, waves the
+ * Desk has not replayed), removes at once when nothing runs there.
  */
 import { useState } from "react";
 import { plural } from "../lib/plural";
@@ -31,10 +33,10 @@ export function RemoveMachineSheet({
   const [error, setError] = useState<string | null>(null);
   const n = agents.length;
 
-  const remove = async (mode?: "drain" | "now") => {
+  const remove = async (mode: "drain" | "now") => {
     setPhase("busy");
     setError(null);
-    const r = await (mode ? ops.remove(machine, mode) : ops.remove(machine));
+    const r = await ops.remove(machine, mode);
     if (!r.ok) {
       setPhase("choose");
       setError(r.error ?? "volleyd refused");
@@ -104,7 +106,7 @@ export function RemoveMachineSheet({
             type="button"
             className="btn btn--danger"
             disabled={busy}
-            onClick={() => void remove()}
+            onClick={() => void remove("drain")}
           >
             {busy ? "Removing…" : `Remove ${machine}`}
           </button>

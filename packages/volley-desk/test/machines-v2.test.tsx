@@ -223,6 +223,14 @@ describe("Settings › Machines v2: the machine card", () => {
     ).toBeInTheDocument();
   });
 
+  it("a verdict reads as stale while volleyd is not live", async () => {
+    setup({ hubUp: false });
+    await act(flush);
+    expect(card("box-a").getByText(/ready for agents/)).toHaveTextContent(
+      "ready for agents · volleyd is not live",
+    );
+  });
+
   it("a card with no verdict yet says so instead of guessing", async () => {
     setup({ readiness: {} });
     await act(flush);
@@ -332,6 +340,25 @@ describe("Add a machine: steps 3–5", () => {
       expect.anything(),
     );
     expect(document.querySelector(".pair--machine")).toBeNull();
+  });
+
+  it("a refused Done keeps step 5 open and says why", async () => {
+    const { config, join } = await joined();
+    config.send.mockResolvedValueOnce({
+      applied: false,
+      rejected: [{ path: "hosts.box-c.max_agents", reason: "box-c is not a host" }],
+    } as never);
+    join({
+      machines: { "box-a": machineRecord(), "box-c": boxC },
+      readiness: { "box-a": readiness(), "box-c": readiness({ name: "box-c" }) },
+    });
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    fireEvent.change(pair().getByLabelText("Max agents on box-c"), { target: { value: "6" } });
+    await act(async () => {
+      fireEvent.click(pair().getByRole("button", { name: "Done" }));
+    });
+    expect(pair().getByRole("alert")).toHaveTextContent("box-c is not a host");
   });
 });
 

@@ -226,7 +226,15 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
         const p = t.placement;
         const shown = open === t.id;
         return (
-          <li key={t.id}>
+          <li
+            key={t.id}
+            // Focus stays on the chip when it opens, so Escape is caught here, around both.
+            onKeyDown={(e) => {
+              if (e.key !== "Escape" || !shown) return;
+              e.stopPropagation();
+              setOpen(null);
+            }}
+          >
             <button
               type="button"
               className="chip host-chip"
@@ -242,11 +250,6 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
                 // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
                 role="dialog"
                 aria-label={`Why ${t.id} runs on ${p.host}`}
-                onKeyDown={(e) => {
-                  if (e.key !== "Escape") return;
-                  e.stopPropagation();
-                  setOpen(null);
-                }}
               >
                 <p className="host-rule">{placementRule(p)}</p>
                 <ol className="host-lines">

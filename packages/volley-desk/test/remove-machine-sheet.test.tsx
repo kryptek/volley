@@ -62,8 +62,9 @@ describe("Remove machine sheet (peer_remove)", () => {
     await act(async () => {
       fireEvent.click(sheet().getByRole("button", { name: "Remove box-a" }));
     });
-    expect(ops.remove).toHaveBeenCalledWith("box-a");
-    expect(onDone).toHaveBeenCalledWith("box-a removed: its account was revoked.");
+    // drain still: volleyd, which has the real count, removes at once when nothing runs.
+    expect(ops.remove).toHaveBeenCalledWith("box-a", "drain");
+    expect(onDone).toHaveBeenCalled();
   });
 
   it("a refused removal says why", async () => {

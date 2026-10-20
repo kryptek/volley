@@ -232,6 +232,13 @@ describe("MachineDown (a machine_down decision)", () => {
     expect(screen.getByRole("radio", { name: "wait" })).not.toBeChecked();
   });
 
+  it("an unknown machine state falls back to is down", () => {
+    render(
+      <MachineDown decision={{ ...down, machine: "rebooting" } as never} onAnswer={vi.fn()} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Needs you: box-b is down");
+  });
+
   it("Answer sends the chosen option", async () => {
     const onAnswer = vi.fn(async () => ({ ok: true }));
     render(<MachineDown decision={down} onAnswer={onAnswer} />);

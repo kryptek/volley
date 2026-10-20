@@ -792,7 +792,7 @@ describe("Settings › Machines", () => {
     await act(async () => {
       fireEvent.click(within(card("box-a")).getByRole("button", { name: "Remove box-a" }));
     });
-    expect(ops.remove).toHaveBeenCalledWith("box-a");
+    expect(ops.remove).toHaveBeenCalledWith("box-a", "drain");
     expect(screen.getByRole("status")).toHaveTextContent("box-a removed: its account was revoked");
   });
 

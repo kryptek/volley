@@ -83,7 +83,8 @@ describe("task host chip and why here", () => {
       "ineligible: box-b is down (no heartbeat for 90 s)",
     ]);
     expect(pop.getByText("cut from 4f9c2e1")).toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    // Focus stays on the chip after the click: Escape there closes the popover.
+    fireEvent.keyDown(chip, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

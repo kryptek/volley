@@ -192,7 +192,8 @@ export function MachineDown({
     // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
     <div className="needs-you" role="status">
       <div className="ny-head">
-        <Icon i={Alert02Icon} s={14} /> Needs you: {host} {MACHINE_STATE[d.machine ?? "down"]}
+        <Icon i={Alert02Icon} s={14} /> Needs you: {host}{" "}
+        {MACHINE_STATE[d.machine ?? "down"] ?? MACHINE_STATE.down}
       </div>
       <p className="ny-q">{d.question}</p>
       {d.tasks && d.tasks.length > 0 && (

@@ -64,10 +64,13 @@ export function ReadinessLine({
   m,
   r,
   now,
+  hubUp = true,
 }: {
   m: MachinePayload;
   r: ReadinessPayload | undefined;
   now: number;
+  /** Whether volleyd is live: while it is not, its verdict is stale (SPEC §4.6.15). */
+  hubUp?: boolean;
 }) {
   if (m.tunnel === "down") {
     return (
@@ -78,10 +81,11 @@ export function ReadinessLine({
     );
   }
   if (!r) return <p className="s-hint">no verdict from volleyd yet</p>;
-  const stale =
-    now - Date.parse(r.checked_at) > VERDICT_STALE_MS ? (
-      <span className="dim"> · verdict from {ago(r.checked_at, now)} ago</span>
-    ) : null;
+  const stale = !hubUp ? (
+    <span className="dim"> · volleyd is not live</span>
+  ) : now - Date.parse(r.checked_at) > VERDICT_STALE_MS ? (
+    <span className="dim"> · verdict from {ago(r.checked_at, now)} ago</span>
+  ) : null;
   if (r.drain) {
     return (
       <p className="m-ready m-ready--warn">
@@ -271,6 +275,8 @@ export interface MachineCardProps {
   /** volleyd's verdict on it; absent until one arrives. */
   r?: ReadinessPayload | undefined;
   now: number;
+  /** Whether volleyd is live: while it is not, the verdict shows as stale. */
+  hubUp?: boolean | undefined;
   /** The supervisor's own machine ("this one"): no pairing ops, no cap editor. */
   self?: boolean;
   /** An admin session: Repair, Re-pair, Remove and the cap editor. */
@@ -319,7 +325,7 @@ export function MachineCard(p: MachineCardProps) {
         <span>{r ? `${m.agents}/${r.max_agents} agents` : plural(m.agents, "agent")}</span>
       </div>
       {!down && <div className="s-hint">seen {ago(m.last_seen, now)} ago</div>}
-      <ReadinessLine m={m} r={r} now={now} />
+      <ReadinessLine m={m} r={r} now={now} hubUp={p.hubUp ?? true} />
       {down && (
         <p className="s-hint m-note">
           New agents for it wait until it is back; the ones already running keep going.

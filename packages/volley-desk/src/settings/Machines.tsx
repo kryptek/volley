@@ -1,20 +1,22 @@
 /**
  * Settings › Machines, ported from the prototype `MachinesBody` (SPEC
- * §4.6.14): the machines that can run agents for the waves. This machine (the
- * one with the broker and volleyd, "this one") comes first, then one card per
- * paired machine's retained record on `volley/_system/machines/+`: name,
- * os/arch and cores, the tunnel with its heartbeat dot, the 1-minute load, its
- * agents and when it was last heard from (why it is down, when it is). Only
- * configured hosts are machines: every account may publish its own record.
- * This machine publishes no record, so its card has only its agents; its os,
- * cores and load wait on volleyd publishing one.
+ * §4.6.14–15): the machines that can run agents for the waves. The
+ * supervisor's own machine comes first as "this one" (its record is the one
+ * named by `_config` `fleet.local_name`; until it has one, a placeholder card
+ * with its agents), then one `MachineCard` per paired machine's retained
+ * record under `volley/_system/machines/#`, with volleyd's readiness verdict
+ * from `<name>/readiness` (stale while volleyd is not live) and, for an
+ * admin, the cap editor. Only configured hosts are machines: every account
+ * may publish its own record.
  *
  * An admin Desk can pair and unpair. **+ Add a machine** creates a pairing
  * code at once (`peer_invite`) and opens a Stepper on "Run this on the other
  * machine": the copyable `volley peer join <code> --to <ssh address>` (the
  * address of this machine, which the owner types) and the code's countdown,
  * waiting until a record for a host that was not there before arrives
- * (joined), then Done. **Remove…** asks first, then sends `peer_remove`,
+ * (joined); then step 3 its checks and verdict (with Repair…), step 4 Claude
+ * on it (Check again runs a dry doctor), step 5 its readiness and max_agents,
+ * then Done. **Remove…** asks first, then sends `peer_remove`,
  * which revokes the machine's account and clears its record. Any other
  * session (not signed in, not an admin, demo, a browser that cannot make a
  * reply key at all) is read-only and is shown the terminal commands instead.
@@ -44,7 +46,7 @@ const COUNTDOWN_TICK_MS = 1000;
 const AGE_TICK_MS = 15_000;
 
 export interface MachinesProps {
-  /** Machine records, by name (`volley/_system/machines/+`); only `hosts` are shown. */
+  /** Machine records, by name (`volley/_system/machines/#`); only `hosts` (and `localName`) are shown. */
   machines: Record<string, MachinePayload>;
   /** The configured hosts (`_waves/_config` `hosts`): the names that are machines; none by default. */
   hosts?: readonly string[];
@@ -190,6 +192,7 @@ function AddMachine({
   signIn,
   now,
   host,
+  hubUp,
   onClose,
 }: {
   ops: PeerOps;
@@ -199,6 +202,7 @@ function AddMachine({
   signIn: ((machine: string) => ReactNode) | undefined;
   now: number;
   host: string;
+  hubUp: boolean;
   onClose: () => void;
 }) {
   const [s, setS] = useState<Pairing>({ phase: "creating" });
@@ -207,6 +211,8 @@ function AddMachine({
   const [repairing, setRepairing] = useState(false);
   const [checking, setChecking] = useState<"idle" | "busy" | { error: string }>("idle");
   const [cap, setCap] = useState<string | null>(null);
+  /** Done's cap change: sending, or why volleyd refused it (the step stays open). */
+  const [saving, setSaving] = useState<"idle" | "busy" | { error: string }>("idle");
   const [to, setTo] = useState("");
   const panel = useRef<HTMLDivElement>(null);
   // The panel opens below the cards: bring it into view (jsdom has no scrollIntoView).
@@ -257,10 +263,15 @@ function AddMachine({
   };
   const done = async () => {
     if (joined && config && capValid && capValue !== currentCap) {
-      await config.send(
+      setSaving("busy");
+      const ack = await config.send(
         { hosts: { [joined]: { max_agents: capValue } } },
         { text: `set ${joined} max_agents to ${capValue}` },
       );
+      if (!ack.applied) {
+        setSaving({ error: ack.rejected[0]?.reason ?? ack.error ?? "volleyd refused" });
+        return;
+      }
     }
     onClose();
   };
@@ -387,7 +398,7 @@ function AddMachine({
               <span className="spinner" aria-hidden="true" /> Waiting for its first doctor report…
             </p>
           )}
-          {rec && <ReadinessLine m={rec} r={verdict} now={now} />}
+          {rec && <ReadinessLine m={rec} r={verdict} now={now} hubUp={hubUp} />}
           <div className="ny-actions">
             {rec?.checks?.some((c) => !c.ok) && (
               <button type="button" className="btn" onClick={() => setRepairing(true)}>
@@ -469,15 +480,23 @@ function AddMachine({
                 max={100}
                 aria-label={`Max agents on ${joined}`}
                 value={cap ?? String(currentCap)}
-                onChange={(e) => setCap(e.target.value)}
+                onChange={(e) => {
+                  setCap(e.target.value);
+                  setSaving("idle");
+                }}
               />
             </label>
+          )}
+          {typeof saving === "object" && (
+            <p className="s-error" role="alert">
+              max_agents was not set: {saving.error}
+            </p>
           )}
           <div className="ny-actions">
             <button
               type="button"
               className="btn btn--hot"
-              disabled={!capValid}
+              disabled={!capValid || saving === "busy"}
               onClick={() => void done()}
             >
               Done
@@ -529,6 +548,7 @@ export function Machines(p: MachinesProps) {
       m={m}
       r={p.readiness?.[m.name]}
       now={now}
+      hubUp={p.hubUp}
       self={self}
       admin={canPair}
       ops={p.ops}
@@ -579,6 +599,7 @@ export function Machines(p: MachinesProps) {
           signIn={p.signIn}
           now={now}
           host={p.host ?? ""}
+          hubUp={p.hubUp}
           onClose={() => setAdding(false)}
         />
       )}
