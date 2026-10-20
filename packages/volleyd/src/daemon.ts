@@ -659,6 +659,8 @@ export function realLocalDoctor(
     const r = await exec(argv, {
       timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
       signal,
+      // Its own children (`gh`, `bun`, …) write under $HOME too: a stop ends them with it.
+      group: true,
     }).catch(() => null);
     // A failing block check exits 1 with the report on stdout.
     return r === null ? null : parseDoctorReport(r.stdout);
@@ -1454,9 +1456,10 @@ export class Daemon {
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) {
-      this.timer = this.time.setInterval(() => void this.tick(), tickMs);
+      // Tracked: a stop waits for a tick or screen pass already past its timer.
+      this.timer = this.time.setInterval(() => void this.track(this.tick()), tickMs);
       this.screenTimer = this.time.setInterval(
-        () => void this.tickScreens(),
+        () => void this.track(this.tickScreens()),
         DAEMON_DEFAULTS.screen_tick_ms,
       );
     }
@@ -1752,10 +1755,14 @@ export class Daemon {
   async stop(): Promise<void> {
     this.halt(false);
     try {
-      await this.localDoctorRun;
       await this.claude.stop();
       await this.tunnelsStopped;
-      await this.enqueue(async () => {});
+      // Nothing may touch $VOLLEYD_HOME once stop resolves: the restart reconciliation, every
+      // tick, screen pass and spawn still in flight beside the queue, the queue itself, then the
+      // own doctor (no new one starts once halted; its child process group is being killed).
+      await this.reconciling;
+      await this.settled();
+      await this.localDoctorRun;
     } finally {
       await this.dynsec?.close();
     }
@@ -1806,6 +1813,8 @@ export class Daemon {
   /** One tick: sample pressure (outside the queue: samplers can be slow), then lease + admission. */
   async tick(): Promise<void> {
     await this.sample();
+    // A sample that outlived a stop starts nothing (the doctor, publishes, journal writes).
+    if (!this.running) return;
     await this.enqueue(() => this.tickNow());
   }
 
@@ -3720,6 +3729,7 @@ export class Daemon {
     const now = this.now();
     this.fleetSince ??= now;
     if (
+      this.running &&
       this.opts.fleet?.localDoctor !== undefined &&
       !this.localDoctorRunning &&
       (this.localDoctorAt === null ||

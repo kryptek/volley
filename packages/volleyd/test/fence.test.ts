@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -17,7 +25,7 @@ import {
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
-import { tempDirForAll } from "./helpers/tmp";
+import { tempDir, tempDirForAll } from "./helpers/tmp";
 import { withEnvSync } from "./helpers/with-env";
 
 /** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
@@ -846,6 +854,31 @@ describe("exec", () => {
     expect(r.timedOut).toBe(true);
     // real process: exec's kill of a real child, on the real clock.
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it("with group, an abort kills the child's own children too", async () => {
+    const marks = tempDir("volleyd-exec-group-");
+    const abort = new AbortController();
+    // The grandchild (git's ssh transport) marks that it runs, then writes again a moment later.
+    const run = exec(["git", "fetch", "ssh://example.invalid/x"], {
+      cwd: repo,
+      env: {
+        ...process.env,
+        GIT_SSH_COMMAND: `sh -c 'touch "${marks}/up"; sleep 0.3; touch "${marks}/late"' --`,
+      },
+      signal: abort.signal,
+      group: true,
+    });
+    for (let i = 0; i < 100 && !existsSync(join(marks, "up")); i++) {
+      // real process: waiting for git to start its transport.
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(existsSync(join(marks, "up"))).toBe(true);
+    abort.abort();
+    await run;
+    // real process: past the grandchild's own write, had it survived.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(existsSync(join(marks, "late"))).toBe(false);
   });
 });
 
