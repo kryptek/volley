@@ -62,6 +62,42 @@ describe("reduce", () => {
     ).toEqual([]);
   });
 
+  it("a task parked on a decision stays parked on stage_entered done until the decision is resolved", () => {
+    // Why the pipeline closes a merged task's open decisions before it journals `done`.
+    const base = events.slice(0, 11); // T0 at merge_ready
+    const at = "2026-10-20T09:20:00.000Z";
+    const parked = [
+      ...base,
+      {
+        seq: 12,
+        at,
+        type: "decision_opened",
+        task: "T0",
+        data: {
+          decision_id: "d9",
+          kind: "pr_head_moved",
+          question: "moved?",
+          options: ["rereview", "fixup", "cancel"],
+        },
+      },
+      { seq: 13, at, type: "stage_entered", task: "T0", data: { stage: "done", merged: true } },
+    ] as JournalEvent[];
+    const rec = replay(parked);
+    expect(rec.state?.tasks.find((t) => t.id === "T0")?.stage).toBe("awaiting_decision");
+    expect(rec.decisions.d9?.resume_stage).toBe("done");
+    const resolved = replay([
+      ...parked,
+      {
+        seq: 14,
+        at,
+        type: "decision_resolved",
+        task: "T0",
+        data: { decision_id: "d9", answer: "superseded_by_merge", by: "volleyd" },
+      } as JournalEvent,
+    ]);
+    expect(resolved.state?.tasks.find((t) => t.id === "T0")?.stage).toBe("done");
+  });
+
   it("is idempotent: re-applying an already-applied seq is a no-op", () => {
     const rec = replay(events);
     for (const e of events) {
