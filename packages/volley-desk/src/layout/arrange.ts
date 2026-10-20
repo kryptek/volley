@@ -21,8 +21,10 @@
  * Pinned windows (C12, `pins.ts`) are skipped: a window pinned in place keeps
  * its position and the rest are laid out clear of it (moved right, or down on
  * a portrait fit area, past any it would cover); a pinned wave window's agents
- * still pack as its cluster. The fit area may be narrowed to leave room for
- * windows anchored to the screen (`avoidAnchored`).
+ * still pack as its cluster. Pinned windows are framed with the rest: each
+ * placement is scored, and the view centred, on the bounding box of the
+ * arranged block and the pinned windows together. The fit area may be
+ * narrowed to leave room for windows anchored to the screen (`avoidAnchored`).
  */
 import { FIT_MIN_SCALE, type Rect, type View } from "../canvas/useViewport";
 
@@ -204,6 +206,15 @@ function clearOf(W: number, H: number, pinned: readonly Rect[], across: boolean)
   return at;
 }
 
+/** The bounding box of `rects` (at least one). */
+function union(rects: readonly Rect[]): Rect {
+  const x = Math.min(...rects.map((r) => r.x));
+  const y = Math.min(...rects.map((r) => r.y));
+  const w = Math.max(...rects.map((r) => r.x + r.w)) - x;
+  const h = Math.max(...rects.map((r) => r.y + r.h)) - y;
+  return { x, y, w, h };
+}
+
 export interface ArrangeOptions {
   /** The screen area to fit into (default `fitArea`): less any windows anchored to the screen. */
   area?: Rect;
@@ -213,7 +224,10 @@ export interface ArrangeOptions {
   skip?: ReadonlySet<string>;
 }
 
-/** The zoom-maximising placement and the view centring it in the fit area; null when empty. */
+/**
+ * The zoom-maximising placement and the view centring it, with the pinned
+ * windows, in the fit area; null when empty.
+ */
 export function arrange(
   clusters: readonly Cluster[],
   screen: Screen,
@@ -221,24 +235,30 @@ export function arrange(
 ): Arrangement | null {
   const area = opts.area ?? fitArea(screen);
   const pinned = opts.pinned ?? {};
+  const pinnedRects = Object.values(pinned);
+  const across = area.w >= area.h;
   const ids = new Set([...Object.keys(pinned), ...(opts.skip ?? [])]);
-  let best: Candidate | null = null;
+  let best: { c: Candidate; off: Pos; u: Rect; s: number } | null = null;
   for (const c of candidates(unpinned(clusters, ids), screen, area)) {
-    if (!best || c.s > best.s + EPS) best = c;
+    // With nothing pinned the offset is (0, 0), the union is the block and the score is `c.s`.
+    const off = clearOf(c.W, c.H, pinnedRects, across);
+    const u = union([{ ...off, w: c.W, h: c.H }, ...pinnedRects]);
+    const s = Math.min(ARRANGE_MAX_SCALE, area.w / u.w, area.h / u.h);
+    if (!best || s > best.s + EPS) best = { c, off, u, s };
   }
   if (!best) return null;
+  const { off, u } = best;
   const s = Math.max(ARRANGE_MIN_SCALE, best.s);
-  const off = clearOf(best.W, best.H, Object.values(pinned), area.w >= area.h);
   const place: Record<string, Pos> = {};
-  for (const [id, p] of Object.entries(best.place)) {
+  for (const [id, p] of Object.entries(best.c.place)) {
     if (!ids.has(id)) place[id] = { x: off.x + p.x, y: off.y + p.y };
   }
   return {
     place,
     view: {
       s,
-      x: area.x + (area.w - best.W * s) / 2 - off.x * s,
-      y: area.y + (area.h - best.H * s) / 2 - off.y * s,
+      x: area.x + (area.w - u.w * s) / 2 - u.x * s,
+      y: area.y + (area.h - u.h * s) / 2 - u.y * s,
     },
   };
 }
