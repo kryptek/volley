@@ -172,10 +172,10 @@ export function execProbes(exec: ExecFn): ReconcileProbes {
       const pr = Array.isArray(prs) ? prs.find((p) => p.headRefName === branch) : undefined;
       if (pr === undefined || typeof pr.number !== "number" || typeof pr.url !== "string")
         return null;
-      const checks = await exec(["gh", "pr", "checks", String(pr.number), "--json", "bucket"], {
-        cwd: repo,
-        timeoutMs: DAEMON_DEFAULTS.reconcile_probe_ms,
-      }).catch(() => null);
+      const checks = await exec(
+        ["gh", "pr", "checks", String(pr.number), "--json", "bucket,workflow,event,startedAt"],
+        { cwd: repo, timeoutMs: DAEMON_DEFAULTS.reconcile_probe_ms },
+      ).catch(() => null);
       return {
         number: pr.number,
         url: pr.url,
@@ -186,16 +186,24 @@ export function execProbes(exec: ExecFn): ReconcileProbes {
   };
 }
 
-/** `gh pr checks --json bucket` → the wave-state CI value. */
+/**
+ * `gh pr checks --json bucket,workflow,event,startedAt` → the wave-state CI value. A cancelled
+ * check is ignored when another check of the same workflow and event is not cancelled: it belongs
+ * to a run that a newer run replaced (artifacts.ts latestRuns). A lone cancelled check is red.
+ */
 export function ciOf(stdout: string): "green" | "red" | "running" | "none" {
-  let checks: { bucket?: unknown }[];
+  let checks: { bucket?: unknown; workflow?: unknown; event?: unknown }[];
   try {
     checks = JSON.parse(stdout);
   } catch {
     return "none";
   }
   if (!Array.isArray(checks) || checks.length === 0) return "none";
-  const buckets = checks.map((c) => c.bucket);
+  const key = (c: (typeof checks)[number]) => `${String(c.workflow)}\u0000${String(c.event)}`;
+  const replaced = new Set(checks.filter((c) => c.bucket !== "cancel").map(key));
+  const buckets = checks
+    .filter((c) => c.bucket !== "cancel" || typeof c.workflow !== "string" || !replaced.has(key(c)))
+    .map((c) => c.bucket);
   if (buckets.some((b) => b === "fail" || b === "cancel")) return "red";
   if (buckets.some((b) => b === "pending")) return "running";
   return "green";

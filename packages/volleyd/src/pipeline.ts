@@ -6,6 +6,7 @@ import {
   type MovedHeadFacts,
   type OperatorMergeCheck,
   type RebaseCheck,
+  type SupersededRun,
   artifactOutcome,
   checkRebase,
   ciStateOf,
@@ -133,6 +134,8 @@ export interface TaskPipeline {
   pr?: { number: number; url: string };
   ci?: "green" | "none";
   ci_runs?: CiRun[];
+  /** Runs on `head` that a newer run of the same workflow and event replaced. */
+  ci_superseded?: SupersededRun[] | undefined;
   /** Review rounds started (the first review step is round 1; a re-review starts the next). */
   round: number;
   reviews: Partial<Record<ReviewerRole, StoredReview>>;
@@ -333,7 +336,11 @@ export function reducePipeline(
         p.pr = { number: pr.number, url: pr.url };
         p.ci = pr.ci === "none" ? "none" : "green";
       }
-      if (Array.isArray(d.ci_runs)) p.ci_runs = d.ci_runs as CiRun[];
+      if (Array.isArray(d.ci_runs)) {
+        p.ci_runs = d.ci_runs as CiRun[];
+        if (Array.isArray(d.ci_superseded)) p.ci_superseded = d.ci_superseded as SupersededRun[];
+        else p.ci_superseded = undefined;
+      }
       if (d.adopted === true) {
         // A head pushed outside the pipeline, re-verified: not another fixup or rebase.
         if (run !== undefined) run.adopt = false;
@@ -460,6 +467,7 @@ export function reducePipeline(
             p.directive = { ...dir, ...(fixup ? { only: true } : {}) };
             p.ci = dir.ci === "none" ? "none" : "green";
             p.ci_runs = dir.runs;
+            p.ci_superseded = undefined;
           }
           p.moved = undefined;
         } else if (isAnswer(answer, "cancel")) p.moved = undefined;
@@ -2575,6 +2583,7 @@ export class PipelineDriver {
       release_branch: v.release_branch,
       ci: p.ci ?? "green",
       ci_runs: p.ci_runs ?? [],
+      ...(p.ci_superseded !== undefined ? { ci_superseded: p.ci_superseded } : {}),
       reviews: p.reviews,
       fixups,
       rebases: p.rebases,

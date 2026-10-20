@@ -2,6 +2,16 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- **CI gate stuck red on a superseded run:** volleyd judges CI on a head by the latest run per workflow and trigger event. A run
+  cancelled by `concurrency: cancel-in-progress` and replaced by a newer run on the same head no longer opens `ci_failed`
+  (re-verify looped on it forever), and restart reconciliation ignores its cancelled check. A cancelled run that nothing
+  replaced still fails, and now says to re-run it rather than to check the provider's status page. The evidence package lists
+  superseded runs under `ci.superseded` (SPEC §4.6.8). (#176)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a

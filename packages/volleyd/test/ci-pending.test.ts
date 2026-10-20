@@ -83,6 +83,19 @@ describe("CI pending is visible", () => {
     expect(h.task()?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (3/5 checks)`);
   });
 
+  it("a change in a superseded run only journals nothing; its run is not counted", async () => {
+    await pending();
+    // A stale run of check-3 that a newer run (902) replaced: not a check of this head.
+    const stale = { id: 800, workflow: "check-3" };
+    h.world.ciRuns[H1] = [...twoOfFive, { ...run("in_progress"), ...stale }];
+    await recheck();
+    h.world.ciRuns[H1] = [...twoOfFive, { ...run("completed", "cancelled"), ...stale }];
+    await recheck();
+    expect(h.events.filter((e) => e.type === "ci_pending")).toHaveLength(1);
+    expect(h.task()?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (2/5 checks)`);
+    expect(h.openDecisions()).toEqual([]);
+  });
+
   it("CI green → ci_green, why_waiting cleared, the reviewers spawn", async () => {
     await pending();
     h.world.ciRuns[H1] = twoOfFive.map(() => run("completed", "success"));

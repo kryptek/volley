@@ -16,6 +16,7 @@ import type { WaveRecord } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { NS } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
+import { FIXTURES } from "./helpers/fake-host";
 import {
   AGENT,
   ARTIFACTS_OK,
@@ -154,7 +155,7 @@ describe("execProbes (git / gh through the fence)", () => {
       ci: "green",
     });
     expect(fake.argvs(["gh", "pr", "checks"])).toEqual([
-      ["gh", "pr", "checks", "7", "--json", "bucket"],
+      ["gh", "pr", "checks", "7", "--json", "bucket,workflow,event,startedAt"],
     ]);
   });
 
@@ -166,6 +167,21 @@ describe("execProbes (git / gh through the fence)", () => {
     expect(ciOf("")).toBe("none");
     expect(ciOf(JSON.stringify([{ bucket: "pass" }, { bucket: "fail" }]))).toBe("red");
     expect(ciOf(JSON.stringify([{ bucket: "pending" }]))).toBe("running");
+  });
+
+  it("a cancelled check beside a replacement run's checks (same workflow and event) is ignored", () => {
+    const checks = JSON.parse(
+      readFileSync(join(FIXTURES, "gh-pr-checks-superseded.json"), "utf-8"),
+    );
+    expect(ciOf(JSON.stringify(checks))).toBe("green");
+    // A lone cancelled check is still red; so is one whose only sibling is another trigger's.
+    expect(ciOf(JSON.stringify(checks.slice(0, 1)))).toBe("red");
+    const otherEvent = [checks[0], { ...checks[1], event: "push" }];
+    expect(ciOf(JSON.stringify(otherEvent))).toBe("red");
+    // Checks without a workflow name have no siblings.
+    expect(ciOf(JSON.stringify([{ bucket: "cancel" }, { bucket: "pass" }]))).toBe("red");
+    // A failing sibling still fails the head.
+    expect(ciOf(JSON.stringify([...checks, { ...checks[1], bucket: "fail" }]))).toBe("red");
   });
 });
 

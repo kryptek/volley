@@ -1,0 +1,28 @@
+[
+  {
+    "databaseId": 604,
+    "name": "CI",
+    "workflowName": "CI",
+    "workflowDatabaseId": 77,
+    "event": "pull_request",
+    "attempt": 1,
+    "createdAt": "2026-10-20T10:00:01Z",
+    "status": "completed",
+    "conclusion": "failure",
+    "headSha": "1111111111111111111111111111111111111111",
+    "url": "https://github.com/example/repo/actions/runs/604"
+  },
+  {
+    "databaseId": 603,
+    "name": "CI",
+    "workflowName": "CI",
+    "workflowDatabaseId": 77,
+    "event": "push",
+    "attempt": 1,
+    "createdAt": "2026-10-20T10:00:00Z",
+    "status": "completed",
+    "conclusion": "success",
+    "headSha": "1111111111111111111111111111111111111111",
+    "url": "https://github.com/example/repo/actions/runs/603"
+  }
+]
