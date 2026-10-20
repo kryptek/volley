@@ -121,7 +121,7 @@
 }
 .term {
   padding: 8px 10px;
-  font: 11.5px / 1.55 var(--f-mono);
+  font: 11.5px / 1.55 var(--f-term);
   color: #c9d1e4;
   white-space: pre-wrap;
   word-break: break-word;
@@ -361,4 +361,16 @@ a.a-link:hover {
 }
 .work-state--idle {
   color: var(--mute);
+}
+
+/* The Terminal tab's ⤢ (opens the popout): a slim strip above the screen. */
+.term-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.term-tools .icon-btn {
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
 }

@@ -2,10 +2,14 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
-### Unreleased
+## Unreleased
 
-#### Fixed
+### Fixed
 
+- volleyd: an agent's `blocked` status was never journaled or decided, whatever its role, so a
+  stuck task (a rebase agent, on a downstream wave) stayed silently in its stage. Every role's
+  `blocked` now opens an `agent_blocked` decision with the agent's reason (`continue | respawn |
+  cancel`); the agent is not retired while it is open (SPEC §5.2). (#196)
 - **volleyd: a `pr_head_moved` that only merged the release branch can be accepted.** When CI
   on the new head is green and the move is a merge of the release branch whose changed files the
   release branch changed too (a CHANGELOG conflict resolved in the merge counts), the decision
@@ -17,6 +21,12 @@ All workspace packages share one version. Dates are release-tag dates.
   the task's open decisions are resolved `superseded_by_merge`, its live agents retired, and it
   becomes `done` with `merged_unverified_head`, releasing its dependents. Before, a merged task
   waited on its decision and could only be recorded as `cancelled`. (#195)
+
+### Added
+
+- volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
+  wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
+  `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)
 
 ## 0.4.0 — 2026-10-20
 

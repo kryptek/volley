@@ -621,6 +621,21 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
 
+**A blocked agent.** An agent of any role (implementer, either reviewer, fixup, rebase or merge)
+that publishes `status: blocked` (SPEC §5.1) gets an `agent_blocked` decision on its task, with
+its reason (`payload.reason`, else `summary`, else `text`; clipped to 500 characters in the
+question, whole in the decision's `reason` and `payload`) and the options:
+
+- `continue`: you steered the agent by hand (or it will go on by itself); the task returns to its
+  stage and volleyd waits for the agent's next status. A later `blocked` asks again.
+- `respawn`: the agent is retired (`relaunched`) and the role's next attempt is spawned.
+- `cancel`: the agent is retired (`stopped`) and the task cancelled.
+
+The agent is never retired while the question is open: SPEC §5.2 lets a blocked agent stay alive
+waiting for mailbox guidance, so it keeps its lock and login. The decision carries the status's
+`wall_time` (`status_at`), so the same retained status re-delivered after a restart is not asked
+about twice.
+
 ## Ownership and claim
 
 Every wave has one **owner**, the coordinator agent id that submitted it — the single writer. It
@@ -1151,7 +1166,8 @@ wave-level one stops the wave).
 
 ### Retire and cleanup
 
-When a supervised agent's `failed` status arrives, the daemon retires it; a `done` is first
+When a supervised agent's `failed` status arrives, the daemon retires it (a `blocked` one is not
+retired: it gets an [`agent_blocked` decision](#decisions)); a `done` is first
 handed to the pipeline, which verifies the claim and retires the agent once it is checked (see
 [the pipeline](#the-pipeline-and-the-merge-ready-gate)). `reaped` (its
 LWT) is retired only after the reap grace passes with no fresh status or heartbeat (see
@@ -1779,6 +1795,16 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
 | any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
+
+**Terminal-status watchdog.** Every terminal status a supervised agent publishes (`done`,
+`blocked`, `failed`) must lead to something in the wave journal that names the agent
+(`decision_opened`, `agent_retired`, `artifact_verified`, `ci_pending`, `steering_sent`,
+`relaunched`, …). One that nothing names within `terminal_unjournaled_alarm_ms` (60 s, on the
+daemon's clock) is a status volleyd dropped: it journals `alarm_raised { alarm:
+"terminal_status_unjournaled", agent_id, role, task, status, since }` once per status (`since` is
+the status's `wall_time`), logs `watchdog: <agent> <status> unjournaled for <n>s`, and journals
+`alarm_cleared` for it once something finally names the agent. A coordinator watching the journal
+learns a task is stuck even when no decision was opened for it.
 
 Every recovery decision carries `class` and `agent_id` (on the journal event and the retained
 topic) and answers `stop task` the same way: a `cancel` to the agent, an interrupt (Escape), and

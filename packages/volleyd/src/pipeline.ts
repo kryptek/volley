@@ -243,6 +243,7 @@ export interface PipelineMarker {
     | "review_result"
     | "fixup_result"
     | "agent_failed"
+    | "agent_blocked"
     | "reviewers_disagree"
     | "merge_ready_invariant"
     | "relaunch"
@@ -570,6 +571,19 @@ export type PipelineEvent =
       /** Why a `failed` one ended, when the daemon stopped it (F6: its machine is being removed). */
       why?: string;
     }
+  /**
+   * A role's agent published `blocked` (SPEC §5.1): it may stay alive awaiting guidance (§5.2), so
+   * nothing is retired. `reason` is `blockedReason(payload)`; `payload` the status payload.
+   */
+  | {
+      kind: "agent_blocked";
+      role: Role;
+      agent_id: string;
+      reason: string;
+      payload: unknown;
+      /** The status envelope's `wall_time`: kept on the decision (a re-delivery is not re-asked). */
+      at?: string;
+    }
   /** Artifacts verified for `role`'s run `agent_id`; `waited_ms`: how long this head has had no CI run. */
   | {
       kind: "verified";
@@ -694,6 +708,8 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return advance(v);
     case "agent_done":
       return onDone(v, ev);
+    case "agent_blocked":
+      return onBlocked(v, ev);
     case "verified":
       return onVerified(v, ev);
     case "rebase_checked":
@@ -1525,6 +1541,55 @@ function rewrittenSteer(detail: string, start: string, branch: string, release: 
   return `volleyd could not verify your work: ${detail}. Do not force-push. Rebuild the merge on the PR history: \`git fetch origin && git checkout -B fix ${start} && git merge --no-edit origin/${release} && git merge --no-edit origin/${branch}\`, then \`git push origin HEAD:${branch}\` (a normal push), then publish done again.`;
 }
 
+/** What a blocked agent says is in its way: `reason`, else `summary`, else `text`. */
+export function blockedReason(payload: unknown): string {
+  const p = (typeof payload === "object" && payload !== null ? payload : {}) as Record<
+    string,
+    unknown
+  >;
+  for (const k of ["reason", "summary", "text"]) {
+    const x = p[k];
+    if (typeof x === "string" && x.trim() !== "") return x;
+  }
+  return "(no reason given)";
+}
+
+/**
+ * A role's agent is blocked: ask the owner. Nothing is retired (the agent may be waiting on its
+ * mailbox); `continue` waits for its next status, `respawn` relaunches the role.
+ */
+function onBlocked(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,
+): PipelineAction[] {
+  const run = v.p.runs[ev.role];
+  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
+    return [];
+  const label = roleLabel(v.p, ev.role);
+  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
+  // By code point, so a clip never splits a surrogate pair.
+  const chars = Array.from(ev.reason);
+  const reason = chars.length > max ? `${chars.slice(0, max).join("")}…` : ev.reason;
+  return [
+    {
+      kind: "decide",
+      marker: { on: "agent_blocked", role: ev.role },
+      decision: {
+        kind: "agent_blocked",
+        task: v.task,
+        question: `${ev.agent_id} (${label}) is blocked: ${reason}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
+        options: ["continue", "respawn", "cancel"],
+      },
+      data: {
+        agent_id: ev.agent_id,
+        reason: ev.reason,
+        payload: ev.payload,
+        ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+      },
+    },
+  ];
+}
+
 /** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
 const roleLabel = (p: TaskPipeline, role: Role): string =>
   role === "rebase" && p.branch_update === "merge" ? "merge (branch update)" : role;
@@ -1540,7 +1605,13 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   if (v.stage === "done") return [];
   if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
   if (isAnswer(answer, "cancel")) {
+    // A blocked agent is still live (SPEC §5.2): it is stopped with the task.
+    const blocked = m.on === "agent_blocked" && m.role !== undefined ? v.p.runs[m.role] : undefined;
+    const agent = (d as { agent_id?: unknown }).agent_id;
     return [
+      ...(blocked !== undefined && blocked.agent_id === agent && blocked.retired === undefined
+        ? [{ kind: "retire" as const, agent_id: blocked.agent_id, status: "stopped" }]
+        : []),
       {
         kind: "journal",
         event: {
@@ -1625,6 +1696,22 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
       return isRespawnAnswer(answer, d.options) ? [] : reask();
+    case "agent_blocked": {
+      // continue: the owner steered it by hand; its next status is handled as usual.
+      if (isAnswer(answer, "continue")) return [];
+      const agent = (d as { agent_id?: unknown }).agent_id;
+      if (role === undefined || typeof agent !== "string") return [];
+      if (isAnswer(answer, "respawn")) {
+        // It went on and was accepted before the answer (steered by hand): keep that work.
+        if (run !== undefined && run.agent_id === agent)
+          return run.accepted || run.retired !== undefined
+            ? []
+            : [{ kind: "relaunch", role, agent_id: agent }];
+        // A newer run of the role already replaced it: only make sure the old agent is gone.
+        return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+      }
+      return reask();
+    }
     case "pr_head_moved": {
       // The reducer moved the task's head to the new one and kept the directive.
       const live = REVIEWER_ROLES.flatMap((r) => {

@@ -547,6 +547,19 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await driver.handle("T1", ev);
       await driver.settled();
     },
+    /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
+    async block(role: Role, reason: string) {
+      const r = run(role);
+      if (r === undefined) throw new Error(`no ${role} run`);
+      await driver.handle("T1", {
+        kind: "agent_blocked",
+        role,
+        agent_id: r.agent_id,
+        reason,
+        payload: { reason },
+      });
+      await driver.settled();
+    },
     /** Resolve an open decision and hand the resolution to the pipeline. */
     async resolve(id: string, answer: string, by = "coord-1") {
       const r = resolveEvent(rec, id, { answer, by }, new Date());
