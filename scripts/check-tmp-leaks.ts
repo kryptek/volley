@@ -104,13 +104,15 @@ function main(argv: string[]): number {
   // `bun script -- cmd` hands the script no `--` when it comes first, so it is optional.
   let rest = argv;
   let given: string | undefined;
+  let badDir = false;
   if (rest[0] === "--dir") {
     given = rest[1];
+    badDir = given === undefined || given === "" || given.startsWith("-");
     rest = rest.slice(2);
   }
   if (rest[0] === "--") rest = rest.slice(1);
   const command = rest;
-  if (command.length === 0 || given === "") {
+  if (command.length === 0 || badDir) {
     console.error("usage: bun scripts/check-tmp-leaks.ts [--dir <path>] -- <command...>");
     return 2;
   }
@@ -122,6 +124,7 @@ function main(argv: string[]): number {
       env: { ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir },
     });
     if (r.error) throw r.error;
+    if (r.signal) console.error(`check-tmp-leaks: the command was killed by ${r.signal}`);
     const leaks = groupLeaks(before, readdirSync(dir));
     if (leaks.size > 0) console.error(leakReport(leaks, (p) => ownersOf(p)));
     if (r.status !== 0) return r.status ?? 1;

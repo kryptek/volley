@@ -59,8 +59,9 @@ export function makeWorkdir(
 /**
  * The parent environment minus anything that would leak the developer's own session into a
  * hook under test (Claude Code / cmux / Volley variables), plus `extra`. VOLLEY_AUTH_DIR
- * defaults to an empty temp dir (removed after the test), so a coordinator-mode hook never reads (or sends to a test
- * broker) the host's real `<mosquitto etc>/volley/coordinator.json`.
+ * defaults to an empty temp dir (removed after the test), so a coordinator-mode hook never reads
+ * (or sends to a test broker) the host's real `<mosquitto etc>/volley/coordinator.json`. That dir
+ * is a `tempDir`: call this (and `runHook` / `runScript`) inside a test or a `beforeEach`.
  */
 export function hookEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};

@@ -12,7 +12,7 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function fakeTmp(): string {
-  const dir = mkdtempSync(join(tmpdir(), "check-tmp-leaks-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "vly-leakcheck-test-"));
   made.push(dir);
   return dir;
 }
@@ -119,6 +119,22 @@ describe("check-tmp-leaks (CLI)", () => {
     expect(r.out).toContain("volley-x-: 1 (volley-x-abc)");
     // Nothing reaches the real temp dir: the private one is gone too.
     expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  test("--dir without a path prints usage", () => {
+    const tmp = fakeTmp();
+    for (const args of [["--dir"], ["--dir", "--", "true"]]) {
+      const r = run(args, tmp);
+      expect(r.code).toBe(2);
+      expect(r.out).toContain("usage");
+    }
+  });
+
+  test("a command killed by a signal says so", () => {
+    const tmp = fakeTmp();
+    const r = run(["--dir", tmp, "--", "sh", "-c", "kill -TERM $$"], tmp);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("killed by SIGTERM");
   });
 
   test("without a command it prints usage", () => {

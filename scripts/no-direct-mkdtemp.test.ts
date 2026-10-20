@@ -53,6 +53,18 @@ describe("temp dirs in tests", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("no test file creates anything under a literal /tmp", () => {
+    // check-tmp-leaks points TMPDIR at a private dir; a hard-coded /tmp path would escape it.
+    const write =
+      /\b(mkdir|mkdirSync|writeFile|writeFileSync|mkdtemp|mkdtempSync)\(\s*["'`]\/tmp\//;
+    const offenders = testFiles.flatMap((f) =>
+      readFileSync(f, "utf8")
+        .split("\n")
+        .flatMap((line, i) => (write.test(line) ? [`${relative(ROOT, f)}:${i + 1}`] : [])),
+    );
+    expect(offenders).toEqual([]);
+  });
+
   test("every tempDir prefix is one check-tmp-leaks watches", () => {
     const prefixes = testFiles
       .filter((f) => !f.endsWith(HELPER))

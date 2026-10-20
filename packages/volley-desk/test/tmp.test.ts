@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir, tempDirForAll } from "./helpers/tmp";
 
 // The tests in each describe run in order: a later test checks what an earlier one left behind.
@@ -13,8 +13,15 @@ const failing: (name: string, fn: () => void) => void =
 describe("tempDir", () => {
   let seen = "";
   let fromBeforeEach = "";
+  let previousFromBeforeEach = "";
+  let existedInAfterEach = false;
   beforeEach(() => {
+    previousFromBeforeEach = fromBeforeEach;
     fromBeforeEach = tempDir("vly-tmp-test-each-");
+  });
+  // Like a daemon's teardown: the test's dir must still be there while an afterEach runs.
+  afterEach(() => {
+    existedInAfterEach = seen !== "" && existsSync(seen);
   });
 
   it("is a fresh, writable directory during the test", () => {
@@ -24,9 +31,13 @@ describe("tempDir", () => {
     expect(existsSync(fromBeforeEach)).toBe(true);
   });
 
-  it("is gone, contents and all, in the next test", () => {
+  it("is gone, contents and all, in the next test, after the afterEach hooks ran", () => {
     expect(seen).not.toBe("");
+    expect(existedInAfterEach).toBe(true);
     expect(existsSync(seen)).toBe(false);
+    // The beforeEach one too.
+    expect(previousFromBeforeEach).not.toBe("");
+    expect(existsSync(previousFromBeforeEach)).toBe(false);
   });
 
   failing("is removed when its test throws", () => {

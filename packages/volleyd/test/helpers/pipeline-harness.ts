@@ -476,7 +476,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     openDecisions: () =>
       (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),
-    /** Nothing left to release: `home` is a tempDir, removed when the test ends. */
+    /** @deprecated Nothing to release: `home` is a tempDir, removed when the test ends. */
     cleanup: () => {},
   };
   return h;

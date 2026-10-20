@@ -149,6 +149,7 @@ export interface SpawnEnv {
   request: (over?: Partial<SpawnRequest>) => SpawnRequest;
   /** The worktree a T1 implementer spawn uses. */
   worktree: string;
+  /** @deprecated Nothing to release: the dir is a tempDir, removed when the test ends. */
   cleanup: () => Promise<void>;
 }
 
@@ -243,7 +244,6 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     creds,
     request: (over = {}) => ({ wave, task: "T1", role: "implementer", attempt: 1, ...over }),
     worktree: join(dir, "wt", "w1", "T1-implementer"),
-    // `dir` is a tempDir, removed when the test ends
     cleanup: async () => {},
   };
 }
