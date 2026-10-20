@@ -85,12 +85,12 @@ describe("schemaRows", () => {
               ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
               : v.type === "array"
                 ? []
-              : v.additionalProperties
-                ? heavyPools.map((pool) => [
-                    `${pre}${k}.${pool}`,
-                    v.additionalProperties as JsonSchema,
-                  ])
-                : [[`${pre}${k}`, v]],
+                : v.additionalProperties
+                  ? heavyPools.map((pool) => [
+                      `${pre}${k}.${pool}`,
+                      v.additionalProperties as JsonSchema,
+                    ])
+                  : [[`${pre}${k}`, v]],
           ),
         );
       const leaves = Object.entries(
