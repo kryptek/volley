@@ -1087,6 +1087,22 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
   };
   const ciFailed = () => h.openDecisions().find((d) => d.kind === "ci_failed");
 
+  it("the CI directive lists only the failed runs (a skipped run is left out)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.runLog = fixture("gh-run-log-failed.txt");
+    h.world.ciRuns[H1] = [
+      { status: "completed", conclusion: "failure", workflow: "CI / test" },
+      { status: "completed", conclusion: "skipped", workflow: "CI / docs" },
+    ];
+    await h.finish("implementer", { head: H1 });
+    await h.resolve(ciFailed()?.decision_id as string, "fixup");
+    const md = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(md).toContain("- CI / test: failure");
+    expect(md).not.toContain("CI / docs");
+  });
+
   it("CI red on the implementer's first head: fixup with the CI directive, then the reviews", async () => {
     h = pipelineHarness();
     await h.start();
@@ -1286,6 +1302,27 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     expect(types()).not.toContain("task_cancelled");
     expect(stage()).not.toBe("cancelled");
     expect(h.retired).toEqual([]);
+  });
+
+  it("a stall answered respawn after the agent ended (failed) relaunches nothing", async () => {
+    h = pipelineHarness();
+    await h.start();
+    const agent = h.run("implementer")?.agent_id as string;
+    await h.finish("implementer", { status: "failed" });
+    const stalled = {
+      decision_id: "d-stalled-late",
+      kind: "agent_stalled",
+      task: "T1",
+      agent_id: agent,
+      question: "stalled",
+      options: ["nudge again", "respawn", "stop task"],
+      pipeline: { on: "liveness", role: "implementer", agent_id: agent, attempt: 1 },
+      resolved: { answer: "respawn", by: "coord-1", at: new Date().toISOString() },
+    } as unknown as DecisionRecord;
+    await h.driver.handle("T1", { kind: "decision_resolved", decision: stalled });
+    await h.driver.settled();
+    expect(h.events.some((e) => e.type === "relaunched")).toBe(false);
+    expect(h.spawns.filter((s) => s.role === "implementer")).toHaveLength(1);
   });
 
   it("an unverifiable done answered re-verify re-verifies (no respawn)", async () => {

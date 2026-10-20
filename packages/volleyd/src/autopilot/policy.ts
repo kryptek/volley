@@ -286,6 +286,7 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     kinds: ["ci_failed"],
     condition:
       'pipeline.on === "ci_failed" and classification: own_change (unclassified: infra === false)',
+    // Nothing sets classification until A3 classifies red heads: until then this is `infra === false`.
     when: (d) =>
       on(d) === "ci_failed" &&
       (d.classification === "own_change" || (d.classification === undefined && d.infra === false)),

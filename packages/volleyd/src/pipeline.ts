@@ -11,6 +11,7 @@ import {
   artifactOutcome,
   checkRebase,
   ciStateOf,
+  failedRuns,
   landed,
   probeLanded,
   probeMovedHead,
@@ -1857,9 +1858,10 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return role !== undefined ? [{ kind: "verify", role }] : [];
     case "liveness":
       // A stalled agent: respawn replaces it; any other answer is the daemon's (it steers it).
-      return role !== undefined && isRespawnAnswer(answer, d.options)
-        ? respawnRun(v, role, m.agent_id)
-        : [];
+      if (role === undefined || !isRespawnAnswer(answer, d.options)) return [];
+      // Ended meanwhile (its status is handled as usual): nothing to replace.
+      if (run !== undefined && run.agent_id === m.agent_id && run.retired !== undefined) return [];
+      return respawnRun(v, role, m.agent_id);
     case "ci_failed":
       if (role !== undefined && isAnswer(answer, "fixup") && (d.options ?? []).includes("fixup"))
         return ciFixup(v, d, m);
@@ -2469,10 +2471,8 @@ function renderCiDirectiveMd(d: Directive): string {
     "",
     `## CI on ${at}: red`,
     "",
-    ...d.runs
-      .filter((r) => r.status === "completed" && r.conclusion !== "success")
-      .map((r) => `- ${r.name}: ${r.conclusion ?? r.status} (${r.url})`),
-    ...(d.runs.length > 0 ? [""] : []),
+    ...failedRuns(d.runs).map((r) => `- ${r.name}: ${r.conclusion ?? r.status} (${r.url})`),
+    ...(failedRuns(d.runs).length > 0 ? [""] : []),
     ...failureMd(d),
     "## The failed runs' log (its tail)",
     "",
