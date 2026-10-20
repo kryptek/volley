@@ -416,3 +416,37 @@ describe("phone width (390 px)", () => {
     expect(phone).toMatch(/\.m-sheet\s*\{[^}]*inset:\s*0/);
   });
 });
+
+describe("Machines focus (the agent window's machine chip)", () => {
+  it("scrolls the focused machine's card into view once, on mount", () => {
+    const seen: Element[] = [];
+    const spy = vi.fn(function (this: Element) {
+      seen.push(this);
+    });
+    // jsdom has no scrollIntoView.
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      setup({
+        machines: { "box-a": machineRecord(), "box-b": machineRecord({ name: "box-b" }) },
+        hosts: ["box-a", "box-b"],
+        focus: "box-b",
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(seen[0]).toBe(screen.getByRole("article", { name: "box-b" }));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("the supervisor's own machine scrolls to its card (the hub card until it has a record)", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      setup({ localName: "studio", focus: "studio" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.contexts[0]).toBe(screen.getByRole("article", { name: "This machine" }));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+});

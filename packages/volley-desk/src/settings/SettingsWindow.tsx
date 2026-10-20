@@ -114,6 +114,13 @@ const initials = (name: string) =>
 
 export function SettingsWindow(p: SettingsWindowProps) {
   const [sec, setSec] = useState<SectionKey>(p.initial ?? "general");
+  // An open window follows a new section it is given (and a new machine to focus, on Machines).
+  const { initial } = p;
+  const focusMachine = p.machines?.focus;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new machine to focus re-opens Machines
+  useEffect(() => {
+    if (initial) setSec(initial);
+  }, [initial, focusMachine]);
   const [q, setQ] = useState("");
   const dialog = useRef<HTMLDivElement>(null);
   const shown = matchSections(q);

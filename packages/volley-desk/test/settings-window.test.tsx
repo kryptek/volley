@@ -142,6 +142,13 @@ describe("SettingsWindow", () => {
     );
   });
 
+  it("an open window follows a new section it is given (a machine chip asks for Machines)", () => {
+    const { rerender } = render(<Harness initial="general" />);
+    open("About Volley");
+    rerender(<Harness initial="machines" machines={{ machines: {}, hubUp: true, ops: null, focus: "box-a" }} />);
+    expect(heading()).toHaveTextContent("Machines");
+  });
+
   it("closes on Escape, the close button and a scrim click", () => {
     const onClose = vi.fn();
     render(<Harness onClose={onClose} />);
