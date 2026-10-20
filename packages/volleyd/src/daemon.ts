@@ -62,21 +62,30 @@ import {
   summaryPayload,
 } from "./admission";
 import { budgetUsed } from "./autopilot/budgets";
+import { carryHandoff, carryPicker } from "./autopilot/carry";
 import {
   INBOX_CHANNEL,
+  INBOX_ID,
   type InboxAnswerRequest,
+  type InboxHandler,
   type InboxItem,
   type InboxKind,
   type InboxWhere,
+  type SessionSurface,
   answerEvent,
   decisionItemId,
   foldInbox,
   inboxEnvelopeType,
   inboxTopic,
   itemForDecision,
+  itemForHandoff,
+  itemForPicker,
   openedEvent,
+  parsePickerQuestions,
   parseWhere,
   parseWhereLabel,
+  pickerAnswerText,
+  pickerItemId,
   ttlExpired,
   whereLabel,
 } from "./autopilot/inbox";
@@ -794,6 +803,8 @@ const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete",
 
 /** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
 const REGISTRY_FILTER = "volley/_system/registry/+";
+/** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
+const PROMPT_RECEIVED = "prompt received";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -898,10 +909,15 @@ export class Daemon {
   /** The needs-you inbox (SPEC §4.6.18), by item id: rebuilt from the journals on start. */
   private readonly inbox = new Map<string, InboxItem>();
   /**
-   * What acts on an accepted answer to an item that is not a decision (a decision's answer
-   * resolves it): pickers and handoffs, release stages, registered by their subsystems.
+   * What carries out an answer to an item that is not a decision (a decision's answer resolves
+   * it): pickers and handoffs (below), release stages, registered by their subsystems. It runs
+   * after the referee's check and before the answer is recorded: a reason it returns (or throws)
+   * refuses the answer and the item stays open.
    */
-  readonly inboxHandlers = new Map<InboxKind, (item: InboxItem) => Promise<void>>();
+  readonly inboxHandlers = new Map<InboxKind, InboxHandler>([
+    ["picker", (item, req) => this.carryInboxAnswer(item, req, carryPicker)],
+    ["handoff", (item, req) => this.carryInboxAnswer(item, req, carryHandoff)],
+  ]);
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
@@ -1593,6 +1609,7 @@ export class Daemon {
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     if (env !== null) this.noteAttention(agent, env);
+    if (env !== null) this.noteInboxSignal(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     const now = this.now();
@@ -6740,13 +6757,19 @@ export class Daemon {
         };
       }
     } else {
-      const answered = await this.recordInboxAnswer(item, req);
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
-      else
-        await handler(answered).catch((e: unknown) =>
-          this.log(`inbox ${id}: ${e instanceof Error ? e.message : String(e)}`),
+      else {
+        const refused = await handler(item, req).catch(
+          (e: unknown) =>
+            `could not carry out the answer: ${e instanceof Error ? e.message : String(e)}`,
         );
+        if (typeof refused === "string") {
+          this.log(`inbox ${id}: answer '${req.answer}' refused: ${refused}`);
+          return { refused };
+        }
+      }
+      await this.recordInboxAnswer(item, req);
     }
     return { item: this.inbox.get(id) as InboxItem };
   }
@@ -6767,6 +6790,127 @@ export class Daemon {
     const res = await this.resolveNow(wave, id, r);
     if (!res.already_resolved) await this.applyPlanAnswer(wave, res.decision, r.by);
     return res;
+  }
+
+  /**
+   * A session's hooks say a person is needed, or was answered there (SPEC §4.6.18): a picker
+   * opened (`picker_opened`, any session) or answered (`picker_answered`), a coordinator turn that
+   * ended on a question (`awaiting_input` with `question`, a session volleyd does not supervise),
+   * the next prompt it was given (`activity` `prompt received`, or the `resumed` of that
+   * UserPromptSubmit), or a turn's end (`idle`: no picker is open any more). Runs on the queue.
+   */
+  private noteInboxSignal(agent: string, env: Envelope): void {
+    const p = (
+      typeof env.payload === "object" && env.payload !== null ? env.payload : {}
+    ) as Record<string, unknown>;
+    const at = Number.isNaN(Date.parse(env.wall_time))
+      ? dateOf(this.time).toISOString()
+      : env.wall_time;
+    if (env.type === "picker_opened") {
+      const questions = parsePickerQuestions(p.questions);
+      if (typeof p.tool_use_id !== "string" || questions === null) return;
+      const toolUseId = p.tool_use_id;
+      if (!INBOX_ID.test(pickerItemId(agent, toolUseId))) return;
+      void this.enqueue(() =>
+        this.openInboxItemNow(
+          itemForPicker(agent, toolUseId, questions, this.sessionSurface(agent, p), at),
+        ),
+      );
+    } else if (env.type === "picker_answered") {
+      const answer = pickerAnswerText(p.answers);
+      if (typeof p.tool_use_id !== "string" || answer === null) return;
+      const id = pickerItemId(agent, p.tool_use_id);
+      void this.enqueue(() => this.closeInTerminal(id, answer));
+    } else if (env.type === "awaiting_input") {
+      const seq = p.seq;
+      if (typeof p.question !== "string" || p.question.trim() === "") return;
+      if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) return;
+      if (this.supervised.has(agent)) return; // a wave agent's question is a decision (liveness)
+      const question = p.question;
+      void this.enqueue(() =>
+        this.openInboxItemNow(
+          itemForHandoff(agent, seq, question, this.sessionSurface(agent, p), at),
+        ),
+      );
+    } else if (
+      (env.type === "activity" && p.msg === PROMPT_RECEIVED) ||
+      (env.type === "resumed" && p.hook_event === "UserPromptSubmit")
+    ) {
+      void this.enqueue(() => this.closeOpenItems(agent, "handoff", "answered in its terminal"));
+    } else if (env.type === "idle") {
+      void this.enqueue(() => this.closeOpenItems(agent, "picker", "dismissed in its terminal"));
+    }
+  }
+
+  /**
+   * Where `agent`'s screen is: a supervised agent's workspace on its host, else the workspace
+   * its hooks name (a coordinator session, on this machine).
+   */
+  private sessionSurface(agent: string, p: Record<string, unknown>): SessionSurface {
+    const a = this.supervised.get(agent);
+    if (a !== undefined) {
+      return {
+        wave: a.wave,
+        task: a.task,
+        workspace: a.workspace,
+        host: a.host.name,
+        machine: a.host.name === LOCAL_HOST ? this.config.localName() : a.host.name,
+        supervised: true,
+      };
+    }
+    return {
+      ...(typeof p.workspace === "string" && p.workspace !== "" ? { workspace: p.workspace } : {}),
+      machine: this.config.localName(),
+      supervised: false,
+    };
+  }
+
+  /** Close an open item with what its session's terminal answered (`where: terminal`). */
+  private async closeInTerminal(id: string, answer: string): Promise<void> {
+    const item = this.inbox.get(id);
+    if (item === undefined || item.answered !== undefined) return; // answered here: confirmed
+    const machine = typeof item.source.machine === "string" ? item.source.machine : undefined;
+    await this.recordInboxAnswer(item, {
+      version: item.version,
+      answer,
+      by: item.agent_id,
+      where: { kind: "terminal", ...(machine !== undefined ? { machine } : {}) },
+    });
+  }
+
+  /** Close `agent`'s open items of `kind` as answered in its terminal. */
+  private async closeOpenItems(agent: string, kind: InboxKind, answer: string): Promise<void> {
+    for (const item of [...this.inbox.values()]) {
+      if (item.agent_id === agent && item.kind === kind && item.answered === undefined)
+        await this.closeInTerminal(item.id, answer);
+    }
+  }
+
+  /**
+   * Carry out an inbox answer on its session's screen (autopilot/carry.ts), or why not: volleyd
+   * cannot see a session whose workspace it does not know.
+   */
+  private async carryInboxAnswer(
+    item: InboxItem,
+    req: InboxAnswerRequest,
+    carry: typeof carryPicker,
+  ): Promise<string | null> {
+    const a = this.supervised.get(item.agent_id);
+    const source = typeof item.source.workspace === "string" ? item.source.workspace : undefined;
+    const workspace = a?.workspace ?? source;
+    if (workspace === undefined)
+      return "volleyd cannot see this session's screen: answer it in its terminal";
+    const host = a?.host ?? this.host;
+    return carry(
+      {
+        host,
+        workspace,
+        readScreen: (ws) => this.readScreenBounded(ws, host),
+        sleep: (ms) => new Promise((r) => this.time.setTimeout(r, ms)),
+      },
+      item,
+      req.answer,
+    );
   }
 
   /** The referee accepted an answer: journal `inbox_answered`, keep and publish the record. */

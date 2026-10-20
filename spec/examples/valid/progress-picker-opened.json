@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "parent_id": null,
+  "wall_time": "2026-10-20T14:05:00.000Z",
+  "channel": "progress",
+  "type": "picker_opened",
+  "payload": {
+    "tool_use_id": "toolu_01LV3L22tMmNCxfPc68am4Sn",
+    "questions": [
+      {
+        "question": "Dispatch wave w2 now?",
+        "header": "Go/no-go",
+        "options": [
+          { "label": "go", "description": "start the wave" },
+          { "label": "hold", "description": "wait, ask again later" },
+          { "label": "cancel", "description": "do not run it" }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "workspace": "workspace:7",
+    "seq": 44,
+    "source": "harness-hook",
+    "hook_event": "PreToolUse"
+  }
+}
