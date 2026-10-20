@@ -289,6 +289,42 @@ esac
     });
   });
 
+  it("with the real cmux shape, the prompt fields never reach any published message", async () => {
+    const bin = join(mkdtempSync(join(tmpdir(), "volley-hooks-cmux-")), "cmux");
+    const list = join(__dirname, "fixtures", "cmux-list-workspaces.json");
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+case "$1" in
+  identify) echo '{"caller":{"workspace_ref":"workspace:1515"}}' ;;
+  list-workspaces) cat '${list}' ;;
+esac
+`,
+    );
+    chmodSync(bin, 0o755);
+    const raw: string[] = [];
+    const stop = await client.subscribeStream("#", (m) => {
+      raw.push(String(m.payload));
+    });
+    const run = await start({
+      CMUX_WORKSPACE_ID: "6f1c2a10-0000-4000-8000-000000000002",
+      CMUX_BUNDLED_CLI_PATH: bin,
+    });
+    expect(run.exitCode).toBe(0);
+    await tick(200);
+    await stop();
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace: "workspace:1515",
+      workspace_title: "Release triage",
+    });
+    expect(raw.length).toBeGreaterThan(0);
+    for (const text of [...raw, run.stdout, JSON.stringify(reg)]) {
+      expect(text).not.toMatch(/PROMPT-MARKER|CONVO-MARKER/);
+      expect(text).not.toMatch(/latest_submitted|latest_conversation/);
+    }
+  });
+
   it("no title source: no workspace_title", async () => {
     await start({ VOLLEY_WORKSPACE_TITLE: "" });
     const reg = await retainedEnvelope(client, registryTopic(COORD));

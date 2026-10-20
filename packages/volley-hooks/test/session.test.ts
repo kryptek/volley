@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -131,6 +131,14 @@ describe("republishRegistry", () => {
 });
 
 describe("workspaceTitleFrom (cmux list-workspaces --json)", () => {
+  it("reads the real cmux shape: matches `ref`, takes `title`, nothing else", () => {
+    const json = JSON.parse(
+      readFileSync(join(__dirname, "fixtures", "cmux-list-workspaces.json"), "utf-8"),
+    );
+    expect(workspaceTitleFrom(json, { ref: "workspace:1515" })).toBe("Release triage");
+    expect(workspaceTitleFrom(json, { ref: "workspace:1514" })).toBe("Another workspace");
+  });
+
   const ws = [
     { ref: "workspace:1", id: "aaaa-1", index: 0, title: "other", selected: false },
     { ref: "workspace:2", id: "bbbb-2", index: 1, title: "  #169 desk purpose  ", selected: true },

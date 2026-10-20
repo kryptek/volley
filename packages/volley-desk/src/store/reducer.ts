@@ -981,8 +981,36 @@ export function endedWaves(state: DeskState): Set<string> {
   );
 }
 
+/** Registry entries the harness hooks wrote: `model_source` is theirs (SPEC §4.3). */
+const HOOK_SOURCES = new Set(["harness-hook", "unknown"]);
+
 /**
- * The top bar's "N agents working": agents (not coordinators, never
+ * An interactive Claude Code session rather than a dispatched agent: the hooks
+ * registered it (`model_source`), nobody launched it (no `parent_id`) and no
+ * wave runs it (SPEC §4.3).
+ */
+export function isSession(a: Pick<AgentView, "registry" | "parentId" | "wave" | "task">): boolean {
+  const src = a.registry?.model_source;
+  return (
+    typeof src === "string" &&
+    HOOK_SOURCES.has(src) &&
+    a.parentId === null &&
+    a.wave === UNASSIGNED &&
+    a.task === null
+  );
+}
+
+/** The top bar's "· N sessions": live interactive sessions (`isSession`), apart from the agents. */
+export function sessionCount(state: DeskState): number {
+  return Object.values(state.agents).filter(
+    (a) => !state.coordinators[a.id] && isSession(a) && LIVE_AGENT.has(a.status?.type ?? ""),
+  ).length;
+}
+
+const LIVE_AGENT = new Set(["spawning", "registered", "working"]);
+
+/**
+ * The top bar's "N agents working": agents (not coordinators, never sessions, never
  * supervisors, none of a stopped / complete wave) whose status is `working`, or still `spawning` / `registered`
  * while they publish progress — an agent the MCP server left at `registered`
  * (it never set `working` itself) that is narrating is at work.
@@ -990,7 +1018,7 @@ export function endedWaves(state: DeskState): Set<string> {
 export function workingCount(state: DeskState): number {
   return Object.values(state.agents).filter((a) => {
     // Nothing runs in a stopped / complete wave, whatever an agent's last status said.
-    if (state.coordinators[a.id] || isEndedWave(state.waves[a.wave])) return false;
+    if (state.coordinators[a.id] || isSession(a) || isEndedWave(state.waves[a.wave])) return false;
     const t = a.status?.type;
     if (t === "working") return true;
     return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;

@@ -17,7 +17,9 @@
  * The window, the steering panel, the unassigned / sessions cards and the
  * Needs-you notification all use the same `label`.
  */
-import { UNASSIGNED } from "../../store/reducer";
+import { isSession } from "../../store/reducer";
+
+export { isSession };
 import type { AgentView, WaveView } from "../../store/types";
 
 export type PurposeSource = "wave" | "registered" | "session" | "cwd" | "narration" | "id";
@@ -71,25 +73,6 @@ export function basename(p: unknown): string | null {
   if (typeof p !== "string") return null;
   const parts = p.split(/[/\\]/).filter((x) => x !== "");
   return oneLine(parts[parts.length - 1]);
-}
-
-/** Registry entries the harness hooks wrote: `model_source` is theirs (SPEC §4.3). */
-const HOOK_SOURCES = new Set(["harness-hook", "unknown"]);
-
-/**
- * An interactive Claude Code session rather than a dispatched agent: the hooks
- * registered it (`model_source`), nobody launched it (no `parent_id`) and no
- * wave runs it (SPEC §4.3).
- */
-export function isSession(a: Pick<AgentView, "registry" | "parentId" | "wave" | "task">): boolean {
-  const src = a.registry?.model_source;
-  return (
-    typeof src === "string" &&
-    HOOK_SOURCES.has(src) &&
-    a.parentId === null &&
-    a.wave === UNASSIGNED &&
-    a.task === null
-  );
 }
 
 /** The earliest `progress` message the agent itself sent (not its hooks). */
