@@ -779,6 +779,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
+| `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
@@ -1210,14 +1211,42 @@ reconnect with a fresh `spawning` (SPEC §6.5). Retiring deletes the agent's log
 it): volleyd publishes the agent's retained `status: reaped { reason: "credentials_deleted" }`,
 then empty retained payloads on its `registry`, `status`, `progress`, `result`, `capability`,
 `screen` and `usage` topics, then the batched `deleteClient` (journaled `agent_reaped_by_supervisor`
-and `credentials_revoked`); then the lock is released, the agent's workspace closed (its cmux
-workspace, or its tmux session on an ssh host: `agent_retired { workspace, workspace_closed }`),
-and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+and `credentials_revoked`); then the lock is released, the agent's session ended, and
+`agent_retired { status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
-so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's
-consent token (`--force` for dirty worktrees); worktrees of agents not yet retired are skipped,
-and branches are never deleted.
+so the cleared records live on in the journal. Only the wave's own agents, only terminal ones.
+
+**The retired marker.** Before the login is deleted, volleyd writes
+`<worktree>/.volley/retired.json` `{ agent_id, status, at }` through the agent's host (so a
+remote box gets it too). The agent's hooks read it: a marker naming their own agent id makes them
+end quietly (exit 0, no broker connect, a one-time `{ code: "RETIRED" }` note in
+`hooks-error.json`) instead of reporting the refused login as `AUTH_FAILED`. A marker naming
+another id (a reused worktree) is ignored.
+
+**Ending the session.** With `retire_close_session` on (the default) the retire then closes the
+agent's workspace (its cmux workspace, bounded by a 15 s timeout, or its tmux session on an ssh
+host) and, on this machine, stops whatever process still runs under the agent's worktree: a
+closed cmux workspace does not always end its `claude`. A process counts only by its argv (the
+launch script's `--mcp-config=<worktree>/.volley/mcp.json`; volleyd lists processes with the
+fenced `ps -axo pid=,command=` and signals them itself: SIGTERM, a 5 s grace, SIGKILL). It is
+journaled `agent_session_closed { agent_id, workspace, how, pids }` (`how`: `close-workspace`,
+`kill-session`, `signal` when only a process was stopped, or `none`) before
+`agent_retired { workspace, workspace_closed }`. An agent retired after a daemon restart has
+only a journaled ref; a short cmux ref (`workspace:<n>`) may name another workspace by then, so
+volleyd re-finds the workspace by its `<wave> <task> <role>` title (`cmux list-workspaces`,
+exactly one match) and, when it cannot, closes nothing and still stops the processes under the
+worktree. A worktree or title another live agent of the wave now holds (a relaunch into the same
+worktree) is left alone. With `retire_close_session: false` finished sessions stay open for
+inspection (`workspace_closed: false`; the marker is still written).
+
+Nothing on disk is deleted: `volleyd cleanup <wave>
+--yes` closes any workspace a retire could not close, runs `git worktree remove` with the fence's
+consent token (`--force` for dirty worktrees), and stops the retired agents' processes still
+running on this machine: every process whose `--mcp-config=` lies inside the worktree of a
+target whose every agent is retired, never one under any other worktree (an agent not yet
+retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
+id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
+deleted.
 
 Answering a `repo_untrusted` decision with `volleyd resolve <id> trust` (owner only) records
 exactly `projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`; it re-checks the
@@ -2255,6 +2284,8 @@ ALLOW (program by bare name only — never a path):
     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
   (agent logins are minted and deleted over volleyd's own Dynamic Security control
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+  ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
+    agent's claude by `process.kill`, never by a spawned `kill`)
   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
     retains no $SYS/broker/version)
   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>

@@ -120,6 +120,11 @@ export interface Tunables {
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
   require_fresh_base: boolean;
+  /**
+   * A retire also ends the agent's session (its workspace closed, its `claude` process stopped).
+   * false: finished sessions stay open for inspection.
+   */
+  retire_close_session: boolean;
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
@@ -361,6 +366,7 @@ export const WAVE_EVENT_TYPES = [
   "agent_spawned",
   "agent_registered",
   "agent_retired",
+  "agent_session_closed",
   "spawn_failed",
   "spawn_recovered",
   // A launch whose outcome was unknown (spawn.ts reconcileLaunch): its agent registered and was

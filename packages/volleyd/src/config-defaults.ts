@@ -44,6 +44,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
+  retire_close_session: true,
   placement: {
     nudge_on_merge: "files",
     // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
@@ -215,6 +216,12 @@ export const DAEMON_DEFAULTS = {
   worktree_scan_max_entries: 2000,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
+  /** Hard bound on one `cmux close-workspace` (a retire's, or cleanup's). */
+  workspace_close_timeout_ms: 15_000,
+  /** Between SIGTERM and SIGKILL when volleyd stops a retired agent's process (procs.ts). */
+  proc_kill_grace_ms: 5_000,
+  /** Hard bound on the `ps` that lists processes (procs.ts). */
+  ps_timeout_ms: 10_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
   /** Consecutive failed captures that back the agent off and mark its screen stale. */

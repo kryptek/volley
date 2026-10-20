@@ -24,6 +24,7 @@
             "agent_spawned",
             "agent_registered",
             "agent_retired",
+            "agent_session_closed",
             "spawn_failed",
             "spawn_recovered",
             "spawn_adopted",
