@@ -141,7 +141,7 @@
           "minimum": 60,
           "maximum": 86400,
           "default": 7200,
-          "description": "Seconds an idle agent that reported background_wait (waiting on its own background task) is left alone before the idle nudge path resumes."
+          "description": "Seconds, counted from the start of the idle, that evidence of an idle agent's own work (background_wait, a lease, running shells, a fresh worktree write) holds off the idle nudge; past it the nudge path resumes."
         },
         "stall_backoff_max_s": {
           "type": "integer",

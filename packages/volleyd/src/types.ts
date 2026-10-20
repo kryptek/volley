@@ -71,7 +71,7 @@ export interface Tunables {
   claim_after_s: number;
   heartbeat_alarm_s: number;
   idle_grace_s: number;
-  /** Longest an idle agent's `background_wait` (its own background task) holds off the nudge. */
+  /** Longest idle (from its start) that any own-work evidence (`background_wait`, lease, shells, worktree writes) holds off the nudge. */
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;

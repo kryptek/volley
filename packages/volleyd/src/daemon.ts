@@ -3335,6 +3335,9 @@ export class Daemon {
     };
     if (e.background_wait !== null || e.lease_held || (e.shells_running ?? 0) > 0) return e;
     if (a.host.name !== "local") return e;
+    const eff = this.config.effective(a.wave);
+    // Past background_wait_max_s of idle no evidence counts (ownWorkReason): skip the walk.
+    if (now - a.liveness.activity_at >= secondsMs(eff.background_wait_max_s)) return e;
     if (a.worktree === undefined) {
       const spawned = this.journalEvents(a.wave)
         .reverse()
@@ -3343,7 +3346,6 @@ export class Daemon {
     }
     const worktree = a.worktree;
     if (worktree === null) return e;
-    const eff = this.config.effective(a.wave);
     e.worktree_write_at = await newestWrite(worktree, {
       now,
       freshMs: secondsMs(eff.idle_grace_s),
