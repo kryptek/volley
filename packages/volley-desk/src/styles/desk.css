@@ -493,3 +493,27 @@ input.recessed:focus {
 .a-nosignal {
   margin: 6px 0;
 }
+
+/* -------------------------------------------------- pinned windows (C12) */
+/* The screen-anchored layer: above the canvas windows, below the top bar and dock. */
+.hud {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: hidden;
+}
+.hud .win {
+  pointer-events: auto;
+}
+.win-pin--place,
+.win-pin--screen {
+  color: var(--acc);
+}
+.win--collapsed .win-bar {
+  border-bottom-color: transparent;
+}
+.win--collapsed .win-body[hidden],
+.win--collapsed .win-foot[hidden] {
+  display: none;
+}

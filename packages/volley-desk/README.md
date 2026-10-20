@@ -83,6 +83,19 @@ Agents that finished (`done`, `failed` or `reaped`) more than 10 minutes ago lea
 
 Auto-arrange (Settings › General) is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
 
+### Pinning windows
+
+Every window's title bar has a pin toggle. A click cycles it: **pinned in place**, then **anchored to the screen**, then unpinned. The button's name and tooltip say the current state and what the next click does.
+
+- **Pinned in place.** The window keeps its canvas position. Arrange skips it and lays the other windows out clear of it. It still pans and zooms with the canvas, and you can still drag it.
+- **Anchored to the screen.** The window leaves the canvas for a fixed layer above it (`.hud`), at its full size, like a HUD. Pan, zoom, fit and arrange never move it. It is saved as the screen corner nearest its centre plus an offset from that corner, so it keeps that corner when the viewport (the browser window) is resized. It stays below the top bar. Arrange, the first fit and go-to fit into the screen minus the anchored windows, unless leaving room for one would take more than half the width or height. Anchored windows have no tethers. At phone width an anchored window collapses to its title bar and never covers the dock. A tap on the title bar, or its Expand button, opens it.
+
+Pins are saved per browser in the `volley-desk:layout` localStorage entry, with separate desktop and phone layouts. Each is saved under a window key that outlives the agent: `panel:coordinators`, `wave:<id>`, and `task:<wave>/<task>/<role>` for the agent that holds that slot in the wave state now, so a respawned agent's window keeps its pin (a finished predecessor still on the Desk is keyed by its id). An agent with no task falls back to `agent:<id>`. **Reset layout** (Settings › General) clears every pin and arranges. Layouts are not synced between devices.
+
+![The Wave coordinators window anchored top left; arrange & fit leaves it room](docs/pinning-anchored.png)
+
+![At phone width: anchored and collapsed to its title bar, then expanded](docs/pinning-phone-collapsed.png) ![](docs/pinning-phone-expanded.png)
+
 ## Phone width
 
 Below 700 px (`NARROW_PX` in `useViewport.ts`) the Desk starts at scale 0.5 (offset 8, 70, as in the prototype), the top bar drops its counts but keeps the needs-you pill and its toggles, and every window is clamped to `min(460, 100vw - 24)`. The Settings window puts its sections in a scrolling strip above the content; the steering bar, a wave's settings (one column) and the Needs-you actions (wrapping) fit the viewport. Rotating or resizing across the threshold switches layouts live.
@@ -123,6 +136,9 @@ src/canvas/World.tsx        the transformed world layer (world--anim while arran
 src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-column packing,
                             rows × columns chosen for the largest zoom (port of the prototype)
 src/layout/useAutoArrange.ts auto-arrange triggers (the ON/OFF setting is the look's autoArrange)
+src/layout/pins.ts          pure window pinning: pin modes, screen anchors (corner + offset), the
+                            fit area that avoids anchored windows, window keys, the saved layout
+src/layout/usePins.ts       the pins for this device class, kept in localStorage
 src/canvas/Frame.tsx        window frame: drag, focus (useFocusOrder), win--born (4 s), onSize,
                             chromes glass | liquid | spotlight | glow | solid, Needs-you
                             effect pulse | electric | star (attnStyle; wrapAttention overrides)
@@ -225,7 +241,7 @@ The no-coordinator banner's **Claim this wave** sends `volleyd claim <wave>` as 
 
 ## Settings
 
-The dock's **Settings** opens the Settings window: General (auto-arrange, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config), Claude accounts & usage, Broker accounts, Machines and Setup & Security (below) and About (version, licences). The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
+The dock's **Settings** opens the Settings window: General (auto-arrange, Reset layout, finished agents, sound, browser notifications, narration effect), Appearance (backgrounds with search, dim, window style, Needs-you effect, tethers), Supervisor (volleyd's global config), Claude accounts & usage, Broker accounts, Machines and Setup & Security (below) and About (version, licences). The sidebar shows the Desk's broker username and its role. The look's keys persist in `volley-desk-look`; sound and browser notifications share volley-dash's `volley-dash:notify` entry with the top bar's toggles.
 
 The config rows (Supervisor, and a wave's gear) come from the config schema, so a new tunable shows up without Desk changes: a bounded number gets a stepped slider, a string gets a text field, and each lease pool gets a capacity row. Hints come from the schema descriptions.
 

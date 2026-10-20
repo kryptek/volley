@@ -14,12 +14,17 @@
  * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
  * opens Setup & Security once, its Preview shows the sign-in screen, and Open setup…
  * closes Settings and shows the setup wizard in its own modal (as the prototype).
- * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
+ * Hardening (D8): the phone layout (`useScreenSize`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
  * off the canvas with their agents under "Show finished" (and get no tethers
  * when shown); the reconnect / resume grace (`syncing`) holds every liveness
  * judgement; a task's parallel reviewers carry the `review (spec + quality)` chip.
+ * Pinning (C12, `layout/pins.ts`): each window's title bar cycles it through
+ * pinned in place (arrange skips it) and anchored to the screen (rendered in the
+ * `.hud` layer above the canvas, untouched by pan, zoom, fit and arrange, which
+ * leave room for it; collapsed to its title bar at phone width), saved per
+ * window key and device class; Settings, General, Reset layout clears them.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDeskKeys } from "./a11y/keys";
@@ -41,12 +46,30 @@ import {
   NARROW_PX,
   type Rect,
   clampWindowWidth,
+  fitToArea,
   phoneMaxWidth,
+  useScreenSize,
   useViewport,
-  useViewportWidth,
 } from "./canvas/useViewport";
-import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
+import {
+  CGAP,
+  type Cluster,
+  GAP,
+  fitArea as arrangeArea,
+  arrange as arrangeLayout,
+} from "./layout/arrange";
+import {
+  type Pin,
+  anchorAt,
+  avoidAnchored,
+  hudBounds,
+  nextPinMode,
+  pinModeOf,
+  screenPos,
+  windowKeys,
+} from "./layout/pins";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
+import { usePins } from "./layout/usePins";
 import { plural } from "./lib/plural";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock } from "./look/DeskDock";
@@ -241,9 +264,20 @@ function useDismissedWaves() {
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
-  const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
-  const vw = useViewportWidth();
+  const { view, setView, zoomAt, panBy, fitTo: fitView, stageRef, stageHandlers } = useViewport();
+  const screenSize = useScreenSize();
+  const vw = screenSize.width;
   const narrow = vw < NARROW_PX;
+  const {
+    pins,
+    setPin,
+    save: savePinsNow,
+    reset: resetPins,
+  } = usePins(narrow ? "phone" : "desktop");
+  /** The screen-anchored layer, above the canvas (C12). */
+  const [hud, setHud] = useState<HTMLDivElement | null>(null);
+  /** Anchored windows expanded at phone width (they start collapsed to their title bar). */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
@@ -387,19 +421,15 @@ export default function App() {
   const slotOf = (id: string): Pos => {
     if (slots === null) {
       const out: Record<string, Pos> = {};
-      const shown = [
-        ...visible.flatMap((w) => [
-          { id: w, w: WAVE_W, h: WAVE_H },
-          ...(groups[w] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
-        ]),
-        ...(coordsShown ? [{ id: COORDS_ID, w: COORDS_W, h: coordsH(coordsRows) }] : []),
-      ];
+      const shown = shownIds().filter((id) => !anchored(id));
       const taken: Rect[] = [];
-      for (const b of [...shown.filter((x) => moved[x.id]), ...shown.filter((x) => !moved[x.id])]) {
+      const isPlaced = (id: string) => placedAt(id) !== undefined;
+      for (const id of [...shown.filter(isPlaced), ...shown.filter((x) => !isPlaced(x))]) {
+        const b = { id, ...dims(id) };
         const { w, h } = sizeOf(b.id, b.w, b.h);
-        const at = moved[b.id] ?? layout[b.id] ?? { x: 0, y: 0 };
+        const at = placedAt(b.id) ?? layout[b.id] ?? { x: 0, y: 0 };
         let y = at.y;
-        if (!moved[b.id]) {
+        if (!isPlaced(b.id)) {
           const hit = () =>
             taken.find((r) => at.x < r.x + r.w && r.x < at.x + w && y < r.y + r.h && r.y < y + h);
           for (let r = hit(); r; r = hit()) y = r.y + r.h + GAP;
@@ -411,12 +441,114 @@ export default function App() {
     }
     return slots[id] ?? layout[id] ?? { x: 0, y: 0 };
   };
-  const pos = (id: string): Pos => moved[id] ?? slotOf(id);
-  const move = (id: string) => (dx: number, dy: number) =>
+  const pos = (id: string): Pos => placedAt(id) ?? slotOf(id);
+  const move = (id: string) => (dx: number, dy: number) => {
+    // A pinned window's pin follows the drag through updaters, saved on the drop (`onDrag`).
+    const pin = pinOf(id);
+    if (pin?.mode === "screen") {
+      const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+      setPin(
+        keyOf(id),
+        (p) => {
+          if (p?.mode !== "screen") return p;
+          const { left, top } = screenPos(p, { w, h }, screenSize, bounds);
+          return anchorAt({ x: left + dx, y: top + dy, w, h }, screenSize, bounds);
+        },
+        { save: false },
+      );
+      return;
+    }
+    if (pin?.mode === "place") {
+      setPin(keyOf(id), (p) => (p?.mode === "place" ? { ...p, x: p.x + dx, y: p.y + dy } : p), {
+        save: false,
+      });
+      return;
+    }
     setMoved((m) => {
       const p = m[id] ?? pos(id);
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
+  };
+
+  // ------------------------------------------------------------ pinning (C12)
+  const keys = windowKeys(
+    [COORDS_ID],
+    waveIds,
+    Object.values(state.agents).map((a) => ({
+      id: a.id,
+      wave: a.wave,
+      task: a.task,
+      role: a.role,
+      holds:
+        !!a.task &&
+        !!a.role &&
+        state.waves[a.wave]?.state?.tasks.find((t) => t.id === a.task)?.agents[a.role] === a.id,
+    })),
+  );
+  const keyOf = (id: string) => keys[id] ?? id;
+  const pinOf = (id: string): Pin | undefined => pins[keyOf(id)];
+  const anchored = (id: string) => pinOf(id)?.mode === "screen";
+  /** A window pinned in place or placed by a drag or an arrange; undefined until then. */
+  const placedAt = (id: string): Pos | undefined => {
+    const pin = pinOf(id);
+    return pin?.mode === "place" ? { x: pin.x, y: pin.y } : moved[id];
+  };
+  /** A window's default size: the coordinators window, a wave window or an agent window. */
+  const dims = (id: string) =>
+    id === COORDS_ID
+      ? { w: COORDS_W, h: coordsH(coordsRows) }
+      : waveIds.includes(id)
+        ? { w: WAVE_W, h: WAVE_H }
+        : { w: AGENT_W, h: AGENT_H };
+  /** Every window shown: the visible waves and their agents, then the coordinators window. */
+  const shownIds = () => [
+    ...visible.flatMap((w) => [w, ...(groups[w] ?? []).map((a) => a.id)]),
+    ...(coordsShown ? [COORDS_ID] : []),
+  ];
+  const bounds = hudBounds(screenSize, narrow);
+  /** An anchored window's rect on screen (its measured size, or its default). */
+  const hudRect = (id: string): Rect | undefined => {
+    const pin = pinOf(id);
+    if (pin?.mode !== "screen") return undefined;
+    const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+    const { left, top } = screenPos(pin, { w, h }, screenSize, bounds);
+    return { x: left, y: top, w, h };
+  };
+  const hudRects = () => shownIds().flatMap((id) => hudRect(id) ?? []);
+  /** Fit the view to world rects, leaving room for the windows anchored to the screen. */
+  const fitTo = (rs: readonly Rect[]) =>
+    fitView(rs, avoidAnchored(fitToArea(screenSize), hudRects()));
+  /** The pin toggle: unpinned, then pinned in place, then anchored to the screen, then unpinned. */
+  const cyclePin = (id: string) => {
+    const key = keyOf(id);
+    const mode = nextPinMode(pinModeOf(pinOf(id)));
+    const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+    if (mode === "place") {
+      setPin(key, { mode: "place", ...pos(id) });
+    } else if (mode === "screen") {
+      // Anchored where it is on screen now, at its full size.
+      const p = pos(id);
+      setPin(
+        key,
+        anchorAt({ x: view.x + p.x * view.s, y: view.y + p.y * view.s, w, h }, screenSize, bounds),
+      );
+    } else {
+      // Back on the canvas under where it was on screen.
+      const r = hudRect(id);
+      if (r)
+        setMoved((m) => ({
+          ...m,
+          [id]: { x: (r.x - view.x) / view.s, y: (r.y - view.y) / view.s },
+        }));
+      setPin(key, null);
+      setExpanded((e) => {
+        if (!e.has(id)) return e;
+        const next = new Set(e);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
 
   const sizes = useRef<Record<string, { w: number; h: number }>>({});
   // Until a window is measured it is its (clamped) default size.
@@ -428,10 +560,11 @@ export default function App() {
     const { w: sw, h: sh } = sizeOf(id, w, h);
     return { ...pos(id), w: sw, h: sh };
   };
-  const clusterOf = (id: string): Rect[] => [
-    rectOf(id, WAVE_W, WAVE_H),
-    ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
-  ];
+  // A window anchored to the screen is not on the canvas: no fit frames it.
+  const clusterOf = (id: string): Rect[] =>
+    [id, ...(groups[id] ?? []).map((a) => a.id)]
+      .filter((x) => !anchored(x))
+      .map((x) => rectOf(x, dims(x).w, dims(x).h));
   const endedHidden = waveIds.filter((id) => ended.has(id) && !endedShown(id)).length;
   // Only what is shown takes part in a fit or an arrange: a folded or hidden wave is not on the canvas.
   const visible = waveIds.filter((id) => !hidden.has(id) && (!ended.has(id) || endedShown(id)));
@@ -443,10 +576,10 @@ export default function App() {
   const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
-  const rects: Rect[] = [
-    ...visible.flatMap(clusterOf),
-    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(coordsRows))] : []),
-  ];
+  // The first fit frames only the unpinned windows.
+  const rects: Rect[] = shownIds()
+    .filter((id) => pinOf(id) === undefined)
+    .map((id) => rectOf(id, dims(id).w, dims(id).h));
   const fitted = useRef(false);
   useEffect(() => {
     if (fitted.current || rects.length === 0) return;
@@ -478,7 +611,19 @@ export default function App() {
         ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
         : []),
     ];
-    const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
+    // Pinned windows are skipped: one pinned in place is kept clear of, and the fit
+    // area leaves room for those anchored to the screen.
+    const scr = { width: window.innerWidth, height: window.innerHeight };
+    const shownNow = shownIds();
+    const r = arrangeLayout(clusters, scr, {
+      area: avoidAnchored(arrangeArea(scr), hudRects()),
+      pinned: Object.fromEntries(
+        shownNow
+          .filter((id) => pinOf(id)?.mode === "place")
+          .map((id) => [id, rectOf(id, dims(id).w, dims(id).h)]),
+      ),
+      skip: new Set(shownNow.filter(anchored)),
+    });
     if (!r) return;
     setAnimating(true);
     setMoved((m) => ({ ...m, ...r.place }));
@@ -501,10 +646,14 @@ export default function App() {
     clearTimeout(animEnd.current);
     animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
   };
+  // A window anchored to the screen leaves the canvas (or comes back): that re-arranges too.
   const layoutKey = [
     coordsShown ? "c" : "",
     ...visible,
     ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
+    ...shownIds()
+      .filter(anchored)
+      .map((id) => `@${id}`),
   ].join("|");
   // A reconnect's resync empties the waves and the replay rebuilds them: hold the
   // key until it settles, so only windows that really came or went re-arrange.
@@ -517,6 +666,13 @@ export default function App() {
     arrange,
     hold: settling && settledOnce.current,
   });
+  // Settings, General, Reset layout: arrange once the cleared pins have rendered.
+  const [resetTick, setResetTick] = useState(0);
+  const arrangeNow = useRef(arrange);
+  arrangeNow.current = arrange;
+  useEffect(() => {
+    if (resetTick > 0) arrangeNow.current();
+  }, [resetTick]);
 
   // Without auto-arrange nothing re-lays the canvas: fit to the shown wave once it is rendered.
   useEffect(() => {
@@ -555,14 +711,17 @@ export default function App() {
   const dismissedCount = [...ended].filter((id) => dismissed.has(id)).length;
 
   const place = (id: string, attn?: Attention) => ({
-    pos: pos(id),
+    ...placeOnScreen(id),
+    pin: { mode: pinModeOf(pinOf(id)), onCycle: () => cyclePin(id) },
     z: z(id),
-    scale: view.s,
     chrome: look.chrome,
     attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
-    onDrag: (on: boolean) => setDragging((d) => (on ? id : d === id ? null : d)),
+    onDrag: (on: boolean) => {
+      setDragging((d) => (on ? id : d === id ? null : d));
+      if (!on && pinOf(id)) savePinsNow();
+    },
     // A window not laid out yet (0 × 0) keeps its fallback size.
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
@@ -570,6 +729,29 @@ export default function App() {
     ...(narrow ? { maxWidth: phoneMaxWidth(vw) } : {}),
     ...(attn ? { attn } : {}),
   });
+  /** On the canvas at its world position, or anchored: in the `.hud` layer, unscaled. */
+  function placeOnScreen(id: string) {
+    const r = hudRect(id);
+    if (!r) return { pos: pos(id), scale: view.s };
+    const open = !narrow || expanded.has(id);
+    return {
+      pos: { x: r.x, y: r.y },
+      scale: 1,
+      layer: hud,
+      ...(narrow
+        ? {
+            collapsed: !open,
+            onCollapse: (c: boolean) =>
+              setExpanded((e) => {
+                const next = new Set(e);
+                if (c) next.delete(id);
+                else next.add(id);
+                return next;
+              }),
+          }
+        : {}),
+    };
+  }
   const frame = (id: string, accent: string, width: number) => ({
     id,
     accent,
@@ -608,7 +790,12 @@ export default function App() {
     });
   const goTo = (t: NeedsYouTarget) => {
     show(t.wave);
-    fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
+    if (anchored(t.id)) {
+      // Already on screen: open it if it is collapsed.
+      if (narrow) setExpanded((e) => new Set(e).add(t.id));
+    } else {
+      fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
+    }
     focus(t.id);
   };
 
@@ -634,19 +821,22 @@ export default function App() {
   useNotifyOnAttention(notify, items, { quiet: settling });
 
   // Tethers: wave window → each of its agents, for visible waves.
+  // None to or from a window anchored to the screen: it is not on the canvas.
   const tethers: Tether[] = visible
-    .filter((id) => !ended.has(id))
+    .filter((id) => !ended.has(id) && !anchored(id))
     .flatMap((id) =>
-      (groups[id] ?? []).map((a) => ({
-        id: a.id,
-        waveId: id,
-        // The rendered width: on a phone the wave window is clamped.
-        wave: rectOf(id, WAVE_W, WAVE_H),
-        agent: pos(a.id),
-        accent: accentOf(id),
-        // A new `progress` envelope sends a pulse down the cable (D10).
-        beat: progressBeat(a.feed),
-      })),
+      (groups[id] ?? [])
+        .filter((a) => !anchored(a.id))
+        .map((a) => ({
+          id: a.id,
+          waveId: id,
+          // The rendered width: on a phone the wave window is clamped.
+          wave: rectOf(id, WAVE_W, WAVE_H),
+          agent: pos(a.id),
+          accent: accentOf(id),
+          // A new `progress` envelope sends a pulse down the cable (D10).
+          beat: progressBeat(a.feed),
+        })),
     );
   useDeskKeys({
     stageRef,
@@ -834,6 +1024,8 @@ export default function App() {
         </World>
       </div>
 
+      <div className="hud" ref={setHud} />
+
       <TopBar
         state={state}
         connection={connection}
@@ -907,6 +1099,11 @@ export default function App() {
             },
           }}
           onArrange={arrange}
+          onResetLayout={() => {
+            resetPins();
+            setExpanded(new Set());
+            setResetTick((t) => t + 1);
+          }}
           onClose={() => setDeskSettings(null)}
         />
       )}
