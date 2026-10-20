@@ -104,6 +104,14 @@ brief's single-quoted prompt within the double-quoted `--command`. A
 non-numeric issue number is refused (exit 2). `validate-skill.ts` fails a
 SKILL.md that puts a raw issue title on a shell line.
 
+## Changelog fragments
+
+Dispatched agents record their change as a fragment, `changes/<issue>.<type>.md` (see the
+repo-root `changes/README.md`), never by editing `CHANGELOG.md`, so sibling PRs in a wave never
+conflict on it. The release step assembles them on the release branch, before the version bump:
+`bun run changelog --version <v> --date <YYYY-MM-DD> --commit` (**Release branch merge** in
+`SKILL.md`).
+
 ## Parity vs. legacy
 
 The [`parity-report.md`](./parity-report.md) committed at tag time records
