@@ -57,6 +57,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   fleet: { local_name: null },
+  // --- Autopilot merging (SPEC §4.6.16) ---
+  autopilot: { merge: "auto", merge_retry_max: 2 },
 };
 
 /**

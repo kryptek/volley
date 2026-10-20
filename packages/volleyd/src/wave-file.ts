@@ -4,6 +4,7 @@ import { rewordWeights } from "./config-store";
 import { AUTO_HOST } from "./placement";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
+  MergeMode,
   PipelineStage,
   PipelineStep,
   RemoteHostConfig,
@@ -57,6 +58,7 @@ interface RawWave {
   placement?: "auto" | "local";
   placement_prefer?: string[];
   placement_avoid?: string[];
+  merge?: MergeMode;
 }
 
 /** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
@@ -193,6 +195,7 @@ function normalise(w: RawWave): Wave {
     ...(w.placement === "auto" ? { placement: "auto" as const } : {}),
     ...(w.placement_prefer !== undefined ? { placement_prefer: w.placement_prefer } : {}),
     ...(w.placement_avoid !== undefined ? { placement_avoid: w.placement_avoid } : {}),
+    ...(w.merge !== undefined ? { merge: w.merge } : {}),
   };
 }
 

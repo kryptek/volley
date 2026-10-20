@@ -396,6 +396,26 @@
               "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: derived from the machine's host name (spec section 4.6.15). Never a hosts.<name> key. The retained effective config carries the resolved name, never null."
             }
           }
+        },
+        "autopilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Autopilot merging (spec section 4.6.16). Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "merge": {
+              "type": "string",
+              "enum": ["auto", "manual"],
+              "default": "auto",
+              "description": "Who merges a gated PR when the wave file has no merge: key: auto (the supervisor squash-merges exactly the gated head, journaled merged_by_supervisor) or manual (a human merges; the supervisor only observes the merge)."
+            },
+            "merge_retry_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
+            }
+          }
         }
       }
     },

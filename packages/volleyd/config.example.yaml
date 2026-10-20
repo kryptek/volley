@@ -108,3 +108,11 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+
+# --- Autopilot merging (README "The pipeline and the merge-ready gate") ---
+# autopilot:
+#   merge: auto                  # who merges a gated PR when the wave file has no merge: key:
+#                                # auto (volleyd squash-merges exactly the gated head, behind the
+#                                # fence; merged_by_supervisor) or manual (a human merges)
+#   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
+#                                # (decision merge_refused: retry, manual or cancel)

@@ -48,6 +48,20 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Added
 
+- **volleyd: autopilot merging, behind the fence.** volleyd can merge a gated PR itself, exactly
+  at the head its evidence describes: the gate mints a `MergeToken` for `{ wave, task, pr, head,
+  release_branch }` after writing the evidence package, and the authority fence allows exactly
+  `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` with a token for that PR
+  and head (never `--admin`, `--auto`, `--merge` or `--rebase`; `git merge`, `push` and `rebase`
+  stay denied). A merge is journaled `merged_by_supervisor { task, pr, head, merge_sha, by }`,
+  then `artifact_verified { role: "merged", via: "supervisor" }` and `done`. A merge GitHub
+  refuses (head moved, checks required, branch protection) raises `merge_refused` and the PR is
+  re-read; after `autopilot.merge_retry_max` (2) refusals decision `merge_refused` asks `retry`,
+  `manual` or `cancel`. New wave-file key `merge: auto | manual` (default: the new tunable
+  `autopilot.merge`, default `auto`); under `manual` nothing changes. For now volleyd merges only
+  in a wave of one task (the merge queue that orders merges across tasks comes next). The
+  evidence package says who merges. (#198)
+
 - volley-desk: the agent window's title bar is two rows that never bunch: the status mark, the
   wave, role, stage and machine chips and the actions on the first; the headline in full (at
   most two lines), its issue and PR links and the account picker on the second. Under 420 px the

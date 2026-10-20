@@ -1,0 +1,56 @@
+import type { ExecFn } from "../exec";
+import type { MergeToken } from "../fence";
+
+/**
+ * Autopilot merging (SPEC §4.6.16): the ONE module that may build `gh pr merge`
+ * (test/no-merge.test.ts exempts exactly this file). The argv is the only shape the fence allows,
+ * and only with the gate's MergeToken for exactly that PR and head: GitHub refuses the merge when
+ * the head moved since the gate (`--match-head-commit`). Never --admin or --auto: a refused merge
+ * is reported, not forced.
+ */
+
+export type MergeOutcome = { ok: true; merge_sha: string | null } | { ok: false; stderr: string };
+
+export function mergeArgv(token: MergeToken, deleteBranch: boolean): string[] {
+  return [
+    "gh",
+    "pr",
+    "merge",
+    String(token.pr),
+    "--squash",
+    "--match-head-commit",
+    token.head,
+    ...(deleteBranch ? ["--delete-branch"] : []),
+  ];
+}
+
+/**
+ * Merge the token's PR at its head, then read the merge commit back (`gh pr view`). A merge
+ * whose commit cannot be read back is still a merge (`merge_sha: null`); `gh` exiting non-zero
+ * (head moved, checks required, branch protection) is `{ ok: false, stderr }`.
+ */
+export async function mergePr(
+  exec: ExecFn,
+  token: MergeToken,
+  cwd?: string,
+  deleteBranch = false,
+): Promise<MergeOutcome> {
+  const where = cwd !== undefined ? { cwd } : {};
+  const r = await exec(mergeArgv(token, deleteBranch), { merge: token, ...where });
+  if (r.code !== 0) return { ok: false, stderr: (r.stderr || r.stdout).trim() };
+  const view = await exec(
+    ["gh", "pr", "view", String(token.pr), "--json", "mergeCommit,state"],
+    where,
+  );
+  return { ok: true, merge_sha: view.code === 0 ? mergeSha(view.stdout) : null };
+}
+
+function mergeSha(text: string): string | null {
+  try {
+    const v = JSON.parse(text) as { mergeCommit?: { oid?: unknown } | null };
+    const oid = v?.mergeCommit?.oid;
+    return typeof oid === "string" && oid !== "" ? oid : null;
+  } catch {
+    return null;
+  }
+}

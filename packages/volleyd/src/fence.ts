@@ -25,11 +25,19 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * DENY (never, consent or not):
  *   git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
- *   gh pr merge | gh workflow run | gh repo delete | gh api with any method other than GET
+ *   gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
+ *     other than GET
  *   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
  *     ansible, ansible-playbook, eksctl, doctl, flyctl
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
  *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+ *
+ * MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
+ *   evidence package is written, checked by identity like consent tokens): exactly
+ *     gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+ *   with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+ *   moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
+ *   else (git merge, push and rebase stay denied).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -225,6 +233,50 @@ export function mintScriptToken(path: string): ScriptToken {
   const token = Object.freeze({ path });
   scripts.add(token);
   return token;
+}
+
+const merges = new WeakSet<object>();
+
+/**
+ * Permission to merge one gated PR at exactly its gated head (autopilot merging, SPEC §4.6.16).
+ * Only `mintMergeToken` creates one (checked by identity).
+ */
+export interface MergeToken {
+  readonly wave: string;
+  readonly task: string;
+  readonly pr: number;
+  readonly head: string;
+  readonly release_branch: string;
+}
+
+const SHA40 = /^[0-9a-f]{40}$/;
+
+/** Callers: the pipeline's gate (PipelineDriver.gate), after the evidence package is written. */
+export function mintMergeToken(t: MergeToken): MergeToken {
+  if (!Number.isSafeInteger(t.pr) || t.pr <= 0)
+    throw new FenceError(`gh pr merge ${t.pr}`, "not a PR number");
+  if (!SHA40.test(t.head))
+    throw new FenceError(`gh pr merge --match-head-commit ${t.head}`, "not a full commit sha");
+  const token = Object.freeze({
+    wave: t.wave,
+    task: t.task,
+    pr: t.pr,
+    head: t.head,
+    release_branch: t.release_branch,
+  });
+  merges.add(token);
+  return token;
+}
+
+/** `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]`, exactly, for the token's n and head. */
+function mergeVerdict(args: readonly string[], token: MergeToken | undefined): Verdict {
+  if (token === undefined || !merges.has(token)) return deny("gh pr merge");
+  const exact = ["pr", "merge", String(token.pr), "--squash", "--match-head-commit", token.head];
+  const ok =
+    (args.length === exact.length ||
+      (args.length === exact.length + 1 && args[exact.length] === "--delete-branch")) &&
+    exact.every((a, i) => args[i] === a);
+  return ok ? ALLOW : deny("gh pr merge (not the gated PR at its gated head)");
 }
 
 const switches = new WeakSet<object>();
@@ -495,6 +547,8 @@ export interface FenceOptions {
   remote?: RemoteScript;
   /** For starting or typing LAUNCH_COMMAND: the sealed launch script. */
   launch?: LaunchToken;
+  /** For `gh pr merge`: the gate's token for exactly that PR and head. */
+  merge?: MergeToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
@@ -940,7 +994,7 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
     case "git":
       return git(args);
     case "gh":
-      return gh(args);
+      return gh(args, opts);
     case "cmux":
       return cmux(args, opts);
     case "claude":
@@ -1061,10 +1115,10 @@ function git(args: string[]): Verdict {
   return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
-function gh(args: string[]): Verdict {
+function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
-  if (two === "pr merge" || two === "workflow run" || two === "repo delete")
-    return deny(`gh ${two}`);
+  if (two === "pr merge") return mergeVerdict(args, opts.merge);
+  if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
       ...(GH_SPECS.api as OptSpec),
