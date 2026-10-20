@@ -9,6 +9,7 @@ import type { Daemon } from "../src/daemon";
 import { decisionTopic, waveDecisionId } from "../src/decisions";
 import { emptyRecord } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
+import { eventually } from "./helpers/broker-wait";
 import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { schemaErrors } from "./helpers/schema";
 import { tempDir } from "./helpers/tmp";
@@ -179,7 +180,9 @@ describe("a settled wave whose repo has a playbook", () => {
       ]);
       await daemon.tick();
       expect(ofType("decision_opened")).toHaveLength(1);
-      await expect.poll(() => ring.ids()).toEqual([id]);
+      // Not expect.poll: the bun test runner (one of CI's two runners) does not provide it.
+      await eventually(() => JSON.stringify(ring.ids()) === JSON.stringify([id]));
+      expect(ring.ids()).toEqual([id]);
 
       const r = await ctl().request("resolve", { decision_id: id, answer: "go", by: "coord-a" });
       expect(r.error).toBeUndefined();
