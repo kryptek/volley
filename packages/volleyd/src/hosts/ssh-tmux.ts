@@ -223,6 +223,53 @@ export class SshTmuxHost implements RemoteHost {
     return r;
   }
 
+  /** A worktree at an exact commit: detached (a reviewer) or on a new branch (a fixup). */
+  private async worktreeAtCommit(
+    spec: WorktreeSpec,
+    fetchError: string | null,
+  ): Promise<WorktreeResult> {
+    const git = (...args: string[]) => this.run([{ argv: ["git", ...args] }]);
+    if (fetchError !== null) {
+      const has = await git(
+        "-C",
+        spec.repo,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${spec.base}^{commit}`,
+      );
+      if (has.code !== 0) {
+        throw new SpawnError(
+          "WORKTREE_FAILED",
+          `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
+          { host: this.name, repo: spec.repo },
+        );
+      }
+    }
+    const add = await git(
+      "-C",
+      spec.repo,
+      "worktree",
+      "add",
+      ...(spec.detach === true
+        ? ["--detach", spec.path, spec.base]
+        : ["--no-track", spec.path, "-b", spec.branch, spec.base]),
+    );
+    if (add.code !== 0) {
+      throw new SpawnError(
+        "WORKTREE_FAILED",
+        `git worktree add failed on ${this.spec.target}: ${add.stderr.trim()}`,
+        { host: this.name, path: spec.path, branch: spec.branch },
+      );
+    }
+    await this.excludeVolleyFiles(spec.repo);
+    return {
+      path: spec.path,
+      branch: spec.detach === true ? `HEAD (detached at ${spec.base})` : spec.branch,
+      reused: false,
+    };
+  }
+
   async prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult> {
     const git = (...args: string[]) => this.run([{ argv: ["git", ...args] }]);
     const inside = await git("-C", spec.path, "rev-parse", "--is-inside-work-tree");
@@ -238,6 +285,9 @@ export class SshTmuxHost implements RemoteHost {
     // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
     const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
     const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    // A start commit (a reviewer's or fixup's PR head, by sha) is used as it is, like on this
+    // machine: never `origin/<sha>`. The box may already hold it (its own agent pushed it).
+    if (isCommitSha(spec.base)) return this.worktreeAtCommit(spec, fetchError);
     if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
@@ -575,3 +625,8 @@ export function sessionName(title: string): string {
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
 const pane = (session: string) => `=${session}:`;
+
+/** A full commit id (what a reviewer or fixup starts from), not a branch name. */
+function isCommitSha(ref: string): boolean {
+  return /^[0-9a-f]{40}$/.test(ref);
+}
