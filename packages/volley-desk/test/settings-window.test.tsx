@@ -449,6 +449,7 @@ describe("SettingsWindow", () => {
       ),
       invite: vi.fn(),
       remove: vi.fn(),
+      doctor: vi.fn(),
     };
     render(
       <Harness

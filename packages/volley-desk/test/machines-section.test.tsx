@@ -16,6 +16,7 @@ import {
 } from "../src/store/peerOps";
 import { initialState, localAgentCount, reduceAll, resync } from "../src/store/reducer";
 import type { DeskMessage, Envelope, MachinePayload } from "../src/store/types";
+import { fakePeerOps } from "./helpers/peer-ops";
 
 const NOW = Date.parse("2026-10-19T09:30:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -372,6 +373,74 @@ describe("peer ops: admin requests on the Desk's admin channel", () => {
     await expect(r).resolves.toEqual({ ok: true });
   });
 
+  it("peer_remove with drain or now sends that flag and reports what volleyd started", async () => {
+    const c = fakeClient();
+    const ops = peerOps(c, { replyKey: stubKey });
+    const drain = ops.remove("box-a", "drain");
+    const req = await published(c, 1);
+    expect(req.env.payload).toMatchObject({ op: "peer_remove", name: "box-a", drain: true });
+    expect(req.env.payload).not.toHaveProperty("now");
+    c.answer({
+      op: "peer_remove",
+      ok: true,
+      result: { name: "box-a", removing: "drain", agents: 2, revoked: false, host_removed: false },
+    });
+    await expect(drain).resolves.toEqual({ ok: true, removing: "drain", agents: 2 });
+    const now = ops.remove("box-a", "now");
+    const req2 = await published(c, 2);
+    expect(req2.env.payload).toMatchObject({ op: "peer_remove", name: "box-a", now: true });
+    c.answer({ op: "peer_remove", ok: true, result: { revoked: true, host_removed: true } });
+    await expect(now).resolves.toEqual({ ok: true });
+  });
+
+  it("a re-pairing invite names the machine (`for`)", async () => {
+    const c = fakeClient();
+    const pending = peerOps(c).invite("box-a");
+    const req = await published(c, 1);
+    expect(req.env.payload).toMatchObject({ op: "peer_invite", for: "box-a" });
+    c.answer({ op: "peer_invite", ok: true, sealed: sealTo(req.env, { code: "MXQ4-7KDP" }) });
+    await expect(pending).resolves.toMatchObject({ ok: true, code: "MXQ4-7KDP" });
+  });
+
+  it("peer_doctor runs the doctor (dry run or fix) and returns its checks and plan", async () => {
+    const c = fakeClient();
+    const ops = peerOps(c, { replyKey: stubKey });
+    const dry = ops.doctor("box-a", { fix: false });
+    const req = await published(c, 1);
+    expect(req.env.payload).toMatchObject({
+      op: "peer_doctor",
+      name: "box-a",
+      fix: false,
+      clone: false,
+    });
+    const check = { id: "gh.auth", ok: false, severity: "block", detail: "gh is not signed in" };
+    c.answer({
+      op: "peer_doctor",
+      ok: true,
+      result: {
+        name: "box-a",
+        fix: false,
+        checks: [check],
+        doctor_at: iso(NOW),
+        plan: [{ ...check, fix: "gh auth login" }],
+      },
+    });
+    await expect(dry).resolves.toEqual({
+      ok: true,
+      checks: [check],
+      plan: [{ ...check, fix: "gh auth login" }],
+      doctorAt: iso(NOW),
+    });
+    const fix = ops.doctor("box-a", { fix: true, clone: true });
+    const req2 = await published(c, 2);
+    expect(req2.env.payload).toMatchObject({ op: "peer_doctor", fix: true, clone: true });
+    c.answer({ op: "peer_doctor", ok: false, error: "ssh: connect to host box-a: timed out" });
+    await expect(fix).resolves.toEqual({
+      ok: false,
+      error: "ssh: connect to host box-a: timed out",
+    });
+  });
+
   it("admin(): an answered account_list proves an admin; it asks once and then knows", async () => {
     const c = fakeClient();
     const ops = peerOps(c, { replyKey: stubKey });
@@ -535,17 +604,14 @@ describe("peer ops: admin requests on the Desk's admin channel", () => {
 type Known = ReturnType<PeerOps["known"]>;
 
 function fakeOps(over: Partial<PeerOps> = {}) {
-  return {
-    known: vi.fn((): Known => null),
-    admin: vi.fn(async (): Promise<AdminStatus> => "admin"),
+  return fakePeerOps({
     invite: vi.fn(async () => ({
       ok: true as const,
       code: "MXQ4-7KDP",
       expiresAt: iso(NOW + 600_000),
     })),
-    remove: vi.fn(async () => ({ ok: true })),
     ...over,
-  };
+  });
 }
 
 function setup(props: Partial<MachinesProps> = {}) {
