@@ -36,6 +36,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   dynsec_batch_ms: 50,
   credential_sweep_interval_s: 600,
   claude: { default_account: null, warn_at_pct: 90 },
+  branch_update: "rebase",
+  agent_mcp: "strict",
   hosts: {},
 };
 

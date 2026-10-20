@@ -169,6 +169,7 @@ import { toPathErrors, validator } from "./schemas";
 import { lastOutput, lastOutputNote } from "./screens";
 import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./setup-ops";
 import type {
+  AgentMcp,
   CoordinatorAttention,
   JournalEvent,
   NewEvent,
@@ -411,6 +412,10 @@ export interface SpawnerOptions {
 interface SpawnPipelineOptions {
   start?: SpawnStart;
   files?: Record<string, string>;
+  /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
+  branch_update?: "merge";
+  /** A respawn of a moved or vanished agent: its own MCP servers, not the tunable's now. */
+  agent_mcp?: AgentMcp;
   /** An account move's resume note, appended to the brief. */
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
@@ -2381,6 +2386,7 @@ export class Daemon {
       mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
       ...(this.credentials !== undefined ? { credentials: this.credentials } : {}),
+      log: (line) => this.log(line),
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
@@ -2971,6 +2977,7 @@ export class Daemon {
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
+      branchUpdate: () => this.config.effective(wave).branch_update,
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -3097,7 +3104,7 @@ export class Daemon {
     wave: WaveId,
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string> },
+    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
   ): void {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;
@@ -3554,11 +3561,14 @@ export class Daemon {
         await this.append(wave, { type: "task_cancelled", task: d.task, data: { by, why } });
         return;
       }
-      // Approved by the owner: a fresh spawn (its own lock check still applies).
+      // Approved by the owner: a fresh spawn (its own lock check still applies). A pipeline role
+      // continues where the vanished agent was, as it was launched: its start point, worktree
+      // and `.volley/` inputs, a merge-mode rebase step's merge brief, its MCP servers.
       const role = String(x.role) as Role;
       const task = d.task;
+      const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
       this.refused.delete(`${wave}/${task}/${role}`);
-      void this.startSpawn(wave, task, role).catch((e: unknown) =>
+      void this.startSpawn(wave, task, role, moveRespawn(spawned)).catch((e: unknown) =>
         this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
       );
       return;

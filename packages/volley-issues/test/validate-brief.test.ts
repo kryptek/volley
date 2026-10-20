@@ -38,6 +38,7 @@ describe("validate-brief.sh", () => {
       "fixup.md.tmpl",
       "implementer.md.tmpl",
       "quality_reviewer.md.tmpl",
+      "rebase-merge.md.tmpl",
       "rebase.md.tmpl",
       "spec_reviewer.md.tmpl",
     ]);

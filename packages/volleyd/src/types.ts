@@ -91,8 +91,21 @@ export interface Tunables {
   credential_sweep_interval_s: number;
   /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
   claude: { default_account: string | null; warn_at_pct: number };
+  /**
+   * How the pipeline's rebase step brings a PR branch up to date with the moved release branch:
+   * `rebase` (rebase, then a lease-guarded force-push) or `merge` (merge it in, a normal push).
+   */
+  branch_update: BranchUpdate;
+  /**
+   * The MCP servers a launched agent loads: `strict` only volleyd's `volley` server; `inherit`
+   * the user's own servers (plugins, connectors) too, with volleyd's `volley` taking that name.
+   */
+  agent_mcp: AgentMcp;
   hosts: Record<string, RemoteHostConfig>;
 }
+
+export type BranchUpdate = "rebase" | "merge";
+export type AgentMcp = "strict" | "inherit";
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
 export type TunablesPatch = {

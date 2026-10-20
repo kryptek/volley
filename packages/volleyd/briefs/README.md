@@ -1,7 +1,9 @@
 # Agent briefs
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
-`fixup`, `rebase`. At spawn, `src/brief.ts` renders `<role>.md.tmpl` into the agent's
+`fixup`, `rebase`, plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
+`branch_update: merge` (merge the release branch in, a normal push, never a force-push). At
+spawn, `src/brief.ts` renders `<role>.md.tmpl` (or that variant) into the agent's
 `.volley/brief.md`, below the repo's brief preface (if any); `launch.sh` passes that file to
 `claude` as its prompt, so the brief never appears in an argv.
 
@@ -21,7 +23,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 
 ## The protocol block
 
-Every template ends with the same protocol block. Keep it in all five when you edit one:
+Every template ends with the same protocol block. Keep it in all six when you edit one:
 
 - **No registration step.** The session hooks register the agent (with its model), send
   heartbeats and deliver mailbox mail; the brief must never ask the agent to call `vol_register`.
@@ -39,7 +41,8 @@ Every template ends with the same protocol block. Keep it in all five when you e
 Pipeline roles get their inputs as files the spawn writes into `.volley/` before launch:
 `review.md` (reviewers: the PR, the exact head of their detached worktree, the diff command),
 `findings.md` + `findings.json` (fixup: every finding, numbered `S1…`/`Q1…`, the trivial-only
-rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push).
+rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push;
+under `branch_update: merge`, the merge and its normal push).
 Reviewers and the fixup publish a retained `result` before `done` — `type: "review"` with
 `{ findings, verdict, hygiene: { checked: true, findings } }`, `type: "fixup"` with
 `{ resolved: [{ finding, how }] }` (`spec/schemas/review-result.schema.json`); the templates

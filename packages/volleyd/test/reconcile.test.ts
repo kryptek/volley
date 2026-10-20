@@ -1,4 +1,5 @@
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
@@ -269,6 +270,63 @@ describe("daemon: restart reconciliation", () => {
     await fourth.reconciled();
     expect(reconciled()).toHaveLength(2);
     expect(respawnDecisions()).toHaveLength(1);
+  });
+
+  it("respawning a vanished merge-mode rebase agent keeps its merge brief, start point and worktree", async () => {
+    s = await makeSupervisedEnv();
+    await s.daemon.stop();
+    // A rebase step under branch_update: merge, launched as the pipeline launches one, whose agent
+    // left no trace (no registry, status or lock); the implementer is alive and untouched.
+    const path = join(s.env.home, "waves", "w1", "journal.jsonl");
+    const lines = readFileSync(path, "utf-8").trimEnd().split("\n");
+    const last = JSON.parse(lines.at(-1) ?? "{}") as JournalEvent;
+    const impl = lines
+      .map((l) => JSON.parse(l) as JournalEvent)
+      .find((e) => e.type === "agent_spawned" && e.data.agent_id === AGENT);
+    const gone = "w1-t1-rebase-1";
+    const worktree = join(s.env.home, "wt", "w1", "T1-rebase-1");
+    const ev = {
+      ...impl,
+      seq: last.seq + 1,
+      data: {
+        ...impl?.data,
+        agent_id: gone,
+        role: "rebase",
+        attempt: 1,
+        worktree,
+        branch: "w1/T1-implementer-1",
+        start: "abc123",
+        detached: false,
+        branch_update: "merge",
+        agent_mcp: "inherit",
+        lock: join(s.env.home, "locks", "gone.lock"),
+      },
+    };
+    writeFileSync(path, `${[...lines, JSON.stringify(ev)].join("\n")}\n`);
+    rmSync(join(s.env.home, "waves", "w1", "snapshot.json"), { force: true });
+
+    second = await s.restart({ reconcile: probes() });
+    await second.reconciled();
+    expect(respawnDecisions()).toHaveLength(1);
+    expect(respawnDecisions()[0]?.data).toMatchObject({ role: "rebase", agent_id: gone });
+    const id = respawnDecisions()[0]?.data.decision_id as string;
+    await second.resolveDecision("w1", id, { answer: "respawn", by: "tester" });
+    await s.until(() => s.host.launches.some((l) => l.cwd.endsWith("/T1-rebase-1")));
+    const launch = s.host.launches.find((l) => l.cwd.endsWith("/T1-rebase-1"));
+    const brief = readFileSync(join(launch?.cwd ?? "", ".volley", "brief.md"), "utf-8");
+    expect(brief).toContain("# Merge for issue #42");
+    expect(brief).not.toContain("# Rebase for issue");
+    const spawned = s
+      .journal()
+      .filter((e) => e.type === "agent_spawned" && e.data.role === "rebase")
+      .at(-1);
+    expect(spawned?.data).toMatchObject({
+      start: "abc123",
+      worktree_attempt: 1,
+      branch_update: "merge",
+      agent_mcp: "inherit",
+    });
+    expect(spawned?.data.agent_id).not.toBe(gone);
   });
 
   it("a heartbeat seen while reconciling counts: no registry, status or lock, but alive → re_wait", async () => {

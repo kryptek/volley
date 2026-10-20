@@ -2,7 +2,7 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-10-19
 
 The onboarding release: a fresh machine reaches a phone-signed-in Desk, a paired second machine
 and a second Claude account without reading source. It is also the first tag of everything listed

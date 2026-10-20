@@ -1,5 +1,5 @@
 import type { Role } from "../brief";
-import type { JournalEvent, NewEvent, TaskId } from "../types";
+import type { AgentMcp, JournalEvent, NewEvent, TaskId } from "../types";
 
 /**
  * `agent_move_account { agent, acct }`: move a running agent to another Claude account profile.
@@ -99,17 +99,23 @@ export async function moveAgentAccount(m: MoveRequest, d: MoveDeps): Promise<Mov
 }
 
 /**
- * What a moved agent's respawn carries over from its `agent_spawned` record: a pipeline role
- * (reviewer, fixup, rebase) keeps its start point and continues in its own per-attempt worktree,
- * where its `.volley/` inputs (review.md, findings.md, …) still are. An implementer's worktree
- * is per role, so it needs neither.
+ * What a respawn of a moved or vanished agent carries over from its `agent_spawned` record: its
+ * MCP servers (`agent_mcp`, whatever the tunable says now), and for a pipeline role (reviewer,
+ * fixup, rebase) its start point and its own per-attempt worktree, where its `.volley/` inputs
+ * (review.md, findings.md, rebase.md, …) still are, plus a merge-mode rebase step's merge brief.
+ * An implementer's worktree is per role, so it needs neither.
  */
 export function moveRespawn(spawned: Record<string, unknown> | undefined): {
   start?: { ref: string; detach: boolean };
   worktreeAttempt?: number;
+  branch_update?: "merge";
+  agent_mcp?: AgentMcp;
 } {
-  if (typeof spawned?.start !== "string") return {};
+  if (spawned === undefined) return {};
+  const mcp = { agent_mcp: spawned.agent_mcp === "inherit" ? "inherit" : "strict" } as const;
+  if (typeof spawned.start !== "string") return mcp;
   return {
+    ...mcp,
     start: { ref: spawned.start, detach: spawned.detached === true },
     // A moved agent moved again: its worktree is still the first attempt's.
     ...(typeof spawned.worktree_attempt === "number"
@@ -117,6 +123,7 @@ export function moveRespawn(spawned: Record<string, unknown> | undefined): {
       : typeof spawned.attempt === "number"
         ? { worktreeAttempt: spawned.attempt }
         : {}),
+    ...(spawned.branch_update === "merge" ? { branch_update: "merge" as const } : {}),
   };
 }
 

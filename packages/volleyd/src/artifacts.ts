@@ -42,8 +42,18 @@ export interface PrRef {
 }
 
 export type ArtifactReport =
-  /** `remote_head`: origin's branch is at another commit than the local head (a push from elsewhere). */
-  | { kind: "missing"; missing: "push" | "pr" | "base"; detail: string; remote_head?: string }
+  /**
+   * `remote_head`: origin's branch is at another commit than the local head (a push from
+   * elsewhere). `rewritten_from`: a merge-mode update's start, which the pushed head does not
+   * descend from (the branch's history was rewritten).
+   */
+  | {
+      kind: "missing";
+      missing: "push" | "pr" | "base";
+      detail: string;
+      remote_head?: string;
+      rewritten_from?: string;
+    }
   | {
       kind: "ok";
       head: string;

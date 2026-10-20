@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   BriefPrefaceTooLarge,
@@ -33,13 +33,23 @@ import {
   mcpConfigPath,
   renderLaunchScript,
   renderMcpConfig,
+  strayVolleyServers,
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { reapAndRevoke, retainedTopics } from "./retire";
 import { classifyScreen, lastOutput, lastOutputNote } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
-import type { NewEvent, TaskId, Tunables, Wave, WaveId, WaveTask } from "./types";
+import type {
+  AgentMcp,
+  BranchUpdate,
+  NewEvent,
+  TaskId,
+  Tunables,
+  Wave,
+  WaveId,
+  WaveTask,
+} from "./types";
 import {
   type AgentWatch,
   type VerifyResult,
@@ -79,6 +89,16 @@ export interface SpawnRequest {
   /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
   files?: Record<string, string>;
   /**
+   * A rebase role's step under `branch_update: merge` (fixed when the step started): its brief is
+   * the merge one (`briefs/rebase-merge.md.tmpl`). Absent: rebase.
+   */
+  branch_update?: BranchUpdate;
+  /**
+   * The agent's MCP servers, when they must be the earlier agent's (a respawn of a moved or
+   * vanished agent, from its `agent_spawned` record), not the tunable's current value.
+   */
+  agent_mcp?: AgentMcp;
+  /**
    * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
    * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
    */
@@ -116,9 +136,15 @@ export interface SpawnDeps {
   mintCredentials: boolean;
   /** Where the logins come from: volleyd's Dynamic Security control connection (dynsec.ts). */
   credentials?: AgentCredentials;
+  /** volleyd's log (a spawn's warnings); absent: journal only. */
+  log?: (line: string) => void;
   tunables: Pick<
     Tunables,
-    "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
+    | "worktree_root"
+    | "spawn_timeout_s"
+    | "heartbeat_alarm_s"
+    | "brief_preface_max_bytes"
+    | "agent_mcp"
   >;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
@@ -382,9 +408,13 @@ async function launchAttempt(
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }
 
+  if ((req.agent_mcp ?? deps.tunables.agent_mcp) === "inherit")
+    await warnStrayVolley(ctx, agentId, attempt);
+
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
-  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir), {
+  const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,
     namespace: ctx.namespace,
     wave: req.wave.wave,
@@ -425,6 +455,7 @@ async function launchAttempt(
   }
 
   const parent = deps.owner ?? SUPERVISOR;
+  const agentMcp = req.agent_mcp ?? deps.tunables.agent_mcp;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
     // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
@@ -450,6 +481,7 @@ async function launchAttempt(
       agentId,
       worktree: ctx.worktree,
       ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
+      ...(agentMcp === "inherit" ? { agentMcp } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -496,6 +528,8 @@ async function launchAttempt(
         worktree_reused: wt.reused,
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
+        ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),
+        ...(agentMcp === "inherit" ? { agent_mcp: "inherit" } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),
@@ -861,6 +895,51 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   const path = join(dir, `${agentId}-${stampOf(ctx.deps).replace(/[:.]/g, "-")}.txt`);
   writeFileSync(path, screen);
   return path;
+}
+
+/**
+ * Under `agent_mcp: inherit`, warn (journal + log) when the profile's `.claude.json` or the
+ * worktree's `.mcp.json` runs volley-mcp under a name other than `volley`: volleyd's server does
+ * not take that entry over, so a second Volley server starts in the agent's session. The spawn
+ * goes on; the entry is the owner's to rename or remove.
+ */
+async function warnStrayVolley(ctx: Ctx, agentId: string, attempt: number): Promise<void> {
+  const { deps, req } = ctx;
+  const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
+  const profile =
+    deps.remoteTrust !== undefined ? await deps.remoteTrust.read() : readClaudeJson(profilePath);
+  const mcpJson = join(ctx.worktree, ".mcp.json");
+  const raw =
+    deps.host.readFile !== undefined
+      ? await deps.host.readFile(mcpJson)
+      : existsSync(mcpJson)
+        ? readFileSync(mcpJson, "utf-8")
+        : null;
+  let project: unknown = null;
+  try {
+    project = raw !== null ? JSON.parse(raw) : null;
+  } catch {
+    // Not JSON: Claude Code loads nothing from it either.
+  }
+  const servers = strayVolleyServers([
+    { source: profilePath, config: profile },
+    { source: ".mcp.json", config: project },
+  ]);
+  if (servers.length === 0) return;
+  const message = `agent_mcp: inherit: ${agentId} also loads ${servers.map((s) => `'${s.name}' (${s.source})`).join(", ")}, which runs volley-mcp under a name other than 'volley'; rename it to 'volley' so volleyd's server takes it over, or remove it`;
+  deps.log?.(message);
+  await deps.journal({
+    type: "alarm_raised",
+    task: req.task,
+    data: {
+      alarm: "agent_mcp_stray_volley",
+      role: req.role,
+      attempt,
+      agent_id: agentId,
+      servers,
+      message,
+    },
+  });
 }
 
 /** Journal a refusal and release the lock (no agent holds the worktree). */
