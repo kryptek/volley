@@ -7,7 +7,11 @@ import type { GitHubRepo, WaveTask } from "../store/types";
 
 const SLUG = /^[^/\s]+\/[^/\s]+$/;
 
-/** `value` when it is a well-formed `github` (`owner/repo` slug, http(s) URL), else undefined. */
+/**
+ * `value` when it is a well-formed `github` (`owner/repo` slug, http(s) URL), else undefined.
+ * Its twin is volleyd's `asGitHubRepo` (packages/volleyd/src/repo-visibility.ts): keep the two
+ * checks in step.
+ */
 export function githubOf(value: unknown): GitHubRepo | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { slug, url } = value as { slug?: unknown; url?: unknown };

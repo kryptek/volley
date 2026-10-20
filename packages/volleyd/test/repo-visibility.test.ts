@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readJournalFile } from "../src/journal";
+import { asGitHubRepo } from "../src/repo-visibility";
 import { HYGIENE_CHECK, hygieneText } from "../src/reviews";
 import type { JournalEvent, WaveState } from "../src/types";
 import { type DaemonEnv, makeDaemonEnv } from "./helpers/daemon-env";
@@ -206,5 +207,13 @@ describe("public hygiene: the repository's visibility, read at submit", () => {
       { visibility: "public", source: "gh", public_hygiene: "auto" },
     ]);
     expect(await state()).not.toHaveProperty("github");
+  });
+});
+
+describe("asGitHubRepo", () => {
+  it("accepts a URL scheme in any case, as the Desk's githubOf does", () => {
+    const url = "HTTPS://github.com/example-org/example-repo";
+    expect(asGitHubRepo({ slug: GITHUB.slug, url })).toEqual({ slug: GITHUB.slug, url });
+    expect(asGitHubRepo({ slug: GITHUB.slug, url: "ftp://github.com/x/y" })).toBeUndefined();
   });
 });

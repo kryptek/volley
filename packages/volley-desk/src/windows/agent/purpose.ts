@@ -27,7 +27,7 @@ export interface PurposeLink {
   text: string;
   /** Opens in a new tab; `null` for a bare number with no repo to resolve it in. */
   href: string | null;
-  /** The accessible name (`Issue #42 on GitHub`, `PR #7 on GitHub`; `Issue #42` unlinked). */
+  /** The accessible name (`Issue #42 on GitHub`, `PR #7 on <host>`; `Issue #42` unlinked). */
   label: string;
 }
 
@@ -52,7 +52,12 @@ function repoOf(v: unknown): string | null {
   return typeof v === "string" && REPO.test(v) ? v : null;
 }
 
-/** The link's accessible name: on GitHub when it opens there, else its host; bare unlinked. */
+/**
+ * A registered link's accessible name. One rule for every purpose link: `on GitHub` when the
+ * link is known to open on GitHub, else `on <host>`; bare when unlinked. A wave's links are
+ * known to be GitHub (the supervisor read the repository with gh, an Enterprise host included);
+ * a registered URL is known to be GitHub only on github.com, so any other host is named.
+ */
 function labelOf(kind: "issue" | "pr", n: string | null, href: string | null): string {
   const what = kind === "pr" ? "PR" : "Issue";
   const name = n ? `${what} #${n}` : what;

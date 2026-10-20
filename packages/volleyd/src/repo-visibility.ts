@@ -12,13 +12,14 @@ const SLUG = /^[^/\s]+\/[^/\s]+$/;
 
 /**
  * `value` as a wave state's `github` (SPEC §4.6.1) when it is one: an `owner/repo` slug and an
- * http(s) URL. Undefined otherwise; nothing is ever guessed.
+ * http(s) URL. Undefined otherwise; nothing is ever guessed. Its twin is the Desk's `githubOf`
+ * (packages/volley-desk/src/lib/github.ts): keep the two checks in step.
  */
 export function asGitHubRepo(value: unknown): GitHubRepo | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { slug, url } = value as { slug?: unknown; url?: unknown };
   if (typeof slug !== "string" || !SLUG.test(slug)) return undefined;
-  if (typeof url !== "string" || !/^https?:\/\//.test(url) || !URL.canParse(url)) return undefined;
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url) || !URL.canParse(url)) return undefined;
   return { slug, url };
 }
 

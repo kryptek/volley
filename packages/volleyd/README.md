@@ -2046,7 +2046,8 @@ prints `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)`, `P1 (forced)` or 
 header. The same read gives the repository's GitHub name and URL: the wave state carries
 `github: { slug: "owner/repo", url }` (the Desk's repo chip and issue links) and `volleyd status`
 prints `github: owner/repo` under the hygiene line; with no valid `nameWithOwner` and http(s)
-`url` (a failed read included) `github` is absent, never guessed from a remote or the path. A daemon that spawns no agents reads and journals nothing (the level is then P1). A
+`url` (a failed read included) `github` is absent, never guessed from a remote or the path. A
+daemon that spawns no agents reads and journals nothing (the level is then P1). A
 `done` without a parseable result (at that level) is steered once with the level's contract,
 then `agent_blocked` (`respawn` / `skip`). The spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
 `ISSUE.md` in its worktree). A P1 from
