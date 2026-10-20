@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T12:03:00.000Z",
+  "channel": "_waves/events",
+  "type": "inbox_answered",
+  "payload": {
+    "wave": "w1",
+    "seq": 42,
+    "at": "2026-10-20T12:03:00.000Z",
+    "data": {
+      "id": "d-w1-d-3k9x2m7q",
+      "kind": "decision",
+      "answer": "blocker",
+      "by": "desk",
+      "where": { "kind": "desk", "device": "phone" },
+      "version": 2
+    }
+  }
+}

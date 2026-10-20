@@ -63,6 +63,24 @@ import {
 } from "./admission";
 import { budgetUsed } from "./autopilot/budgets";
 import {
+  INBOX_CHANNEL,
+  type InboxAnswerRequest,
+  type InboxItem,
+  type InboxKind,
+  type InboxWhere,
+  answerEvent,
+  decisionItemId,
+  foldInbox,
+  inboxEnvelopeType,
+  inboxTopic,
+  itemForDecision,
+  openedEvent,
+  parseWhere,
+  parseWhereLabel,
+  ttlExpired,
+  whereLabel,
+} from "./autopilot/inbox";
+import {
   type Budget,
   type EscalateWhy,
   POLICY_TABLE,
@@ -877,6 +895,13 @@ export class Daemon {
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
+  /** The needs-you inbox (SPEC §4.6.18), by item id: rebuilt from the journals on start. */
+  private readonly inbox = new Map<string, InboxItem>();
+  /**
+   * What acts on an accepted answer to an item that is not a decision (a decision's answer
+   * resolves it): pickers and handoffs, release stages, registered by their subsystems.
+   */
+  readonly inboxHandlers = new Map<InboxKind, (item: InboxItem) => Promise<void>>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
@@ -1281,6 +1306,8 @@ export class Daemon {
         }
       }
     }
+    foldInbox(this.inbox, this.system.readAll());
+    for (const log of this.waves.values()) foldInbox(this.inbox, log.journal.readAll());
   }
 
   /**
@@ -1469,8 +1496,17 @@ export class Daemon {
       for (const d of Object.values(log.record.decisions)) {
         if (d.resolved === undefined) await this.publishDecision(wave, d);
         else await this.clearRetained(decisionTopic(wave, d.decision_id));
+        // A decision opened before the inbox existed gets its item now.
+        if (d.resolved === undefined && !this.inbox.has(decisionItemId(wave, d.decision_id)))
+          await this.openDecisionItem(wave, d);
+        // Resolved without closing its item (a crash between the two): closed now, as answered.
+        else if (d.resolved !== undefined)
+          await this.closeDecisionItem(wave, d, { by: d.resolved.by });
       }
     }
+    // The journal is the record: every item is re-published (an answered one until its ttl).
+    await this.sweepInbox();
+    for (const item of this.inbox.values()) await this.publishInboxItem(item);
     // Before the statuses: a replayed terminal status of a session carrying a coordinator name
     // is kept only once its registry entry is known (`bindOwner` needs it).
     await this.subscribeRegistry();
@@ -2264,6 +2300,7 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    await this.sweepInbox();
     await this.sweepMachines();
     await this.machineDownPass();
     await this.removalSweep();
@@ -6328,6 +6365,8 @@ export class Daemon {
     const log = this.waves.get(wave);
     const opened = log?.record.decisions[id];
     if (log === undefined || opened === undefined) return;
+    // Its inbox item first (SPEC §4.6.18): an autopilot answer closes it like any other.
+    if (opened.resolved === undefined) await this.openDecisionItem(wave, opened);
     if (!(await this.autopilot(wave, opened))) return;
     const d = log.record.decisions[id] as DecisionRecord;
     await this.publishDecision(wave, d);
@@ -6435,7 +6474,7 @@ export class Daemon {
   private async resolveNow(
     wave: WaveId,
     id: string,
-    r: { answer: string; by: string; rationale?: string },
+    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
     beforeResolved?: () => Promise<void>,
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
@@ -6467,6 +6506,8 @@ export class Daemon {
     await beforeResolved?.();
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
+    // Every answer closes the decision's inbox item through the referee (SPEC §4.6.18).
+    await this.closeDecisionItem(wave, d, r);
     if (move !== null) {
       await this.append(wave, {
         type: "wave_account_moved",
@@ -6644,6 +6685,209 @@ export class Daemon {
         this.log(`account_limit for ${lim.wave}: ${e instanceof Error ? e.message : String(e)}`),
       );
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The needs-you inbox (SPEC §4.6.18): volleyd is the referee
+  // -------------------------------------------------------------------------------------------
+
+  /** One inbox item (open, or answered and not yet cleared). */
+  inboxItem(id: string): InboxItem | undefined {
+    return this.inbox.get(id);
+  }
+
+  /**
+   * Open an inbox item (pickers, handoffs, release stages): journal `inbox_opened` in its wave
+   * (else `_system`) and publish it retained. Opening an id that exists returns that item.
+   */
+  openInboxItem(
+    input: Omit<InboxItem, "version" | "opened_at" | "answered"> & { opened_at?: string },
+  ): Promise<InboxItem> {
+    return this.serial(() =>
+      this.openInboxItemNow({
+        ...input,
+        version: 1,
+        opened_at: input.opened_at ?? dateOf(this.time).toISOString(),
+      }),
+    );
+  }
+
+  /**
+   * Answer an inbox item through the referee: the first answer at the item's current version wins;
+   * a decision's answer resolves it, any other kind's goes to its `inboxHandlers` entry.
+   */
+  answerInboxItem(
+    id: string,
+    req: InboxAnswerRequest,
+  ): Promise<{ item: InboxItem } | { refused: string }> {
+    return this.serial(() => this.answerInboxItemNow(id, req));
+  }
+
+  private async openInboxItemNow(item: InboxItem): Promise<InboxItem> {
+    const prior = this.inbox.get(item.id);
+    if (prior !== undefined) return prior;
+    this.inbox.set(item.id, item);
+    await this.journalInbox(item, openedEvent(item));
+    await this.publishInboxItem(item);
+    return item;
+  }
+
+  private async answerInboxItemNow(
+    id: string,
+    req: InboxAnswerRequest,
+  ): Promise<{ item: InboxItem } | { refused: string }> {
+    const item = this.inbox.get(id);
+    if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    const check = answerEvent(item, req, dateOf(this.time));
+    if ("refused" in check) return check;
+    if (item.kind === "decision") {
+      const wave = item.wave;
+      const decision = item.source.decision_id;
+      if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
+        return { refused: `inbox item '${id}' names no open decision` };
+      // The owner check `resolve` applies: the inbox is no way around it.
+      const state = this.waves.get(wave)?.record.state;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (refused !== null) return { refused };
+      const r = await this.answerDecision(wave, decision, req);
+      if ("refused" in r) return r;
+      if (r.already_resolved) {
+        // Resolved without closing its item (a crash between the two): closed now, as answered.
+        const first = r.decision.resolved;
+        if (first !== undefined) await this.closeDecisionItem(wave, r.decision, { by: first.by });
+        const now = this.inbox.get(id)?.answered;
+        return {
+          refused: `already answered on ${now !== undefined ? whereLabel(now.where) : "cli"}`,
+        };
+      }
+    } else {
+      const answered = await this.recordInboxAnswer(item, req);
+      const handler = this.inboxHandlers.get(item.kind);
+      if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
+      else
+        await handler(answered).catch((e: unknown) =>
+          this.log(`inbox ${id}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+    }
+    return { item: this.inbox.get(id) as InboxItem };
+  }
+
+  /**
+   * Resolve a decision with an answer given anywhere (the resolve op, the Desk, a terminal): the
+   * trust check, the resolution (which closes its inbox item), then what a plan answer applies.
+   */
+  private async answerDecision(
+    wave: WaveId,
+    id: string,
+    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
+  ): Promise<
+    { refused: string } | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
+  > {
+    const trust = await this.trustAnswer(wave, id, r.answer);
+    if (trust !== null) return { refused: trust };
+    const res = await this.resolveNow(wave, id, r);
+    if (!res.already_resolved) await this.applyPlanAnswer(wave, res.decision, r.by);
+    return res;
+  }
+
+  /** The referee accepted an answer: journal `inbox_answered`, keep and publish the record. */
+  private async recordInboxAnswer(item: InboxItem, req: InboxAnswerRequest): Promise<InboxItem> {
+    const r = answerEvent(item, req, dateOf(this.time));
+    if ("refused" in r) throw new Error(r.refused);
+    this.inbox.set(item.id, r.item);
+    await this.journalInbox(item, r.event);
+    await this.publishInboxItem(r.item);
+    this.log(`inbox ${item.id} answered on ${whereLabel(req.where)} by ${req.by}: ${req.answer}`);
+    return r.item;
+  }
+
+  /** An inbox event goes to the item's wave journal, else `_system`. */
+  private async journalInbox(item: InboxItem, ev: NewEvent): Promise<void> {
+    if (item.wave !== undefined && this.waves.has(item.wave)) await this.append(item.wave, ev);
+    else await this.appendSystem(ev);
+  }
+
+  private async publishInboxItem(item: InboxItem): Promise<void> {
+    await this.publish(
+      inboxTopic(item.id),
+      this.envelope(INBOX_CHANNEL, inboxEnvelopeType(item), item),
+      true,
+    );
+  }
+
+  /** The inbox item mirroring a decision; `owner_only` from the wave's `autopilot.owner_only`. */
+  private async openDecisionItem(wave: WaveId, d: DecisionRecord): Promise<void> {
+    const agent = (d as { agent_id?: unknown }).agent_id;
+    await this.openInboxItemNow(
+      itemForDecision(
+        { ...decisionPayload(d), ...(typeof agent === "string" ? { agent_id: agent } : {}) },
+        this.config.effective(wave).autopilot,
+      ),
+    );
+  }
+
+  /**
+   * A decision was resolved: its open item is answered at its current version. `where` is
+   * autopilot for volleyd's own answers, else the request's (default: the CLI).
+   */
+  private async closeDecisionItem(
+    wave: WaveId,
+    d: DecisionRecord,
+    r: { by: string; where?: InboxWhere },
+  ): Promise<void> {
+    const item = this.inbox.get(decisionItemId(wave, d.decision_id));
+    if (item === undefined || item.answered !== undefined || d.resolved === undefined) return;
+    const where: InboxWhere =
+      r.by === DAEMON_AGENT_ID ? { kind: "autopilot" } : (r.where ?? { kind: "cli" });
+    await this.recordInboxAnswer(item, {
+      version: item.version,
+      answer: d.resolved.answer,
+      by: r.by,
+      where,
+    });
+  }
+
+  /** Clear the answered items whose `autopilot.inbox_answered_ttl_s` has passed. */
+  private async sweepInbox(): Promise<void> {
+    for (const item of [...this.inbox.values()]) {
+      const wave = item.wave !== undefined && this.waves.has(item.wave) ? item.wave : undefined;
+      const ttl = this.config.effective(wave).autopilot.inbox_answered_ttl_s;
+      if (!ttlExpired(item, this.now(), ttl)) continue;
+      this.inbox.delete(item.id);
+      await this.clearRetained(inboxTopic(item.id));
+    }
+  }
+
+  /** `inbox`: the open items (with `all: true`, answered ones not yet cleared too), oldest first. */
+  private listInbox(p: Record<string, unknown>): HandlerResult {
+    const items = [...this.inbox.values()]
+      .filter((i) => p.all === true || i.answered === undefined)
+      .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
+    return { ok: true, result: { items, now: dateOf(this.time).toISOString() } };
+  }
+
+  /** `inbox_answer { id, version, answer, where }`: any login that may steer. */
+  private async inboxAnswerOp(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
+    if (typeof p.id !== "string" || p.id === "")
+      return { ok: false, error: "inbox_answer requires payload.id" };
+    if (typeof p.version !== "number" || !Number.isInteger(p.version))
+      return { ok: false, error: "inbox_answer requires an integer payload.version" };
+    if (typeof p.answer !== "string")
+      return { ok: false, error: "inbox_answer requires payload.answer" };
+    const where = parseWhere(p.where);
+    if (where === null)
+      return { ok: false, error: "where.kind must be desk, terminal, cli or autopilot" };
+    // Only volleyd answers as autopilot.
+    if (where.kind === "autopilot")
+      return { ok: false, error: "only the supervisor answers as autopilot" };
+    const r = await this.answerInboxItemNow(p.id, {
+      version: p.version,
+      answer: p.answer,
+      by,
+      where,
+    });
+    return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
   }
 
   private async publishDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
@@ -6958,6 +7202,10 @@ export class Daemon {
         return this.policyOp(p);
       case "resolve":
         return this.resolveOp(p, by);
+      case "inbox":
+        return this.listInbox(p);
+      case "inbox_answer":
+        return this.inboxAnswerOp(p, by);
       case "claim":
         // Ownership must go to a stable identity, never the CLI's per-invocation agent id.
         if (typeof p.by !== "string" || p.by === "")
@@ -7422,14 +7670,22 @@ export class Daemon {
       };
     const refused = guardMutation(state, by, "resolve", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
-    const trust = await this.trustAnswer(wave, id, p.answer);
-    if (trust !== null) return { ok: false, error: trust };
-    const r = await this.resolveNow(wave, id, {
+    let where: InboxWhere = { kind: "cli" };
+    if (p.where !== undefined) {
+      const w = typeof p.where === "string" ? parseWhereLabel(p.where) : parseWhere(p.where);
+      if (w === null || w.kind === "autopilot")
+        return { ok: false, error: `resolve: unknown --where '${String(p.where)}'` };
+      where = w;
+    }
+    const r = await this.answerDecision(wave, id, {
       answer: p.answer,
       by,
+      where,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
-    if (!r.already_resolved) await this.applyPlanAnswer(wave, r.decision, by);
+    if ("refused" in r) return { ok: false, error: r.refused };
+    // Resolving twice stays a no-op; the answer says where the first one was given.
+    const first = this.inbox.get(decisionItemId(wave, id))?.answered;
     return {
       ok: true,
       result: {
@@ -7437,6 +7693,9 @@ export class Daemon {
         decision_id: id,
         already_resolved: r.already_resolved,
         resolved: r.decision.resolved,
+        ...(r.already_resolved && first !== undefined
+          ? { already_answered: `already answered on ${whereLabel(first.where)}` }
+          : {}),
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };

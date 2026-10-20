@@ -495,6 +495,13 @@
               "default": 2,
               "description": "spawn_budget_exhausted: automatic raise by <n> answers may take the wave's spawn budget up to this multiple of its derived budget."
             },
+            "inbox_answered_ttl_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 600,
+              "description": "How long an answered needs-you inbox item stays retained with its answered record before the supervisor clears it (spec section 4.6.18)."
+            },
             "merge": {
               "type": "string",
               "enum": ["auto", "manual"],

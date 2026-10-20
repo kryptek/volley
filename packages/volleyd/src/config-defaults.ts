@@ -68,6 +68,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     ci_fixup_max: 2,
     question_max: 1,
     budget_raise_max: 2,
+    inbox_answered_ttl_s: 600,
     merge: "auto",
     merge_retry_max: 2,
     reconnect_grace_s: 900,
