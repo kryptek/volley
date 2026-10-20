@@ -70,6 +70,12 @@
 # plugin servers and connectors).
 # agent_mcp: strict
 
+# What the reviewers flag as public hygiene (person names, local usernames, machine paths,
+# private hostnames or IPs): auto (read the repository's visibility once per wave version: P1
+# for a public repository or one whose visibility cannot be read, a non-blocking P3 for a
+# private or internal one), on (always P1) or off (no hygiene check).
+# public_hygiene: auto
+
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and
 # must be absolute. See README "Remote hosts (ssh + tmux)".

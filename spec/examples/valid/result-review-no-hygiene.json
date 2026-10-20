@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-quality_reviewer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-20T12:00:00.000Z",
+  "channel": "result",
+  "type": "review",
+  "payload": {
+    "findings": [
+      { "severity": "P3", "file": "src/batch.ts", "line": 7, "text": "Checked; the retry bound is fine." }
+    ],
+    "verdict": "approve",
+    "summary": "A review for a private repository: no hygiene block is required."
+  }
+}

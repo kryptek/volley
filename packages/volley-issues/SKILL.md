@@ -151,7 +151,7 @@ commit messages, branch names or PR text:
 <!-- build and test commands, gates, files that must not change, conventions -->
 ```
 
-The preface is copied verbatim (no `{{placeholder}}` expansion) and is capped at `brief_preface_max_bytes` (16 KiB by default; a larger file refuses `volleyd validate` and `volleyd run` with `BRIEF_PREFACE_TOO_LARGE`). `.volley/brief-extra.md` is different: optional per-repo *notes* (build commands, gates) appended as a "Repository notes" section at the end of each brief. Rules go in the preface; notes in the extra. Reviewers also check public hygiene on their own (a fixed line in their briefs), so a leak is a P1 even in a repo with no preface.
+The preface is copied verbatim (no `{{placeholder}}` expansion) and is capped at `brief_preface_max_bytes` (16 KiB by default; a larger file refuses `volleyd validate` and `volleyd run` with `BRIEF_PREFACE_TOO_LARGE`). `.volley/brief-extra.md` is different: optional per-repo *notes* (build commands, gates) appended as a "Repository notes" section at the end of each brief. Rules go in the preface; notes in the extra. Reviewers also check public hygiene on their own (a line in their briefs), following volleyd's `public_hygiene` tunable (`auto` by default): for a public repository — or one whose visibility volleyd could not read — a leak is a P1 even in a repo with no preface; for a private or internal one it is a non-blocking P3 note; `public_hygiene: on` in the wave's `config:` forces P1, `off` drops the check. The preface's rules still apply verbatim to every brief either way.
 
 ### Step 4: validate and submit
 

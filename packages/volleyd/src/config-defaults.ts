@@ -38,6 +38,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   claude: { default_account: null, warn_at_pct: 90 },
   branch_update: "rebase",
   agent_mcp: "strict",
+  public_hygiene: "auto",
   hosts: {},
 };
 
@@ -132,6 +133,8 @@ export const DAEMON_DEFAULTS = {
   steer_wait_ack_max_ms: 300_000,
   /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
   issue_fetch_ms: 15_000,
+  /** How long the daemon waits for `gh repo view --json visibility` (at submit, under `auto`). */
+  repo_visibility_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
   /** Kill a `volley auth` account command (accounts.ts) after this long. */

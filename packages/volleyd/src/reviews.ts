@@ -1,7 +1,7 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
 import { validator } from "./schemas";
-import type { TaskId } from "./types";
+import type { HygieneLevel, PublicHygiene, RepoVisibility, TaskId } from "./types";
 
 /**
  * Review results (review-result.schema.json): parsing what reviewers and the fixup publish on
@@ -22,19 +22,66 @@ export interface ReviewResult {
   findings: Finding[];
   verdict: "approve" | "changes_requested";
   /**
-   * The reviewer's public-hygiene check (required in a published result; absent on a review the
-   * owner skipped). Its findings are also in `findings`.
+   * The reviewer's hygiene check (required at level `p1`, optional at `p3`, dropped at `off`;
+   * absent on a review the owner skipped). Its findings are also in `findings`.
    */
   hygiene?: { checked: true; findings: Finding[] };
   summary?: string;
 }
 
 /**
- * The fixed check line in both reviewer briefs, present whatever the repo's preface says
- * (test/reviews.test.ts holds the templates to it).
+ * The P1 check line both reviewer briefs carry for a public repository (`hygieneText("p1")`;
+ * test/reviews.test.ts holds the templates to it).
  */
 export const HYGIENE_CHECK =
   "Public hygiene: flag as P1 any person name, local username, machine path (home directories, temp paths), private hostname or IP in the diff, commit messages or PR text.";
+
+export type { HygieneLevel };
+
+/** The `public_hygiene` tunable and the repo's visibility (null/unknown: as public). */
+export function hygieneLevel(mode: PublicHygiene, visibility: RepoVisibility | null): HygieneLevel {
+  if (mode === "on") return "p1";
+  if (mode === "off") return "off";
+  return visibility === "private" || visibility === "internal" ? "p3" : "p1";
+}
+
+/**
+ * The reviewer briefs' `{{hygiene_rule}}` and `{{hygiene_contract}}` for a level (the contract
+ * names the commits to check against `release_branch`).
+ */
+export function hygieneText(
+  level: HygieneLevel,
+  release_branch = "<release branch>",
+): { rule: string; contract: string } {
+  const commits = `every commit message (\`git log origin/${release_branch}..HEAD\`) and the PR title and body`;
+  const shape =
+    "same shape as a finding; `file` is `COMMIT` or `PR` for a commit message or the PR text";
+  switch (level) {
+    case "p1":
+      return {
+        rule: HYGIENE_CHECK,
+        contract: `- \`hygiene\` is required: add \`"hygiene": { "checked": true, "findings": [] }\` to the payload once you have checked the diff, ${commits} for the public-hygiene line above; \`findings\` lists each hit as a P1 (${shape}). A result without it is not accepted.`,
+      };
+    case "p3":
+      return {
+        rule: "Hygiene (private repository): note as P3 any person name, local username, machine path, private hostname or IP in the diff, commit messages or PR text; it will not block the merge.",
+        contract: `- \`hygiene\` is optional (a private repository): if you checked the diff, ${commits} for the hygiene line above, add \`"hygiene": { "checked": true, "findings": [] }\` with each hit as a P3 (${shape}). Hits never block the merge.`,
+      };
+    case "off":
+      return { rule: "", contract: "" };
+  }
+}
+
+/** The steer for a reviewer whose `done` came without a result this level would parse. */
+export function resultSteerText(level: HygieneLevel): string {
+  const hygiene =
+    level === "p1"
+      ? ', "hygiene": { "checked": true, "findings": [<public-hygiene P1s, same shape>] }'
+      : level === "p3"
+        ? ' (optional: , "hygiene": { "checked": true, "findings": [<hygiene P3s, same shape>] })'
+        : "";
+  return `Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested"${hygiene} }) — then publish done again.`;
+}
 
 export interface FixupResult {
   resolved: { finding: string; how: string }[];
@@ -51,25 +98,32 @@ export const isReviewerRole = (r: string): r is ReviewerRole =>
 const ID_PREFIX: Record<ReviewerRole, string> = { spec_reviewer: "S", quality_reviewer: "Q" };
 
 /**
- * A reviewer's `result` payload, or null when it is not a review result (one without
- * `hygiene.checked` is not). Every hygiene hit is a P1, whatever severity the reviewer gave it.
- * Hygiene findings are folded into `findings` (once, as the P1, if the reviewer listed them in
- * both), so the fixup and the disagreement check see them like any other.
+ * A reviewer's `result` payload, or null when it is not a review result. At level `p1` one
+ * without `hygiene.checked` is not, and every hygiene hit is a P1 whatever severity the reviewer
+ * gave it; at `p3` the block is optional and every hit is a P3; at `off` the block is dropped.
+ * Hygiene findings are folded into `findings` (once, at the level's severity, if the reviewer
+ * listed them in both), so the fixup and the disagreement check see them like any other.
  */
-export function parseReviewResult(payload: unknown): ReviewResult | null {
+export function parseReviewResult(
+  payload: unknown,
+  level: HygieneLevel = "p1",
+): ReviewResult | null {
   if (!validator("review-result.schema.json#/$defs/review")(payload)) return null;
-  const r = payload as ReviewResult & { hygiene: { findings: Finding[] } };
+  const { hygiene, ...r } = payload as ReviewResult;
+  if (level === "off") return r;
+  if (hygiene === undefined) return level === "p1" ? null : r;
+  const severity: Severity = level === "p1" ? "P1" : "P3";
   const key = (f: Finding) => JSON.stringify([f.file, f.line, f.text]);
-  const hits = r.hygiene.findings.map((f): Finding => ({ ...f, severity: "P1" }));
+  const hits = hygiene.findings.map((f): Finding => ({ ...f, severity }));
   const hit = new Set(hits.map(key));
   const listed = new Set(r.findings.map(key));
   return {
     ...r,
     findings: [
-      ...r.findings.map((f): Finding => (hit.has(key(f)) ? { ...f, severity: "P1" } : f)),
+      ...r.findings.map((f): Finding => (hit.has(key(f)) ? { ...f, severity } : f)),
       ...hits.filter((f) => !listed.has(key(f))),
     ],
-    hygiene: { ...r.hygiene, findings: hits },
+    hygiene: { ...hygiene, findings: hits },
   };
 }
 

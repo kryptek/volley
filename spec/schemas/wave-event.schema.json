@@ -70,7 +70,8 @@
             "credentials_swept",
             "peer_invited",
             "peer_joined",
-            "peer_removed"
+            "peer_removed",
+            "repo_visibility_detected"
           ]
         },
         "payload": {
