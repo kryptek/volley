@@ -13,6 +13,10 @@ const overlap = (a, c) =>
   a.x < c.x + c.width && c.x < a.x + a.width && a.y < c.y + c.height && c.y < a.y + a.height;
 const round = (r) => r && { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) };
 const report = {};
+/** What failed, as "<device>: <what>"; any entry fails the check (exit 1). */
+const failures = [];
+/** The anchored window's top-left still where it was anchored, within a pixel. */
+const holds = (a, c) => !!a && !!c && Math.abs(a.x - c.x) <= 1 && Math.abs(a.y - c.y) <= 1;
 for (const [name, viewport, smaller] of [
   ["desktop", DESKTOP, { width: 1200, height: 800 }],
   ["phone", PHONE, { width: 360, height: 740 }],
@@ -34,7 +38,7 @@ for (const [name, viewport, smaller] of [
   r.afterOne = await pin.getAttribute("aria-label");
   await pin.click();
   r.afterTwo = await pin.getAttribute("aria-label");
-  r.inHud = await coords.evaluate((el) => el.parentElement?.classList.contains("hud") ?? false);
+  r.inHud = await coords.evaluate((el) => el.closest(".hud") !== null);
   // Drag it by its title bar as far up and left as it goes.
   const bar = coords.locator(".win-bar");
   const bb = await bar.boundingBox();
@@ -113,9 +117,30 @@ for (const [name, viewport, smaller] of [
   };
   await page.screenshot({ path: `${out}/pinning-in-place-${name}.png` });
 
+  const expect = (ok, what) => {
+    if (!ok) failures.push(`${name}: ${what}`);
+  };
+  expect(r.inHud, "the anchored window is not in the .hud layer");
+  expect(r.afterTwo?.startsWith("Anchored to the screen"), "two clicks did not anchor it");
+  for (const step of ["afterArrange", "afterPan", "afterResize", "afterReload"]) {
+    expect(holds(r.anchored, r[step]), `${step} moved it: ${JSON.stringify(r[step])}`);
+  }
+  expect(r.reloadLabel?.startsWith("Anchored to the screen"), "the pin was lost on reload");
+  expect(r.arrangedCovering.length === 0, `arranged windows cover it: ${r.arrangedCovering}`);
+  expect(r.pinnedInPlace.kept, "arrange moved the wave pinned in place");
+  if (name === "phone") {
+    expect(r.collapsed, "not collapsed to its title bar at phone width");
+    expect(!r.coversDockCollapsed, "it covers the dock");
+    expect(r.expandedOnTap, "a tap did not expand it");
+  }
   report[name] = r;
   await page.evaluate(() => localStorage.clear());
   await page.close();
 }
 console.log(JSON.stringify(report, null, 1));
 await b.close();
+if (failures.length > 0) {
+  console.error(`FAILED:\n${failures.join("\n")}`);
+  process.exit(1);
+}
+console.log("pinning: ok");

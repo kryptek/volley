@@ -143,12 +143,17 @@ export interface KeyedAgent {
   wave: string;
   task: string | null;
   role: string | null;
+  /** The agent holds its task's role slot in the wave state now (`tasks[].agents[role]`). */
+  holds?: boolean;
 }
 
 /**
  * Each window's pin key: `panel:<name>`, `wave:<id>`, and for an agent its
- * slot `task:<wave>/<task>/<role>` (a respawned agent keeps its window's pin),
- * else `agent:<id>`. A second agent in a slot already keyed gets its id.
+ * slot `task:<wave>/<task>/<role>`, else `agent:<id>`. The slot key goes to
+ * the agent that holds the slot now, so a respawned agent's window keeps the
+ * pin while its finished predecessor (still in the store) is keyed by its id;
+ * whatever order the agents arrived in. A slot no agent is known to hold
+ * (no wave state yet) goes to its first agent.
  */
 export function windowKeys(
   panels: readonly string[],
@@ -158,12 +163,26 @@ export function windowKeys(
   const out: Record<string, string> = {};
   for (const p of panels) out[p] = `panel:${p}`;
   for (const w of waves) out[w] = `wave:${w}`;
+  const slotOf = (a: KeyedAgent) =>
+    a.task && a.role ? `task:${a.wave}/${a.task}/${a.role}` : null;
   const taken = new Set<string>();
   for (const a of agents) {
-    const slot = a.task && a.role ? `task:${a.wave}/${a.task}/${a.role}` : null;
-    const key = slot && !taken.has(slot) ? slot : `agent:${a.id}`;
-    taken.add(key);
-    out[a.id] = key;
+    const slot = slotOf(a);
+    if (slot && a.holds && !taken.has(slot)) {
+      taken.add(slot);
+      out[a.id] = slot;
+    }
+  }
+  for (const a of agents) {
+    if (out[a.id]) continue;
+    const slot = slotOf(a);
+    const held = slot !== null && agents.some((b) => b.holds && slotOf(b) === slot);
+    if (slot && !held && !taken.has(slot)) {
+      taken.add(slot);
+      out[a.id] = slot;
+    } else {
+      out[a.id] = `agent:${a.id}`;
+    }
   }
   return out;
 }

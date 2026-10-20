@@ -18,8 +18,11 @@
  * pointer move. `onDrag` reports the title-bar drag (the tethers sway then).
  * Pinning (C12): `pin` puts the pin toggle in the title bar (a click cycles
  * unpinned → pinned in place → anchored to the screen; its name and tooltip
- * say the state); `layer` renders the window into the screen-anchored layer
- * instead of the canvas; `collapsed` shows only the title bar, and a tap on
+ * say the state); `layer` moves the window into the screen-anchored layer
+ * instead of the canvas. The window always renders into its own host element,
+ * which is moved between its place on the canvas and the layer, so pinning
+ * never remounts it (its state is kept) and the focus is restored after the
+ * move; `collapsed` shows only the title bar, and a tap on
  * the bar (or the Expand button) calls `onCollapse`.
  */
 import type React from "react";
@@ -38,6 +41,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -245,6 +249,24 @@ export function Frame(p: FrameProps) {
   };
   const name = p.label ?? (typeof p.title === "string" ? p.title : "window");
 
+  // The host the window renders into, and the marker for its place on the canvas. Checked
+  // after every render: the host follows its marker when React reorders the windows.
+  const [host] = useState(() => document.createElement("div"));
+  const marker = useRef<HTMLSpanElement>(null);
+  const layer = p.layer ?? null;
+  useLayoutEffect(() => {
+    const home = marker.current;
+    const into = layer ?? home?.parentNode;
+    if (!into) return;
+    if (host.parentNode === into && (layer || host.previousSibling === home)) return;
+    const active = document.activeElement;
+    const refocus = active instanceof HTMLElement && host.contains(active) ? active : null;
+    if (layer) layer.appendChild(host);
+    else home?.after(host);
+    refocus?.focus();
+  });
+  useLayoutEffect(() => () => host.remove(), [host]);
+
   const inner = (
     <div className={`win-inner win-depth chrome-${p.chrome}`}>
       {p.chrome === "liquid" && (
@@ -366,7 +388,12 @@ export function Frame(p: FrameProps) {
       {p.attn === "you" ? wrap(framed) : framed}
     </section>
   );
-  return p.layer ? createPortal(section, p.layer) : section;
+  return (
+    <>
+      <span ref={marker} hidden />
+      {createPortal(section, host)}
+    </>
+  );
 }
 
 /** Z-order for a set of windows: `focus(id)` raises one above all others. */

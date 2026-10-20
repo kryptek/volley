@@ -60,7 +60,7 @@ export function General({
   notify: NotifyOptions;
   setNotify: SetNotify;
   onArrange: () => void;
-  /** Clear every window pin (pinned in place, anchored to the screen) on this device. */
+  /** Clear every window pin (pinned in place, anchored to the screen) in this browser (the desktop and phone layouts both). */
   onResetLayout?: () => void;
 }) {
   const { toggle: toggleNotify, blocked } = useNotifyToggle(setNotify);

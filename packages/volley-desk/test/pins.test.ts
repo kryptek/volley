@@ -140,7 +140,35 @@ describe("window keys: stable across agents coming and going", () => {
     });
   });
 
-  it("two agents in the same slot: the later one is keyed by its id", () => {
+  it("a respawned agent keeps the slot's pin: the slot key goes to its current holder", () => {
+    // The finished predecessor is still in the store (and listed first); the live successor
+    // holds the slot in the wave state.
+    const k = windowKeys(
+      [],
+      [],
+      [
+        { id: "old", wave: "w1", task: "T1", role: "fixup", holds: false },
+        { id: "new", wave: "w1", task: "T1", role: "fixup", holds: true },
+      ],
+    );
+    expect(k.new).toBe("task:w1/T1/fixup");
+    expect(k.old).toBe("agent:old");
+  });
+
+  it("the key does not depend on the order agents arrive in", () => {
+    const k = windowKeys(
+      [],
+      [],
+      [
+        { id: "new", wave: "w1", task: "T1", role: "fixup", holds: true },
+        { id: "old", wave: "w1", task: "T1", role: "fixup", holds: false },
+      ],
+    );
+    expect(k.new).toBe("task:w1/T1/fixup");
+    expect(k.old).toBe("agent:old");
+  });
+
+  it("with no holder known (no wave state yet), the first agent of the slot takes it", () => {
     const k = windowKeys(
       [],
       [],

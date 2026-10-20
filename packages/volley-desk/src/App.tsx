@@ -14,7 +14,7 @@
  * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
  * opens Setup & Security once, its Preview shows the sign-in screen, and Open setup…
  * closes Settings and shows the setup wizard in its own modal (as the prototype).
- * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
+ * Hardening (D8): the phone layout (`useScreenSize`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
  * off the canvas with their agents under "Show finished" (and get no tethers
@@ -50,7 +50,6 @@ import {
   phoneMaxWidth,
   useScreenSize,
   useViewport,
-  useViewportWidth,
 } from "./canvas/useViewport";
 import {
   CGAP,
@@ -266,10 +265,15 @@ export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
   const { view, setView, zoomAt, panBy, fitTo: fitView, stageRef, stageHandlers } = useViewport();
-  const vw = useViewportWidth();
-  const narrow = vw < NARROW_PX;
   const screenSize = useScreenSize();
-  const { pins, setPin, reset: resetPins } = usePins(narrow ? "phone" : "desktop");
+  const vw = screenSize.width;
+  const narrow = vw < NARROW_PX;
+  const {
+    pins,
+    setPin,
+    save: savePinsNow,
+    reset: resetPins,
+  } = usePins(narrow ? "phone" : "desktop");
   /** The screen-anchored layer, above the canvas (C12). */
   const [hud, setHud] = useState<HTMLDivElement | null>(null);
   /** Anchored windows expanded at phone width (they start collapsed to their title bar). */
@@ -437,15 +441,25 @@ export default function App() {
   };
   const pos = (id: string): Pos => placedAt(id) ?? slotOf(id);
   const move = (id: string) => (dx: number, dy: number) => {
+    // A pinned window's pin follows the drag through updaters, saved on the drop (`onDrag`).
     const pin = pinOf(id);
     if (pin?.mode === "screen") {
-      const at = hudRect(id);
-      if (at)
-        setPin(keyOf(id), anchorAt({ ...at, x: at.x + dx, y: at.y + dy }, screenSize, bounds));
+      const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+      setPin(
+        keyOf(id),
+        (p) => {
+          if (p?.mode !== "screen") return p;
+          const { left, top } = screenPos(p, { w, h }, screenSize, bounds);
+          return anchorAt({ x: left + dx, y: top + dy, w, h }, screenSize, bounds);
+        },
+        { save: false },
+      );
       return;
     }
     if (pin?.mode === "place") {
-      setPin(keyOf(id), { mode: "place", x: pin.x + dx, y: pin.y + dy });
+      setPin(keyOf(id), (p) => (p?.mode === "place" ? { ...p, x: p.x + dx, y: p.y + dy } : p), {
+        save: false,
+      });
       return;
     }
     setMoved((m) => {
@@ -463,6 +477,10 @@ export default function App() {
       wave: a.wave,
       task: a.task,
       role: a.role,
+      holds:
+        !!a.task &&
+        !!a.role &&
+        state.waves[a.wave]?.state?.tasks.find((t) => t.id === a.task)?.agents[a.role] === a.id,
     })),
   );
   const keyOf = (id: string) => keys[id] ?? id;
@@ -698,7 +716,10 @@ export default function App() {
     attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
-    onDrag: (on: boolean) => setDragging((d) => (on ? id : d === id ? null : d)),
+    onDrag: (on: boolean) => {
+      setDragging((d) => (on ? id : d === id ? null : d));
+      if (!on && pinOf(id)) savePinsNow();
+    },
     // A window not laid out yet (0 × 0) keeps its fallback size.
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };

@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { Frame, type FrameProps } from "../src/canvas/Frame";
@@ -80,6 +81,50 @@ describe("Frame: the pin toggle", () => {
     layer.remove();
   });
 
+  it("moving into the layer and back keeps the window mounted, its state and the focus", () => {
+    const layer = document.createElement("div");
+    document.body.appendChild(layer);
+    let mounts = 0;
+    function Child() {
+      const [n, setN] = useState(0);
+      useEffect(() => {
+        mounts += 1;
+      }, []);
+      return (
+        <button type="button" onClick={() => setN((x) => x + 1)}>
+          clicked {n}
+        </button>
+      );
+    }
+    function Host() {
+      const [mode, setMode] = useState<"none" | "place" | "screen">("place");
+      return (
+        <Frame
+          {...base}
+          pin={{ mode, onCycle: () => setMode((m) => (m === "place" ? "screen" : "place")) }}
+          {...(mode === "screen" ? { layer } : {})}
+        >
+          <Child />
+        </Frame>
+      );
+    }
+    const { container } = render(<Host />);
+    fireEvent.click(screen.getByRole("button", { name: "clicked 0" }));
+    const pin = screen.getByRole("button", { name: "Pinned in place · anchor to the screen" });
+    pin.focus();
+    fireEvent.click(pin);
+    expect(layer.querySelector("section.win")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "clicked 1" })).toBeVisible();
+    expect(document.activeElement).toHaveAccessibleName("Anchored to the screen · unpin");
+    fireEvent.click(document.activeElement as HTMLElement);
+    expect(container.querySelector("section.win")).not.toBeNull();
+    expect(layer.querySelector("section.win")).toBeNull();
+    expect(document.activeElement).toHaveAccessibleName("Pinned in place · anchor to the screen");
+    expect(screen.getByRole("button", { name: "clicked 1" })).toBeVisible();
+    expect(mounts).toBe(1);
+    layer.remove();
+  });
+
   it("collapsed: only the title bar shows, and a tap on it expands", () => {
     const onCollapse = vi.fn();
     render(
@@ -138,6 +183,12 @@ describe("App: pinning windows (demo mode)", () => {
     within(el).getByRole("button", {
       name: /^(Not pinned|Pinned in place|Anchored to the screen) · /,
     });
+  const view = (c: HTMLElement) => {
+    const t = (c.querySelector(".world") as HTMLElement).style.transform;
+    const [, x = "0", y = "0", sc = "1"] =
+      /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(t) ?? [];
+    return { x: Number(x), y: Number(y), s: Number(sc) };
+  };
   const arrangeNow = () => {
     fireEvent.click(screen.getByRole("button", { name: "Arrange & fit" }));
     advance(ARRANGE_ANIM_MS);
@@ -227,27 +278,90 @@ describe("App: pinning windows (demo mode)", () => {
     expect(loadPins().desktop["panel:coordinators"]).toBeUndefined();
   });
 
-  it("phone and desktop layouts are independent", () => {
-    renderApp();
+  it("phone and desktop layouts are independent, across the phone-width threshold", () => {
+    const { container } = renderApp();
     advance(400 + ARRANGE_ANIM_MS);
     fireEvent.click(pinBtn(coords()));
-    expect(loadPins().desktop["panel:coordinators"]).toMatchObject({ mode: "place" });
+    fireEvent.click(pinBtn(coords()));
+    expect(loadPins().desktop["panel:coordinators"]).toMatchObject({ mode: "screen" });
     expect(loadPins().phone["panel:coordinators"]).toBeUndefined();
+    // at phone width the desktop pin does not apply
+    setScreen(390, 844);
+    act(() => window.dispatchEvent(new Event("resize")));
+    advance(200 + ARRANGE_ANIM_MS);
+    expect(pinBtn(coords())).toHaveAccessibleName("Not pinned · pin in place");
+    expect(container.querySelector(".world")?.contains(coords())).toBe(true);
+    // a phone pin does not apply on the desktop
+    fireEvent.click(pinBtn(coords()));
+    expect(loadPins().phone["panel:coordinators"]).toMatchObject({ mode: "place" });
+    setScreen(1600, 1000);
+    act(() => window.dispatchEvent(new Event("resize")));
+    advance(200 + ARRANGE_ANIM_MS);
+    expect(pinBtn(coords())).toHaveAccessibleName("Anchored to the screen · unpin");
+    expect(container.querySelector(".hud")?.contains(coords())).toBe(true);
   });
 
-  it("Settings › General › Reset layout clears every pin", () => {
+  it("Settings › General › Reset layout clears every pin, then arranges", () => {
     const { container } = renderApp();
     advance(400 + ARRANGE_ANIM_MS);
     fireEvent.click(pinBtn(coords()));
     fireEvent.click(pinBtn(coords()));
     const wave = screen.getByRole("region", { name: "ci-speed" });
     fireEvent.click(pinBtn(wave));
+    dragBar(wave, 4000, 3000);
+    const pinnedAt = at(screen.getByRole("region", { name: "ci-speed" }));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Reset layout" }));
     advance(ARRANGE_ANIM_MS);
     expect(localStorage.getItem(PINS_STORAGE_KEY)).toBe(JSON.stringify({ desktop: {}, phone: {} }));
     expect(container.querySelector(".world")?.contains(coords())).toBe(true);
     expect(pinBtn(coords())).toHaveAccessibleName("Not pinned · pin in place");
+    // the arrange put the formerly pinned wave back among the others
+    expect(at(screen.getByRole("region", { name: "ci-speed" }))).not.toEqual(pinnedAt);
+  });
+
+  it("arrange & fit leaves room for a window anchored to the screen", () => {
+    const { container } = renderApp();
+    advance(400 + ARRANGE_ANIM_MS);
+    fireEvent.click(pinBtn(coords()));
+    fireEvent.click(pinBtn(coords()));
+    dragBar(coords(), -5000, -5000);
+    expect(at(coords())).toEqual({ left: "8px", top: "64px" });
+    arrangeNow();
+    const v = view(container);
+    const wins = [...container.querySelectorAll<HTMLElement>(".world section.win")];
+    expect(wins.length).toBeGreaterThan(0);
+    // the coordinators window is 430 wide at (8, 64): every canvas window starts right of it
+    for (const w of wins) {
+      expect(v.x + Number.parseFloat(w.style.left) * v.s).toBeGreaterThanOrEqual(8 + 430);
+    }
+  });
+
+  it("a fit (go-to from the coordinators list) leaves room for it too", () => {
+    const { container } = renderApp();
+    advance(400 + ARRANGE_ANIM_MS);
+    fireEvent.click(pinBtn(coords()));
+    fireEvent.click(pinBtn(coords()));
+    dragBar(coords(), -5000, -5000);
+    advance(120 + ARRANGE_ANIM_MS);
+    fireEvent.click(within(coords()).getByRole("button", { name: "Go to ci-speed" }));
+    const v = view(container);
+    const wave = screen.getByRole("region", { name: "ci-speed" });
+    expect(v.x + Number.parseFloat(wave.style.left) * v.s).toBeGreaterThanOrEqual(8 + 430);
+  });
+
+  it("the first fit frames only unpinned windows", () => {
+    // Auto-arrange off: only the first fit sets the view.
+    localStorage.setItem("volley-desk-look", JSON.stringify({ autoArrange: false }));
+    const baseline = renderApp();
+    const s0 = view(baseline.container).s;
+    // pin the coordinators window in place far away, then reload
+    fireEvent.click(pinBtn(coords()));
+    dragBar(coords(), -20_000, -20_000);
+    baseline.unmount();
+    const again = renderApp();
+    // a fit that included it would zoom far out; one without it frames the rest as before or closer
+    expect(view(again.container).s).toBeGreaterThanOrEqual(s0);
   });
 
   describe("at phone width", () => {

@@ -503,7 +503,7 @@ input.recessed:focus {
   pointer-events: none;
   overflow: hidden;
 }
-.hud > .win {
+.hud .win {
   pointer-events: auto;
 }
 .win-pin--place,
