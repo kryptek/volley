@@ -1,12 +1,12 @@
 /**
- * useNotifyOnAttention — fires a browser notification and the bundled chime
- * when an item's attention tier moves into `you`. Ported from volley-dash's
- * `useNotifyOnAgentEvent`, with the same two gates:
+ * useNotifyOnAttention — fires a browser notification and the
+ * `attention_needed` sound when an item's attention tier moves into `you`.
+ * Ported from volley-dash's `useNotifyOnAgentEvent`:
  *
  *   - `settings.enabled` + `Notification.permission === "granted"` → a
  *     desktop notification, `tag` = the item key so repeats collapse.
- *   - `settings.sound` + no `prefers-reduced-motion` → reset and play the
- *     chime (reduced motion silences it; the notification still fires).
+ *   - the fresh items go to the sound manager as one `emitSound` (its
+ *     policy gates and coalesces them: Settings › Sound, reduced motion).
  *
  * An item fires once per entry into `you`: it must leave `you` (be seen at
  * another tier) before it can fire again. An item that disappears keeps its
@@ -17,6 +17,7 @@
  */
 import { useEffect, useRef } from "react";
 import type { Tier } from "../attention";
+import { emitSound } from "../sounds/emit";
 import type { NotifyOptions } from "./use-notify-settings";
 
 export interface AttentionItem {
@@ -34,7 +35,6 @@ export interface NotifyOnAttentionOptions {
   armAfterMs?: number;
   /** How long a vanished item's tier is remembered (default 30 s). */
   forgetAfterMs?: number;
-  audioSrc?: string;
 }
 
 const FORGET_AFTER_MS = 30_000;
@@ -42,22 +42,10 @@ const FORGET_AFTER_MS = 30_000;
 export function useNotifyOnAttention(
   settings: NotifyOptions,
   items: readonly AttentionItem[],
-  {
-    quiet = false,
-    armAfterMs = 0,
-    forgetAfterMs = FORGET_AFTER_MS,
-    audioSrc = "/notify.mp3",
-  }: NotifyOnAttentionOptions = {},
+  { quiet = false, armAfterMs = 0, forgetAfterMs = FORGET_AFTER_MS }: NotifyOnAttentionOptions = {},
 ): void {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const mountedAt = useRef(Date.now());
   const seen = useRef(new Map<string, { you: boolean; missingSince?: number }>());
-
-  useEffect(() => {
-    if (audioRef.current !== null) return;
-    if (typeof window === "undefined" || typeof window.Audio === "undefined") return;
-    audioRef.current = new window.Audio(audioSrc);
-  }, [audioSrc]);
 
   useEffect(() => {
     const now = Date.now();
@@ -80,21 +68,10 @@ export function useNotifyOnAttention(
 
     const N = typeof window !== "undefined" ? window.Notification : undefined;
     const canNotify = settings.enabled && N !== undefined && N.permission === "granted";
-    const reduceMotion =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const canSound = settings.sound && !reduceMotion;
-
     if (canNotify && N !== undefined) {
       for (const it of fresh) new N(`Volley: ${it.title}`, { body: it.body, tag: it.key });
     }
-    // One chime per render, however many items arrived together.
-    if (canSound && audioRef.current !== null) {
-      audioRef.current.currentTime = 0;
-      void audioRef.current.play()?.catch(() => {
-        // Autoplay policies may reject until the page has had a user gesture.
-      });
-    }
+    // One policy pass for the lot: however many arrived together, one chime.
+    emitSound("attention_needed", fresh.length);
   }, [settings, items, quiet, armAfterMs, forgetAfterMs]);
 }

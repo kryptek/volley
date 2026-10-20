@@ -1,0 +1,91 @@
+# The Desk's sound themes, as ElevenLabs Sound Effects prompts. A clip's prompt is
+#   base_prompt + ", " + style_suffix + ", " + severity_suffix
+# so a theme is one style line and an event is one line. Theme ids and labels match
+# packages/volley-desk/src/sounds/themes.ts; event ids match src/sounds/events.ts
+# (scripts/sounds/generate.test.ts keeps them in step). See sounds/README.md.
+
+severity_suffix:
+  failure: "lower pitch, darker, short decay, subdued, a soft sense of something going wrong"
+  neutral: "mid pitch, even, unobtrusive, clean and dry, no melody"
+  success: "brighter, gently rising, a touch longer, pleasant resolution"
+  attention: "clear and noticeable but not alarming, two gentle notes, polite"
+
+themes:
+  - id: synthwave
+    label: Synthwave
+    brief: "80s analogue synth: short saw and square blips, soft neon pads on success, a low detuned thud on failure."
+    style_suffix: "80s analogue synthesizer UI sound, short saw and square wave blip, retro neon synthwave, no drums, no vocals"
+  - id: arcade
+    label: Arcade 8-bit
+    brief: "NES-style square and triangle chiptune: 1-bit clicks, two-note rising jingles, a descending buzz on failure."
+    style_suffix: "NES-style 8-bit chiptune sound effect, square and triangle waves, retro video game, no vocals"
+  - id: glass
+    label: Glass
+    brief: "Struck crystal and wine-glass tones: bell-like, airy, long but quiet tails; cracked-glass tick for failure."
+    style_suffix: "struck crystal and wine-glass tone, bell-like and airy, quiet tail, delicate, no vocals"
+  - id: soft-ui
+    label: Soft UI
+    brief: "Rounded, muted sine pops and gentle marimba taps: the quietest theme, nothing above a whisper."
+    style_suffix: "soft rounded muted sine pop and gentle marimba tap, very quiet and gentle app interface sound, no vocals"
+  - id: mech-keys
+    label: Mechanical keyboard
+    brief: "Tactile switch clicks, keycap thocks, a spacebar for drops, a key-chord for success, a stuck-key rattle for failure."
+    style_suffix: "mechanical keyboard sound, tactile switch click and keycap thock, close-miked, dry room, no music"
+  - id: sci-fi
+    label: Sci-fi bridge
+    brief: "Starship console: filtered sweeps, confirmation chirps, a klaxon-shaped low tone for failure, a warp swell for wave start."
+    style_suffix: "starship bridge console computer sound, filtered electronic sweep and chirp, science fiction interface, no vocals"
+  - id: wood
+    label: Nature / wood
+    brief: "Wood blocks, bamboo chimes, pebbles and a water drop for drops; a dull knock for failure, birdsong fragment for success."
+    style_suffix: "natural organic sound, wood block, bamboo chime, pebble and water drop, acoustic and warm, no music"
+  - id: retro-mac
+    label: Retro Mac
+    brief: "Early-90s desktop: sampled-sounding boops, a drawer slide for panels, a startup-chord fragment for wave start, a classic quack on failure."
+    style_suffix: "early 1990s desktop computer system sound, lo-res sampled boop, vintage personal computer interface, no vocals"
+  - id: pizzicato
+    label: Orchestral pizzicato
+    brief: "Plucked strings and a harp glissando for success, a low cello pluck for failure, a timpani touch for wave events."
+    style_suffix: "orchestral pizzicato plucked strings, harp and cello, a light timpani touch, classical, dry, no vocals"
+  - id: lo-fi
+    label: Lo-fi tape
+    brief: "Cassette-warm keys and tape stops: wow-and-flutter chords, a tape-stop for failure, a rewind for drag start."
+    style_suffix: "lo-fi cassette tape sound, warm electric piano keys with wow and flutter, tape hiss, mellow, no drums, no vocals"
+  - id: space
+    label: Space ambient
+    brief: "Deep pads and soft sub pulses: a distant ping for clicks, a slow bloom for success, a hollow drop for failure."
+    style_suffix: "deep space ambient sound, soft synth pad and sub pulse, distant and spacious, calm, no vocals"
+  - id: minimal
+    label: Minimal clicks
+    brief: "Barely-there ticks and single sine dots: the theme for people who want feedback, not music."
+    style_suffix: "minimal barely-there tick or single pure sine dot, extremely subtle and short, clean, no music"
+
+events:
+  - { id: ui_click, severity: neutral, duration_s: 0.5, base_prompt: "a single tiny button click, very short" }
+  - { id: ui_drag_start, severity: neutral, duration_s: 0.5, base_prompt: "picking up an object to drag it, a short lift" }
+  - { id: ui_drop, severity: neutral, duration_s: 0.5, base_prompt: "setting an object down after dragging, a short soft landing" }
+  - { id: tethers_on, severity: success, duration_s: 0.5, base_prompt: "cables connecting, a short upward link-up" }
+  - { id: tethers_off, severity: neutral, duration_s: 0.5, base_prompt: "cables disconnecting, a short downward unlink" }
+  - { id: panel_open, severity: neutral, duration_s: 0.5, base_prompt: "a panel sliding open, short whoosh" }
+  - { id: panel_close, severity: neutral, duration_s: 0.5, base_prompt: "a panel sliding shut, short reverse whoosh" }
+  - { id: agent_spawned, severity: neutral, duration_s: 0.7, base_prompt: "something new powering on and appearing, a short spawn" }
+  - { id: agent_working, severity: neutral, duration_s: 0.6, base_prompt: "a quiet machine starting to work, short busy blip" }
+  - { id: agent_complete, severity: success, duration_s: 0.8, base_prompt: "a task finished successfully, short completion chime" }
+  - { id: agent_failed, severity: failure, duration_s: 0.8, base_prompt: "a task failed or got stuck, short error tone" }
+  - { id: agent_reaped, severity: failure, duration_s: 0.8, base_prompt: "something powering down and vanishing, a short shutdown" }
+  - { id: review_written, severity: neutral, duration_s: 0.7, base_prompt: "a page stamped as reviewed, short approval mark" }
+  - { id: decision_answered, severity: success, duration_s: 0.7, base_prompt: "a question answered, short confirming acknowledgement" }
+  - { id: ci_passed, severity: success, duration_s: 0.8, base_prompt: "automated checks passed, short positive confirmation" }
+  - { id: ci_failed, severity: failure, duration_s: 0.8, base_prompt: "automated checks failed, short negative buzz" }
+  - { id: merge_ready, severity: success, duration_s: 0.9, base_prompt: "a gate opening, work ready to merge, short hopeful cue" }
+  - { id: pr_merged, severity: success, duration_s: 0.9, base_prompt: "two pieces joining together, short triumphant merge" }
+  - { id: wave_start, severity: neutral, duration_s: 1.5, base_prompt: "a fleet of workers launching, a rising swell starting up" }
+  - { id: wave_complete, severity: success, duration_s: 1.5, base_prompt: "a whole project completed, a short celebratory finale" }
+  - { id: wave_stopped, severity: failure, duration_s: 1.5, base_prompt: "a whole operation halted, a falling wind-down" }
+  - { id: steering_sent, severity: neutral, duration_s: 0.6, base_prompt: "a short message sent, quick outgoing whoosh" }
+  - { id: steering_delivered, severity: success, duration_s: 0.6, base_prompt: "a message received at the other end, short delivered blip" }
+  - { id: account_limit, severity: failure, duration_s: 0.8, base_prompt: "a quota running out, short warning that a limit was reached" }
+  - { id: machine_down, severity: failure, duration_s: 0.8, base_prompt: "a remote computer going offline, short power-down" }
+  - { id: broker_disconnected, severity: failure, duration_s: 0.8, base_prompt: "a network connection dropping, short descending disconnect" }
+  - { id: broker_reconnected, severity: success, duration_s: 0.8, base_prompt: "a network connection restored, short ascending reconnect" }
+  - { id: attention_needed, severity: attention, duration_s: 1.2, base_prompt: "a gentle notification that someone needs you" }

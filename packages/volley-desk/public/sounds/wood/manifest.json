@@ -1,0 +1,149 @@
+{
+  "theme": "wood",
+  "label": "Nature / wood",
+  "version": 28,
+  "generated_at": "2026-10-20T04:32:04.677Z",
+  "clips": {
+    "ui_click": {
+      "file": "ui_click.ogg",
+      "ms": 487,
+      "variant": 1
+    },
+    "ui_drag_start": {
+      "file": "ui_drag_start.ogg",
+      "ms": 252,
+      "variant": 2
+    },
+    "ui_drop": {
+      "file": "ui_drop.ogg",
+      "ms": 321,
+      "variant": 3
+    },
+    "tethers_on": {
+      "file": "tethers_on.ogg",
+      "ms": 186,
+      "variant": 3
+    },
+    "tethers_off": {
+      "file": "tethers_off.ogg",
+      "ms": 273,
+      "variant": 1
+    },
+    "panel_open": {
+      "file": "panel_open.ogg",
+      "ms": 314,
+      "variant": 2
+    },
+    "panel_close": {
+      "file": "panel_close.ogg",
+      "ms": 487,
+      "variant": 3
+    },
+    "agent_spawned": {
+      "file": "agent_spawned.ogg",
+      "ms": 445,
+      "variant": 1
+    },
+    "agent_working": {
+      "file": "agent_working.ogg",
+      "ms": 607,
+      "variant": 3
+    },
+    "agent_complete": {
+      "file": "agent_complete.ogg",
+      "ms": 807,
+      "variant": 2
+    },
+    "agent_failed": {
+      "file": "agent_failed.ogg",
+      "ms": 807,
+      "variant": 3
+    },
+    "agent_reaped": {
+      "file": "agent_reaped.ogg",
+      "ms": 727,
+      "variant": 1
+    },
+    "review_written": {
+      "file": "review_written.ogg",
+      "ms": 362,
+      "variant": 1
+    },
+    "decision_answered": {
+      "file": "decision_answered.ogg",
+      "ms": 405,
+      "variant": 3
+    },
+    "ci_passed": {
+      "file": "ci_passed.ogg",
+      "ms": 536,
+      "variant": 1
+    },
+    "ci_failed": {
+      "file": "ci_failed.ogg",
+      "ms": 807,
+      "variant": 2
+    },
+    "merge_ready": {
+      "file": "merge_ready.ogg",
+      "ms": 887,
+      "variant": 1
+    },
+    "pr_merged": {
+      "file": "pr_merged.ogg",
+      "ms": 531,
+      "variant": 3
+    },
+    "wave_start": {
+      "file": "wave_start.ogg",
+      "ms": 1352,
+      "variant": 2
+    },
+    "wave_complete": {
+      "file": "wave_complete.ogg",
+      "ms": 958,
+      "variant": 3
+    },
+    "wave_stopped": {
+      "file": "wave_stopped.ogg",
+      "ms": 1487,
+      "variant": 1
+    },
+    "steering_sent": {
+      "file": "steering_sent.ogg",
+      "ms": 536,
+      "variant": 2
+    },
+    "steering_delivered": {
+      "file": "steering_delivered.ogg",
+      "ms": 514,
+      "variant": 2
+    },
+    "account_limit": {
+      "file": "account_limit.ogg",
+      "ms": 780,
+      "variant": 2
+    },
+    "machine_down": {
+      "file": "machine_down.ogg",
+      "ms": 602,
+      "variant": 2
+    },
+    "broker_disconnected": {
+      "file": "broker_disconnected.ogg",
+      "ms": 723,
+      "variant": 1
+    },
+    "broker_reconnected": {
+      "file": "broker_reconnected.ogg",
+      "ms": 573,
+      "variant": 3
+    },
+    "attention_needed": {
+      "file": "attention_needed.ogg",
+      "ms": 1207,
+      "variant": 3
+    }
+  },
+  "missing": []
+}

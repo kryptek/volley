@@ -32,6 +32,7 @@ import type { EffectiveCoordinator } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
 import { noun, plural } from "../../lib/plural";
+import { usePanelSound } from "../../sounds/usePanelSound";
 import { supervisorHealth } from "../../store/reducer";
 import type { CoordinatorState, SupervisorView, WaveView } from "../../store/types";
 import { age } from "../agent/AgentWindow";
@@ -218,6 +219,7 @@ function WaveRow({
 }
 
 export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
+  usePanelSound();
   const [endedOpen, setEndedOpen] = useState(false);
   const isEnded = (w: WaveView) => ENDED_LABEL[w.state?.status ?? ""] !== undefined;
   const active = p.waves.filter((w) => !isEnded(w));

@@ -54,6 +54,7 @@ import ElectricBorder from "../rb/ElectricBorder/ElectricBorder";
 import GlassSurface from "../rb/GlassSurface/GlassSurface";
 import SpotlightCard from "../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../rb/StarBorder/StarBorder";
+import { emitSound } from "../sounds/emit";
 import { NARROW_PX } from "./useViewport";
 
 export type { AttnStyle, Chrome } from "../look/options";
@@ -179,6 +180,8 @@ export function Frame(p: FrameProps) {
   const last = useRef<{ x: number; y: number } | null>(null);
   /** Where the current title-bar press started (a tap is one that barely moved). */
   const start = useRef<{ x: number; y: number } | null>(null);
+  /** Whether the current press has moved out of tap range (it sounded `ui_drag_start`). */
+  const dragged = useRef(false);
   const box = useRef<HTMLElement>(null);
   const onSize = useRef(p.onSize);
   onSize.current = p.onSize;
@@ -231,6 +234,12 @@ export function Frame(p: FrameProps) {
   };
   const move = (e: React.PointerEvent) => {
     if (!last.current) return;
+    const s0 = start.current;
+    // A drag sounds once it leaves tap range: a tap is a collapse, not a drag.
+    if (!dragged.current && s0 && Math.hypot(e.clientX - s0.x, e.clientY - s0.y) >= TAP_PX) {
+      dragged.current = true;
+      emitSound("ui_drag_start");
+    }
     p.onMove((e.clientX - last.current.x) / p.scale, (e.clientY - last.current.y) / p.scale);
     last.current = { x: e.clientX, y: e.clientY };
   };
@@ -241,6 +250,8 @@ export function Frame(p: FrameProps) {
     start.current = null;
     hovered.current = null;
     p.onDrag?.(false);
+    if (dragged.current) emitSound("ui_drop");
+    dragged.current = false;
     const tap =
       s0 !== null &&
       e.type === "pointerup" &&

@@ -1,7 +1,9 @@
 /**
  * The Desk's notifications, ported from volley-dash: a browser notification
- * and the bundled chime when an item's attention tier moves into `you`, using
- * volley-dash's settings (same storage key, so preferences carry over).
+ * and an `attention_needed` sound event when an item's attention tier moves
+ * into `you`, using volley-dash's settings (same storage key, so preferences
+ * carry over). Whether the sound plays is the sound manager's call
+ * (sound-manager.test.tsx).
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +14,7 @@ import {
   type NotifyOptions,
   useNotifySettings,
 } from "../src/notify/use-notify-settings";
+import { onSound } from "../src/sounds/emit";
 
 const on: NotifyOptions = { enabled: true, sound: true, on: ["blocked", "failed", "reaped"] };
 
@@ -40,17 +43,21 @@ function installNotificationMock(permission: NotificationPermission): void {
   });
 }
 
-let playSpy: ReturnType<typeof vi.spyOn>;
+/** The `attention_needed` emits, as their counts. */
+let sounds: number[];
+let offSound: () => void;
 
 beforeEach(() => {
   setReducedMotion(false);
   installNotificationMock("granted");
-  playSpy = vi
-    .spyOn(HTMLAudioElement.prototype, "play")
-    .mockImplementation(() => Promise.resolve());
+  sounds = [];
+  offSound = onSound((id, count) => {
+    if (id === "attention_needed") sounds.push(count);
+  });
 });
 
 afterEach(() => {
+  offSound();
   vi.restoreAllMocks();
   (globalThis as { Notification?: unknown }).Notification = undefined;
   localStorage.clear();
@@ -72,7 +79,7 @@ function setup(settings: NotifyOptions, first: AttentionItem[] = []) {
 }
 
 describe("useNotifyOnAttention", () => {
-  it("fires a notification and the chime on a transition into you, once", () => {
+  it("fires a notification and the attention sound on a transition into you, once", () => {
     const { rerender } = setup(on, [item("coordinator")]);
     rerender({ items: [item("you")], s: on });
     expect(notificationCtor).toHaveBeenCalledTimes(1);
@@ -80,12 +87,22 @@ describe("useNotifyOnAttention", () => {
       "Volley: status-chip needs you",
       expect.objectContaining({ body: "Ties: shared or dense ranking?", tag: "wave:status-chip" }),
     );
-    expect(playSpy).toHaveBeenCalledTimes(1);
+    expect(sounds).toEqual([1]);
     // Still `you` on the next render: no re-fire.
     rerender({ items: [item("you", { body: "changed text" })], s: on });
     rerender({ items: [item("you")], s: { ...on } });
     expect(notificationCtor).toHaveBeenCalledTimes(1);
-    expect(playSpy).toHaveBeenCalledTimes(1);
+    expect(sounds).toEqual([1]);
+  });
+
+  it("emits one attention sound for items that arrive together, with their count", () => {
+    const { rerender } = setup(on, []);
+    rerender({
+      items: [item("you"), item("you", { key: "agent:a" }), item("you", { key: "agent:b" })],
+      s: on,
+    });
+    expect(notificationCtor).toHaveBeenCalledTimes(3);
+    expect(sounds).toEqual([3]);
   });
 
   it("fires again after the item left you and came back", () => {
@@ -123,7 +140,7 @@ describe("useNotifyOnAttention", () => {
     // Settled: what is at you now was already at you while quiet.
     rerender({ items: [item("you")], quiet: false });
     expect(notificationCtor).not.toHaveBeenCalled();
-    expect(playSpy).not.toHaveBeenCalled();
+    expect(sounds).toEqual([]);
     // A real transition after settling fires.
     rerender({ items: [item("coordinator")], quiet: false });
     rerender({ items: [item("you")], quiet: false });
@@ -140,19 +157,18 @@ describe("useNotifyOnAttention", () => {
     expect(notificationCtor).not.toHaveBeenCalled();
   });
 
-  it("gates the banner on enabled + permission and the chime on sound + motion", () => {
+  it("gates the banner on enabled + permission; the sound event goes out either way", () => {
     const off = { ...on, enabled: false, sound: false };
     const a = setup(off, [item("none")]);
     a.rerender({ items: [item("you")], s: off });
     expect(notificationCtor).not.toHaveBeenCalled();
-    expect(playSpy).not.toHaveBeenCalled();
+    expect(sounds).toEqual([1]);
     a.unmount();
 
     installNotificationMock("denied");
     const b = setup(on, [item("none")]);
     b.rerender({ items: [item("you")], s: on });
     expect(notificationCtor).not.toHaveBeenCalled();
-    expect(playSpy).toHaveBeenCalledTimes(1);
     b.unmount();
 
     installNotificationMock("granted");
@@ -160,7 +176,13 @@ describe("useNotifyOnAttention", () => {
     const c = setup(on, [item("none")]);
     c.rerender({ items: [item("you")], s: on });
     expect(notificationCtor).toHaveBeenCalledTimes(1);
-    expect(playSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("no longer creates an audio element", () => {
+    const audio = vi.spyOn(window, "Audio");
+    const { rerender } = setup(on, [item("none")]);
+    rerender({ items: [item("you")], s: on });
+    expect(audio).not.toHaveBeenCalled();
   });
 });
 

@@ -12,10 +12,12 @@ import {
   Rocket01Icon,
   ServerStack01Icon,
   Settings02Icon,
+  VolumeHighIcon,
 } from "@hugeicons/core-free-icons";
 
 export type SectionKey =
   | "general"
+  | "sound"
   | "appearance"
   | "supervisor"
   | "claude"
@@ -43,7 +45,15 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: Settings02Icon,
     tint: "#8e8e93",
     group: 0,
-    keywords: "auto arrange sound notifications finished narration",
+    keywords: "auto arrange notifications finished narration",
+  },
+  {
+    key: "sound",
+    label: "Sound",
+    icon: VolumeHighIcon,
+    tint: "#ff2d55",
+    group: 0,
+    keywords: "sound theme volume mute audition quiet hours vibrate chime",
   },
   {
     key: "appearance",
