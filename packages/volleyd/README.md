@@ -2410,7 +2410,10 @@ one at a time, in order, and brings each up to date just before its merge
   task GitHub refused goes after the tasks still waiting.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it, or it waits for an answer.
+  it) and keeps it until it merged, GitHub refused it, or it waits for an answer. A task whose
+  turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
+  keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
+  and is passed over, with the tasks that come after it, while another queued task can go.
   `merge_started { task, pr, head }` is journaled before each `gh pr merge`. A merge that ends
   without an outcome (the hard timeout fired, `gh` could not run, or the daemon restarted while
   it ran) is journaled `merge_ended { task, why: timed_out | failed | interrupted }`: the task is
@@ -2428,7 +2431,9 @@ one at a time, in order, and brings each up to date just before its merge
   history the reviewers saw stays).
 - **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
   (`.volley/rebase.md`) says so. An agent that publishes `blocked` on a conflict it cannot
-  resolve, or fails, opens decision `merge_conflict` (options `respawn`, `manual`, `cancel`).
+  resolve, or fails, while the task is queued opens decision `merge_conflict` (options
+  `respawn`, `manual`, `cancel`); during a rebase before the gate it is an ordinary
+  `agent_blocked`.
   Autopilot answers `respawn` once per task (`merge_conflict/respawn`, under `respawn_max`), then
   leaves it to the owner; `manual` takes the task out of the queue and leaves it at the gate for a
   person, and the turn passes to the next task.
@@ -2438,7 +2443,8 @@ one at a time, in order, and brings each up to date just before its merge
 - **`volleyd merge <wave> <task>`** (the `merge` control op, owner only) merges one task at
   `merge_ready` now through the same verb, under `merge: manual` too; it answers with the merge
   commit (`merged_by_supervisor` carries `requested_by`), or with GitHub's refusal, and is refused
-  while another task holds the release branch.
+  while another task holds the release branch's turn (naming it: that task may be being brought
+  up to date, which takes a rebase agent and a CI run).
 
 ---
 

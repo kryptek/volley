@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import {
   type Harness,
   type HarnessOptions,
@@ -269,6 +270,18 @@ describe("merge queue", () => {
     expect(held.get("/repo#release/w1")).toBeUndefined();
   });
 
+  it("a turn holder whose turn check keeps failing passes the turn on: the queue is not wedged", async () => {
+    await threeGated();
+    // T1's PR is retargeted after its gate: every turn check of T1 throws.
+    h.world.prView[7] = { baseRefName: "main" };
+    for (let i = 0; i < DAEMON_DEFAULTS.merge_turn_check_failures_max + 2; i++) {
+      h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+      await h.tick();
+    }
+    expect(mergedPrs()).toContain(8);
+    expect(mergedPrs()).not.toContain(7);
+  });
+
   it("autopilot.delete_branch adds --delete-branch", async () => {
     await threeGated({ deleteBranch: true });
     await h.tick();
@@ -286,6 +299,18 @@ describe("merge queue", () => {
 });
 
 describe("merge_conflict", () => {
+  it("a rebase before the gate (never queued) that blocks is agent_blocked, not merge_conflict", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    await h.start();
+    h.openPr(H.T1, "T1", PR.T1);
+    h.world.mergeBase[H.T1] = sha(0xdead); // behind the release tip before it ever gated
+    await h.finish("implementer", { head: H.T1, ci: "green" });
+    expect(rebasesOf("T1")).toBe(1);
+    await h.block("rebase", "CONFLICT (content): merge conflict in src/batch.ts", "T1");
+    expect(h.openDecisions().map((d) => d.kind)).toEqual(["agent_blocked"]);
+    expect(ofType("merge_queued")).toEqual([]);
+  });
+
   async function conflicted() {
     await threeGated();
     await h.tick(); // T1 merged

@@ -18,7 +18,7 @@ import {
   verifyOperatorMerge,
 } from "./artifacts";
 import { mergePr } from "./autopilot/merge";
-import { nextToMerge, queueOf } from "./autopilot/merge-queue";
+import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
@@ -1822,11 +1822,12 @@ function clipReason(text: string): string {
 }
 
 /**
- * Under autopilot merging, a rebase (or merge) agent that cannot bring the branch up to date —
- * it publishes `blocked`, or fails — is a merge conflict (SPEC §4.6.17).
+ * Under autopilot merging, a rebase (or merge) agent that cannot bring a queued task's branch up
+ * to date — it publishes `blocked`, or fails — is a merge conflict (SPEC §4.6.17). A rebase
+ * before the gate (the task was never queued) is an ordinary blocked agent.
  */
 const mergeConflict = (v: PipelineView, role: Role): boolean =>
-  role === "rebase" && v.p.rebasing && v.merge === "auto";
+  role === "rebase" && v.p.rebasing && v.merge === "auto" && v.p.queued_at !== undefined;
 
 function mergeConflictDecision(
   v: PipelineView,
@@ -2574,6 +2575,8 @@ export interface PipelineDeps {
 export interface ReleaseLock {
   acquire(branch: string, key: string): boolean;
   release(branch: string, key: string): void;
+  /** Who holds the branch now (`<wave>/<task>`), if anyone. */
+  holder?(branch: string): string | undefined;
 }
 
 /** A release lock over one map (the daemon's, or a driver's own). */
@@ -2588,6 +2591,7 @@ export function releaseLockOn(held: Map<string, string>): ReleaseLock {
     release: (branch, key) => {
       if (held.get(branch) === key) held.delete(branch);
     },
+    holder: (branch) => held.get(branch),
   };
 }
 
@@ -2641,9 +2645,17 @@ export class PipelineDriver {
   /**
    * The merge queue's turn in this wave (SPEC §4.6.17): the task holding its release branch's
    * lock, the refusals it had when it took the turn, and whether its rebase check found it up to
-   * date (then the gate re-minted its token and it may merge).
+   * date (then the gate re-minted its token and it may merge), and its turn checks that failed
+   * in a row.
    */
-  private turn: { task: TaskId; branch: string; refusals: number; fresh: boolean } | undefined;
+  private turn:
+    | { task: TaskId; branch: string; refusals: number; fresh: boolean; failures: number }
+    | undefined;
+  /**
+   * Tasks that gave up the turn after `merge_turn_check_failures_max` failed turn checks: passed
+   * over (with the tasks after them) while another queued task can take the turn.
+   */
+  private readonly passedOver = new Set<TaskId>();
   private readonly lock: ReleaseLock;
   /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
   private readonly merging = new Set<TaskId>();
@@ -2787,7 +2799,7 @@ export class PipelineDriver {
       const v = this.view(t.id);
       if (v === null || t.stage !== "merge_ready" || v.p.queued_at !== undefined) continue;
       if (!autoMergeOn(v) || v.p.pr === undefined) continue;
-      // Its place, as the newest entry.
+      // Its place, as the newest entry: "~" sorts after every ISO time (code-unit order).
       const rec = this.deps.record();
       const hyp = { ...rec, pipeline: { ...rec.pipeline, [t.id]: { ...v.p, queued_at: "~" } } };
       const position = queueOf(hyp).findIndex((e) => e.task === t.id) + 1;
@@ -2802,6 +2814,7 @@ export class PipelineDriver {
     if (turn !== undefined) {
       const key = `${this.wave}/${turn.task}`;
       const v = this.view(turn.task);
+      const stuck = turn.failures >= DAEMON_DEFAULTS.merge_turn_check_failures_max;
       const holds =
         v !== null &&
         queue.some((e) => e.task === turn.task) &&
@@ -2809,8 +2822,9 @@ export class PipelineDriver {
         v.stage !== "awaiting_decision" &&
         v.stage !== "blocked" &&
         turn.branch === branch &&
-        this.lock.acquire(branch, key);
-      if (holds) {
+        !stuck;
+      // acquire is idempotent for the holder: it only re-asserts the lock.
+      if (holds && this.lock.acquire(branch, key)) {
         // The turn's rebase check did not come back usable (an error, a head that moved): again.
         if (v.stage === "merge_ready" && !turn.fresh)
           await this.run(turn.task, [{ kind: "check_rebase" }], false);
@@ -2818,12 +2832,30 @@ export class PipelineDriver {
       }
       this.lock.release(turn.branch, key);
       this.turn = undefined;
+      if (stuck) this.passedOver.add(turn.task);
     }
-    const n = nextToMerge({ [branch]: queue }, new Set());
+    for (const t of this.passedOver)
+      if (!queue.some((e) => e.task === t)) this.passedOver.delete(t);
+    const n =
+      nextToMerge({ [branch]: this.withoutPassedOver(queue) }, new Set()) ??
+      nextToMerge({ [branch]: queue }, new Set());
     if (n === null || !this.lock.acquire(branch, `${this.wave}/${n.task}`)) return;
     const refusals = this.view(n.task)?.p.merge_refusals ?? 0;
-    this.turn = { task: n.task, branch, refusals, fresh: false };
+    this.passedOver.delete(n.task);
+    this.turn = { task: n.task, branch, refusals, fresh: false, failures: 0 };
     await this.run(n.task, [{ kind: "check_rebase" }], true);
+  }
+
+  /** The queue without the passed-over tasks and the tasks after them (they never go first). */
+  private withoutPassedOver(queue: QueueEntry[]): QueueEntry[] {
+    if (this.passedOver.size === 0) return queue;
+    const wave = this.deps.record().wave;
+    const skip = new Set(this.passedOver);
+    // Queue order puts a task after the ones it comes after, so one pass is transitive.
+    return queue.filter((e) => {
+      if (wave?.tasks[e.task]?.after.some((d) => skip.has(d))) skip.add(e.task);
+      return !skip.has(e.task);
+    });
   }
 
   /**
@@ -2885,7 +2917,7 @@ export class PipelineDriver {
     const branch = this.branchKey() as string;
     const own = this.turn?.task === task;
     if (!this.lock.acquire(branch, `${this.wave}/${task}`))
-      return `another merge holds ${v.release_branch} (the merge queue merges one task at a time); try again once it has merged`;
+      return `${this.lock.holder?.(branch) ?? "another task"} holds ${v.release_branch} (its merge-queue turn: it is brought up to date if it is behind, then merged); try again once it has merged or given up the turn`;
     const held = this.mergeTokens.get(task);
     const token =
       held !== undefined && held.head === head && held.pr === pr.number
@@ -3058,7 +3090,17 @@ export class PipelineDriver {
           const key = `${task}/check_rebase`;
           if (v?.p.head === undefined || this.inflight.has(key)) break;
           if (!eventDriven && !this.due(`${task}/check_rebase/${v.p.head}`)) break;
-          this.beside(task, key, { what: "check_rebase" }, () => this.gateCheck(v));
+          this.beside(
+            task,
+            key,
+            { what: "check_rebase" },
+            () => this.gateCheck(v),
+            async (ev) => {
+              // The merge turn's check: failures in a row pass the turn on (mergeNext).
+              if (this.turn?.task === task)
+                this.turn.failures = ev.kind === "io_failed" ? this.turn.failures + 1 : 0;
+            },
+          );
           break;
         }
         case "check_merged": {
