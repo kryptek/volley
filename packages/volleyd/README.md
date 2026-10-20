@@ -638,7 +638,9 @@ its next agent is up (with `--role`, none in that role), the steer is **queued**
 state's `tasks[].queued_steers` counts them and `volleyd status` prints `steer queued (n)`. The
 next agent of the task to register (of that role, when one was named) gets every matching queued
 steer in order, with the id and `seq` it was queued with, journaled as `steering_sent` with
-`queued: true`. A task that is cancelled or done, or a wave that stops, drops its queue
+`queued: true`. A steer sent after the next agent is spawned but before it registers goes to it
+directly, so it can arrive ahead of the queued ones; its `seq` is still the higher one, so order
+by `seq`. A task that is cancelled or done, or a wave that stops, drops its queue
 (`steering_dropped { message_ids, reason }`); the journal keeps it across a restart. `urgent` /
 `escape_only` with no live agent is an error (`no live agent to interrupt`), a task that is
 done, cancelled or blocked cannot be steered, and a stopped or complete wave queues nothing.

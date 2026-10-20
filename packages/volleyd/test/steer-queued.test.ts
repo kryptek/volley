@@ -166,6 +166,20 @@ describe("steer with no live agent", () => {
     expect(s.journal().some((e) => e.type === "steering_sent")).toBe(false);
   });
 
+  it("a task that reaches done drops its queue (journaled)", async () => {
+    await retiredImplementer();
+    const queued = await steer({ text: "too late" });
+    await s.daemon.recordEvent("w1", {
+      type: "stage_entered",
+      task: "T1",
+      data: { stage: "done" },
+    });
+    const dropped = await s.event("steering_dropped");
+    expect(dropped.task).toBe("T1");
+    expect(dropped.data).toEqual({ message_ids: [queued.message_id], reason: "task done" });
+    expect(queuedOf()).toBeUndefined();
+  });
+
   it("survives a daemon restart (the journal holds the queue)", async () => {
     await retiredImplementer();
     await steer({ text: "after the restart" });
