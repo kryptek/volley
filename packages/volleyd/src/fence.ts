@@ -48,7 +48,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     list-workspaces · ping
  *   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
- *     `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+ *     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
+ *     left out only under `agent_mcp: inherit`) — or from a
  *     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
  *     a profile's login state and plan, never a credential)
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
@@ -1246,7 +1247,7 @@ const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
 const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
 const LAUNCH_PROFILE = new RegExp(`^export CLAUDE_CONFIG_DIR=(${SHQ})$`);
 const LAUNCH_EXEC = new RegExp(
-  `^exec claude .* --model (${SHQ}) --settings ${SHQ} --strict-mcp-config --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
+  `^exec claude .* --model (${SHQ}) --settings ${SHQ}( --strict-mcp-config)? --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
 /** What a `.volley/mcp.json` may run: some checkout's volley-mcp entry point. */
 const MCP_ENTRY_SUFFIX = "/packages/volley-mcp/src/index.ts";
@@ -1318,19 +1319,21 @@ function profileDirAllowed(dir: string, worktree: string): boolean {
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
  * bash and point every hook at other code), optional Claude account profile (`CLAUDE_CONFIG_DIR`,
  * `profileDirAllowed`, with its credential env unset) and `worktree` — so
- * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and
- * `--` before the prompt). Parsed back into its values and re-rendered, so not one byte can
- * differ from a script volleyd writes.
+ * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, or
+ * without it under `agent_mcp: inherit`, and `--` before the prompt). Parsed back into its
+ * values and re-rendered, so not one byte can differ from a script volleyd writes.
  */
 function isLaunchScript(content: string, worktree: string): boolean {
   const lines = content.split("\n");
   const hooks = LAUNCH_HOOKS.exec(lines[4] ?? "");
   const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
   if (hooks === null || run === null) return false;
-  if (!absPath(worktree) || unshq(run[2] as string) !== mcpConfigPath(worktree)) return false;
+  if (!absPath(worktree) || unshq(run[3] as string) !== mcpConfigPath(worktree)) return false;
   // A Claude account profile: its CLAUDE_CONFIG_DIR export (re-rendered below with its unset).
   const profile = LAUNCH_PROFILE.exec(lines[5] ?? "");
   const claudeConfigDir = profile !== null ? unshq(profile[1] as string) : undefined;
+  // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
+  const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
   for (const line of lines.slice(profile !== null ? 7 : 5, -2)) {
     const m = LAUNCH_EXPORT.exec(line);
@@ -1340,10 +1343,11 @@ function isLaunchScript(content: string, worktree: string): boolean {
   const vars = {
     hooksDir: unshq(hooks[1] as string),
     model: unshq(run[1] as string),
-    agentId: unshq(run[3] as string),
+    agentId: unshq(run[4] as string),
     worktree,
     env,
     ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
+    ...(strict ? {} : { agentMcp: "inherit" as const }),
   };
   return (
     (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&

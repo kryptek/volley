@@ -736,16 +736,26 @@ describe("the launch command needs the token of a launch script volleyd sealed",
     expect(() => sealLaunchScript("/tmp/../etc", script)).toThrow(FenceError);
   });
 
-  it("pins the MCP wiring: --strict-mcp-config --mcp-config=<this worktree>/.volley/mcp.json --", () => {
+  it("pins the MCP wiring: [--strict-mcp-config] --mcp-config=<this worktree>/.volley/mcp.json --", () => {
     expect(script).toContain("--strict-mcp-config --mcp-config='/tmp/wt/.volley/mcp.json'");
     expect(() => sealLaunchScript("/tmp/wt", script)).not.toThrow();
+    // agent_mcp: inherit — the same script without the strict flag (and only without it).
+    const inherit = renderLaunchScript({ ...vars, agentMcp: "inherit" });
+    expect(inherit).toBe(script.replace("--strict-mcp-config ", ""));
+    expect(() => sealLaunchScript("/tmp/wt", inherit)).not.toThrow();
     // another worktree's mcp.json (or a path outside any worktree) is not this launch's
     expect(() => sealLaunchScript("/tmp/other", script)).toThrow(FenceError);
     const other = renderLaunchScript({ ...vars, worktree: "/tmp/other" });
     expect(() => sealLaunchScript("/tmp/wt", other)).toThrow(FenceError);
     const edits: Record<string, string> = {
       "the variadic space form": script.replace("--mcp-config=", "--mcp-config "),
-      "no --strict-mcp-config": script.replace("--strict-mcp-config ", ""),
+      "--strict-mcp-config out of its place": script
+        .replace("--strict-mcp-config ", "")
+        .replace(" --name ", " --strict-mcp-config --name "),
+      "inherit with a second --mcp-config": inherit.replace(
+        " --mcp-config=",
+        " --mcp-config='/tmp/evil.json' --mcp-config=",
+      ),
       "no -- before the prompt": script.replace(' -- "$(cat', ' "$(cat'),
       "a second --mcp-config": script.replace(
         "--strict-mcp-config ",

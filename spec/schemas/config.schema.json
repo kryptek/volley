@@ -241,6 +241,18 @@
             }
           }
         },
+        "branch_update": {
+          "type": "string",
+          "enum": ["rebase", "merge"],
+          "default": "rebase",
+          "description": "How the pipeline's rebase step brings a PR branch up to date when the release branch moved (spec section 4.6.4): rebase (rebase onto the release branch, then a lease-guarded force-push) or merge (merge the release branch in, then a normal push: no force-push of any kind; the new head must descend from the old one). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "agent_mcp": {
+          "type": "string",
+          "enum": ["strict", "inherit"],
+          "default": "strict",
+          "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "hosts": {
           "type": "object",
           "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",

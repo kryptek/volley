@@ -80,6 +80,22 @@ describe("ConfigStore layering", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });
 
+  it("branch_update defaults to rebase and agent_mcp to strict; both layer like any tunable", () => {
+    writeFileSync(join(home, "config.yaml"), "branch_update: merge\n");
+    const c = open();
+    expect(CONFIG_DEFAULTS.branch_update).toBe("rebase");
+    expect(CONFIG_DEFAULTS.agent_mcp).toBe("strict");
+    expect(c.get("branch_update")).toBe("merge");
+    c.setWaveOverrides("w1", { branch_update: "rebase", agent_mcp: "inherit" });
+    expect(c.effective("w1")).toMatchObject({ branch_update: "rebase", agent_mcp: "inherit" });
+    expect(c.effective().agent_mcp).toBe("strict");
+    const r = c.applyPatch({ agent_mcp: "everything" } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
   it("rejects Object prototype names as config paths", () => {
     for (const p of ["constructor", "toString", "__proto__", "hasOwnProperty.x"]) {
       expect(() => open().get(p)).toThrow(/unknown config path/);

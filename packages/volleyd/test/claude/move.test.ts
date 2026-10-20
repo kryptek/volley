@@ -123,11 +123,15 @@ describe("accountMoves (replayed from the journal)", () => {
   });
 });
 
-describe("moveRespawn (what a moved agent's respawn carries over)", () => {
+describe("moveRespawn (what a moved or vanished agent's respawn carries over)", () => {
   it("a reviewer keeps its start point and its own attempt's worktree", () => {
     expect(
       moveRespawn({ role: "spec_reviewer", attempt: 2, start: "abc123", detached: true }),
-    ).toEqual({ start: { ref: "abc123", detach: true }, worktreeAttempt: 2 });
+    ).toEqual({
+      agent_mcp: "strict",
+      start: { ref: "abc123", detach: true },
+      worktreeAttempt: 2,
+    });
   });
 
   it("an agent moved again stays in the first attempt's worktree", () => {
@@ -139,11 +143,41 @@ describe("moveRespawn (what a moved agent's respawn carries over)", () => {
         start: "abc123",
         detached: false,
       }),
-    ).toEqual({ start: { ref: "abc123", detach: false }, worktreeAttempt: 1 });
+    ).toEqual({
+      agent_mcp: "strict",
+      start: { ref: "abc123", detach: false },
+      worktreeAttempt: 1,
+    });
   });
 
-  it("an implementer (per-role worktree) needs neither", () => {
-    expect(moveRespawn({ role: "implementer", attempt: 1 })).toEqual({});
+  it("a merge-mode rebase step keeps its merge brief", () => {
+    expect(
+      moveRespawn({
+        role: "rebase",
+        attempt: 1,
+        start: "abc123",
+        detached: false,
+        branch_update: "merge",
+      }),
+    ).toEqual({
+      agent_mcp: "strict",
+      start: { ref: "abc123", detach: false },
+      worktreeAttempt: 1,
+      branch_update: "merge",
+    });
+  });
+
+  it("an implementer (per-role worktree) needs no start point or worktree", () => {
+    expect(moveRespawn({ role: "implementer", attempt: 1 })).toEqual({ agent_mcp: "strict" });
     expect(moveRespawn(undefined)).toEqual({});
+  });
+
+  it("keeps the agent's MCP servers (agent_mcp), whatever the tunable says now", () => {
+    expect(moveRespawn({ role: "implementer", attempt: 1, agent_mcp: "inherit" })).toEqual({
+      agent_mcp: "inherit",
+    });
+    expect(
+      moveRespawn({ role: "fixup", attempt: 2, start: "abc123", agent_mcp: "inherit" }),
+    ).toMatchObject({ agent_mcp: "inherit", start: { ref: "abc123", detach: false } });
   });
 });
