@@ -10,7 +10,7 @@ import { agentIdFor } from "../src/identity";
 import { readJournalFile } from "../src/journal";
 import { retainedTopics } from "../src/retire";
 import type { JournalEvent } from "../src/types";
-import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { fakeExec } from "./helpers/fake-exec";
@@ -80,7 +80,7 @@ describe("relaunch of a spawn-type decision", () => {
    * w1 (one task, [implement]) on a fake host and a fake clock. The first launch fails as
    * `first` says; every later launch registers normally.
    */
-  async function setup(first: "auth" | "mcp") {
+  async function setup(first: "auth" | "mcp", autopilot = false) {
     env = await makeDaemonEnv();
     const repo = join(realpathSync(env.home), "repo");
     mkdirSync(repo);
@@ -136,6 +136,7 @@ describe("relaunch of a spawn-type decision", () => {
     };
     clock = fakeClock(Date.now());
     daemon = await env.start({
+      ...(autopilot ? AUTOPILOT_ON : {}),
       clock,
       spawner: {
         host,
@@ -259,6 +260,44 @@ describe("relaunch of a spawn-type decision", () => {
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
   });
+
+  /** The agents the daemon supervises now (none retired may stay among them). */
+  const supervisedIds = () => [
+    ...(daemon as unknown as { supervised: Map<string, unknown> }).supervised.keys(),
+  ];
+
+  for (const first of ["auth", "mcp"] as const) {
+    it(`autopilot relaunches a ${first === "auth" ? "hooks_auth_failed" : "mcp_not_registered"} launch only once it is supervised`, async () => {
+      const opened = await setup(first, true);
+      await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
+      await waits.settled();
+      const ev = journal();
+      const auto = ev.findIndex((e) => e.type === "decision_auto_resolved");
+      expect(ev[auto]?.data).toMatchObject({
+        decision_id: opened.data.decision_id,
+        policy: "relaunch/bad-launch",
+        answer: "relaunch",
+      });
+      expect(ev[auto + 1]).toMatchObject({
+        type: "decision_resolved",
+        data: { decision_id: opened.data.decision_id, by: "volleyd" },
+      });
+      expect(ev.filter((e) => e.type === "relaunched")).toHaveLength(1);
+      // The retired attempt is no longer watched: supervision was attached before the answer.
+      expect(supervisedIds()).not.toContain(A1);
+      expect(supervisedIds()).toContain(A2);
+      expect(daemon.snapshot("w1")?.tasks[0]).toMatchObject({ agents: { implementer: A2 } });
+      if (first === "auth") {
+        // The pause ran before the answer that retired it.
+        const types = ev.map((e) => e.type);
+        const steer = ev.findIndex(
+          (e) => e.type === "steering_sent" && e.data.reason === "auth_failed",
+        );
+        expect(steer).toBeGreaterThan(-1);
+        expect(steer).toBeLessThan(types.indexOf("decision_auto_resolved"));
+      }
+    });
+  }
 
   it("the relaunched agent's deleted login is reported: reaped { credentials_deleted } journaled", async () => {
     const opened = await setup("mcp");
