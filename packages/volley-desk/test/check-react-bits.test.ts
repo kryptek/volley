@@ -1,33 +1,19 @@
 // @vitest-environment node
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { REACT_BITS_ALLOW_LIST, checkReactBits, main } from "../scripts/check-react-bits";
-
-const dirs: string[] = [];
+import { tempDir } from "./helpers/tmp";
 
 function rbDir(components: string[]): string {
-  const root = mkdtempSync(path.join(tmpdir(), "desk-rb-"));
-  dirs.push(root);
+  const root = tempDir("desk-rb-");
   for (const name of components) {
     mkdirSync(path.join(root, name));
     writeFileSync(path.join(root, name, `${name}.tsx`), "export default function X() {}\n");
   }
   return root;
 }
-
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-});
 
 describe("check-react-bits", () => {
   it("allow-lists the prototype's free components", () => {

@@ -1,0 +1,3 @@
+# `bun test` (the CI bun-runner job): sweep the temp dirs a throwing afterEach kept.
+[test]
+preload = ["./test/helpers/tmp-preload.ts"]

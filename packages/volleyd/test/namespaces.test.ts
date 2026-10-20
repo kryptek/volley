@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -11,6 +10,7 @@ import { watchAgent } from "../src/verify";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
+import { tempDir } from "./helpers/tmp";
 
 /**
  * A wave's own `namespace:` (its agents live in `volley/<wave-ns>/…`) is honoured for cancel,
@@ -51,14 +51,13 @@ const start = () =>
 
 beforeEach(async () => {
   broker = await startTestBroker();
-  home = mkdtempSync(join(tmpdir(), "volleyd-ns-"));
+  home = tempDir("volleyd-ns-");
 });
 afterEach(async () => {
   await agent?.disconnect();
   await client?.close();
   await daemon?.stop();
   await broker.close();
-  rmSync(home, { recursive: true, force: true });
 });
 
 async function withRunningAgent(): Promise<void> {
@@ -139,7 +138,7 @@ describe("a wave's namespace", () => {
 
 describe("two daemons on one broker", () => {
   it("each answers control queries only from its own namespace", async () => {
-    const otherHome = mkdtempSync(join(tmpdir(), "volleyd-ns-other-"));
+    const otherHome = tempDir("volleyd-ns-other-");
     daemon = await start();
     const other = await Daemon.start({
       brokerUrl: broker.url,
@@ -167,7 +166,6 @@ describe("two daemons on one broker", () => {
       expect(existsSync(join(otherHome, "waves", WAVE))).toBe(false);
     } finally {
       await other.stop();
-      rmSync(otherHome, { recursive: true, force: true });
     }
   });
 });

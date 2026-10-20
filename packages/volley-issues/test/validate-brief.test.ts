@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import { tempDirForAll } from "./helpers/tmp";
 
 const GATE = fileURLToPath(new URL("../scripts/validate-brief.sh", import.meta.url));
 const NARRATION_BLOCK = readFileSync(
@@ -13,11 +13,10 @@ const NARRATION_BLOCK = readFileSync(
 /** volleyd's spawn-brief templates: the briefs volleyd runs `$VOLLEYD_HOME/brief-gate` on. */
 const VOLLEYD_BRIEFS = fileURLToPath(new URL("../../volleyd/briefs/", import.meta.url));
 
-const tmp = mkdtempSync(join(tmpdir(), "validate-brief-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = tempDirForAll("validate-brief-");
 
 function gate(brief: string): { code: number | null; out: string } {
-  const file = join(tmp, `brief-${Math.random().toString(36).slice(2)}.md`);
+  const file = join(tmp(), `brief-${Math.random().toString(36).slice(2)}.md`);
   writeFileSync(file, brief);
   const r = spawnSync("bash", [GATE, file], { encoding: "utf-8" });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };

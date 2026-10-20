@@ -2,14 +2,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -32,6 +30,7 @@ import type { ExecResult, StepPlan } from "../../src/setup/step";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 const DENIED = "Access denied - only processes started inside cmux can connect";
 const DENIED_PASSWORD = "ERROR: Authentication required — send auth <password> first";
@@ -118,24 +117,20 @@ describe("setup: cmux", () => {
   });
 
   it("stores the password mode 0600 and gives cmux it in its environment, not on argv", () => {
-    const home = mkdtempSync(join(tmpdir(), "volley-cmux-home-"));
-    try {
-      expect(readCmuxPassword(home)).toBeNull();
-      expect(cmuxEnv(home, { PATH: "/usr/bin" })).toBeUndefined();
-      const file = writeCmuxPassword(home, "s3cret");
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(readCmuxPassword(home)).toBe("s3cret");
-      expect(cmuxEnv(home, { PATH: "/usr/bin" })).toEqual({
-        PATH: "/usr/bin",
-        CMUX_SOCKET_PASSWORD: "s3cret",
-      });
-      // An explicit one in volleyd's own environment wins.
-      expect(cmuxEnv(home, { CMUX_SOCKET_PASSWORD: "mine" })).toBeUndefined();
-      writeFileSync(file, "not json");
-      expect(readCmuxPassword(home)).toBeNull();
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
+    const home = tempDir("volley-cmux-home-");
+    expect(readCmuxPassword(home)).toBeNull();
+    expect(cmuxEnv(home, { PATH: "/usr/bin" })).toBeUndefined();
+    const file = writeCmuxPassword(home, "s3cret");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readCmuxPassword(home)).toBe("s3cret");
+    expect(cmuxEnv(home, { PATH: "/usr/bin" })).toEqual({
+      PATH: "/usr/bin",
+      CMUX_SOCKET_PASSWORD: "s3cret",
+    });
+    // An explicit one in volleyd's own environment wins.
+    expect(cmuxEnv(home, { CMUX_SOCKET_PASSWORD: "mine" })).toBeUndefined();
+    writeFileSync(file, "not json");
+    expect(readCmuxPassword(home)).toBeNull();
   });
 
   it("the fence lets setup run exactly the service-like check", () => {
@@ -174,7 +169,7 @@ describe("setup: cmux", () => {
     const cmuxChange = (p: StepPlan) => p.changes.find((c) => c.summary.startsWith(CMUX_SUMMARY));
 
     beforeEach(async () => {
-      dir = mkdtempSync(join(tmpdir(), "volley-setup-cmux-"));
+      dir = tempDir("volley-setup-cmux-");
       fake = await startFakeDynsec();
       m = fakeMachine(fake, dir, { platform: "darwin" });
       cmuxPassword = null;
@@ -223,7 +218,6 @@ describe("setup: cmux", () => {
     });
     afterEach(async () => {
       await fake.close();
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it("recommends Automation mode, keeps Password mode optional, and records the mode", async () => {

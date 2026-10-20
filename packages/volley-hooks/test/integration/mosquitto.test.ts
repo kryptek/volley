@@ -11,6 +11,7 @@ import {
   runHook,
   tick,
 } from "../helpers/hooks";
+import { tempDirForAll } from "../helpers/tmp";
 
 /**
  * The default production path — an MQTT 5 persistent session with `sessionExpiryInterval`,
@@ -27,14 +28,16 @@ describe.skipIf(!RUN)("mosquitto (MQTT 5): mailbox drain", () => {
   const env = { VOLLEY_HOOKS_MQTT_VERSION: "5" };
   let client: VolleyBroker;
   let dir: string;
+  const workdir = tempDirForAll("volley-hooks-it-");
 
   beforeAll(async () => {
     client = await connectClient(url, `${agent}-observer`);
-    dir = makeWorkdir({ agent_id: agent, namespace: ns, broker_url: url });
+    dir = makeWorkdir({ agent_id: agent, namespace: ns, broker_url: url }, workdir());
   });
 
   afterAll(async () => {
-    await client.disconnect();
+    // A throwing afterAll skips the later ones (the workdir's removal among them).
+    if (client) await client.disconnect();
   });
 
   const postToolUse = () =>

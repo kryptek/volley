@@ -1,16 +1,7 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo, createServer as createNetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateConfig } from "../../src/auth/config";
@@ -27,19 +18,19 @@ import { unifiedDiff } from "../../src/setup/step";
 import { startTestBroker } from "../helpers/aedes-broker";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { ANONYMOUS_CONFIG, type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 describe("setup: broker", () => {
   let dir: string;
   let fake: FakeDynsec;
   let m: FakeMachine;
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-broker-"));
+    dir = tempDir("volley-setup-broker-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir);
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const applyAll = async (plan: Awaited<ReturnType<typeof planSecurity>>) => {
