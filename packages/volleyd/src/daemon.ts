@@ -437,7 +437,8 @@ export interface DaemonOptions {
    * here), and the version a machine must run (default: this package's).
    */
   fleet?: {
-    localDoctor?: (repo: string | null) => Promise<DoctorReport | null>;
+    /** Ends its run (its child process) once `signal` aborts: a stop waits for that. */
+    localDoctor?: (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null>;
     localPath?: () => PathProbe;
     version?: string;
     /**
@@ -652,11 +653,12 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
  */
 export function realLocalDoctor(
   exec: ExecFn = realExec,
-): (repo: string | null) => Promise<DoctorReport | null> {
-  return async (repo) => {
+): (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null> {
+  return async (repo, signal) => {
     const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
     const r = await exec(argv, {
       timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+      signal,
     }).catch(() => null);
     // A failing block check exits 1 with the report on stdout.
     return r === null ? null : parseDoctorReport(r.stdout);
@@ -977,6 +979,9 @@ export class Daemon {
   private localDoctorTried: string | null = null;
   private localDoctorAt: number | null = null;
   private localDoctorRunning = false;
+  /** The run in flight (a stop awaits it) and what aborts it (halt). */
+  private localDoctorRun: Promise<void> | null = null;
+  private readonly localDoctorAbort = new AbortController();
   /**
    * Machines whose verdict has its inputs in this process (SPEC §4.6.15): until then a verdict is
    * neither published nor journaled, so a restart neither replaces the last retained verdict nor
@@ -1719,6 +1724,8 @@ export class Daemon {
     this.time.clearInterval(this.pruneTimer);
     this.time.clearTimeout(this.sweepTimer);
     this.time.clearInterval(this.countTimer);
+    // Its child process must not outlive the daemon (it writes under the daemon's $HOME).
+    this.localDoctorAbort.abort();
     if (closeControl) void this.dynsec?.close();
     for (const t of this.stopGrace.values()) this.time.clearTimeout(t);
     this.stopGrace.clear();
@@ -1745,6 +1752,7 @@ export class Daemon {
   async stop(): Promise<void> {
     this.halt(false);
     try {
+      await this.localDoctorRun;
       await this.claude.stop();
       await this.tunnelsStopped;
       await this.enqueue(async () => {});
@@ -3718,7 +3726,7 @@ export class Daemon {
         now - this.localDoctorAt >= beat ||
         this.localDoctorTried !== this.waveRepo())
     ) {
-      void this.runLocalDoctor();
+      this.localDoctorRun = this.runLocalDoctor();
     }
     if (
       this.ownRecordAt === null ||
@@ -3742,7 +3750,7 @@ export class Daemon {
     const repo = this.waveRepo();
     this.localDoctorTried = repo;
     try {
-      const report = await doctor(repo).catch((e: unknown) => {
+      const report = await doctor(repo, this.localDoctorAbort.signal).catch((e: unknown) => {
         this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
         return null;
       });
