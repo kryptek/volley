@@ -160,3 +160,31 @@ describe("createPlayer", () => {
     expect(p.isLoaded("synthwave")).toBe(true);
   });
 });
+
+describe("the committed themes", () => {
+  it("every theme's manifest has a clip for every catalogue event, and the player finds them", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { SOUND_EVENT_IDS } = await import("../src/sounds/events");
+    const { THEMES } = await import("../src/sounds/themes");
+    for (const t of THEMES) {
+      const dir = join(__dirname, "../public/sounds", t.id);
+      const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+      expect(manifest.theme).toBe(t.id);
+      expect(Object.keys(manifest.clips).sort()).toEqual([...SOUND_EVENT_IDS].sort());
+      expect(manifest.missing).toEqual([]);
+    }
+    // The player, over the real synthwave manifest, fetches and decodes every clip.
+    const dir = join(__dirname, "../public/sounds/synthwave");
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    const routes: Record<string, unknown> = { "/sounds/synthwave/manifest.json": manifest };
+    for (const [id, clip] of Object.entries(manifest.clips as Record<string, { file: string }>))
+      routes[`/sounds/synthwave/${clip.file}`] = `synthwave/${id}`;
+    net = installFetch(routes);
+    const p = createPlayer({ baseUrl: "/sounds" });
+    await p.unlock();
+    await p.loadTheme("synthwave");
+    for (const id of SOUND_EVENT_IDS) await p.play(id);
+    expect(ctx().sources).toHaveLength(SOUND_EVENT_IDS.length);
+  });
+});
