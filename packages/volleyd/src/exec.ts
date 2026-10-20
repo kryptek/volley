@@ -12,7 +12,9 @@ export interface ExecOptions extends FenceOptions {
   signal?: AbortSignal;
   /**
    * Spawn the child as its own process group's leader and send every kill (abort, timeout) to the
-   * whole group, so the processes it started die with it instead of outliving it.
+   * whole group, so the processes it started die with it instead of outliving it. The child
+   * leaves volleyd's own group, so a Ctrl-C or SIGHUP to a foreground `volleyd daemon` no longer
+   * reaches it: only an abort (stop()) or the timeout ends it.
    */
   group?: true;
   /**

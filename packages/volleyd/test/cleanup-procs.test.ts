@@ -92,16 +92,32 @@ describe("cleanup stops retired agents' processes", () => {
     expect(alive(other)).toBe(true);
   });
 
+  it("--yes leaves alone a process in a worktree the journal does not name yet (an agent being launched)", async () => {
+    const { home, root } = setup();
+    const a = sleeper(join(root, "w1", "T1-implementer"));
+    // The daemon launches before it journals agent_spawned: this worktree is not in the plan.
+    const launching = sleeper(join(root, "w1", "T4-implementer"));
+    await listed([a, launching]);
+    const io = makeBufferIO();
+    await cleanupWave(home, "w1", { yes: true, force: false, reap: { graceMs: 2000 } }, io);
+    const out = io.readStdout();
+    expect(out).toContain(`stopped ${a} (w1-t1-implementer-1)\n`);
+    expect(out).not.toContain(`stopped ${launching} `);
+    expect(alive(launching)).toBe(true);
+  });
+
   it("the dry run only says what it would stop", async () => {
     const { home, root } = setup();
     const a = sleeper(join(root, "w1", "T1-implementer"));
     const live = sleeper(join(root, "w1", "T3-implementer"));
-    await listed([a, live]);
+    const launching = sleeper(join(root, "w1", "T4-implementer"));
+    await listed([a, live, launching]);
     const io = makeBufferIO();
     await cleanupWave(home, "w1", { yes: false, force: false }, io);
     const out = io.readStdout();
     expect(out).toContain(`would stop ${a} (w1-t1-implementer-1)\n`);
     expect(out).not.toContain(`would stop ${live} `);
+    expect(out).not.toContain(`would stop ${launching} `);
     expect(out).not.toMatch(/^stopped /m);
     expect(alive(a)).toBe(true);
   });

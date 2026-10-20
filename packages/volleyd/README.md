@@ -1242,10 +1242,10 @@ inspection (`workspace_closed: false`; the marker is still written).
 Nothing on disk is deleted: `volleyd cleanup <wave>
 --yes` closes any workspace a retire could not close, runs `git worktree remove` with the fence's
 consent token (`--force` for dirty worktrees), and stops the retired agents' processes still
-running on this machine: once per wave root (the directory the wave's worktrees are in), every
-process whose `--mcp-config=` lies inside it, never one under a worktree of an agent not yet
-retired and never one outside the root (`stopped <pid> (<agent id>)`; the dry run prints
-`would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
+running on this machine: every process whose `--mcp-config=` lies inside the worktree of a
+target whose every agent is retired, never one under any other worktree (an agent not yet
+retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
+id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
 deleted.
 
 Answering a `repo_untrusted` decision with `volleyd resolve <id> trust` (owner only) records

@@ -9,7 +9,7 @@ import { LocalCmuxHost } from "../hosts/local-cmux";
 import { SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
 import { readJournalFile } from "../journal";
-import { type ReapOptions, listAgentProcesses, reapUnder, underRoot } from "../procs";
+import { type StopOptions, listAgentProcesses, stopProcesses, underRoot } from "../procs";
 import type { Wave } from "../types";
 import { expandHome } from "../worktree";
 
@@ -17,7 +17,7 @@ const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force]
 
 Remove what a wave's retired agents left behind: their cmux workspaces (tmux sessions on a
 remote host), git worktrees, and claude processes still running on this machine (any process
-whose --mcp-config= lies in the wave's worktree root: SIGTERM, a grace, then SIGKILL).
+whose --mcp-config= lies in one of those worktrees: SIGTERM, a grace, then SIGKILL).
 Without --yes, only prints what would be removed. Only worktrees whose every agent is retired
 (journaled agent_retired) are touched; live agents are listed and skipped. Branches are kept.
 A worktree with uncommitted changes is skipped unless --force is given.
@@ -78,7 +78,7 @@ export interface CleanupOptions {
   force: boolean;
   exec?: ExecFn;
   /** How processes are stopped (tests: a shorter grace). */
-  reap?: ReapOptions;
+  reap?: StopOptions;
 }
 
 /** Run (or with `yes: false`, print) the cleanup. Returns the number of failed removals. */
@@ -129,7 +129,7 @@ export async function cleanupWave(
       io.stderr(`could not remove ${t.worktree}${where}: ${r.stderr.trim()}\n`);
     }
   }
-  failed += await stopProcesses(targets, run, consent !== undefined, opts.reap ?? {}, io);
+  failed += await stopRetiredProcesses(targets, run, consent !== undefined, opts.reap ?? {}, io);
   if (consent === undefined && targets.some((t) => t.live.length === 0)) {
     io.stdout("dry run: pass --yes to remove\n");
   }
@@ -137,41 +137,39 @@ export async function cleanupWave(
 }
 
 /**
- * Stop the retired agents' processes still running on this machine: once per wave root (the
- * directory its local worktrees are in), never under a worktree a live agent holds, never
- * outside the root. Without `yes`, only prints them. Returns 1 when the processes could not be
+ * Stop the retired agents' processes still running on this machine: only under the worktree of
+ * a local target whose every agent is retired. Not the whole wave root: the daemon launches an
+ * agent before it journals agent_spawned, so a worktree the plan does not name may be one being
+ * launched right now. Without `yes`, only prints them. Returns 1 when the processes could not be
  * listed.
  */
-async function stopProcesses(
+async function stopRetiredProcesses(
   targets: Target[],
   run: ExecFn,
   yes: boolean,
-  reap: ReapOptions,
+  reap: StopOptions,
   io: IO,
 ): Promise<number> {
-  const local = targets.filter((t) => t.remote === undefined);
-  // Every local worktree is held by a live agent: nothing of this wave is left to stop.
-  if (!local.some((t) => t.live.length === 0)) return 0;
-  const roots = [...new Set(local.map((t) => dirname(t.worktree)))];
-  const exclude = local.filter((t) => t.live.length > 0).map((t) => t.worktree);
-  /** `<agent id>` of the worktree an mcp path is in, else the path itself. */
-  const label = (mcp: string) => {
-    const t = local.find((x) => underRoot(dirname(dirname(mcp)), x.worktree));
-    return t?.agents.at(-1) ?? mcp;
-  };
+  const retired = targets.filter((t) => t.remote === undefined && t.live.length === 0);
+  if (retired.length === 0) return 0;
+  /** The retired target an mcp path's worktree is in, if any. */
+  const targetOf = (mcp: string) =>
+    retired.find((t) => underRoot(dirname(dirname(mcp)), t.worktree));
   try {
-    for (const root of roots) {
-      if (!yes) {
-        const inRoot = (mcp: string) =>
-          underRoot(dirname(dirname(mcp)), root) &&
-          !exclude.some((x) => underRoot(dirname(dirname(mcp)), x));
-        for (const p of await listAgentProcesses(run))
-          if (inRoot(p.mcp)) io.stdout(`would stop ${p.pid} (${label(p.mcp)})\n`);
-        continue;
-      }
-      const r = await reapUnder(run, root, { ...reap, exclude });
-      for (const p of r.stopped) io.stdout(`stopped ${p.pid} (${label(p.mcp)})\n`);
+    const mine = (await listAgentProcesses(run)).flatMap((p) => {
+      const t = targetOf(p.mcp);
+      return t === undefined ? [] : [{ ...p, label: t.agents.at(-1) ?? p.mcp }];
+    });
+    const labelOf = new Map(mine.map((p) => [p.pid, p.label]));
+    if (!yes) {
+      for (const p of mine) io.stdout(`would stop ${p.pid} (${p.label})\n`);
+      return 0;
     }
+    const stopped = await stopProcesses(
+      mine.map((p) => p.pid),
+      reap,
+    );
+    for (const s of stopped) io.stdout(`stopped ${s.pid} (${labelOf.get(s.pid)})\n`);
     return 0;
   } catch (e) {
     io.stderr(`processes: ${e instanceof Error ? e.message : String(e)}\n`);
