@@ -8,6 +8,7 @@
     "pool": "backend-it",
     "capacity": 3,
     "per_machine": 1,
+    "per_machine_overrides": { "box-a": 1, "studio": 2 },
     "held": [
       { "lease_id": "l-001", "holder": "w1-t1-implementer-1", "host": "box-a", "since": "2026-10-19T09:40:00.000Z", "ttl_s": 3600 },
       { "lease_id": "l-002", "holder": "w1-t3-implementer-1", "host": "studio", "since": "2026-10-19T09:45:00.000Z", "ttl_s": 3600 },

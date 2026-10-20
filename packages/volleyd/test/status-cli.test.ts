@@ -15,7 +15,7 @@ import {
   renderPlist,
   uninstallService,
 } from "../src/commands/install";
-import { formatLogins, formatWave } from "../src/commands/status";
+import { formatLocalAgents, formatLogins, formatWave } from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
@@ -360,6 +360,22 @@ describe("volleyd run: the release playbook (SPEC §4.6.19)", () => {
     } finally {
       await env.cleanup();
     }
+  });
+});
+
+describe("volleyd status: local agents (SPEC §4.6.15)", () => {
+  it("prints the own machine's mode and whether the fallback is active", () => {
+    expect(formatLocalAgents({ mode: "fallback", active: false, why: "box-a eligible" })).toBe(
+      "local agents: fallback (idle: box-a eligible)",
+    );
+    expect(formatLocalAgents({ mode: "fallback", active: true, why: "box-a: tunnel down" })).toBe(
+      "local agents: fallback (active: box-a: tunnel down)",
+    );
+    expect(formatLocalAgents({ mode: "fallback", active: true })).toBe(
+      "local agents: fallback (active)",
+    );
+    expect(formatLocalAgents({ mode: "always", active: false })).toBe("local agents: always");
+    expect(formatLocalAgents({ mode: "never", active: false })).toBe("local agents: never");
   });
 });
 

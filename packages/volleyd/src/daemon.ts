@@ -193,6 +193,7 @@ import {
   type LeaseBook,
   type LeaseInput,
   type LeaseRequest,
+  capFor,
   heldOn,
   step as leaseStep,
   poolPayload,
@@ -222,7 +223,9 @@ import {
 import { type DoctorRun, type PeerReply, PeerService } from "./peers";
 import {
   AUTO_HOST,
+  type FilterOptions,
   type MachineView,
+  type PlaceOptions,
   type Placement,
   type Snapshot,
   type Unplaced,
@@ -1087,6 +1090,8 @@ export class Daemon {
   >();
   /** Each machine's verdict as last published (`key`: readinessKey) and when. */
   private readonly published = new Map<string, { key: string; at: number }>();
+  /** The own machine's last computed `local_agents` (its verdict's), for `volleyd status`. */
+  private ownLocalAgents: ReadinessPayload["local_agents"];
   /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
   private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
   // --- Fleet (F3): placement ---
@@ -2409,11 +2414,7 @@ export class Daemon {
       candidates,
       w,
       this.placementSnapshot(gate, eff),
-      {
-        placement: eff.placement,
-        warn_at_pct: eff.claude.warn_at_pct,
-        localName: this.config.localName(),
-      },
+      this.placeOptions(eff),
       gate,
       (host) => this.hostVerdict(host, eff),
       {
@@ -2477,6 +2478,26 @@ export class Daemon {
     const input = this.readinessInput(name, isLocal, cfg, extra, eff, gate);
     const verdict = readiness(input);
     return { verdict, view: machineView(input, verdict, verdict.usage.five_hour_pct) };
+  }
+
+  /**
+   * The machine filter's options under `eff`: placement's thresholds, the usage warning level and
+   * the own machine's `fleet.local_agents` mode with its fallback profile (SPEC §4.6.15).
+   */
+  private filterOptions(eff: Tunables): FilterOptions {
+    return {
+      placement: eff.placement,
+      warn_at_pct: eff.claude.warn_at_pct,
+      local_agents: eff.fleet.local_agents ?? "always",
+      fallback: eff.fleet.fallback,
+      now: this.now(),
+      down_grace_ms: secondsMs(eff.placement.down_decision_after_s),
+    };
+  }
+
+  /** `place`'s options under `eff`: the machine filter's, and the own machine's name. */
+  private placeOptions(eff: Tunables): PlaceOptions {
+    return { ...this.filterOptions(eff), localName: this.config.localName() };
   }
 
   /** What placement knows now: the own machine and every configured host, with their verdicts. */
@@ -2655,9 +2676,7 @@ export class Daemon {
     const eff = this.config.effective(wave);
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
-      placement: eff.placement,
-      warn_at_pct: eff.claude.warn_at_pct,
-      localName: this.config.localName(),
+      ...this.placeOptions(eff),
       exclude,
     });
   }
@@ -2951,7 +2970,8 @@ export class Daemon {
   /**
    * Why machine `host` should not take a respawn now: closed to new agents (draining, being
    * removed, removed: `closed`), down, or not eligible (readiness and placement's filter); null
-   * when it may.
+   * when it may. The own machine is judged as a candidate like any (`local_agents: always`):
+   * its `fleet.local_agents` mode steers where new work goes, it is no trouble with the machine.
    */
   private hostTrouble(host: string): { why: string; closed: boolean } | null {
     const closed = this.closedMachine(host);
@@ -2966,12 +2986,14 @@ export class Daemon {
     const cfg = this.config.effective();
     const local = this.config.localName();
     if (host !== local && !Object.hasOwn(cfg.hosts, host)) return null;
+    const eff: Tunables =
+      host === local ? { ...cfg, fleet: { ...cfg.fleet, local_agents: "always" } } : cfg;
     const v = this.machineState(
       host,
       host === local,
       cfg,
       this.requirementsExtra(),
-      cfg,
+      eff,
       this.pressure(GLOBAL),
     ).verdict;
     return v.eligible
@@ -4221,12 +4243,16 @@ export class Daemon {
     for (const n of [...this.published.keys()])
       if (!names.includes(n)) await this.clearReadiness(n);
     const shared = this.requirementsExtra();
-    for (const name of only === undefined ? names : names.filter((n) => n === only)) {
+    // The own machine's verdict weighs every peer's (its `local_agents` mode), so a peer's
+    // change re-computes it too.
+    const which = only === undefined ? names : names.filter((n) => n === only || n === local);
+    for (const name of which) {
       const isLocal = name === local;
       if (!isLocal) this.maybeProbe(name);
       // Inputs not gathered yet in this process: the last retained verdict stands.
       if (!this.isSettled(name, isLocal)) continue;
       const v = this.machineState(name, isLocal, cfg, shared, cfg, this.pressure(GLOBAL)).verdict;
+      if (isLocal) this.ownLocalAgents = v.local_agents;
       const key = readinessKey(v);
       const now = this.now();
       const prior = this.published.get(name);
@@ -4299,6 +4325,7 @@ export class Daemon {
   ): ReadinessInput {
     const h = Object.hasOwn(cfg.hosts, name) ? cfg.hosts[name] : undefined;
     const probe = this.probes.get(name);
+    const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
     const account = isLocal
       ? cfg.claude.default_account
@@ -4328,26 +4355,44 @@ export class Daemon {
       placed: isLocal
         ? this.supervised.size + this.reservedOn(null)
         : this.placedOn(name) + this.reservedOn(name),
+      ...(isLocal
+        ? {
+            // Its own agents alone, which its fallback profile counts (SPEC §4.6.15), and every
+            // peer, whose eligibility its `local_agents` mode weighs. Each peer's view is built
+            // again here (and placement's snapshot builds it once more): O(peers²) per tick,
+            // deliberate at fleet sizes of a handful, for one source of each peer's view.
+            localAgents: this.placedOn(name) + this.reservedOn(name),
+            peers: Object.keys(cfg.hosts)
+              .filter((n) => n !== name)
+              .map((n) => this.machineState(n, false, cfg, extra, eff, gate).view),
+          }
+        : downSince !== undefined
+          ? { downSince }
+          : {}),
       heavy: Object.fromEntries(
-        Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
-          c.per_machine === undefined
+        Object.entries(cfg.lease_pools).flatMap(([pool, c]) => {
+          // The cap in force on this machine (its override, else the pool's); the own machine
+          // also has a slot count in each pool its fallback profile names.
+          const named = isLocal && Object.hasOwn(cfg.fleet.fallback.per_machine, pool);
+          const cap = capFor(c, name) ?? (named ? c.capacity : undefined);
+          return cap === undefined
             ? []
             : [
                 [
                   pool,
                   {
                     held: heldOn(this.leases, pool, name) + this.heavyReservedOn(name, pool),
-                    per_machine: c.per_machine,
+                    per_machine: cap,
                   },
                 ],
-              ],
-        ),
+              ];
+        }),
       ),
       usage: {
         account,
         five_hour_pct: account !== null ? (records[account]?.five_hour?.pct ?? null) : null,
       },
-      filter: { placement: eff.placement, warn_at_pct: eff.claude.warn_at_pct },
+      filter: this.filterOptions(eff),
       held: isLocal ? machineReasons(gate) : this.hostVerdict(name, eff).recovering,
       ...extra,
       checkedAt: dateOf(this.time),
@@ -7333,6 +7378,12 @@ export class Daemon {
             ...(this.killSwitch ? { kill_switch: true } : {}),
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
+            // The own machine's local_agents mode, as its last verdict said (SPEC §4.6.15),
+            // once it has a peer to weigh (a lone machine has no fallback to speak of).
+            ...(this.ownLocalAgents !== undefined &&
+            Object.keys(this.config.effective().hosts).length > 0
+              ? { local_agents: this.ownLocalAgents }
+              : {}),
           },
         };
       }

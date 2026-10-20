@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
+import { localPinWarnings } from "../src/commands/validate";
 import { CONFIG_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC } from "../src/control";
 import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
+import { parseWaveFile } from "../src/wave-file";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { runCli } from "./helpers/run-cli";
 import { tempDir } from "./helpers/tmp";
@@ -414,5 +416,48 @@ describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
     expect(r.stdout).toContain(
       "placement preview unavailable (no supervisor config on the broker): tasks are placed at admission\n",
     );
+  });
+});
+
+describe("volleyd validate: a task pinned to local under fleet.local_agents: never (SPEC §4.6.15)", () => {
+  const wave = (head: string, tasks: string) =>
+    parseWaveFile(
+      `wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\n${head}tasks:\n${tasks}`,
+    );
+  const homeWith = (yaml: string | null) => {
+    const home = tempDir("volleyd-validate-home-");
+    if (yaml !== null) writeFileSync(join(home, "config.yaml"), yaml);
+    return { VOLLEYD_HOME: home };
+  };
+  const PINNED = "  T1: { issue: 1, host: local }\n  T2: { issue: 2 }\n";
+
+  it("warns once per pinned task of a placement: auto wave; the task still runs there", () => {
+    expect(
+      localPinWarnings(
+        wave("placement: auto\n", PINNED),
+        homeWith("fleet:\n  local_agents: never\n"),
+      ),
+    ).toBe(
+      "warning: T1 pins host: local while fleet.local_agents is never; it still runs there (the wave file is explicit)\n",
+    );
+  });
+
+  it("says nothing under another mode, without config.yaml, or for a wave that does not place", () => {
+    const w = wave("placement: auto\n", PINNED);
+    expect(localPinWarnings(w, homeWith("fleet:\n  local_agents: fallback\n"))).toBe("");
+    expect(localPinWarnings(w, homeWith(null))).toBe("");
+    expect(localPinWarnings(wave("", PINNED), homeWith("fleet:\n  local_agents: never\n"))).toBe(
+      "",
+    );
+  });
+
+  it("reads the wave's own config: block over config.yaml", () => {
+    const never = wave("placement: auto\nconfig:\n  fleet:\n    local_agents: never\n", PINNED);
+    expect(localPinWarnings(never, homeWith(null))).toContain("warning: T1 pins host: local");
+    const fallback = wave(
+      "placement: auto\nconfig:\n  fleet:\n    local_agents: fallback\n",
+      PINNED,
+    );
+    expect(localPinWarnings(fallback, homeWith("fleet:\n  local_agents: never\n"))).toBe("");
   });
 });

@@ -158,9 +158,21 @@ export interface ConfigRowsProps {
   accent: string;
   /** Under the section groups (the global scope's save note). */
   foot?: string;
+  /** A row to scroll into view and focus on open, by its path (`fleet.local_agents`). */
+  focus?: string | undefined;
+  /** Bumped on every request, so the same row is brought back again. */
+  focusSeq?: number | undefined;
 }
 
-export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRowsProps) {
+export function ConfigRows({
+  scope,
+  values,
+  transport,
+  accent,
+  foot,
+  focus,
+  focusSeq,
+}: ConfigRowsProps) {
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [acks, setAcks] = useState<Record<string, RowState>>({});
   /** Numbers each user change; `latest` holds the newest per path. */
@@ -176,6 +188,18 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   /** Paths whose slider is moving and not let go yet. */
   const editing = useRef(new Set<string>());
   const writable = transport !== null && scope === "global";
+  const root = useRef<HTMLDivElement>(null);
+  // A deep link into a row (a machine card's chip): scroll to it and focus its control.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new focusSeq is a new request
+  useEffect(() => {
+    if (!focus) return;
+    const rowEl = [
+      ...(root.current?.querySelectorAll<HTMLElement>(".cfg-row[data-path]") ?? []),
+    ].find((el) => el.dataset.path === focus);
+    if (!rowEl) return;
+    rowEl.scrollIntoView({ block: "center" });
+    rowEl.querySelector<HTMLElement>("select, input, button, [role='slider'], [tabindex]")?.focus();
+  }, [focus, focusSeq]);
   /** No transport: a global row drafts a value for its copyable command instead of sending. */
   const draftOnly = transport === null && scope === "global";
   const rows = schemaRows(CONFIG_SCHEMA, values);
@@ -236,7 +260,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   const commit = (row: SchemaRow, value: unknown, delay: number) => {
     if (draftOnly) {
       editing.current.delete(row.path);
-      if (Object.is(value, valueAt(values, row.path))) dropDraft(row.path);
+      if (Object.is(value, valueAt(values, row.path) ?? row.default)) dropDraft(row.path);
       else setDrafts((d) => ({ ...d, [row.path]: value }));
       return;
     }
@@ -246,7 +270,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
     unqueue(path);
     const flying = inFlight.current[path];
     // Compare with what is in flight, not the retained value: a revert must still go out.
-    if (Object.is(value, flying ? flying.value : valueAt(values, path))) {
+    if (Object.is(value, flying ? flying.value : (valueAt(values, path) ?? row.default))) {
       if (flying) latest.current[path] = flying.n;
       else dropDraft(path);
       return;
@@ -267,11 +291,11 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   };
 
   const renderRow = (row: SchemaRow) => {
-    const current = valueAt(values, row.path);
+    const current = valueAt(values, row.path) ?? row.default;
     const shown = Object.hasOwn(drafts, row.path) ? drafts[row.path] : current;
     const c = row.control;
     return (
-      <div className="cfg-row" key={row.path}>
+      <div className="cfg-row" key={row.path} data-path={row.path}>
         <div className="cfg-lbl">
           <span>{row.label}</span>
           <span className="mono">{display(shown, row.unit)}</span>
@@ -357,7 +381,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
     return [[section, inSection] as const];
   });
   return (
-    <>
+    <div className="cfg-rows" ref={root}>
       {groups.map(([section, inSection], i) => (
         <Group key={section} title={section} {...(foot && i === groups.length - 1 ? { foot } : {})}>
           {inSection.length === 0 ? (
@@ -367,6 +391,6 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
           )}
         </Group>
       ))}
-    </>
+    </div>
   );
 }

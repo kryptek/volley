@@ -16,6 +16,8 @@
 #     capacity: 3
 #     ttl_s: 3600               # lease expiry unless renewed (default 3600)
 #     match: ["mvn .*verify", "mvn .*test", "gradle .*integrationTest"]
+#     per_machine_overrides: { local: 1 }  # per machine name (local: the supervisor's own),
+#                                # the cap there in place of per_machine (0..capacity)
 #   build:
 #     capacity: 2
 #     match: ["npm run build", "vite build"]
@@ -108,6 +110,14 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+#   local_agents: null           # how it takes auto-placed tasks: always (a candidate like any
+#                                # peer), fallback (only while no paired machine is eligible, under
+#                                # fallback: below), never; null: fallback once any hosts.<name> is
+#                                # configured, else always
+#   fallback:                    # its profile while it is the fallback
+#     max_agents: 3              # agents on it at most (hard_ceiling still caps the total)
+#     per_machine: {}            # per heavy pool, its slots, e.g. { js-suite: 1, backend-it: 0 };
+#                                # a pool not named gets 1 when it sets per_machine
 
 # --- Autopilot: decisions volleyd answers itself, and merging (README "Autopilot") ---
 # autopilot:
