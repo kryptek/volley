@@ -23,7 +23,9 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { ciPending } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
+import { issueHref } from "../../lib/github";
 import { plural } from "../../lib/plural";
+import { RepoChip } from "../../look/RepoChip";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
 import { Dag, type DagNode, HostChips } from "./Dag";
@@ -123,17 +125,21 @@ export function IconBtn(p: {
 /**
  * Graph nodes in wave-file order (`taskOrder`). A cancelled task the spec still
  * lists is flagged `cancelled`; one the spec no longer lists was removed by a
- * plan change and is dropped.
+ * plan change and is dropped. With the state's `github`, each node links its issue.
  */
 export function dagNodes(s: WaveStatePayload): DagNode[] {
   const spec = s.spec?.tasks ?? {};
   const state = new Map(s.tasks.map((t) => [t.id, t]));
+  const href = (n: number) => {
+    const h = issueHref(s.github, n);
+    return h !== null ? { issueHref: h } : {};
+  };
   return taskOrder(s).flatMap((id): DagNode[] => {
     const t = state.get(id);
     const sp = spec[id];
     if (!sp) {
       if (!t || t.stage === "cancelled") return [];
-      return [{ id, issue: t.issue, after: [], stage: deskStage(t.stage) }];
+      return [{ id, issue: t.issue, after: [], stage: deskStage(t.stage), ...href(t.issue) }];
     }
     return [
       {
@@ -143,6 +149,7 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
         stage: t ? deskStage(t.stage) : "queued",
         ...(sp.title ? { title: sp.title } : {}),
         ...(t?.stage === "cancelled" ? { cancelled: true } : {}),
+        ...href(sp.issue),
       },
     ];
   });
@@ -178,6 +185,7 @@ export function WaveWindow(p: WaveWindowProps) {
           {mine ? "★ yours" : (s.owner ?? "no owner")}
         </span>
       )}
+      <RepoChip github={s?.github} />
       {ended && <span className="chip chip--ended">{ended}</span>}
       {!ended && ci.length > 0 && (
         <span

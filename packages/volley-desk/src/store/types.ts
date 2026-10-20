@@ -149,6 +149,14 @@ export interface WaveCoordinator {
   last_seen: string;
 }
 
+/** wave-state `github` (SPEC §4.6.1): the repository on GitHub, as the supervisor read it. */
+export interface GitHubRepo {
+  /** `owner/repo`. */
+  slug: string;
+  /** The repository's canonical URL. */
+  url: string;
+}
+
 export interface WaveStatePayload {
   wave: string;
   version: number;
@@ -162,6 +170,8 @@ export interface WaveStatePayload {
   spec?: WaveSpec;
   coordinator?: WaveCoordinator;
   effective_config?: Tunables;
+  /** Absent from an older supervisor or when the read failed: nothing then links. */
+  github?: GitHubRepo;
   updated_at: string;
   [key: string]: unknown;
 }

@@ -100,9 +100,40 @@ describe("agent window header: two rows", () => {
     expect(row2.querySelector(".t-name")).toHaveTextContent(
       "T1 · Chip mapper + null-case handling",
     );
-    expect(within(row2).getByRole("link", { name: "#102" })).toBeInTheDocument();
+    expect(within(row2).getByRole("link", { name: "Issue #102 on GitHub" })).toBeInTheDocument();
     expect(within(row2).getByRole("combobox", { name: "Claude account for T1" })).toBeTruthy();
     expect(container.querySelector(".a-purpose")).toBeNull();
+  });
+});
+
+describe("agent window header: GitHub links", () => {
+  /** The demo state with the fixup's wave state's `github` removed. */
+  function noGithub(): DeskState {
+    const s = demo();
+    const agent = s.agents[FIXUP];
+    const wave = agent && s.waves[agent.wave];
+    if (!agent || !wave?.state) throw new Error("no demo agent");
+    const { github: _, ...state } = wave.state;
+    return { ...s, waves: { ...s.waves, [agent.wave]: { ...wave, state } as WaveView } };
+  }
+
+  it("the issue is a named link to the wave's github; a pointer-down on it starts no drag", () => {
+    const onDrag = vi.fn();
+    renderHeader(demo(), { frame: { ...frame, onDrag } });
+    const issue = screen.getByRole("link", { name: "Issue #102 on GitHub" });
+    expect(issue).toHaveAttribute("href", "https://github.com/example-org/example-repo/issues/102");
+    expect(issue.getAttribute("rel")).toContain("noopener");
+    expect(issue).toHaveAttribute("target", "_blank");
+    expect(issue).toHaveTextContent("#102");
+    fireEvent.pointerDown(issue, { button: 0, pointerId: 1, clientX: 5, clientY: 5 });
+    expect(onDrag).not.toHaveBeenCalled();
+  });
+
+  it("without github the number is shown unlinked", () => {
+    const { container } = renderHeader(noGithub());
+    const row2 = container.querySelector(".win-bar > .win-sub") as HTMLElement;
+    expect(within(row2).getByText("#102")).toHaveClass("a-link", "dim");
+    expect(screen.queryByRole("link", { name: /Issue #102/ })).toBeNull();
   });
 });
 

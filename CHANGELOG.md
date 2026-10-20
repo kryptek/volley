@@ -32,6 +32,12 @@ All workspace packages share one version. Dates are release-tag dates.
   a why-here and load tooltip on hover or focus, and opens Settings › Machines at that machine's
   card; it replaces the footer's `on <host>`, and the body's purpose line now shows only when the
   headline does not already. (#220)
+- volley-desk: GitHub links everywhere a wave shows work. A repo chip (the GitHub mark and
+  `owner/repo`) on the wave window, each wave row of the Coordinators window and its Supervisor
+  row (`N repositories` past two); every `#n` / `PR #n` on the agent window header, the
+  dependency graph and the machine-down banner is a link named `Issue #n on GitHub` /
+  `PR #n on GitHub`, opening in a new tab. Links come from the wave state's `github` only;
+  without it the numbers render unlinked. (#225)
 - volleyd: the wave state carries `github: { slug, url }`, the repository's `owner/repo` name and
   URL from the `gh repo view` volleyd already runs per wave version (now
   `--json nameWithOwner,url,visibility`, under every `public_hygiene` level); absent when it

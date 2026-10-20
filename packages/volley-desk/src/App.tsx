@@ -1015,6 +1015,10 @@ export default function App() {
                         <MachineDown
                           key={d.decision_id}
                           decision={d}
+                          github={wave.state?.github}
+                          issues={Object.fromEntries(
+                            (wave.state?.tasks ?? []).map((t) => [t.id, t.issue]),
+                          )}
                           onAnswer={
                             control
                               ? (answer) =>

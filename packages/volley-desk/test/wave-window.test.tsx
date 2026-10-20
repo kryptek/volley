@@ -206,7 +206,7 @@ describe("WaveWindow", () => {
   it("renders the banner slot above the graph", () => {
     renderWave({ banner: <div>needs you</div> });
     const banner = screen.getByText("needs you");
-    const graph = screen.getByRole("img", { name: "Task dependency graph" });
+    const graph = screen.getByRole("group", { name: "Task dependency graph" });
     expect(banner.compareDocumentPosition(graph) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -244,5 +244,31 @@ describe("accentFor", () => {
       ["status-chip", "ci-speed", "leaderboard", "a", "b", "c"].map(accentFor),
     );
     expect(spread.size).toBeGreaterThan(1);
+  });
+});
+
+describe("WaveWindow: GitHub", () => {
+  it("shows the repo chip after the owner chip when the state has github, links the graph's issues", () => {
+    const w = wave();
+    const github = {
+      slug: "example-org/example-repo",
+      url: "https://github.com/example-org/example-repo",
+    };
+    const { container } = renderWave({
+      wave: { ...w, state: { ...(w.state as WaveStatePayload), github } },
+    });
+    const chip = screen.getByRole("link", { name: "example-org/example-repo on GitHub" });
+    expect(container.querySelector(".win-title")?.contains(chip)).toBe(true);
+    expect(screen.getByRole("link", { name: "Issue #101 on GitHub" })).toHaveAttribute(
+      "href",
+      "https://github.com/example-org/example-repo/issues/101",
+    );
+  });
+
+  it("no github: no chip, the graph's issues unlinked", () => {
+    const { container } = renderWave();
+    expect(container.querySelector(".chip--repo")).toBeNull();
+    expect(screen.queryByRole("link", { name: /on GitHub/ })).toBeNull();
+    expect(container.querySelector(".dag-issue")).toHaveTextContent("#101");
   });
 });

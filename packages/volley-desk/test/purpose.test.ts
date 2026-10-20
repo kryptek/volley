@@ -65,12 +65,58 @@ function progress(msg: string, at: number, source?: string): FeedEntry {
 }
 
 describe("purposeOf", () => {
-  it("a wave agent: `<task> · <title>`, the issue linked through the wave's repo", () => {
-    const p = purposeOf(agent({ wave: "w1", task: "T3", role: "implementer" }), wave());
+  const GITHUB = {
+    slug: "example-org/example-repo",
+    url: "https://github.com/example-org/example-repo",
+  };
+  const PR = { number: 7, url: "https://github.com/example-org/example-repo/pull/7" };
+  const withPr = (over: Record<string, unknown> = {}) =>
+    wave({
+      tasks: [{ id: "T3", issue: 42, stage: "implement", agents: {}, pr: PR }],
+      ...over,
+    });
+
+  it("a wave agent: `<task> · <title>`, the issue linked through the wave's github", () => {
+    const p = purposeOf(
+      agent({ wave: "w1", task: "T3", role: "implementer" }),
+      withPr({ github: GITHUB }),
+    );
     expect(p.label).toBe("T3 · Fix the login redirect");
     expect(p.source).toBe("wave");
     expect(p.links).toEqual([
-      { text: "#42", href: "https://github.com/example-org/example-repo/issues/42" },
+      {
+        text: "#42",
+        href: "https://github.com/example-org/example-repo/issues/42",
+        label: "Issue #42 on GitHub",
+      },
+      { text: "PR #7", href: PR.url, label: "PR #7 on GitHub" },
+    ]);
+  });
+
+  it("a wave with no github: the issue unlinked even when repo looks like a slug", () => {
+    const p = purposeOf(agent({ wave: "w1", task: "T3", role: "implementer" }), wave());
+    expect(p.links).toEqual([{ text: "#42", href: null, label: "Issue #42" }]);
+  });
+
+  it("a GitHub Enterprise host: the issue derived from its url, still named on GitHub", () => {
+    const p = purposeOf(
+      agent({ wave: "w1", task: "T3", role: "implementer" }),
+      wave({ github: { slug: "org/repo", url: "https://github.example.com/org/repo" } }),
+    );
+    expect(p.links).toEqual([
+      {
+        text: "#42",
+        href: "https://github.example.com/org/repo/issues/42",
+        label: "Issue #42 on GitHub",
+      },
+    ]);
+  });
+
+  it("a wave with no github still links a PR through its own url", () => {
+    const p = purposeOf(agent({ wave: "w1", task: "T3", role: "implementer" }), withPr());
+    expect(p.links).toEqual([
+      { text: "#42", href: null, label: "Issue #42" },
+      { text: "PR #7", href: PR.url, label: "PR #7 on GitHub" },
     ]);
   });
 
@@ -91,8 +137,16 @@ describe("purposeOf", () => {
     expect(p.label).toBe("#155 C13 parity — spec review");
     expect(p.source).toBe("registered");
     expect(p.links).toEqual([
-      { text: "#155", href: "https://github.com/example-org/example-repo/issues/155" },
-      { text: "PR #167", href: "https://github.com/example-org/example-repo/pull/167" },
+      {
+        text: "#155",
+        href: "https://github.com/example-org/example-repo/issues/155",
+        label: "Issue #155 on GitHub",
+      },
+      {
+        text: "PR #167",
+        href: "https://github.com/example-org/example-repo/pull/167",
+        label: "PR #167 on GitHub",
+      },
     ]);
   });
 
@@ -101,7 +155,7 @@ describe("purposeOf", () => {
       agent({ registry: reg({ title: "x", links: { issue: 7, pr: "javascript:alert(1)" } }) }),
       undefined,
     );
-    expect(p.links).toEqual([{ text: "#7", href: null }]);
+    expect(p.links).toEqual([{ text: "#7", href: null, label: "Issue #7" }]);
   });
 
   it("no title: the cwd basename", () => {
