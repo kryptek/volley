@@ -1,14 +1,27 @@
 import { spawnSync } from "node:child_process";
 import { constants, type JsonWebKeyInput, createPublicKey, publicEncrypt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { chmodSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import addFormats from "ajv-formats";
+import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import {
   LAUNCHD_LABEL,
+  PEER_DEFAULTS,
   type PeerConfig,
   type PeerDeps,
   type PeerExec,
@@ -27,6 +40,7 @@ import {
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
+import { type FakePeerMachine, fakePeerMachine } from "../helpers/fake-peer-machine";
 import { tempDir } from "../helpers/tmp";
 
 const NS = "test";
@@ -108,8 +122,13 @@ interface Call {
   input?: string;
 }
 
-/** Fake exec: records argv + stdin; `reply` answers by argv. */
-function fakeExec(reply: (c: Call) => Partial<{ code: number; stdout: string; stderr: string }>) {
+type Reply = Partial<{ code: number; stdout: string; stderr: string }>;
+
+/**
+ * Fake exec: records argv + stdin; `reply` answers by argv. A reply of undefined hands the call
+ * to the fake box (the doctor's probes: a healthy machine unless the test changes it).
+ */
+function fakeExec(reply: (c: Call) => Reply | undefined, machine: FakePeerMachine = box) {
   const calls: Call[] = [];
   const exec: PeerExec = async (argv, opts = {}) => {
     const c: Call = { argv, ...(opts.input !== undefined ? { input: opts.input } : {}) };
@@ -119,25 +138,32 @@ function fakeExec(reply: (c: Call) => Partial<{ code: number; stdout: string; st
       await new Promise<void>((r) => opts.signal?.addEventListener("abort", () => r()));
       return { code: 143, stdout: "", stderr: "" };
     }
+    const r = reply(c);
     // launchd has no job loaded unless a test says so.
     const base = argv[0] === "launchctl" && argv[1] === "print" ? 113 : 0;
-    return { code: base, stdout: "", stderr: "", ...reply(c) };
+    if (r === undefined && base === 0) return machine.exec(argv, opts);
+    return { code: base, stdout: "", stderr: "", ...r };
   };
   return { exec, calls };
 }
 
 let tb: TestBroker;
 let home: string;
+/** This machine: a healthy box (tools, volley checkout, a trusted clone of the wave repo). */
+let box: FakePeerMachine;
 beforeEach(async () => {
   tb = await startTestBroker();
-  home = tempDir("volley-peer-home-");
+  box = fakePeerMachine({ trusted: true });
+  home = box.home;
 });
 afterEach(async () => {
   await tb.close();
+  box.cleanup();
 });
 
 function deps(exec: PeerExec, over: Partial<PeerDeps> = {}): PeerDeps {
   return {
+    ...box.deps(),
     exec,
     home,
     platform: "linux",
@@ -148,10 +174,12 @@ function deps(exec: PeerExec, over: Partial<PeerDeps> = {}): PeerDeps {
     cpus: () => 8,
     loadavg: () => [0.5, 0.25, 0.125],
     now: () => new Date("2026-10-19T09:00:00.000Z"),
+    monotonic: () => 0,
+    envPath: () => "/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin",
     sleep: async () => {},
     readStdin: async () => "",
     volleyArgv: ["/usr/local/bin/bun", "/opt/volley/packages/volley-cli/src/cli.ts"],
-    volleyDir: "/opt/volley",
+    volleyDir: box.volleyDir,
     // The "tunnel": this machine's port is the test broker.
     connect: async (_url, auth, will) => {
       const b = new VolleyBroker();
@@ -194,8 +222,9 @@ const JOINED = {
 
 /** The host's answers over ssh: the reachability probe, then the redeem. */
 const hostSsh =
-  (redeem: Partial<{ code: number; stdout: string; stderr: string }>) => (c: Call) => {
-    if (c.argv[0] !== "ssh") return {};
+  (redeem: Partial<{ code: number; stdout: string; stderr: string }>) =>
+  (c: Call): Reply | undefined => {
+    if (c.argv[0] !== "ssh") return undefined;
     if (c.input?.includes("volley-peer-ok")) return { stdout: "volley-peer-ok\n" };
     if (c.input?.includes("peer redeem")) return redeem;
     return { code: 127, stderr: "unexpected script" };
@@ -208,9 +237,129 @@ const redeemRequest = (script: string) => {
   return { request: JSON.parse(Buffer.from(m[1] as string, "base64").toString()), volley: m[2] };
 };
 
+/** `volley/_system/machines/<name>` envelopes must validate against the F0 machine schema. */
+const SCHEMAS = fileURLToPath(new URL("../../../../spec/schemas/", import.meta.url));
+let ajv: Ajv2020 | null = null;
+function expectValidRecord(raw: string) {
+  if (ajv === null) {
+    ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(ajv);
+    for (const f of readdirSync(SCHEMAS).filter((f) => f.endsWith(".schema.json"))) {
+      ajv.addSchema(JSON.parse(readFileSync(join(SCHEMAS, f), "utf-8")));
+    }
+  }
+  const validate = ajv.getSchema("https://volley.systems/schemas/0.1/machine.schema.json");
+  if (validate === undefined) throw new Error("machine.schema.json not loaded");
+  const ok = validate(JSON.parse(raw));
+  expect(validate.errors ?? []).toEqual([]);
+  expect(ok).toBe(true);
+}
+
 describe("volley peer join (on the machine to pair)", () => {
+  it("runs the doctor first: a block check stops before the code is sent, so it stays usable", async () => {
+    box.tools.tmux.path = null;
+    box.tools.tmux.sshPath = null;
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(f.calls.some((c) => c.argv[0] === "ssh")).toBe(false);
+    expect(r.stdout).toContain("✗ tool.tmux: tmux is not installed");
+    expect(r.stdout).toContain("fix: sudo apt-get install -y tmux");
+    expect(r.stderr).toContain("the code is still valid");
+    // The exact doctor command, with the join's own --repo (no peer.json before pairing).
+    expect(r.stderr).toContain(`volley peer doctor --fix --repo '${box.repoPath}'`);
+    expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("the estimated ssh PATH never stops a join: it warns, and the supervisor's own probe decides", async () => {
+    box.tools.claude.path = "/home/dev/.local/bin/claude";
+    box.tools.claude.sshPath = null;
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^! claude_on_path: estimated: /m);
+    expect(r.stdout).toContain("fix: sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude");
+    expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(2);
+  });
+
+  it("the stop message carries --volley-dir when the join was given one", async () => {
+    box.tools.tmux.path = null;
+    box.tools.tmux.sshPath = null;
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--volley-dir", box.volleyDir],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      `volley peer doctor --fix --repo <path> --volley-dir '${box.volleyDir}'`,
+    );
+  });
+
+  it("no --repo is a block check: the join stops before redeeming", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("✗ repo.clone: no wave repo: pass --repo");
+    expect(f.calls.some((c) => c.argv[0] === "ssh")).toBe(false);
+  });
+
+  it("warn checks are printed and the join continues", async () => {
+    box.cleanup();
+    box = fakePeerMachine({ trusted: true, gh: { signedIn: false } });
+    home = box.home;
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("! gh.auth: gh is not signed in");
+    expect(r.stdout).toContain("fix: gh auth login && gh auth setup-git");
+    expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(2);
+    expect(existsSync(peerFile(home))).toBe(true);
+  });
+
+  it("join --replace sends replace: true (a re-pairing code from invite --for)", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--repo",
+        box.repoPath,
+        "--name",
+        "box-a",
+        "--replace",
+      ],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(0);
+    const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
+    expect(redeemRequest(ssh[1]?.input as string).request).toMatchObject({
+      name: "box-a",
+      replace: true,
+    });
+    // A plain join sends no replace.
+    const g = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    await run(["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath], deps(g.exec));
+    const plain = redeemRequest(g.calls.filter((c) => c.argv[0] === "ssh")[1]?.input as string);
+    expect(plain.request.replace).toBeUndefined();
+  });
+
   it("runs every remote step as a script under bash -s, writes peer.json, installs the service, prints trust, registers", async () => {
-    const repo = join(home, "src", "repo");
+    const repo = box.repoPath;
+    rmSync(join(home, ".claude.json"));
     const f = fakeExec(hostSsh({ stdout: `${JSON.stringify(JOINED)}\n` }));
     const r = await run(
       ["join", "abcd-efgh", "--to", "dev@host", "--repo", repo, "--port", "21883"],
@@ -242,7 +391,7 @@ describe("volley peer join (on the machine to pair)", () => {
       code: "abcd-efgh",
       name: "box-a",
       target: "dev@Box-A.lan",
-      volley_dir: "/opt/volley",
+      volley_dir: box.volleyDir,
       repo,
       port: 21883,
       os: "linux",
@@ -272,6 +421,8 @@ describe("volley peer join (on the machine to pair)", () => {
       "ExecStart=/usr/local/bin/bun /opt/volley/packages/volley-cli/src/cli.ts peer run",
     );
     expect(unit).toContain("Restart=on-failure");
+    // join's PATH, so the heartbeat's doctor finds what this terminal finds.
+    expect(unit).toContain("Environment=PATH=/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin");
     expect(unit).not.toContain("network-online.target");
     // Lingering first (the service must outlive this ssh session), then enable + restart (a
     // re-join replaces a running service).
@@ -297,8 +448,9 @@ describe("volley peer join (on the machine to pair)", () => {
     await reader.disconnect();
     const env = parseEnvelope(raw ?? "");
     expect(env).toMatchObject({ agent_id: "box-a", channel: "_system/machines", type: "machine" });
-    expect(env?.payload).toEqual({
+    expect(env?.payload).toMatchObject({
       name: "box-a",
+      kind: "peer",
       os: "linux",
       arch: "x64",
       cores: 8,
@@ -307,16 +459,16 @@ describe("volley peer join (on the machine to pair)", () => {
       agents: 0,
       remote_port: 21883,
       last_seen: "2026-10-19T09:00:00.000Z",
+      // The join's own doctor run.
+      doctor_at: "2026-10-19T09:00:00.000Z",
+      auth: { gh: "ok", claude: "signed_in", trust: "missing", claude_plan: "max" },
     });
+    expectValidRecord(raw ?? "");
     expect(r.stdout).toContain("Registered: volley/_system/machines/box-a");
   });
 
   it("on macOS installs a launchd agent and bootstraps it; a trusted repo says so", async () => {
-    const repo = "/srv/src/repo";
-    writeFileSync(
-      join(home, ".claude.json"),
-      JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } }),
-    );
+    const repo = box.repoPath;
     const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
     const r = await run(
       ["join", "ABCD-EFGH", "--to", "host", "--repo", repo, "--remote-volley", "/opt/bin/volley"],
@@ -328,6 +480,10 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<string>peer</string>");
     expect(text).toContain("<string>run</string>");
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
+    // launchd's own PATH is /usr/bin:/bin:/usr/sbin:/sbin: the service gets join's.
+    expect(text).toContain(
+      "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
+    );
     // Nothing loaded yet: nothing to boot out.
     expect(
       f.calls.filter((c) => c.argv[0] === "launchctl" && c.argv[1] !== "print").map((c) => c.argv),
@@ -355,7 +511,7 @@ describe("volley peer join (on the machine to pair)", () => {
       return {};
     });
     const r = await run(
-      ["join", "ABCD-EFGH", "--to", "host"],
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
       deps(f.exec, { platform: "darwin" }),
     );
     expect(r.exitCode).toBe(0);
@@ -388,7 +544,7 @@ describe("volley peer join (on the machine to pair)", () => {
       return {};
     });
     const r = await run(
-      ["join", "ABCD-EFGH", "--to", "host"],
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
       deps(f.exec, { platform: "darwin" }),
     );
     expect(r.exitCode).not.toBe(0);
@@ -405,7 +561,7 @@ describe("volley peer join (on the machine to pair)", () => {
         : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
     );
     const r = await run(
-      ["join", "ABCD-EFGH", "--to", "host"],
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
       deps(f.exec, { platform: "darwin" }),
     );
     expect(r.exitCode).toBe(0);
@@ -423,7 +579,10 @@ describe("volley peer join (on the machine to pair)", () => {
         ? { code: 1, stderr: "Could not enable linger: Access denied" }
         : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(0);
     expect(r.stdout).not.toContain(
       `Installed the tunnel service: systemd user unit ${join(home, ".config", "systemd", "user", SYSTEMD_UNIT)}.`,
@@ -439,7 +598,8 @@ describe("volley peer join (on the machine to pair)", () => {
         ? { code: 1, stderr: "Failed to connect to bus: No medium found" }
         : hostSsh({ stdout: JSON.stringify(JOINED) })(c),
     );
-    const repo = join(home, "repo");
+    const repo = box.repoPath;
+    rmSync(join(home, ".claude.json"));
     const r = await run(["join", "ABCD-EFGH", "--to", "dev@host", "--repo", repo], deps(f.exec));
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("No medium found");
@@ -459,7 +619,10 @@ describe("volley peer join (on the machine to pair)", () => {
           "dev@Box-A.lan: Permission denied (publickey).\nthe supervisor's machine cannot ssh to dev@Box-A.lan\n",
       }),
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("dev@host cannot ssh to dev@Box-A.lan");
     expect(r.stderr).toContain("--target");
@@ -521,7 +684,10 @@ describe("volley peer join (on the machine to pair)", () => {
     const f = fakeExec(
       hostSsh({ code: 5, stderr: "sh: 1: Syntax error: end of file unexpected\n" }),
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).not.toContain("cannot ssh to");
     expect(r.stderr).toContain(
@@ -541,7 +707,10 @@ describe("volley peer join (on the machine to pair)", () => {
         : c === "bun"
           ? "/opt/homebrew/bin/bun"
           : null;
-    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec, { which }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec, { which }),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
     expect(r.stderr).toContain("~/.zshenv");
@@ -553,7 +722,7 @@ describe("volley peer join (on the machine to pair)", () => {
       hostSsh({ code: 4, stderr: "volley-peer-missing: claude\nvolley-peer-shell: bash\n" }),
     );
     const rb = await run(
-      ["join", "ABCD-EFGH", "--to", "dev@host"],
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
       deps(b.exec, { which: () => null }),
     );
     expect(rb.stderr).toContain("the top of ~/.bashrc");
@@ -562,9 +731,12 @@ describe("volley peer join (on the machine to pair)", () => {
 
   it("an untrusted host key says so, with the one-time command, not 'set up key-based ssh'", async () => {
     const f = fakeExec((c) =>
-      c.argv[0] === "ssh" ? { code: 255, stderr: "Host key verification failed.\n" } : {},
+      c.argv[0] === "ssh" ? { code: 255, stderr: "Host key verification failed.\n" } : undefined,
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("does not trust dev@host's host key yet");
     expect(r.stderr).toContain("ssh dev@host true");
@@ -582,15 +754,15 @@ describe("volley peer join (on the machine to pair)", () => {
   it("a repo trusted through a parent folder counts as trusted (T4's rule)", async () => {
     writeFileSync(
       join(home, ".claude.json"),
-      JSON.stringify({ projects: { "/srv/src": { hasTrustDialogAccepted: true } } }),
+      JSON.stringify({ projects: { [dirname(box.repoPath)]: { hasTrustDialogAccepted: true } } }),
     );
     const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
     const r = await run(
-      ["join", "ABCD-EFGH", "--to", "host", "--repo", "/srv/src/repo"],
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
       deps(f.exec),
     );
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Claude Code trusts /srv/src/repo on this machine.");
+    expect(r.stdout).toContain(`Claude Code trusts ${box.repoPath} on this machine.`);
   });
 
   it("refuses a --target that is not an ssh destination", async () => {
@@ -605,18 +777,26 @@ describe("volley peer join (on the machine to pair)", () => {
 
   it("an unreachable host stops before anything is redeemed or written", async () => {
     const f = fakeExec((c) =>
-      c.argv[0] === "ssh" ? { code: 255, stderr: "ssh: connect to host: Connection refused" } : {},
+      c.argv[0] === "ssh"
+        ? { code: 255, stderr: "ssh: connect to host: Connection refused" }
+        : undefined,
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("cannot reach host over ssh");
-    expect(f.calls).toHaveLength(1);
+    expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(1);
     expect(existsSync(peerFile(home))).toBe(false);
   });
 
   it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
     const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
-    const r = await run(["join", "ABCD-EFGH", "--to", "dev@host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("volley: command not found");
     expect(r.stderr).toContain(
@@ -635,7 +815,16 @@ describe("volley peer join (on the machine to pair)", () => {
     ]) {
       const f = fakeExec(hostSsh({ code: 127, stderr }));
       const r = await run(
-        ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+        [
+          "join",
+          "ABCD-EFGH",
+          "--to",
+          "dev@host",
+          "--repo",
+          box.repoPath,
+          "--remote-volley",
+          "~/.volley/bin/volley",
+        ],
         deps(f.exec),
       );
       expect(r.exitCode).toBe(1);
@@ -657,7 +846,16 @@ describe("volley peer join (on the machine to pair)", () => {
       }),
     );
     const r = await run(
-      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "/opt/volley/bin/volley"],
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--repo",
+        box.repoPath,
+        "--remote-volley",
+        "/opt/volley/bin/volley",
+      ],
       deps(g.exec),
     );
     expect(r.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
@@ -670,7 +868,16 @@ describe("volley peer join (on the machine to pair)", () => {
       }),
     );
     const again = await run(
-      ["join", "ABCD-EFGH", "--to", "dev@host", "--remote-volley", "~/.volley/bin/volley"],
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--repo",
+        box.repoPath,
+        "--remote-volley",
+        "~/.volley/bin/volley",
+      ],
       deps(h.exec),
     );
     expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
@@ -684,7 +891,10 @@ describe("volley peer join (on the machine to pair)", () => {
     const f = fakeExec(
       hostSsh({ code: 1, stderr: "volley peer redeem: invalid or expired pairing code\n" }),
     );
-    const r = await run(["join", "ABCD-EFGH", "--to", "host"], deps(f.exec));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("invalid or expired pairing code");
     expect(existsSync(peerFile(home))).toBe(false);
@@ -722,7 +932,30 @@ describe("volley peer on the supervisor's machine", () => {
     expect(v.adminTopics).toEqual(["volley/_system/auth/ops/admin-1"]);
     expect(v.seen[0]).toMatchObject({ op: "peer_invite", reply_key: { kty: "RSA" } });
     expect(r.stdout).toContain("Pairing code: ABCD-EFGH");
-    expect(r.stdout).toContain("volley peer join ABCD-EFGH --to dev@Box-A.lan");
+    expect(r.stdout).toContain(
+      "volley peer join ABCD-EFGH --to dev@Box-A.lan --repo <path to its clone of the wave repo>",
+    );
+  });
+
+  it("invite --for <name> mints a re-pairing code bound to the name and prints a join with --replace", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { expires_at: "2026-10-19T09:10:00.000Z", ttl_s: 600, for: p.for },
+      sealed: sealTo(p.reply_key, { code: "ABCD-EFGH" }),
+    }));
+    const r = await run(["invite", "--for", "box-a"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "peer_invite", for: "box-a" });
+    expect(r.stdout).toContain(
+      "volley peer join ABCD-EFGH --to dev@Box-A.lan --repo <path to its clone of the wave repo> --name box-a --replace",
+    );
+    expect(r.stdout).toContain("re-pairs box-a");
+  });
+
+  it("invite --for refuses a name that cannot be a machine", async () => {
+    const r = await run(["invite", "--for", "Bad Name"], deps(fakeExec(() => ({})).exec), ADMIN);
+    expect(r.exitCode).toBe(2);
   });
 
   it("redeem hands the stdin request to volleyd and prints the unsealed account as JSON", async () => {
@@ -780,6 +1013,56 @@ describe("volley peer on the supervisor's machine", () => {
     expect(v.adminTopics).toEqual(["volley/_system/auth/ops/admin-1"]);
     expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a" });
     expect(r.stdout).toContain("removed box-a: account revoked, hosts.box-a removed");
+  });
+
+  it("remove --drain sends drain: true and says the machine is drained, then removed", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, removing: "drain", agents: 2, revoked: false, host_removed: false },
+    }));
+    const r = await run(["remove", "box-a", "--drain"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a", drain: true });
+    expect(v.seen[0]?.now).toBeUndefined();
+    expect(r.stdout).toBe(
+      "draining box-a: nothing new starts there; 2 agents left. volleyd removes it (revokes its account, drops hosts.box-a) once they finish.\n",
+    );
+  });
+
+  it("remove --now sends now: true and says the agents are being stopped", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, removing: "now", agents: 1, revoked: false, host_removed: false },
+    }));
+    const r = await run(["remove", "box-a", "--now"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "peer_remove", name: "box-a", now: true });
+    expect(r.stdout).toContain("stopping 1 agent on box-a");
+    expect(r.stdout).toContain("respawn");
+  });
+
+  it("remove --drain on an idle machine removes it at once, as plain remove does", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) => ({
+      ok: true,
+      result: { name: p.name, revoked: true, host_removed: true },
+    }));
+    const r = await run(["remove", "box-a", "--drain"], deps(fakeExec(() => ({})).exec), ADMIN);
+    await v.b.disconnect();
+    expect(r.stdout).toContain("removed box-a: account revoked, hosts.box-a removed");
+  });
+
+  it("remove refuses --drain with --now, and --drain on another verb", async () => {
+    const both = await run(
+      ["remove", "box-a", "--drain", "--now"],
+      deps(fakeExec(() => ({})).exec),
+    );
+    expect(both.exitCode).toBe(2);
+    expect(both.stderr).toContain("--drain and --now exclude each other");
+    const other = await run(["list", "--drain"], deps(fakeExec(() => ({})).exec));
+    expect(other.exitCode).toBe(2);
+    expect(other.stderr).toContain("--drain is an option of volley peer remove only");
   });
 
   it("list prints each machine's health", async () => {
@@ -956,10 +1239,160 @@ describe("volley peer run (the service)", () => {
     password: "peer-secret",
     joined_at: "2026-10-19T09:00:00.000Z",
   };
-  const writeCfg = () => {
+  const writeCfg = (over: Partial<PeerConfig> = {}) => {
     mkdirSync(join(home, ".volley"), { recursive: true });
-    writeFileSync(peerFile(home), JSON.stringify(cfg), { mode: 0o600 });
+    writeFileSync(peerFile(home), JSON.stringify({ ...cfg, ...over }), { mode: 0o600 });
   };
+
+  /** A retained readiness verdict for box-a, published as `agentId`. */
+  async function readiness(agentId: string, payload: Record<string, unknown>) {
+    const sup = new VolleyBroker();
+    await sup.connect({ url: tb.url, agentId });
+    await sup.publish(
+      "volley/_system/machines/box-a/readiness",
+      JSON.stringify(
+        buildEnvelope({
+          agentId,
+          parentId: null,
+          channel: "_system/machines",
+          type: "readiness",
+          payload: { name: "box-a", ...payload },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await sup.disconnect();
+  }
+
+  /**
+   * Run the service on a fake clock for `beats` heartbeats; every record it published. Each beat
+   * also lets a little real time pass (the last one more), so the doctor, which runs beside the
+   * beats, can finish.
+   */
+  async function heartbeats(
+    beats: number,
+    f: { exec: PeerExec; calls: Call[] } = fakeExec(() => undefined),
+  ) {
+    const start = Date.parse("2026-10-19T09:00:00.000Z");
+    let t = start;
+    const stop = new AbortController();
+    let n = 0;
+    const d = deps(f.exec, {
+      now: () => new Date(t),
+      monotonic: () => t - start,
+      sleep: async (ms) => {
+        if (ms !== PEER_DEFAULTS.heartbeat_ms) return;
+        const last = ++n >= beats;
+        await new Promise((r) => setTimeout(r, last ? 300 : 30));
+        if (last) stop.abort();
+        else t += ms;
+      },
+    });
+    const reader = new VolleyBroker();
+    await reader.connect({ url: tb.url, agentId: "reader" });
+    const records: string[] = [];
+    const unsubscribe = await reader.subscribeStream(machineTopic("box-a"), ({ payload }) => {
+      records.push(payload);
+    });
+    const code = await runService(makeBufferIO(), d, stop.signal);
+    await new Promise((r) => setTimeout(r, 100));
+    await unsubscribe();
+    await reader.disconnect();
+    return { code, records, f };
+  }
+
+  it("embeds the doctor in every heartbeat; the record validates against machine.schema.json", async () => {
+    writeCfg({ repo: box.repoPath });
+    // The supervisor's verdict names the version it requires (only volleyd's is believed).
+    await readiness("volleyd", { requirements: { volley: "0.5.0" } });
+    const { code, records } = await heartbeats(3);
+    expect(code).toBe(0);
+    const up = records
+      .map((r) => parseEnvelope(r))
+      .filter((e) => e?.payload && (e.payload as { tunnel?: string }).tunnel === "up")
+      .map((e) => e?.payload as Record<string, unknown>);
+    expect(up.length).toBeGreaterThanOrEqual(3);
+    for (const raw of records) expectValidRecord(raw);
+    // The first beat goes out before the doctor finishes (it never waits on it); the record
+    // published when the doctor finishes, and every beat after, carries its result.
+    const doctored = up.filter((p) => p.doctor_at !== undefined);
+    expect(doctored.length).toBeGreaterThanOrEqual(1);
+    expect(up.at(-1)?.doctor_at).toBeDefined();
+    const p = doctored[0] as Record<string, unknown>;
+    expect(p).toMatchObject({
+      name: "box-a",
+      kind: "peer",
+      memory: { total_mb: 16384, available_pct: 50 },
+      disk: { free_gb: 500, free_pct: 50 },
+      uptime_s: 86_400,
+      versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.2", git: "2.43.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok", claude_plan: "max" },
+      repo: { path: box.repoPath, exists: true, origin: "github.com/example-org/example-repo" },
+    });
+    // When the doctor finished: the first beat's time, or the next one's.
+    expect(p.doctor_at).toMatch(/^2026-10-19T09:00:(00|30)\.000Z$/);
+    const checks = p.checks as { id: string; ok: boolean; fix?: unknown }[];
+    expect(checks.find((c) => c.id === "volley.version")).toMatchObject({ ok: false });
+    // Fix text never travels in the record.
+    expect(checks.some((c) => "fix" in c)).toBe(false);
+    // Heartbeats between doctor runs repeat its result.
+    const later = up.at(-1) as Record<string, unknown>;
+    expect(later.doctor_at).toBe(p.doctor_at);
+    expect(later.last_seen).toBe("2026-10-19T09:01:00.000Z");
+  });
+
+  it("a doctor that hangs never holds up a heartbeat, and never runs twice at once", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const f = fakeExec(() => undefined);
+    let hangs = 0;
+    const hung: PeerExec = (argv, o) => {
+      if (basename(argv[0] ?? "") !== "claude" || argv[1] !== "auth") return f.exec(argv, o);
+      hangs++;
+      return new Promise(() => {});
+    };
+    const perInterval = PEER_DEFAULTS.doctor_interval_s / (PEER_DEFAULTS.heartbeat_ms / 1000);
+    const { records } = await heartbeats(perInterval + 2, { exec: hung, calls: f.calls });
+    const up = records.filter((r) => r.includes('"tunnel":"up"'));
+    // One record per beat, though the doctor never finished.
+    expect(up).toHaveLength(perInterval + 2);
+    expect(up.some((r) => r.includes("doctor_at"))).toBe(false);
+    expect(hangs).toBe(1);
+  });
+
+  it("a token planted in every probe's output never reaches a heartbeat record", async () => {
+    box.cleanup();
+    const token = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    box = fakePeerMachine({
+      trusted: true,
+      plant: token,
+      origin: `https://x-access-token:${token}@github.com/example-org/example-repo.git`,
+      gh: { user: token },
+      claudeStatus: { loggedIn: true, subscriptionType: token },
+    });
+    home = box.home;
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const { records } = await heartbeats(3);
+    expect(records.some((r) => r.includes("doctor_at"))).toBe(true);
+    for (const r of records) expect(r).not.toContain(token);
+  });
+
+  it("re-runs the doctor after doctor_interval_s and not before", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const perInterval = PEER_DEFAULTS.doctor_interval_s / (PEER_DEFAULTS.heartbeat_ms / 1000);
+    const doctorRuns = (f: { calls: Call[] }) =>
+      f.calls.filter((c) => basename(c.argv[0] ?? "") === "claude" && c.argv[1] === "auth").length;
+    const before = await heartbeats(perInterval);
+    expect(doctorRuns(before.f)).toBe(1);
+    const after = await heartbeats(perInterval + 1);
+    expect(doctorRuns(after.f)).toBe(2);
+    const last = parseEnvelope(
+      after.records.filter((r) => r.includes('"tunnel":"up"')).at(-1) ?? "",
+    )?.payload as { doctor_at?: string };
+    expect(last.doctor_at).toBe("2026-10-19T09:10:00.000Z");
+  });
 
   it("keeps the -L tunnel up and heartbeats the record; a clean stop leaves it tunnel: down", async () => {
     writeCfg();
@@ -1005,6 +1438,128 @@ describe("volley peer run (the service)", () => {
     const io = makeBufferIO();
     expect(await runService(io, deps(fakeExec(() => ({})).exec))).toBe(1);
     expect(io.readStderr()).toContain("volley peer join");
+  });
+});
+
+describe("volley peer doctor (the verb)", () => {
+  const writeCfg = (over: Partial<PeerConfig> = {}) => {
+    mkdirSync(join(home, ".volley"), { recursive: true });
+    writeFileSync(
+      peerFile(home),
+      JSON.stringify({
+        name: "box-a",
+        host: "dev@host",
+        target: "dev@box-a",
+        namespace: "default",
+        broker: { host: "127.0.0.1", port: 1883 },
+        remote_port: 21883,
+        username: "box-a",
+        password: "peer-secret",
+        joined_at: "2026-10-19T09:00:00.000Z",
+        ...over,
+      }),
+      { mode: 0o600 },
+    );
+  };
+  const readiness = async (agentId: string, volley: string) => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId });
+    await b.publish(
+      "volley/_system/machines/box-a/readiness",
+      JSON.stringify(
+        buildEnvelope({
+          agentId,
+          parentId: null,
+          channel: "_system/machines",
+          type: "readiness",
+          payload: { name: "box-a", requirements: { volley } },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await b.disconnect();
+  };
+  const doctorJson = async (argv: string[], over: Partial<PeerDeps> = {}) => {
+    const f = fakeExec(() => undefined);
+    const r = await run(["doctor", "--json", ...argv], deps(f.exec, over));
+    return { ...r, f, report: r.exitCode === 2 ? null : JSON.parse(r.stdout) };
+  };
+  const check = (r: { checks: { id: string }[] }, id: string) =>
+    r.checks.find((c) => c.id === id) as { ok: boolean; detail: string } | undefined;
+
+  it("refuses an --origin that carries a password or a token, or reads like an option", async () => {
+    for (const origin of [
+      "https://user:pw@github.com/example-org/example-repo.git",
+      "https://x-access-token:ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789@github.com/o/r",
+      "-oProxyCommand=sh",
+    ]) {
+      const r = await doctorJson(["--origin", origin]);
+      expect(r.exitCode).toBe(2);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain("--origin");
+      expect(r.stderr).not.toContain("ghp_");
+    }
+  });
+
+  it("--clone needs --fix", async () => {
+    const r = await doctorJson(["--clone", "--repo", box.repoPath]);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("--clone needs --fix");
+  });
+
+  it("the doctor's flags are refused on the other verbs (never silently ignored)", async () => {
+    const f = fakeExec(() => undefined);
+    const join = await run(["join", "ABCD-EFGH", "--to", "dev@host", "--clone"], deps(f.exec));
+    expect(join.exitCode).toBe(2);
+    expect(join.stderr).toContain("--clone is an option of volley peer doctor only");
+    expect(f.calls).toEqual([]);
+    const invite = await run(["invite", "--fix"], deps(f.exec));
+    expect(invite.exitCode).toBe(2);
+    const doctor = await run(["doctor", "--for", "box-a"], deps(f.exec));
+    expect(doctor.exitCode).toBe(2);
+    expect(doctor.stderr).toContain("--for is an option of volley peer invite only");
+  });
+
+  it("--repo defaults to peer.json's; the supervisor's requirement is read through the tunnel", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", "0.5.0");
+    const r = await doctorJson([]);
+    expect(r.exitCode).toBe(1);
+    expect(r.report.repo.path).toBe(box.repoPath);
+    expect(check(r.report, "volley.version")?.ok).toBe(false);
+    expect(check(r.report, "volley.version")?.detail).toContain("0.5.0");
+    // --repo wins over peer.json's.
+    const other = await doctorJson(["--repo", join(box.root, "elsewhere")]);
+    expect(other.report.repo.path).toBe(join(box.root, "elsewhere"));
+  });
+
+  it("a readiness verdict from anyone but the supervisor is ignored", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("box-b", "0.5.0");
+    const r = await doctorJson([]);
+    expect(check(r.report, "volley.version")).toMatchObject({ ok: true });
+    expect(check(r.report, "volley.version")?.detail).toContain("not known here");
+  });
+
+  it("a tunnel that is down leaves the requirement unknown; the doctor still runs", async () => {
+    writeCfg({ repo: box.repoPath });
+    const r = await doctorJson([], {
+      connect: async () => {
+        throw new Error("connect ECONNREFUSED 127.0.0.1:21883");
+      },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(check(r.report, "volley.version")?.detail).toContain("not known here");
+  });
+
+  it("--volley-dir checks that checkout instead of the running one", async () => {
+    const dir = join(box.root, "other-volley");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "volley", version: "0.3.9" }));
+    const r = await doctorJson(["--repo", box.repoPath, "--volley-dir", dir]);
+    expect(r.report.versions.volley).toBe("0.3.9");
+    expect(check(r.report, "volley.installed")?.ok).toBe(false);
+    expect(check(r.report, "volley.installed")?.detail).toContain(dir);
   });
 });
 

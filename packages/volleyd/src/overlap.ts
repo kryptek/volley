@@ -1,6 +1,6 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { exec } from "./exec";
-import type { TaskId, WaveId } from "./types";
+import type { NudgeOnMerge, TaskId, WaveId } from "./types";
 
 /**
  * Overlap warning: at submit, compare each new task's file list (the wave file's `files` hints
@@ -163,6 +163,70 @@ export function findOverlaps(
 export function formatOverlap(w: OverlapWarning): string {
   const [a, b] = w.tasks;
   return `overlap: ${a.wave}/${a.task} and ${b.wave}/${b.task} both touch ${w.paths.join(", ")}`;
+}
+
+/** A running implementer a merged PR may nudge: its task's wave-file `files` hints. */
+export interface RunningImplementer {
+  task: TaskId;
+  agent_id: string;
+  files: string[];
+}
+
+/** One merge nudge to send: `files` are the merged PR's paths it touches (empty under `all`). */
+export interface NudgeTarget {
+  task: TaskId;
+  agent_id: string;
+  files: string[];
+}
+
+/**
+ * Who a merged PR nudges (`placement.nudge_on_merge`): under `files`, each running implementer
+ * whose task's files hints share a path with the PR's changed files (a task with no hints is
+ * never nudged); under `all`, every one of them; under `off`, none. Pure.
+ */
+export function nudgeTargets(
+  running: RunningImplementer[],
+  mergedFiles: string[],
+  mode: NudgeOnMerge,
+): NudgeTarget[] {
+  if (mode === "off") return [];
+  if (mode === "all")
+    return running.map((r) => ({ task: r.task, agent_id: r.agent_id, files: [] }));
+  return running.flatMap((r) => {
+    const files = mergedFiles.filter((m) => r.files.some((f) => shared(f, m) !== null));
+    return files.length > 0 ? [{ task: r.task, agent_id: r.agent_id, files }] : [];
+  });
+}
+
+/** The steering text of one merge nudge. volleyd never rebases: the agent does, in its session. */
+export function nudgeText(o: {
+  release_branch: string;
+  /** The commit the release branch moved to (the merge), when known. */
+  sha: string | null;
+  pr: number;
+  files: string[];
+}): string {
+  const moved = `origin/${o.release_branch} moved${o.sha !== null ? ` to ${o.sha.slice(0, 7)}` : ""} with #${o.pr}`;
+  const shown = o.files.slice(0, DAEMON_DEFAULTS.nudge_files_shown).join(", ");
+  const more = o.files.length - DAEMON_DEFAULTS.nudge_files_shown;
+  const touches =
+    o.files.length > 0
+      ? ` (touches ${o.files.length} of your files: ${shown}${more > 0 ? ` and ${more} more` : ""})`
+      : "";
+  return `${moved}${touches}; rebase when convenient, before you push again.`;
+}
+
+/** The changed paths in `gh pr view <n> --json files` output; null when it does not parse. */
+export function parsePrFiles(stdout: string): string[] | null {
+  try {
+    const files = (JSON.parse(stdout) as { files?: unknown }).files;
+    if (!Array.isArray(files)) return null;
+    return files.flatMap((f) =>
+      typeof (f as { path?: unknown })?.path === "string" ? [(f as { path: string }).path] : [],
+    );
+  } catch {
+    return null;
+  }
 }
 
 /** Signature of the issue-body fetcher the daemon uses at submit (injected in tests). */

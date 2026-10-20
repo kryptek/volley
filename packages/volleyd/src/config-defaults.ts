@@ -42,6 +42,20 @@ export const CONFIG_DEFAULTS: Tunables = {
   agent_mcp: "strict",
   public_hygiene: "auto",
   hosts: {},
+  // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
+  require_fresh_base: true,
+  placement: {
+    nudge_on_merge: "files",
+    // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
+    load_per_core_max: 1.5,
+    mem_available_min_pct: 10,
+    disk_free_min_gb: 5,
+    weights: { cpu: 40, slots: 30, mem: 15, usage: 15 },
+    // --- Fleet: a machine that stays down (SPEC §4.6.15) ---
+    down_decision_after_s: 300,
+  },
+  // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
+  fleet: { local_name: null },
 };
 
 /**
@@ -67,6 +81,10 @@ export const REMOTE_HOST_DEFAULTS = {
   supervise_tunnel: true,
   /** `worktree_root` default: this directory beside the remote repo. */
   worktree_dir: ".volley-worktrees",
+  /** `hosts.<name>.max_agents` unset: the supervised agents a peer runs at once (SPEC §4.6.15). */
+  max_agents: 4,
+  /** `hosts.<name>.drain` unset: the host takes placements. */
+  drain: false,
 } as const;
 
 /** Who `updated_by` names before anyone has changed the config. */
@@ -239,6 +257,11 @@ export const DAEMON_DEFAULTS = {
   claude_signin_timeout_ms: 900_000,
   /** Bound on one `claude auth status`. */
   claude_auth_status_timeout_ms: 15_000,
+  /**
+   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before its URL is
+   * published: an ssh that exits sooner (the local port is taken) restarts the sign-in once.
+   */
+  signin_forward_settle_ms: 3_000,
   /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
   claude_json_lock_attempts: 50,
   claude_json_lock_wait_ms: 20,
@@ -255,4 +278,16 @@ export const DAEMON_DEFAULTS = {
   machine_heartbeat_ms: 30_000,
   /** A machine whose record is older than this is down: its tunnel is marked down, spawns park. */
   machine_down_after_ms: 90_000,
+  // --- Fleet: readiness (readiness.ts), the supervisor's own record, peer_doctor ---
+  /** The readiness PATH probe (`command -v claude bun` over ssh) runs at most this often per host. */
+  path_probe_interval_ms: 300_000,
+  /** Bound on one PATH probe. */
+  path_probe_timeout_ms: 15_000,
+  /** Bound on the supervisor's own doctor run (`volley peer doctor --json`, every heartbeat). */
+  local_doctor_timeout_ms: 120_000,
+  /** Bound on a `peer_doctor` run on a box (a `--fix` may check out and install volley there). */
+  peer_doctor_timeout_ms: 900_000,
+  // --- Fleet: merge nudge (overlap.ts) ---
+  /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
+  nudge_files_shown: 5,
 } as const;

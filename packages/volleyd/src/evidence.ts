@@ -43,6 +43,8 @@ export interface EvidenceInput {
   /** P1s the owner ruled not blockers (`reviewers_disagree` → fine), and who ruled. */
   not_blockers?: Disagreement[];
   ruled_by?: string;
+  /** The release-branch commit the task's worktree was cut from (its `base_sha`), when known. */
+  base_sha?: string;
   /** The release-branch check the gate passed. */
   release: RebaseCheck;
   generated_at: string;
@@ -88,6 +90,8 @@ export interface EvidenceJson {
   current_with_release_branch: boolean;
   behind_by: number;
   release_sha: string;
+  /** The release-branch commit the task's worktree was cut from (absent when unknown). */
+  base_sha?: string;
   generated_at: string;
 }
 
@@ -163,12 +167,21 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
     current_with_release_branch: e.release.behind === 0,
     behind_by: e.release.behind,
     release_sha: e.release.release_sha,
+    ...(e.base_sha !== undefined ? { base_sha: e.base_sha } : {}),
     generated_at: e.generated_at,
   };
 }
 
 const where = (f: { file: string; line?: number }) =>
   f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+
+/** `yes` / `no (behind by N)`; with the task's base: `yes — cut from <sha7>, 0 behind`. */
+function releaseLine(j: EvidenceJson): string {
+  const current = j.current_with_release_branch ? "yes" : "no";
+  if (j.base_sha === undefined)
+    return j.current_with_release_branch ? current : `${current} (behind by ${j.behind_by})`;
+  return `${current} — cut from ${j.base_sha.slice(0, 7)}, ${j.behind_by} behind`;
+}
 
 /** The human half. Pure. */
 export function renderEvidenceMd(j: EvidenceJson): string {
@@ -191,7 +204,7 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     ...(j.ci.superseded ?? []).map(
       (r) => `  - superseded (not this head's CI): ${r.conclusion ?? "not finished"} — ${r.url}`,
     ),
-    `- Branch current with release branch: ${j.current_with_release_branch ? "yes" : `no (behind by ${j.behind_by})`} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
+    `- Branch current with release branch: ${releaseLine(j)} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
     "",
     "volleyd never merges. A human merges this PR after reading the above.",
     "",

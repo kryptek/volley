@@ -15,21 +15,59 @@ export const MACHINE_CHANNEL = "_system/machines";
 export const MACHINES_FILTER = "volley/_system/machines/+";
 export const machineTopic = (name: string) => `volley/_system/machines/${name}`;
 
-/** One `machine.schema.json` payload. */
+/** One doctor check as a record carries it (no fix text). */
+export interface MachineCheck {
+  id: string;
+  ok: boolean;
+  severity: "block" | "warn";
+  detail: string;
+}
+
+/** One `machine.schema.json` payload (SPEC §4.6.14, plus the Fleet fields of §4.6.15). */
 export interface MachineRecord {
   name: string;
+  /** `supervisor`: the supervisor's own machine, published by volleyd. Absent: `peer`. */
+  kind?: "peer" | "supervisor";
   os: string;
   arch?: string;
   cores: number;
-  tunnel: "up" | "down";
+  /** `local`: the supervisor's own machine, which needs no tunnel. */
+  tunnel: "up" | "down" | "local";
   reason?: "disconnect" | "heartbeat_timeout";
   load: [number, number, number];
   agents: number;
   remote_port?: number;
+  memory?: { total_mb: number; available_pct: number };
+  disk?: { path: string; free_gb: number; free_pct: number };
+  uptime_s?: number;
+  versions?: {
+    peer: string | null;
+    volley: string | null;
+    bun: string | null;
+    git: string | null;
+  } & Partial<Record<"node" | "gh" | "tmux" | "claude", string | null>>;
+  auth?: {
+    gh: "ok" | "unauthenticated" | "missing" | "no_write";
+    claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
+    trust: "ok" | "missing" | "unknown";
+    claude_plan?: string | null;
+  };
+  repo?: {
+    path: string;
+    exists: boolean;
+    origin?: string;
+    release_branch?: string;
+    fetched_at?: string | null;
+  };
+  checks?: MachineCheck[];
+  doctor_at?: string;
   last_seen: string;
 }
 
 export type MachineStatus = "up" | "down";
+
+/** A record's status: the supervisor's own machine (`tunnel: local`) is always up. */
+export const statusOf = (r: MachineRecord): MachineStatus => (r.tunnel === "down" ? "down" : "up");
 
 /**
  * The record carried by a retained message on `topic`, or null: not a schema-valid machine
@@ -75,6 +113,8 @@ interface Entry {
   status: MachineStatus;
   /** When the supervisor last received an `up` record (its own clock). */
   heardAt: number;
+  /** When it went down (its own clock); undefined while it is up. */
+  downAt?: number;
 }
 
 export class MachineHealth {
@@ -88,7 +128,7 @@ export class MachineHealth {
    */
   observe(incoming: MachineRecord): void {
     const prior = this.machines.get(incoming.name);
-    const status: MachineStatus = incoming.tunnel;
+    const status = statusOf(incoming);
     const record: MachineRecord =
       status === "down" && prior !== undefined
         ? {
@@ -102,7 +142,14 @@ export class MachineHealth {
           }
         : incoming;
     const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
-    this.machines.set(record.name, { record, status, heardAt });
+    const downAt =
+      status === "up" ? undefined : prior?.status === "down" ? prior.downAt : this.deps.now();
+    this.machines.set(record.name, {
+      record,
+      status,
+      heardAt,
+      ...(downAt !== undefined ? { downAt } : {}),
+    });
     if (prior?.status !== status) this.deps.onChange(record.name, status, record);
   }
 
@@ -115,9 +162,10 @@ export class MachineHealth {
     const now = this.deps.now();
     const down: MachineRecord[] = [];
     for (const [name, e] of this.machines) {
-      if (e.status !== "up" || now - e.heardAt < limit) continue;
+      // The supervisor's own machine publishes no heartbeat to miss: it is always up.
+      if (e.status !== "up" || e.record.tunnel === "local" || now - e.heardAt < limit) continue;
       const record: MachineRecord = { ...e.record, tunnel: "down", reason: "heartbeat_timeout" };
-      this.machines.set(name, { ...e, record, status: "down" });
+      this.machines.set(name, { ...e, record, status: "down", downAt: now });
       down.push(record);
       this.deps.onChange(name, "down", record);
     }
@@ -138,6 +186,14 @@ export class MachineHealth {
     return this.machines.get(name)?.status;
   }
 
+  /**
+   * When the supervisor marked the machine down (its own clock, epoch ms); undefined while it is
+   * up or unknown. A `machine_down` decision opens `placement.down_decision_after_s` after it.
+   */
+  downSince(name: string): number | undefined {
+    return this.machines.get(name)?.downAt;
+  }
+
   record(name: string): MachineRecord | undefined {
     return this.machines.get(name)?.record;
   }
@@ -150,4 +206,47 @@ export class MachineHealth {
   forget(name: string): void {
     this.machines.delete(name);
   }
+}
+
+/** `volley peer doctor --json` (volley-cli): the record's doctor fields, plus each check's fix. */
+export interface DoctorReport {
+  checks: (MachineCheck & { fix?: string })[];
+  versions?: MachineRecord["versions"];
+  auth?: MachineRecord["auth"];
+  repo?: MachineRecord["repo"];
+  memory?: MachineRecord["memory"];
+  disk?: MachineRecord["disk"];
+  doctor_at: string;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The doctor's JSON report from its stdout, or null when it printed none. */
+export function parseDoctorReport(stdout: string): DoctorReport | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!isObject(v) || !Array.isArray(v.checks) || typeof v.doctor_at !== "string") return null;
+  return v as unknown as DoctorReport;
+}
+
+/** A report as record fields: the checks without their fix text (a record never carries it). */
+export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
+  const pick = <K extends keyof DoctorReport>(k: K) =>
+    isObject(r[k]) ? { [k]: r[k] } : ({} as Record<string, never>);
+  return {
+    checks: r.checks
+      .slice(0, 32)
+      .map(({ id, ok, severity, detail }) => ({ id, ok, severity, detail })),
+    ...pick("versions"),
+    ...pick("auth"),
+    ...pick("repo"),
+    ...pick("memory"),
+    ...pick("disk"),
+    doctor_at: r.doctor_at,
+  };
 }

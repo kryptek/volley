@@ -3,7 +3,7 @@
  * System Settings–style dialog. The sidebar has the traffic dots, a search
  * over the section labels and keywords (`matchSections`), the signed-in
  * broker account and the sections in three groups with coloured icon tiles;
- * the main pane shows the picked section (General, Appearance, Supervisor,
+ * the main pane shows the picked section (General, Sound, Appearance, Supervisor,
  * Claude accounts & usage, Broker accounts, Machines, Setup & Security,
  * About). Escape, the close button and a scrim click close it (Escape in a search box with a
  * query clears the query instead); focus moves in on open (and Tab stays
@@ -16,9 +16,11 @@ import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
+import { SOUND0 } from "../sounds/settings";
+import { usePanelSound } from "../sounds/usePanelSound";
 import type { AuthOps } from "../store/control";
 import type { AdminStatus } from "../store/peerOps";
-import type { ConfigPayload } from "../store/types";
+import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
 import { BrokerAccounts } from "./BrokerAccounts";
@@ -26,6 +28,7 @@ import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
 import { Machines, type MachinesProps } from "./Machines";
 import { Setup, useAdminRole } from "./Setup";
+import { Sound, type SoundSectionProps } from "./Sound";
 import { Supervisor } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
 import { clearOnEscape } from "./primitives";
@@ -53,6 +56,8 @@ export interface SettingsWindowProps {
   config: ConfigPayload | null;
   /** `null` = no broker credentials: the Supervisor rows are read-only. */
   transport: ConfigTransport | null;
+  /** The retained lease pools (Settings › Supervisor's lease card). */
+  leases?: Record<string, LeasePoolPayload>;
   onArrange: () => void;
   /** Settings › General › Reset layout: clear every window pin (C12). */
   onResetLayout?: () => void;
@@ -61,6 +66,8 @@ export interface SettingsWindowProps {
   initial?: SectionKey;
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
   claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
+  /** Settings › Sound: the sound settings and the sound manager's theme loading and audition. */
+  sound?: SoundSectionProps;
   /** Settings › Machines: the machine records and the pairing ops. */
   machines?: MachinesProps;
   /** Settings › Broker accounts and Setup & Security: volleyd's admin channel and where the Desk is. */
@@ -77,6 +84,16 @@ export interface SettingsWindowProps {
     onOpenSetup?: (repair: boolean) => void;
   };
 }
+
+/** Settings › Sound with nothing behind it (a caller that passes no `sound`). */
+const SOUND_OFF: SoundSectionProps = {
+  sound: SOUND0,
+  setSound: () => {},
+  loadTheme: async () => {},
+  audition: () => {},
+  disposeAudition: () => {},
+  canVibrate: false,
+};
 
 /** The account row's second line for an admin session (a redeemed admin token). */
 const ADMIN_ROLE = "Admin · manages accounts and setup";
@@ -113,6 +130,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
   const admin = authAdmin || peerAdmin === "admin";
 
   useFocusTrap(dialog);
+  usePanelSound();
   // Focus moves into the window so Escape works at once; it goes back on close.
   useEffect(() => {
     const opener = document.activeElement;
@@ -218,12 +236,16 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 setNotify={p.setNotify}
                 onArrange={p.onArrange}
                 {...(p.onResetLayout ? { onResetLayout: p.onResetLayout } : {})}
+                onOpenSound={() => setSec("sound")}
               />
             )}
+            {sec === "sound" && <Sound {...(p.sound ?? SOUND_OFF)} />}
             {sec === "appearance" && (
               <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
             )}
-            {sec === "supervisor" && <Supervisor config={p.config} transport={p.transport} />}
+            {sec === "supervisor" && (
+              <Supervisor config={p.config} transport={p.transport} leases={p.leases ?? {}} />
+            )}
             {sec === "claude" && (
               <ClaudeAccounts
                 accounts={p.claude?.accounts ?? {}}

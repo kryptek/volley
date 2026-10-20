@@ -29,7 +29,8 @@
  * Machines (SPEC §4.6.14): each paired machine's retained health record goes
  * into `machines` by name, taken only from the machine itself or volleyd and
  * only when it names its topic's machine. Which of them are machines at all
- * (configured hosts) is the section's call, at render time.
+ * (configured hosts) is the section's call, at render time. volleyd's
+ * readiness verdict on each (§4.6.15) goes into `readiness` by name.
  */
 import {
   type AgentAttention,
@@ -45,6 +46,7 @@ import {
   type LeasePoolPayload,
   type MachinePayload,
   ROLES,
+  type ReadinessPayload,
   type Receipts,
   type RegistryPayload,
   type Role,
@@ -96,7 +98,8 @@ export type Route =
   | { kind: "claudeAccount"; acct: string }
   | { kind: "signin"; acct: string }
   | { kind: "usage"; agentId: string }
-  | { kind: "machine"; name: string };
+  | { kind: "machine"; name: string }
+  | { kind: "readiness"; name: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
@@ -110,6 +113,9 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
     if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
     if (p.length === 4 && b === "machines" && c) return { kind: "machine", name: c };
+    if (p.length === 5 && b === "machines" && c && d === "readiness") {
+      return { kind: "readiness", name: c };
+    }
     return null;
   }
   if (a === "_waves") {
@@ -202,7 +208,22 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceSignin(state, route.acct, m);
     case "machine":
       return reduceMachine(state, route.name, m);
+    case "readiness":
+      return reduceReadiness(state, route.name, m);
   }
+}
+
+/**
+ * volleyd's readiness verdict on a machine (SPEC §4.6.15): taken only from
+ * volleyd (the broker lets no one else write it; the id is a sanity check)
+ * and only when it names its topic's machine; a cleared topic forgets it.
+ */
+function reduceReadiness(state: DeskState, name: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, readiness: keyed(state.readiness, name, undefined) };
+  const p = env.payload as Partial<ReadinessPayload> | undefined;
+  if (env.agent_id !== "volleyd" || p?.name !== name) return state;
+  return { ...state, readiness: keyed(state.readiness, name, p as ReadinessPayload) };
 }
 
 /**
@@ -269,6 +290,7 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
     ...optional("url", str(p.url) ?? prev?.url),
     ...optional("flow", str(p.flow) ?? prev?.flow),
     ...optional("attach", str(p.attach) ?? prev?.attach),
+    ...optional("manual_url", str(p.manual_url) ?? prev?.manual_url),
     ...optional("plan", str(p.plan)),
     ...optional("reason", str(p.reason)),
   };
@@ -320,6 +342,7 @@ export function resync(state: DeskState): DeskState {
     claudeAccounts: {},
     usage: {},
     machines: {},
+    readiness: {},
     unconfirmed: [...unconfirmed],
   };
 }
@@ -1033,6 +1056,12 @@ export function workingCount(state: DeskState): number {
     if (t === "working") return true;
     return (t === "spawning" || t === "registered") && a.lastProgress !== undefined;
   }).length;
+}
+
+/** Whether agent `id` is running: it has a status and it is not terminal. */
+export function isLiveAgent(state: DeskState, id: string): boolean {
+  const t = state.agents[id]?.status?.type;
+  return t !== undefined && !TERMINAL_STATUS.has(t);
 }
 
 /**

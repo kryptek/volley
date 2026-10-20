@@ -43,7 +43,8 @@
                 "pr_closed",
                 "pr_head_moved",
                 "spawn_budget_exhausted",
-                "account_limit"
+                "account_limit",
+                "machine_down"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
@@ -62,7 +63,7 @@
             "host": {
               "type": "string",
               "minLength": 1,
-              "description": "repo_untrusted / remote_repo_missing on a remote host: the host's name (wave file or the hosts tunable)."
+              "description": "repo_untrusted / remote_repo_missing on a remote host, and machine_down: the host's name (wave file or the hosts tunable)."
             },
             "target": {
               "type": "string",
@@ -105,6 +106,22 @@
               ],
               "description": "account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
             },
+            "down_since": {
+              "type": "string",
+              "format": "date-time",
+              "description": "machine_down: when the supervisor marked the host down, or since when it is draining, being removed or removed (spec section 4.6.14)."
+            },
+            "tasks": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+              "description": "machine_down: the wave's unfinished tasks on the host, running and queued."
+            },
+            "machine": {
+              "enum": ["down", "draining", "removing", "removed"],
+              "description": "machine_down: what is wrong with the host (absent: down). draining, removing and removed: nothing new starts there (spec section 4.6.15)."
+            },
             "resolved": {
               "type": "object",
               "required": ["answer", "by", "at"],
@@ -114,6 +131,11 @@
                 "at": { "type": "string", "format": "date-time" }
               }
             }
+          },
+          "if": { "properties": { "kind": { "const": "machine_down" } }, "required": ["kind"] },
+          "then": {
+            "required": ["host", "down_since", "tasks"],
+            "properties": { "task": { "type": "null" } }
           }
         }
       },

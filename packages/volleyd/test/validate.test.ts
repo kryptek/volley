@@ -2,7 +2,13 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { CONFIG_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_TOPIC } from "../src/control";
+import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
+import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { runCli } from "./helpers/run-cli";
 import { tempDir } from "./helpers/tmp";
 
@@ -64,7 +70,11 @@ describe("volleyd validate: the release branch", () => {
     expect(r.exitCode).toBe(0);
   });
 
+  /** An origin remote (never contacted: validate stays offline). */
+  const addOrigin = () => git(repo, "remote", "add", "origin", "https://example.com/repo.git");
+
   it("only origin/release/x (pushed from another clone) is enough", async () => {
+    addOrigin();
     git(repo, "update-ref", "refs/remotes/origin/release/x", "HEAD");
     const r = await runCli(["validate", waveFile(repo)]);
     expect(r.stderr).toBe("");
@@ -72,8 +82,66 @@ describe("volleyd validate: the release branch", () => {
   });
 
   it("the local branch is enough", async () => {
+    addOrigin();
     git(repo, "branch", "release/x");
     expect((await runCli(["validate", waveFile(repo)])).exitCode).toBe(0);
+  });
+
+  it("a local-only repo (no origin) with require_fresh_base on → BASE_STALE in one line, with the fix", async () => {
+    git(repo, "branch", "release/x");
+    const r = await runCli(["validate", waveFile(repo)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe(
+      `volleyd validate: BASE_STALE: ${repo} has no origin remote, so volleyd cannot fetch release/x before it cuts each agent's worktree (require_fresh_base is on). Fix: add the remote and push the branch (\`git -C ${repo} remote add origin <url>\`, then \`git -C ${repo} push -u origin release/x\`), or work from the local copy: \`volleyd config set require_fresh_base false\` (or \`config: { require_fresh_base: false }\` in the wave file).\n`,
+    );
+  });
+
+  it("a local-only repo is fine with require_fresh_base off: the wave's config:, or $VOLLEYD_HOME/config.yaml", async () => {
+    git(repo, "branch", "release/x");
+    const waved = await runCli([
+      "validate",
+      waveFile(repo, "{ issue: 1 }\nconfig: { require_fresh_base: false }"),
+    ]);
+    expect(waved.stderr).toBe("");
+    expect(waved.exitCode).toBe(0);
+    const home = join(dir, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.yaml"), "require_fresh_base: false\n");
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const global = await runCli(["validate", waveFile(repo)], env);
+    expect(global.stderr).toBe("");
+    expect(global.exitCode).toBe(0);
+  });
+
+  it("placement weights that reach all four at 0 across config.yaml and the wave's config: are refused", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-weights");
+    mkdirSync(home);
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nplacement:\n  weights: { usage: 0 }\n",
+    );
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    const zero = await runCli(
+      [
+        "validate",
+        waveFile(
+          repo,
+          "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0, slots: 0, mem: 0 } } }",
+        ),
+      ],
+      env,
+    );
+    expect(zero.exitCode).toBe(1);
+    expect(zero.stderr).toBe(
+      "volleyd validate: config.placement.weights: not all four weights may be 0 (cpu, slots, mem, usage) with the global config\n",
+    );
+    const ok = await runCli(
+      ["validate", waveFile(repo, "{ issue: 1 }\nconfig: { placement: { weights: { cpu: 0 } } }")],
+      env,
+    );
+    expect(ok.stderr).toBe("");
+    expect(ok.exitCode).toBe(0);
   });
 
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {
@@ -156,5 +224,119 @@ describe("volleyd validate: the brief preface", () => {
     const r = await runCli(["validate", waveFile(`brief_preface: ${file}\n`)]);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("not valid UTF-8");
+  });
+});
+
+describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
+  let dir: string;
+  let broker: TestBroker;
+  let pub: VolleyBroker;
+  beforeEach(async () => {
+    dir = realpathSync(tempDir("volleyd-validate-place-"));
+    broker = await startTestBroker();
+    pub = new VolleyBroker();
+    await pub.connect({ url: broker.url, agentId: "volleyd" });
+  });
+  afterEach(async () => {
+    await pub.disconnect();
+    await broker.close();
+  });
+
+  const retain = (
+    topic: string,
+    channel: string,
+    type: string,
+    payload: unknown,
+    agentId = "volleyd",
+  ) =>
+    pub.publish(
+      topic,
+      JSON.stringify(buildEnvelope({ agentId, parentId: null, channel, type, payload })),
+      { qos: 1, retain: true },
+    );
+  const machine = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    os: "linux",
+    cores: 16,
+    tunnel: "up",
+    load: [3.2, 3, 2],
+    agents: 0,
+    memory: { total_mb: 65536, available_pct: 71 },
+    last_seen: "2026-10-19T09:00:00.000Z",
+    ...over,
+  });
+  const verdict = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    ready: true,
+    reasons: [],
+    drain: false,
+    max_agents: 4,
+    placed: 0,
+    path_ok: { claude: true, bun: true },
+    requirements: { volley: "0.4.0" },
+    heavy: {},
+    usage: { account: null, five_hour_pct: 34 },
+    eligible: true,
+    checked_at: "2026-10-19T09:00:00.000Z",
+    ...over,
+  });
+  const waveFile = (head: string) => {
+    const file = join(dir, "w.yaml");
+    // The repo is not on this machine and every task is placed: no release-branch check here.
+    writeFileSync(
+      file,
+      `wave: w1\nrepo: ${join(dir, "elsewhere")}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\n${head}tasks:\n  T1: { issue: 1 }\n  T3: { issue: 3 }\n`,
+    );
+    return file;
+  };
+  const env = () => ({ VOLLEY_BROKER_URL: broker.url, VOLLEYD_HOME: join(dir, "home") });
+
+  it("prints where each auto task would go if admitted now, and that admission decides", async () => {
+    await retain(CONFIG_TOPIC, "_waves/_config", "config", {
+      ...CONFIG_DEFAULTS,
+      fleet: { local_name: "control" },
+    });
+    await retain(machineTopic("box-a"), MACHINE_CHANNEL, "machine", machine("box-a"), "box-a");
+    await retain(
+      machineTopic("control"),
+      MACHINE_CHANNEL,
+      "machine",
+      machine("control", {
+        kind: "supervisor",
+        tunnel: "local",
+        cores: 8,
+        load: [6, 6, 6],
+        memory: { total_mb: 8192, available_pct: 40 },
+      }),
+    );
+    await retain(
+      `${machineTopic("box-a")}/readiness`,
+      "_system/machines/readiness",
+      "readiness",
+      verdict("box-a", { max_agents: 1 }),
+    );
+    await retain(
+      `${machineTopic("control")}/readiness`,
+      "_system/machines/readiness",
+      "readiness",
+      verdict("control", { max_agents: 12, placed: 2 }),
+    );
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "if admitted now: T1 → box-a (0.85), T3 → local (0.58)\n  (from the machines' records now; the real decision is made at admission)\n",
+    );
+  });
+
+  it("a wave that does not place prints no preview; no supervisor config says so", async () => {
+    const plain = await runCli(["validate", waveFile("")], env());
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout).not.toContain("admitted now");
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "placement preview unavailable (no supervisor config on the broker): tasks are placed at admission\n",
+    );
   });
 });

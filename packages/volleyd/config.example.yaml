@@ -90,3 +90,18 @@
 #     tunnel:
 #       remote_port: 21883         # remote 127.0.0.1 port that reaches the broker
 #       supervise: true            # volleyd keeps `ssh -N -R` up itself
+#     max_agents: 4                # supervised agents it runs at once (1..100); hard_ceiling caps the total
+#     drain: false                 # true: no new placements there; its running agents finish
+
+# --- Fleet: fresh base + merge nudge (README "Base ref", "The pipeline and the merge-ready gate") ---
+# require_fresh_base: true       # a failed `git fetch origin <release>` refuses the spawn (BASE_STALE,
+#                                # retried with the usual backoff); false: cut from the host's last
+#                                # copy and journal a BASE_STALE warning
+# placement:
+#   nudge_on_merge: files        # when a wave's PR merges, steer its running implementers once:
+#                                # files (their task's files hints overlap the PR's), all, or off
+
+# --- Fleet: the supervisor's own machine (README "Fleet: readiness, the supervisor's card, Repair") ---
+# fleet:
+#   local_name: null             # its machine record's name; null: the host name's first label,
+#                                # lowercased. Never a hosts.<name> key.

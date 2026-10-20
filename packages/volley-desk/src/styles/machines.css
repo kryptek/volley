@@ -136,8 +136,218 @@
   flex: none;
 }
 
+/* F7: a machine's readiness, checks, usage and cap (SPEC §4.6.15). */
+.machine--down {
+  opacity: 0.62;
+}
+.m-ready {
+  margin: 0;
+  font-size: 12.5px;
+}
+.m-ready p {
+  margin: 0;
+}
+.m-ready--ok {
+  color: var(--ok);
+}
+.m-ready--warn {
+  color: #ffd60a;
+}
+.m-ready--bad {
+  color: #ff6961;
+}
+.m-ready--down {
+  color: var(--mute);
+}
+.m-reasons {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  color: var(--ink);
+  font-size: 12px;
+}
+.m-checks {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.m-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+}
+.m-glyph {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  font-weight: 700;
+}
+.m-check--ok .m-glyph {
+  color: var(--ok);
+}
+.m-check--warn .m-glyph {
+  color: #ffd60a;
+}
+.m-check--block .m-glyph {
+  color: #ff6961;
+}
+.m-check-id {
+  color: var(--mute);
+}
+.m-check-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.m-fix {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 18px;
+}
+.m-usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+.m-meter {
+  flex: 1;
+  min-width: 40px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.m-meter i {
+  display: block;
+  height: 100%;
+  background: #34c759;
+}
+.m-cap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px 8px;
+}
+.m-cap label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.m-cap input {
+  width: 64px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 5px 8px;
+  border-radius: 8px;
+}
+.m-steps {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.pair--machine .m-cap {
+  margin: 4px 0 10px;
+}
+.m-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* Repair / Remove sheets: a modal over the section; full-screen on a phone. */
+.m-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.m-sheet {
+  box-sizing: border-box;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--panel-solid);
+  color: var(--ink);
+  outline: none;
+}
+.m-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.m-sheet-sub {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.m-plan {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.m-plan li {
+  overflow-wrap: anywhere;
+}
+.m-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.m-sheet .ny-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.m-sheet .btn--danger {
+  background: #ff453a;
+  border-color: #ff453a;
+  color: #fff;
+}
+
 @media (max-width: 720px) {
   .machines {
     grid-template-columns: 1fr;
   }
+  .m-sheet {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    max-height: none;
+    border-radius: 0;
+  }
+}
+
+/* Sign in on <machine>: the phone disclosure. */
+.m-phone {
+  margin-top: 10px;
+}
+
+.m-phone summary {
+  cursor: pointer;
 }

@@ -101,7 +101,31 @@ export interface WaveTask {
     ci?: "green" | "red" | "running" | "none";
   };
   evidence_path?: string;
+  /** The remote host the task's agents run on; absent for the supervisor's own machine. */
+  host?: string;
+  /** Where the task was placed and why (SPEC §4.6.15); absent until it is placed. */
+  placement?: TaskPlacement;
+  /** The release-branch commit the task's current worktree was cut from. */
+  base_sha?: string;
   [key: string]: unknown;
+}
+
+/** One machine placement considered, best first: volleyd writes `line`, the Desk only shows it. */
+export interface PlacementCandidate {
+  host: string;
+  /** 0..1; `null` when the machine was not eligible. */
+  score: number | null;
+  line: string;
+}
+
+/** `tasks[].placement` (SPEC §4.6.1): the machine a task was placed on, by whom and why. */
+export interface TaskPlacement {
+  /** A machine name: the supervisor's own machine under its `fleet.local_name`. */
+  host: string;
+  by: "auto" | "wave_file" | "decision";
+  score: number | null;
+  decided_at: string;
+  candidates: PlacementCandidate[];
 }
 
 export type PipelineStep = string | string[];
@@ -163,6 +187,7 @@ export const DECISION_KINDS = [
   "pr_head_moved",
   "spawn_budget_exhausted",
   "account_limit",
+  "machine_down",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -183,6 +208,11 @@ export interface DecisionPayload {
   pct?: number;
   resets_at?: string | null;
   suggested?: string | null;
+  /** `machine_down` extras (SPEC §4.6.2): the host, since when, its unfinished tasks, its state. */
+  host?: string;
+  down_since?: string;
+  tasks?: string[];
+  machine?: "down" | "draining" | "removing" | "removed";
 }
 
 // ------------------------------------------------------- config and leases
@@ -191,7 +221,10 @@ export interface DecisionPayload {
 export interface Tunables {
   hard_ceiling?: number;
   spawn_budget_multiplier?: number;
-  lease_pools?: Record<string, { capacity: number; ttl_s?: number; match?: string[] }>;
+  lease_pools?: Record<
+    string,
+    { capacity: number; per_machine?: number; ttl_s?: number; match?: string[] }
+  >;
   admission?: {
     memory_pressure_max_level?: number;
     cmux_ping_max_ms?: number;
@@ -211,6 +244,10 @@ export interface Tunables {
   screen_tail_interval_s?: number;
   /** Claude account profiles (SPEC §4.6.11); absent from a supervisor that predates them. */
   claude?: { default_account?: string | null; warn_at_pct?: number };
+  /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
+  hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
+  /** The Fleet's names (SPEC §4.6.15): `local_name` is the supervisor's own machine. */
+  fleet?: { local_name?: string | null };
   [key: string]: unknown;
 }
 
@@ -225,8 +262,11 @@ export interface ConfigPayload extends Tunables {
 export interface LeasePoolPayload {
   pool: string;
   capacity: number;
-  held: { lease_id: string; holder: string; since: string; ttl_s: number }[];
-  queue: { lease_id: string; holder: string; since: string }[];
+  /** The cap per machine (SPEC §4.6.5); absent means `capacity`. */
+  per_machine?: number;
+  /** `host`: the holder's machine; `null` for a holder volleyd did not spawn, absent from an older one. */
+  held: { lease_id: string; holder: string; host?: string | null; since: string; ttl_s: number }[];
+  queue: { lease_id: string; holder: string; host?: string | null; since: string }[];
   reasons: string[];
 }
 
@@ -274,23 +314,37 @@ export interface ClaudeSignin {
   flow?: string;
   /** The tmux session to attach to for a `manual_code` sign-in. */
   attach?: string;
+  /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+  manual_url?: string;
   plan?: string;
   reason?: string;
   /** Local receipt time (ms). */
   at: number;
 }
 
+/** One doctor check on a machine record (SPEC §4.6.15): states only, never a fix's text. */
+export interface MachineCheck {
+  id: string;
+  ok: boolean;
+  /** `block`: failing makes the machine not ready; `warn`: shown only. */
+  severity: "block" | "warn";
+  detail: string;
+}
+
 /**
- * machine.schema.json payload: a paired machine's retained health record on
+ * machine.schema.json payload: a machine's retained health record on
  * `volley/_system/machines/<name>` (SPEC §4.6.14), published by the machine
- * every heartbeat and by volleyd when the heartbeat stops.
+ * every heartbeat and by volleyd when the heartbeat stops. volleyd publishes
+ * its own machine's (`kind: "supervisor"`, `tunnel: "local"`). The Fleet
+ * fields (§4.6.15) come with a doctor report.
  */
 export interface MachinePayload {
   name: string;
+  kind?: "peer" | "supervisor";
   os: string;
   arch?: string;
   cores: number;
-  tunnel: "up" | "down";
+  tunnel: "up" | "down" | "local";
   /** Why the tunnel is down; absent while it is up. */
   reason?: "disconnect" | "heartbeat_timeout";
   /** The 1, 5 and 15 minute load averages. */
@@ -298,6 +352,46 @@ export interface MachinePayload {
   agents: number;
   remote_port?: number;
   last_seen: string;
+  memory?: { total_mb: number; available_pct: number };
+  disk?: { path: string; free_gb: number; free_pct: number };
+  uptime_s?: number;
+  versions?: Record<string, string | null>;
+  auth?: {
+    gh: "ok" | "unauthenticated" | "missing" | "no_write";
+    claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
+    trust: "ok" | "missing" | "unknown";
+    claude_plan?: string;
+  };
+  repo?: {
+    path: string;
+    exists: boolean;
+    origin?: string;
+    release_branch?: string;
+    fetched_at?: string | null;
+  };
+  checks?: MachineCheck[];
+  doctor_at?: string;
+}
+
+/**
+ * readiness.schema.json payload: volleyd's verdict on a machine, on
+ * `volley/_system/machines/<name>/readiness` (SPEC §4.6.15).
+ */
+export interface ReadinessPayload {
+  name: string;
+  ready: boolean;
+  /** One line per blocker; empty when ready. */
+  reasons: string[];
+  drain: boolean;
+  max_agents: number;
+  placed: number;
+  path_ok: { claude: boolean | null; bun: boolean | null };
+  requirements: { volley: string; bun?: string; sharing?: Record<string, string> };
+  heavy: Record<string, { held: number; per_machine: number }>;
+  usage: { account: string | null; five_hour_pct: number | null };
+  eligible: boolean;
+  ineligible_reason?: string;
+  checked_at: string;
 }
 
 // ------------------------------------------------------------------- store
@@ -464,6 +558,8 @@ export interface DeskState {
   signins?: Record<string, ClaudeSignin>;
   /** Paired machines' retained health records, by machine name. */
   machines?: Record<string, MachinePayload>;
+  /** volleyd's readiness verdicts, by machine name. */
+  readiness?: Record<string, ReadinessPayload>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

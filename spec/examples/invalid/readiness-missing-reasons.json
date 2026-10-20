@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:30:05.000Z",
+  "channel": "_system/machines/readiness",
+  "type": "readiness",
+  "payload": {
+    "name": "box-a",
+    "ready": true,
+    "drain": false,
+    "max_agents": 4,
+    "placed": 1,
+    "path_ok": { "claude": true, "bun": true },
+    "requirements": { "volley": "0.4.0" },
+    "heavy": {},
+    "usage": { "account": "primary", "five_hour_pct": 12 },
+    "eligible": true,
+    "checked_at": "2026-10-19T09:30:05.000Z"
+  }
+}

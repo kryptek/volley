@@ -13,6 +13,7 @@ import {
   mintModelSwitchToken,
   mintScriptToken,
   mintSetupToken,
+  mintSigninForwardToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
@@ -1018,5 +1019,105 @@ describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () =>
 
   it("a relative root admits nothing", () => {
     expect(() => seal(join(root, "work"), { VOLLEY_CLAUDE_DIR: "rel/claude" })).toThrow(FenceError);
+  });
+});
+
+describe("the sign-in forward (F8): `ssh -N -L` only with the token a remote sign-in minted", () => {
+  const TARGET = "dev@box-a";
+  const fwd = (port: number | string, other: number | string = port, target = TARGET) => [
+    "ssh",
+    "-N",
+    "-L",
+    `127.0.0.1:${port}:127.0.0.1:${other}`,
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ConnectTimeout=10",
+    target,
+  ];
+
+  it("is allowed with the token minted for exactly that target and port", () => {
+    const forward = mintSigninForwardToken(TARGET, 51051, []);
+    expect(() => assertAllowed(fwd(51051), { forward })).not.toThrow();
+  });
+
+  it("is denied without a token, or with a look-alike one", () => {
+    expect(() => assertAllowed(fwd(51051))).toThrow(FenceError);
+    const fake = Object.freeze({ target: TARGET, port: 51051 });
+    expect(() => assertAllowed(fwd(51051), { forward: fake })).toThrow(FenceError);
+  });
+
+  it("is denied with a token for another target or another port", () => {
+    expect(() =>
+      assertAllowed(fwd(51051), { forward: mintSigninForwardToken("dev@box-b", 51051, []) }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(fwd(51051), { forward: mintSigninForwardToken(TARGET, 51052, []) }),
+    ).toThrow(FenceError);
+  });
+
+  it("is denied with different ports on the two sides", () => {
+    const forward = mintSigninForwardToken(TARGET, 51051, []);
+    expect(() => assertAllowed(fwd(51051, 22), { forward })).toThrow(FenceError);
+    expect(() => assertAllowed(fwd(22, 51051), { forward })).toThrow(FenceError);
+  });
+
+  it("is denied with another bind address or destination host", () => {
+    const forward = mintSigninForwardToken(TARGET, 51051, []);
+    const argv = fwd(51051);
+    for (const spec of [
+      "0.0.0.0:51051:127.0.0.1:51051",
+      "51051:127.0.0.1:51051",
+      "127.0.0.1:51051:example.com:51051",
+      "*:51051:127.0.0.1:51051",
+    ]) {
+      argv[3] = spec;
+      expect(() => assertAllowed(argv, { forward }), spec).toThrow(FenceError);
+    }
+  });
+
+  it("a token is never minted for a port outside 1024..65535 or a broker tunnel's port", () => {
+    for (const port of [0, 22, 1023, 65536, 1.5, -1]) {
+      expect(() => mintSigninForwardToken(TARGET, port, []), String(port)).toThrow(FenceError);
+    }
+    expect(() => mintSigninForwardToken(TARGET, 18830, [1883, 18830])).toThrow(FenceError);
+    expect(() => mintSigninForwardToken("-oProxyCommand=sh", 51051, [])).toThrow(FenceError);
+    expect(() => mintSigninForwardToken(TARGET, 1024, [])).not.toThrow();
+    expect(() => mintSigninForwardToken(TARGET, 65535, [])).not.toThrow();
+  });
+
+  it("is denied with any extra or missing argv", () => {
+    const forward = mintSigninForwardToken(TARGET, 51051, []);
+    const base = fwd(51051);
+    const variants: string[][] = [
+      [...base, "bash"],
+      [...base.slice(0, -1), "-o", "ProxyCommand=sh", TARGET],
+      [...base.slice(0, -1), "-R", "51051:127.0.0.1:51051", TARGET],
+      ["ssh", "-N", "-L", "127.0.0.1:51051:127.0.0.1:51051", TARGET],
+      ["ssh", "-T", ...base.slice(2)],
+      [
+        "ssh",
+        "-N",
+        "-L",
+        "127.0.0.1:51051:127.0.0.1:51051",
+        "-L",
+        "127.0.0.1:2:127.0.0.1:2",
+        ...base.slice(4),
+      ],
+      base.map((a) => (a === "ConnectTimeout=10" ? "ConnectTimeout=1;sh" : a)),
+    ];
+    for (const argv of variants) {
+      expect(() => assertAllowed(argv, { forward }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("the token allows the forward only, nothing else", () => {
+    const forward = mintSigninForwardToken(TARGET, 51051, []);
+    expect(() => assertAllowed(["git", "push"], { forward })).toThrow(FenceError);
+    expect(() => assertAllowed(["ssh", "-T", TARGET, "bash", "-s"], { forward })).toThrow(
+      FenceError,
+    );
   });
 });

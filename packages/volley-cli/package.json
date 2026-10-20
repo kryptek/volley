@@ -1,6 +1,6 @@
 {
   "name": "volley-cli",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "Volley CLI — `volley pub / sub / wait / list` for shell scripts and CI",
   "license": "Apache-2.0",
@@ -17,6 +17,7 @@
     "./commands/desk-serve": "./src/commands/desk-serve.ts",
     "./commands/setup": "./src/commands/setup.ts",
     "./io": "./src/io.ts",
+    "./peer/machine": "./src/peer/checks/machine.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/broker": "./src/setup/broker.ts",
     "./setup/cmux": "./src/setup/cmux.ts",
@@ -25,14 +26,16 @@
     "./setup/service-path": "./src/setup/service-path.ts",
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",
-    "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts"
+    "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts",
+    "./test/vm-stat": "./test/fixtures/vm-stat.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "volley-mcp": "workspace:*"
+    "volley-mcp": "workspace:*",
+    "volleyd": "workspace:*"
   },
   "devDependencies": {
     "aedes": "^0.51.0",

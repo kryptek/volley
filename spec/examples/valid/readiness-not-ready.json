@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:30:05.000Z",
+  "channel": "_system/machines/readiness",
+  "type": "readiness",
+  "payload": {
+    "name": "box-b",
+    "ready": false,
+    "reasons": [
+      "claude is not on the non-interactive ssh PATH",
+      "volley 0.3.0 is older than the supervisor's 0.4.0"
+    ],
+    "drain": false,
+    "max_agents": 4,
+    "placed": 0,
+    "path_ok": { "claude": false, "bun": true },
+    "requirements": { "volley": "0.4.0" },
+    "heavy": {},
+    "usage": { "account": null, "five_hour_pct": null },
+    "eligible": false,
+    "ineligible_reason": "not ready: claude is not on the non-interactive ssh PATH",
+    "checked_at": "2026-10-19T09:30:05.000Z"
+  }
+}

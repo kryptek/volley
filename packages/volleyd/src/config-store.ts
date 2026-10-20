@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { dateOf, systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
+import { localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type { ConfigPayload, Tunables, TunablesPatch, WaveId } from "./types";
@@ -78,6 +79,76 @@ function errorsFor(ref: string, value: unknown): PathError[] {
 const TUNABLES = "config.schema.json#/$defs/tunables";
 
 /**
+ * The tunables' schema errors, with a lease pool's `per_machine` above its `capacity` said
+ * plainly at the field's path: the schema can only express that bound as `if`/`then` pairs,
+ * whose errors (`must match "then" schema`) name neither the field nor the bound.
+ */
+function tunablesErrors(value: unknown, host: string): PathError[] {
+  return [...fleetNameErrors(value, host), ...poolErrors(value).map(rewordWeights)];
+}
+
+/** The reason all four `placement.weights` at 0 are refused with (SPEC §4.6.15). */
+export const ALL_ZERO_WEIGHTS = "not all four weights may be 0 (cpu, slots, mem, usage)";
+
+/** The schema's `not` on all-zero weights (`must NOT be valid`), said plainly. */
+export function rewordWeights(e: PathError): PathError {
+  return e.path.endsWith("placement.weights") && e.reason === "must NOT be valid"
+    ? { path: e.path, reason: ALL_ZERO_WEIGHTS }
+    : e;
+}
+
+/**
+ * The supervisor's own machine name (`fleet.local_name`, else derived from `host`) is never a
+ * configured host's (SPEC §4.6.15): two machines would write one record topic.
+ */
+function fleetNameErrors(value: unknown, host: string): PathError[] {
+  if (!isPlain(value) || !isPlain(value.hosts)) return [];
+  const set = isPlain(value.fleet) ? value.fleet.local_name : undefined;
+  const name = localMachineName(typeof set === "string" ? set : null, host);
+  if (!Object.hasOwn(value.hosts, name)) return [];
+  return typeof set === "string" && set === name
+    ? [{ path: "fleet.local_name", reason: `"${name}" is a configured host (hosts.${name})` }]
+    : [
+        {
+          path: `hosts.${name}`,
+          reason: `"${name}" is the supervisor's own machine name (derived from its host name; set fleet.local_name to name it otherwise)`,
+        },
+      ];
+}
+
+function poolErrors(value: unknown): PathError[] {
+  const pools = isPlain(value) && isPlain(value.lease_pools) ? value.lease_pools : {};
+  const over = Object.entries(pools).flatMap(([name, p]) =>
+    isPlain(p) &&
+    typeof p.capacity === "number" &&
+    typeof p.per_machine === "number" &&
+    p.per_machine > p.capacity
+      ? [{ name, capacity: p.capacity }]
+      : [],
+  );
+  if (over.length === 0) return errorsFor(TUNABLES, value);
+  // Everything else about the value is still checked, with the over-cap fields left out.
+  const without = (p: Plain) =>
+    Object.fromEntries(Object.entries(p).filter(([k]) => k !== "per_machine"));
+  const rest = {
+    ...(value as Plain),
+    lease_pools: Object.fromEntries(
+      Object.entries(pools).map(([name, p]) => [
+        name,
+        isPlain(p) && over.some((o) => o.name === name) ? without(p) : p,
+      ]),
+    ),
+  };
+  return [
+    ...over.map(({ name, capacity }) => ({
+      path: `lease_pools.${name}.per_machine`,
+      reason: `must be at most capacity (${capacity})`,
+    })),
+    ...errorsFor(TUNABLES, rest),
+  ];
+}
+
+/**
  * The supervisor config model: built-in defaults ← `$VOLLEYD_HOME/config.yaml` ← per-wave
  * `config:` overrides. Every subsystem reads tunables through `get()`/`effective()` so a
  * `config_set` takes effect without a restart. Changes are validated against the T1 config
@@ -97,12 +168,15 @@ export class ConfigStore {
   private updatedAt: string;
   private updatedBy: string;
   private readonly listeners: ((c: ConfigChange) => void)[] = [];
+  /** The machine's host name, from which `fleet.local_name: null` derives the machine name. */
+  private readonly hostname: string;
 
   private constructor(
-    opts: { home: string; system: Journal; now: () => Date; defaults: Tunables },
+    opts: { home: string; system: Journal; now: () => Date; defaults: Tunables; hostname: string },
     layer: TunablesPatch,
   ) {
     this.file = join(opts.home, "config.yaml");
+    this.hostname = opts.hostname;
     this.system = opts.system;
     this.now = opts.now;
     this.defaults = opts.defaults;
@@ -121,8 +195,11 @@ export class ConfigStore {
     system: Journal;
     now?: () => Date;
     defaults?: Tunables;
+    /** Tests: the host name `fleet.local_name: null` derives from (default: the machine's). */
+    hostname?: string;
   }): ConfigStore {
     const defaults = opts.defaults ?? CONFIG_DEFAULTS;
+    const host = opts.hostname ?? hostname();
     const file = join(opts.home, "config.yaml");
     let layer: TunablesPatch = {};
     if (existsSync(file)) {
@@ -136,14 +213,25 @@ export class ConfigStore {
       }
       layer = (parsed ?? {}) as TunablesPatch;
       // The file is a patch over the defaults: what must be valid is the merged result.
-      const errors = errorsFor(TUNABLES, isPlain(layer) ? merge(defaults, layer) : layer);
+      const errors = tunablesErrors(isPlain(layer) ? merge(defaults, layer) : layer, host);
       if (errors.length > 0) throw new ConfigError(file, errors);
     }
     return new ConfigStore(
       // real clock: the default when the daemon injects no clock
-      { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults },
+      { ...opts, now: opts.now ?? (() => dateOf(systemClock)), defaults, hostname: host },
       layer,
     );
+  }
+
+  /**
+   * What a wave's `config:` would make invalid once merged over the global config, which its own
+   * schema check cannot see: all four `placement.weights` at 0 between the two layers.
+   */
+  waveOverrideErrors(overrides: TunablesPatch): PathError[] {
+    const w = merge(this.global, overrides).placement.weights;
+    return Object.values(w).every((v) => v === 0)
+      ? [{ path: "config.placement.weights", reason: `${ALL_ZERO_WEIGHTS} with the global config` }]
+      : [];
   }
 
   /** Register (or replace) a wave's `config:` overrides. Validated by the wave-file schema. */
@@ -177,14 +265,24 @@ export class ConfigStore {
     return v;
   }
 
-  /** The retained `volley/_waves/_config` payload (config.schema.json). */
+  /**
+   * The retained `volley/_waves/_config` payload (config.schema.json). `fleet.local_name` is the
+   * resolved name, never null: clients recognise the supervisor's machine by it.
+   */
   retainedPayload(): ConfigPayload {
+    const eff = this.effective();
     return {
       version: this.version,
       updated_at: this.updatedAt,
       updated_by: this.updatedBy,
-      ...this.effective(),
+      ...eff,
+      fleet: { ...eff.fleet, local_name: this.localName() },
     };
+  }
+
+  /** The supervisor's own machine name: `fleet.local_name`, else derived from the host name. */
+  localName(): string {
+    return localMachineName(this.global.fleet?.local_name ?? null, this.hostname);
   }
 
   onChange(listener: (c: ConfigChange) => void): void {
@@ -206,7 +304,7 @@ export class ConfigStore {
     else rejected.push(...emptyObjects(patch));
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(this.defaults, nextLayer);
-    if (rejected.length === 0) rejected.push(...errorsFor(TUNABLES, nextGlobal));
+    if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal, this.hostname));
     if (rejected.length > 0) return { applied: false, rejected };
     return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
   }

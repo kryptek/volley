@@ -520,6 +520,71 @@ describe("volley lease", () => {
   });
 });
 
+describe("volley lease status on a machine-aware pool", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "volleyd" });
+    const since = "2026-10-19T12:00:00.000Z";
+    const held = (lease_id: string, holder: string, host: string | null) => ({
+      lease_id,
+      holder,
+      host,
+      since,
+      ttl_s: 3600,
+    });
+    const payload = {
+      pool: "backend-it",
+      capacity: 4,
+      per_machine: 1,
+      held: [
+        held("l-1", "hand-1", null),
+        held("l-2", "agent-b", "box-b"),
+        held("l-3", "agent-a", "box-a"),
+      ],
+      queue: [{ lease_id: "l-4", holder: "agent-c", host: "box-a", since }],
+      reasons: ["queued l-4: 1/1 backend-it leases held on box-a (per machine)"],
+    };
+    await b.publish(
+      "volley/_system/leases/backend-it",
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "volleyd",
+          parentId: null,
+          channel: "_system/leases",
+          type: "lease_pool",
+          payload,
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await b.disconnect();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("groups holders and queued requests under their host, (unknown host) last", async () => {
+    const r = await runCli({ argv: ["lease", "status", "--broker-url", tb.url] });
+    expect(r.exitCode).toBe(0);
+    const at = "since 2026-10-19T12:00:00.000Z";
+    expect(r.stdout).toBe(
+      [
+        "backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it leases held on box-a (per machine)",
+        "  box-a  1/1 held",
+        `    held    l-3  agent-a  ${at}`,
+        `    queued  l-4  agent-c  ${at}`,
+        "  box-b  1/1 held",
+        `    held    l-2  agent-b  ${at}`,
+        "  (unknown host)  1 held",
+        `    held    l-1  hand-1  ${at}`,
+        "",
+      ].join("\n"),
+    );
+  });
+});
+
 describe("volley lease with a supervisor that never answers", () => {
   it("run: gives up after three unanswered re-sends and runs unleased", async () => {
     const tb = await startTestBroker();

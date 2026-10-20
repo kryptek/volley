@@ -1,10 +1,14 @@
 {
   "name": "volley-desk",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "Volley Desk \u2014 an infinite canvas of live wave and agent windows over MQTT (Vite + React 19 + React Bits)",
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./sounds-events": "./src/sounds/events.ts",
+    "./sounds-themes": "./src/sounds/themes.ts"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -17,7 +17,7 @@ import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
 import { sealLaunchScript } from "./fence";
-import type { Host } from "./hosts/host";
+import type { Host, WorktreeResult } from "./hosts/host";
 import {
   type AgentCredentials,
   type BrokerCredentials,
@@ -113,6 +113,12 @@ export interface SpawnRequest {
    * fresh one: an account move of a pipeline role (claude/move.ts moveRespawn).
    */
   worktreeAttempt?: number;
+  /**
+   * An implementer respawn (F6): the branch an earlier attempt of the role was cut on. When
+   * origin has it, this attempt continues on it (cut from origin's copy, the same name) and its
+   * brief names the branch and the PR open from it, so no second branch or PR is started.
+   */
+  continueBranch?: string;
 }
 
 export interface SpawnDeps {
@@ -148,7 +154,8 @@ export interface SpawnDeps {
     | "heartbeat_alarm_s"
     | "brief_preface_max_bytes"
     | "agent_mcp"
-  >;
+  > &
+    Partial<Pick<Tunables, "require_fresh_base">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -384,6 +391,59 @@ function loadPreface(wave: Wave, deps: SpawnDeps) {
   }
 }
 
+/** A branch an earlier attempt pushed, and the PR open from it (if any). */
+interface CarriedBranch {
+  branch: string;
+  pr?: { number: number; url: string };
+}
+
+/**
+ * Whether origin has `branch` (fetched, then its remote-tracking ref read, as artifacts.ts
+ * verifies a push), and the open PR from it. Null when it was never pushed: the attempt then
+ * starts a fresh branch.
+ */
+async function pushedBranch(
+  exec: Host["exec"],
+  repo: string,
+  branch: string,
+): Promise<CarriedBranch | null> {
+  const fetched = await exec(["git", "-C", repo, "fetch", "--quiet", "origin", branch]);
+  if (fetched.code !== 0) return null;
+  const ref = await exec([
+    "git",
+    "-C",
+    repo,
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `refs/remotes/origin/${branch}`,
+  ]);
+  if (ref.code !== 0 || ref.stdout.trim() === "") return null;
+  const prs = await exec(
+    ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,url,headRefName"],
+    { cwd: repo },
+  );
+  let list: { number?: unknown; url?: unknown; headRefName?: unknown }[] = [];
+  try {
+    const parsed: unknown = prs.code === 0 ? JSON.parse(prs.stdout) : [];
+    if (Array.isArray(parsed)) list = parsed;
+  } catch {}
+  // `gh pr list --head` can return another branch's PR: only an exact head match counts.
+  const pr = list.find((p) => p.headRefName === branch);
+  return typeof pr?.number === "number" && typeof pr.url === "string"
+    ? { branch, pr: { number: pr.number, url: pr.url } }
+    : { branch };
+}
+
+/** The brief's note for an attempt that continues an earlier one's pushed branch. */
+function carriedNote(c: CarriedBranch, release: string): string {
+  const pr =
+    c.pr !== undefined
+      ? `PR #${c.pr.number} (${c.pr.url}) is open from it: push your commits to \`${c.branch}\` and that PR picks them up. Do not open another PR.`
+      : `No PR is open from it yet: open one from \`${c.branch}\` against \`${release}\` (gh pr create --base ${release}).`;
+  return `An earlier attempt of this task pushed \`${c.branch}\`, and this worktree continues it: it is that branch, cut from origin's copy. Read what is already there (git log ${release}..HEAD) and carry on from it; do not start over on a new branch. ${pr}`;
+}
+
 /** Steps 2–5 for one attempt: everything up to a running terminal and a live watch. */
 async function launchAttempt(
   ctx: Ctx,
@@ -394,15 +454,42 @@ async function launchAttempt(
 ): Promise<Launched> {
   const { req, deps, task } = ctx;
   const { host } = deps;
-  const branch = branchName(req.wave.wave, req.task, req.role, attempt);
-  const wt = await host.prepareWorktree({
+  const carried =
+    req.start === undefined && req.continueBranch !== undefined
+      ? await pushedBranch(host.exec, ctx.repo, req.continueBranch)
+      : null;
+  const branch = carried?.branch ?? branchName(req.wave.wave, req.task, req.role, attempt);
+  const cut = await host.prepareWorktree({
     repo: ctx.repo,
     path: ctx.worktree,
     branch,
-    base: req.start?.ref ?? req.wave.release_branch,
+    // A carried branch is fetched and cut like the release branch: from origin's copy.
+    base: carried?.branch ?? req.start?.ref ?? req.wave.release_branch,
     ...(req.start?.detach === true ? { detach: true } : {}),
-    ...(req.start === undefined ? { releaseBase: true } : {}),
+    ...(req.start === undefined
+      ? { releaseBase: true, requireFresh: deps.tunables.require_fresh_base !== false }
+      : {}),
   });
+  // A carried branch's tip is not the task's base: the first attempt's base_sha stands.
+  const { base: _tip, ...carriedCut } = cut;
+  const wt: WorktreeResult = carried !== null ? carriedCut : cut;
+  // require_fresh_base off and the fetch failed: cut from the host's last copy, said out loud.
+  if (wt.base !== undefined && !wt.base.fresh) {
+    await deps.journal({
+      type: "alarm_raised",
+      task: req.task,
+      data: {
+        code: "BASE_STALE",
+        severity: "warning",
+        message: `${req.wave.release_branch} could not be fetched (${wt.base.fetch_error ?? "fetch failed"}); require_fresh_base is off, so ${branch} was cut from the last fetched copy at ${wt.base.sha.slice(0, 7)}`,
+        role: req.role,
+        attempt,
+        host: host.name,
+        base_sha: wt.base.sha,
+        ...(wt.base.fetch_error !== undefined ? { fetch_error: wt.base.fetch_error } : {}),
+      },
+    });
+  }
 
   // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
   if (req.role !== "quality_reviewer")
@@ -440,9 +527,13 @@ async function launchAttempt(
     hygiene_contract: hygiene.contract,
   });
   const brief = withPreface(preface, rendered);
+  const notes = [
+    ...(carried !== null ? [carriedNote(carried, req.wave.release_branch)] : []),
+    ...(req.resumeNote !== undefined ? [req.resumeNote] : []),
+  ];
   await host.writeFile(
     briefPath,
-    req.resumeNote !== undefined ? `${brief.trimEnd()}\n\n---\n\n${req.resumeNote}\n` : brief,
+    notes.length > 0 ? `${brief.trimEnd()}\n\n---\n\n${notes.join("\n\n")}\n` : brief,
   );
   if (deps.briefGate !== null)
     await runBriefGate(host.exec, deps.briefGate, briefPath, ctx.worktree);
@@ -532,6 +623,7 @@ async function launchAttempt(
         worktree: ctx.worktree,
         branch: wt.branch,
         worktree_reused: wt.reused,
+        ...(wt.base !== undefined ? { base_sha: wt.base.sha } : {}),
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),

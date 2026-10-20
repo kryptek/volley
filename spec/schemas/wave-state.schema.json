@@ -119,12 +119,21 @@
         "host": {
           "type": "string",
           "minLength": 1,
-          "description": "The remote host the task's agents run on (its name from the wave file); absent for the supervisor's own host."
+          "description": "The remote host the task's agents run on (its name from the wave file, the hosts tunable or placement); absent for the supervisor's own host."
         },
         "host_down": {
           "type": "string",
           "minLength": 1,
           "description": "Set while the task's host is a paired machine whose tunnel is down (SPEC §4.6.14): why, e.g. 'no heartbeat for 90 s'. Covers running agents too, not only parked spawns; absent while the machine is up."
+        },
+        "placement": {
+          "$ref": "#/$defs/placement",
+          "description": "Where the task was placed and why (spec section 4.6.15); absent until the supervisor places it."
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,64}$",
+          "description": "The release-branch commit the task's current worktree was cut from (spec section 4.6.15)."
         },
         "queued_steers": {
           "type": "integer",
@@ -210,6 +219,49 @@
         }
       }
     },
+    "placement": {
+      "type": "object",
+      "required": ["host", "by", "score", "decided_at", "candidates"],
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/hostName",
+          "description": "The machine the task runs on; the supervisor's own machine under its fleet.local_name."
+        },
+        "by": {
+          "enum": ["auto", "wave_file", "decision"],
+          "description": "auto: the placement engine chose. wave_file: the wave file named the host. decision: an answered decision (machine_down, a respawn) moved it."
+        },
+        "score": {
+          "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }],
+          "description": "The chosen host's score; null when the host was not scored (by wave_file)."
+        },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "candidates": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Every machine considered, best first. The supervisor writes each line; a client shows it and never computes its own.",
+          "items": { "$ref": "#/$defs/placementCandidate" }
+        }
+      }
+    },
+    "placementCandidate": {
+      "type": "object",
+      "required": ["host", "score", "line"],
+      "properties": {
+        "host": { "$ref": "#/$defs/hostName" },
+        "score": {
+          "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }],
+          "description": "null: not eligible, or not scored."
+        },
+        "line": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Why this machine scored as it did, or why it was not eligible, in one human-readable line."
+        }
+      }
+    },
+    "hostName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
     "briefPreface": {
       "type": "object",
       "required": ["path", "sha256", "bytes"],

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
   closeSync,
   existsSync,
+  constants as fsConstants,
   mkdirSync,
   openSync,
   readFileSync,
@@ -10,14 +12,24 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import {
+  availableParallelism,
+  freemem,
+  homedir,
+  loadavg,
+  arch as osArch,
+  platform,
+  totalmem,
+  uptime,
+} from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { countLiveAgents } from "volley-cli/setup/broker";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
+import pkg from "../package.json";
 import {
   AUTH_CHANNEL,
   AUTH_OPS_FILTER,
@@ -37,17 +49,23 @@ import { type ActivityEvidence, newestWrite } from "./activity-evidence";
 import {
   type AdmissionState,
   type AdmissionSummary,
+  type HostSamples,
+  type HostThresholds,
   type Sample,
   type Samples,
   type Verdict,
   allowJson,
   decide,
+  foldHost,
+  hostSamples,
+  machineReasons,
   summaryPayload,
 } from "./admission";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
+import { type Sharing, readSharing } from "./claude/sharing";
 import {
   type LimitSeen,
   USAGE_FILTER,
@@ -67,7 +85,7 @@ import {
   waveAccount,
   waveAccountMoves,
 } from "./claude/usage";
-import { DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
@@ -97,10 +115,15 @@ import {
   type DecisionInput,
   type DecisionPayload,
   type DecisionRecord,
+  ID_RE,
+  MACHINE_DOWN_CANCEL,
+  MACHINE_DOWN_REPLACE,
+  MACHINE_DOWN_WAIT,
   attentionPayload,
   decisionPayload,
   decisionTopic,
   describeDecision,
+  machineDownInput,
   openDecisions,
   openEvent,
   renderDecisionsMd,
@@ -111,6 +134,7 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken } from "./fence";
+import { LOCAL_HOST } from "./fleet-name";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -134,22 +158,36 @@ import {
   type LeaseBook,
   type LeaseInput,
   type LeaseRequest,
+  heldOn,
   step as leaseStep,
   poolPayload,
   replayLeases,
 } from "./leases";
 import {
+  type DoctorReport,
   MACHINES_FILTER,
   MACHINE_CHANNEL,
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  doctorFields,
   machineTopic,
+  parseDoctorReport,
   parseMachine,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import { claimVerdict, guardMutation } from "./ownership";
-import { PeerService } from "./peers";
+import { type DoctorRun, type PeerReply, PeerService } from "./peers";
+import {
+  AUTO_HOST,
+  type MachineView,
+  type Placement,
+  type Snapshot,
+  type Unplaced,
+  needsPlacement,
+  place,
+  reserve,
+} from "./placement";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
@@ -157,12 +195,24 @@ import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
 import { sampleContainers } from "./pressure/containers";
 import { sampleMemory } from "./pressure/memory";
-import { type SpawnFailure, type WaveRecord, latestSpawnFailure } from "./reducer";
+import {
+  PATH_TOOLS,
+  type PathProbe,
+  READINESS_CHANNEL,
+  type ReadinessInput,
+  type ReadinessPayload,
+  machineView,
+  readiness,
+  readinessKey,
+  readinessTopic,
+} from "./readiness";
+import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import { readRepoVisibility } from "./repo-visibility";
 import {
   type Admission,
   activeTasks,
   admit,
+  admitPlacing,
   pipelineRoles,
   spawnBudget,
   spawnsUsed,
@@ -175,11 +225,13 @@ import type {
   CoordinatorAttention,
   JournalEvent,
   NewEvent,
+  NudgeOnMerge,
   PublicHygiene,
   RepoVisibility,
   TaskAgents,
   TaskId,
   TaskStage,
+  TaskState,
   Tunables,
   TunablesPatch,
   Wave,
@@ -254,11 +306,14 @@ import {
   STOP_ANSWER,
   UNVERIFIED_CLASS,
   creditOccurrences,
+  isRespawnAnswer,
   modelSwitchInput,
   parseSwitchAnswer,
   recoveryAllowed,
+  respawnTarget,
   switchModel,
   switchesSent,
+  withRespawnOn,
 } from "./recovery";
 import {
   type ReapDeps,
@@ -280,6 +335,8 @@ import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
+  AGENT_BRANCH,
+  checkFreshBase,
   checkReleaseBranch,
   expandHome,
   fetchRelease,
@@ -372,6 +429,27 @@ export interface DaemonOptions {
   /** git/GitHub probes for restart reconciliation (default: `git`/`gh` through the fenced exec). */
   reconcile?: ReconcileProbes;
   /**
+   * The Fleet (SPEC §4.6.15): the supervisor's own machine's doctor, given the running wave's
+   * repo or null (default: none, so its machine is not ready; `volleyd daemon` passes
+   * `realLocalDoctor`), the PATH probe of its own agents' environment (default: `PATH` resolved
+   * here), and the version a machine must run (default: this package's).
+   */
+  fleet?: {
+    localDoctor?: (repo: string | null) => Promise<DoctorReport | null>;
+    localPath?: () => PathProbe;
+    version?: string;
+    /**
+     * The own machine's OS readings for its record (default: `node:os`'s). On macOS its memory
+     * figure is the own doctor's (`vm_stat`), not `freemem`.
+     */
+    os?: Partial<{
+      platform: () => NodeJS.Platform;
+      loadavg: () => number[];
+      freemem: () => number;
+      totalmem: () => number;
+    }>;
+  };
+  /**
    * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
    * primary profile's directory (default `~/.claude`), the exec sign-ins run through (default
    * the fenced exec) and the sign-in poll / timeout (tests).
@@ -382,6 +460,8 @@ export interface DaemonOptions {
     exec?: ExecFn;
     signinPollMs?: number;
     signinTimeoutMs?: number;
+    /** How long a paired machine's sign-in forward must stay up (default: config-defaults). */
+    forwardSettleMs?: number;
   };
 }
 
@@ -480,8 +560,16 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+/**
+ * An account op answered after a long run outside the daemon's queue (`peer_doctor`): `later`
+ * resolves to the answer and the `_system` record to journal with it.
+ */
+interface DeferredAuth {
+  later: () => Promise<AuthOutcome & { journal?: NewEvent }>;
+}
+
 /** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
-const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove"]);
+const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove", "peer_doctor"]);
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
@@ -553,6 +641,42 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
   };
 }
 
+/**
+ * The supervisor's own doctor (SPEC §4.6.15): `volley peer doctor --json [--repo <repo>]` through
+ * the fence. The supervisor is no peer (it has no `peer.json`), so the running wave's repo is the
+ * clone it checks; with none, the report's `repo.*` checks only say that no repo was given.
+ */
+export function realLocalDoctor(
+  exec: ExecFn = realExec,
+): (repo: string | null) => Promise<DoctorReport | null> {
+  return async (repo) => {
+    const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
+    const r = await exec(argv, {
+      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+    }).catch(() => null);
+    // A failing block check exits 1 with the report on stdout.
+    return r === null ? null : parseDoctorReport(r.stdout);
+  };
+}
+
+/**
+ * Whether `claude` and `bun` resolve on `path` (the daemon's own `PATH`, which its agent sessions
+ * inherit): what `command -v` answers on a box, without a shell.
+ */
+export function pathProbe(path: string | undefined = process.env.PATH): PathProbe {
+  const dirs = (path ?? "").split(delimiter).filter((d) => d !== "");
+  const on = (tool: string) =>
+    dirs.some((d) => {
+      try {
+        accessSync(join(d, tool), fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  return Object.fromEntries(PATH_TOOLS.map((t) => [t, on(t)])) as PathProbe;
+}
+
 /** A wave file's `repo` as a directory (`~/x` → `$HOME/x`). */
 const repoDir = (repo: string) =>
   repo === "~" || repo.startsWith("~/") ? join(homedir(), repo.slice(1)) : repo;
@@ -587,6 +711,17 @@ type HandlerResult = Reply & {
 };
 
 const OPEN_ADMISSION: Admission = { allow: Number.POSITIVE_INFINITY, reasons: [] };
+/** The per-host thresholds of `eff`: placement's minimums, admission's hysteresis. */
+const hostThresholds = (eff: Tunables): HostThresholds => ({
+  mem_available_min_pct: eff.placement.mem_available_min_pct,
+  load_per_core_max: eff.placement.load_per_core_max,
+  hysteresis_samples: eff.admission.hysteresis_samples,
+});
+/** Whether a wave places tasks (SPEC §4.6.15): `placement: auto`, or a task still `host: auto`. */
+const placing = (w: Wave): boolean =>
+  w.placement === AUTO_HOST ||
+  w.task_order.some((id) => needsPlacement(w.tasks[id] ?? { host: "" }));
+
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -808,6 +943,65 @@ export class Daemon {
   private usage: UsageBook;
   /** Every spawned agent's wave and host (from `agent_spawned`): where its usage belongs. */
   private readonly spawnedAgents = new Map<string, { wave: WaveId; host: string }>();
+  // --- Fleet (F6): down, drain and remove-now ---
+  /** Agents launched and still being verified (not supervised yet), by id. */
+  private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
+  /** A remove-now's agents told to stop, by id: when (their grace counts from it). */
+  private readonly evicted = new Map<string, number>();
+  /** Since when a configured host has been seen draining (`hosts.<name>.drain`). */
+  private readonly drainSeen = new Map<string, number>();
+  /** When each paired machine was removed (`_system`'s `peer_removed`). */
+  private readonly removedAt = new Map<string, number>();
+  /**
+   * A `respawn` approved while the task's machine was closed, by `<wave>/<task>`: its role and
+   * how it continues the vanished agent (moveRespawn).
+   */
+  private readonly heldRespawn = new Map<string, { role: Role; pipeline: SpawnPipelineOptions }>();
+  // --- Fleet (F2): the supervisor's own record, readiness verdicts, PATH probes ---
+  /** The version a machine must run (its readiness `requirements.volley`). */
+  private readonly version: string;
+  /** The supervisor's own machine record, as last published (and when). */
+  private ownRecord: MachineRecord | undefined;
+  private ownRecordAt: number | null = null;
+  /**
+   * The supervisor's own doctor: its last report, the repo that run checked (null: none; undefined:
+   * no run finished yet), when it last started, whether it runs now.
+   */
+  private localReport: DoctorReport | null = null;
+  private localDoctorRepo: string | null | undefined = undefined;
+  /** The repo the last run started with (a failed run is not retried before the next beat). */
+  private localDoctorTried: string | null = null;
+  private localDoctorAt: number | null = null;
+  private localDoctorRunning = false;
+  /**
+   * Machines whose verdict has its inputs in this process (SPEC §4.6.15): until then a verdict is
+   * neither published nor journaled, so a restart neither replaces the last retained verdict nor
+   * journals a flip from inputs not gathered yet. `fleetSince`: when this process began, the
+   * bound on the wait (`machine_down_after_ms`).
+   */
+  private readonly readinessSettled = new Set<string>();
+  private fleetSince: number | null = null;
+  /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
+  private readonly doctoring = new Set<string>();
+  private readonly authRunning = new Set<string>();
+  /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
+  private readonly probes = new Map<
+    string,
+    { path: PathProbe | null; error?: string; at: number; running: boolean }
+  >();
+  /** Each machine's verdict as last published (`key`: readinessKey) and when. */
+  private readonly published = new Map<string, { key: string; at: number }>();
+  /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
+  private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
+  // --- Fleet (F3): placement ---
+  /**
+   * Each peer's last heartbeats (per-host admission), oldest first, at most the largest
+   * `hysteresis_samples` in force; `last_seen` is the newest one's, so a re-delivered record (a
+   * reconnect's retained copy, a QoS 1 duplicate) is not counted again.
+   */
+  private readonly hostHistory = new Map<string, { last_seen: string; samples: HostSamples[] }>();
+  /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
+  private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
   private readonly publishedUsage = new Map<string, string>();
   /** Agents an `agent_move_account` is stopping: their final status is the move's, not the pipeline's. */
@@ -852,6 +1046,16 @@ export class Daemon {
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
     this.leases = replayLeases(this.system.readAll());
+    this.version = opts.fleet?.version ?? pkg.version;
+    for (const e of this.system.readAll()) {
+      if (e.type !== "machine_readiness_changed") continue;
+      const { name, ready, reasons } = e.data as {
+        name: string;
+        ready: boolean;
+        reasons: string[];
+      };
+      this.journaledReadiness.set(name, { ready, reasons });
+    }
     if (opts.spawner?.credentials !== undefined) {
       this.credentials = opts.spawner.credentials;
     } else if (opts.dynsecAdmin !== undefined) {
@@ -908,6 +1112,17 @@ export class Daemon {
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
       onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
+      // --- Fleet (F8): a paired machine's sign-in (`primary@<name>`) and its forward ---
+      remote: (name) => this.remoteFor(name),
+      reservedPorts: () => [
+        brokerAddress(opts.brokerUrl).port,
+        ...Object.values(this.config.effective().hosts).map(
+          (h) => h.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
+        ),
+      ],
+      ...(opts.claude?.forwardSettleMs !== undefined
+        ? { forwardSettleMs: opts.claude.forwardSettleMs }
+        : {}),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -936,10 +1151,17 @@ export class Daemon {
       hosts: () => this.config.effective().hosts,
       setHost: (name, host, by) => this.config.applyPatch({ hosts: { [name]: host } }, by),
       removeHost: (name, by) => this.config.removeHost(name, by),
+      // --- Fleet (F6): drain and remove-now ---
+      setDrain: (name, by) =>
+        this.config.applyPatch({ hosts: { [name]: { drain: true } } } as TunablesPatch, by),
+      liveAgents: (name) => this.agentsOn(name),
       clearMachine: async (name) => {
         this.machines.forget(name);
         await this.clearRetained(machineTopic(name));
+        await this.clearReadiness(name);
       },
+      localName: () => this.config.localName(),
+      remote: (name) => this.remoteFor(name),
       machines: () => this.machines.all(),
       journal: (ev) => this.appendSystem(ev),
     });
@@ -1130,14 +1352,23 @@ export class Daemon {
         const name = m.topic.split("/")[3] ?? "";
         // A cleared record (peer_remove) forgets the machine, so a late `down` cannot revive it.
         if (m.payload === "") {
-          void this.enqueue(async () => this.machines.forget(name));
+          void this.enqueue(async () => {
+            this.machines.forget(name);
+            this.hostHistory.delete(name);
+          });
           return;
         }
         const record = parseMachine(m.topic, m.payload);
         // Every account may publish its own record: only a configured host's is a machine.
         if (record === null) return;
         void this.enqueue(async () => {
-          if (Object.hasOwn(this.config.effective().hosts, name)) this.machines.observe(record);
+          // A configured host is a peer whatever its record says (SPEC §4.6.15): never local.
+          if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
+            return;
+          }
+          this.machines.observe(record);
+          if (record.tunnel === "up") this.sampleHost(name, record);
+          await this.publishReadiness(name);
         });
       }),
     );
@@ -1715,7 +1946,13 @@ export class Daemon {
       this.log(`ignored lease request: holder ${req.holder} is not the sender ${env.agent_id}`);
       return;
     }
-    await this.runLeases({ kind: "request", pool, req });
+    // Machine-aware leases (F4): the holder's machine, from its `agent_spawned` (null: a
+    // hand-run holder the daemon did not spawn), counted against the pool's `per_machine`.
+    // The `local` token is the supervisor's own machine, held under its name (SPEC §4.6.15).
+    const spawned = this.spawnedAgents.get(req.holder)?.host;
+    const host =
+      spawned === undefined ? null : spawned === LOCAL_HOST ? this.config.localName() : spawned;
+    await this.runLeases({ kind: "request", pool, req, host });
   }
 
   /** Step the lease book: journal + mirror every event, re-publish the pools it touched. */
@@ -1809,6 +2046,9 @@ export class Daemon {
    */
   private async tickNow(): Promise<void> {
     await this.sweepMachines();
+    await this.machineDownPass();
+    await this.removalSweep();
+    await this.fleetTick();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
@@ -1822,6 +2062,18 @@ export class Daemon {
         continue;
       }
       const eff = this.config.effective(wave);
+      // --- Fleet (F3): a wave that places its tasks admits them one by one, each on its machine ---
+      if (placing(rec.wave)) {
+        const before = JSON.stringify(this.heldBack.get(wave) ?? []);
+        const r = await this.admitPlaced(wave, rec, candidates, live, eff);
+        live += r.admitted;
+        this.heldBack.set(wave, r.reasons);
+        if (r.budget) await this.budgetExhausted(wave, null);
+        if (r.changed || (r.admitted === 0 && before !== JSON.stringify(r.reasons)))
+          await this.publishState(wave);
+        continue;
+      }
+      // --- end Fleet (F3) ---
       const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
         live,
         hardCeiling: eff.hard_ceiling,
@@ -1858,6 +2110,788 @@ export class Daemon {
         } catch (e) {
           this.log(`pipeline ${wave}: ${e instanceof Error ? e.message : String(e)}`);
         }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F3, SPEC §4.6.15): placement at admission, per-host admission
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Admit a placing wave's ready tasks (`admitPlacing`): each placed, then admitted by its
+   * machine, journaled `task_placed` then `task_admitted`. A task with no eligible machine stays
+   * queued with the closest machine's reason, and is placed again next tick. With the gate closed
+   * (paused, kill switch, a global signal) no task keeps a stale placement reason: the wave's own
+   * reason is what `why_waiting` shows. The verdicts of the machines placed on are re-computed at
+   * once (their `placed` and `heavy` count the reservations).
+   */
+  private async admitPlaced(
+    wave: WaveId,
+    rec: WaveRecord,
+    candidates: TaskId[],
+    live: number,
+    eff: Tunables,
+  ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
+    const w = rec.wave as Wave;
+    const prefix = `${wave}/`;
+    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const r = admitPlacing(
+      candidates,
+      w,
+      this.placementSnapshot(gate, eff),
+      {
+        placement: eff.placement,
+        warn_at_pct: eff.claude.warn_at_pct,
+        localName: this.config.localName(),
+      },
+      gate,
+      (host) => this.hostVerdict(host, eff),
+      {
+        live,
+        hardCeiling: eff.hard_ceiling,
+        spawnsUsed: spawnsUsed(rec),
+        spawnBudget: spawnBudget(w, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+      },
+    );
+    let changed = false;
+    for (const k of [...this.heldTask.keys()]) {
+      if (k.startsWith(prefix) && r.held[k.slice(prefix.length)] === undefined) {
+        this.heldTask.delete(k);
+        changed = true;
+      }
+    }
+    for (const [id, why] of Object.entries(r.held)) {
+      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
+      this.heldTask.set(`${prefix}${id}`, why);
+      changed = true;
+    }
+    for (const { id, placement: p, placed } of r.admit) {
+      if (placed && rec.state?.tasks.find((t) => t.id === id)?.placement === undefined) {
+        await this.append(wave, {
+          type: "task_placed",
+          task: id,
+          data: {
+            task: id,
+            host: p.host,
+            score: p.score,
+            candidates: p.candidates,
+            by: p.by,
+            ...(p.local ? { local: true } : {}),
+          },
+        });
+      }
+      await this.append(wave, { type: "task_admitted", task: id, data: {} });
+    }
+    if (r.admit.length > 0) {
+      // The own machine counts every reservation; a peer its own.
+      const hosts = new Set([this.config.localName(), ...r.admit.map((a) => a.placement.host)]);
+      for (const host of hosts) await this.publishReadiness(host);
+    }
+    return { admitted: r.admit.length, reasons: r.reasons, budget: r.budget, changed };
+  }
+
+  /**
+   * One machine's readiness input and verdict, and placement's view of it: one computation, so
+   * the published `eligible` and placement read the same filter. `filter` and `held` come from
+   * `eff` (a wave's effective config when placing for it; the supervisor's for the verdict) and
+   * `gate` (the own machine's admission).
+   */
+  private machineState(
+    name: string,
+    isLocal: boolean,
+    cfg: Tunables,
+    extra: Pick<ReadinessInput, "bun" | "sharing">,
+    eff: Tunables,
+    gate: Admission,
+  ): { verdict: ReadinessPayload; view: MachineView } {
+    const input = this.readinessInput(name, isLocal, cfg, extra, eff, gate);
+    const verdict = readiness(input);
+    return { verdict, view: machineView(input, verdict, verdict.usage.five_hour_pct) };
+  }
+
+  /** What placement knows now: the own machine and every configured host, with their verdicts. */
+  private placementSnapshot(gate: Admission, eff: Tunables): Snapshot {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const extra = this.requirementsExtra();
+    const names = [local, ...Object.keys(cfg.hosts).filter((n) => n !== local)];
+    return {
+      machines: names.map(
+        (name) => this.machineState(name, name === local, cfg, extra, eff, gate).view,
+      ),
+      reservations: {},
+    };
+  }
+
+  /** Peer `name`'s own admission now, from its last heartbeats under `eff`'s thresholds. */
+  private hostVerdict(name: string, eff: Tunables) {
+    return foldHost(name, this.hostHistory.get(name)?.samples ?? [], hostThresholds(eff));
+  }
+
+  /**
+   * A peer's heartbeat is one per-host admission sample (memory available, load per core). A
+   * record whose `last_seen` is not newer than the last one counted is the same heartbeat again.
+   */
+  private sampleHost(name: string, record: MachineRecord): void {
+    const prior = this.hostHistory.get(name);
+    if (prior !== undefined && Date.parse(record.last_seen) <= Date.parse(prior.last_seen)) return;
+    const keep = Math.max(
+      this.config.effective().admission.hysteresis_samples,
+      ...this.runningWaves().map(([w]) => this.config.effective(w).admission.hysteresis_samples),
+    );
+    this.hostHistory.set(name, {
+      last_seen: record.last_seen,
+      samples: [...(prior?.samples ?? []), hostSamples(record)].slice(-keep),
+    });
+  }
+
+  /**
+   * Whether task `t` of `rec` is a placement reserved on its machine: placed and admitted, and its
+   * implementer not a live supervised agent (not spawned yet, or spawned and not supervised yet),
+   * so no other count has it.
+   */
+  private isReserved(rec: WaveRecord, t: TaskState): boolean {
+    if (t.placement === undefined || !rec.admitted.includes(t.id)) return false;
+    if (t.stage !== "queued" && t.stage !== "implement") return false;
+    const agent = t.agents.implementer;
+    return agent === undefined || !this.supervised.has(agent);
+  }
+
+  /** Placements reserved on machine `name` (null: on any) that have no live agent yet. */
+  private reservedOn(name: string | null): number {
+    let n = 0;
+    for (const log of this.waves.values()) {
+      const rec = log.record;
+      for (const t of rec.state?.tasks ?? []) {
+        if (!this.isReserved(rec, t)) continue;
+        if (name === null || t.placement?.host === name) n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Heavy placements reserved on machine `name` in lease pool `pool` (`isReserved`): each will
+   * take a per-machine slot there, so placement counts it as held already.
+   */
+  private heavyReservedOn(name: string, pool: string): number {
+    let n = 0;
+    for (const log of this.waves.values()) {
+      const rec = log.record;
+      if (rec.wave?.heavy_pools.includes(pool) !== true) continue;
+      for (const t of rec.state?.tasks ?? []) {
+        if (t.placement?.host !== name || rec.wave.tasks[t.id]?.heavy !== true) continue;
+        if (this.isReserved(rec, t)) n++;
+      }
+    }
+    return n;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F6, SPEC §4.6.15): a machine that stays down, re-placement, drain and remove-now
+  // -------------------------------------------------------------------------------------------
+
+  /** The machine task `id` runs on (its own machine under its name); undefined: not placed yet. */
+  private machineOfTask(rec: WaveRecord, id: TaskId): string | undefined {
+    const host = rec.wave?.tasks[id]?.host;
+    if (host === undefined || host === AUTO_HOST) return undefined;
+    return host === LOCAL_HOST ? this.config.localName() : host;
+  }
+
+  /** Whether task `task` has a live agent: supervised, launched and being verified, or spawning. */
+  private taskLive(wave: WaveId, task: TaskId): boolean {
+    for (const a of this.supervised.values()) if (a.wave === wave && a.task === task) return true;
+    for (const a of this.launching.values()) if (a.wave === wave && a.task === task) return true;
+    for (const key of this.spawning) if (key.startsWith(`${wave}/${task}/`)) return true;
+    return false;
+  }
+
+  /**
+   * Why nothing new may start on paired machine `name` (SPEC §4.6.15), and since when: it was
+   * `removed` (a `peer_removed`, and no host of that name since), is being removed (`removing`:
+   * a pending `peer_remove`) or is `draining` (`hosts.<name>.drain`). Null: it may (a down
+   * machine's spawns park on its tunnel instead).
+   */
+  private closedMachine(
+    name: string,
+  ): { machine: "draining" | "removing" | "removed"; since: number } | null {
+    if (name === this.config.localName()) return null;
+    const pending = this.peers.removals()[name];
+    if (pending !== undefined) return { machine: "removing", since: Date.parse(pending.at) };
+    const hosts = this.config.effective().hosts;
+    if (Object.hasOwn(hosts, name)) {
+      if (hosts[name]?.drain !== true) {
+        this.drainSeen.delete(name);
+        return null;
+      }
+      const since = this.drainSeen.get(name) ?? this.now();
+      this.drainSeen.set(name, since);
+      return { machine: "draining", since };
+    }
+    const removed = this.removedAt.get(name);
+    return removed !== undefined ? { machine: "removed", since: removed } : null;
+  }
+
+  /** The line a task waiting on closed machine `name` shows. */
+  private closedLine(name: string, machine: "draining" | "removing" | "removed"): string {
+    return machine === "removed"
+      ? `${name} was removed`
+      : `${name} is ${machine === "draining" ? "draining" : "being removed"}: nothing new starts there`;
+  }
+
+  /** The closed machine task `task` is placed on (`closedMachine`); null for any other. */
+  private closedFor(wave: WaveId, task: TaskId): { line: string; machine: string } | null {
+    const def = this.waves.get(wave)?.record.wave?.tasks[task];
+    if (def === undefined || def.host === LOCAL_HOST || def.host === AUTO_HOST) return null;
+    // A task's own inline `host:` is no paired machine.
+    if (def.host_spec !== undefined && !Object.hasOwn(this.config.effective().hosts, def.host))
+      return null;
+    const c = this.closedMachine(def.host);
+    return c !== null ? { line: this.closedLine(def.host, c.machine), machine: def.host } : null;
+  }
+
+  /**
+   * True (and the reason kept for why_waiting) when task `task`'s machine is closed to new
+   * agents: its spawn waits for the owner's re-place answer (`machineDownPass` asks). Running
+   * agents are never touched.
+   */
+  private parkClosed(wave: WaveId, task: TaskId): boolean {
+    const closed = this.closedFor(wave, task);
+    if (closed === null) return false;
+    const key = `${wave}/${task}`;
+    const reason = `${closed.line}; re-place or cancel ${task} (its machine_down decision)`;
+    if (this.parked.get(key) !== reason) {
+      this.parked.set(key, reason);
+      void this.enqueue(() => this.publishState(wave));
+    }
+    return true;
+  }
+
+  /**
+   * Where task `task` of `wave` would be placed now, never on `exclude`: F3's `place` with the
+   * same machine filter and score, as if the task asked for placement. `snap` carries the
+   * reservations of earlier re-placements in the same answer.
+   */
+  private placeAway(
+    wave: WaveId,
+    task: TaskId,
+    exclude: string[],
+    snap?: Snapshot,
+  ): Placement | Unplaced | null {
+    const rec = this.waves.get(wave)?.record;
+    const w = rec?.wave;
+    const def = w?.tasks[task];
+    if (rec === undefined || w == null || def === undefined) return null;
+    const eff = this.config.effective(wave);
+    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
+      placement: eff.placement,
+      warn_at_pct: eff.claude.warn_at_pct,
+      localName: this.config.localName(),
+      exclude,
+    });
+  }
+
+  /** Journal an owner's re-placement (`by: decision`, `from` the machine it leaves). */
+  private async rePlace(wave: WaveId, task: TaskId, p: Placement, from: string): Promise<void> {
+    await this.append(wave, {
+      type: "task_placed",
+      task,
+      data: {
+        task,
+        host: p.host,
+        score: p.score,
+        candidates: p.candidates,
+        by: "decision",
+        from,
+        ...(p.local ? { local: true } : {}),
+      },
+    });
+    // It no longer waits on the machine it left; its next spawn goes where it now is.
+    const key = `${wave}/${task}`;
+    this.parked.delete(key);
+    for (const k of this.refused.keys()) {
+      if (k.startsWith(`${key}/`)) this.refused.delete(k);
+    }
+    // A respawn the owner approved while the machine was closed starts now.
+    const held = this.heldRespawn.get(key);
+    if (held !== undefined) {
+      this.heldRespawn.delete(key);
+      void this.startSpawn(wave, task, held.role, held.pipeline).catch((e: unknown) =>
+        this.log(`respawn ${key}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+    }
+  }
+
+  /**
+   * The wave's unfinished tasks on machine `name`: those with no live agent (queued, or between
+   * roles: they would be re-placed) and those with one (never moved). A task whose own open
+   * decision already offers `respawn on <machine>` is left to that question.
+   */
+  private tasksOn(wave: WaveId, name: string): { queued: TaskId[]; running: TaskId[] } {
+    const rec = this.waves.get(wave)?.record;
+    const queued: TaskId[] = [];
+    const running: TaskId[] = [];
+    if (rec === undefined) return { queued, running };
+    const elsewhere = new Set(
+      openDecisions(rec)
+        .filter((d) => d.task !== null && (d.options ?? []).some((o) => respawnTarget(o, [o])))
+        .map((d) => d.task),
+    );
+    for (const t of rec.state?.tasks ?? []) {
+      if (t.stage === "done" || t.stage === "cancelled") continue;
+      if (this.machineOfTask(rec, t.id) !== name) continue;
+      if (this.taskLive(wave, t.id)) running.push(t.id);
+      else if (!elsewhere.has(t.id)) queued.push(t.id);
+    }
+    return { queued, running };
+  }
+
+  /** What is wrong with machine `name` for its waiting tasks, since when; null: nothing. */
+  private troubleOf(
+    name: string,
+  ): { machine: "down" | "draining" | "removing" | "removed"; since: number; why: string } | null {
+    const closed = this.closedMachine(name);
+    if (closed !== null) return { ...closed, why: "" };
+    const since = this.machines.downSince(name);
+    const record = this.machines.record(name);
+    if (since === undefined || record === undefined) return null;
+    return { machine: "down", since, why: this.machines.whyDown(record) };
+  }
+
+  /**
+   * Every tick, per running wave and machine with trouble (SPEC §4.6.15): a machine down for
+   * `placement.down_decision_after_s` with unfinished tasks of the wave, or one closed to new
+   * agents (draining, being removed, removed) with tasks of the wave waiting for an agent there,
+   * opens the wave's `machine_down` decision. Once answered it is asked again only when a waiting
+   * task appears that the last question about the same trouble did not name (`wait` holds until
+   * then). A `re-place queued tasks` answer keeps applying: a task it could not move yet moves as
+   * soon as a machine is eligible. An open question whose trouble changed (the machine was
+   * removed, or its drain lifted) closes itself. Nothing is re-placed without an answer.
+   */
+  private async machineDownPass(): Promise<void> {
+    const now = this.now();
+    const names = new Set(this.machines.all().map((m) => m.name));
+    for (const [, log] of this.runningWaves()) {
+      for (const t of log.record.state?.tasks ?? []) {
+        const m = this.machineOfTask(log.record, t.id);
+        if (m !== undefined) names.add(m);
+      }
+    }
+    for (const name of names) {
+      const trouble = this.troubleOf(name);
+      for (const [wave, log] of this.runningWaves()) {
+        const rec = log.record;
+        const asked = Object.values(rec.decisions).filter(
+          (d) => d.kind === "machine_down" && d.host === name,
+        );
+        await this.supersedeMachineDown(wave, name, asked, trouble?.machine ?? null);
+        if (trouble === null) continue;
+        const after = secondsMs(this.config.effective(wave).placement.down_decision_after_s);
+        if (trouble.machine === "down" && now - trouble.since < after) continue;
+        const current = asked.filter(
+          (d) =>
+            (d.machine ?? "down") === trouble.machine && Date.parse(d.opened_at) >= trouble.since,
+        );
+        await this.keepRePlacing(wave, name, current);
+        const on = this.tasksOn(wave, name);
+        const none =
+          trouble.machine === "down" ? on.queued.length + on.running.length : on.queued.length;
+        if (none === 0) continue;
+        if (asked.some((d) => d.resolved === undefined)) continue;
+        const last = current.sort((a, b) => a.opened_at.localeCompare(b.opened_at)).at(-1);
+        if (last !== undefined && on.queued.every((t) => last.tasks?.includes(t) === true))
+          continue;
+        const probe = on.queued[0] ?? on.running[0] ?? "";
+        const best = this.placeAway(wave, probe, [name]);
+        const { input, data } = machineDownInput({
+          host: name,
+          machine: trouble.machine,
+          downSince: trouble.since,
+          now,
+          why: trouble.why,
+          queued: on.queued,
+          running: on.running,
+          best: best !== null && best.host !== null ? best.host : null,
+        });
+        let id = `machine_down-${name}`;
+        for (let k = 2; rec.decisions[id] !== undefined; k++) id = `machine_down-${name}-${k}`;
+        try {
+          await this.openDecisionNow(wave, { ...input, ...(ID_RE.test(id) ? { id } : {}) }, data);
+        } catch (e) {
+          this.log(`machine_down ${wave}/${name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * An open `machine_down` question about trouble machine `name` no longer has (`now`: what it
+   * has, null: none) closes itself: answered `wait` when the machine takes new agents again,
+   * `superseded` when its trouble changed (the question about the new trouble follows).
+   */
+  private async supersedeMachineDown(
+    wave: WaveId,
+    name: string,
+    asked: DecisionRecord[],
+    now: string | null,
+  ): Promise<void> {
+    for (const d of asked) {
+      if (d.resolved !== undefined || (d.machine ?? "down") === now) continue;
+      const what =
+        now === null
+          ? "takes new agents again"
+          : now === "removed"
+            ? "was removed"
+            : now === "removing"
+              ? "is being removed"
+              : `is ${now}`;
+      await this.resolveNow(wave, d.decision_id, {
+        answer: now === null ? MACHINE_DOWN_WAIT : "superseded",
+        by: DAEMON_AGENT_ID,
+        rationale: `${name} ${what}`,
+      });
+    }
+  }
+
+  /**
+   * The owner answered `re-place queued tasks` about this trouble (`asked`): each task it named
+   * that is still waiting on machine `name` and could not be moved then is placed again as soon
+   * as a machine is eligible (`by: decision`).
+   */
+  private async keepRePlacing(wave: WaveId, name: string, asked: DecisionRecord[]): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.wave == null) return;
+    const answered = asked.filter(
+      (d) => d.resolved?.answer.trim().toLowerCase() === MACHINE_DOWN_REPLACE,
+    );
+    const ids = new Set(answered.flatMap((d) => d.tasks ?? []));
+    if (ids.size === 0) return;
+    const waiting = new Set(this.tasksOn(wave, name).queued);
+    let snap: Snapshot | undefined;
+    let moved = false;
+    for (const id of ids) {
+      if (!waiting.has(id)) continue;
+      snap ??= this.placementSnapshot(
+        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        this.config.effective(wave),
+      );
+      const p = this.placeAway(wave, id, [name], snap);
+      if (p === null || p.host === null) continue;
+      await this.rePlace(wave, id, p, name);
+      snap = reserve(snap, p.host, rec.wave.tasks[id], rec.wave);
+      moved = true;
+    }
+    if (moved) await this.publishState(wave);
+  }
+
+  /** Machine `name` is back: its open `machine_down` questions about it being down close (`wait`). */
+  private async machineBack(name: string): Promise<void> {
+    for (const [wave, log] of this.waves) {
+      for (const d of openDecisions(log.record)) {
+        if (d.kind !== "machine_down" || d.host !== name || (d.machine ?? "down") !== "down")
+          continue;
+        await this.resolveNow(wave, d.decision_id, {
+          answer: MACHINE_DOWN_WAIT,
+          by: DAEMON_AGENT_ID,
+          rationale: `${name} is back`,
+        });
+      }
+    }
+  }
+
+  /**
+   * A `machine_down` answer. `re-place queued tasks`: each listed task that still has no live
+   * agent and still sits on the machine is placed again without it (journaled `by: decision`),
+   * each placement reserved for the next; one with no eligible machine stays, says so, and moves
+   * once one is (`keepRePlacing`). `cancel`: every listed task not finished is cancelled (a
+   * running agent is told to stop). `wait`, or anything else: everything stays parked.
+   */
+  private async onMachineDownResolved(wave: WaveId, d: DecisionRecord): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const host = d.host;
+    if (rec?.wave == null || d.resolved === undefined || host === undefined) return;
+    const answer = d.resolved.answer.trim().toLowerCase();
+    const listed = (d.tasks ?? []).flatMap((id) => {
+      const t = rec.state?.tasks.find((x) => x.id === id);
+      return t !== undefined && t.stage !== "done" && t.stage !== "cancelled" ? [t] : [];
+    });
+    if (answer === MACHINE_DOWN_REPLACE) {
+      const eff = this.config.effective(wave);
+      let snap = this.placementSnapshot(
+        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        eff,
+      );
+      const moved = new Set<string>();
+      for (const t of listed) {
+        if (this.taskLive(wave, t.id) || this.machineOfTask(rec, t.id) !== host) continue;
+        const p = this.placeAway(wave, t.id, [host], snap);
+        if (p === null) continue;
+        if (p.host === null) {
+          await this.append(wave, {
+            type: "alarm_raised",
+            task: t.id,
+            data: {
+              code: "NOT_REPLACED",
+              message: `${t.id} stays queued for ${host}: ${p.why}; it is placed as soon as a machine is eligible`,
+              host,
+            },
+          });
+          continue;
+        }
+        await this.rePlace(wave, t.id, p, host);
+        snap = reserve(snap, p.host, rec.wave.tasks[t.id], rec.wave);
+        moved.add(p.host);
+      }
+      for (const name of [this.config.localName(), ...moved]) await this.publishReadiness(name);
+      await this.publishState(wave);
+      return;
+    }
+    if (answer === MACHINE_DOWN_CANCEL) {
+      const why = `${d.resolved.by} cancelled it: ${host} ${(d.machine ?? "down") === "down" ? "stayed down" : `is ${d.machine}`} (decision ${d.decision_id})`;
+      for (const t of listed) {
+        const live = [...this.supervised].filter(([, a]) => a.wave === wave && a.task === t.id);
+        const [first, ...rest] = live;
+        if (first === undefined) {
+          await this.append(wave, {
+            type: "task_cancelled",
+            task: t.id,
+            data: { by: d.resolved.by, why },
+          });
+          continue;
+        }
+        for (const [id, a] of rest) {
+          await this.cancelAgent(
+            wave,
+            { task: a.task, role: a.role, agent_id: id },
+            DAEMON_AGENT_ID,
+            {
+              text: `volleyd: ${why}. Stop work on ${t.id} now and exit.`,
+              from_agent_id: DAEMON_AGENT_ID,
+              wave,
+              task: t.id,
+            },
+          );
+        }
+        await this.cancelTask(wave, t.id, first[0], why);
+      }
+    }
+  }
+
+  /**
+   * Why machine `host` should not take a respawn now: closed to new agents (draining, being
+   * removed, removed: `closed`), down, or not eligible (readiness and placement's filter); null
+   * when it may.
+   */
+  private hostTrouble(host: string): { why: string; closed: boolean } | null {
+    const closed = this.closedMachine(host);
+    if (closed !== null) {
+      const why = closed.machine === "removing" ? "being removed" : closed.machine;
+      return { why, closed: true };
+    }
+    const record = this.machines.record(host);
+    if (this.machines.status(host) === "down" && record !== undefined) {
+      return { why: `down (${this.machines.whyDown(record)})`, closed: false };
+    }
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    if (host !== local && !Object.hasOwn(cfg.hosts, host)) return null;
+    const v = this.machineState(
+      host,
+      host === local,
+      cfg,
+      this.requirementsExtra(),
+      cfg,
+      this.pressure(GLOBAL),
+    ).verdict;
+    return v.eligible
+      ? null
+      : { why: `not eligible (${v.ineligible_reason ?? "not ready"})`, closed: false };
+  }
+
+  /**
+   * A decision that offers `respawn` for a task whose machine is down or not eligible also
+   * offers `respawn on <best>` (SPEC §4.6.15); one whose machine is closed to new agents offers
+   * only that. Asked again, the offer is made afresh (a new best, or plain `respawn` back once
+   * the machine is fine). Unchanged when the machine is fine or nothing else is eligible.
+   */
+  private withRespawnElsewhere(
+    wave: WaveId,
+    input: DecisionInput,
+    extra: Record<string, unknown>,
+  ): DecisionInput {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || input.task === null) return input;
+    const offers = (input.options ?? []).some((o) => {
+      const n = o.trim().toLowerCase();
+      return n === "respawn" || respawnTarget(o, [o]) !== null;
+    });
+    if (!offers) return input;
+    const host = this.machineOfTask(rec, input.task);
+    if (host === undefined) return input;
+    const trouble = this.hostTrouble(host);
+    const best = trouble !== null ? this.placeAway(wave, input.task, [host]) : null;
+    if (trouble === null || best === null || best.host === null) return withRespawnOn(input, null);
+    const marker = extra.pipeline as { role?: unknown } | undefined;
+    const role = typeof marker?.role === "string" ? marker.role : extra.role;
+    return withRespawnOn(input, {
+      host,
+      why: trouble.why,
+      best: best.host,
+      closed: trouble.closed,
+      ...(typeof role === "string" ? { role } : {}),
+    });
+  }
+
+  /**
+   * `respawn on <machine>` answered: the task is re-placed there first (journaled `by:
+   * decision`), so the respawn the answer then triggers starts on it. Returns why the machine
+   * cannot take it now (down, closed or not eligible since the question was asked: nothing is
+   * re-placed), else null.
+   */
+  private async respawnOn(wave: WaveId, d: DecisionRecord, target: string): Promise<string | null> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || d.task === null) return null;
+    const local = this.config.localName();
+    if (target !== local && !Object.hasOwn(this.config.effective().hosts, target)) {
+      return `no machine named "${target}" to respawn on`;
+    }
+    const from = this.machineOfTask(rec, d.task) ?? local;
+    const trouble =
+      target === from ? { why: "the machine it is leaving" } : this.hostTrouble(target);
+    if (trouble !== null) return `${target} cannot take it now: it is ${trouble.why}`;
+    const p = this.placeAway(wave, d.task, [from]);
+    const candidates = p?.candidates ?? [];
+    const row = candidates.find((c) => c.host === target);
+    if (row === undefined || row.score === null) {
+      const line = row?.line.replace(/^ineligible: /, "") ?? "not a candidate";
+      return `${target} cannot take it now: ${line}`;
+    }
+    await this.rePlace(
+      wave,
+      d.task,
+      { host: target, local: target === local, by: "auto", score: row.score, candidates },
+      from,
+    );
+    return null;
+  }
+
+  /** A refused `respawn on <machine>` answer: the same question again, with a fresh offer. */
+  private async askAgainRefused(
+    wave: WaveId,
+    d: DecisionRecord,
+    answer: string,
+    why: string,
+  ): Promise<void> {
+    const {
+      decision_id: _id,
+      wave: _wave,
+      task,
+      kind,
+      question,
+      options,
+      pointers,
+      opened_at: _at,
+      resolved: _resolved,
+      resume_stage: _stage,
+      parks: _parks,
+      rationale: _why,
+      ...extra
+    } = d;
+    const base = question.replace(/^".*?" was refused: [^.]*\. /, "");
+    try {
+      await this.openDecisionNow(
+        wave,
+        {
+          kind,
+          task,
+          question: `"${answer}" was refused: ${why}. ${base}`,
+          pointers,
+          ...(options !== undefined ? { options } : {}),
+        },
+        extra,
+      );
+    } catch (e) {
+      this.log(`ask again ${d.decision_id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * The live agents on machine `name`: supervised, launched and still being verified, and the
+   * spawns in flight for tasks there (a drain waits for all of them).
+   */
+  private agentsOn(name: string): string[] {
+    const local = this.config.localName();
+    const on = (id: string) => {
+      const host = this.spawnedAgents.get(id)?.host ?? LOCAL_HOST;
+      return (host === LOCAL_HOST ? local : host) === name;
+    };
+    const ids = [...this.supervised.keys(), ...this.launching.keys()].filter(on);
+    for (const key of this.spawning) {
+      const [wave = "", task = "", role = ""] = key.split("/");
+      const rec = this.waves.get(wave)?.record;
+      if (rec === undefined || this.machineOfTask(rec, task) !== name || !isRole(role)) continue;
+      // Not journaled `agent_spawned` yet: the id its spawn is taking.
+      const id = agentIdFor(wave, task, role, this.agentAttempt(wave, task, role));
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return [...new Set(ids)];
+  }
+
+  /** `peer_remove { now }`: tell supervised agent `id` on machine `name` to stop (once). */
+  private async evictOne(name: string, id: string, a: Supervised, by: string): Promise<void> {
+    this.evicted.set(id, this.now());
+    await this.cancelAgent(a.wave, { task: a.task, role: a.role, agent_id: id }, by, {
+      text: `volleyd: ${name} is being removed (by ${by}). Stop work on ${a.task} now: do not push, open or merge anything further, publish your terminal status and exit.`,
+      from_agent_id: DAEMON_AGENT_ID,
+      wave: a.wave,
+      task: a.task,
+    });
+  }
+
+  /** `peer_remove { now }`: tell every agent on the machine to stop (the sweep force-retires). */
+  private async evict(name: string, by: string): Promise<void> {
+    for (const id of this.agentsOn(name)) {
+      const a = this.supervised.get(id);
+      if (a !== undefined && !this.evicted.has(id)) await this.evictOne(name, id, a, by);
+    }
+  }
+
+  /**
+   * Every tick: a drain or remove-now whose machine has no live agent left (none supervised,
+   * launched or spawning there) finishes (`peer_removed`). A remove-now tells each agent there to
+   * stop, those that came up after it began too, and force-retires each one still live
+   * `stop_grace_s` after it was told, which opens its respawn decision.
+   */
+  private async removalSweep(): Promise<void> {
+    for (const [name, pending] of Object.entries(this.peers.removals())) {
+      const live = this.agentsOn(name);
+      if (live.length === 0) {
+        for (const id of this.evicted.keys()) if (!this.supervised.has(id)) this.evicted.delete(id);
+        const r = await this.peers.finishRemoval(name);
+        if (!r.ok) this.log(`peer_remove ${name}: ${r.error}`);
+        continue;
+      }
+      if (pending.mode !== "now") continue;
+      const grace = secondsMs(this.config.effective().stop_grace_s);
+      for (const id of live) {
+        const a = this.supervised.get(id);
+        // Launched but not verified yet: told to stop once it is supervised.
+        if (a === undefined) continue;
+        const told = this.evicted.get(id);
+        if (told === undefined) {
+          await this.evictOne(name, id, a, pending.by);
+          continue;
+        }
+        if (this.now() < told + grace) continue;
+        this.evicted.delete(id);
+        await this.append(a.wave, {
+          type: "agent_force_retired",
+          task: a.task,
+          data: { agent_id: id, role: a.role, reason: "peer_remove" },
+        });
+        await this.onFinal(id, "stopped", `was stopped: ${name} is being removed`);
       }
     }
   }
@@ -1960,6 +2994,13 @@ export class Daemon {
     const t = w.tasks[task];
     if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
     const key = `${wave}/${task}/${role}`;
+    // Its machine takes no new agents (draining, being removed, removed): it waits for the
+    // owner's re-place answer, never a spawn that fails on a host that is gone.
+    const closed = this.closedFor(wave, task);
+    if (closed !== null) {
+      this.parkClosed(wave, task);
+      throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
+    }
     let remote: RemoteHost | undefined;
     if (t.host !== "local") {
       try {
@@ -1999,6 +3040,11 @@ export class Daemon {
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
       const { resumeNote, ...rest } = pipeline;
+      // An implementer respawn continues the branch (and PR) an earlier attempt pushed.
+      const carried =
+        role === "implementer" && rest.start === undefined && rest.worktreeAttempt === undefined
+          ? this.lastBranch(wave, task, role)
+          : undefined;
       let req = {
         wave: w,
         task,
@@ -2008,6 +3054,7 @@ export class Daemon {
         account: { id: account.id, dir: account.dir },
         hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
+        ...(carried !== undefined ? { continueBranch: carried } : {}),
       };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
@@ -2020,15 +3067,20 @@ export class Daemon {
       const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
       if (res.kind === "launched") {
         this.refused.delete(key);
+        this.launching.set(res.agentId, { wave, task, role });
         void res.verified.then(
           (outcome) => {
+            this.launching.delete(res.agentId);
             this.supervise(wave, task, role, outcome, res.lock.path, host, tunnel);
             // Refused by the broker: no work it does can be delivered. Pause it until the
             // decision's answer (relaunch / cancel) replaces or retires it.
             if (outcome.kind === "decision" && outcome.decision === "hooks_auth_failed")
               void this.enqueue(() => this.pauseAuthFailed(outcome.agentId));
           },
-          (e: unknown) => this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`),
+          (e: unknown) => {
+            this.launching.delete(res.agentId);
+            this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`);
+          },
         );
         // Best effort, after supervision is attached: the agent is launched whatever it says.
         void this.spawnRecovered(wave, task, role, res.agentId, prior).catch((e: unknown) =>
@@ -2165,6 +3217,16 @@ export class Daemon {
     if (open !== undefined) {
       await this.resolveNow(wave, open.decision_id, { answer: "recovered", by: DAEMON_AGENT_ID });
     }
+  }
+
+  /** The branch the latest agent of a task's role was cut on (`agent_spawned`), if any. */
+  private lastBranch(wave: WaveId, task: TaskId, role: Role): string | undefined {
+    const spawned = this.waves
+      .get(wave)
+      ?.journal.readAll()
+      .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
+      .at(-1)?.data.branch;
+    return typeof spawned === "string" && AGENT_BRANCH.test(spawned) ? spawned : undefined;
   }
 
   /** The attempt number the next agent spawned for a task's role gets (its branch's `-<n>`). */
@@ -2440,7 +3502,21 @@ export class Daemon {
 
   /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
   private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
-    const spec = resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts);
+    return this.remoteBySpec(
+      resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts),
+    );
+  }
+
+  /** The configured host `name` (no task's inline `host:`), or why it cannot be reached. */
+  private remoteFor(name: string): RemoteHost | string {
+    try {
+      return this.remoteBySpec(resolveRemoteHost(name, undefined, this.config.effective().hosts));
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  private remoteBySpec(spec: RemoteHostSpec): RemoteHost {
     const key = JSON.stringify(spec);
     let h = this.remotes.get(key);
     if (h === undefined) {
@@ -2530,6 +3606,7 @@ export class Daemon {
    * tunnel: its spawn waits. Only new spawns wait; running agents are never touched.
    */
   private parkOnTunnel(wave: WaveId, task: string): boolean {
+    if (this.parkClosed(wave, task)) return true;
     const key = `${wave}/${task}`;
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
     let target: string | undefined;
@@ -2618,6 +3695,427 @@ export class Daemon {
     }
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Fleet (F2, SPEC §4.6.15): the supervisor's own machine record, readiness, PATH probes
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Every tick: start the own doctor when one is due (outside the queue: it runs for seconds),
+   * re-publish the own record every `machine_heartbeat_ms`, then re-compute every verdict.
+   */
+  private async fleetTick(): Promise<void> {
+    const beat = DAEMON_DEFAULTS.machine_heartbeat_ms;
+    const now = this.now();
+    this.fleetSince ??= now;
+    if (
+      this.opts.fleet?.localDoctor !== undefined &&
+      !this.localDoctorRunning &&
+      (this.localDoctorAt === null ||
+        now - this.localDoctorAt >= beat ||
+        this.localDoctorTried !== this.waveRepo())
+    ) {
+      void this.runLocalDoctor();
+    }
+    if (
+      this.ownRecordAt === null ||
+      now - this.ownRecordAt >= beat ||
+      this.ownRecord?.name !== this.config.localName()
+    ) {
+      await this.publishOwnRecord();
+    }
+    await this.publishReadiness();
+  }
+
+  /**
+   * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
+   * report fills the own record. Runs again at once when the running wave's repo changes.
+   */
+  private async runLocalDoctor(): Promise<void> {
+    const doctor = this.opts.fleet?.localDoctor;
+    if (doctor === undefined) return;
+    this.localDoctorRunning = true;
+    this.localDoctorAt = this.now();
+    const repo = this.waveRepo();
+    this.localDoctorTried = repo;
+    try {
+      const report = await doctor(repo).catch((e: unknown) => {
+        this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (!this.running) return;
+      // A failed run settles the verdict too (on the last report, or none).
+      await this.enqueue(async () => {
+        if (report !== null) {
+          this.localReport = report;
+          this.localDoctorRepo = repo;
+        } else if (this.localDoctorRepo === undefined) {
+          this.localDoctorRepo = null;
+        }
+        await this.publishOwnRecord();
+        await this.publishReadiness(this.config.localName());
+      });
+    } finally {
+      this.localDoctorRunning = false;
+    }
+  }
+
+  /**
+   * The own machine's record, as volleyd (`kind: supervisor`, `tunnel: local`): live load,
+   * memory and agents from `os`, the rest from the own doctor's last report. A renamed machine
+   * (`fleet.local_name`) clears the old name's record and verdict.
+   */
+  private async publishOwnRecord(): Promise<void> {
+    const name = this.config.localName();
+    const prior = this.ownRecord;
+    if (prior !== undefined && prior.name !== name) {
+      this.machines.forget(prior.name);
+      await this.clearRetained(machineTopic(prior.name));
+      await this.clearReadiness(prior.name);
+    }
+    const sys = this.opts.fleet?.os;
+    const total = (sys?.totalmem ?? totalmem)();
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const os = (sys?.platform ?? platform)();
+    // Available memory has one definition on every machine (SPEC §4.6.15). Linux: `freemem()` is
+    // MemAvailable. macOS: free pages alone under-count, so the figure is the own doctor's
+    // (`vm_stat`, as every macOS peer reports it); none yet: unknown, never the free pages.
+    const available =
+      os === "darwin"
+        ? (this.localReport?.memory?.available_pct ?? null)
+        : round(((sys?.freemem ?? freemem)() / total) * 100);
+    const memory =
+      available === null
+        ? undefined
+        : { total_mb: Math.max(1, Math.round(total / (1024 * 1024))), available_pct: available };
+    const base: MachineRecord = {
+      name,
+      kind: "supervisor",
+      os,
+      arch: osArch(),
+      cores: Math.max(1, availableParallelism()),
+      tunnel: "local",
+      load: (sys?.loadavg ?? loadavg)().slice(0, 3).map(round) as [number, number, number],
+      agents: this.placedOn(name),
+      ...(memory !== undefined ? { memory } : {}),
+      uptime_s: Math.floor(uptime()),
+      last_seen: dateOf(this.time).toISOString(),
+    };
+    const report = this.localReport;
+    let record: MachineRecord =
+      report === null
+        ? base
+        : {
+            ...base,
+            ...doctorFields(report),
+            ...(memory !== undefined ? { memory } : {}),
+            ...(report.versions !== undefined
+              ? { versions: { ...report.versions, volley: this.version } }
+              : {}),
+          };
+    if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
+      this.log("own doctor report does not fit machine.schema.json: published without it");
+      record = base;
+    }
+    this.ownRecord = record;
+    this.ownRecordAt = this.now();
+    this.machines.observe(record);
+    await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+  }
+
+  /** Live supervised agents on machine `name` (the `local` token is the own machine). */
+  private placedOn(name: string): number {
+    const local = this.config.localName();
+    let n = 0;
+    for (const id of this.supervised.keys()) {
+      const host = this.spawnedAgents.get(id)?.host ?? LOCAL_HOST;
+      if ((host === LOCAL_HOST ? local : host) === name) n++;
+    }
+    return n;
+  }
+
+  /**
+   * Re-compute the verdict of every machine (or only `name`): the own machine and every
+   * configured host. Published retained when it changed or is a heartbeat old; journaled as
+   * `machine_readiness_changed` when `ready` or `reasons` change. A host no longer configured has
+   * its verdict cleared.
+   */
+  private async publishReadiness(only?: string): Promise<void> {
+    if (!this.running) return;
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const names = [local, ...Object.keys(cfg.hosts).filter((n) => n !== local)];
+    for (const n of [...this.published.keys()])
+      if (!names.includes(n)) await this.clearReadiness(n);
+    const shared = this.requirementsExtra();
+    for (const name of only === undefined ? names : names.filter((n) => n === only)) {
+      const isLocal = name === local;
+      if (!isLocal) this.maybeProbe(name);
+      // Inputs not gathered yet in this process: the last retained verdict stands.
+      if (!this.isSettled(name, isLocal)) continue;
+      const v = this.machineState(name, isLocal, cfg, shared, cfg, this.pressure(GLOBAL)).verdict;
+      const key = readinessKey(v);
+      const now = this.now();
+      const prior = this.published.get(name);
+      if (
+        prior === undefined ||
+        prior.key !== key ||
+        now - prior.at >= DAEMON_DEFAULTS.machine_heartbeat_ms
+      ) {
+        this.published.set(name, { key, at: now });
+        await this.publish(
+          readinessTopic(name),
+          this.envelope(READINESS_CHANNEL, "readiness", v),
+          true,
+        );
+      }
+      // A machine's first settled verdict is its baseline (nothing changed yet); a restart
+      // compares with the last journaled one.
+      const was = this.journaledReadiness.get(name);
+      if (was === undefined)
+        this.journaledReadiness.set(name, { ready: v.ready, reasons: v.reasons });
+      else if (was.ready !== v.ready || JSON.stringify(was.reasons) !== JSON.stringify(v.reasons)) {
+        this.journaledReadiness.set(name, { ready: v.ready, reasons: v.reasons });
+        await this.appendSystem({
+          type: "machine_readiness_changed",
+          data: { name, ready: v.ready, reasons: v.reasons },
+        });
+      }
+    }
+  }
+
+  /**
+   * Whether machine `name`'s verdict has its inputs: a peer's record has folded in and its first
+   * PATH probe finished (none runs while its tunnel is not up); the own machine's first doctor run
+   * finished. Either way at most `machine_down_after_ms` after this process began. Once settled,
+   * a machine stays settled.
+   */
+  private isSettled(name: string, isLocal: boolean): boolean {
+    if (this.readinessSettled.has(name)) return true;
+    let warm: boolean;
+    if (isLocal) {
+      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorRepo !== undefined;
+    } else {
+      const r = this.machines.record(name);
+      const probe = this.probes.get(name);
+      warm = r !== undefined && (r.tunnel !== "up" || (probe !== undefined && !probe.running));
+    }
+    this.fleetSince ??= this.now();
+    if (!warm && this.now() - this.fleetSince < DAEMON_DEFAULTS.machine_down_after_ms) {
+      return false;
+    }
+    this.readinessSettled.add(name);
+    return true;
+  }
+
+  /** A removed (or renamed) machine: its verdict cleared, its probe forgotten. */
+  private async clearReadiness(name: string): Promise<void> {
+    this.published.delete(name);
+    this.probes.delete(name);
+    this.readinessSettled.delete(name);
+    await this.clearRetained(readinessTopic(name));
+  }
+
+  private readinessInput(
+    name: string,
+    isLocal: boolean,
+    cfg: Tunables,
+    extra: Pick<ReadinessInput, "bun" | "sharing">,
+    eff: Tunables,
+    gate: Admission,
+  ): ReadinessInput {
+    const h = Object.hasOwn(cfg.hosts, name) ? cfg.hosts[name] : undefined;
+    const probe = this.probes.get(name);
+    const records = accountRecords(this.usage);
+    const account = isLocal
+      ? cfg.claude.default_account
+      : (Object.keys(records)
+          .filter((a) => a.endsWith(`@${name}`))
+          .sort()[0] ?? null);
+    return {
+      name,
+      record: isLocal ? this.ownRecord : this.machines.record(name),
+      local: isLocal,
+      // The own machine is capped by hard_ceiling, which caps every supervised agent: its
+      // headroom is the ceiling less all of them, wherever they run.
+      host: isLocal
+        ? { max_agents: cfg.hard_ceiling, drain: false }
+        : {
+            max_agents: h?.max_agents ?? REMOTE_HOST_DEFAULTS.max_agents,
+            // A pending removal keeps it closed, whatever its drain says now.
+            drain:
+              (h?.drain ?? REMOTE_HOST_DEFAULTS.drain) ||
+              Object.hasOwn(this.peers.removals(), name),
+          },
+      hostVersion: this.version,
+      hostOrigin: this.waveOrigin(),
+      ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
+      probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
+      ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
+      placed: isLocal
+        ? this.supervised.size + this.reservedOn(null)
+        : this.placedOn(name) + this.reservedOn(name),
+      heavy: Object.fromEntries(
+        Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
+          c.per_machine === undefined
+            ? []
+            : [
+                [
+                  pool,
+                  {
+                    held: heldOn(this.leases, pool, name) + this.heavyReservedOn(name, pool),
+                    per_machine: c.per_machine,
+                  },
+                ],
+              ],
+        ),
+      ),
+      usage: {
+        account,
+        five_hour_pct: account !== null ? (records[account]?.five_hour?.pct ?? null) : null,
+      },
+      filter: { placement: eff.placement, warn_at_pct: eff.claude.warn_at_pct },
+      held: isLocal ? machineReasons(gate) : this.hostVerdict(name, eff).recovering,
+      ...extra,
+      checkedAt: dateOf(this.time),
+    };
+  }
+
+  /**
+   * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
+   * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
+   * wave runs, or no run has checked its clone yet (a failed run keeps an earlier wave's report).
+   */
+  private waveOrigin(): string | null {
+    const repo = this.localDoctorRepo;
+    return typeof repo === "string" && repo === this.waveRepo()
+      ? (this.localReport?.repo?.origin ?? null)
+      : null;
+  }
+
+  /**
+   * The wave repo the supervisor's own clone is checked against: the running wave's (the first by
+   * wave id when several run), as an absolute path; null when no wave runs.
+   */
+  private waveRepo(): string | null {
+    const repos = this.runningWaves()
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, l]) => l.record.wave?.repo ?? "")
+      .filter((r) => r !== "");
+    return repos[0] !== undefined ? resolve(repoDir(repos[0])) : null;
+  }
+
+  /**
+   * What every verdict's `requirements` adds to the version: the bun the running wave's repo
+   * (`waveRepo`) asks for (`engines.bun`, else `packageManager`), and the own `sharing.yaml`
+   * modes.
+   */
+  private requirementsExtra(): Pick<ReadinessInput, "bun" | "sharing"> {
+    let sharing: Sharing | undefined;
+    try {
+      sharing = readSharing(this.opts.claude?.root ?? claudeRoot());
+    } catch {
+      sharing = undefined;
+    }
+    let bun: string | undefined;
+    const dir = this.waveRepo();
+    if (dir !== null) {
+      try {
+        const p = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")) as {
+          engines?: { bun?: unknown };
+          packageManager?: unknown;
+        };
+        const engines =
+          typeof p.engines?.bun === "string" ? p.engines.bun.replace(/^[\s^~>=<]+/, "") : "";
+        const pm =
+          typeof p.packageManager === "string" && p.packageManager.startsWith("bun@")
+            ? (p.packageManager.slice("bun@".length).split("+")[0] ?? "")
+            : "";
+        const v = engines !== "" ? engines : pm;
+        if (/^[0-9][0-9A-Za-z.-]{0,63}$/.test(v)) bun = v;
+      } catch {}
+    }
+    return {
+      ...(bun !== undefined ? { bun } : {}),
+      ...(sharing !== undefined ? { sharing } : {}),
+    };
+  }
+
+  /**
+   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms`: run
+   * beside the queue (it is an ssh round-trip), then re-compute that machine's verdict.
+   */
+  private maybeProbe(name: string): void {
+    if (this.machines.record(name)?.tunnel !== "up") return;
+    const prior = this.probes.get(name);
+    const at = this.now();
+    if (
+      prior !== undefined &&
+      (prior.running || at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms)
+    ) {
+      return;
+    }
+    const host = this.remoteFor(name);
+    if (typeof host === "string") {
+      this.probes.set(name, { path: null, error: host, at, running: false });
+      return;
+    }
+    this.probes.set(name, { path: prior?.path ?? null, at, running: true });
+    void Promise.resolve()
+      .then(() => host.probePath())
+      .then(
+        (path) => ({ path }),
+        (e: unknown) => ({ path: null, error: e instanceof Error ? e.message : String(e) }),
+      )
+      .then(async (r) => {
+        if (!this.running) return;
+        await this.enqueue(async () => {
+          // A removed host (or a newer probe) is not overwritten by this one.
+          if (this.probes.get(name)?.at !== at) return;
+          this.probes.set(name, { ...r, at, running: false });
+          await this.publishReadiness(name);
+        });
+      });
+  }
+
+  /**
+   * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
+   * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
+   * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
+   * PATH is probed again, and `peer_doctor_run` is journaled.
+   */
+  private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const req = this.peers.doctorRequest(p, this.waveOrigin());
+    if (!("host" in req)) return { reply: authReply("peer_doctor", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_doctor", {
+          ok: false,
+          error: `a doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
+    const run: DoctorRun = req;
+    return {
+      later: async () => {
+        let r: PeerReply;
+        try {
+          r = await this.peers.runDoctor(run);
+        } finally {
+          this.doctoring.delete(run.name);
+        }
+        if (r.ok) this.probes.delete(run.name);
+        return {
+          reply: authReply("peer_doctor", r),
+          journal: {
+            type: "peer_doctor_run",
+            data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
+          },
+        };
+      },
+    };
+  }
+
   /**
    * A machine went down or came back: journal a drop for the waves with unfinished tasks on its
    * host, re-publish their state (their spawns park or resume), then re-admit.
@@ -2628,6 +4126,7 @@ export class Daemon {
     record: MachineRecord,
   ): Promise<void> {
     if (!this.running) return;
+    if (status === "up") await this.machineBack(name);
     for (const [wave, log] of this.waves) {
       const tasks = (log.record.state?.tasks ?? [])
         .filter((t) => t.stage !== "done" && t.stage !== "cancelled")
@@ -3022,6 +4521,8 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
+      nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
@@ -3060,7 +4561,7 @@ export class Daemon {
    * tells the pipeline it failed; `done` goes to the pipeline, which verifies the claim (steering
    * the agent while it is still live) and retires it.
    */
-  private async onFinal(agentId: string, type: string): Promise<void> {
+  private async onFinal(agentId: string, type: string, why?: string): Promise<void> {
     const a = this.supervised.get(agentId);
     if (a === undefined || this.moving.has(agentId)) return;
     if (type !== "done") await this.retire(agentId, type);
@@ -3074,6 +4575,7 @@ export class Daemon {
       agent_id: agentId,
       status: type === "done" ? "done" : "failed",
       ...(result !== undefined ? { result } : {}),
+      ...(why !== undefined ? { why } : {}),
     });
   }
 
@@ -3136,6 +4638,8 @@ export class Daemon {
     if (this.opts.spawner === undefined || rec?.wave == null) return;
     const key = `${wave}/${task}/${role}`;
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
+    // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
+    if (this.parkClosed(wave, task)) return;
     const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
     const hold = roleSpawnHold({
       killSwitch: this.killSwitch,
@@ -3630,7 +5134,10 @@ export class Daemon {
     const why = `${by} stopped the task (decision ${d.decision_id})`;
     if (cls === "respawn_needed") {
       const a = answer.trim().toLowerCase();
-      const respawn = a === "respawn" && isRole(String(x.role)) && this.opts.spawner !== undefined;
+      const respawn =
+        isRespawnAnswer(answer, d.options) &&
+        isRole(String(x.role)) &&
+        this.opts.spawner !== undefined;
       if (a !== STOP_ANSWER && !respawn) return;
       // Either way the vanished agent is done with: retired, so no later restart reconciles it.
       await this.retireGone(wave, d.task, agentId, x);
@@ -3645,7 +5152,13 @@ export class Daemon {
       const task = d.task;
       const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
       this.refused.delete(`${wave}/${task}/${role}`);
-      void this.startSpawn(wave, task, role, moveRespawn(spawned)).catch((e: unknown) =>
+      const pipeline = moveRespawn(spawned);
+      // Its machine takes no new agents: it starts once the task is re-placed.
+      if (this.parkClosed(wave, task)) {
+        this.heldRespawn.set(`${wave}/${task}`, { role, pipeline });
+        return;
+      }
+      void this.startSpawn(wave, task, role, pipeline).catch((e: unknown) =>
         this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
       );
       return;
@@ -4008,6 +5521,11 @@ export class Daemon {
     if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
       return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
     if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    if (this.waves.get(wave)?.record.wave?.tasks[task]?.host === AUTO_HOST)
+      return {
+        ok: false,
+        error: `task ${task} is not placed yet (host: auto): it is placed when the scheduler admits it`,
+      };
     this.refused.delete(`${wave}/${task}/${role}`);
     try {
       const res = await this.startSpawn(wave, task, role);
@@ -4126,9 +5644,13 @@ export class Daemon {
   }
 
   private observeJournal(wave: WaveId, journal: Journal): void {
-    if (wave !== SYSTEM_WAVE) for (const e of journal.readAll()) this.noteSpawn(wave, e);
+    for (const e of journal.readAll()) {
+      if (wave !== SYSTEM_WAVE) this.noteSpawn(wave, e);
+      else this.noteRemoved(e);
+    }
     journal.onAppend((event) => {
       if (wave !== SYSTEM_WAVE) this.noteSpawn(wave, event);
+      else this.noteRemoved(event);
       for (const fn of this.journalListeners) fn(wave, event);
     });
   }
@@ -4138,6 +5660,12 @@ export class Daemon {
     const { agent_id: id, host } = e.data as { agent_id?: unknown; host?: unknown };
     if (e.type !== "agent_spawned" || typeof id !== "string") return;
     this.spawnedAgents.set(id, { wave, host: typeof host === "string" ? host : "local" });
+  }
+
+  /** A `peer_removed` (F6): when the machine went, for the tasks still placed on it. */
+  private noteRemoved(e: JournalEvent): void {
+    if (e.type === "peer_removed" && typeof e.data.name === "string")
+      this.removedAt.set(e.data.name, Date.parse(e.at));
   }
 
   /** Append to a wave journal, then mirror the event and re-publish the retained state. */
@@ -4204,7 +5732,7 @@ export class Daemon {
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
       const host = rec.wave?.tasks[t.id]?.host;
-      if (host !== undefined && host !== "local") t.host = host;
+      if (host !== undefined && host !== "local" && host !== AUTO_HOST) t.host = host;
       // A paired machine that is down: its running agents too (SPEC §4.6.14).
       const machine = t.host !== undefined ? this.machines.record(t.host) : undefined;
       if (machine?.tunnel === "down" && t.stage !== "done" && t.stage !== "cancelled") {
@@ -4218,11 +5746,21 @@ export class Daemon {
       if (t.stage !== "queued" && t.why_waiting !== undefined) continue;
       t.why_waiting = spawnFailedWhy(f, this.now());
     }
+    // On a machine that takes no new agents (F6): what it waits for, whatever its stage.
+    for (const t of state.tasks) {
+      if (t.stage === "done" || t.stage === "cancelled" || t.why_waiting !== undefined) continue;
+      if (this.taskLive(wave, t.id)) continue;
+      const closed = this.closedFor(wave, t.id);
+      if (closed !== null)
+        t.why_waiting = `${closed.line}; re-place or cancel ${t.id} (its machine_down decision)`;
+    }
     for (const t of state.tasks) {
       if (t.stage !== "queued" || t.why_waiting !== undefined) continue;
       const parked = this.parked.get(`${wave}/${t.id}`);
       if (parked !== undefined) t.why_waiting = parked;
       else if (rec.admitted.includes(t.id)) t.why_waiting = "admitted: awaiting spawn";
+      else if (candidates.has(t.id) && this.heldTask.has(`${wave}/${t.id}`))
+        t.why_waiting = this.heldTask.get(`${wave}/${t.id}`) as string;
       else if (candidates.has(t.id) && held.length > 0) t.why_waiting = held.join("; ");
     }
     for (const t of state.tasks) {
@@ -4301,7 +5839,11 @@ export class Daemon {
   ): Promise<DecisionRecord> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const r = openEvent(log.record, input, dateOf(this.time));
+    const r = openEvent(
+      log.record,
+      this.withRespawnElsewhere(wave, input, extra),
+      dateOf(this.time),
+    );
     if ("error" in r) throw new Error(r.error);
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     const d = log.record.decisions[r.id] as DecisionRecord;
@@ -4332,9 +5874,28 @@ export class Daemon {
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    const ev = resolveEvent(log.record, id, r, dateOf(this.time));
+    let ev = resolveEvent(log.record, id, r, dateOf(this.time));
     if ("error" in ev) throw new Error(ev.error);
     if ("already" in ev) return { decision: ev.already, already_resolved: true };
+    // `respawn on <machine>` (F6): the task moves there before the respawn the answer triggers.
+    // A machine that cannot take it now refuses the answer: journaled as not offered, so the
+    // question is asked again with a fresh best.
+    const asked = log.record.decisions[id];
+    const target =
+      asked !== undefined && asked.task !== null ? respawnTarget(r.answer, asked.options) : null;
+    const refused =
+      asked !== undefined && target !== null ? await this.respawnOn(wave, asked, target) : null;
+    if (refused !== null) {
+      const again = resolveEvent(
+        log.record,
+        id,
+        { ...r, answer: `${r.answer} (refused: ${refused})` },
+        dateOf(this.time),
+      );
+      if ("error" in again) throw new Error(again.error);
+      if ("already" in again) return { decision: again.already, already_resolved: true };
+      ev = again;
+    }
     const move = this.accountLimitMove(wave, log.record.decisions[id], r.answer);
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
@@ -4354,6 +5915,10 @@ export class Daemon {
     await this.clearRetained(topic);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
+    // The pipeline asks its own questions again; a supervisor's is asked again here.
+    if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
+      await this.askAgainRefused(wave, d, r.answer, refused);
+    if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       if (r.answer.trim().toLowerCase() === "cancel") {
         await this.append(wave, {
@@ -4658,6 +6223,8 @@ export class Daemon {
     const key = `${topic}/${cid}`;
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
+    // A redelivery of a request still running (peer_doctor): its answer comes when the run ends.
+    if (this.authRunning.has(key)) return;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
     if (tokenId === null && SETUP_OPS.has(payload.op as string)) {
       // A step can take minutes (the Desk build): answered beside the queue, never blocking it.
@@ -4669,7 +6236,26 @@ export class Daemon {
       return;
     }
     const exec = this.opts.authExec ?? realExec;
-    let out: AuthOutcome;
+    const failed = (e: unknown): AuthOutcome => ({
+      reply: {
+        text: "ACKED",
+        acked_type: "query",
+        op: typeof payload.op === "string" ? payload.op : "",
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    });
+    const finish = async (o: AuthOutcome & { journal?: NewEvent }) => {
+      if (o.event !== undefined) this.system.append(o.event, dateOf(this.time));
+      if (o.journal !== undefined) await this.appendSystem(o.journal);
+      if (!o.reply.ok) this.log(`refused ${o.reply.op || "auth request"}: ${o.reply.error}`);
+      this.authAnswered.set(key, o.reply);
+      if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+        this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+      }
+      await send(o.reply);
+    };
+    let out: AuthOutcome | DeferredAuth;
     try {
       if (tokenId !== null) {
         out = await redeemToken(exec, tokenId, payload);
@@ -4694,24 +6280,23 @@ export class Daemon {
             );
       }
     } catch (e) {
-      const op = typeof payload.op === "string" ? payload.op : "";
-      out = {
-        reply: {
-          text: "ACKED",
-          acked_type: "query",
-          op,
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        },
-      };
+      out = failed(e);
     }
-    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
-    if (!out.reply.ok) this.log(`refused ${out.reply.op || "auth request"}: ${out.reply.error}`);
-    this.authAnswered.set(key, out.reply);
-    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
-      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    if ("later" in out) {
+      // Outside the queue: only the answer (and its journal record) goes back through it.
+      const { later } = out;
+      this.authRunning.add(key);
+      void later()
+        .catch(failed)
+        .then((o) =>
+          this.enqueue(async () => {
+            this.authRunning.delete(key);
+            if (this.running) await finish(o);
+          }),
+        );
+      return;
     }
-    await send(out.reply);
+    await finish(out);
   }
 
   /**
@@ -4771,15 +6356,23 @@ export class Daemon {
    * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
    * names: the account ops' admin check, then peers.ts (which journals them itself).
    */
-  private async peerAdminOp(exec: ExecFn, sender: string, p: Record<string, unknown>) {
+  private async peerAdminOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
     const accounts = await listAccounts(exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    if (op === "peer_doctor") return this.peerDoctor(p, sender);
     const r =
       op === "peer_invite"
         ? await this.peers.invite(p, sender)
         : await this.peers.remove(p, sender);
+    // remove-now (F6): its agents are told to stop now; the sweep finishes the removal.
+    if (op === "peer_remove" && r.ok && (r.result as { removing?: string }).removing === "now")
+      await this.evict(p.name as string, sender);
     const { rejected: _r, ...answer } = r;
     return { reply: authReply(op, answer) };
   }
@@ -4904,6 +6497,7 @@ export class Daemon {
       case "token_redeem":
       case "peer_invite":
       case "peer_remove":
+      case "peer_doctor":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
@@ -5018,13 +6612,19 @@ export class Daemon {
    * `origin/<branch>` once it is fetched (a branch pushed from another clone counts), so a wave
    * whose every spawn would fail is refused before any task is admitted. Checked only where
    * volleyd spawns into that repo: with a spawner, and a task on the local host (a remote host's
-   * clone is fetched and checked on the box).
+   * clone is fetched and checked on the box). With require_fresh_base on, also BASE_STALE when no
+   * spawn could get a fresh base (no `origin` remote, or a branch origin does not have), instead
+   * of admitting tasks that would each retry a refusal for the whole spawn backoff.
    */
   private async releaseBranchMissing(wave: Wave): Promise<string | null> {
     if (this.opts.spawner === undefined || !spawnsLocally(wave)) return null;
     const repo = expandHome(wave.repo);
-    await fetchRelease(this.host.exec, repo, wave.release_branch);
-    return checkReleaseBranch(this.host.exec, repo, wave.release_branch);
+    const fetchError = await fetchRelease(this.host.exec, repo, wave.release_branch);
+    const missing = await checkReleaseBranch(this.host.exec, repo, wave.release_branch);
+    if (missing !== null) return missing;
+    // --- Fleet fresh base (SPEC §4.6.15): no origin, or a branch never pushed, is refused now. ---
+    const fresh = wave.config.require_fresh_base ?? this.config.effective().require_fresh_base;
+    return fresh ? checkFreshBase(this.host.exec, repo, wave.release_branch, fetchError) : null;
   }
 
   /**
@@ -5046,6 +6646,14 @@ export class Daemon {
       return refuse({ ok: false, error: `owner '${owner}' is not a valid agent id` });
     const wave = this.parseRequestWave(p, "run");
     if ("ok" in wave) return refuse(wave);
+    const merged = this.config.waveOverrideErrors(wave.config);
+    if (merged.length > 0) {
+      return refuse({
+        ok: false,
+        error: merged.map((e) => `${e.path}: ${e.reason}`).join("; "),
+        errors: merged,
+      });
+    }
     const log = this.waves.get(wave.wave);
     const existing = log?.record.state;
     if (log === undefined || existing == null) return { wave, owner };
@@ -5616,7 +7224,9 @@ export class Daemon {
     numbered?: { seq: number; supersedes?: string },
   ): Promise<void> {
     const log = this.waves.get(wave) as WaveLog;
-    const { seq, supersedes } = numbered ?? nextSteer(log.record, task);
+    // A merge nudge is additive: it never supersedes an earlier (owner or pipeline) steer.
+    const { seq, supersedes } =
+      numbered ?? nextSteer(log.record, task, { additive: isAdditiveSteer(extra.reason) });
     await this.publish(
       buildTopic(target.namespace, target.agent_id, "mailbox"),
       this.envelope(

@@ -32,7 +32,14 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "build", "bun.lock", "spec/examples"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      "build",
+      "bun.lock",
+      "spec/examples",
+      "packages/volley-desk/public/sounds"
+    ]
   },
   "overrides": [
     {

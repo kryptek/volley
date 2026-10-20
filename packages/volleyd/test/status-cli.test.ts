@@ -592,3 +592,63 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).not.toContain("VOLLEY_AUTH_PASSWORD");
   });
 });
+
+describe("volleyd status: placement why-lines (SPEC §4.6.15)", () => {
+  it("prints each placed task's host and every candidate's line, best first", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        {
+          id: "T1",
+          issue: 101,
+          stage: "implement",
+          agents: {},
+          host: "box-a",
+          placement: {
+            host: "box-a",
+            by: "auto",
+            score: 0.81,
+            decided_at: "2026-10-19T10:00:00.000Z",
+            candidates: [
+              {
+                host: "box-a",
+                score: 0.81,
+                line: "load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%",
+              },
+              {
+                host: "control",
+                score: 0.63,
+                line: "load 6.0 on 8 cores · 2/12 agents · 40% mem · usage 34%",
+              },
+              { host: "box-b", score: null, line: "ineligible: draining" },
+            ],
+          },
+        },
+        {
+          id: "T2",
+          issue: 102,
+          stage: "queued",
+          agents: {},
+          why_waiting: "no eligible machine: box-b: draining",
+        },
+      ],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out).toBe(
+      "w1  running  plan v1  owner: -  tasks: 2  gates: 0  decisions: 0  alarms: 0\n" +
+        "  T1  #101   implement     \n" +
+        "    on box-a (auto, 0.81)\n" +
+        "      box-a    0.81  load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%\n" +
+        "      control  0.63  load 6.0 on 8 cores · 2/12 agents · 40% mem · usage 34%\n" +
+        "      box-b    -     ineligible: draining\n" +
+        "  T2  #102   queued          no eligible machine: box-b: draining\n",
+    );
+  });
+});

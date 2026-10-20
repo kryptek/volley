@@ -12,10 +12,12 @@ import {
   Rocket01Icon,
   ServerStack01Icon,
   Settings02Icon,
+  VolumeHighIcon,
 } from "@hugeicons/core-free-icons";
 
 export type SectionKey =
   | "general"
+  | "sound"
   | "appearance"
   | "supervisor"
   | "claude"
@@ -43,7 +45,15 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: Settings02Icon,
     tint: "#8e8e93",
     group: 0,
-    keywords: "auto arrange sound notifications finished narration",
+    keywords: "auto arrange notifications finished narration",
+  },
+  {
+    key: "sound",
+    label: "Sound",
+    icon: VolumeHighIcon,
+    tint: "#ff2d55",
+    group: 0,
+    keywords: "sound theme volume mute audition quiet hours vibrate chime",
   },
   {
     key: "appearance",
@@ -59,7 +69,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: ServerStack01Icon,
     tint: "#30b0c7",
     group: 1,
-    keywords: "ceiling leases admission memory escalate heartbeat claim model",
+    keywords:
+      "ceiling leases lease pools per machine admission memory escalate heartbeat claim model",
   },
   {
     key: "claude",
@@ -83,7 +94,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: ComputerIcon,
     tint: "#34c759",
     group: 1,
-    keywords: "peer pair add machine tunnel host",
+    keywords:
+      "peer pair add machine tunnel host fleet ready readiness doctor repair re-pair drain remove max agents cap",
   },
   {
     key: "setup",

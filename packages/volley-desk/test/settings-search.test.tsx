@@ -12,8 +12,21 @@ describe("matchSections", () => {
     expect(keys("ceiling")).toEqual(["supervisor"]);
     expect(keys("  Background ")).toEqual(["appearance"]);
     expect(keys("ABOUT")).toEqual(["about"]);
-    expect(keys("")).toHaveLength(8);
+    expect(keys("")).toHaveLength(9);
+  });
+
+  it("finds Sound by its words; 'theme' still finds Appearance too", () => {
+    expect(keys("quiet")).toEqual(["sound"]);
+    expect(keys("vibrate")).toEqual(["sound"]);
+    expect(keys("audition")).toEqual(["sound"]);
+    expect(keys("theme")).toEqual(["sound", "appearance"]);
     expect(keys("zzz")).toEqual([]);
+  });
+
+  it("finds the Fleet's controls: Machines for repair and drain, Supervisor for lease pools", () => {
+    expect(keys("repair")).toEqual(["machines"]);
+    expect(keys("drain")).toEqual(["machines"]);
+    expect(keys("lease pools")).toEqual(["supervisor"]);
   });
 });
 
@@ -47,7 +60,7 @@ describe("the sidebar search", () => {
     fireEvent.change(search(), { target: { value: "ceiling" } });
     expect(listed()).toEqual(["Supervisor"]);
     fireEvent.change(search(), { target: { value: "" } });
-    expect(listed()).toHaveLength(8);
+    expect(listed()).toHaveLength(9);
   });
 
   it("says so when nothing matches, and keeps the open section on screen", () => {

@@ -1,42 +1,52 @@
 /**
  * Settings › Machines, ported from the prototype `MachinesBody` (SPEC
- * §4.6.14): the machines that can run agents for the waves. This machine (the
- * one with the broker and volleyd, "this one") comes first, then one card per
- * paired machine's retained record on `volley/_system/machines/+`: name,
- * os/arch and cores, the tunnel with its heartbeat dot, the 1-minute load, its
- * agents and when it was last heard from (why it is down, when it is). Only
- * configured hosts are machines: every account may publish its own record.
- * This machine publishes no record, so its card has only its agents; its os,
- * cores and load wait on volleyd publishing one.
+ * §4.6.14–15): the machines that can run agents for the waves. The
+ * supervisor's own machine comes first as "this one" (its record is the one
+ * named by `_config` `fleet.local_name`; until it has one, a placeholder card
+ * with its agents), then one `MachineCard` per paired machine's retained
+ * record under `volley/_system/machines/#`, with volleyd's readiness verdict
+ * from `<name>/readiness` (stale while volleyd is not live) and, for an
+ * admin, the cap editor. Only configured hosts are machines: every account
+ * may publish its own record.
  *
  * An admin Desk can pair and unpair. **+ Add a machine** creates a pairing
  * code at once (`peer_invite`) and opens a Stepper on "Run this on the other
  * machine": the copyable `volley peer join <code> --to <ssh address>` (the
  * address of this machine, which the owner types) and the code's countdown,
  * waiting until a record for a host that was not there before arrives
- * (joined), then Done. **Remove…** asks first, then sends `peer_remove`,
+ * (joined); then step 3 its checks and verdict (with Repair…), step 4 Claude
+ * on it (Check again runs a dry doctor), step 5 its readiness and max_agents,
+ * then Done. **Remove…** asks first, then sends `peer_remove`,
  * which revokes the machine's account and clears its record. Any other
  * session (not signed in, not an admin, demo, a browser that cannot make a
  * reply key at all) is read-only and is shown the terminal commands instead.
  * A plain-http LAN page can pair: its reply key comes from `lib/rsa.ts`.
  */
-import { Copy01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
-import type { MachinePayload } from "../store/types";
+import type {
+  ClaudeAccountPayload,
+  MachinePayload,
+  ReadinessPayload,
+  WaveStatePayload,
+} from "../store/types";
+import { DEFAULT_MAX_AGENTS, MachineCard, ReadinessLine, countdown } from "./MachineCard";
+import { CheckRows, CopyCommand } from "./MachineRows";
+import { RepairSheet } from "./RepairSheet";
+import type { ConfigTransport } from "./configTransport";
 import "../styles/machines.css";
 
 const MACHINES_TINT = "#34c759";
 /** How often the clock ticks: every second while a code counts down, else for the "seen" ages. */
 const COUNTDOWN_TICK_MS = 1000;
 const AGE_TICK_MS = 15_000;
-const COPIED_MS = 2000;
 
 export interface MachinesProps {
-  /** Machine records, by name (`volley/_system/machines/+`); only `hosts` are shown. */
+  /** Machine records, by name (`volley/_system/machines/#`); only `hosts` (and `localName`) are shown. */
   machines: Record<string, MachinePayload>;
   /** The configured hosts (`_waves/_config` `hosts`): the names that are machines; none by default. */
   hosts?: readonly string[];
@@ -52,6 +62,41 @@ export interface MachinesProps {
   host?: string;
   /** Told what the admin check found (Settings' account row shows an admin as one). */
   onAdmin?: (admin: AdminStatus) => void;
+  /** volleyd's readiness verdicts, by machine name (`volley/_system/machines/<name>/readiness`). */
+  readiness?: Record<string, ReadinessPayload>;
+  /** The supervisor's own machine name (`_config` `fleet.local_name`): its record is "this one". */
+  localName?: string | null | undefined;
+  /** volleyd's config channel, for the cap editors; `null` = read-only. */
+  configTransport?: ConfigTransport | null;
+  /** The Claude account records, for each machine's usage meter. */
+  accounts?: Record<string, ClaudeAccountPayload>;
+  /** Each machine's live agents (`agentsOnMachines`), listed by Remove. */
+  agentsOn?: Record<string, string[]>;
+  /** The remote Claude sign-in's button for a machine, when the Desk has one. */
+  signIn?: (machine: string) => ReactNode;
+}
+
+const FINISHED: ReadonlySet<string> = new Set(["done", "cancelled"]);
+
+/**
+ * Each machine's agents, from the waves' unfinished tasks: a task's machine is its `host`, else
+ * its placement's (the supervisor's own machine, under its local name). `live` narrows them to
+ * the agents still running (the store's statuses).
+ */
+export function agentsOnMachines(
+  states: readonly WaveStatePayload[],
+  live: (agentId: string) => boolean = () => true,
+): Record<string, string[]> {
+  const on: Record<string, string[]> = {};
+  for (const s of states) {
+    for (const t of s.tasks) {
+      const host = t.host ?? t.placement?.host;
+      if (!host || FINISHED.has(t.stage)) continue;
+      const ids = Object.values(t.agents).filter((a): a is string => !!a && live(a));
+      if (ids.length) on[host] = [...(on[host] ?? []), ...ids];
+    }
+  }
+  return on;
 }
 
 /** The clock, ticking every `ms`; a fixed `now` (tests) never ticks. */
@@ -112,130 +157,6 @@ export function sshHost(brokerUrl: string | null): string {
   }
 }
 
-/** `20s`, `5m`, `3h`, `2d`: how long ago `iso` was. */
-export function ago(iso: string, now: number): string {
-  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
-  if (Number.isNaN(s)) return "a while";
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86_400)}d`;
-}
-
-/** `m:ss` left until `iso`. */
-const countdown = (iso: string, now: number) => {
-  const left = Math.max(0, Math.ceil((Date.parse(iso) - now) / 1000));
-  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
-};
-
-const DOWN_REASON: Record<string, string> = {
-  heartbeat_timeout: "no heartbeat",
-  disconnect: "disconnected",
-};
-
-/** One load average as the record has it, at most two decimals. */
-const load = (n: number | undefined) => (n === undefined ? "—" : String(Number(n.toFixed(2))));
-
-type Removing = { phase: "confirm" } | { phase: "busy" } | { phase: "failed"; error: string };
-
-function MachineCard({
-  m,
-  now,
-  admin,
-  onRemoved,
-  ops,
-}: {
-  m: MachinePayload;
-  now: number;
-  admin: boolean;
-  onRemoved: (name: string) => void;
-  ops: PeerOps | null;
-}) {
-  const [removing, setRemoving] = useState<Removing | null>(null);
-  const down = m.tunnel === "down";
-  const remove = async () => {
-    if (!ops) return;
-    setRemoving({ phase: "busy" });
-    const r = await ops.remove(m.name);
-    if (r.ok) {
-      setRemoving(null);
-      onRemoved(m.name);
-    } else {
-      setRemoving({ phase: "failed", error: r.error ?? "volleyd refused" });
-    }
-  };
-  return (
-    <article className="machine" aria-label={m.name}>
-      <div className="m-head">
-        <b>{m.name}</b>
-      </div>
-      <div className="dim">
-        {m.os}
-        {m.arch ? ` ${m.arch}` : ""} · {plural(m.cores, "core")}
-      </div>
-      <div className="m-stats">
-        <span className={`hb${down ? " hb--stale" : ""}`}>
-          <i />
-          tunnel {m.tunnel}
-        </span>
-        <span className="mono">load {load(m.load[0])}</span>
-        <span>{plural(m.agents, "agent")}</span>
-      </div>
-      <div className="s-hint">
-        {down
-          ? `${DOWN_REASON[m.reason ?? ""] ?? "tunnel down"} · last seen ${ago(m.last_seen, now)} ago`
-          : `seen ${ago(m.last_seen, now)} ago`}
-      </div>
-      {down && (
-        <p className="s-hint m-note">
-          New agents for it wait until it is back; the ones already running keep going.
-        </p>
-      )}
-      {admin && removing === null && (
-        <button
-          type="button"
-          className="btn m-remove"
-          onClick={() => setRemoving({ phase: "confirm" })}
-        >
-          Remove…
-        </button>
-      )}
-      {admin && removing !== null && (
-        <div className="m-confirm">
-          <p className="s-hint">
-            Remove {m.name}? This revokes its broker account, takes it out of volleyd’s hosts and
-            clears its record. Its tunnel stops at its next check; pairing it again takes a new
-            code.
-          </p>
-          {removing.phase === "failed" && (
-            <p className="s-error" role="alert">
-              {removing.error}
-            </p>
-          )}
-          <div className="ny-actions">
-            <button
-              type="button"
-              className="btn btn--danger"
-              disabled={removing.phase === "busy"}
-              onClick={() => void remove()}
-            >
-              {removing.phase === "busy" ? "Removing…" : `Remove ${m.name}`}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={removing.phase === "busy"}
-              onClick={() => setRemoving(null)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </article>
-  );
-}
-
 /** This machine: the broker and volleyd run here, so it has no tunnel and no record. */
 function HubCard({ up, agents }: { up: boolean; agents: number }) {
   return (
@@ -257,40 +178,6 @@ function HubCard({ up, agents }: { up: boolean; agents: number }) {
   );
 }
 
-function CopyCommand({ text, ready }: { text: string; ready: boolean }) {
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  useEffect(() => {
-    if (state === "idle") return;
-    const t = setTimeout(() => setState("idle"), COPIED_MS);
-    return () => clearTimeout(t);
-  }, [state]);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setState("copied");
-    } catch {
-      setState("failed");
-    }
-  };
-  return (
-    <div className="m-command recessed">
-      <code className="mono">
-        {text.split(" ").map((w, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: the words of one fixed command
-          <Fragment key={i}>
-            {i > 0 && " "}
-            {w.startsWith("-") ? <span className="m-flag">{w}</span> : w}
-          </Fragment>
-        ))}
-      </code>
-      <button type="button" className="btn" disabled={!ready} onClick={() => void copy()}>
-        <HugeiconsIcon icon={Copy01Icon} size={13} strokeWidth={1.8} />
-        {state === "copied" ? "Copied" : state === "failed" ? "Select it to copy" : "Copy"}
-      </button>
-    </div>
-  );
-}
-
 type Pairing =
   | { phase: "creating" }
   | { phase: "failed"; error: string }
@@ -300,17 +187,32 @@ type Pairing =
 function AddMachine({
   ops,
   machines,
+  readiness,
+  config,
+  signIn,
   now,
   host,
+  hubUp,
   onClose,
 }: {
   ops: PeerOps;
   machines: Record<string, MachinePayload>;
+  readiness: Record<string, ReadinessPayload>;
+  config: ConfigTransport | null;
+  signIn: ((machine: string) => ReactNode) | undefined;
   now: number;
   host: string;
+  hubUp: boolean;
   onClose: () => void;
 }) {
   const [s, setS] = useState<Pairing>({ phase: "creating" });
+  /** After the join: 0 Checks, 1 Claude on <machine>, 2 Ready. */
+  const [after, setAfter] = useState(0);
+  const [repairing, setRepairing] = useState(false);
+  const [checking, setChecking] = useState<"idle" | "busy" | { error: string }>("idle");
+  const [cap, setCap] = useState<string | null>(null);
+  /** Done's cap change: sending, or why volleyd refused it (the step stays open). */
+  const [saving, setSaving] = useState<"idle" | "busy" | { error: string }>("idle");
   const [to, setTo] = useState("");
   const panel = useRef<HTMLDivElement>(null);
   // The panel opens below the cards: bring it into view (jsdom has no scrollIntoView).
@@ -345,7 +247,41 @@ function AddMachine({
     void create();
   }, [create]);
 
-  const step = joined ? 3 : s.phase === "waiting" ? 2 : 1;
+  const step = joined ? 3 + after : s.phase === "waiting" ? 2 : 1;
+  const rec = joined ? machines[joined] : undefined;
+  const verdict = joined ? readiness[joined] : undefined;
+  const ctx = { machine: joined ?? "", repo: rec?.repo?.path };
+  const currentCap = verdict?.max_agents ?? DEFAULT_MAX_AGENTS;
+  const capValue = Number(cap ?? currentCap);
+  const capValid = Number.isInteger(capValue) && capValue >= 1 && capValue <= 100;
+  // Check again: a dry doctor run makes the machine publish a fresh record, and volleyd a verdict.
+  const checkAgain = async () => {
+    if (!joined) return;
+    setChecking("busy");
+    const a = await ops.doctor(joined, { fix: false });
+    setChecking(a.ok ? "idle" : { error: a.error });
+  };
+  const done = async () => {
+    if (joined && config && capValid && capValue !== currentCap) {
+      setSaving("busy");
+      const ack = await config.send(
+        { hosts: { [joined]: { max_agents: capValue } } },
+        { text: `set ${joined} max_agents to ${capValue}` },
+      );
+      if (!ack.applied) {
+        setSaving({ error: ack.rejected[0]?.reason ?? ack.error ?? "volleyd refused" });
+        return;
+      }
+    }
+    onClose();
+  };
+  const next = (
+    <div className="ny-actions">
+      <button type="button" className="btn btn--hot" onClick={() => setAfter((n) => n + 1)}>
+        Next
+      </button>
+    </div>
+  );
   return (
     <div ref={panel} className="pair pair--machine">
       <Stepper
@@ -451,16 +387,118 @@ function AddMachine({
             </>
           )}
         </Step>
-        <Step title="Ready" description="Joined">
+        <Step title="Checks" description="Joined">
           <h3>
             <HugeiconsIcon icon={Tick02Icon} size={15} strokeWidth={1.8} /> {joined} joined
           </h3>
-          <p className="dim">
-            Its tunnel is up and it reports its health here. New waves can now place agents on{" "}
-            {joined}.
-          </p>
+          {rec?.checks?.length ? (
+            <CheckRows checks={rec.checks} ctx={ctx} label={`Checks on ${joined}`} />
+          ) : (
+            <p className="dim">
+              <span className="spinner" aria-hidden="true" /> Waiting for its first doctor report…
+            </p>
+          )}
+          {rec && <ReadinessLine m={rec} r={verdict} now={now} hubUp={hubUp} />}
           <div className="ny-actions">
-            <button type="button" className="btn btn--hot" onClick={onClose}>
+            {rec?.checks?.some((c) => !c.ok) && (
+              <button type="button" className="btn" onClick={() => setRepairing(true)}>
+                Repair…
+              </button>
+            )}
+            <button type="button" className="btn btn--hot" onClick={() => setAfter(1)}>
+              Next
+            </button>
+          </div>
+          {repairing && joined && (
+            <RepairSheet
+              machine={joined}
+              ops={ops}
+              repo={rec?.repo?.path}
+              onClose={() => setRepairing(false)}
+            />
+          )}
+        </Step>
+        <Step title="Claude" description={joined ? `On ${joined}` : "Sign in"}>
+          <h3>Claude on {joined}</h3>
+          {rec?.auth?.claude === "signed_in" ? (
+            <p className="dim">Claude Code is signed in on {joined}.</p>
+          ) : (
+            (joined && signIn?.(joined)) || (
+              <ol className="m-steps">
+                <li>
+                  On {joined}, run claude there and sign in (<code className="mono">/login</code>)
+                  with the account its agents should use.
+                </li>
+                <li>Run claude once in the wave repo and accept the trust dialog.</li>
+                <li>Check again here.</li>
+              </ol>
+            )
+          )}
+          {rec?.auth?.claude === "signed_in" && rec.auth.trust !== "ok" && (
+            <p className="s-hint">
+              Then run claude once in the wave repo on {joined} and accept the trust dialog.
+            </p>
+          )}
+          {typeof checking === "object" && (
+            <p className="s-error" role="alert">
+              {checking.error}
+            </p>
+          )}
+          <div className="ny-actions">
+            <button
+              type="button"
+              className="btn"
+              disabled={checking === "busy"}
+              onClick={() => void checkAgain()}
+            >
+              {checking === "busy" ? "Checking…" : "Check again"}
+            </button>
+          </div>
+          {next}
+        </Step>
+        <Step title="Ready" description="Placement">
+          <h3>{verdict?.ready ? `${joined} is ready for agents` : `${joined} is not ready yet`}</h3>
+          {verdict && !verdict.ready && (
+            <ul className="m-reasons">
+              {verdict.reasons.map((x) => (
+                <li key={x}>{x}</li>
+              ))}
+            </ul>
+          )}
+          <p className="dim">
+            Waves with <code className="mono">placement: auto</code> (or a task with{" "}
+            <code className="mono">host: auto</code>) can place agents on {joined} while it is
+            ready; every other task runs where its wave file says.
+          </p>
+          {config && (
+            <label className="m-cap">
+              <span className="s-hint">Max agents</span>
+              <input
+                className="recessed mono"
+                type="number"
+                min={1}
+                max={100}
+                aria-label={`Max agents on ${joined}`}
+                value={cap ?? String(currentCap)}
+                onChange={(e) => {
+                  setCap(e.target.value);
+                  setSaving("idle");
+                }}
+              />
+            </label>
+          )}
+          {typeof saving === "object" && (
+            <p className="s-error" role="alert">
+              max_agents was not set: {saving.error}
+            </p>
+          )}
+          <div className="ny-actions">
+            <button
+              type="button"
+              className="btn btn--hot"
+              disabled={!capValid || saving === "busy"}
+              onClick={() => void done()}
+            >
               Done
             </button>
           </div>
@@ -484,7 +522,10 @@ function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
 
 export function Machines(p: MachinesProps) {
   const [adding, setAdding] = useState(false);
-  const now = useNow(p.now, adding ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
+  /** Re-pairing codes counting down on cards. */
+  const [counting, setCounting] = useState(0);
+  const onCountdown = useCallback((on: boolean) => setCounting((n) => n + (on ? 1 : -1)), []);
+  const now = useNow(p.now, adding || counting > 0 ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
   // A browser that cannot make a reply key at all (not even lib/rsa's): read-only.
   const secure = pairingSupported();
   const admin = useAdmin(secure ? p.ops : null, p.hubUp);
@@ -499,6 +540,27 @@ export function Machines(p: MachinesProps) {
   }, [p.machines, p.hosts]);
   const machines = Object.values(shown).sort((a, b) => a.name.localeCompare(b.name));
   const canPair = secure && admin === "admin" && p.ops !== null;
+  // volleyd's own record, published as itself under its local name (never a configured host).
+  const own = p.localName ? p.machines[p.localName] : undefined;
+  const card = (m: MachinePayload, self = false) => (
+    <MachineCard
+      key={m.name}
+      m={m}
+      r={p.readiness?.[m.name]}
+      now={now}
+      hubUp={p.hubUp}
+      self={self}
+      admin={canPair}
+      ops={p.ops}
+      config={p.configTransport}
+      accounts={p.accounts}
+      agents={p.agentsOn?.[m.name]}
+      host={p.host}
+      onRemoved={setNotice}
+      signIn={self ? undefined : p.signIn?.(m.name)}
+      onCountdown={onCountdown}
+    />
+  );
 
   return (
     <div className="machines-section">
@@ -508,17 +570,8 @@ export function Machines(p: MachinesProps) {
       </p>
       {notice && <output className="s-hint m-notice">{notice}</output>}
       <div className="machines">
-        <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />
-        {machines.map((m) => (
-          <MachineCard
-            key={m.name}
-            m={m}
-            now={now}
-            admin={canPair}
-            ops={p.ops}
-            onRemoved={(name) => setNotice(`${name} removed: its account was revoked.`)}
-          />
-        ))}
+        {own ? card(own, true) : <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />}
+        {machines.map((m) => card(m))}
         {canPair && !adding && (
           <button
             type="button"
@@ -541,8 +594,12 @@ export function Machines(p: MachinesProps) {
         <AddMachine
           ops={p.ops}
           machines={shown}
+          readiness={p.readiness ?? {}}
+          config={p.configTransport ?? null}
+          signIn={p.signIn}
           now={now}
           host={p.host ?? ""}
+          hubUp={p.hubUp}
           onClose={() => setAdding(false)}
         />
       )}

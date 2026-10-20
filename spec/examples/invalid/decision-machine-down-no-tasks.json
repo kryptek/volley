@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T10:05:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "machine_down-box-a-1",
+    "wave": "w1",
+    "task": null,
+    "kind": "machine_down",
+    "question": "Needs you: box-a has been down for 5 min (no heartbeat for 90 s). Wait for it, re-place its queued tasks, or cancel them?",
+    "options": ["wait", "re-place queued tasks", "cancel"],
+    "pointers": {},
+    "opened_at": "2026-10-19T10:05:00.000Z",
+    "host": "box-a",
+    "down_since": "2026-10-19T10:00:00.000Z"
+  }
+}

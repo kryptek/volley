@@ -16,19 +16,21 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
 | `usage.schema.json` | `usage` (the agent's harness) | section 4.6.12 |
 | `claude-account.schema.json` | `_system/claude-accounts/<acct>` | section 4.6.12 |
-| `wave-state.schema.json` | `_waves/<wave>/state` | section 4.6.1 |
-| `decision.schema.json` | `_waves/<wave>/decisions/<id>` | section 4.6.2 |
-| `wave-event.schema.json` | `_waves/<wave>/events` | section 4.6.3 |
-| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | section 4.6.4 |
+| `wave-state.schema.json` | `_waves/<wave>/state` | sections 4.6.1, 4.6.15 |
+| `decision.schema.json` | `_waves/<wave>/decisions/<id>` | sections 4.6.2, 4.6.15 |
+| `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15 |
+| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | sections 4.6.4, 4.6.15 |
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
-| `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
+| `lease-pool.schema.json` | `_system/leases/<pool>` | sections 4.6.5, 4.6.15 |
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
 | `admission.schema.json` | `_system/admission` | section 4.6.7 |
+| `machine.schema.json` | `_system/machines/<name>` (the machine; the supervisor's own as `kind: supervisor`) | sections 4.6.14, 4.6.15 |
+| `readiness.schema.json` | `_system/machines/<name>/readiness` (the supervisor only) | section 4.6.15 |
 | `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | section 4.6.10 |
 | `account.schema.json` | `accounts.json` account registry file (not an envelope) | section 4.6.10 |
 | `setup-result.schema.json` | the `result` of a `setup_plan` (`$defs/plan`) or `setup_apply` (`$defs/applied`) answer on `_system/auth/replies/<correlation_id>` | section 4.6.10 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
-| `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | section 4.6 |
+| `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | sections 4.6, 4.6.15 |
 
 ## Validating a payload
 

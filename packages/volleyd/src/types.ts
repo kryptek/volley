@@ -35,6 +35,8 @@ export type PipelineStep = PipelineStage | PipelineStage[];
 
 export interface LeasePoolConfig {
   capacity: number;
+  /** The most leases holders on one machine may hold at once (1..capacity); unset: capacity. */
+  per_machine?: number;
   ttl_s?: number;
   match?: string[];
 }
@@ -60,6 +62,10 @@ export interface RemoteHostConfig {
   /** The volley checkout on the remote machine (its volley-hooks is `$VOLLEY_HOOKS_DIR`). */
   volley_dir?: string;
   tunnel?: { remote_port?: number; supervise?: boolean };
+  /** The most supervised agents the host runs at once (default 4, SPEC §4.6.15). */
+  max_agents?: number;
+  /** true: no new placements on the host; its running agents finish. */
+  drain?: boolean;
 }
 
 /** Every runtime tunable, fully populated (what `ConfigStore.effective()` returns). */
@@ -111,6 +117,37 @@ export interface Tunables {
    */
   public_hygiene: PublicHygiene;
   hosts: Record<string, RemoteHostConfig>;
+  // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
+  /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
+  require_fresh_base: boolean;
+  placement: PlacementConfig;
+  /** The supervisor's own machine (SPEC §4.6.15). */
+  fleet: FleetConfig;
+}
+
+/** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
+export interface FleetConfig {
+  local_name: string | null;
+}
+
+/** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
+export type NudgeOnMerge = "files" | "all" | "off";
+
+/** Automatic placement across machines (config `placement`, SPEC §4.6.15). */
+export interface PlacementConfig {
+  nudge_on_merge: NudgeOnMerge;
+  // --- Fleet: placement engine (placement.ts) ---
+  /** A machine whose load per core (the higher of the 1- and 5-minute) is above this takes no new placement. */
+  load_per_core_max: number;
+  /** A machine with less available memory (percent) takes no new placement. */
+  mem_available_min_pct: number;
+  /** A machine with less free disk (GB) takes no new placement. */
+  disk_free_min_gb: number;
+  /** Relative weights of each headroom in a candidate's score (renormalised over the known ones). */
+  weights: { cpu: number; slots: number; mem: number; usage: number };
+  // --- Fleet: a machine that stays down ---
+  /** Seconds a machine with unfinished tasks stays down before its `machine_down` decision opens. */
+  down_decision_after_s: number;
 }
 
 export type BranchUpdate = "rebase" | "merge";
@@ -153,13 +190,18 @@ export interface WaveTask {
   /** The task's pipeline as written (its own, else the wave's). */
   pipeline: PipelineStep[];
   model: string;
-  /** Where the task's agents run: `local` (the default) or a remote host's name. */
+  /**
+   * Where the task's agents run: `local` (the default), a remote host's name, or `auto` until
+   * placement chooses (the reducer's `task_placed` then sets the chosen one).
+   */
   host: string;
   /** An inline remote `host:` (layered over config `hosts.<host>`). */
   host_spec?: RemoteHostConfig & { type: "ssh"; name?: string };
   files: string[];
   /** `account:` as written on the task (a Claude account id); absent: the wave's. */
   account?: string;
+  /** `heavy: true`: placement needs a free per-machine slot in each of the wave's `heavy_pools`. */
+  heavy?: boolean;
 }
 
 export interface Wave {
@@ -181,6 +223,11 @@ export interface Wave {
   brief_preface?: string;
   /** `account:` as written (a Claude account id); absent: `claude.default_account`. */
   account?: string;
+  /** `placement: auto` (absent: `local`): unpinned tasks are placed across machines (placement.ts). */
+  placement?: "auto";
+  /** Machines placement ranks first, and uses only when nothing else is eligible. */
+  placement_prefer?: string[];
+  placement_avoid?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +285,20 @@ export interface TaskState {
   next_retry_at?: string | null;
   /** Gated without reviews because its wave-file pipeline lists no review stage. */
   reviews_skipped_by_plan?: boolean;
+  /** The release-branch commit the task's current worktree was cut from (`agent_spawned`). */
+  base_sha?: string;
+  /** Where the task was placed and why (`task_placed`, placement.ts); absent until placed. */
+  placement?: TaskPlacement;
+}
+
+/** wave-state `tasks[].placement` (SPEC §4.6.15). */
+export interface TaskPlacement {
+  /** A machine name: the supervisor's own under its `fleet.local_name`. */
+  host: string;
+  by: "auto" | "wave_file" | "decision";
+  score: number | null;
+  decided_at: string;
+  candidates: { host: string; score: number | null; line: string }[];
 }
 
 export interface WaveSpec {
@@ -357,6 +418,16 @@ export const WAVE_EVENT_TYPES = [
   "peer_invited",
   "peer_joined",
   "peer_removed",
+  // Fleet (SPEC §4.6.15): a running implementer told that a sibling PR merged (pipeline.ts).
+  "merge_nudge_sent",
+  // Fleet (SPEC §4.6.15): where a task starts and why (placement.ts).
+  "task_placed",
+  // Fleet (SPEC §4.6.15): a machine's readiness verdict changed, in the `_system` journal.
+  "machine_readiness_changed",
+  // Fleet (SPEC §4.6.14): an admin's `peer_doctor` ran on a paired machine, in `_system`.
+  "peer_doctor_run",
+  // Fleet (SPEC §4.6.14): `peer_remove { drain | now }` started; `peer_removed` follows later.
+  "peer_drain_started",
   // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
   "repo_visibility_detected",
 ] as const;

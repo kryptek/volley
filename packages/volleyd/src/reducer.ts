@@ -1,5 +1,7 @@
 import { type DecisionRecord, parksTask } from "./decisions";
+import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import { AUTO_HOST } from "./placement";
 import { hygieneLevel } from "./reviews";
 import type {
   JournalEvent,
@@ -7,6 +9,7 @@ import type {
   RepoVisibility,
   TaskAgents,
   TaskId,
+  TaskPlacement,
   TaskStage,
   TaskState,
   TunablesPatch,
@@ -39,8 +42,11 @@ export interface WaveRecord {
   overrides: TunablesPatch;
   /** Every decision opened in this wave (open and resolved), by id. */
   decisions: Record<string, DecisionRecord>;
-  /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
-  steers: Record<TaskId, { seq: number; message_id: string }>;
+  /**
+   * Per task: the last steering's `seq` (numbers the next one) and the last one a later steer may
+   * supersede (`message_id`; an additive steer such as a merge nudge never becomes it).
+   */
+  steers: Record<TaskId, { seq: number; message_id?: string }>;
   /** Steers held for each task's next agent, in order (`steering_queued`), until sent or dropped. */
   queued_steers: Record<TaskId, QueuedSteer[]>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
@@ -134,6 +140,16 @@ export function emptyRecord(): WaveRecord {
   };
 }
 
+/**
+ * Set task `id`'s host in the effective plan (copy on write: `wave` and `plan` may share task
+ * objects, and the submitted plan keeps what the file said).
+ */
+function setTaskHost(rec: WaveRecord, id: TaskId, host: string): void {
+  const def = rec.wave?.tasks[id];
+  if (rec.wave == null || def === undefined || def.host === host) return;
+  rec.wave = { ...rec.wave, tasks: { ...rec.wave.tasks, [id]: { ...def, host } } };
+}
+
 const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   wave_paused: "paused",
   wave_resumed: "running",
@@ -182,7 +198,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // plan-apply.ts: `plan` is the file as submitted, `wave` the effective plan.
       const wave = ev.data.wave as Wave;
       const plan = (ev.data.plan as Wave | undefined) ?? wave;
+      const before = next.wave;
       next.wave = wave;
+      // A task is placed once: a placed task the new version still leaves to placement keeps
+      // its host.
+      for (const t of state.tasks) {
+        const placed = before?.tasks[t.id]?.host;
+        if (
+          t.placement !== undefined &&
+          placed !== undefined &&
+          wave.tasks[t.id]?.host === AUTO_HOST
+        )
+          setTaskHost(next, t.id, placed);
+      }
       next.plan = plan;
       next.overrides = plan.config;
       state.version = plan.version;
@@ -206,9 +234,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
-        // issue the event names.
+        // issue the event names, and is placed afresh when its plan leaves it to placement.
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
+        const asWritten = next.plan?.tasks[ev.task]?.host;
+        if (task.placement !== undefined && asWritten === AUTO_HOST)
+          setTaskHost(next, ev.task, AUTO_HOST);
         const def = next.wave?.tasks[ev.task];
         if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
@@ -217,10 +248,27 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
+    case "task_placed": {
+      // Placement (SPEC §4.6.15): the effective plan runs every role of the task there (`local`
+      // for the supervisor's own machine), and the state shows where and why.
+      if (task === undefined || ev.task === undefined) break;
+      const d = ev.data as Omit<TaskPlacement, "decided_at"> & { local?: boolean };
+      task.placement = {
+        host: d.host,
+        by: d.by,
+        score: d.score,
+        decided_at: ev.at,
+        candidates: d.candidates,
+      };
+      setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
+      break;
+    }
     case "agent_spawned":
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+        // A worktree cut from the release branch (not a pipeline start ref): its base.
+        if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
@@ -337,10 +385,14 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "steering_sent":
       if (ev.task !== undefined && ev.data.type === "steering") {
-        // A queued steer delivered late never moves the numbering back.
+        // A queued steer delivered late never moves the numbering back; an additive steer takes
+        // the next seq but leaves what the next steer supersedes.
         const seq = ev.data.seq as number;
-        if (seq >= (next.steers[ev.task]?.seq ?? 0))
-          next.steers[ev.task] = { seq, message_id: ev.data.message_id as string };
+        if (seq >= (next.steers[ev.task]?.seq ?? 0)) {
+          const prev = next.steers[ev.task]?.message_id;
+          const id = isAdditiveSteer(ev.data.reason) ? prev : (ev.data.message_id as string);
+          next.steers[ev.task] = { seq, ...(id !== undefined ? { message_id: id } : {}) };
+        }
         unqueue(next, ev.task, [ev.data.message_id]);
       }
       break;
@@ -522,6 +574,12 @@ export function raiseBy(answer: string): number | null {
   const n = m !== null ? Number(m[1]) : 0;
   return n >= 1 ? n : null;
 }
+
+/**
+ * A steer that adds to what the agent was told and replaces nothing: a merge nudge (SPEC
+ * §4.6.15). It never carries `supersedes`, and no later steer supersedes it.
+ */
+export const isAdditiveSteer = (reason: unknown): boolean => reason === "merge_nudge";
 
 /** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */
 function surfacedAlarms(p: TaskPipeline | undefined): NonNullable<TaskState["alarms"]> {

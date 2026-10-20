@@ -10,10 +10,12 @@ import {
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
+import { type DoctorReport, parseDoctorReport } from "../machines";
+import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
-import { EXCLUDE_LINES } from "../worktree";
+import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
 import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
@@ -70,6 +72,8 @@ export function resolveRemoteHost(
 /** What the daemon needs from a remote host beyond `Host` (SshTmuxHost; fakes in tests). */
 export interface RemoteHost extends Host {
   readonly spec: RemoteHostSpec;
+  /** Run fenced steps on the box as one `bash -s` script (claude/remote-signin.ts). */
+  run(steps: RemoteStep[], opts?: RemoteRunOptions): Promise<ExecResult>;
   /** `$VOLLEY_HOOKS_DIR` on the box. */
   readonly hooksDir: string;
   /** The box's volley-mcp entry point (its `.volley/mcp.json` server). */
@@ -85,7 +89,24 @@ export interface RemoteHost extends Host {
   recordTrust(root: string): Promise<void>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
+  /**
+   * Readiness's PATH probe: whether `claude` and `bun` resolve on the non-interactive ssh PATH
+   * (the same `bash -s` that runs launch.sh). Throws when ssh fails.
+   */
+  probePath(): Promise<PathProbe>;
+  /**
+   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
+   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
+   */
+  runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
 }
+
+/** The fence tokens and bound a `run` may carry. */
+export type RemoteRunOptions = Pick<
+  ExecOptions,
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin"
+>;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
 const SSH_FAILED = 255;
@@ -143,10 +164,7 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   /** Run steps on the box as one fenced `bash -s` script. */
-  run(
-    steps: RemoteStep[],
-    opts: Pick<ExecOptions, "consent" | "timeoutMs" | "launch" | "modelSwitch"> = {},
-  ): Promise<ExecResult> {
+  run(steps: RemoteStep[], opts: RemoteRunOptions = {}): Promise<ExecResult> {
     return this.localExec(
       [
         "ssh",
@@ -165,6 +183,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
+        ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
   }
@@ -215,14 +234,26 @@ export class SshTmuxHost implements RemoteHost {
       return { path: spec.path, branch, reused: true };
     }
     // The box's clone must have the release branch as it is now: fetch it, cut from origin's.
+    // A failed fetch refuses the spawn unless require_fresh_base is off (then: the box's copy);
+    // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
     const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
-    if (fetch.code !== 0) {
+    const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
-        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetch.stderr.trim()}`,
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
+        { host: this.name, repo: spec.repo },
+      );
+    }
+    if (fetchError !== null && spec.requireFresh !== false) {
+      throw new SpawnError(
+        "BASE_STALE",
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}; require_fresh_base is on, so no worktree is cut from the box's copy. ${freshBaseFix(spec.base)}`,
         {
           host: this.name,
           repo: spec.repo,
+          branch: spec.base,
+          fetch_error: fetchError,
         },
       );
     }
@@ -249,7 +280,23 @@ export class SshTmuxHost implements RemoteHost {
       );
     }
     await this.excludeVolleyFiles(spec.repo);
-    return { path: spec.path, branch: spec.branch, reused: false };
+    // The commit it was cut from (the task's base_sha): the new branch's tip, as it is now.
+    const tip = spec.releaseBase === true ? await git("-C", spec.path, "rev-parse", "HEAD") : null;
+    const sha = tip?.code === 0 ? tip.stdout.trim() : "";
+    return {
+      path: spec.path,
+      branch: spec.branch,
+      reused: false,
+      ...(sha !== ""
+        ? {
+            base: {
+              sha,
+              fresh: fetchError === null,
+              ...(fetchError !== null ? { fetch_error: fetchError } : {}),
+            },
+          }
+        : {}),
+    };
   }
 
   /** Append `EXCLUDE_LINES` to the box repo's shared `info/exclude`, each at most once. */
@@ -403,6 +450,39 @@ export class SshTmuxHost implements RemoteHost {
     const r = await this.run([{ argv: ["cat", path] }]).catch(() => null);
     if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
     return r.code === 0 ? r.stdout : null;
+  }
+
+  async probePath(): Promise<PathProbe> {
+    const r = await this.run([{ argv: ["command", "-v", ...PATH_TOOLS] }], {
+      timeoutMs: DAEMON_DEFAULTS.path_probe_timeout_ms,
+    }).catch(() => null);
+    if (r === null || transportFailed(r)) throw this.sshFailed("PATH probe", r);
+    // `command -v` exits 1 when a name is missing: what it printed is the answer either way.
+    return parsePathProbe(r.stdout);
+  }
+
+  async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
+    const argv = [
+      "volley",
+      "peer",
+      "doctor",
+      "--json",
+      ...(opts.fix ? ["--fix", "--yes"] : []),
+      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
+    ];
+    // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
+    const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {
+      timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
+    }).catch(() => null);
+    if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
+    // A failing block check exits 1 with the report on stdout.
+    const report = parseDoctorReport(r.stdout);
+    if (report === null) {
+      throw new Error(
+        `volley peer doctor on ${this.spec.target} printed no report: ${firstLine(r.stderr, `exit ${r.code}`)}`,
+      );
+    }
+    return report;
   }
 
   /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */

@@ -88,10 +88,20 @@ export function steerTarget(
   return null;
 }
 
-/** `seq` for the next steer to `task` (1, 2, …) and the message it supersedes. */
-export function nextSteer(rec: WaveRecord, task: TaskId): { seq: number; supersedes?: string } {
+/**
+ * `seq` for the next steer to `task` (1, 2, …) and the message it supersedes: the last steer that
+ * is not additive. An `additive` steer (a merge nudge) supersedes nothing.
+ */
+export function nextSteer(
+  rec: WaveRecord,
+  task: TaskId,
+  opts: { additive?: boolean } = {},
+): { seq: number; supersedes?: string } {
   const prev = rec.steers[task];
-  return prev === undefined ? { seq: 1 } : { seq: prev.seq + 1, supersedes: prev.message_id };
+  const seq = (prev?.seq ?? 0) + 1;
+  return prev?.message_id === undefined || opts.additive === true
+    ? { seq }
+    : { seq, supersedes: prev.message_id };
 }
 
 /** Every agent currently working a task of the wave (admitted, not settled), deduplicated. */

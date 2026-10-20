@@ -363,10 +363,51 @@ describe("SshTmuxHost", () => {
     expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
   });
 
-  it("a failed fetch or worktree add is WORKTREE_FAILED", async () => {
+  it("a failed fetch is BASE_STALE (require_fresh_base); off, the box's copy is used and reported", async () => {
+    const tip = "c".repeat(40);
     const r = remote((s) =>
       argvIs("git", "-C", SPEC.repo, "fetch")(s)
         ? { code: 128, stderr: "couldn't find remote ref release/w1" }
+        : argvIs("git", "-C", "/wt", "rev-parse", "--is-inside-work-tree")(s)
+          ? { code: 128 }
+          : argvIs("git", "-C", "/wt", "rev-parse", "HEAD")(s)
+            ? { stdout: `${tip}\n` }
+            : undefined,
+    );
+    const spec = {
+      repo: SPEC.repo,
+      path: "/wt",
+      branch: "b",
+      base: "release/w1",
+      releaseBase: true,
+    };
+    const err = (await r.host.prepareWorktree(spec).then(
+      () => null,
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(err).toMatchObject({ code: "BASE_STALE" });
+    expect(err.message).toContain("couldn't find remote ref release/w1");
+    expect(err.message).toContain("volleyd config set require_fresh_base false");
+    expect(r.steps().some(argvIs("git", "-C", SPEC.repo, "worktree"))).toBe(false);
+    // A start ref (a reviewer's head), not the release base: the plain worktree failure.
+    const plain = (await r.host.prepareWorktree({ ...spec, releaseBase: false }).then(
+      () => null,
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(plain).toMatchObject({ code: "WORKTREE_FAILED" });
+    expect(plain.message).not.toContain("require_fresh_base");
+    const res = await r.host.prepareWorktree({ ...spec, requireFresh: false });
+    expect(res.base).toEqual({
+      sha: tip,
+      fresh: false,
+      fetch_error: "couldn't find remote ref release/w1",
+    });
+  });
+
+  it("a failed worktree add is WORKTREE_FAILED", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "worktree")(s)
+        ? { code: 128, stderr: "fatal: already exists" }
         : argvIs("git", "-C", "/wt", "rev-parse")(s)
           ? { code: 128 }
           : undefined,
@@ -528,6 +569,59 @@ describe("resolveRemoteHost", () => {
     );
     expect(() => resolveRemoteHost("half", { type: "ssh", name: "half", target: "x" }, {})).toThrow(
       /repo, volley_dir/,
+    );
+  });
+});
+
+describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
+  const REPORT = {
+    checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone" }],
+    doctor_at: "2026-10-19T09:00:00.000Z",
+  };
+
+  it("probePath runs `command -v claude bun` on the box and reads what resolved", async () => {
+    // `command -v` exits 1 when one name is missing; what it printed is still the answer.
+    const r = remote(() => ({ code: 1, stdout: "/home/dev/.bun/bin/bun\n" }));
+    expect(await r.host.probePath()).toEqual({ claude: false, bun: true });
+    expect(r.steps()).toEqual([{ argv: ["command", "-v", "claude", "bun"] }]);
+  });
+
+  it("probePath throws when ssh itself fails (no answer is not a missing tool)", async () => {
+    const r = remote(() => ({ code: 255, stderr: "ssh: connect to host box: Connection refused" }));
+    await expect(r.host.probePath()).rejects.toThrow(/Connection refused/);
+  });
+
+  it("runDoctor runs volley peer doctor --json in the box's volley checkout and parses it", async () => {
+    const r = remote(() => ({ code: 1, stdout: JSON.stringify(REPORT) }));
+    expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
+    expect(await r.host.runDoctor({ fix: true, clone: "https://github.com/o/r" })).toEqual(REPORT);
+    expect(r.steps()).toEqual([
+      { argv: ["volley", "peer", "doctor", "--json"], cwd: SPEC.volley_dir },
+      {
+        argv: [
+          "volley",
+          "peer",
+          "doctor",
+          "--json",
+          "--fix",
+          "--yes",
+          "--clone",
+          "--origin",
+          "https://github.com/o/r",
+        ],
+        cwd: SPEC.volley_dir,
+      },
+    ]);
+  });
+
+  it("runDoctor throws with ssh's reason, or when the doctor printed no report", async () => {
+    const down = remote(() => ({ code: 255, stderr: "Permission denied (publickey)" }));
+    await expect(down.host.runDoctor({ fix: false })).rejects.toThrow(
+      /ssh to dev@box failed.*Permission denied/,
+    );
+    const none = remote(() => ({ code: 127, stderr: "bash: volley: command not found" }));
+    await expect(none.host.runDoctor({ fix: false })).rejects.toThrow(
+      /printed no report: bash: volley: command not found/,
     );
   });
 });

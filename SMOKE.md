@@ -2,7 +2,238 @@
 
 This file collects feature-level smoke recipes that span multiple packages — the per-package SMOKE.md files under `packages/*/SMOKE.md` cover narrower scopes (volley-issues dispatch, volley-skill / volley-wait skill installation, etc.). Add a new section per plan that ships a release tag.
 
-**v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+**v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+
+---
+
+## Plan 12 — Fleet (v0.4.0)
+
+**Done means:** the owner pairs a real second machine from the Desk, repairs it, signs it in to
+Claude from the Mac's browser and from a phone, runs a wave that places itself, and watches a
+machine go down, get busy and leave, without reading source. Every step below is a checkbox
+with what a pass looks like. A red item is a bug: file it, fix it in its own PR, re-run the step,
+and tag `v0.4.0` only once every box is ticked.
+
+Anything Plan 11 already covers (setup, the phone sign-in, the credential audit's setup, the
+second Claude account) is not repeated: run [Plan 11](#plan-11--onboarding-v030) first on the same
+release head, or have its results for it.
+
+**You need:** the Mac from Plan 11 (volleyd, the Desk, an admin Desk session, the coordinator
+login exported as in its step 9), a phone on the same Wi-Fi, and **one real second machine**,
+called `box-a` below (Linux or macOS): bun, git, tmux, `gh` signed in with push access to the
+test repo, `claude` installed but **not signed in** and, to begin with, **not on the
+non-interactive ssh PATH** (only in the interactive shell's, e.g. `~/.zshrc`), a Volley checkout
+of this release with `bun install` run, and key-based ssh both ways with the Mac. The test repo
+from Plan 11 with **three** small open issues and a pushed release branch
+`release/<yyyy-mm-dd>-fleet-smoke`. Keep a stopwatch; note the time each step takes.
+
+`volley peer join` runs the doctor and the ssh PATH check before it uses the code, and stops on
+any blocking row, so a machine cannot pair broken. Step (a) therefore sees join refuse first,
+pairs a clean machine, then breaks three things on purpose (the PATH, the install, the clone) so
+the Desk's rows and **Repair** have something real to show and fix.
+
+**Before you start** (on the Mac): a heavy pool with one slot per machine, in
+`$VOLLEYD_HOME/config.yaml` (default `~/.volley/volleyd/config.yaml`), then restart volleyd
+(`launchctl kickstart -k gui/$UID/systems.volley.volleyd`):
+
+```yaml
+lease_pools:
+  smoke-heavy: { capacity: 2, per_machine: 1, match: ["^sleep 90$"] }
+```
+
+`volleyd config get` shows the pool, and the Desk's Settings › Supervisor › Lease pools has a
+`smoke-heavy` card reading `0/2` with `1 per machine`.
+
+### (a) Pair from the Desk, then break it and repair it
+
+- [ ] Settings › Machines › **+ Add a machine**. Step 1 shows a code; step 2 the command
+  `volley peer join <code> --to <you@mac>` with **Copy** (fill in the ssh address first). Run it
+  on `box-a` with `--repo <path for the clone>`, a clone of the test repo you make first
+  (`git clone <test repo> <path>`).
+  **Pass:** join stops before using the code: `claude` is not on the PATH of a non-interactive
+  ssh session, with the exact line for the login shell's file (zsh: `~/.zshenv`; bash: the top
+  of `~/.bashrc`), and says the code is still valid. A plain `bun install` (not the doctor's)
+  also stops it on `volley.installed` with `volley peer doctor --fix` to run: run that if so.
+- [ ] Add the printed line on `box-a` and run the same join again. **Pass:** `paired`; the Desk's
+  step 3 (Checks) shows `box-a`'s rows from its first heartbeat within 60 s. Time from the
+  first join to this.
+- [ ] **Break the PATH.** Take the line out again (`ssh box-a 'command -v claude'` prints
+  nothing). **Pass:** within one PATH probe (`path_probe_interval_ms`, at most 5 min) the card's
+  verdict reads `not ready` with a line naming `claude` and the ssh PATH (the supervisor's probe
+  decides), and the `claude_on_path` row is `!` once the next doctor run sees it, with the
+  command (Linux: `sudo ln -s ~/.local/bin/claude /usr/local/bin/claude`; macOS: the
+  `~/.zshenv` line) and **Copy**. Run the command on `box-a`, then **Check again** (step 4 of
+  the Stepper) or **Repair…** without applying (both run a dry doctor; a Repair also has volleyd
+  probe the PATH again on its next re-compute).
+  **Pass:** the row turns ✓ and the reason is gone. Time it.
+- [ ] **Break the install and the clone.** On `box-a`:
+  `rm <volley checkout>/node_modules/.volley-lock-sha256` (what a `git pull` without a reinstall
+  looks like to the doctor) and `mv <clone> <clone>.bak`. On the next heartbeat `volley.installed` and `repo.clone` are ✗.
+  **Repair…** opens the plan sheet: "This will:" lists `bun install --frozen-lockfile` in the
+  volley checkout; "You run on box-a:" lists the rest (the Claude sign-in). Turn on **Also clone
+  the wave repo**, **Apply** with no wave running.
+  **Pass:** refused before anything runs on `box-a`: `the wave repo's origin is not known (no
+  running wave's clone reports one) …` (the clone comes from the running wave's origin).
+  Now start a wave of the test repo on the Mac (Plan 11's `smoke.yaml` with a new `wave:` id and
+  `host: local` on its task: `volleyd run <file>`), wait until the Mac's card shows the repo's
+  `repo.origin` ✓, then **Repair…**, **Also clone the wave repo**, **Apply** again.
+  **Pass:** the sheet waits (a doctor run may take minutes), then the rows re-render:
+  `volley.installed` ✓, `repo.clone` / `repo.origin` ✓ (a fresh clone at the path), nothing new
+  red; `volleyd events _system | tail` has
+  `peer_doctor_run { … fix: true, clone: true, ok: true }`; on `box-a`,
+  `git -C <clone> remote get-url origin` is `https://<the test repo's host/path>` (volleyd
+  passes the running wave's origin as `--clone --origin <https URL>`, #188).
+  Time it. Remove `<clone>.bak`.
+- [ ] **Repair…** again and **Apply**. **Pass:** every fix says "already done". Then
+  `volleyd stop <wave>` the wave you started.
+
+### (b) Provisioning rows
+
+- [ ] On the `box-a` card, the `skills`, `hooks`, `mcp` and `sharing` rows. **Pass:** all four
+  ✓ after (a)'s Repair (if one is `!`, **Repair…** once more must turn it ✓; record which).
+- [ ] On `box-a`, in the clone, start an interactive `claude` session (it will ask you to sign
+  in: do that in (c) first if you prefer, then come back) and run `/volley list`.
+  **Pass:** it lists the Mac's agents and `box-a`'s own session; `/volley-issues` is also
+  offered.
+
+### (c) GUI sign-in from the Mac
+
+- [ ] The card's line says Claude is not signed in. **Sign in on box-a**: the sheet goes
+  *Starting…* → **Open sign-in ↗**. Open it in the Mac's browser and sign in.
+  **Pass:** the sheet shows *Signed in · <plan>* and the card turns green
+  (`Claude signed in · <plan>`, the verdict `ready for agents` once nothing else blocks). Time it.
+- [ ] **The forward is gone:** on the Mac, `ps -ax | grep -- '-N -L 127.0.0.1'` shows no
+  `ssh -N -L` left, and on `box-a` `tmux ls` has no `volley-signin-primary`.
+- [ ] **Audit: nothing credential-shaped kept.** On the Mac and on `box-a`:
+  `grep -rIl -E 'sk-ant-|oauth|refresh_token|access_token' ~/.volley` → nothing (the sign-in's
+  `~/.volley/signin/primary/` on `box-a` holds only `signin.sh`, `browser.sh` and the url file);
+  `volleyd events _system | grep -i -E 'sk-ant-|token"'` → only `claude_signin_*` events with
+  `acct` and `plan`, never a URL with a code or a token; `volley sub 'volley/_system/claude/#'`
+  for the next sign-in shows the localhost sign-in URL and the attach command, never a
+  credential.
+
+### (d) Phone fallback
+
+- [ ] Sign `box-a` out of Claude (`/logout` in a `claude` session there), wait for the card's
+  line to say so (or **Repair…** without Apply to refresh), then **Sign in on box-a** again and
+  open **From a phone instead**.
+  **Pass:** the sheet shows the phone link and the copyable
+  `ssh <box-a> -t tmux attach -t volley-signin-primary`, and has no text field of any kind.
+- [ ] Open the link on the phone and sign in; run the attach command in a terminal on the Mac;
+  type the code the phone shows **into that terminal**.
+  **Pass:** the terminal's `claude` accepts it, the sheet and the card turn green. Time it.
+
+### (e) Automatic placement
+
+- [ ] `fleet.yaml` (the three issues; T1's issue asks the agent to run `sleep 90` once, the
+  heavy command):
+  ```yaml
+  wave: <yyyy-mm-dd>-fleet-smoke
+  repo: <abs path of the test repo on the Mac>
+  release_branch: release/<yyyy-mm-dd>-fleet-smoke
+  model: claude-opus-5-5
+  pipeline: [implement, merge_ready]
+  placement: auto
+  placement_avoid: [<the Mac's machine name>]   # the "this one" card's name
+  heavy_pools: [smoke-heavy]
+  tasks:
+    T1: { issue: <n1>, heavy: true }
+    T2: { issue: <n2> }
+    T3: { issue: <n3>, host: box-a }   # pinned: waits behind box-a's cap of 1
+  ```
+  `volleyd validate fleet.yaml`. **Pass:** `ok`, and the preview
+  `if admitted now: T1 → <machine> (<score>), T2 → <machine> (<score>)` with the note that the
+  real decision is made at admission (each line is that task alone, so both may name `box-a`).
+- [ ] `volleyd config set hosts.box-a.max_agents 1` (put it back afterwards), then
+  `volleyd run fleet.yaml`. Avoiding the Mac sends the first task admitted to `box-a`; with
+  `box-a` then full, the Mac is the only eligible machine left for the other.
+  **Pass:** T1 and T2 start on **different** machines; the second one's line for
+  `box-a` reads `ineligible: 1/1 agents (max_agents)`. `volleyd status` prints, under each,
+  `on <machine> (auto, <score>)` and every candidate's line; the Desk's host chip on each task
+  (`T1 · box-a`) opens a popover with `placed automatically at admission` and the **same lines,
+  in the same order**. The agent windows' footers read `on <machine>`.
+- [ ] When T1's agent runs `sleep 90`: **Pass:** Settings › Supervisor › Lease pools ›
+  `smoke-heavy` shows `1/2` with the holder grouped under T1's machine (`volley lease status` agrees,
+  grouped by host).
+
+### (f) Down
+
+One of T1 / T2 is running on `box-a` and T3 is pinned there, waiting behind its cap of 1.
+
+- [ ] Stop the peer service on `box-a` (`systemctl --user stop volley-peer.service`, or
+  `launchctl bootout gui/$UID/systems.volley.peer`). **Pass:** within 90 s the card greys out
+  (`down · last seen … · no heartbeat`), spawns for `box-a` park, and the parked task's
+  `why_waiting` names `box-a`.
+- [ ] Wait. **Pass:** about 5 minutes after it went down a `machine_down` Needs-you appears on
+  the wave: the host, how long it has been down, the tasks there (running ones named as left
+  alone), and **re-place queued tasks** pre-selected. Time from the stop to the banner.
+- [ ] **Answer** with re-place. **Pass:** the queued task is placed again without `box-a`
+  (T3's chip reads `re-placed by owner on <date>`) and spawns on the Mac; `volleyd events <wave>`
+  has `task_placed { by: "decision", from: "box-a" }`.
+- [ ] Start the service again. **Pass:** the card is live within a heartbeat; an agent that was
+  running on `box-a` before the stop is still the same agent (same id, same tmux session, its
+  work carried on): **nothing running was touched**.
+
+### (g) Overload
+
+- [ ] `volleyd config set hosts.box-a.max_agents 4` again. With an agent running on `box-a`
+  (from (e), or a new one-task wave with `host: box-a`), load it:
+  `for i in $(seq $(nproc 2>/dev/null || sysctl -n hw.ncpu)); do yes > /dev/null & done`. **Pass:** within two heartbeats the card
+  reads `overloaded: load … on … cores · no new agents`; a task that becomes ready meanwhile
+  goes to the Mac or waits (`why_waiting` names `box-a: overloaded …`), never to `box-a`; the
+  running agent keeps narrating.
+- [ ] `kill %1 %2 …` (or `pkill yes`). **Pass:** the card reads `recovering: … clear for 1/3
+  samples`, then `2/3`, and `box-a` is eligible again after the third clean heartbeat.
+
+### (h) Drain and remove
+
+- [ ] With exactly one agent running on `box-a`: Machines › `box-a` › **Remove…** →
+  **Drain, then remove**. **Pass:** the card reads `draining · 1 agent left`; nothing new is
+  placed there.
+- [ ] Let that agent finish. **Pass:** `box-a` disappears from Machines; `volley auth list` has
+  no `box-a` account; the service on `box-a` stops itself within 60 s ("this machine was
+  unpaired"); `volleyd events _system` has `peer_drain_started`, then `peer_removed`.
+
+### Results
+
+```
+OWNER RESULTS (<date>, release head <sha>, box-a: <os/arch, cores>):
+  setup: smoke-heavy pool shown (0/2, 1 per machine):
+  (a) join refused on the PATH: / paired, rows in step 3 (time __): / PATH broken: not ready + claude_on_path row, Check again green (time __):
+      Repair: clone refused with no wave: / bun install + clone applied (time __); second Repair all "already done":
+  (b) skills / hooks / mcp / sharing green: / /volley list on box-a:
+  (c) GUI sign-in (time __), card green with plan: / forward gone (ps, tmux ls): / audit (~/.volley, journal, broker):
+  (d) phone fallback (time __), no input in the sheet, card green:
+  (e) preview printed: / T1 and T2 on different machines: / why-here = volleyd status: / heavy lease under its host:
+  (f) parked within 90 s: / machine_down after __ min, re-place pre-selected: / re-placed, spawned on the Mac: / back, nothing touched:
+  (g) overloaded within __ s, nothing new placed, running agent kept going: / eligible after 3 heartbeats:
+  (h) draining · 1 agent left: / removed after it finished, account revoked, service exited:
+  Red items (issue, fix PR, step re-run):
+```
+
+---
+
+## Desk sound themes (#171)
+
+**Done means:** every theme sounds right to the owner, and the Desk's sound rules hold in a real
+browser. About 15 minutes, in the Desk's demo mode (`volley dash`, then add `?demo=1`), with the
+speakers on.
+
+1. Open Settings › Sound. Pick **Arcade 8-bit**: its card lights up, a thin bar runs until it has
+   loaded, and the browser's Network panel shows one `manifest.json` and up to 28 `.ogg` clips from
+   `sounds/arcade/` (under 200 KB) and nothing from any other theme.
+2. On every theme card, press each chip of its audition row. Each plays once, in that theme, and the
+   picked theme does not change. Note any clip to re-roll as `<theme>/<event>` in a comment on
+   #171; the comment that has none reads "audition passed".
+3. Close Settings, click a dock item and drag a window by its title bar: a click, a lift and a drop.
+   Toggle the tethers in the dock: on and off sound differently.
+4. Wait for the demo wave to put something into Needs you (the top-bar pill counts up): the
+   Needs-you sound plays once, however many items arrived together.
+5. Turn on **Only when the Desk tab is hidden**. Agent and wave sounds stop while the tab is in
+   front; switch to another tab and they play again; clicks never play there. Turn it off.
+6. Turn on **Mute all**: nothing plays, but the audition chips still do. Turn it off.
+7. Turn on reduced motion in the OS: nothing plays. Turn off **Follow reduced motion**: sounds
+   play again.
 
 ---
 

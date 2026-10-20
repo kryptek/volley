@@ -1,11 +1,14 @@
 {
   "name": "volleyd",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "volleyd — durable wave supervisor daemon: wave files, journal, DAG scheduler, authority fence",
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "volleyd": "./src/cli.ts" },
+  "exports": {
+    "./claude/sharing": "./src/claude/sharing.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

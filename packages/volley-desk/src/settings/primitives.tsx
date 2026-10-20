@@ -103,6 +103,7 @@ export function Seg<K extends string>({
         }}
         itemProps={(i: number) => ({
           role: "radio",
+          "data-sound": "click",
           "aria-checked": i === index,
           tabIndex: i === index ? 0 : -1,
         })}
@@ -137,6 +138,7 @@ export function Toggle({
       type="button"
       className={`switch${on ? " on" : ""}`}
       role="switch"
+      data-sound="click"
       aria-checked={on}
       aria-label={label}
       disabled={disabled}

@@ -3,7 +3,14 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
-import { SIGNIN_COMMAND, renderSigninScript } from "./claude/signin-script";
+import {
+  BROWSER_HELPER,
+  SIGNIN_COMMAND,
+  SIGNIN_SCRIPT,
+  SIGNIN_URL_FILE,
+  renderBrowserHelper,
+  renderSigninScript,
+} from "./claude/signin-script";
 import { volleydHome } from "./config-store";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
 import { AGENT_BRANCH } from "./worktree";
@@ -68,6 +75,9 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley auth token --json   (admin_token: the token sealed to the admin who asked)
  *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
  *     LABEL 1..64 printable characters, not starting with `-`
+ *   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
+ *     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
+ *     an absolute path with no `.`/`..` segment and no control character
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -102,12 +112,17 @@ import { AGENT_BRANCH } from "./worktree";
  *                      minted when an approved model_switch decision is acted on); <id> is a
  *                      MODEL_ID, the wave-file schema's `model` pattern
  *
- * SSH (remote hosts, src/hosts/ssh-tmux.ts) — two forms only:
+ * SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
  *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
  *     every step is checked against the REMOTE allow-list below and the script `exec` sends on
  *     stdin is `renderRemoteScript` of exactly those steps; a raw stdin script is refused, as is
  *     any `ssh <target> '<command>'` string (zsh login shells word-split it differently).
  *   ssh -N -R <port>:<host>:<port> [-o <Opt>=<v>]… <target>   the reverse broker tunnel.
+ *   ssh -N -L 127.0.0.1:<p>:127.0.0.1:<p> -o BatchMode=yes -o ExitOnForwardFailure=yes
+ *     -o ConnectTimeout=<s> <target>   a paired machine's Claude sign-in forward
+ *     (src/claude/forward.ts), exactly that argv, only with the SigninForwardToken a remote
+ *     sign-in minted for exactly (<target>, <p>): the same port on both ends, p in 1024..65535,
+ *     never a broker tunnel's port (`mintSigninForwardToken`). Its bytes are never read.
  *   -o takes only BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax,
  *   ExitOnForwardFailure (never ProxyCommand, LocalCommand, …); a target never starts with '-'.
  *
@@ -115,15 +130,20 @@ import { AGENT_BRANCH } from "./worktree";
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
  *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
- *     the LaunchToken sealed for <dir>) | capture-pane | has-session |
+ *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+ *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
+ *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
  *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
- *     kill-session = CONSENT; no other tmux global option
+ *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
+ *     work) — any other kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
- *     nc -z 127.0.0.1 <port> · printenv PATH
+ *     nc -z 127.0.0.1 <port> · printenv PATH | HOME
+ *   claude auth status (exactly: the box's login state and plan, never a credential; a login
+ *     runs only from a sealed signin.sh)
  *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
- *     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
+ *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
@@ -133,7 +153,14 @@ import { AGENT_BRANCH } from "./worktree";
  *     (what the tmux session runs) is written whole, never appended, and its content must be
  *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG)
+ *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+ *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
+ *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
+ *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
+ *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+ *   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+ *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
+ *     credentials or port, isCloneUrl); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json
@@ -245,9 +272,14 @@ export function sealLaunchScript(worktree: string, content: string): LaunchToken
 
 const signins = new WeakSet<object>();
 
-/** Proof that `<cwd>/signin.sh` is one volleyd rendered (`sealSigninScript`). */
+/**
+ * Proof that `<cwd>/signin.sh` is one volleyd rendered: a profile's on this machine
+ * (`sealSigninScript`), or a paired machine's default profile's (`sealRemoteSigninScript`,
+ * `remote`). Each starts only its own kind of session.
+ */
 export interface SigninToken {
   readonly cwd: string;
+  readonly remote: boolean;
 }
 
 /** A sign-in tmux session's name: `volley-signin-<acct>`, the account id grammar. */
@@ -266,8 +298,76 @@ export function sealSigninScript(dir: string, content: string): SigninToken {
   const configDir = m !== null ? unshq(m[1] as string) : "";
   if (!absPath(configDir) || renderSigninScript({ configDir, signinDir: dir }) !== content)
     throw new FenceError("signin.sh", "only a script renderSigninScript renders for this dir");
-  const token = Object.freeze({ cwd: dir });
+  const token = Object.freeze({ cwd: dir, remote: false });
   signins.add(token);
+  return token;
+}
+
+/** A paired machine's sign-in dir: `<home>/.volley/signin/<acct>` (remote-signin.ts). */
+const REMOTE_SIGNIN_DIR = /^\/(?:.*\/)?\.volley\/signin\/[a-z0-9][a-z0-9_-]{0,62}$/;
+const isRemoteSigninDir = (dir: string) => absPath(dir) && REMOTE_SIGNIN_DIR.test(dir);
+
+/**
+ * Seal the sign-in script volleyd is about to write to `<dir>/signin.sh` on a paired machine:
+ * throws `FenceError` unless `dir` is `<abs>/.volley/signin/<acct>` and `content` is exactly
+ * `renderSigninScript` of that dir with no profile dir (the box's own default profile).
+ * Callers: remote-signin.ts.
+ */
+export function sealRemoteSigninScript(dir: string, content: string): SigninToken {
+  if (!isRemoteSigninDir(dir))
+    throw new FenceError("signin.sh", "the sign-in dir is not <home>/.volley/signin/<acct>");
+  if (renderSigninScript({ signinDir: dir }) !== content)
+    throw new FenceError("signin.sh", "only a script renderSigninScript renders for this dir");
+  const token = Object.freeze({ cwd: dir, remote: true });
+  signins.add(token);
+  return token;
+}
+
+/**
+ * A file of a paired machine's sign-in dir and the only content volleyd writes to it: the sealed
+ * `signin.sh`, the `browser.sh` helper, or an empty `url` (a stale URL is never read back). Null
+ * for any other path.
+ */
+function remoteSigninFile(path: string): { name: string; content: string } | null {
+  const slash = path.lastIndexOf("/");
+  const dir = path.slice(0, slash);
+  const name = path.slice(slash + 1);
+  if (slash < 0 || !absPath(path) || !isRemoteSigninDir(dir)) return null;
+  if (name === SIGNIN_SCRIPT) return { name, content: renderSigninScript({ signinDir: dir }) };
+  if (name === BROWSER_HELPER) return { name, content: renderBrowserHelper(dir) };
+  if (name === SIGNIN_URL_FILE) return { name, content: "" };
+  return null;
+}
+
+const forwards = new WeakSet<object>();
+
+/**
+ * Permission for one sign-in forward: `ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port> … <target>`,
+ * which carries the browser's redirect to Claude Code's own listener on a paired machine. Only
+ * `mintSigninForwardToken` creates one (checked by identity). Callers: remote-signin.ts.
+ */
+export interface SigninForwardToken {
+  readonly target: string;
+  readonly port: number;
+}
+
+/**
+ * Mint the forward token for (`target`, `port`): throws `FenceError` for a target that is not an
+ * ssh destination, a port outside 1024..65535, or one of `reserved` (the ports the config's
+ * broker tunnels use).
+ */
+export function mintSigninForwardToken(
+  target: string,
+  port: number,
+  reserved: readonly number[],
+): SigninForwardToken {
+  if (!SSH_TARGET.test(target)) throw new FenceError("ssh -L", "the target is not an ssh host");
+  if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new FenceError("ssh -L", `port ${port} is outside 1024..65535`);
+  if (reserved.includes(port))
+    throw new FenceError("ssh -L", `port ${port} is a broker tunnel's port`);
+  const token = Object.freeze({ target, port });
+  forwards.add(token);
   return token;
 }
 
@@ -396,6 +496,8 @@ export interface FenceOptions {
   modelSwitch?: ModelSwitchToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
+  /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
+  forward?: SigninForwardToken;
   /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
@@ -1094,10 +1196,27 @@ const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
   token: (a) => a.length === 1 && a[0] === "--json",
 };
 
+/** The own doctor's `--repo`: absolute, normalised (no `.`/`..` segment), no control character. */
+function isRepoPath(p: string | undefined): boolean {
+  if (p === undefined || !p.startsWith("/")) return false;
+  return (
+    [...p].every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f) &&
+    !p.split("/").some((seg) => seg === "." || seg === "..")
+  );
+}
+
 /** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
   const [group, verb] = args;
   const name = `volley ${[group, verb].filter((a) => a !== undefined).join(" ")}`;
+  // The supervisor is its own machine's doctor (SPEC §4.6.15): a report, never a fix.
+  if (group === "peer" && verb === "doctor") {
+    const rest = args.slice(2);
+    const ok =
+      rest[0] === "--json" &&
+      (rest.length === 1 || (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])));
+    return ok ? ALLOW : deny(`volley peer doctor ${rest.join(" ")} (only --json [--repo <abs>])`);
+  }
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
@@ -1162,6 +1281,7 @@ export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
+  if (args.includes("-L")) return [forwardVerdict(args, opts)];
   const script = opts.remote;
   let mode: "T" | "N" | undefined;
   let reverse = false;
@@ -1190,6 +1310,50 @@ function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
     return [deny("ssh bash -s (without a fenced remote script)")];
   return script.steps.map((s) => remoteStep(s, opts));
 }
+
+/** `-L 127.0.0.1:<port>:127.0.0.1:<port>`: loopback on both ends. */
+const SSH_LOCAL_FORWARD = /^127\.0\.0\.1:([0-9]{1,5}):127\.0\.0\.1:([0-9]{1,5})$/;
+
+/**
+ * The sign-in forward, one exact argv: `-N -L 127.0.0.1:<p>:127.0.0.1:<p> -o BatchMode=yes
+ * -o ExitOnForwardFailure=yes -o ConnectTimeout=<s> <target>`, with the token minted for exactly
+ * (target, p). The same port on both ends: the OAuth redirect must match verbatim.
+ */
+function forwardVerdict(args: readonly string[], opts: FenceOptions): Verdict {
+  const t = opts.forward;
+  const m = SSH_LOCAL_FORWARD.exec(args[2] ?? "");
+  const ok =
+    t !== undefined &&
+    forwards.has(t) &&
+    opts.remote === undefined &&
+    m !== null &&
+    m[1] === String(t.port) &&
+    m[2] === String(t.port) &&
+    args.length === 10 &&
+    sameArgv(args.slice(0, 2), ["-N", "-L"]) &&
+    sameArgv(args.slice(3, 8), ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o"]) &&
+    /^ConnectTimeout=[0-9]{1,4}$/.test(args[8] ?? "") &&
+    args[9] === t.target;
+  return ok ? ALLOW : deny("ssh -L (only a sign-in's forward, with its token)");
+}
+
+/** The tools the readiness PATH probe resolves on a box (`command -v claude bun`). */
+export const PATH_PROBE_TOOLS = ["claude", "bun"] as const;
+/** `volley peer doctor` on a box (the Desk's Repair, `peer_doctor`): these argv only. */
+const REMOTE_DOCTOR: readonly (readonly string[])[] = [
+  ["peer", "doctor", "--json"],
+  ["peer", "doctor", "--json", "--fix", "--yes"],
+];
+/** … and with `--clone`, the URL it clones from (`--origin`, a CLONE_URL). */
+const REMOTE_DOCTOR_CLONE = ["peer", "doctor", "--json", "--fix", "--yes", "--clone", "--origin"];
+/**
+ * What a box's doctor may clone (`--origin`): `https://<host>/<path>`, the form `cloneUrl`
+ * (peers.ts) makes from a normalised origin. No credentials, port, query, `..` segment, space or
+ * control character, so git reads it as nothing but a URL.
+ */
+const CLONE_URL = /^https:\/\/[a-z0-9.-]+(?:\/[A-Za-z0-9._~-]+)+$/;
+export const isCloneUrl = (url: string): boolean =>
+  CLONE_URL.test(url) && !url.split("/").some((seg) => seg === "." || seg === "..");
 
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
@@ -1397,6 +1561,15 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
     const b64 = step.stdin !== undefined && BASE64.test(step.stdin);
     if (sameArgv(step.argv, TRUST_COMPARE) && step.stdout === undefined && step.append !== true)
       return b64 ? ALLOW : deny("remote cmp (base64 text on stdin only)");
+    const signin = step.stdout !== undefined ? remoteSigninFile(step.stdout) : null;
+    if (signin !== null) {
+      return sameArgv(step.argv, ["base64", "-d"]) &&
+        b64 &&
+        step.append !== true &&
+        Buffer.from(step.stdin ?? "", "base64").toString("utf-8") === signin.content
+        ? ALLOW
+        : deny(`remote ${signin.name} write (only what volleyd renders for that sign-in dir)`);
+    }
     const write =
       prog === "base64" &&
       args.length === 1 &&
@@ -1440,19 +1613,26 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
     case "mkdir":
       return args[0] === "-p" && paths(args.slice(1)) ? ALLOW : deny("mkdir (only -p <path>…)");
     case "cat":
-      return paths(args) && args.every(readablePath)
+      return paths(args) &&
+        args.every((a) => readablePath(a) || remoteSigninFile(a)?.name === SIGNIN_URL_FILE)
         ? ALLOW
         : deny("cat (only the files volleyd reads)");
     case "chmod":
       // Three digits: no setuid, setgid or sticky bit; only on the files volleyd writes.
       return /^[0-7]{3}$/.test(args[0] ?? "") &&
         paths(args.slice(1)) &&
-        args.slice(1).every(writablePath)
+        args.slice(1).every((a) => writablePath(a) || isSigninScriptFile(a))
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
     case "printenv":
-      // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch).
-      return sameArgv(args, ["PATH"]) ? ALLOW : deny("printenv (only PATH)");
+      // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch), and
+      // its HOME, where a sign-in's dir is (remote-signin.ts).
+      return sameArgv(args, ["PATH"]) || sameArgv(args, ["HOME"])
+        ? ALLOW
+        : deny("printenv (only PATH or HOME)");
+    case "claude":
+      // The box's login state and plan (remote-signin.ts); a login runs only from signin.sh.
+      return sameArgv(args, ["auth", "status"]) ? ALLOW : deny("claude (only auth status)");
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -1462,6 +1642,23 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         : deny("nc (only -z 127.0.0.1 <port>)");
     case "base64":
       return deny("base64 (only as a file write)");
+    // --- Fleet (F2): the PATH probe and the doctor on a paired machine ---
+    case "command":
+      return args[0] === "-v" &&
+        args.length > 1 &&
+        args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
+        ? ALLOW
+        : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
+    case "volley":
+      // The one remote volley step: elsewhere volley is a local program (`volley auth`).
+      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape)) ||
+        (args.length === REMOTE_DOCTOR_CLONE.length + 1 &&
+          sameArgv(args.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
+          isCloneUrl(args.at(-1) ?? ""))
+        ? ALLOW
+        : deny(
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone --origin <https URL>]])`,
+          );
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
       const v = evaluate([prog, ...args], opts);
@@ -1484,6 +1681,8 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
   if (sub === undefined || sub.startsWith("-")) return deny(`tmux ${sub ?? ""}`.trim());
   if (sub === "kill-session") {
+    // A sign-in session holds no agent's work (as locally): no consent.
+    if (rest.length === 2 && rest[0] === "-t" && SIGNIN_SESSION.test(rest[1] ?? "")) return ALLOW;
     const v = checkArgs("tmux kill-session", rest, { valued: ["-t"] });
     return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
   }
@@ -1513,6 +1712,8 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
   }
+  if (sub === "new-session" && rest.at(-1) === SIGNIN_COMMAND)
+    return remoteSigninSession(rest, opts);
   const spec = Object.hasOwn(TMUX_SPECS, sub) ? TMUX_SPECS[sub] : undefined;
   if (spec === undefined) return deny(`tmux ${sub}`);
   const v = checkArgs(`tmux ${sub}`, rest, spec);
@@ -1545,6 +1746,7 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
         session("-s") &&
         opts.signin !== undefined &&
         signins.has(opts.signin) &&
+        !opts.signin.remote &&
         opts.signin.cwd === cwd
         ? ALLOW
         : deny("tmux new-session (only a sealed sign-in script, in a volley-signin-* session)");
@@ -1559,6 +1761,31 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
     default:
       return deny(verb);
   }
+}
+
+/** `signin.sh` or `browser.sh` of a paired machine's sign-in dir (chmod: the helper runs). */
+const isSigninScriptFile = (p: string) => {
+  const f = remoteSigninFile(p);
+  return f !== null && f.name !== SIGNIN_URL_FILE;
+};
+
+/**
+ * A paired machine's sign-in session: exactly `new-session -d -s volley-signin-<acct> -c <dir>
+ * 'bash signin.sh'`, with the remote seal for <dir> (`sealRemoteSigninScript`).
+ */
+function remoteSigninSession(args: readonly string[], opts: FenceOptions): Verdict {
+  const [d, s, session, c, cwd] = args;
+  return args.length === 6 &&
+    d === "-d" &&
+    s === "-s" &&
+    SIGNIN_SESSION.test(session ?? "") &&
+    c === "-c" &&
+    opts.signin !== undefined &&
+    signins.has(opts.signin) &&
+    opts.signin.remote &&
+    opts.signin.cwd === cwd
+    ? ALLOW
+    : deny("tmux new-session (only a sealed sign-in script, in a volley-signin-* session)");
 }
 
 /**

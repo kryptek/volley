@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CREDENTIAL_ENV } from "../src/claude/signin-script";
+import { CREDENTIAL_ENV, renderSigninScript } from "../src/claude/signin-script";
 
 /**
  * Grep-guard: volleyd never reads, stores or forwards a Claude credential (the accounts spike,
@@ -9,10 +9,13 @@ import { CREDENTIAL_ENV } from "../src/claude/signin-script";
  * profile's `.credentials.json` (its fallback when the Keychain is locked), the Keychain item
  * `Claude Code-credentials[-<hash>]` or the `security` calls that read it — or the
  * `setup-token` flow, which prints a bearer token. The credential env variables appear only in
- * CREDENTIAL_ENV, which launch.sh and signin.sh `unset`.
+ * CREDENTIAL_ENV, which launch.sh and signin.sh `unset`. The same holds for the machine doctor
+ * (`volley peer doctor`, volley-cli's `src/peer/`), which runs `claude auth status` and reads
+ * `~/.claude.json` on every paired machine.
  */
 
 const SRC = new URL("../src/", import.meta.url).pathname;
+const PEER_DOCTOR = new URL("../../volley-cli/src/peer/", import.meta.url).pathname;
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
@@ -54,6 +57,41 @@ describe("no Claude credential handling in volleyd", () => {
     expect(hits('exec(["claude", "setup-token"])')).toBe(true);
     expect(hits("env.CLAUDE_CODE_OAUTH_TOKEN = token")).toBe(true);
     expect(hits('exec(["claude", "auth", "status"])')).toBe(false);
+  });
+
+  it("the machine doctor's modules name no token location and no credential env", () => {
+    const files = sourceFiles(PEER_DOCTOR);
+    // The doctor and every check family are scanned (a module that moves away must be followed).
+    expect(files.map((f) => relative(PEER_DOCTOR, f)).sort()).toEqual(
+      expect.arrayContaining([
+        "doctor.ts",
+        "checks/claude.ts",
+        "checks/github.ts",
+        "checks/machine.ts",
+        "checks/repo.ts",
+        "checks/tools.ts",
+      ]),
+    );
+    expect(files.flatMap(offenders)).toEqual([]);
+  });
+
+  it("a paired machine's sign-in (remote-signin, forward) names none and unsets the credential env there", () => {
+    const files = sourceFiles(join(SRC, "claude")).filter((f) =>
+      /\/(remote-signin|forward|signin-script)\.ts$/.test(f),
+    );
+    expect(files.map((f) => relative(SRC, f)).sort()).toEqual([
+      "claude/forward.ts",
+      "claude/remote-signin.ts",
+      "claude/signin-script.ts",
+    ]);
+    const listed = new Set(CREDENTIAL_ENV.map((k) => `claude/signin-script.ts: "${k}",`));
+    expect(files.flatMap(offenders).filter((o) => !listed.has(o.replace(/:\d+:/, ":")))).toEqual(
+      [],
+    );
+    // The box's script (no profile dir) still unsets every credential variable.
+    const script = renderSigninScript({ signinDir: "/home/dev/.volley/signin/primary" });
+    expect(script).toContain(`unset ${CREDENTIAL_ENV.join(" ")}`);
+    expect(script).not.toMatch(/setup-token|CLAUDE_CONFIG_DIR/);
   });
 
   it("src/ names no token location; the credential env lives only in CREDENTIAL_ENV", () => {

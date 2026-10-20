@@ -2,6 +2,60 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.4.0 — 2026-10-20
+
+The Fleet release: volleyd judges which machines can run an agent, places a wave's tasks across
+them and says why, and asks the owner before anything is re-placed when a machine goes down,
+gets busy or leaves. A paired machine is checked, repaired and signed in to Claude from the Desk.
+Owner smoke: [`SMOKE.md`](SMOKE.md) Plan 12.
+
+### Added
+
+- **SPEC §4.6.15 Fleet**, with the machine record's doctor fields, the new readiness verdict
+  schema, placement in the wave file and wave state, `per_machine` lease caps, the
+  `machine_down` decision and the Fleet tunables, each with valid and invalid examples. (#112)
+- **`volley peer doctor [--fix] [--clone] [--json]`**: one line per check (tools, the
+  non-interactive ssh PATH, the volley checkout and version, the repo clone and origin, GitHub
+  push access, the Claude sign-in and folder trust, memory and disk), the fix for each, and
+  `--fix` applying only the safe ones. `peer join` runs it first; every heartbeat carries its
+  result. `volley peer invite --for <name>` / `join --replace` re-pair a machine. (#113)
+- **The peer's Claude profile:** the doctor's `skills`, `hooks`, `mcp` and `sharing` rows, and
+  `--fix` provisioning them, so a session on a paired machine has `/volley` and the hooks
+  without reading a README. (#117)
+- **Readiness:** volleyd publishes a record for its own machine and a retained verdict per
+  machine (`volley/_system/machines/<name>/readiness`): ready or not in plain words, eligible
+  for placement or not, from the doctor and its own probe of the ssh PATH an agent gets.
+  `hosts.<name>.max_agents` and `hosts.<name>.drain`; the admin op `peer_doctor` (Repair). (#116)
+  Repair's clone clones from the running wave's origin (`--clone --origin <https URL>`). (#188)
+- **Placement:** `placement: auto` in a wave file (or `host: auto` on a task) places each task
+  at admission on the best eligible machine, scored from CPU, slots, memory and usage headroom,
+  with `placement_prefer` / `placement_avoid` and `heavy: true`. Every candidate gets a "why
+  here" line; `volleyd validate` / `run` preview the placement and `volleyd status` prints it.
+  A peer's own load and memory gate its admissions. (#118)
+- **Machine-aware leases:** each lease holder's host, and a pool's `per_machine` cap. (#114)
+- **A fresh base:** `require_fresh_base` (a worktree is cut from a freshly fetched release
+  branch), `base_sha` on every task, and a steer to running implementers whose files overlap a
+  PR that just merged (`placement.nudge_on_merge`). (#115)
+- **Down, overload, drain, remove:** a machine down for 5 minutes opens one `machine_down`
+  decision per wave (wait, re-place queued tasks, cancel); an overloaded machine takes no new
+  agents until three clean heartbeats; respawn decisions offer `respawn on <best>`;
+  `volley peer remove --drain | --now`. A running agent is never moved. (#120)
+- **The Desk's Machines v2:** readiness and doctor rows on each card, the cap editor,
+  **Repair…**, **Re-pair…** and **Remove…** sheets, Add a machine's checks / Claude / ready
+  steps, lease pools grouped by host, a host chip with "why here" on each task, and the
+  `machine_down` banner with re-place pre-selected. (#121)
+- **Signing a paired machine in to Claude from the Mac:** **Sign in on <machine>** runs Claude
+  Code's own `claude auth login` on the machine in tmux and forwards its localhost callback for
+  the length of the sign-in (one fenced, transient `ssh -L`), with a phone fallback that types
+  the code into a terminal, never into Volley. (#122)
+- **Desk sound themes:** twelve themes of short generated clips (Synthwave by default) for 28 Desk events: clicks, drags,
+  tethers, panels, agents spawning, finishing and failing, reviews, decisions, CI, gates, merges, waves, steering, account
+  limits, machines and the broker, and anything that needs you. Settings › Sound picks a theme, plays any clip of any theme,
+  and has master volume, mute, per-event switches, only-when-hidden, quiet hours, reduced motion and vibrate. A burst plays
+  once and is read out ("12 agents completed"). The clips are generated with the ElevenLabs Sound Effects API from
+  `sounds/prompts.yaml` (`bun run sounds:generate`, `sounds:pick`, `sounds:check`). The Desk's old chime is gone; the
+  legacy dashboard keeps its own. (#171)
+
 ## 0.3.2 — 2026-10-20
 
 Fixes found running a downstream project's wave through volleyd 0.3.0.

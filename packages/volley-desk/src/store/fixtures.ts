@@ -24,6 +24,8 @@ export function isDemoMode(search: string, env: Record<string, unknown>): boolea
 
 const NS = "demo";
 const SUPERVISOR = "volleyd";
+/** The supervisor's own machine (`fleet.local_name`, SPEC §4.6.15). */
+const LOCAL_MACHINE = "studio";
 const MODEL = "claude-opus-5-5";
 const PIPELINE = ["implement", ["spec_review", "quality_review"], "fixup", "merge_ready"];
 
@@ -182,6 +184,34 @@ const WAVES: WaveDef[] = [
   },
 ];
 
+/** Where the demo's placed tasks run, and why (SPEC §4.6.15 `tasks[].placement`). */
+function placed(wave: string, task: string, now: number) {
+  if (wave !== "ci-speed" || task !== "T6") return {};
+  return {
+    host: "box-a",
+    base_sha: "4f9c2e1d8b7a6c5e4d3c2b1a0f9e8d7c6b5a4f3e",
+    placement: {
+      host: "box-a",
+      by: "auto" as const,
+      score: 0.74,
+      decided_at: iso(now - 25 * 60_000),
+      candidates: [
+        {
+          host: "box-a",
+          score: 0.74,
+          line: "box-a: 0.74 (cpu 0.83, slots 0.67, mem 0.71, usage 0.58)",
+        },
+        {
+          host: LOCAL_MACHINE,
+          score: 0.41,
+          line: `${LOCAL_MACHINE}: 0.41 (cpu 0.2, slots 0.58, mem 0.52, usage 0.58)`,
+        },
+        { host: "box-b", score: null, line: "ineligible: box-b is down (no heartbeat for 90 s)" },
+      ],
+    },
+  };
+}
+
 const decisionId = (w: WaveDef) =>
   `${w.id}-${w.decision?.task.toLowerCase()}-${w.decision?.kind}-1`;
 
@@ -199,6 +229,7 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
       issue: t.issue,
       stage: t.stage,
       agents: t.agents ?? {},
+      ...placed(w.id, t.id, now),
       ...(t.stage === "queued" && t.after.length
         ? { waiting_on: t.after, why_waiting: `after: ${t.after.join(", ")}` }
         : {}),
@@ -459,19 +490,34 @@ function globals(now: number): DeskMessage[] {
     idle_grace_s: 180,
     screen_tail_interval_s: 5,
     hosts: {
-      "box-a": { target: "owner@box-a", tunnel: { remote_port: 21883, supervise: false } },
+      "box-a": {
+        target: "owner@box-a",
+        tunnel: { remote_port: 21883, supervise: false },
+        max_agents: 6,
+      },
       "box-b": { target: "owner@box-b", tunnel: { remote_port: 21884, supervise: false } },
     },
+    fleet: { local_name: LOCAL_MACHINE },
     claude: { default_account: "most_headroom", warn_at_pct: 90 },
   };
   const since = iso(now - 20 * 60_000);
   const heavy = {
     pool: "heavy-it",
     capacity: 3,
-    held: ["ci-speed-t6-implementer-1", "status-chip-t1-fixup-1", "ci-speed-fb-implementer-1"].map(
-      (holder, i) => ({ lease_id: `l-00${i + 1}`, holder, since, ttl_s: 3600 }),
-    ),
-    queue: [{ lease_id: "l-004", holder: "ci-speed-t3b-implementer-1", since: iso(now - 60_000) }],
+    per_machine: 2,
+    held: [
+      ["ci-speed-t6-implementer-1", "box-a"],
+      ["status-chip-t1-fixup-1", LOCAL_MACHINE],
+      ["ci-speed-fb-implementer-1", null],
+    ].map(([holder, host], i) => ({ lease_id: `l-00${i + 1}`, holder, host, since, ttl_s: 3600 })),
+    queue: [
+      {
+        lease_id: "l-004",
+        holder: "ci-speed-t3b-implementer-1",
+        host: "box-a",
+        since: iso(now - 60_000),
+      },
+    ],
     reasons: ["queued: 3/3 heavy-it leases held"],
   };
   const build = {
@@ -618,11 +664,53 @@ function claudeUsage(now: number): DeskMessage[] {
   ];
 }
 
-/** Two paired machines' health records (SPEC §4.6.14): one up, one whose heartbeat stopped. */
+/**
+ * The machines (SPEC §4.6.14–15): the supervisor's own record, two paired machines' (one up
+ * with a doctor report, one whose heartbeat stopped) and volleyd's readiness verdict on each.
+ */
 function machines(now: number): DeskMessage[] {
+  const checks = (trust: boolean) => [
+    { id: "tool.git", ok: true, severity: "block", detail: "git 2.47.0" },
+    { id: "tool.bun", ok: true, severity: "block", detail: "bun 1.3.2" },
+    { id: "claude_on_path", ok: true, severity: "warn", detail: "claude resolves on the ssh PATH" },
+    { id: "volley.version", ok: true, severity: "block", detail: "volley 0.3.1" },
+    { id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/work/example-repo" },
+    {
+      id: "gh.auth",
+      ok: true,
+      severity: "block",
+      detail: "gh can push to example-org/example-repo",
+    },
+    { id: "claude.signin", ok: true, severity: "block", detail: "Claude Code is signed in" },
+    trust
+      ? { id: "claude.trust", ok: true, severity: "warn", detail: "Claude Code trusts the repo" }
+      : { id: "claude.trust", ok: false, severity: "warn", detail: "the repo is not trusted yet" },
+  ];
+  const doctor = (trust: boolean, repo: string) => ({
+    memory: { total_mb: 65_536, available_pct: 71 },
+    disk: { path: "/srv/work", free_gb: 312, free_pct: 64 },
+    versions: { peer: "0.3.1", volley: "0.3.1", bun: "1.3.2", git: "2.47.0", claude: "2.1.0" },
+    auth: { gh: "ok", claude: "signed_in", trust: trust ? "ok" : "missing" },
+    repo: { path: repo, exists: true, origin: "github.com/example-org/example-repo" },
+    checks: checks(trust),
+    doctor_at: iso(now - 60_000),
+  });
   const records = [
     {
+      name: LOCAL_MACHINE,
+      kind: "supervisor",
+      os: "darwin",
+      arch: "arm64",
+      cores: 12,
+      tunnel: "local",
+      load: [3.1, 2.8, 2.5],
+      agents: 5,
+      last_seen: iso(now - 5_000),
+      ...doctor(true, "/path/to/repo"),
+    },
+    {
       name: "box-a",
+      kind: "peer",
       os: "linux",
       arch: "x64",
       cores: 32,
@@ -631,6 +719,7 @@ function machines(now: number): DeskMessage[] {
       agents: 2,
       remote_port: 21883,
       last_seen: iso(now - 12_000),
+      ...doctor(false, "/srv/work/example-repo"),
     },
     {
       name: "box-b",
@@ -645,12 +734,51 @@ function machines(now: number): DeskMessage[] {
       last_seen: iso(now - 6 * 60_000),
     },
   ];
-  return records.map((r) => ({
-    topic: `volley/_system/machines/${r.name}`,
-    envelope: env(r.tunnel === "up" ? r.name : SUPERVISOR, "_system/machines", "machine", r, now),
-    receivedAt: now,
-    retained: true,
-  }));
+  const verdict = (name: string, over: Record<string, unknown>) => ({
+    name,
+    ready: true,
+    reasons: [],
+    drain: false,
+    max_agents: 4,
+    placed: 0,
+    path_ok: { claude: true, bun: true },
+    requirements: { volley: "0.3.1" },
+    heavy: {},
+    usage: { account: `primary@${name}`, five_hour_pct: 38 },
+    eligible: true,
+    checked_at: iso(now - 4_000),
+    ...over,
+  });
+  const verdicts = [
+    verdict(LOCAL_MACHINE, {
+      max_agents: 12,
+      placed: 5,
+      eligible: false,
+      ineligible_reason: "memory available 18% (min 20%)",
+      usage: { account: "primary", five_hour_pct: 64 },
+    }),
+    verdict("box-a", { max_agents: 6, placed: 2 }),
+    verdict("box-b", {
+      ready: false,
+      eligible: false,
+      reasons: ["tunnel down: no heartbeat for 90 s"],
+      ineligible_reason: "box-b is down (no heartbeat for 90 s)",
+    }),
+  ];
+  return [
+    ...records.map((r) => ({
+      topic: `volley/_system/machines/${r.name}`,
+      envelope: env(r.tunnel === "up" ? r.name : SUPERVISOR, "_system/machines", "machine", r, now),
+      receivedAt: now,
+      retained: true,
+    })),
+    ...verdicts.map((v) => ({
+      topic: `volley/_system/machines/${v.name}/readiness`,
+      envelope: env(SUPERVISOR, "_system/machines/readiness", "readiness", v, now),
+      receivedAt: now,
+      retained: true,
+    })),
+  ];
 }
 
 /** Every retained/live message the demo starts from, oldest agent history first per agent. */

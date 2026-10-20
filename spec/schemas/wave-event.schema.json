@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-event.schema.json",
   "title": "Volley Wave Event",
-  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. See spec section 4.6.3.",
+  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. Event data is free-form except for the event types constrained below. See spec sections 4.6.3 and 4.6.15.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -71,6 +71,11 @@
             "peer_invited",
             "peer_joined",
             "peer_removed",
+            "task_placed",
+            "machine_readiness_changed",
+            "merge_nudge_sent",
+            "peer_doctor_run",
+            "peer_drain_started",
             "repo_visibility_detected"
           ]
         },
@@ -95,6 +100,100 @@
         }
       },
       "required": ["channel", "type", "payload"]
+    },
+    {
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "task_placed" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["task", "host", "score", "candidates", "by"],
+                    "properties": {
+                      "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                      "host": { "$ref": "wave-state.schema.json#/$defs/hostName" },
+                      "score": {
+                        "$ref": "wave-state.schema.json#/$defs/placement/properties/score"
+                      },
+                      "candidates": {
+                        "$ref": "wave-state.schema.json#/$defs/placement/properties/candidates"
+                      },
+                      "by": { "$ref": "wave-state.schema.json#/$defs/placement/properties/by" },
+                      "from": {
+                        "$ref": "wave-state.schema.json#/$defs/hostName",
+                        "description": "The host the task was placed on before, when it is re-placed."
+                      },
+                      "local": {
+                        "const": true,
+                        "description": "The supervisor's own machine (its agents' tasks[].host stays absent); absent for a peer."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "machine_readiness_changed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["name", "ready", "reasons"],
+                    "properties": {
+                      "name": {
+                        "$ref": "readiness.schema.json#/allOf/1/properties/payload/properties/name"
+                      },
+                      "ready": { "type": "boolean" },
+                      "reasons": {
+                        "$ref": "readiness.schema.json#/allOf/1/properties/payload/properties/reasons"
+                      }
+                    }
+                  },
+                  "wave": { "const": "_system" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "merge_nudge_sent" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["task", "agent_id", "merged_pr", "files"],
+                    "properties": {
+                      "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                      "agent_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "merged_pr": { "type": "integer", "minimum": 1 },
+                      "files": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "description": "The merged PR's files that overlap the task's; empty under nudge_on_merge: all."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }

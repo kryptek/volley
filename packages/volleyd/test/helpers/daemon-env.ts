@@ -45,6 +45,8 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     protocolVersion: 4,
     pressure: NO_PRESSURE,
     ...extra,
+    // The own machine's record never reads the load or memory of the machine running the test.
+    fleet: { os: CALM_OS, ...extra.fleet },
   });
   const reader = new VolleyBroker();
   await reader.connect({ url: broker.url, agentId: "test-reader" });
@@ -74,3 +76,14 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     },
   };
 }
+
+/**
+ * The own machine's OS readings for a daemon test (DaemonOptions.fleet.os): a calm Linux box, so a
+ * test's own-machine verdict never depends on the load or memory of the machine running it.
+ */
+export const CALM_OS = {
+  platform: () => "linux" as NodeJS.Platform,
+  loadavg: () => [0.5, 0.5, 0.5],
+  freemem: () => 8 * 1024 ** 3,
+  totalmem: () => 16 * 1024 ** 3,
+};

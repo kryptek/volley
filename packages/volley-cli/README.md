@@ -20,6 +20,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
 - [`volley lease`](#volley-lease)
+- [`volley peer`](#volley-peer)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -62,7 +63,7 @@ volley --help
 | `volley auth`   | Broker logins on mosquitto 2.1 Dynamic Security: `init` / `migrate` the shared roles and fixed identities, agent logins, role accounts and one-time admin / sign-in tokens. See [`volley auth`](#volley-auth) below. |
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 | `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list`, `sync` (sharing + MCP servers), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
-| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (account, tunnel service, trust check, host entry), `run` (the service). See the volleyd README's "Paired machines". |
+| `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
 
@@ -211,6 +212,130 @@ Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/vo
 
 ---
 
+## `volley peer`
+
+Pairs a second machine with `volleyd`'s, so waves can run agents there (SPEC §4.6.14; the volleyd
+README's "Paired machines" has the whole walk-through). On the supervisor's machine, as an admin
+account: `volley peer invite` (a one-time code), `volley peer invite --for <name>` (a code that
+re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name> [--drain |
+--now]`. On any machine, `volley peer doctor [--fix]` says whether it can run an agent and fixes
+what it safely can. On the machine to pair: `volley peer join <code> --to <user@supervisor> --repo
+<clone>` (add `--name <name> --replace` with a `--for` code), then the `volley peer run` service it
+installs.
+
+### `volley peer remove`
+
+```sh
+volley peer remove box-a           # now: revoke its account, drop hosts.box-a, clear its record
+volley peer remove box-a --drain   # place nothing new there; remove it once its agents finish
+volley peer remove box-a --now     # stop its agents (each task gets a respawn question), then remove
+```
+
+With agents still running there, `--drain` and `--now` answer at once (`draining box-a: nothing
+new starts there; 2 agents left. …`) and `volleyd` finishes the removal itself: `--drain` waits
+for the agents to finish; `--now` asks each to stop, retires those still running after
+`stop_grace_s`, and opens each task's respawn decision, which offers `respawn on <best>` (another
+eligible machine). With no agent there, both remove at once like the plain form. The two flags
+exclude each other.
+
+### `volley peer doctor`
+
+The one command that says whether this machine can run an agent, and what to do if not:
+
+```sh
+volley peer doctor                       # one line per check: ✓ ok, ! warning, ✗ blocks agents
+volley peer doctor --fix                 # print the plan, ask, apply the safe fixes, check again
+volley peer doctor --fix --yes --clone --origin https://github.com/example-org/example-repo
+volley peer doctor --json                # the machine record's doctor fields (SPEC §4.6.15)
+volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's sharing modes
+```
+
+| Check | Severity | What it looks at |
+|---|---|---|
+| `tool.<name>` | block (`gh`: warn) | `bun git gh tmux nc base64 cmp claude` installed (`command -v`), and their versions |
+| `bun_on_path`, `claude_on_path` | warn | **an estimate**: whether the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets, guessed as sshd's default `PATH` through your login shell's `-c` (sshd's `SetEnv`, `~/.ssh/environment` and `pam_env` are invisible to it). The detail says "estimated"; the supervisor's own probe of the real ssh `PATH` (readiness `path_ok`) decides |
+| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install records the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
+| `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
+| `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
+| `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
+| `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
+| `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
+| `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
+| `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
+| `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |
+| `mcp` | warn | `~/.claude.json`'s `mcpServers.volley` runs this checkout's `packages/volley-mcp/src/index.ts` with bun, with `VOLLEY_BROKER_URL` at the tunnel's port and the peer's namespace (`mcp: own`: left as is) |
+| `sharing` | warn | the three rows above follow the sharing modes (SPEC §4.6.11): `--sharing`, else the supervisor's readiness `requirements.sharing`, read through the tunnel, else the defaults; the detail names where they came from and which items are left as is |
+| `machine.memory`, `machine.disk` | warn | available memory (Linux: `MemAvailable`; macOS: `vm_stat`'s free + inactive + speculative + purgeable pages, as free pages alone under-count), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
+
+Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
+shell's), so the doctor inside the `volley peer run` service reads the machine the way a terminal
+does. `gh.auth` and `claude.signin` only warn (a join is not held up by them), but the
+supervisor's readiness needs both, so the human output ends with a line naming them while they
+fail.
+
+**Fixes.** `--fix` runs only what writes inside the volley checkout (`bun install
+--frozen-lockfile`; with a known requirement, `git fetch origin --tags && git checkout --detach
+v<version> && bun install --frozen-lockfile`) and, with `--clone` and `--origin`, one `git clone`
+into an empty `--repo` (`git clone -- <url> <path>`, prompt-free like `repo.fetch`). A step two
+fixes share runs once, at its last place, so a fresh checkout behind the supervisor gets `fetch`,
+`checkout`, then the install. It prints its plan (on stderr under `--json`) and asks first unless
+`--yes`, checks everything again afterwards, and a second run reports each of those as "already
+done" (`volley.version` says "not checked" while the supervisor's requirement is unknown).
+Everything else is printed for you to run: installing a tool (`brew install …` on macOS,
+`sudo apt-get install -y …` or `sudo dnf install -y …` on Linux; `gh` from cli.github.com's
+package repository on apt), the line that puts Claude Code on the ssh `PATH` (Linux:
+`sudo ln -s ~/.local/bin/claude /usr/local/bin/claude`; macOS: a line in `~/.zshenv` for zsh,
+`fish_add_path -U` for fish, and for bash, which reads no startup file there, `chsh -s /bin/zsh`
+or an sshd `SetEnv PATH=…`), `gh auth login && gh auth setup-git`, the Claude sign-in, a wrong
+`origin` (explained, never changed), and `package.json` disagreeing with `bun.lock` (local
+edits: `git -C <dir> status`). Exit status 1 while a `block` check fails.
+
+**The Claude profile.** The last four rows prepare this machine's own Claude profile the way
+`volley setup` and the packages' installers do locally, so a session you start here has
+`/volley`, `/volley-issues`, the hooks and the volley MCP server without reading a README. They
+only warn: an agent volleyd spawns runs without them (its spawn writes `.volley/mcp.json` and
+brings the hooks itself). Their `--fix` writes only inside `~/.claude`, `~/.claude.json`'s
+`mcpServers` and the hooks' state folder: the two skill installers (idempotent; a folder in the
+way is backed up), or `cp -R` of a missing skill under `skills: copy`; the hooks installer with
+`CLAUDE_SETTINGS`, `--broker-url mqtt://127.0.0.1:<remote_port>` and, outside the `default`
+namespace, `--namespace` (it carries them in every hook's prefix; the usage statusLine comes with
+it; a login in the URL is left out and said so, as the hooks take theirs from their own login
+file); `claude mcp add-json -s user volley …`
+(`claude mcp remove -s user volley` first when an entry is there but differs, so a new port is
+re-registered). The registration carries no broker login, and an entry with settings of your own
+(env keys such as a login, or an agent id other than `coordinator`) is never rewritten: its fix
+is printed for you to run, and keeps those settings (each value shown as `<yours>`, for you to
+fill in). A skill link that points at nothing is reported as a broken link and repaired (under
+`skills: copy`, the link is removed and the copy made). On a machine that is not paired there is
+no tunnel to expect: the hooks are checked against the URL they already carry (none: the
+installer runs without `--broker-url`) and the MCP entry's URL is not compared. The modes come
+from the supervisor's readiness verdict (`requirements.sharing`, its own `sharing.yaml`);
+`--sharing <json>` sets them by hand and wins over the verdict (validated like `sharing.yaml`: an
+unknown item or mode, or `mcp: linked`, is a usage error), and without either the defaults
+apply (`skills` linked, `settings.json` and `mcp` copied). `.claude.json` is never linked or
+copied whole, and the doctor runs no `volley auth` command.
+
+**No secrets.** The doctor keeps states and plain labels only: exit codes of `gh auth status`,
+the `loggedIn` and plan of `claude auth status`, an origin with any credentials stripped. Nothing
+it prints or publishes carries a token (it also scrubs anything token-shaped), and `--origin`
+refuses a URL with a password or token in it.
+
+**Where it runs.** `volley peer join` runs it first and stops on a `block` check before the
+pairing code is used, so the code stays valid while you fix things (it prints the exact
+`volley peer doctor --fix --repo …` to run); `warn` checks, the ssh `PATH` estimate among them,
+are printed and the join goes on. `volley peer run` (whose service file carries the `PATH` the
+join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock)
+beside the heartbeat, never in its way: a beat never waits for it, a run is given up after
+`PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
+heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
+text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`
+too except on macOS, whose `available_pct` is the last doctor run's `vm_stat` figure. Available memory
+has one definition on every machine, the supervisor's own included, so placement can compare them
+(SPEC §4.6.15): memory the kernel can hand out without paging anything active out, over total
+memory (Linux: `MemAvailable`; macOS: free + inactive + speculative + purgeable pages).
+
+---
+
 ## `volley lease`
 
 Heavy operations (integration-test suites, builds, browsers) share machine-global **lease pools**
@@ -225,7 +350,23 @@ volley lease run --pool backend-it -- mvn -q verify
 
 volley lease acquire --pool build --lease-id nightly-1     # {"pool":"build","lease_id":"nightly-1","holder":"lease-x1y2z3","waited_s":0}
 volley lease release --pool build --lease-id nightly-1 --holder lease-x1y2z3   # default holder: a <holder>.<rand> id's prefix
-volley lease status                                        # every pool: holders, queue, reasons
+volley lease status                                        # every pool: holders, queue, reasons, by machine
+```
+
+`status` groups each pool's holders and queued requests under the machine they run on, hosts by
+name and `(unknown host)` last (a holder volleyd did not spawn, or every holder of a supervisor
+that does not report hosts); a pool with a `per_machine` cap shows it, and each machine's share of
+it:
+
+```text
+backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it leases held on box-a (per machine)
+  box-a  1/1 held
+    held    l-3  agent-a  since 2026-10-19T12:00:00.000Z
+    queued  l-4  agent-c  since 2026-10-19T12:00:00.000Z
+  box-b  1/1 held
+    held    l-2  agent-b  since 2026-10-19T12:00:00.000Z
+  (unknown host)  1 held
+    held    l-1  hand-1  since 2026-10-19T12:00:00.000Z
 ```
 
 - **Holder** = `--holder`, else the `agent_id` in `<--project-dir or cwd>/.volley/agent.json`, else a

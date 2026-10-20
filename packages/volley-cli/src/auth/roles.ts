@@ -109,12 +109,10 @@ export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   // A one-time token's login (username = token id): its own redeem topic and its own answer,
   // nothing under volley/ (it may subscribe to nothing else, so it receives nothing else).
   token: [send("volley-auth/redeem/%u"), read("volley-auth/redeem/%u/reply")],
-  // Every account: read the tree, its own channels, registry entry and machine record.
-  account: [
-    ...ownIdentity,
-    send("volley/_system/machines/%u"),
-    send("volley/_system/machines/%u/#"),
-  ],
+  // Every account: read the tree, its own channels, registry entry and machine record. The record
+  // topic only: never a machine's readiness verdict under it, its own included (SPEC §4.6.15). Not
+  // a deny: a supervisor account holds this role first, and its first matching ACL would decide.
+  account: [...ownIdentity, send("volley/_system/machines/%u")],
   // A dispatched agent (username = agent id): read the tree, write its own channels and registry
   // entry, lease requests, and ack the fixed steering identities' mailboxes (SPEC §4.4: an ack goes
   // to the sender's mailbox). Never another agent's mailbox, status or registry entry.

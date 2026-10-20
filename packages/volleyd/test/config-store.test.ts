@@ -73,6 +73,15 @@ describe("ConfigStore layering", () => {
     expect(c.get("hard_ceiling", "w1")).toBe(8);
   });
 
+  it("placement.nudge_on_merge: the default, config.yaml, then a wave's config: (what the pipeline reads)", () => {
+    expect(open().get("placement.nudge_on_merge")).toBe("files");
+    writeFileSync(join(home, "config.yaml"), "placement:\n  nudge_on_merge: all\n");
+    const c = open();
+    c.setWaveOverrides("w1", { placement: { nudge_on_merge: "off" } });
+    expect(c.get("placement.nudge_on_merge", "w1")).toBe("off");
+    expect(c.get("placement.nudge_on_merge", "w2")).toBe("all");
+  });
+
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });
@@ -151,6 +160,23 @@ describe("ConfigStore layering", () => {
     expect((err as Error).message).toContain("config.yaml");
     expect((err as ConfigError).errors).toEqual([
       { path: "hard_ceiling", reason: "must be <= 100" },
+    ]);
+  });
+
+  it("fails load on a per_machine above its pool's capacity, naming the path", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  build: { capacity: 2, per_machine: 3 }\n",
+    );
+    let err: unknown;
+    try {
+      open();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).errors).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
     ]);
   });
 
@@ -260,6 +286,25 @@ describe("applyPatch", () => {
     ]);
   });
 
+  it("refuses a per_machine above its pool's capacity, naming the path; equal is accepted", () => {
+    const c = open();
+    const r = c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 3 } } }, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (2)" },
+    ]);
+    expect(c.applyPatch({ lease_pools: { build: { capacity: 2, per_machine: 2 } } }, "x")).toEqual({
+      applied: true,
+      rejected: [],
+      version: 2,
+    });
+    // Cutting capacity below an existing per_machine is refused the same way.
+    const cut = c.applyPatch({ lease_pools: { build: { capacity: 1 } } }, "x");
+    expect(cut.rejected).toEqual([
+      { path: "lease_pools.build.per_machine", reason: "must be at most capacity (1)" },
+    ]);
+  });
+
   it("rejects an empty sub-object as a no-op, without bumping the version", () => {
     const c = open();
     const r = c.applyPatch({ admission: {} }, "x");
@@ -320,5 +365,117 @@ describe("ConfigStore.removeHost (volley peer remove)", () => {
     });
     expect(readFileSync(join(home, "config.yaml"), "utf-8")).toBe(HOSTS);
     expect(c.retainedPayload().version).toBe(1);
+  });
+});
+
+describe("Fleet keys: hosts.<name>.max_agents / drain, fleet.local_name (SPEC §4.6.15)", () => {
+  const BOX = "hosts:\n  box-a:\n    target: dev@box-a\n    volley_dir: /opt/volley\n";
+  const openAs = (hostname: string) =>
+    ConfigStore.load({
+      home,
+      system: Journal.open(join(home, "waves", SYSTEM_WAVE)),
+      now,
+      hostname,
+    });
+
+  it("refuses max_agents outside 1..100, a non-boolean drain and a reserved local_name", () => {
+    writeFileSync(join(home, "config.yaml"), BOX);
+    const c = openAs("host-1.example");
+    for (const [patch, path] of [
+      [{ hosts: { "box-a": { max_agents: 0 } } }, "hosts.box-a.max_agents"],
+      [{ hosts: { "box-a": { max_agents: 101 } } }, "hosts.box-a.max_agents"],
+      [{ hosts: { "box-a": { drain: "yes" } } }, "hosts.box-a.drain"],
+      [{ fleet: { local_name: "local" } }, "fleet.local_name"],
+      [{ fleet: { local_name: "auto" } }, "fleet.local_name"],
+    ] as const) {
+      const r = c.applyPatch(patch as never, "admin-1");
+      expect(r.applied, JSON.stringify(patch)).toBe(false);
+      expect(r.rejected.map((e) => e.path)).toContain(path);
+    }
+    expect(c.retainedPayload().version).toBe(1);
+  });
+
+  it("applies max_agents and drain hot, journaled as config_changed", () => {
+    writeFileSync(join(home, "config.yaml"), BOX);
+    const c = openAs("host-1.example");
+    const r = c.applyPatch({ hosts: { "box-a": { max_agents: 2, drain: true } } }, "admin-1");
+    expect(r).toEqual({ applied: true, rejected: [], version: 2 });
+    expect(c.effective().hosts["box-a"]).toMatchObject({ max_agents: 2, drain: true });
+    const ev = readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).find(
+      (e) => e.type === "config_changed",
+    );
+    expect(ev?.data.patch).toEqual({ hosts: { "box-a": { max_agents: 2, drain: true } } });
+  });
+
+  it("never lets the supervisor's machine name be a configured host's, either way round", () => {
+    writeFileSync(join(home, "config.yaml"), BOX);
+    const c = openAs("host-1.example");
+    const named = c.applyPatch({ fleet: { local_name: "box-a" } }, "admin-1");
+    expect(named.applied).toBe(false);
+    expect(named.rejected).toEqual([
+      expect.objectContaining({
+        path: "fleet.local_name",
+        reason: expect.stringContaining("box-a"),
+      }),
+    ]);
+    // The derived name (from the host name) counts too.
+    const host = c.applyPatch(
+      { hosts: { "host-1": { target: "dev@host-1", volley_dir: "/opt/volley" } } },
+      "admin-1",
+    );
+    expect(host.applied).toBe(false);
+    expect(host.rejected).toEqual([expect.objectContaining({ path: "hosts.host-1" })]);
+    // Naming the supervisor's machine otherwise frees the derived name.
+    expect(c.applyPatch({ fleet: { local_name: "control" } }, "admin-1").applied).toBe(true);
+    expect(
+      c.applyPatch(
+        { hosts: { "host-1": { target: "dev@host-1", volley_dir: "/opt/volley" } } },
+        "admin-1",
+      ).applied,
+    ).toBe(true);
+  });
+
+  it("a config.yaml whose host takes the supervisor's name is refused at load", () => {
+    writeFileSync(join(home, "config.yaml"), `${BOX}fleet:\n  local_name: box-a\n`);
+    expect(() => openAs("host-1.example")).toThrow(ConfigError);
+  });
+
+  it("the retained payload carries the resolved name, never null", () => {
+    const c = openAs("MacBook-Pro.local");
+    expect(c.effective().fleet.local_name).toBeNull();
+    const payload = c.retainedPayload();
+    expect(payload.fleet.local_name).toBe("macbook-pro");
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", payload)),
+    ).toEqual([]);
+    c.applyPatch({ fleet: { local_name: "control" } }, "admin-1");
+    expect(c.retainedPayload().fleet.local_name).toBe("control");
+  });
+});
+
+describe("placement.weights: never all four at 0 (SPEC §4.6.15)", () => {
+  const ZERO = "not all four weights may be 0 (cpu, slots, mem, usage)";
+
+  it("a config_set that zeroes them is refused with a plain reason at the field", () => {
+    const c = open();
+    const r = c.applyPatch(
+      { placement: { weights: { cpu: 0, slots: 0, mem: 0, usage: 0 } } },
+      "tester",
+    );
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([{ path: "placement.weights", reason: ZERO }]);
+  });
+
+  it("a wave's config: that zeroes them with the global config's is refused; one that does not passes", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "placement:\n  weights: { cpu: 100, slots: 0, mem: 0, usage: 0 }\n",
+    );
+    const c = open();
+    expect(c.waveOverrideErrors({ placement: { weights: { cpu: 0 } } } as never)).toEqual([
+      { path: "config.placement.weights", reason: `${ZERO} with the global config` },
+    ]);
+    expect(c.waveOverrideErrors({ placement: { weights: { mem: 1 } } } as never)).toEqual([]);
+    expect(c.waveOverrideErrors({})).toEqual([]);
   });
 });

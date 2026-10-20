@@ -4,7 +4,7 @@ import { type ControlTarget, resolveControlTarget, withClient } from "../control
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
-import type { WaveState } from "../types";
+import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
 
 const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
@@ -15,6 +15,8 @@ else the session registered for this directory).
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.
+A placed task shows its host and, under it, every machine the supervisor considered for it,
+best first, with its score and the supervisor's one-line why.
 Without a wave, a first line counts the broker's agent logins (as last re-read: after each
 mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
 (--json: agent_logins).
@@ -65,6 +67,24 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     );
     return EXIT.OK;
   });
+}
+
+/**
+ * Where a placed task runs and why (SPEC §4.6.15): `on <host> (<by>, <score>)`, then every
+ * candidate the supervisor considered, best first, with the line it wrote. Empty when unplaced.
+ */
+export function formatPlacement(t: TaskState): string {
+  const p = t.placement;
+  if (p === undefined) return "";
+  const score = (n: number | null) => (n === null ? "-" : n.toFixed(2));
+  const hostW = Math.max(...p.candidates.map((c) => c.host.length), 1);
+  const head = `    on ${p.host} (${p.by}${p.score !== null ? `, ${score(p.score)}` : ""})\n`;
+  return (
+    head +
+    p.candidates
+      .map((c) => `      ${c.host.padEnd(hostW)}  ${score(c.score).padEnd(4)}  ${c.line}\n`)
+      .join("")
+  );
 }
 
 /** `agent logins: N live, M swept` (status header, from the daemon's credential sweep). */
@@ -137,7 +157,7 @@ export function formatWave(
       .map((g) => `    ${g.role} ${g.agent_id ?? "-"} (${g.state})\n`)
       .join("");
     const alarms = (t.alarms ?? []).map((a) => `    ! ${a.alarm}: ${a.message}\n`).join("");
-    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}`;
+    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
   });
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
 import { apply, emptyRecord, reduce, replay } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
+import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
 
 const events: JournalEvent[] = readFileSync(
@@ -84,6 +85,47 @@ describe("reduce", () => {
     expect(rec.seq).toBe(events.length);
     expect(rec.admitted).toEqual(["T0", "T1"]);
     expect(rec.spawns).toBe(1);
+  });
+
+  it("tasks[].base_sha comes from agent_spawned, survives replay, and a start-ref spawn keeps it", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const base = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const more: JournalEvent[] = [
+      {
+        seq: last.seq + 1,
+        at,
+        type: "agent_spawned",
+        task: "T1",
+        data: {
+          role: "implementer",
+          agent_id: "2026-10-20-example-t1-implementer-1",
+          base_sha: base,
+        },
+      },
+      // A reviewer cut from the PR head (a pipeline start ref) names no release base.
+      {
+        seq: last.seq + 2,
+        at,
+        type: "agent_spawned",
+        task: "T1",
+        data: {
+          role: "spec_reviewer",
+          agent_id: "2026-10-20-example-t1-spec_reviewer-1",
+          start: "f".repeat(40),
+        },
+      },
+    ];
+    const state = reduce([...events, ...more]);
+    const t1 = state.tasks.find((t) => t.id === "T1");
+    expect(t1?.base_sha).toBe(base);
+    expect(state.tasks.find((t) => t.id === "T2")?.base_sha).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    // Replayed (twice over, as after a restart) it is the same.
+    const all = [...events, ...more];
+    expect(replay([...all, ...all]).state?.tasks.find((t) => t.id === "T1")?.base_sha).toBe(base);
   });
 
   it("throws when the journal has no wave_submitted", () => {
@@ -176,5 +218,108 @@ describe("reduce", () => {
       { seq: last.seq + 2, at, type: "task_cancelled", task: "T1", data: {} },
     ]);
     expect(rec.queued_steers.T1).toBeUndefined();
+  });
+});
+
+describe("task_placed (SPEC §4.6.15)", () => {
+  const wave = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\nplacement: auto\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n",
+  );
+  const AT = "2026-10-19T10:00:00.000Z";
+  const base: JournalEvent[] = [
+    { seq: 1, at: AT, type: "wave_submitted", data: { wave } },
+    { seq: 2, at: AT, type: "task_queued", task: "T1", data: { issue: 1 } },
+    { seq: 3, at: AT, type: "task_queued", task: "T2", data: { issue: 2 } },
+  ];
+  const candidates = [
+    { host: "box-a", score: 0.81, line: "load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%" },
+    {
+      host: "control",
+      score: 0.63,
+      line: "load 6.0 on 8 cores · 2/12 agents · 40% mem · usage 34%",
+    },
+    { host: "box-b", score: null, line: "ineligible: draining" },
+  ];
+  const placedA: JournalEvent = {
+    seq: 4,
+    at: AT,
+    type: "task_placed",
+    task: "T1",
+    data: { task: "T1", host: "box-a", score: 0.81, candidates, by: "auto" },
+  };
+  const placedLocal: JournalEvent = {
+    seq: 5,
+    at: AT,
+    type: "task_placed",
+    task: "T2",
+    data: { task: "T2", host: "control", local: true, score: 0.63, candidates, by: "auto" },
+  };
+
+  it("is a wave event whose data validates against the schema", () => {
+    for (const e of [placedA, placedLocal]) {
+      expect(
+        schemaErrors(
+          "wave-event.schema.json",
+          envelope("_waves/events", e.type, {
+            wave: "w1",
+            seq: e.seq,
+            at: e.at,
+            task: e.task,
+            data: e.data,
+          }),
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  it("fills tasks[].placement, sets the task's host, and replays idempotently by seq", () => {
+    const rec = replay([...base, placedA, placedLocal]);
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(t1?.placement).toEqual({
+      host: "box-a",
+      by: "auto",
+      score: 0.81,
+      decided_at: AT,
+      candidates,
+    });
+    // The effective plan now runs T1 on box-a and T2 on the supervisor's own machine: every
+    // later role (reviewers, fixup, rebase) reads its host from there.
+    expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+    expect(rec.wave?.tasks.T2?.host).toBe("local");
+    // The submitted plan keeps `auto`.
+    expect(rec.plan?.tasks.T1?.host).toBe("auto");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+    // Re-applying the same event is a no-op.
+    expect(apply(rec, placedA)).toBe(rec);
+  });
+
+  it("a re-placement (by: decision) carries from; a cancelled task is placed afresh when re-queued", () => {
+    let rec = replay([...base, placedA]);
+    rec = apply(rec, {
+      seq: 5,
+      at: AT,
+      type: "task_placed",
+      task: "T1",
+      data: { task: "T1", host: "box-b", score: 0.5, candidates, by: "decision", from: "box-a" },
+    });
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.placement).toMatchObject({
+      host: "box-b",
+      by: "decision",
+    });
+    expect(rec.wave?.tasks.T1?.host).toBe("box-b");
+    rec = apply(rec, { seq: 6, at: AT, type: "task_cancelled", task: "T1", data: {} });
+    rec = apply(rec, { seq: 7, at: AT, type: "task_queued", task: "T1", data: { issue: 1 } });
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.placement).toBeUndefined();
+    expect(rec.wave?.tasks.T1?.host).toBe("auto");
+  });
+
+  it("a new plan version keeps the placement of a task that is still auto", () => {
+    let rec = replay([...base, placedA]);
+    const v2 = { ...wave, version: 2 };
+    rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+    expect(rec.wave?.tasks.T2?.host).toBe("auto");
   });
 });

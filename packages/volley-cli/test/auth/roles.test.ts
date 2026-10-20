@@ -122,8 +122,29 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("admin-test", "volley/_system/auth/ops/admin-test")).toBe(true);
     expect(fake.canPublish("admin-test", "volley/_system/auth/ops/steer-test")).toBe(false);
     expect(fake.canPublish("steer-test", "volley/_system/auth/ops/steer-test")).toBe(false);
-    expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test/state")).toBe(true);
-    expect(fake.canPublish("peer-test", "volley/_system/machines/other/state")).toBe(false);
+    expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test")).toBe(true);
+    expect(fake.canPublish("peer-test", "volley/_system/machines/other")).toBe(false);
+  });
+
+  it("readiness: no account writes a verdict, its own or another's; the supervisors do (SPEC §4.6.15)", () => {
+    expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test")).toBe(true);
+    expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test/readiness")).toBe(false);
+    expect(fake.canPublish("peer-test", "volley/_system/machines/other/readiness")).toBe(false);
+    for (const u of ["admin-test", "steer-test", "watch-test", "desk", "coordinator"]) {
+      expect(fake.canPublish(u, `volley/_system/machines/${u}/readiness`)).toBe(false);
+    }
+    expect(fake.canPublish("supervisor-test", "volley/_system/machines/peer-test/readiness")).toBe(
+      true,
+    );
+    expect(
+      fake.canPublish("supervisor-test", "volley/_system/machines/supervisor-test/readiness"),
+    ).toBe(true);
+    expect(fake.canPublish("volleyd", "volley/_system/machines/peer-test/readiness")).toBe(true);
+    // No account grant reaches under a machine record, so no deny is needed (or could work: a
+    // supervisor account holds `account` first, and the first matching ACL decides).
+    expect(ROLE_ACLS.account.some((a) => a.topic.startsWith("volley/_system/machines/%u/"))).toBe(
+      false,
+    );
   });
 
   it("the Desk's resume probe: it subscribes to volley/_system/desk-probe/<its client id>", () => {

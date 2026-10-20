@@ -80,15 +80,19 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
-import { sshHost } from "./settings/Machines";
+import { agentsOnMachines, sshHost } from "./settings/Machines";
+import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import type { SectionKey } from "./settings/sections";
+import { emitSound } from "./sounds/emit";
+import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
+import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
-import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
+import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
@@ -97,6 +101,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isLiveAgent,
   isSession,
   isSupervisorId,
   localAgentCount,
@@ -116,7 +121,7 @@ import {
   CoordinatorsWindow,
   ENDED_LABEL,
 } from "./windows/coordinators/CoordinatorsWindow";
-import { AttentionLine, NeedsYou } from "./windows/wave/NeedsYou";
+import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
@@ -297,6 +302,12 @@ export default function App() {
   const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
+  // Sound themes: the manager plays what the store and the Desk's controls do.
+  const [sound, setSound] = useSoundSettings();
+  const sounds = useSoundManager({ state, settling, connection, settings: sound });
+  useNotifyMirror(sound, setSound, notify.sound, (on) =>
+    setNotify((prev) => ({ ...prev, sound: on })),
+  );
   const steering = useSteering(state, writer, identity);
   // volleyd's control channel for the Claude account ops; demo mode has no daemon to answer them.
   const control = demo ? null : (steering.transport?.control ?? null);
@@ -332,6 +343,7 @@ export default function App() {
   const webgl = useWebGL();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl);
+  useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,
@@ -963,16 +975,35 @@ export default function App() {
                 onChat={toggleSteer}
                 steerOpen={steerOpen === id}
                 banner={
-                  needsYou &&
-                  coordinator && (
-                    <NeedsYou
-                      wave={id}
-                      coordinator={coordinator}
-                      openDecisions={openDecisions(wave).length}
-                      now={now}
-                      claim={<ClaimButton wave={id} transport={steering.transport} />}
-                    />
-                  )
+                  <>
+                    {needsYou && coordinator && (
+                      <NeedsYou
+                        wave={id}
+                        coordinator={coordinator}
+                        openDecisions={openDecisions(wave).length}
+                        now={now}
+                        claim={<ClaimButton wave={id} transport={steering.transport} />}
+                      />
+                    )}
+                    {openDecisions(wave)
+                      .filter((d) => d.kind === "machine_down")
+                      .map((d) => (
+                        <MachineDown
+                          key={d.decision_id}
+                          decision={d}
+                          onAnswer={
+                            control
+                              ? (answer) =>
+                                  control(
+                                    "resolve",
+                                    resolveFields(d, answer),
+                                    `volleyd resolve ${d.decision_id}`,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ))}
+                  </>
                 }
                 onSettings={setSettings}
               >
@@ -1061,6 +1092,11 @@ export default function App() {
 
       <div className="hud" ref={setHud} />
 
+      {/* A coalesced burst of sounds, read out: "12 agents completed". */}
+      <output className="sr-only" aria-live="polite">
+        {sounds.announcement}
+      </output>
+
       <TopBar
         state={state}
         connection={connection}
@@ -1099,11 +1135,20 @@ export default function App() {
           setLook={setLook}
           notify={notify}
           setNotify={setNotify}
+          sound={{
+            sound,
+            setSound,
+            loadTheme: sounds.loadTheme,
+            audition: sounds.audition,
+            disposeAudition: sounds.disposeAudition,
+            canVibrate: sounds.player.canVibrate(),
+          }}
           webgl={webgl}
           identity={identity}
           demo={demo}
           config={state.config}
           transport={configTransport}
+          leases={state.leases}
           claude={{
             accounts: state.claudeAccounts ?? {},
             signins: state.signins ?? {},
@@ -1118,6 +1163,29 @@ export default function App() {
             hubAgents: localAgentCount(state),
             ops: peerOps,
             host: sshHost(brokerUrl),
+            readiness: state.readiness ?? {},
+            localName: state.config?.fleet?.local_name,
+            configTransport,
+            accounts: state.claudeAccounts ?? {},
+            agentsOn: agentsOnMachines(
+              Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
+              (id) => isLiveAgent(state, id),
+            ),
+            // A paired machine's Claude sign-in (volleyd's `primary@<name>`), on its card and in
+            // Add a machine's step 4.
+            ...(control
+              ? {
+                  signIn: (name: string) => (
+                    <PeerSignin
+                      machine={name}
+                      signin={state.signins?.[peerAccount(name)]}
+                      signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
+                      control={control}
+                      ops={peerOps}
+                    />
+                  ),
+                }
+              : {}),
           }}
           onboarding={{
             ops: authOps,

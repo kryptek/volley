@@ -6,9 +6,10 @@ import {
   privateDecrypt,
   randomUUID,
 } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -17,15 +18,33 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
+import { type Sharing, parseSharing } from "volleyd/claude/sharing";
+import pkg from "../../package.json";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { withSetupAuthDir } from "../auth/coordinator-login";
 import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { isRepoTrusted } from "../peer/checks/claude";
+import { diskOf, memoryOf, worktreeRoot } from "../peer/checks/machine";
+import {
+  type DoctorDeps,
+  type DoctorOptions,
+  type DoctorReport,
+  blocking,
+  doctor,
+  looksSecret,
+  recordChecks,
+  renderHuman,
+  runDoctor,
+} from "../peer/doctor";
+import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
+
+export { isRepoTrusted };
 
 /**
  * `volley peer`: pair a second machine with the supervisor's (SPEC §4.6.14).
@@ -42,17 +61,32 @@ import { authOpsTopic } from "./auth-roles";
  * Claude Code's folder trust for the repo, and registers the machine. `run` is that service: it
  * keeps `ssh -N -L 127.0.0.1:<port>:<broker>` up and publishes the machine's health record
  * through it every heartbeat, until the broker refuses the peer account (`remove` revoked it).
+ *
+ * `doctor` (src/peer/doctor.ts) checks everything an agent on this machine needs and applies the
+ * safe fixes with `--fix`; `join` runs it before redeeming (a `block` check stops it while the code
+ * is still usable), and `run` embeds its last result in every heartbeat (SPEC §4.6.15).
+ * `invite --for <name>` mints a code that re-pairs an already paired machine (`join --replace`).
  */
 
 const HELP = `Usage:
   On the supervisor's machine:
-    volley peer invite [--ttl <seconds>]       A one-time pairing code (XXXX-XXXX, 10 min)
+    volley peer invite [--ttl <seconds>] [--for <name>]
+                                               A one-time pairing code (XXXX-XXXX, 10 min);
+                                               --for: re-pair the paired machine <name>
     volley peer list [--json]                  Paired machines and their health
-    volley peer remove <name>                  Unpair: revoke its account, drop hosts.<name>
+    volley peer remove <name> [--drain | --now]
+                                               Unpair: revoke its account, drop hosts.<name>;
+                                               --drain: place nothing new there and remove it
+                                               once its agents finish; --now: stop them (each
+                                               gets a respawn question), then remove it
   On the machine to pair:
     volley peer join <code> --to <host> [--name <name>] [--target <user@this-machine>]
                      [--repo <path>] [--volley-dir <path>] [--port <port>]
-                     [--remote-volley <command>] [--no-service]
+                     [--remote-volley <command>] [--no-service] [--replace]
+    volley peer doctor [--fix] [--yes] [--json] [--repo <path>] [--clone]
+                       [--origin <url>] [--release <branch>] [--volley-dir <path>]
+                       [--sharing <json>]
+                                               Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
     volley peer redeem                         Run by join on the host over ssh (JSON on stdin)
@@ -67,6 +101,23 @@ join options:
   --port <port>            Port on this machine's 127.0.0.1 that reaches the broker (default 21883)
   --remote-volley <cmd>    How to run volley on the supervisor's machine (default: volley)
   --no-service             Do not install the service (run \`volley peer run\` yourself)
+  --replace                Re-pair: replace this machine's account and hosts entry (a code
+                           from \`volley peer invite --for <name>\`, with --name <name>)
+  join runs \`volley peer doctor\` first and stops before using the code if a check blocks.
+
+doctor options:
+  --fix                    Apply the safe fixes (the volley checkout's install and version, a
+                           clone with --clone, this machine's Claude profile: the Volley
+                           skills, hooks and MCP server); print the rest as commands to run
+                           yourself
+  --yes                    Do not ask before applying them
+  --json                   The report as JSON (the machine record's doctor fields)
+  --repo <path>            This machine's clone of the wave repo (default: peer.json's)
+  --clone                  With --fix: clone the wave repo at --repo when nothing is there
+  --origin <url>           The wave repo's URL: compared with the clone's origin, cloned by --clone
+  --release <branch>       Check this branch is fetchable from origin
+  --sharing <json>         The Claude profile's sharing modes, e.g. '{"skills":"own"}' (default:
+                           the supervisor's, read through the tunnel; else the defaults)
 
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -87,6 +138,16 @@ const OPTIONS = {
   port: { type: "string" },
   "remote-volley": { type: "string" },
   "no-service": { type: "boolean" },
+  replace: { type: "boolean" },
+  drain: { type: "boolean" },
+  now: { type: "boolean" },
+  for: { type: "string" },
+  fix: { type: "boolean" },
+  yes: { type: "boolean" },
+  clone: { type: "boolean" },
+  origin: { type: "string" },
+  release: { type: "string" },
+  sharing: { type: "string" },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -96,6 +157,20 @@ const OPTIONS = {
   password: { type: "string" },
   help: { type: "boolean", short: "h" },
 } as const;
+
+/** Flags only some verbs take. */
+const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
+  fix: ["doctor"],
+  yes: ["doctor"],
+  clone: ["doctor"],
+  origin: ["doctor"],
+  release: ["doctor"],
+  sharing: ["doctor"],
+  for: ["invite"],
+  replace: ["join"],
+  drain: ["remove"],
+  now: ["remove"],
+};
 
 /** Mirrors volleyd's config-defaults (separate package: no import across the boundary). */
 export const PEER_DEFAULTS = {
@@ -110,6 +185,15 @@ export const PEER_DEFAULTS = {
   tunnel_restart_ms: 2_000,
   tunnel_restart_max_ms: 60_000,
   remote_exec_timeout_ms: 60_000,
+  /** `run` re-runs the doctor this often; heartbeats in between repeat its last result. */
+  doctor_interval_s: 600,
+  /**
+   * `run`'s doctor runs beside the heartbeat, never in its way; a run that takes longer than this
+   * is given up (the last result stays) so the next interval can start a fresh one.
+   */
+  doctor_timeout_ms: 300_000,
+  /** How long the doctor waits for the supervisor's retained readiness verdict (its requirements). */
+  readiness_wait_ms: 1_000,
 } as const;
 
 export const SYSTEMD_UNIT = "volley-peer.service";
@@ -128,8 +212,11 @@ export type PeerExec = (
   opts?: { input?: string; timeoutMs?: number; signal?: AbortSignal },
 ) => Promise<ExecResult>;
 
-/** Everything `volley peer` touches outside the broker, injectable for tests. */
-export interface PeerDeps {
+/**
+ * Everything `volley peer` touches outside the broker, injectable for tests. A superset of what
+ * the doctor needs (`DoctorDeps`: memory, disk, uptime, the login shell, this CLI's version).
+ */
+export interface PeerDeps extends DoctorDeps {
   exec: PeerExec;
   home: string;
   platform: NodeJS.Platform;
@@ -140,6 +227,10 @@ export interface PeerDeps {
   cpus: () => number;
   loadavg: () => [number, number, number];
   now: () => Date;
+  /** A monotonic clock in ms (the doctor's interval: a wall-clock step never stalls it). */
+  monotonic: () => number;
+  /** This process's PATH: the service gets the one `join` ran with (launchd's own is bare). */
+  envPath: () => string | undefined;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readStdin: () => Promise<string>;
   /** argv that runs this volley CLI (the service's ExecStart / ProgramArguments). */
@@ -208,15 +299,29 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
     io.stderr(`volley peer ${verb}: ${msg}\n`);
     return EXIT.USAGE;
   };
+  // The one options table is shared: a flag another verb owns is refused, never ignored.
+  for (const [flag, owner] of Object.entries(OWNED_BY)) {
+    if (v[flag as keyof Values] !== undefined && !owner.includes(verb)) {
+      return usage(`--${flag} is an option of volley peer ${owner.join(", ")} only`);
+    }
+  }
   switch (verb) {
     case "invite":
       if (pos.length !== 0) return usage("takes no arguments");
+      if (v.for !== undefined && !NAME_RE.test(v.for)) {
+        return usage(`--for "${v.for}" must be a machine name ([a-z0-9][a-z0-9_-]{0,62})`);
+      }
       return invite(v, env, io, deps);
     case "list":
       if (pos.length !== 0) return usage("takes no arguments");
       return list(v, env, io);
     case "remove":
       if (pos.length !== 1) return usage("needs exactly one <name>");
+      if (v.drain === true && v.now === true) {
+        return usage(
+          "--drain and --now exclude each other: --drain lets the running agents finish, --now stops them",
+        );
+      }
       return remove(pos[0] as string, v, env, io);
     case "redeem":
       if (pos.length !== 0) return usage("takes no arguments (the request is JSON on stdin)");
@@ -228,6 +333,9 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
     case "run":
       if (pos.length !== 0) return usage("takes no arguments");
       return runService(io, deps);
+    case "doctor":
+      if (pos.length !== 0) return usage("takes no arguments");
+      return doctorVerb(v, io, deps);
     default:
       io.stderr(`volley peer: unknown verb '${verb}'\n\n${HELP}`);
       return EXIT.USAGE;
@@ -477,6 +585,7 @@ async function invite(
       return EXIT.USAGE;
     }
   }
+  if (v.for !== undefined) fields.for = v.for;
   const key = replyKeyPair();
   const a = await ask("invite", "peer_invite", { ...fields, reply_key: key.jwk }, v, env, io, true);
   if (typeof a === "number") return a;
@@ -486,8 +595,12 @@ async function invite(
     return EXIT.ERROR;
   }
   const r = (a.result ?? {}) as { expires_at?: string };
+  // join needs --repo (the doctor blocks without a clone of the wave repo there).
+  const join = `volley peer join ${code} --to ${deps.user()}@${deps.hostname()} --repo <path to its clone of the wave repo>`;
   io.stdout(
-    `Pairing code: ${code} (single use, valid until ${r.expires_at ?? "it expires"})\n\nOn the machine to pair, run:\n  volley peer join ${code} --to ${deps.user()}@${deps.hostname()}\n`,
+    v.for !== undefined
+      ? `Pairing code: ${code} (single use, valid until ${r.expires_at ?? "it expires"}); it re-pairs ${v.for} only.\n\nOn ${v.for}, run:\n  ${join} --name ${v.for} --replace\n`
+      : `Pairing code: ${code} (single use, valid until ${r.expires_at ?? "it expires"})\n\nOn the machine to pair, run:\n  ${join}\n`,
   );
   return EXIT.OK;
 }
@@ -498,9 +611,27 @@ async function remove(
   env: Record<string, string | undefined>,
   io: IO,
 ): Promise<ExitCode> {
-  const a = await ask("remove", "peer_remove", { name }, v, env, io, true);
+  const mode = v.drain === true ? { drain: true } : v.now === true ? { now: true } : {};
+  const a = await ask("remove", "peer_remove", { name, ...mode }, v, env, io, true);
   if (typeof a === "number") return a;
-  const r = (a.result ?? {}) as { revoked?: boolean; host_removed?: boolean };
+  const r = (a.result ?? {}) as {
+    revoked?: boolean;
+    host_removed?: boolean;
+    removing?: "drain" | "now";
+    agents?: number;
+  };
+  // Agents still run there: volleyd answered at once and finishes the removal later.
+  if (r.removing !== undefined) {
+    const n = r.agents ?? 0;
+    const agents = `${n} agent${n === 1 ? "" : "s"}`;
+    const finish = `volleyd removes it (revokes its account, drops hosts.${name}) once they finish.`;
+    io.stdout(
+      r.removing === "drain"
+        ? `draining ${name}: nothing new starts there; ${agents} left. ${finish}\n`
+        : `stopping ${agents} on ${name}: each is asked to stop now and retired after stop_grace_s, and its task gets a respawn question (respawn on another machine, or cancel). ${finish}\n`,
+    );
+    return EXIT.OK;
+  }
   io.stdout(
     `removed ${name}: ${r.revoked === true ? "account revoked" : "no account"}, ${r.host_removed === true ? `hosts.${name} removed` : `no hosts.${name}`}, machine record cleared\nIts tunnel service stops at its next check.\n`,
   );
@@ -549,6 +680,8 @@ interface RedeemRequest {
   port?: number;
   os?: string;
   cores?: number;
+  /** Re-pairing with a code from `invite --for <name>`: replace the account and hosts entry. */
+  replace?: true;
 }
 
 async function redeem(
@@ -631,6 +764,35 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     return fail("--target must be an ssh destination (user@host)", EXIT.USAGE);
   }
 
+  // 0. The doctor: a block check stops the join before the code is used, so it stays valid.
+  io.stdout("Checking this machine (volley peer doctor)...\n");
+  const checked = await runDoctor(
+    { ...deps, volleyDir },
+    {
+      ...(repo !== undefined ? { repo } : {}),
+      // The profile is checked against the tunnel this join sets up.
+      profile: {
+        ...peerProfile(null, null, "defaults"),
+        brokerUrl: `mqtt://127.0.0.1:${port}`,
+      },
+    },
+  );
+  const blocked = blocking(checked.report);
+  // Trust is reported after pairing (step 5), with what to do about it.
+  const failing = checked.report.checks.filter((c) => !c.ok && c.id !== "claude.trust");
+  if (blocked.length > 0) {
+    io.stdout(renderHuman(failing));
+    const doctorCmd = [
+      "volley peer doctor --fix",
+      `--repo ${repo !== undefined ? sq(repo) : "<path>"}`,
+      ...(v["volley-dir"] !== undefined ? [`--volley-dir ${sq(volleyDir)}`] : []),
+    ].join(" ");
+    return fail(
+      `${blocked.length} check(s) above keep this machine from running agents: fix them (\`${doctorCmd}\` applies the safe ones) and run join again. Nothing was redeemed: the code is still valid.`,
+    );
+  }
+  io.stdout(failing.length > 0 ? renderHuman(failing) : "All checks passed.\n");
+
   // 1. ssh reachability.
   io.stdout(`Checking ssh to ${host}...\n`);
   const probe = await remote(deps, host, "echo volley-peer-ok\n");
@@ -654,6 +816,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     port,
     os: deps.platform,
     cores: deps.cpus(),
+    ...(v.replace === true ? { replace: true as const } : {}),
   };
   const remoteVolley = v["remote-volley"] ?? "volley";
   const redeemed = await remote(deps, host, redeemScript(request, remoteVolley));
@@ -744,7 +907,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   }
 
   // 6. Register the machine (the service re-publishes every heartbeat).
-  const registered = await register(deps, cfg);
+  const registered = await register(deps, cfg, checked.report);
   io.stdout(
     registered
       ? `Registered: volley/_system/machines/${cfg.name} (tunnel up).\n`
@@ -852,27 +1015,6 @@ export function redeemScript(request: RedeemRequest, remoteVolley: string): stri
   ].join("\n");
 }
 
-/**
- * True when `repo` or one of its parent directories has an accepted trust dialog: T4's rule
- * (volleyd's trust.ts `isRepoTrusted`, which this package cannot import).
- */
-export function isRepoTrusted(claudeJson: unknown, repo: string): boolean {
-  const projects = (claudeJson as { projects?: unknown } | null)?.projects;
-  if (typeof projects !== "object" || projects === null) return false;
-  const table = projects as Record<string, unknown>;
-  for (let dir = resolve(repo); ; dir = dirname(dir)) {
-    const entry = Object.hasOwn(table, dir) ? table[dir] : undefined;
-    if (
-      typeof entry === "object" &&
-      entry !== null &&
-      (entry as Record<string, unknown>).hasTrustDialogAccepted === true
-    ) {
-      return true;
-    }
-    if (dirname(dir) === dir) return false;
-  }
-}
-
 function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: string): void {
   if (repo === undefined) {
     io.stdout(
@@ -902,7 +1044,7 @@ async function installService(
   if (deps.platform === "linux") {
     const unit = join(deps.home, ".config", "systemd", "user", SYSTEMD_UNIT);
     mkdirSync(dirname(unit), { recursive: true });
-    writeFileSync(unit, systemdUnit(argv));
+    writeFileSync(unit, systemdUnit(argv, deps.envPath()));
     // Without lingering, systemd stops a user's services when their last session ends (the ssh
     // session this join runs in) and starts them only at their next login.
     const user = deps.user();
@@ -946,7 +1088,10 @@ async function installService(
     for (const d of domains) {
       if (wasIn === undefined && (await isLoaded(ld, `${d}/${LAUNCHD_LABEL}`))) wasIn = d;
     }
-    writeFileSync(plist, launchdPlist(argv, join(deps.home, ".volley", "peer.log")));
+    writeFileSync(
+      plist,
+      launchdPlist(argv, join(deps.home, ".volley", "peer.log"), deps.envPath()),
+    );
     for (const d of domains) await unloadLaunchd(ld, d, LAUNCHD_LABEL);
     const errors: string[] = [];
     for (const domain of domains) {
@@ -971,7 +1116,11 @@ async function installService(
   };
 }
 
-export function systemdUnit(argv: string[]): string {
+/**
+ * The service files carry `join`'s PATH: the doctor in every heartbeat must find the tools the
+ * person's own terminal finds (a user service's default PATH, launchd's above all, is bare).
+ */
+export function systemdUnit(argv: string[], path?: string): string {
   const quote = (a: string) =>
     /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `"${a.replace(/(["\\])/g, "\\$1")}"`;
   return `[Unit]
@@ -979,7 +1128,7 @@ Description=Volley peer: broker tunnel and machine heartbeat (volley peer run)
 
 [Service]
 ExecStart=${argv.map(quote).join(" ")}
-# Exit 0 means the peer account was revoked (volley peer remove): stay stopped.
+${path !== undefined && path !== "" ? `Environment=${quote(`PATH=${path.replace(/%/g, "%%")}`)}\n` : ""}# Exit 0 means the peer account was revoked (volley peer remove): stay stopped.
 Restart=on-failure
 RestartSec=10
 
@@ -988,7 +1137,7 @@ WantedBy=default.target
 `;
 }
 
-export function launchdPlist(argv: string[], log: string): string {
+export function launchdPlist(argv: string[], log: string, path?: string): string {
   const x = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -1000,7 +1149,7 @@ export function launchdPlist(argv: string[], log: string): string {
   <array>
 ${argv.map((a) => `    <string>${x(a)}</string>`).join("\n")}
   </array>
-  <key>RunAtLoad</key><true/>
+${path !== undefined && path !== "" ? `  <key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>${x(path)}</string></dict>\n` : ""}  <key>RunAtLoad</key><true/>
   <!-- Exit 0 means the peer account was revoked (volley peer remove): stay stopped. -->
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>${x(log)}</string>
@@ -1023,11 +1172,46 @@ async function agentCount(deps: PeerDeps): Promise<number> {
   return r.stdout.split("\n").filter((l) => l.trim() !== "").length;
 }
 
-/** The `machine.schema.json` envelope for this machine. */
+/**
+ * The Fleet fields of the record (SPEC §4.6.15): `kind`, `memory`, `disk` and `uptime_s` every
+ * heartbeat (no command runs), and the last doctor run's `versions`, `auth`, `repo`, `checks`
+ * (without fix text) and `doctor_at`.
+ */
+function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
+  const root = worktreeRoot(cfg.repo ?? null, deps.home);
+  let st: ReturnType<PeerDeps["statfs"]> = null;
+  for (let p = root; st === null; p = dirname(p)) {
+    if (existsSync(p)) st = deps.statfs(p);
+    if (dirname(p) === p) break;
+  }
+  // macOS: the doctor's vm_stat figure (free pages alone under-count reclaimable memory).
+  const memory =
+    deps.platform === "darwin" && d !== null
+      ? memoryOf(deps.totalmem(), deps.freemem(), d.memory.available_pct)
+      : memoryOf(deps.totalmem(), deps.freemem());
+  return {
+    kind: "peer" as const,
+    memory,
+    ...(st !== null ? { disk: diskOf(root, st) } : {}),
+    uptime_s: Math.max(0, Math.floor(deps.uptime())),
+    ...(d !== null
+      ? {
+          versions: d.versions,
+          auth: d.auth,
+          ...(d.repo !== undefined ? { repo: d.repo } : {}),
+          checks: recordChecks(d),
+          doctor_at: d.doctor_at,
+        }
+      : {}),
+  };
+}
+
+/** The `machine.schema.json` envelope for this machine, with the last doctor run's result. */
 export async function machineEnvelope(
   deps: PeerDeps,
   cfg: PeerConfig,
   tunnel: "up" | "down",
+  doctorReport: DoctorReport | null = null,
 ): Promise<string> {
   return JSON.stringify(
     buildEnvelope({
@@ -1045,6 +1229,7 @@ export async function machineEnvelope(
         load: deps.loadavg().map((l) => Math.max(0, Math.round(l * 100) / 100)),
         agents: await agentCount(deps),
         remote_port: cfg.remote_port,
+        ...fleetFields(deps, cfg, doctorReport),
         last_seen: deps.now().toISOString(),
       },
     }),
@@ -1058,21 +1243,85 @@ const peerAuth = (cfg: PeerConfig): BrokerAuth => ({
 });
 
 /** Connect through the tunnel as the peer, its LWT the record with `tunnel: down`. */
-async function connectPeer(deps: PeerDeps, cfg: PeerConfig): Promise<VolleyBroker> {
+async function connectPeer(
+  deps: PeerDeps,
+  cfg: PeerConfig,
+  d: DoctorReport | null,
+): Promise<VolleyBroker> {
   return deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg), {
     topic: machineTopic(cfg.name),
-    payload: await machineEnvelope(deps, cfg, "down"),
+    payload: await machineEnvelope(deps, cfg, "down", d),
     retain: true,
   });
 }
 
+/**
+ * What the supervisor requires of this machine, from its retained readiness verdict, believed
+ * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, and the
+ * sharing modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null
+ * when absent or invalid).
+ */
+async function requirements(
+  broker: VolleyBroker,
+  name: string,
+): Promise<{ volley: string | null; sharing: Sharing | null }> {
+  const none = { volley: null, sharing: null };
+  const raw = await broker
+    .queryRetained(`${machineTopic(name)}/readiness`, PEER_DEFAULTS.readiness_wait_ms)
+    .catch(() => null);
+  const e = raw !== null ? parseEnvelope(raw) : null;
+  if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return none;
+  const req = (e.payload as { requirements?: { volley?: unknown; sharing?: unknown } } | null)
+    ?.requirements;
+  const v = req?.volley;
+  let sharing: Sharing | null = null;
+  if (typeof req?.sharing === "object" && req.sharing !== null) {
+    try {
+      // JSON is YAML: the same validation as the supervisor's own sharing.yaml.
+      sharing = parseSharing(JSON.stringify(req.sharing));
+    } catch {}
+  }
+  return {
+    // Never one that starts with "-": it ends up in a git argv.
+    volley: typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null,
+    sharing,
+  };
+}
+
+/** The Claude profile a paired machine's doctor checks: the tunnel's URL, the given modes. */
+const peerProfile = (
+  cfg: PeerConfig | null,
+  sharing: Sharing | null,
+  from: ProfileTarget["from"],
+): ProfileTarget => ({
+  brokerUrl: cfg !== null ? brokerThroughTunnel(cfg) : null,
+  namespace: cfg?.namespace ?? null,
+  sharing: sharing ?? { ...DEFAULT_SHARING },
+  from: sharing !== null ? from : "defaults",
+});
+
+/** The doctor as `run` and the `doctor` verb run it for a paired machine. */
+async function peerDoctor(
+  deps: PeerDeps,
+  cfg: PeerConfig,
+  broker: VolleyBroker | null,
+): Promise<DoctorReport> {
+  const req = broker !== null ? await requirements(broker, cfg.name) : null;
+  const { report } = await runDoctor(deps, {
+    ...(cfg.repo !== undefined ? { repo: cfg.repo } : {}),
+    requiredVolley: req?.volley ?? null,
+    profile: peerProfile(cfg, req?.sharing ?? null, "supervisor"),
+  });
+  return report;
+}
+
 /** Publish the record once (join's registration), waiting a little for the fresh tunnel. */
-async function register(deps: PeerDeps, cfg: PeerConfig): Promise<boolean> {
+async function register(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport): Promise<boolean> {
   for (let i = 0; i < PEER_DEFAULTS.register_attempts; i++) {
     try {
       const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg));
       try {
-        await b.publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up"), {
+        await b.publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up", d), {
           qos: 1,
           retain: true,
         });
@@ -1154,14 +1403,57 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   })();
   let broker: VolleyBroker | null = null;
   let exit: ExitCode = EXIT.OK;
+  // The last finished doctor run. The doctor runs beside the heartbeat (every doctor_interval_s,
+  // bounded by doctor_timeout_ms): its probes reach the network, and a beat that waited on them
+  // could miss the supervisor's machine_down_after_ms. Beats in between repeat its last result;
+  // the beat after a run finishes is published at once.
+  let report: DoctorReport | null = null;
+  let doctorAt = Number.NEGATIVE_INFINITY;
+  let doctoring = false;
+  const startDoctor = (b: VolleyBroker) => {
+    doctoring = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`gave up after ${PEER_DEFAULTS.doctor_timeout_ms} ms`)),
+        PEER_DEFAULTS.doctor_timeout_ms,
+      );
+      // Never what keeps the process alive after the service stops.
+      timer.unref?.();
+    });
+    void Promise.race([peerDoctor(deps, cfg, b), timeout])
+      .then(async (r) => {
+        report = r;
+        if (stop.signal.aborted || broker === null) return;
+        await broker
+          .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up", r), {
+            qos: 1,
+            retain: true,
+          })
+          .catch(() => {});
+      })
+      .catch((e: unknown) => {
+        io.stderr(`volley peer run: doctor: ${e instanceof Error ? e.message : String(e)}\n`);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        doctoring = false;
+      });
+  };
   try {
     while (!stop.signal.aborted) {
       try {
-        broker ??= await connectPeer(deps, cfg);
-        await broker.publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up"), {
-          qos: 1,
-          retain: true,
-        });
+        broker ??= await connectPeer(deps, cfg, report);
+        const now = deps.monotonic();
+        if (!doctoring && now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000) {
+          doctorAt = now;
+          startDoctor(broker);
+        }
+        await broker.publish(
+          machineTopic(cfg.name),
+          await machineEnvelope(deps, cfg, "up", report),
+          { qos: 1, retain: true },
+        );
       } catch (e) {
         if (e instanceof VolleyError && e.code === "AUTH_FAILED") {
           io.stderr(
@@ -1185,7 +1477,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     // A clean disconnect suppresses the LWT: say the tunnel is down ourselves.
     if (broker !== null) {
       await broker
-        .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "down"), {
+        .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "down", report), {
           qos: 1,
           retain: true,
         })
@@ -1194,6 +1486,78 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     }
   }
   return exit;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The doctor verb
+// ---------------------------------------------------------------------------------------------
+
+/** A URL with a password or a token in it: never cloned from, never printed. */
+const hasCredential = (url: string) =>
+  looksSecret(url) || /^[a-z][a-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/i.test(url);
+
+/**
+ * `volley peer doctor`: the repo defaults to peer.json's, and on a paired machine the supervisor's
+ * version requirement and sharing modes are read from its readiness verdict through the tunnel
+ * (when it is up); `--sharing` sets the modes by hand.
+ */
+async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> {
+  if (v.origin !== undefined && hasCredential(v.origin)) {
+    io.stderr(
+      "volley peer doctor: --origin must not carry a password or token (gh auth setup-git signs git in)\n",
+    );
+    return EXIT.USAGE;
+  }
+  if (v.origin?.startsWith("-")) {
+    io.stderr("volley peer doctor: --origin must be the wave repo's URL\n");
+    return EXIT.USAGE;
+  }
+  if (v.clone === true && v.fix !== true) {
+    io.stderr("volley peer doctor: --clone needs --fix\n");
+    return EXIT.USAGE;
+  }
+  let flagSharing: Sharing | null = null;
+  if (v.sharing !== undefined) {
+    try {
+      const raw = JSON.parse(v.sharing) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("must be a JSON object of item: mode");
+      }
+      flagSharing = parseSharing(JSON.stringify(raw));
+    } catch (e) {
+      io.stderr(`volley peer doctor: --sharing: ${e instanceof Error ? e.message : String(e)}\n`);
+      return EXIT.USAGE;
+    }
+  }
+  let cfg: PeerConfig | null = null;
+  try {
+    if (existsSync(peerFile(deps.home))) cfg = readPeerConfig(deps.home);
+  } catch {}
+  let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
+  if (cfg !== null) {
+    const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
+    if (b !== null) {
+      req = await requirements(b, cfg.name);
+      await b.disconnect().catch(() => {});
+    }
+  }
+  const required = req.volley;
+  const repo = v.repo ?? cfg?.repo;
+  const opts: DoctorOptions = {
+    ...(repo !== undefined ? { repo: resolve(repo) } : {}),
+    ...(v.origin !== undefined ? { origin: v.origin } : {}),
+    ...(v.release !== undefined ? { release: v.release } : {}),
+    requiredVolley: required,
+    profile:
+      flagSharing !== null
+        ? peerProfile(cfg, flagSharing, "flag")
+        : peerProfile(cfg, req.sharing, "supervisor"),
+    json: v.json === true,
+    fix: v.fix === true,
+    yes: v.yes === true,
+    clone: v.clone === true,
+  };
+  return doctor(io, { ...deps, volleyDir: resolve(v["volley-dir"] ?? deps.volleyDir) }, opts);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1276,6 +1640,8 @@ function realDeps(): PeerDeps {
     cpus: () => Math.max(1, os.cpus().length),
     loadavg: () => os.loadavg() as [number, number, number],
     now: () => new Date(),
+    monotonic: () => performance.now(),
+    envPath: () => process.env.PATH,
     sleep: (ms, signal) =>
       new Promise((r) => {
         const t = setTimeout(r, ms);
@@ -1293,6 +1659,29 @@ function realDeps(): PeerDeps {
     which: (cmd) => Bun.which(cmd),
     // packages/volley-cli/src/commands → the checkout root.
     volleyDir: resolve(dirname(cli), "..", "..", ".."),
+    shell: () => os.userInfo().shell ?? process.env.SHELL ?? "/bin/sh",
+    version: pkg.version,
+    totalmem: () => os.totalmem(),
+    freemem: () => os.freemem(),
+    uptime: () => os.uptime(),
+    statfs: (path) => {
+      try {
+        const s = statfsSync(path);
+        return { bsize: Number(s.bsize), blocks: Number(s.blocks), bavail: Number(s.bavail) };
+      } catch {
+        return null;
+      }
+    },
+    confirm: async (question) => {
+      if (process.stdin.isTTY !== true) return false;
+      // stderr: under --fix --json, stdout is the report alone.
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      try {
+        return /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim());
+      } finally {
+        rl.close();
+      }
+    },
     connect: async (url, auth, will) => {
       const { VolleyBroker } = await import("volley-mcp/broker");
       const b = new VolleyBroker();

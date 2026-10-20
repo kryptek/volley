@@ -1,22 +1,42 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { VolleyBroker } from "volley-mcp/broker";
+import { parseEnvelope } from "volley-mcp/envelope";
+import { randomSuffix } from "volley-mcp/util";
 import { parse } from "yaml";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
-import { CONFIG_DEFAULTS } from "../config-defaults";
-import { volleydHome } from "../config-store";
+import { authFields } from "../broker-auth";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
+import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
+import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
+import { MACHINES_FILTER, type MachineRecord, parseMachine } from "../machines";
+import {
+  type VerdictView,
+  needsPlacement,
+  preview as placementPreview,
+  snapshotFrom,
+} from "../placement";
 import { criticalPaths } from "../scheduler";
+import type { PlacementConfig, Tunables, Wave } from "../types";
 import { loadWaveFile } from "../wave-file";
-import { checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
+import { checkFreshBase, checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
 const HELP = `Usage: volleyd validate <wave.yaml>
 
 Parse and validate a wave file locally (no daemon needed). Exit 0 when valid, 1 with
 path-qualified errors when not. When the wave's repo is on this machine, its release branch must
 exist there, locally or as origin/<branch> (RELEASE_BRANCH_MISSING otherwise); a repo that is
-not here is noted, and the daemon checks it at \`run\`.
+not here is noted, and the daemon checks it at \`run\`. With require_fresh_base on (the
+default), the repo must also have an origin remote (BASE_STALE otherwise: volleyd fetches the
+release branch before every worktree it cuts).
+
+A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also gets a placement
+preview, "if admitted now: T1 → box-a (0.81), T3 → local (0.63)", from the machine records and
+readiness verdicts retained on the broker (VOLLEY_BROKER_URL / VOLLEY_NAMESPACE); the real
+decision is made when the scheduler admits each task.
 
 It also prints the brief preface every agent of the wave would get — its path, size and sha256
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
@@ -25,20 +45,37 @@ default; \`run\` re-checks it against the running daemon's config).
 `;
 
 /**
- * `brief_preface_max_bytes` as \`run\` would see it with no `config:` in the wave: the operator's
+ * A top-level tunable as \`run\` would see it with no `config:` in the wave: the operator's
  * `$VOLLEYD_HOME/config.yaml` over the default. A file that does not parse is the daemon's to
  * report; validate falls back to the default.
  */
-function globalPrefaceCap(env: CommandArgs["env"]): number {
-  const fallback = CONFIG_DEFAULTS.brief_preface_max_bytes;
+function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base">(
+  env: CommandArgs["env"],
+  key: K,
+  valid: (v: unknown) => boolean,
+): Tunables[K] {
+  const fallback = CONFIG_DEFAULTS[key];
   const file = join(volleydHome(env), "config.yaml");
   if (!existsSync(file)) return fallback;
   try {
-    const v = (parse(readFileSync(file, "utf-8")) as { brief_preface_max_bytes?: unknown } | null)
-      ?.brief_preface_max_bytes;
-    return typeof v === "number" && Number.isInteger(v) ? v : fallback;
+    const v = (parse(readFileSync(file, "utf-8")) as Record<string, unknown> | null)?.[key];
+    return valid(v) ? (v as Tunables[K]) : fallback;
   } catch {
     return fallback;
+  }
+}
+
+/** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
+function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weights"]> {
+  const file = join(volleydHome(env), "config.yaml");
+  if (!existsSync(file)) return {};
+  try {
+    const cfg = parse(readFileSync(file, "utf-8")) as {
+      placement?: { weights?: Partial<PlacementConfig["weights"]> };
+    } | null;
+    return cfg?.placement?.weights ?? {};
+  } catch {
+    return {};
   }
 }
 
@@ -65,6 +102,17 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
   }
   try {
     const wave = await loadWaveFile(file);
+    const weights = {
+      ...CONFIG_DEFAULTS.placement.weights,
+      ...globalWeights(env),
+      ...wave.config.placement?.weights,
+    };
+    if (Object.values(weights).every((w) => w === 0)) {
+      io.stderr(
+        `volleyd validate: config.placement.weights: ${ALL_ZERO_WEIGHTS} with the global config\n`,
+      );
+      return EXIT.ERROR;
+    }
     const repo = expandHome(wave.repo);
     let note = "";
     if (!spawnsLocally(wave)) {
@@ -81,11 +129,21 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
         io.stderr(`volleyd validate: ${missing}${hint}\n`);
         return EXIT.ERROR;
       }
+      // require_fresh_base on and no origin: every spawn would be refused. Say so now.
+      const fresh =
+        wave.config.require_fresh_base ??
+        globalTunable(env, "require_fresh_base", (v) => typeof v === "boolean");
+      const stale = fresh ? await checkFreshBase(exec, repo, wave.release_branch) : null;
+      if (stale !== null) {
+        io.stderr(`volleyd validate: ${stale}\n`);
+        return EXIT.ERROR;
+      }
     }
     const prefacePath = briefPrefacePath(wave.repo, wave.brief_preface);
     const preface = readBriefPreface(
       prefacePath,
-      wave.config.brief_preface_max_bytes ?? globalPrefaceCap(env),
+      wave.config.brief_preface_max_bytes ??
+        globalTunable(env, "brief_preface_max_bytes", (v) => Number.isInteger(v)),
     );
     const prefaceLine =
       preface === null
@@ -93,13 +151,98 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
         : formatBriefPreface(preface);
     const cp = criticalPaths(wave);
     const longest = Math.max(...Object.values(cp));
+    let placement = "";
+    if (places(wave)) {
+      let target: ControlTarget | null = null;
+      try {
+        target = resolveControlTarget({}, env);
+      } catch {}
+      placement = target === null ? "" : await previewPlacement(wave, target);
+    }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {
     io.stderr(`volleyd validate: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
+  }
+}
+
+// --- Fleet (F3): placement preview, shared with `run` ---
+
+/** Whether the wave has a task the supervisor places. */
+export const places = (wave: Wave): boolean =>
+  wave.task_order.some((id) => {
+    const t = wave.tasks[id];
+    return t !== undefined && needsPlacement(t);
+  });
+
+/**
+ * The placement preview lines for `wave` ("if admitted now: …", and that the real decision is
+ * made at admission), from what the supervisor retains on the broker: its effective config
+ * (`fleet.local_name`, `placement`, `claude.warn_at_pct`), every machine record and every
+ * readiness verdict it published. Read-only; a broker or supervisor that cannot be read says so.
+ */
+export async function previewPlacement(wave: Wave, target: ControlTarget): Promise<string> {
+  const broker = new VolleyBroker();
+  try {
+    await broker.connect({
+      url: target.brokerUrl,
+      agentId: `volleyd-cli-${randomSuffix(6)}`,
+      connectTimeoutMs: DAEMON_DEFAULTS.probe_ms,
+      ...authFields(target.auth),
+    });
+  } catch (e) {
+    return `placement preview unavailable (${e instanceof Error ? e.message : String(e)}): tasks are placed at admission\n`;
+  }
+  try {
+    const wait = DAEMON_DEFAULTS.registry_scan_ms;
+    const config = parseEnvelope((await broker.queryRetained(CONFIG_TOPIC, wait)) ?? "");
+    if (config === null || config.agent_id !== "volleyd") {
+      return "placement preview unavailable (no supervisor config on the broker): tasks are placed at admission\n";
+    }
+    const cfg = config.payload as Partial<Tunables>;
+    const records: MachineRecord[] = [];
+    for (const m of await broker.subscribeCollect(
+      MACHINES_FILTER,
+      Number.POSITIVE_INFINITY,
+      wait,
+    )) {
+      const r = parseMachine(m.topic, m.payload);
+      if (r !== null) records.push(r);
+    }
+    const verdicts: VerdictView[] = [];
+    for (const m of await broker.subscribeCollect(
+      `${MACHINES_FILTER}/readiness`,
+      Number.POSITIVE_INFINITY,
+      wait,
+    )) {
+      const env = m.payload === "" ? null : parseEnvelope(m.payload);
+      // Only the supervisor publishes readiness (SPEC §4.6.15).
+      if (env !== null && env.agent_id === "volleyd") verdicts.push(env.payload as VerdictView);
+    }
+    const base = { ...CONFIG_DEFAULTS.placement, ...cfg.placement };
+    const over = wave.config.placement ?? {};
+    const placement: PlacementConfig = {
+      ...base,
+      ...over,
+      weights: { ...base.weights, ...over.weights },
+    };
+    const localName = cfg.fleet?.local_name ?? "";
+    const line = placementPreview(wave, snapshotFrom(records, verdicts, localName), {
+      placement,
+      warn_at_pct:
+        wave.config.claude?.warn_at_pct ??
+        cfg.claude?.warn_at_pct ??
+        CONFIG_DEFAULTS.claude.warn_at_pct,
+      localName,
+    });
+    return line === null
+      ? ""
+      : `${line}\n  (from the machines' records now; the real decision is made at admission)\n`;
+  } finally {
+    await broker.disconnect();
   }
 }

@@ -143,6 +143,45 @@ describe("merge-ready evidence package", () => {
     expect(md).toMatch(/S1 · P1.*UNRESOLVED/);
     expect(md).toContain("No fixup ran");
   });
+
+  it("with the task's base_sha, the release-branch line says where it was cut from and how far behind", () => {
+    const base = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const j = evidenceJson({
+      wave: "w1",
+      task: "T1",
+      issue: 42,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+      head: H2,
+      branch: "w1/T1-implementer-1",
+      release_branch: "release/w1",
+      ci: "green",
+      ci_runs: [],
+      reviews: {},
+      fixups: [],
+      rebases: [],
+      base_sha: base,
+      release: { release_sha: sha(9), merge_base: sha(8), behind: 2 },
+      generated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(j).toMatchObject({ base_sha: base, behind_by: 2, current_with_release_branch: false });
+    expect(renderEvidenceMd(j)).toContain(
+      "Branch current with release branch: no — cut from 4b825dc, 2 behind",
+    );
+  });
+
+  it("a gated task's package carries the base its implementer's worktree was cut from", async () => {
+    await gated();
+    const base = h.task()?.base_sha as string;
+    expect(base).toMatch(/^[0-9a-f]{40}$/);
+    const md = readFileSync(h.task()?.evidence_path as string, "utf-8");
+    expect(md).toContain(
+      `Branch current with release branch: yes — cut from ${base.slice(0, 7)}, 0 behind`,
+    );
+    const json = JSON.parse(
+      readFileSync((h.task()?.evidence_path as string).replace(/\.md$/, ".json"), "utf-8"),
+    ) as EvidenceJson;
+    expect(json.base_sha).toBe(base);
+  });
 });
 
 describe("done releases dependents", () => {

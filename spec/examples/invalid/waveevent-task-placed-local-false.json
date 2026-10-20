@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T09:59:58.000Z",
+  "channel": "_waves/events",
+  "type": "task_placed",
+  "payload": {
+    "wave": "w1",
+    "seq": 15,
+    "at": "2026-10-19T09:59:58.000Z",
+    "task": "T3",
+    "data": {
+      "task": "T3",
+      "host": "studio",
+      "score": 0.63,
+      "by": "auto",
+      "local": false,
+      "candidates": [
+        {
+          "host": "studio",
+          "score": 0.63,
+          "line": "load 6.0 on 8 cores · 3/12 agents · 40% mem · usage 34%"
+        },
+        {
+          "host": "box-a",
+          "score": null,
+          "line": "ineligible: 1/1 agents (max_agents)"
+        }
+      ]
+    }
+  }
+}

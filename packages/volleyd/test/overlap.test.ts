@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
-import { findOverlaps, parseFilesSection } from "../src/overlap";
+import {
+  findOverlaps,
+  nudgeTargets,
+  nudgeText,
+  parseFilesSection,
+  parsePrFiles,
+} from "../src/overlap";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { flushMicrotasks } from "./helpers/fake-clock";
@@ -258,5 +264,46 @@ tasks:
         .journalEvents("w3")
         .filter((e) => e.type === "alarm_raised" && e.data.alarm === "overlap_warning"),
     ).toEqual([]);
+  });
+});
+
+describe("nudgeTargets (the merge nudge)", () => {
+  const running = [
+    { task: "T2", agent_id: "w-t2-implementer-1", files: ["packages/a/src/**"] },
+    { task: "T3", agent_id: "w-t3-implementer-1", files: ["docs/"] },
+    { task: "T4", agent_id: "w-t4-implementer-1", files: [] },
+  ];
+  const merged = ["packages/a/src/x.ts", "packages/a/src/deep/y.ts", "README.md"];
+
+  it("files: a glob or dir/ hint matches the merged paths under it; no hint, no nudge", () => {
+    expect(nudgeTargets(running, merged, "files")).toEqual([
+      {
+        task: "T2",
+        agent_id: "w-t2-implementer-1",
+        files: ["packages/a/src/x.ts", "packages/a/src/deep/y.ts"],
+      },
+    ]);
+  });
+
+  it("all nudges everyone with no file list; off nobody", () => {
+    expect(nudgeTargets(running, [], "all").map((n) => [n.task, n.files])).toEqual([
+      ["T2", []],
+      ["T3", []],
+      ["T4", []],
+    ]);
+    expect(nudgeTargets(running, merged, "off")).toEqual([]);
+  });
+
+  it("the text names the move, the PR and the overlap; the file list parses gh's json", () => {
+    expect(
+      nudgeText({ release_branch: "release/r", sha: "abcdef0123", pr: 9, files: ["a.ts"] }),
+    ).toBe(
+      "origin/release/r moved to abcdef0 with #9 (touches 1 of your files: a.ts); rebase when convenient, before you push again.",
+    );
+    expect(parsePrFiles('{"files":[{"path":"a.ts"},{"path":"b/c.ts"}]}')).toEqual([
+      "a.ts",
+      "b/c.ts",
+    ]);
+    expect(parsePrFiles("not json")).toBeNull();
   });
 });

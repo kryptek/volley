@@ -268,3 +268,81 @@ describe("account: (Claude account profiles)", () => {
     );
   });
 });
+
+describe("placement (SPEC §4.6.15)", () => {
+  const TASKS = `tasks:
+  T1:
+    issue: 1
+  T2:
+    issue: 2
+    host: box-a
+  T3:
+    issue: 3
+    host: local
+    heavy: true
+`;
+
+  it("placement: auto makes every task without a host auto; a named host stays", () => {
+    const w = parseWaveFile(
+      `${HEADER}placement: auto\nplacement_prefer: [box-a]\nplacement_avoid: [box-b]\nheavy_pools: [backend-it]\n${TASKS}`,
+    );
+    expect(w).toMatchObject({
+      placement: "auto",
+      placement_prefer: ["box-a"],
+      placement_avoid: ["box-b"],
+      heavy_pools: ["backend-it"],
+    });
+    expect(w.tasks.T1?.host).toBe("auto");
+    expect(w.tasks.T2?.host).toBe("box-a");
+    expect(w.tasks.T3).toMatchObject({ host: "local", heavy: true });
+    expect(w.tasks.T1?.heavy).toBeUndefined();
+  });
+
+  it("without placement: auto, unpinned tasks stay local and host: auto opts one task in", () => {
+    const w = parseWaveFile(`${HEADER}${TASKS}  T4:\n    issue: 4\n    host: auto\n`);
+    expect(w.placement).toBeUndefined();
+    expect(w.placement_prefer).toBeUndefined();
+    expect(w.tasks.T1?.host).toBe("local");
+    expect(w.tasks.T4?.host).toBe("auto");
+    // placement: local is the default, written out.
+    expect(parseWaveFile(`${HEADER}placement: local\n${TASKS}`).tasks.T1?.host).toBe("local");
+  });
+
+  it("placement: elsewhere is refused with a path-qualified error", () => {
+    expect(errorsOf(`${HEADER}placement: elsewhere\n${TASKS}`)).toEqual([
+      expect.stringMatching(/^placement: must be equal to one of the allowed values/),
+    ]);
+    expect(errorsOf(`${HEADER}placement_avoid: [Box A]\n${TASKS}`)[0]).toMatch(
+      /^placement_avoid\[0\]: /,
+    );
+    expect(errorsOf(`${HEADER}tasks:\n  T1:\n    issue: 1\n    heavy: yes please\n`)[0]).toMatch(
+      /^tasks\.T1\.heavy: /,
+    );
+  });
+
+  it("an inline host may not be named auto (the placement token)", () => {
+    expect(
+      errorsOf(
+        `${HEADER}tasks:\n  T1:\n    issue: 1\n    host: { type: ssh, name: auto, target: dev@box, repo: /srv/r, volley_dir: /opt/v }\n`,
+      ),
+    ).toEqual([expect.stringMatching(/^tasks\.T1\.host\.name: /)]);
+  });
+});
+
+describe("fixtures/waves/placement-auto.yaml", () => {
+  it("parses: unpinned tasks auto, a pinned one local, the heavy one marked", () => {
+    const w = parseWaveFile(fixture("waves/placement-auto.yaml"));
+    expect(w).toMatchObject({
+      placement: "auto",
+      placement_prefer: ["box-a"],
+      placement_avoid: ["box-c"],
+      heavy_pools: ["backend-it"],
+    });
+    expect(w.task_order.map((id) => [id, w.tasks[id]?.host, w.tasks[id]?.heavy ?? false])).toEqual([
+      ["T1", "auto", false],
+      ["T2", "auto", true],
+      ["T3", "local", false],
+      ["T4", "auto", false],
+    ]);
+  });
+});

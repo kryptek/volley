@@ -49,10 +49,14 @@ const LEASE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 interface PoolState {
   pool: string;
   capacity: number;
-  held: { lease_id: string; holder: string; since: string; ttl_s: number }[];
-  queue: { lease_id: string; holder: string; since: string }[];
+  per_machine?: number;
+  /** `host`: the holder's machine; null or absent when the supervisor does not know it. */
+  held: { lease_id: string; holder: string; host?: string | null; since: string; ttl_s: number }[];
+  queue: { lease_id: string; holder: string; host?: string | null; since: string }[];
   reasons: string[];
 }
+
+const UNKNOWN_HOST = "(unknown host)";
 
 const HELP = `Usage:
   volley lease run --pool <pool> [options] -- <command> [args...]
@@ -69,7 +73,7 @@ run      Wait for a lease, run the command, release the lease when it exits (or 
          (exit 1, the command does not run). If this process dies, the broker releases the lease.
 acquire  Wait for a lease and print {"pool","lease_id","holder","waited_s"}; release it later.
 release  Release a held lease, or cancel a queued request.
-status   Print every pool's holders, queue and reasons.
+status   Print every pool's holders, queue and reasons, grouped by the holders' machine.
 
 Options:
   --pool <pool>          Lease pool name (from volleyd's lease_pools config)
@@ -743,9 +747,37 @@ async function status(broker: VolleyBroker, r: Resolved, io: IO): Promise<ExitCo
   }
   for (const p of pools) {
     const why = p.reasons.length > 0 ? `  ${p.reasons.join("; ")}` : "";
-    io.stdout(`${p.pool}  ${p.held.length}/${p.capacity} held  ${p.queue.length} queued${why}\n`);
-    for (const h of p.held) io.stdout(`  held    ${h.lease_id}  ${h.holder}  since ${h.since}\n`);
-    for (const q of p.queue) io.stdout(`  queued  ${q.lease_id}  ${q.holder}  since ${q.since}\n`);
+    const cap = p.per_machine !== undefined ? `  max ${p.per_machine} per machine` : "";
+    io.stdout(
+      `${p.pool}  ${p.held.length}/${p.capacity} held${cap}  ${p.queue.length} queued${why}\n`,
+    );
+    for (const [host, g] of byHost(p)) {
+      // A per-machine cap applies to a known machine only.
+      const n = p.per_machine !== undefined && host !== UNKNOWN_HOST ? `/${p.per_machine}` : "";
+      io.stdout(`  ${host}  ${g.held.length}${n} held\n`);
+      for (const h of g.held)
+        io.stdout(`    held    ${h.lease_id}  ${h.holder}  since ${h.since}\n`);
+      for (const q of g.queue)
+        io.stdout(`    queued  ${q.lease_id}  ${q.holder}  since ${q.since}\n`);
+    }
   }
   return EXIT.OK;
+}
+
+/** A pool's held and queued leases by the holder's machine: hosts by name, unknown host last. */
+function byHost(p: PoolState): [string, Pick<PoolState, "held" | "queue">][] {
+  const groups = new Map<string, Pick<PoolState, "held" | "queue">>();
+  const group = (host: string | null | undefined) => {
+    const key = host ?? UNKNOWN_HOST;
+    let g = groups.get(key);
+    if (g === undefined) {
+      g = { held: [], queue: [] };
+      groups.set(key, g);
+    }
+    return g;
+  };
+  for (const h of p.held) group(h.host).held.push(h);
+  for (const q of p.queue) group(q.host).queue.push(q);
+  const rank = (host: string) => (host === UNKNOWN_HOST ? 1 : 0);
+  return [...groups].sort(([a], [b]) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
 }

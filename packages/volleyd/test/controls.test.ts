@@ -335,6 +335,47 @@ describe("steer", () => {
     expect(sent.map((e) => e.data.seq)).toEqual([1, 2]);
   });
 
+  it("a merge nudge is additive: it never supersedes an owner steer, and the next owner steer supersedes the owner's", async () => {
+    const seen: ReturnType<typeof parseEnvelope>[] = [];
+    const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
+      const env = parseEnvelope(payload);
+      if (env?.type === "steering") seen.push(env);
+    });
+    const owner = (text: string) =>
+      client.request("steer", { wave: WAVE, task: "A", text, by: "coord-a", wait_ack_ms: 0 });
+    expect((await owner("don't touch the auth module")).ok).toBe(true);
+    // A sibling's PR merges while the owner's steer is still unread: the pipeline's nudge.
+    const driver = (
+      daemon as unknown as {
+        pipelineFor: (w: string) => { deps: import("../src/pipeline").PipelineDeps };
+      }
+    ).pipelineFor(WAVE);
+    await driver.deps.steer(
+      "A",
+      "implementer",
+      "agent-a1",
+      "origin/release/w-ctl moved with #7; rebase when convenient, before you push again.",
+      "merge_nudge",
+    );
+    const third = await owner("now the auth module is yours");
+    expect(third.ok).toBe(true);
+    await waitFor(() => seen.length === 3);
+    await unsub();
+
+    const [ownerSteer, nudge, later] = seen;
+    expect(nudge?.payload).toMatchObject({ seq: 2 });
+    expect(nudge?.payload).not.toHaveProperty("supersedes");
+    // The owner's next steer replaces the owner's, never the nudge.
+    expect(later?.payload).toMatchObject({ seq: 3, supersedes: ownerSteer?.correlation_id });
+    expect((third.result as { supersedes?: string }).supersedes).toBe(ownerSteer?.correlation_id);
+    const sent = daemon.journalEvents(WAVE).filter((e) => e.type === "steering_sent");
+    expect(sent.map((e) => e.data.seq)).toEqual([1, 2, 3]);
+    expect(sent[1]?.data).toMatchObject({ reason: "merge_nudge" });
+    expect(sent[1]?.data).not.toHaveProperty("supersedes");
+    // Replay keeps the same answer: the record's last supersedable steer is the owner's.
+    expect(daemon.record(WAVE)?.steers.A).toEqual({ seq: 3, message_id: later?.correlation_id });
+  });
+
   it("a redelivered steer request (same correlation_id) is sent and journaled once", async () => {
     const seen: string[] = [];
     const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {

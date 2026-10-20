@@ -19,7 +19,7 @@ import { type RefObject, useEffect, useRef, useState } from "react";
 import ElasticSlider from "../rb/ElasticSlider/ElasticSlider";
 import type { Tunables } from "../store/types";
 import { type ConfigAck, type ConfigTransport, copyCommand } from "./configTransport";
-import { Group } from "./primitives";
+import { Group, Toggle } from "./primitives";
 import {
   CONFIG_SCHEMA,
   SECTIONS,
@@ -43,6 +43,7 @@ const UNSPACED_UNITS = new Set(["×"]);
 function display(value: unknown, unit: string): string {
   if (value === undefined) return "—";
   if (value === null) return "none";
+  if (typeof value === "boolean") return value ? "on" : "off";
   const gap = unit && !UNSPACED_UNITS.has(unit) ? " " : "";
   return `${String(value)}${gap}${unit}`;
 }
@@ -275,7 +276,29 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
           <span>{row.label}</span>
           <span className="mono">{display(shown, row.unit)}</span>
         </div>
-        {c.kind === "slider" ? (
+        {c.kind === "toggle" ? (
+          <Toggle
+            on={shown === true}
+            label={row.label}
+            disabled={!(writable || draftOnly) || current === undefined}
+            onChange={(v) => commit(row, v, 0)}
+          />
+        ) : c.kind === "choice" ? (
+          <select
+            className="cfg-text recessed mono"
+            aria-label={row.label}
+            value={typeof shown === "string" ? shown : ""}
+            disabled={!(writable || draftOnly) || current === undefined}
+            onChange={(e) => commit(row, e.target.value, 0)}
+          >
+            {typeof shown !== "string" && <option value="">—</option>}
+            {c.options.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        ) : c.kind === "slider" ? (
           <ElasticSlider
             value={typeof shown === "number" ? shown : c.min}
             startingValue={c.min}

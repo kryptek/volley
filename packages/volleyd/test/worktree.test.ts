@@ -21,7 +21,11 @@ describe("release base resolution", () => {
     const fake = fakeExec()
       .on(LOCAL, MISSING)
       .on(ORIGIN, { stdout: `${SHA_A}\n` });
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(B);
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toEqual({
+      ref: B,
+      sha: SHA_A,
+      fresh: true,
+    });
     expect(fake.argvs(["git", "-C", REPO, "fetch"])).toEqual([
       ["git", "-C", REPO, "fetch", "--quiet", "origin", B],
     ]);
@@ -38,7 +42,10 @@ describe("release base resolution", () => {
       .on(LOCAL, MISSING)
       .on(ORIGIN, { stdout: `${SHA_A}\n` })
       .on(["git", "-C", REPO, "branch", "--track"], { code: 128, stderr: "fatal: nope" });
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(`origin/${B}`);
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toMatchObject({
+      ref: `origin/${B}`,
+      sha: SHA_A,
+    });
   });
 
   it("a local branch behind origin: origin's ref is used", async () => {
@@ -46,7 +53,10 @@ describe("release base resolution", () => {
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, { stdout: `${SHA_B}\n` })
       .on(["git", "-C", REPO, "merge-base", "--is-ancestor"], { code: 1 });
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(`origin/${B}`);
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toMatchObject({
+      ref: `origin/${B}`,
+      sha: SHA_B,
+    });
     // the question asked: does the local branch contain origin's commit?
     expect(fake.argvs(["git", "-C", REPO, "merge-base"])).toEqual([
       ["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A],
@@ -61,19 +71,22 @@ describe("release base resolution", () => {
       .on(ORIGIN, { stdout: `${SHA_B}\n` })
       .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_A, SHA_B], { code: 1 })
       .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A], { code: 1 });
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(`origin/${B}`);
+    expect(await resolveReleaseBase(fake.exec, REPO, B)).toMatchObject({
+      ref: `origin/${B}`,
+      sha: SHA_B,
+    });
   });
 
   it("a local branch level with (or ahead of) origin is used as it is", async () => {
     const level = fakeExec()
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, { stdout: `${SHA_A}\n` });
-    expect(await resolveReleaseBase(level.exec, REPO, B)).toBe(B);
+    expect(await resolveReleaseBase(level.exec, REPO, B)).toMatchObject({ ref: B, sha: SHA_A });
     const ahead = fakeExec()
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, { stdout: `${SHA_B}\n` })
       .on(["git", "-C", REPO, "merge-base", "--is-ancestor", SHA_B, SHA_A], { code: 0 });
-    expect(await resolveReleaseBase(ahead.exec, REPO, B)).toBe(B);
+    expect(await resolveReleaseBase(ahead.exec, REPO, B)).toMatchObject({ ref: B, sha: SHA_A });
   });
 
   it("the fetch is bounded and never prompts (a timeout counts as a failed fetch)", async () => {
@@ -81,7 +94,12 @@ describe("release base resolution", () => {
       .on(["git", "-C", REPO, "fetch"], { code: -1, timedOut: true })
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, MISSING);
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(B);
+    const err = await resolveReleaseBase(fake.exec, REPO, B).catch((e: unknown) => e);
+    expect((err as SpawnError).code).toBe("BASE_STALE");
+    expect(await resolveReleaseBase(fake.exec, REPO, B, { requireFresh: false })).toMatchObject({
+      ref: B,
+      fresh: false,
+    });
     const fetch = fake.calls.find((c) => c.argv[3] === "fetch");
     expect(fetch?.opts.timeoutMs).toBeGreaterThan(0);
     expect(fetch?.opts.env?.GIT_TERMINAL_PROMPT).toBe("0");
@@ -94,12 +112,57 @@ describe("release base resolution", () => {
     );
   });
 
-  it("a failed fetch (offline, no remote) still resolves what the repo has", async () => {
+  it("require_fresh_base on: a failed fetch refuses with BASE_STALE, never the local branch", async () => {
+    const fake = fakeExec()
+      .on(["git", "-C", REPO, "fetch"], { code: 128, stderr: "fatal: no remote" })
+      .on(LOCAL, { stdout: `${SHA_A}\n` })
+      .on(ORIGIN, { stdout: `${SHA_A}\n` });
+    for (const opts of [undefined, { requireFresh: true }]) {
+      const err = await resolveReleaseBase(fake.exec, REPO, B, opts).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SpawnError);
+      expect((err as SpawnError).code).toBe("BASE_STALE");
+      expect((err as SpawnError).message).toContain("fatal: no remote");
+      expect((err as SpawnError).detail).toMatchObject({ repo: REPO, branch: B });
+    }
+    // Refused before anything else is resolved or created.
+    expect(fake.argvs(["git", "-C", REPO, "branch"])).toEqual([]);
+  });
+
+  it("a BASE_STALE refusal carries git's first line only, then what to do", async () => {
+    const fake = fakeExec()
+      .on(["git", "-C", REPO, "fetch"], {
+        code: 128,
+        stderr:
+          "\nfatal: unable to access 'https://example.com/repo.git/': Could not resolve host\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+      })
+      .on(LOCAL, { stdout: `${SHA_A}\n` });
+    const err = (await resolveReleaseBase(fake.exec, REPO, B).catch(
+      (e: unknown) => e,
+    )) as SpawnError;
+    expect(err.code).toBe("BASE_STALE");
+    expect(err.message).not.toContain("\n");
+    expect(err.message).not.toContain("access rights");
+    expect(err.message).toContain("Could not resolve host");
+    expect(err.message).toContain(
+      `Fix: check that origin is reachable and has ${B}, or work from the local copy: \`volleyd config set require_fresh_base false\``,
+    );
+    expect(err.detail).toMatchObject({
+      fetch_error:
+        "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host",
+    });
+  });
+
+  it("require_fresh_base off: a failed fetch resolves what the repo has, marked not fresh", async () => {
     const fake = fakeExec()
       .on(["git", "-C", REPO, "fetch"], { code: 128, stderr: "fatal: no remote" })
       .on(LOCAL, { stdout: `${SHA_A}\n` })
       .on(ORIGIN, MISSING);
-    expect(await resolveReleaseBase(fake.exec, REPO, B)).toBe(B);
+    expect(await resolveReleaseBase(fake.exec, REPO, B, { requireFresh: false })).toEqual({
+      ref: B,
+      sha: SHA_A,
+      fresh: false,
+      fetch_error: "fatal: no remote",
+    });
   });
 
   it("neither the branch nor origin's: RELEASE_BRANCH_MISSING", async () => {
@@ -150,7 +213,12 @@ describe("addWorktree", () => {
       base: B,
       releaseBase: true,
     });
-    expect(r).toEqual({ path, branch: "w1/T1-implementer-1", reused: false });
+    expect(r).toEqual({
+      path,
+      branch: "w1/T1-implementer-1",
+      reused: false,
+      base: { sha: SHA_A, fresh: true },
+    });
     const steps = fake.calls.map((c) => c.argv.slice(3, 5).join(" "));
     expect(steps.indexOf("fetch --quiet")).toBeLessThan(steps.indexOf("branch --track"));
     expect(steps.indexOf("branch --track")).toBeLessThan(steps.indexOf("worktree add"));
@@ -171,6 +239,32 @@ describe("addWorktree", () => {
     }).catch((e: unknown) => e);
     expect((err as SpawnError).code).toBe("RELEASE_BRANCH_MISSING");
     expect(fake.argvs(["git", "-C", repo, "worktree", "add"])).toEqual([]);
+  });
+
+  it("a failed fetch: refused (BASE_STALE) by default, cut from the local copy with requireFresh off", async () => {
+    const repo = join(dir, "repo");
+    const spec = {
+      repo,
+      path: join(dir, "wt", "T1-implementer"),
+      branch: "w1/T1-implementer-1",
+      base: B,
+      releaseBase: true,
+    };
+    const fake = fakeExec()
+      .on(["git", "-C", repo, "fetch"], { code: 128, stderr: "fatal: unable to access" })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${B}`], {
+        stdout: `${SHA_A}\n`,
+      })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${B}`], {
+        stdout: `${SHA_A}\n`,
+      });
+    const err = await addWorktree(fake.exec, spec).catch((e: unknown) => e);
+    expect((err as SpawnError).code).toBe("BASE_STALE");
+    expect(fake.argvs(["git", "-C", repo, "worktree", "add"])).toEqual([]);
+
+    const r = await addWorktree(fake.exec, { ...spec, requireFresh: false });
+    expect(r.base).toEqual({ sha: SHA_A, fresh: false, fetch_error: "fatal: unable to access" });
+    expect(fake.argvs(["git", "-C", repo, "worktree", "add"])).toHaveLength(1);
   });
 
   it("a pipeline start ref (not the release branch) is used as given: no fetch", async () => {
@@ -198,6 +292,10 @@ describe("addWorktree", () => {
       git(repo, "init", "--quiet", "-b", "main");
       git(repo, "commit", "--quiet", "--allow-empty", "-m", "init");
       git(repo, "branch", "release/x");
+      // An origin the release branch is fetched from (require_fresh_base is on by default).
+      git(dir, "init", "--quiet", "--bare", "origin.git");
+      git(repo, "remote", "add", "origin", join(dir, "origin.git"));
+      git(repo, "push", "--quiet", "origin", "release/x");
     });
 
     it("a branch the failed add left behind (no commits of its own) is reset, and the retry succeeds", async () => {
@@ -211,7 +309,8 @@ describe("addWorktree", () => {
         base: "release/x",
         releaseBase: true,
       });
-      expect(r).toEqual({ path, branch: "w1/T1-implementer-1", reused: false });
+      expect(r).toMatchObject({ path, branch: "w1/T1-implementer-1", reused: false });
+      expect(r.base).toEqual({ sha: git(repo, "rev-parse", "release/x"), fresh: true });
       expect(git(path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("w1/T1-implementer-1");
     });
 

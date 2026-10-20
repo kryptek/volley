@@ -60,7 +60,9 @@ export type ControlOp =
   | "peer_invite"
   | "peer_join"
   | "peer_remove"
-  | "peers";
+  | "peers"
+  // Fleet (F2): the doctor on a paired machine, for an admin (peers.ts doctor).
+  | "peer_doctor";
 
 export interface ControlResponse {
   text: string;

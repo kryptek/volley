@@ -56,6 +56,8 @@ export interface SignalReport {
 export interface Verdict extends Admission {
   state: AdmissionState;
   signals: Record<SignalName, SignalReport>;
+  /** The reason each signal holding starts back gave (the same lines as `reasons`). */
+  reasonOf: Partial<Record<SignalName, string>>;
 }
 
 export const emptyAdmissionState = (): AdmissionState => ({});
@@ -108,6 +110,7 @@ function overReason(name: SignalName, value: number, max: number, cfg: Admission
 export function decide(samples: Samples, state: AdmissionState, cfg: AdmissionConfig): Verdict {
   const next: AdmissionState = {};
   const reasons: string[] = [];
+  const reasonOf: Partial<Record<SignalName, string>> = {};
   const signals = {} as Record<SignalName, SignalReport>;
   const need = cfg.hysteresis_samples;
   for (const name of SIGNALS) {
@@ -119,7 +122,8 @@ export function decide(samples: Samples, state: AdmissionState, cfg: AdmissionCo
 
     if (value !== undefined && value > max) {
       next[name] = { tripped: true, clean: 0 };
-      reasons.push(overReason(name, value, max, cfg));
+      reasonOf[name] = overReason(name, value, max, cfg);
+      reasons.push(reasonOf[name]);
       signals[name] = { state: "over", value, max };
       continue;
     }
@@ -132,7 +136,8 @@ export function decide(samples: Samples, state: AdmissionState, cfg: AdmissionCo
     const error = sample?.error !== undefined ? { error: sample.error } : {};
     if (tripped) {
       const why = value === undefined ? " (last sample unknown)" : "";
-      reasons.push(`recovering: ${LABEL[name]} clear for ${clean}/${need} samples${why}`);
+      reasonOf[name] = `recovering: ${LABEL[name]} clear for ${clean}/${need} samples${why}`;
+      reasons.push(reasonOf[name]);
       signals[name] = {
         state: "recovering",
         ...(value !== undefined ? { value } : {}),
@@ -150,7 +155,171 @@ export function decide(samples: Samples, state: AdmissionState, cfg: AdmissionCo
     reasons,
     state: next,
     signals,
+    reasonOf,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-host admission (SPEC §4.6.15): a task placed on a peer is admitted by that machine's own
+// signals, read from its record at each heartbeat with the same hysteresis, plus the global
+// signals; the supervisor's own machine signals (memory pressure, cmux ping, containers) are
+// local-only and do not hold it.
+// ---------------------------------------------------------------------------------------------
+
+/** Signals that hold starts on every machine: they measure shared limits, not one machine. */
+export const GLOBAL_SIGNALS: readonly SignalName[] = ["api_overload", "ci_queue"];
+
+export const HOST_SIGNALS = ["memory_available", "load_per_core"] as const;
+export type HostSignalName = (typeof HOST_SIGNALS)[number];
+export type HostSamples = Partial<Record<HostSignalName, Sample | undefined>>;
+export type HostAdmissionState = Partial<Record<HostSignalName, SignalMemory>>;
+
+/** The per-host thresholds: placement's eligibility minimums, admission's hysteresis. */
+export interface HostThresholds {
+  mem_available_min_pct: number;
+  load_per_core_max: number;
+  hysteresis_samples: number;
+}
+
+export interface HostVerdict extends Admission {
+  state: HostAdmissionState;
+  /**
+   * The hysteresis reasons alone (`recovering: …`), without the host's name: what placement's
+   * filter adds to its own load and memory checks, which already cover a signal that is over.
+   */
+  recovering: string[];
+}
+
+const HOST_LABEL: Record<HostSignalName, string> = {
+  memory_available: "memory available",
+  load_per_core: "load per core",
+};
+
+/** A machine record's signals (unknown when the record does not carry them). */
+export function hostSamples(r: {
+  cores: number;
+  load: [number, number, number];
+  memory?: { available_pct: number };
+}): HostSamples {
+  const mem = r.memory?.available_pct;
+  // The higher of the 1- and 5-minute loads, as placement's overload filter reads it: a heartbeat
+  // whose 1-minute load dipped while the 5-minute one is still over is not a clean sample.
+  const perCore = r.cores > 0 ? Math.max(r.load[0], r.load[1]) / r.cores : undefined;
+  return {
+    memory_available:
+      mem !== undefined
+        ? { ok: true, value: mem, raw: String(mem) }
+        : { ok: false, raw: "", error: "no memory figure in the machine record" },
+    load_per_core:
+      perCore !== undefined
+        ? { ok: true, value: perCore, raw: String(perCore) }
+        : { ok: false, raw: "", error: "no cores in the machine record" },
+  };
+}
+
+/**
+ * `host`'s verdict for one heartbeat: memory available under its minimum, or load per core over
+ * its maximum, holds starts there; after a breach both must be clear for `hysteresis_samples`
+ * heartbeats. Every reason names the host. The input state is not modified.
+ */
+export function decideHost(
+  host: string,
+  samples: HostSamples,
+  state: HostAdmissionState,
+  t: HostThresholds,
+): HostVerdict {
+  const next: HostAdmissionState = {};
+  const reasons: string[] = [];
+  const recovering: string[] = [];
+  for (const name of HOST_SIGNALS) {
+    const sample = samples[name];
+    const prev = state[name] ?? { tripped: false, clean: 0 };
+    const value = sample?.ok === true ? sample.value : undefined;
+    const over =
+      value !== undefined &&
+      (name === "memory_available" ? value < t.mem_available_min_pct : value > t.load_per_core_max);
+    if (over) {
+      next[name] = { tripped: true, clean: 0 };
+      reasons.push(
+        name === "memory_available"
+          ? `${host}: memory available ${Math.round(value)}% (min ${t.mem_available_min_pct}%)`
+          : `${host}: load ${value.toFixed(2)} per core (max ${t.load_per_core_max})`,
+      );
+      continue;
+    }
+    const clean = prev.tripped ? prev.clean + 1 : 0;
+    const tripped = prev.tripped && clean < t.hysteresis_samples;
+    next[name] = { tripped, clean: tripped ? clean : 0 };
+    if (tripped) {
+      const why = `recovering: ${HOST_LABEL[name]} clear for ${clean}/${t.hysteresis_samples} samples`;
+      recovering.push(why);
+      reasons.push(`${host}: ${why}`);
+    }
+  }
+  return {
+    allow: reasons.length > 0 ? 0 : Number.POSITIVE_INFINITY,
+    reasons,
+    state: next,
+    recovering,
+  };
+}
+
+/**
+ * `host`'s verdict now, from its last heartbeats (oldest first) under thresholds `t`: `decideHost`
+ * folded over them from a clear state. Only the last `hysteresis_samples` heartbeats can hold
+ * starts back, so a history that long gives the exact verdict, and the thresholds are the caller's
+ * at the moment it asks (a wave's own `placement` overrides, a `config_set` that just landed).
+ */
+export function foldHost(host: string, history: HostSamples[], t: HostThresholds): HostVerdict {
+  let v: HostVerdict = {
+    allow: Number.POSITIVE_INFINITY,
+    reasons: [],
+    state: {},
+    recovering: [],
+  };
+  for (const samples of history.slice(-t.hysteresis_samples)) {
+    v = decideHost(host, samples, v.state, t);
+  }
+  return v;
+}
+
+/**
+ * The reasons a verdict's own-machine signals give (memory pressure, cmux ping, containers): what
+ * keeps a placement off the supervisor's machine. A verdict without per-signal reasons gives none
+ * (it applies whole, through `forHost`).
+ */
+export function machineReasons(
+  v: Admission & { reasonOf?: Partial<Record<SignalName, string>> },
+): string[] {
+  const of = v.reasonOf;
+  if (of === undefined) return [];
+  return SIGNALS.filter((n) => !GLOBAL_SIGNALS.includes(n)).flatMap((n) => {
+    const r = of[n];
+    return r !== undefined ? [r] : [];
+  });
+}
+
+/**
+ * The admission of a task placed on a peer: the global signals of `wave` (its wave's verdict)
+ * plus `host`'s own. A verdict without per-signal reasons (injected, or before the first sample)
+ * applies whole.
+ */
+export function forHost(
+  wave: Admission & { reasonOf?: Partial<Record<SignalName, string>> },
+  host: Admission,
+): Admission {
+  const global =
+    wave.reasonOf === undefined
+      ? wave.reasons
+      : GLOBAL_SIGNALS.flatMap((n) => (wave.reasonOf?.[n] !== undefined ? [wave.reasonOf[n]] : []));
+  const reasons = [...global, ...host.reasons];
+  const allow =
+    wave.reasonOf === undefined
+      ? Math.min(wave.allow, host.allow)
+      : reasons.length > 0
+        ? 0
+        : host.allow;
+  return { allow, reasons };
 }
 
 /** A verdict as JSON: `allow` is null when pressure sets no limit. */
