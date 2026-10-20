@@ -127,6 +127,14 @@ describe("axe (jsdom)", () => {
     expect(await violations()).toEqual([]);
   }, 30_000);
 
+  it("reports no violations with a terminal popout open", async () => {
+    renderApp();
+    fireEvent.click(screen.getAllByRole("tab", { name: "Terminal" })[0] as HTMLElement);
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in a window" }));
+    expect(screen.getByRole("dialog", { name: /^Terminal: / })).toBeInTheDocument();
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
   it("reports no violations with a steering panel and the wave settings open", async () => {
     renderApp();
     fireEvent.click(screen.getAllByRole("button", { name: /^Message / })[0] as HTMLElement);

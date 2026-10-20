@@ -916,7 +916,7 @@ describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
         .at(-1)?.data,
     ).toMatchObject({ host: "control", by: "decision", from: "box" });
     await f.tick();
-    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer 2"]);
     expect(spawnFailures()).toEqual([]);
   });
 
@@ -956,7 +956,7 @@ describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
         .at(-1)?.data,
     ).toMatchObject({ task: "T1", host: "control", by: "decision", from: "box" });
     await f.tick();
-    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer"]);
+    expect(f.local.launches.map((l) => l.name)).toEqual(["w1 T1 implementer 2"]);
     expect(spawnFailures()).toEqual([]);
   });
 

@@ -621,6 +621,21 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
 
+**A blocked agent.** An agent of any role (implementer, either reviewer, fixup, rebase or merge)
+that publishes `status: blocked` (SPEC §5.1) gets an `agent_blocked` decision on its task, with
+its reason (`payload.reason`, else `summary`, else `text`; clipped to 500 characters in the
+question, whole in the decision's `reason` and `payload`) and the options:
+
+- `continue`: you steered the agent by hand (or it will go on by itself); the task returns to its
+  stage and volleyd waits for the agent's next status. A later `blocked` asks again.
+- `respawn`: the agent is retired (`relaunched`) and the role's next attempt is spawned.
+- `cancel`: the agent is retired (`stopped`) and the task cancelled.
+
+The agent is never retired while the question is open: SPEC §5.2 lets a blocked agent stay alive
+waiting for mailbox guidance, so it keeps its lock and login. The decision carries the status's
+`wall_time` (`status_at`), so the same retained status re-delivered after a restart is not asked
+about twice.
+
 ## Ownership and claim
 
 Every wave has one **owner**, the coordinator agent id that submitted it — the single writer. It
@@ -796,7 +811,7 @@ lists every key with its default and example pools, commented out.
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
-| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
+| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>[ <attempt>]" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
@@ -874,6 +889,38 @@ Failures are counted per role (two reviewers of one step fail and back off indep
 per agent attempt; the task shows its most recent one, and its decision resolves once no role
 is still failing. The backoff carries over a restart: the retry runs when the journal's
 `next_retry_at` says, and stopped retries stay stopped until someone answers "retry now".
+
+**Launches whose outcome is unknown.** A launch can fail without saying whether it created
+anything: the cmux CLI gives up on its own (`Error: Command timed out`) or hits volleyd's bound
+on it (`launch_timeout_ms`, 60 s), exits with no workspace ref, or ssh drops after a remote
+`tmux new-session` was sent. Such a launch may still have opened the workspace and started the
+agent, so before anything retries it volleyd reconciles: it looks the workspace up by the exact
+name it gave it (`cmux list-workspaces`; `tmux has-session` on a remote host) and waits up to
+`launch_reconcile_ms` (30 s) for the agent's hook signals on the watch it subscribed before the
+launch. That name is one per agent id: `<wave> <task> <role>`, with the attempt appended after the
+first (`w1 T1 fixup 2`), so the lookup never finds a workspace an earlier attempt left open.
+
+- The agent registered: it is **adopted**. The journal gets `spawn_adopted { agent_id, role,
+  attempt, workspace, after: "launch_unknown", waited_ms }`, then the usual `agent_spawned`
+  with `adopted: true`; nothing is launched a second time and verification goes on as for any
+  launch. If neither lookup found its workspace, `spawn_adopted` says `workspace: "unknown"` and
+  `agent_spawned` carries an empty `workspace`: the agent runs and is supervised through its
+  messages, but volleyd cannot read its screen, send it keys or close its workspace on retire (a
+  human closes it).
+- A workspace is there but no agent registered: volleyd closes it (`launch_orphan_closed {
+  agent_id, workspace }`) and the spawn fails as above; its retry may reuse the agent id, since
+  that session is known gone.
+- Nothing is there and the host answered: the spawn fails as above.
+- The host could not be asked (the lookup failed or timed out), more than one workspace carries
+  the name (which one is this launch's cannot be told) or the workspace could not be closed:
+  the attempt is **burned** (`spawn_identity_burned { agent_id, role, attempt, why }`), its
+  login revoked, and the retry takes the next attempt number, so no retry ever reuses an agent
+  id that may be live. Its branch follows (`-2` after a never-used `-1`). The failure still
+  counts toward `spawn_retry_max`.
+
+A launch cmux refused (not running, not installed, refusing volleyd) created nothing and fails
+straight away. Launches are serialized per host: one `cmux new-workspace` (or remote
+`tmux new-session`) is in flight at a time, so a slow cmux does not stack them.
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
@@ -1152,7 +1199,8 @@ wave-level one stops the wave).
 
 ### Retire and cleanup
 
-When a supervised agent's `failed` status arrives, the daemon retires it; a `done` is first
+When a supervised agent's `failed` status arrives, the daemon retires it (a `blocked` one is not
+retired: it gets an [`agent_blocked` decision](#decisions)); a `done` is first
 handed to the pipeline, which verifies the claim and retires the agent once it is checked (see
 [the pipeline](#the-pipeline-and-the-merge-ready-gate)). `reaped` (its
 LWT) is retired only after the reap grace passes with no fresh status or heartbeat (see
@@ -1808,6 +1856,16 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
 | any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
+
+**Terminal-status watchdog.** Every terminal status a supervised agent publishes (`done`,
+`blocked`, `failed`) must lead to something in the wave journal that names the agent
+(`decision_opened`, `agent_retired`, `artifact_verified`, `ci_pending`, `steering_sent`,
+`relaunched`, …). One that nothing names within `terminal_unjournaled_alarm_ms` (60 s, on the
+daemon's clock) is a status volleyd dropped: it journals `alarm_raised { alarm:
+"terminal_status_unjournaled", agent_id, role, task, status, since }` once per status (`since` is
+the status's `wall_time`), logs `watchdog: <agent> <status> unjournaled for <n>s`, and journals
+`alarm_cleared` for it once something finally names the agent. A coordinator watching the journal
+learns a task is stuck even when no decision was opened for it.
 
 Every recovery decision carries `class` and `agent_id` (on the journal event and the retained
 topic) and answers `stop task` the same way: a `cancel` to the agent, an interrupt (Escape), and

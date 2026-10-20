@@ -4,13 +4,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
-import { CONFIG_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type Daemon, spawnFailedDecisionId } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { apply, emptyRecord } from "../src/reducer";
 import { SpawnError } from "../src/spawn-error";
 import type { JournalEvent, TaskState } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
@@ -76,6 +77,9 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       taskHost?: string;
       /** The repo's origin: unknown to the fake (default), absent, or without the branch. */
       origin?: "none" | "unpushed";
+      /** How launches end (fake-host.ts `launchOutcome`) and what a workspace lookup finds. */
+      launchOutcome?: FakeHost["launchOutcome"];
+      found?: FakeHost["found"];
     } = {},
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     clock = fakeClock(T0);
@@ -136,6 +140,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     gitCalls = () => fake.argvs(["git", "-C", repo]);
     creds = memoryCredentials();
     host = fakeHost(fake);
+    host.launchOutcome = o.launchOutcome ?? "ok";
+    if (o.found !== undefined) host.found = o.found;
     const prepare = host.prepareWorktree.bind(host);
     host.prepareWorktree = async (spec) => {
       if (failing) {
@@ -342,6 +348,89 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect(r.stderr).toBe("");
     await daemon.tick();
     expect((await event("spawn_recovered")).data).toMatchObject({ after_failures: 2, attempt: 3 });
+  });
+
+  describe("a launch whose outcome is unknown", () => {
+    /** Sessions come up only once `open` is called. */
+    const held = () => {
+      let open = () => {};
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      return { gate, open };
+    };
+    /** The reconcile window of the n-th launch runs out: no agent registered in it. */
+    const windowEnds = async (finds: number) => {
+      await eventually(() => host.finds.length >= finds);
+      await clock.advance(DAEMON_DEFAULTS.launch_reconcile_ms);
+    };
+
+    it("its empty workspace is closed, and the retry reuses the same agent id", async () => {
+      const sessions = held();
+      await setup("spawn_retry_max: 5", {
+        failing: false,
+        sessionGate: sessions.gate,
+        launchOutcome: "unknown",
+        found: "workspace:1",
+      });
+      await windowEnds(1);
+      expect((await event("spawn_failed")).data).toMatchObject({
+        code: "LAUNCH_FAILED",
+        attempt: 1,
+      });
+      expect(of("launch_orphan_closed")[0]?.data).toMatchObject({
+        agent_id: ID,
+        workspace: "workspace:1",
+      });
+      expect(host.closed).toEqual(["workspace:1"]);
+      expect(of("spawn_identity_burned")).toEqual([]);
+
+      host.launchOutcome = "ok";
+      sessions.open();
+      await clock.advance(30_000);
+      await daemon.tick();
+      expect((await event("agent_spawned")).data.agent_id).toBe(ID);
+      expect(host.launches).toHaveLength(2);
+      await event("spawn_recovered");
+    });
+
+    it("an undecidable one burns its identity: the retry takes the next attempt, the failures keep counting", async () => {
+      const sessions = held();
+      await setup("spawn_retry_max: 5", {
+        failing: false,
+        sessionGate: sessions.gate,
+        launchOutcome: "unknown",
+        found: new Error("cmux list-workspaces failed: timed out"),
+      });
+      await windowEnds(1);
+      await event("spawn_failed");
+      expect(of("spawn_identity_burned")[0]?.data).toMatchObject({ agent_id: ID, attempt: 1 });
+      expect(creds.revoked).toContain(ID);
+
+      // The retry launches attempt 2, which burns too: the failure count goes on (no reset).
+      await clock.advance(30_000);
+      await daemon.tick();
+      await windowEnds(3);
+      expect((await event("spawn_failed", 2)).data).toMatchObject({ attempt: 2 });
+      expect(of("spawn_identity_burned")[1]?.data).toMatchObject({
+        agent_id: "w1-t1-implementer-2",
+        attempt: 2,
+      });
+
+      host.launchOutcome = "ok";
+      await clock.advance(60_000);
+      await daemon.tick();
+      const spawned = await event("agent_spawned");
+      expect(spawned.data).toMatchObject({
+        agent_id: "w1-t1-implementer-3",
+        attempt: 3,
+        branch: "w1/T1-implementer-3",
+      });
+      expect(host.launches).toHaveLength(3);
+      // The simulated session (agent -1's) is never let up.
+      closing = true;
+      sessions.open();
+    });
   });
 
   it("'stop task' cancels the task", async () => {

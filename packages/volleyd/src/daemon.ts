@@ -242,7 +242,7 @@ import type {
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
-import { PipelineDriver, type SpawnStart, roleSpawnHold } from "./pipeline";
+import { PipelineDriver, type SpawnStart, blockedReason, roleSpawnHold } from "./pipeline";
 
 import {
   type BriefPrefaceInfo,
@@ -336,6 +336,14 @@ import {
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
+import {
+  TERMINAL_ALARM,
+  type TerminalSeen,
+  WATCHED_STATUS,
+  journaledSince,
+  namedAgent,
+  unjournaledTerminals,
+} from "./watchdog";
 import {
   AGENT_BRANCH,
   checkFreshBase,
@@ -541,6 +549,8 @@ interface Supervised {
   suppressedReap?: string | undefined;
   /** `wall_time` of the final status last handed to the pipeline (a re-delivery is ignored). */
   finalSeen?: string | undefined;
+  /** `wall_time` of the `blocked` status last handed to the pipeline (a re-delivery is ignored). */
+  blockedSeen?: string | undefined;
   /** The latest status other than `reaped` (what liveness checks while a reap is suppressed). */
   liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
@@ -908,6 +918,12 @@ export class Daemon {
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
+  /** Terminal statuses received and not yet journaled about (watchdog.ts), by agent. */
+  private readonly terminals = new Map<string, TerminalSeen & { wave: WaveId }>();
+  /** Per agent: the seq of the latest wave journal event naming it (watchdog.ts namedAgent). */
+  private readonly lastNamed = new Map<string, number>();
+  /** `<agent>@<wall_time>` of each terminal status the watchdog has alarmed on. */
+  private readonly terminalAlarmed = new Set<string>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
@@ -2072,6 +2088,7 @@ export class Daemon {
     await this.fleetTick();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
+    await this.watchTerminals();
     for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
@@ -3137,10 +3154,13 @@ export class Daemon {
     }
     const eff = this.config.effective(wave);
     // Failures count per spawn: this role's, for the agent attempt it is trying to launch.
+    // A failure that burned its attempt's identity moved the next one on: still the same run.
     const spawnAttempt = this.agentAttempt(wave, task, role);
     const prev = rec.spawnFailures[task]?.[role];
+    const prevAttempt = prev?.spawn_attempt ?? spawnAttempt;
     const n =
-      prev !== undefined && (prev.spawn_attempt ?? spawnAttempt) === spawnAttempt
+      prev !== undefined &&
+      (prevAttempt === spawnAttempt || this.burnedAttempts(wave, task, role).includes(prevAttempt))
         ? prev.attempt + 1
         : 1;
     const stopped = n >= eff.spawn_retry_max;
@@ -3254,12 +3274,25 @@ export class Daemon {
   private agentAttempt(wave: WaveId, task: TaskId, role: Role): number {
     const journal = this.waves.get(wave)?.journal;
     if (journal === undefined) return 1;
+    // A burned attempt (a launch whose outcome could not be decided) may still have a live
+    // session: its identity is never reused, so it counts like a spawned one.
     return (
       journal
         .readAll()
-        .filter((e) => e.type === "agent_spawned" && e.task === task && e.data.role === role)
-        .length + 1
+        .filter(
+          (e) =>
+            (e.type === "agent_spawned" || e.type === "spawn_identity_burned") &&
+            e.task === task &&
+            e.data.role === role,
+        ).length + 1
     );
+  }
+
+  /** The attempts of a task's role whose identity was burned (`spawn_identity_burned`). */
+  private burnedAttempts(wave: WaveId, task: TaskId, role: Role): number[] {
+    return (this.waves.get(wave)?.journal.readAll() ?? [])
+      .filter((e) => e.type === "spawn_identity_burned" && e.task === task && e.data.role === role)
+      .map((e) => Number(e.data.attempt));
   }
 
   /**
@@ -4339,8 +4372,11 @@ export class Daemon {
       this.scheduleReap(agentId, a);
     };
     this.trackScreen(agentId, a);
-    const check = (type: string) => {
+    const check = (type: string, live = true) => {
       if (this.supervised.get(agentId) !== a) return;
+      // A status that arrived while supervised: the watchdog checks something is journaled
+      // about it (one already retained at re-attach was handled, or is re-handled below).
+      if (live) this.noteTerminal(agentId, a);
       if (type === "reaped") {
         // A re-delivery (same wall_time) of a reap a heartbeat already suppressed changes nothing.
         if (a.watch.state.status?.wall_time === a.suppressedReap) return;
@@ -4354,6 +4390,14 @@ export class Daemon {
       a.pendingReap = undefined;
       a.suppressedReap = undefined;
       a.liveStatus = type;
+      if (type === "blocked") {
+        // Not final (SPEC §5.2: it may wait for mailbox guidance): the pipeline asks the owner.
+        const at = a.watch.state.status?.wall_time;
+        if (at !== undefined && at === a.blockedSeen) return;
+        a.blockedSeen = at;
+        void this.enqueue(() => this.onBlocked(agentId));
+        return;
+      }
       if (!FINAL_STATUS.has(type)) return;
       // A re-delivery (same wall_time) of a final status already handed over is not a new claim.
       const at = a.watch.state.status?.wall_time;
@@ -4362,8 +4406,8 @@ export class Daemon {
       // A `done` is a claim: the pipeline checks it before the agent is retired (T6).
       void this.enqueue(() => this.onFinal(agentId, type));
     };
-    watch.onStatus(check);
-    if (watch.state.status !== null) check(watch.state.status.type);
+    watch.onStatus((type) => check(type));
+    if (watch.state.status !== null) check(watch.state.status.type, false);
     if (outcome.kind === "registered")
       void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
   }
@@ -4663,6 +4707,95 @@ export class Daemon {
       ...(result !== undefined ? { result } : {}),
       ...(why !== undefined ? { why } : {}),
     });
+  }
+
+  /**
+   * A supervised agent's `blocked` status: the pipeline opens its `agent_blocked` decision. The
+   * agent is not retired. A status a decision already names (a re-delivery after a restart) is
+   * not asked about twice. Nothing is journaled while the agent is moving (or, in the pipeline,
+   * for an accepted or stale run): the terminal-status watchdog's alarm is the intended backstop.
+   */
+  private async onBlocked(agentId: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    const status = a?.watch.state.status;
+    if (a === undefined || status?.type !== "blocked" || this.moving.has(agentId)) return;
+    const rec = this.waves.get(a.wave)?.record;
+    const asked = Object.values(rec?.decisions ?? {}).some((d) => {
+      const x = d as unknown as Record<string, unknown>;
+      return x.agent_id === agentId && x.status_at === status.wall_time;
+    });
+    if (asked) return;
+    await this.pipelineFor(a.wave).handle(a.task, {
+      kind: "agent_blocked",
+      role: a.role,
+      agent_id: agentId,
+      reason: blockedReason(status.payload),
+      payload: status.payload,
+      at: status.wall_time,
+    });
+  }
+
+  /** Arm the watchdog for the agent's current status if it is a new terminal one. */
+  private noteTerminal(agentId: string, a: Supervised): void {
+    const st = a.watch.state.status;
+    if (st === null || !WATCHED_STATUS.has(st.type)) return;
+    const prev = this.terminals.get(agentId);
+    if (prev !== undefined && prev.wall_time === st.wall_time) return;
+    this.terminals.set(agentId, {
+      wave: a.wave,
+      agent_id: agentId,
+      role: a.role,
+      task: a.task,
+      status: st.type,
+      wall_time: st.wall_time,
+      seen_at: this.now(),
+      after_seq: this.waves.get(a.wave)?.record.seq ?? 0,
+    });
+  }
+
+  /**
+   * The terminal-status watchdog (watchdog.ts): a terminal status nothing was journaled about
+   * within `terminal_unjournaled_alarm_ms` raises one alarm; the first event naming the agent
+   * afterwards clears it.
+   */
+  private async watchTerminals(): Promise<void> {
+    const seen = [...this.terminals.values()];
+    for (const t of seen) {
+      if (!journaledSince(t, this.lastNamed)) continue;
+      this.terminals.delete(t.agent_id);
+      const key = `${t.agent_id}@${t.wall_time}`;
+      if (!this.terminalAlarmed.delete(key) || !this.waves.has(t.wave)) continue;
+      await this.append(t.wave, {
+        type: "alarm_cleared",
+        task: t.task,
+        data: { alarm: TERMINAL_ALARM, agent_id: t.agent_id, status: t.status },
+      });
+    }
+    const late = unjournaledTerminals(
+      [...this.terminals.values()],
+      this.lastNamed,
+      this.now(),
+      DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms,
+    );
+    for (const u of late) {
+      const t = this.terminals.get(u.agent_id);
+      const key = `${u.agent_id}@${u.since}`;
+      if (t === undefined || this.terminalAlarmed.has(key)) continue;
+      if (!this.waves.has(t.wave)) {
+        // The wave is gone: nothing will ever journal it, so stop watching.
+        this.terminals.delete(u.agent_id);
+        continue;
+      }
+      this.terminalAlarmed.add(key);
+      this.log(
+        `watchdog: ${u.agent_id} ${u.status} unjournaled for ${Math.round((this.now() - t.seen_at) / 1000)}s`,
+      );
+      await this.append(t.wave, {
+        type: "alarm_raised",
+        task: u.task,
+        data: { alarm: TERMINAL_ALARM, ...u },
+      });
+    }
   }
 
   /**
@@ -5762,6 +5895,8 @@ export class Daemon {
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
     const queued = log.record.queued_steers;
     const event = log.append(ev, dateOf(this.time));
+    const named = namedAgent(event);
+    if (named !== undefined) this.lastNamed.set(named, event.seq);
     const published = this.track(this.publishAppended(wave, event));
     // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
     const ended =

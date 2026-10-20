@@ -73,8 +73,19 @@ export interface Host {
   prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult>;
   /** Write a file on the host, creating parent directories. */
   writeFile(path: string, content: string, mode?: number): Promise<void>;
-  /** Open a terminal running `spec.command`; resolves with the workspace ref. */
+  /**
+   * Open a terminal running `spec.command`; resolves with the workspace ref. A failure is a
+   * `SpawnError` LAUNCH_FAILED whose `detail.outcome` is `refused` (nothing was created) or
+   * `unknown` (the workspace may exist and its agent be starting: spawn.ts reconciles before any
+   * retry); a remote host's also carries `detail.candidate`, the session name it tried.
+   */
   launch(spec: LaunchSpec): Promise<{ workspace: string }>;
+  /**
+   * The ref of the workspace volleyd titled `name` (`candidate`: the session name a failed
+   * launch tried, for hosts that name sessions themselves), or null when there is none. Rejects
+   * when the host cannot be asked: the caller treats that as undecidable.
+   */
+  findWorkspace(name: string, candidate?: string): Promise<string | null>;
   /** The last `lines` lines of the workspace's screen, or null when it cannot be read. */
   readScreen(workspace: string, lines: number): Promise<string | null>;
   /** Press one key (e.g. `Enter`, `Escape`) in the workspace. */

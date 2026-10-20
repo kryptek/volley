@@ -8,6 +8,15 @@
  * overlay for the lit top edge, dark bottom edge and inner ring — and every
  * text box is `recessed` like its `f3d` fields.
  */
+/* Nerd Font and powerline glyphs for the Terminal (`--f-term`): the bundled symbols-only font
+ * (THIRD_PARTY_NOTICES.md), limited to the Private Use Areas so it loads only when a screen
+ * has such a glyph. */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype");
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD;
+}
 :root {
   --ink: #e8ecf4;
   --mute: #a3abc0;
@@ -22,6 +31,7 @@
   --ok: #4ade80;
   --f-ui: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
   --f-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --f-term: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace, "Symbols Nerd Font Mono";
   --f-display: "Bricolage Grotesque", "Instrument Sans", system-ui, sans-serif;
   /* The sign-in card's lift: contact shadow, ambient, a wide soft drop. */
   --win-shadow: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 24px -6px rgba(0, 0, 0, 0.55), 0 40px 80px
