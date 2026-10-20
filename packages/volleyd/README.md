@@ -793,6 +793,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
+| `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |

@@ -108,3 +108,8 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+
+# --- Coordinator names (README "Ownership and claim") ---
+# autopilot:
+#   reconnect_grace_s: 900       # a wave owned by a coordinator name whose session went away reads
+#                                # coordinator.state "reconnecting" this long (60..86400), then "gone"

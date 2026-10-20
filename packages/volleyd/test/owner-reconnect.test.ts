@@ -140,6 +140,12 @@ describe("a wave owned by a coordinator name", () => {
     expect(claim.ok).toBe(false);
     expect(claim.error).toContain("coordinator-b2");
 
+    // The bound agent "claiming" its own wave changes nothing: the name keeps it.
+    const own = await client.request("claim", { wave: WAVE, by: "coordinator-b2" });
+    expect(own.result).toMatchObject({ owner: NAME });
+    expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
+    expect(daemon.journalEvents(WAVE).some((e) => e.type === "owner_claimed")).toBe(false);
+
     // A daemon restart replays the retained registry: the binding comes back, nothing re-journaled.
     await daemon.stop();
     daemon = await t.start({ clock });

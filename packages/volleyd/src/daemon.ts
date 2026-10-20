@@ -1632,7 +1632,7 @@ export class Daemon {
     if (status !== undefined && OWNER_GONE.has(status.type)) {
       // Not yet stamped: the status was just seen and its rebind is still queued.
       const away = binding?.gone_at ?? this.now();
-      const grace = this.config.effective().autopilot.reconnect_grace_s * 1000;
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
       const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
       return { agent_id: agent, state, last_seen };
     }
@@ -1713,7 +1713,7 @@ export class Daemon {
       ...(away ? { gone_at: gone_at ?? this.now() } : {}),
     });
     if (away && gone_at === undefined) {
-      const grace = this.config.effective().autopilot.reconnect_grace_s * 1000;
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
       this.reconnectTimers.set(
         name,
         this.time.setTimeout(() => {
@@ -7362,6 +7362,9 @@ export class Daemon {
       claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
+    // The agent bound to a coordinator-name owner already acts for it: the name keeps the wave.
+    if (bound !== undefined && bound === by)
+      return { ok: true, result: { wave: w.wave, owner, previous: owner, why: verdict.why } };
     if (owner !== by) {
       await this.append(w.wave, {
         type: "owner_claimed",
