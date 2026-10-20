@@ -32,7 +32,7 @@ async function control(): Promise<ControlClient> {
 const retainedItem = async (id: string) =>
   (await s.env.retained(inboxTopic(id))) as { type: string; payload: InboxItem } | null;
 
-describe("the needs-you inbox in the daemon (SPEC §4.6.17)", () => {
+describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
   it("a decision opens a retained inbox item; inbox_opened is journaled", async () => {
     s = await makeSupervisedEnv();
     const d = await s.daemon.openDecision("w1", disagree);

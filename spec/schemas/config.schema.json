@@ -400,7 +400,7 @@
         "autopilot": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Decisions the supervisor answers itself from its policy table, and its remediation budgets (spec section 4.6.16). Each maximum counts automatic answers per wave under one budget key. Optional in the retained payload: a supervisor that predates it omits it.",
+          "description": "Decisions the supervisor answers itself from its policy table, and its remediation budgets (spec section 4.6.16), and who merges a gated PR (spec section 4.6.17). Each maximum counts automatic answers per wave under one budget key. Optional in the retained payload: a supervisor that predates it omits it.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -432,6 +432,7 @@
                   "spawn_budget_exhausted",
                   "account_limit",
                   "machine_down",
+                  "merge_refused",
                   "release_go",
                   "stage_go"
                 ]
@@ -492,7 +493,20 @@
               "minimum": 0,
               "maximum": 86400,
               "default": 600,
-              "description": "How long an answered needs-you inbox item stays retained with its answered record before the supervisor clears it (spec section 4.6.17)."
+              "description": "How long an answered needs-you inbox item stays retained with its answered record before the supervisor clears it (spec section 4.6.18)."
+            },
+            "merge": {
+              "type": "string",
+              "enum": ["auto", "manual"],
+              "default": "auto",
+              "description": "Who merges a gated PR when the wave file has no merge: key: auto (the supervisor squash-merges exactly the gated head, journaled merged_by_supervisor) or manual (a human merges; the supervisor only observes the merge)."
+            },
+            "merge_retry_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
             }
           }
         }

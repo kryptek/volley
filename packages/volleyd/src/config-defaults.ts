@@ -57,7 +57,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   fleet: { local_name: null },
-  // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16) ---
+  // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,
     owner_only: ["plan_change", "repo_untrusted", "model_switch", "release_go", "stage_go"],
@@ -68,6 +68,8 @@ export const CONFIG_DEFAULTS: Tunables = {
     question_max: 1,
     budget_raise_max: 2,
     inbox_answered_ttl_s: 600,
+    merge: "auto",
+    merge_retry_max: 2,
   },
 };
 

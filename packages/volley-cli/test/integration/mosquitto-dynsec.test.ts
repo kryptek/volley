@@ -215,7 +215,7 @@ describe.skipIf(!RUN)("Volley roles on mosquitto 2.1 Dynamic Security", () => {
     expect(await delivered(reply)).toBe(false);
   });
 
-  it("the needs-you inbox (SPEC §4.6.17): steer reads but cannot write; the supervisors write", async () => {
+  it("the needs-you inbox (SPEC §4.6.18): steer reads but cannot write; the supervisors write", async () => {
     const topic = `volley/_inbox/d-${NS}-d-abc`;
     const read: string[] = [];
     const steer = await connectAs("steer-test");

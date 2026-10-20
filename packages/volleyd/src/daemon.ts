@@ -250,6 +250,7 @@ import type {
   AgentMcp,
   CoordinatorAttention,
   JournalEvent,
+  MergeMode,
   NewEvent,
   NudgeOnMerge,
   PublicHygiene,
@@ -885,7 +886,7 @@ export class Daemon {
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
-  /** The needs-you inbox (SPEC §4.6.17), by item id: rebuilt from the journals on start. */
+  /** The needs-you inbox (SPEC §4.6.18), by item id: rebuilt from the journals on start. */
   private readonly inbox = new Map<string, InboxItem>();
   /**
    * What acts on an accepted answer to an item that is not a decision (a decision's answer
@@ -4675,7 +4676,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd never merges.
+  // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
@@ -4727,6 +4728,10 @@ export class Daemon {
       },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
+      // --- Autopilot merging (SPEC §4.6.17): the wave file's merge:, else autopilot.merge. ---
+      mergeMode: () =>
+        log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
+      mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
@@ -6170,7 +6175,7 @@ export class Daemon {
     const log = this.waves.get(wave);
     const opened = log?.record.decisions[id];
     if (log === undefined || opened === undefined) return;
-    // Its inbox item first (SPEC §4.6.17): an autopilot answer closes it like any other.
+    // Its inbox item first (SPEC §4.6.18): an autopilot answer closes it like any other.
     if (opened.resolved === undefined) await this.openDecisionItem(wave, opened);
     if (!(await this.autopilot(wave, opened))) return;
     const d = log.record.decisions[id] as DecisionRecord;
@@ -6311,7 +6316,7 @@ export class Daemon {
     await beforeResolved?.();
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
-    // Every answer closes the decision's inbox item through the referee (SPEC §4.6.17).
+    // Every answer closes the decision's inbox item through the referee (SPEC §4.6.18).
     await this.closeDecisionItem(wave, d, r);
     if (move !== null) {
       await this.append(wave, {
@@ -6493,7 +6498,7 @@ export class Daemon {
   }
 
   // -------------------------------------------------------------------------------------------
-  // The needs-you inbox (SPEC §4.6.17): volleyd is the referee
+  // The needs-you inbox (SPEC §4.6.18): volleyd is the referee
   // -------------------------------------------------------------------------------------------
 
   /** One inbox item (open, or answered and not yet cleared). */

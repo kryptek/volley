@@ -32,7 +32,7 @@ const disagree: DecisionPayload = {
 
 const desk = { kind: "desk" as const, device: "phone" };
 
-describe("inbox records (SPEC §4.6.17)", () => {
+describe("inbox records (SPEC §4.6.18)", () => {
   it("inboxTopic is volley/_inbox/<id>", () => {
     expect(inboxTopic("d-w1-d-abc")).toBe("volley/_inbox/d-w1-d-abc");
   });

@@ -188,6 +188,7 @@ export const DECISION_KINDS = [
   "spawn_budget_exhausted",
   "account_limit",
   "machine_down",
+  "merge_refused",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -409,7 +410,7 @@ export interface InboxWhere {
 
 /**
  * inbox-item.schema.json payload: one thing waiting for a person, on `volley/_inbox/<id>`
- * (SPEC §4.6.17). Answer it with an `inbox_answer { id, version, answer, where }` request to
+ * (SPEC §4.6.18). Answer it with an `inbox_answer { id, version, answer, where }` request to
  * volleyd, the referee: the first answer at the current `version` wins.
  */
 export interface InboxItem {
@@ -597,7 +598,7 @@ export interface DeskState {
   machines?: Record<string, MachinePayload>;
   /** volleyd's readiness verdicts, by machine name. */
   readiness?: Record<string, ReadinessPayload>;
-  /** The needs-you inbox (SPEC §4.6.17): volleyd's retained items, by item id. */
+  /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
   inbox?: Record<string, InboxItem>;
 }
 

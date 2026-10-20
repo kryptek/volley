@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/inbox-item.schema.json",
   "title": "Volley Needs-you Inbox Item",
-  "description": "One thing waiting for a person, published retained to volley/_inbox/<id> by the supervisor only. The supervisor is the referee: the first answer at the item's current version wins, and the answered record is kept for autopilot.inbox_answered_ttl_s, then cleared with an empty retained payload. See spec section 4.6.17.",
+  "description": "One thing waiting for a person, published retained to volley/_inbox/<id> by the supervisor only. The supervisor is the referee: the first answer at the item's current version wins, and the answered record is kept for autopilot.inbox_answered_ttl_s, then cleared with an empty retained payload. See spec section 4.6.18.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {

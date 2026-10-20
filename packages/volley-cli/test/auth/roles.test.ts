@@ -157,7 +157,7 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("desk", "volley/_system/desk-probe/desk-ab12", "desk-ab12")).toBe(false);
   });
 
-  it("the needs-you inbox (SPEC §4.6.17): steer, watch and admin read it; only the supervisors write it", () => {
+  it("the needs-you inbox (SPEC §4.6.18): steer, watch and admin read it; only the supervisors write it", () => {
     for (const u of ["steer-test", "watch-test", "admin-test", "desk"]) {
       expect(fake.canSubscribe(u, "volley/_inbox/+")).toBe(true);
       expect(fake.canPublish(u, "volley/_inbox/d-w1-d-abc")).toBe(false);

@@ -219,7 +219,7 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
 }
 
 /**
- * A needs-you inbox item (SPEC §4.6.17): taken only from volleyd (the broker lets no one else
+ * A needs-you inbox item (SPEC §4.6.18): taken only from volleyd (the broker lets no one else
  * write it; the id is a sanity check) and only when it names its topic's id; a cleared topic
  * forgets it. An answered item stays (with `answered`) until volleyd clears it.
  */

@@ -86,7 +86,7 @@ const operator: RoleAcl[] = [
 /**
  * Every role's ACLs. Order is the order the broker gets them; priorities decide evaluation.
  *
- * The needs-you inbox (`volley/_inbox/<id>`, SPEC §4.6.17) needs no rows of its own: every
+ * The needs-you inbox (`volley/_inbox/<id>`, SPEC §4.6.18) needs no rows of its own: every
  * account reads it through `volley/#`, no account or agent grant reaches it (their writes are
  * four levels deep, or under `_system`), and only `volleyd` and `supervisor` write it, through
  * `volley/#`. An answer is a mailbox request to volleyd, so any login that may steer answers.

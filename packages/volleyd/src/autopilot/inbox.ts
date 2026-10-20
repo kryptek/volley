@@ -3,7 +3,7 @@ import type { DecisionPayload } from "../decisions";
 import type { AutopilotConfig, JournalEvent, NewEvent, TaskId, WaveId } from "../types";
 
 /**
- * The needs-you inbox (SPEC §4.6.17): one retained record per thing waiting for a person, on
+ * The needs-you inbox (SPEC §4.6.18): one retained record per thing waiting for a person, on
  * `volley/_inbox/<id>`, published by volleyd only. volleyd is the referee: an answer names the
  * item version it answers, the first one at the current version wins (compare-and-set) and a
  * later one is refused with where the winner answered. Everything here is pure; the daemon
