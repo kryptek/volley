@@ -4525,10 +4525,7 @@ export class Daemon {
       const shared = worktree !== null && others.some((e) => e.data.worktree === worktree);
       let ws = workspace;
       if (ws !== null && !ref.trusted) {
-        const found =
-          shared || host.findWorkspace === undefined
-            ? null
-            : await host.findWorkspace(ref.title).catch(() => null);
+        const found = shared ? null : await host.findWorkspace(ref.title).catch(() => null);
         ws = found !== null && !others.some((e) => e.data.workspace === found) ? found : null;
       }
       const end = await host.endSession(

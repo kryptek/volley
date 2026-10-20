@@ -63,7 +63,7 @@ describe("retire closes the agent's workspace", () => {
     await s.settled();
     await s.status("failed", { reason: "gave up after the restart" });
     const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
-    expect(s.host.found).toEqual(["w1 T1 implementer"]);
+    expect(s.host.finds).toEqual([{ name: "w1 T1 implementer" }]);
     expect(s.host.closed).toEqual(["workspace:7"]);
     expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
     const ended = s.journal().find((e) => e.type === "agent_session_closed");

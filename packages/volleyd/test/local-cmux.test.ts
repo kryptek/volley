@@ -296,14 +296,11 @@ describe("LocalCmuxHost", () => {
     const host = new LocalCmuxHost(fake.exec);
     expect(await host.findWorkspace("w1 T1 implementer")).toBe("workspace:12");
     // Two with one title: neither is trusted.
-    expect(await host.findWorkspace("w1 T2 fixup")).toBeNull();
+    await expect(host.findWorkspace("w1 T2 fixup")).rejects.toThrow(/2 workspaces/);
     expect(await host.findWorkspace("w1 T3 implementer")).toBeNull();
-    expect(parseWorkspaceList(list)[1]).toEqual({
-      ref: "workspace:3",
-      title: "✳ the owner's session",
-    });
+    expect(parseWorkspaceList(list, "✳ the owner's session")).toBe("workspace:3");
     const down = fakeExec().on(["cmux", "list-workspaces"], { code: 1 });
-    expect(await new LocalCmuxHost(down.exec).findWorkspace("w1 T1 implementer")).toBeNull();
+    await expect(new LocalCmuxHost(down.exec).findWorkspace("w1 T1 implementer")).rejects.toThrow();
   });
 
   it("writeFile creates parents and applies the mode", async () => {

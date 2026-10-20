@@ -107,8 +107,6 @@ export interface Host {
     worktree: string | null,
     consent: ConsentToken,
   ): Promise<SessionEnd>;
-  /** The ref of the one workspace titled exactly `name`; null when none, several or unreadable. */
-  findWorkspace?(name: string): Promise<string | null>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
   readonly screenSource?: string;
   /**

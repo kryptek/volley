@@ -187,26 +187,6 @@ export class LocalCmuxHost implements Host {
           );
     return { closed, pids, how: closed ? "close-workspace" : pids.length > 0 ? "signal" : "none" };
   }
-
-  async findWorkspace(name: string): Promise<string | null> {
-    const r = await this.cmux(["cmux", "list-workspaces"], {
-      timeoutMs: DAEMON_DEFAULTS.screen_read_timeout_ms,
-    }).catch(() => null);
-    if (r === null || r.code !== 0 || r.timedOut) return null;
-    const refs = parseWorkspaceList(r.stdout).filter((w) => w.title === name);
-    return refs.length === 1 ? (refs[0] as { ref: string }).ref : null;
-  }
-}
-
-/**
- * `cmux list-workspaces` output (`[* ]workspace:<n>  <title>[  [selected]]` per line) → refs and
- * titles. Pure.
- */
-export function parseWorkspaceList(stdout: string): { ref: string; title: string }[] {
-  return stdout.split("\n").flatMap((line) => {
-    const m = /^[\s*]*(workspace:[A-Za-z0-9-]+)\s+(.*?)(?:\s+\[selected\])?\s*$/.exec(line);
-    return m === null ? [] : [{ ref: m[1] as string, title: m[2] as string }];
-  });
 }
 
 /**
