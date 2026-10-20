@@ -498,7 +498,9 @@ describe("volley peer join (on the machine to pair)", () => {
       symlinkSync("/bin/sh", join(box, "tools", "sh"));
       write(join(box, "tools", "bun"), "#!/bin/sh\n");
       write(join(box, "tools", "tmux"), "#!/bin/sh\n");
-      write(join(box, "volley"), `#!/bin/sh\ntouch ${join(box, "redeemed")}\n`);
+      // Like `volley peer redeem`, it reads the whole request from stdin (a stub that does not
+      // could exit first, and base64 then dies of SIGPIPE: exit 141 under pipefail).
+      write(join(box, "volley"), `#!/bin/sh\ncat > ${join(box, "redeemed")}\n`);
       const script = redeemScript(
         { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
         join(box, "volley"),
@@ -520,7 +522,10 @@ describe("volley peer join (on the machine to pair)", () => {
         env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
       });
       expect(ok.status, ok.stderr).toBe(0);
-      expect(existsSync(join(box, "redeemed"))).toBe(true);
+      expect(JSON.parse(readFileSync(join(box, "redeemed"), "utf-8"))).toMatchObject({
+        code: "ABCD-EFGH",
+        target: "dev@box-a",
+      });
     } finally {
       rmSync(box, { recursive: true, force: true });
     }
