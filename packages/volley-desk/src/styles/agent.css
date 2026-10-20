@@ -121,7 +121,7 @@
 }
 .term {
   padding: 8px 10px;
-  font: 11.5px / 1.55 var(--f-mono);
+  font: 11.5px / 1.55 var(--f-term);
   color: #c9d1e4;
   white-space: pre-wrap;
   word-break: break-word;
