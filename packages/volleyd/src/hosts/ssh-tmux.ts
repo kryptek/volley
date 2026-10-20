@@ -16,7 +16,14 @@ import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
-import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
+import type {
+  Host,
+  LaunchSpec,
+  SessionEnd,
+  TypedTextTokens,
+  WorktreeResult,
+  WorktreeSpec,
+} from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
 export interface RemoteHostSpec {
@@ -340,28 +347,56 @@ export class SshTmuxHost implements RemoteHost {
     );
   }
 
-  async launch(spec: LaunchSpec): Promise<{ workspace: string }> {
+  /** The launch chain: each launch starts after the one before it settles. */
+  private launches: Promise<unknown> = Promise.resolve();
+
+  /** Open a tmux session. Serialized: one `new-session` in flight at a time on this host. */
+  launch(spec: LaunchSpec): Promise<{ workspace: string }> {
+    const run = this.launches.then(() => this.launchNow(spec));
+    this.launches = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * A failed launch's `detail.outcome` is `unknown` when `new-session` was sent and ssh failed
+   * (the command may have run), else `refused`; `detail.candidate` is the session name tried.
+   */
+  private async launchNow(spec: LaunchSpec): Promise<{ workspace: string }> {
     const fail = (msg: string, detail: Record<string, unknown> = {}) =>
-      new SpawnError("LAUNCH_FAILED", msg, { host: this.name, ...detail });
+      new SpawnError("LAUNCH_FAILED", msg, { host: this.name, outcome: "refused", ...detail });
     if (spec.command.trim() !== TMUX_LAUNCH_COMMAND) {
       throw fail(`a remote session runs only '${TMUX_LAUNCH_COMMAND}'`);
     }
     const session = await this.freeSession(sessionName(spec.name)).catch((e: unknown) => {
-      throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`);
+      throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`, {
+        candidate: sessionName(spec.name),
+      });
     });
     await this.syncTmuxPath();
     const r = await this.run(
       [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
       spec.launch !== undefined ? { launch: spec.launch } : {},
     ).catch((e: unknown) => {
-      throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`);
+      throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`, {
+        candidate: session,
+        outcome: "unknown",
+      });
     });
     if (r.code !== 0) {
-      throw fail(`tmux new-session failed on ${this.spec.target}: ${r.stderr.trim()}`, {
-        exit: r.code,
-      });
+      const lost = transportFailed(r);
+      throw fail(
+        `tmux new-session failed on ${this.spec.target}: ${lost && r.timedOut ? "timed out" : r.stderr.trim()}`,
+        { exit: r.code, candidate: session, outcome: lost ? "unknown" : "refused" },
+      );
     }
     return { workspace: session };
+  }
+
+  async findWorkspace(name: string, candidate?: string): Promise<string | null> {
+    const session = candidate ?? sessionName(name);
+    const r = await this.run([{ argv: ["tmux", "has-session", "-t", `=${session}`] }]);
+    if (transportFailed(r)) throw this.sshFailed("has-session", r);
+    return r.code === 0 ? session : null;
   }
 
   /**
@@ -391,11 +426,16 @@ export class SshTmuxHost implements RemoteHost {
     );
   }
 
-  /** `base`, or `base-2`, `base-3`, … — the first name no tmux session has. */
+  /**
+   * `base`, or `base-2`, `base-3`, … — the first name no tmux session has. A fallback can equal
+   * a later attempt's base (`w1-T1-role-2` is also attempt 2's `sessionName`); that is harmless,
+   * since a reconcile looks up the exact candidate the launch tried, not the base.
+   */
   private async freeSession(base: string): Promise<string> {
     for (let i = 1; i <= DAEMON_DEFAULTS.tmux_session_attempts; i++) {
       const name = i === 1 ? base : `${base}-${i}`;
       const r = await this.run([{ argv: ["tmux", "has-session", "-t", `=${name}`] }]);
+      if (transportFailed(r)) throw this.sshFailed("has-session", r);
       if (r.code !== 0) return name;
     }
     throw new Error(`no free session name for ${base}`);
@@ -426,6 +466,22 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+  }
+
+  /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
+  async endSession(
+    workspace: string | null,
+    _worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd> {
+    if (workspace === null) return { closed: false, pids: [], how: "none" };
+    const closed = await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], {
+      consent,
+    }).then(
+      (r) => r.code === 0 && !r.timedOut,
+      () => false,
+    );
+    return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 
   /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */

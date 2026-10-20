@@ -228,6 +228,98 @@ describe("SshTmuxHost", () => {
     expect((err as Error).message).toContain("tmux: command not found");
   });
 
+  it("classifies a failed launch: unknown once new-session was sent over a failing ssh, else refused", async () => {
+    const launch = (reply: StepReply): Promise<SpawnError> =>
+      remote(reply)
+        .host.launch({
+          cwd: "/wt",
+          name: "w1 T1 implementer",
+          command: LAUNCH_COMMAND,
+          launch: sealed("/wt"),
+        })
+        .then(
+          () => {
+            throw new Error("launched");
+          },
+          (e: unknown) => e as SpawnError,
+        );
+    const noSession = (s: RemoteStep) =>
+      argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined;
+    // tmux answered and refused: nothing was created.
+    const refused = await launch(
+      (s) => noSession(s) ?? (argvIs("tmux", "new-session")(s) ? { code: 1 } : undefined),
+    );
+    expect(refused.detail).toMatchObject({ outcome: "refused", candidate: "w1-T1-implementer" });
+    // ssh failed after new-session was sent: the session may be running.
+    const dropped = await launch(
+      (s) => noSession(s) ?? (argvIs("tmux", "new-session")(s) ? { code: 255 } : undefined),
+    );
+    expect(dropped.detail).toMatchObject({ outcome: "unknown", candidate: "w1-T1-implementer" });
+    const timedOut = await launch(
+      (s) =>
+        noSession(s) ??
+        (argvIs("tmux", "new-session")(s) ? { code: 1, timedOut: true } : undefined),
+    );
+    expect(timedOut.detail).toMatchObject({ outcome: "unknown" });
+    // ssh never got as far as new-session.
+    const unreachable = await launch((s) =>
+      argvIs("tmux", "has-session")(s) ? { code: 255 } : undefined,
+    );
+    expect(unreachable.detail).toMatchObject({ outcome: "refused" });
+  });
+
+  it("serializes launches: one new-session in flight at a time", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let sent = 0;
+    const fake = fakeExec().on(["ssh"], async (_argv, opts: ExecOptions) => {
+      const step = opts.remote?.steps[0];
+      if (step === undefined) return {};
+      if (argvIs("tmux", "has-session")(step)) return { code: 1 };
+      if (argvIs("tmux", "new-session")(step)) {
+        sent += 1;
+        if (sent === 1) await gate;
+      }
+      return {};
+    });
+    const host = new SshTmuxHost(SPEC, fake.exec);
+    const spec = (n: string) => ({
+      cwd: "/wt",
+      name: n,
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+    });
+    const first = host.launch(spec("w1 T1 implementer"));
+    const second = host.launch(spec("w1 T2 implementer"));
+    // Let every pending step run: the second launch must still be waiting on the first.
+    for (let i = 0; i < 200; i++) await Promise.resolve();
+    expect(sent).toBe(1);
+    release();
+    expect(await first).toEqual({ workspace: "w1-T1-implementer" });
+    expect(await second).toEqual({ workspace: "w1-T2-implementer" });
+  });
+
+  it("findWorkspace asks tmux has-session for the exact candidate session", async () => {
+    const live = new Set(["=w1-T1-implementer-2"]);
+    const r = remote((s) =>
+      argvIs("tmux", "has-session")(s) ? { code: live.has(s.argv[3] ?? "") ? 0 : 1 } : undefined,
+    );
+    expect(await r.host.findWorkspace("w1 T1 implementer", "w1-T1-implementer-2")).toBe(
+      "w1-T1-implementer-2",
+    );
+    // Without a candidate: the session name the title maps to.
+    expect(await r.host.findWorkspace("w1 T1 implementer")).toBeNull();
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "has-session", "-t", "=w1-T1-implementer-2"],
+      ["tmux", "has-session", "-t", "=w1-T1-implementer"],
+    ]);
+    // ssh failing is undecidable.
+    const down = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 255 } : undefined));
+    await expect(down.host.findWorkspace("w1 T1 implementer")).rejects.toThrow();
+  });
+
   it("launch.sh for a remote host: the box's mcp.json, the remote hooks dir, env exports for tooling", () => {
     const host = new SshTmuxHost(SPEC, fakeExec().exec);
     // The box's own volley checkout runs the agent's MCP server.
@@ -299,6 +391,26 @@ describe("SshTmuxHost", () => {
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
     ]);
+  });
+
+  it("endSession is kill-session (tmux ends the pane's processes); no ref, nothing run", async () => {
+    const r = remote();
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    expect(await r.host.endSession("w1-T1-implementer", "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: true,
+      pids: [],
+      how: "kill-session",
+    });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
+    ]);
+    const r2 = remote();
+    expect(await r2.host.endSession(null, "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: false,
+      pids: [],
+      how: "none",
+    });
+    expect(r2.steps()).toEqual([]);
   });
 
   it("prepareWorktree fetches the release branch, then cuts the worktree from it, no tracking", async () => {

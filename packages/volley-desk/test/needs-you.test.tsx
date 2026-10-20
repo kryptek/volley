@@ -169,7 +169,7 @@ describe("Frame attention wrapper", () => {
     title: "w",
     accent: "#fff",
     pos: { x: 0, y: 0 },
-    width: 100,
+    width: 460,
     z: 1,
     scale: 1,
     chrome: "glass" as const,

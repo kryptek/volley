@@ -1,5 +1,5 @@
 import type { DecisionInput } from "./decisions";
-import type { ExecFn } from "./exec";
+import type { ExecFn, ExecResult } from "./exec";
 import type { NewEvent, TaskId } from "./types";
 
 /**
@@ -618,12 +618,59 @@ export interface MovedHeadFacts {
   /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
   log: string;
   diffstat: string;
+  /** Present when `to` is a merge of `from` and a commit on the release branch. */
+  release_merge?: ReleaseMerge;
+}
+
+/**
+ * A moved head that merges a release-branch commit (`parent`) into the gated head: the files the
+ * move touched, the files the release branch changed since the PR branched from it, and whether
+ * the first are all among the second (a conflict resolved inside such a file still counts).
+ */
+export interface ReleaseMerge {
+  parent: string;
+  moved_files: string[];
+  release_files: string[];
+  only_release: boolean;
+}
+
+const names = (text: string): string[] =>
+  text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+
+/** Is `to` a merge of `from` and a commit on `origin/<release>` only? Null: not such a merge. */
+async function releaseMergeOf(
+  git: (...args: string[]) => Promise<ExecResult>,
+  o: { from: string; to: string; release_branch: string },
+): Promise<ReleaseMerge | null> {
+  const p = await git("log", "-n", "1", "--format=%P", o.to);
+  const parents = p.code === 0 ? p.stdout.split(/\s+/).filter((x) => x !== "") : [];
+  const parent = parents.find((x) => x !== o.from);
+  if (parents.length !== 2 || !parents.includes(o.from) || parent === undefined) return null;
+  await git("fetch", "origin", o.release_branch);
+  const on = await git("merge-base", "--is-ancestor", parent, `origin/${o.release_branch}`);
+  if (on.code !== 0) return null;
+  const base = await git("merge-base", o.from, parent);
+  if (base.code !== 0 || line(base.stdout) === "") return null;
+  const moved = await git("diff", "--name-only", o.from, o.to);
+  const release = await git("diff", "--name-only", line(base.stdout), parent);
+  if (moved.code !== 0 || release.code !== 0) return null;
+  const moved_files = names(moved.stdout);
+  const release_files = names(release.stdout);
+  return {
+    parent,
+    moved_files,
+    release_files,
+    only_release: moved_files.every((f) => release_files.includes(f)),
+  };
 }
 
 /** Gather MovedHeadFacts (read-only git / gh through the fenced exec). */
 export async function probeMovedHead(
   exec: ExecFn,
-  o: { cwd: string; branch: string; from: string; to: string },
+  o: { cwd: string; branch: string; from: string; to: string; release_branch?: string },
 ): Promise<MovedHeadFacts> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await git("fetch", "origin", o.branch);
@@ -638,6 +685,10 @@ export async function probeMovedHead(
   }
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
   const stat = await git("diff", "--stat", o.from, o.to);
+  const merge =
+    o.release_branch !== undefined
+      ? await releaseMergeOf(git, { from: o.from, to: o.to, release_branch: o.release_branch })
+      : null;
   return {
     ci: {
       state: ci.state,
@@ -648,5 +699,6 @@ export async function probeMovedHead(
     },
     log: log.code === 0 ? log.stdout.trim() : "",
     diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",
+    ...(merge !== null ? { release_merge: merge } : {}),
   };
 }

@@ -83,6 +83,8 @@ export interface SupervisedEnvOptions {
   pipeline?: string;
   /** Extra top-level wave-file lines (e.g. `spawn_budget: 1`). */
   waveExtra?: string;
+  /** How launches end (fake-host.ts `launchOutcome`; default ok). */
+  launchOutcome?: FakeHost["launchOutcome"];
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -107,6 +109,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     });
   for (const [prefix, reply] of o.exec ?? []) fake.on(prefix, reply);
   const host = fakeHost(fake);
+  host.launchOutcome = o.launchOutcome ?? "ok";
   const creds = o.creds ?? memoryCredentials();
   const ns = o.namespace ?? NS;
 

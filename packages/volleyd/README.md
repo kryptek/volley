@@ -779,6 +779,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
+| `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
@@ -810,7 +811,7 @@ lists every key with its default and example pools, commented out.
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
-| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
+| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>[ <attempt>]" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
@@ -888,6 +889,38 @@ Failures are counted per role (two reviewers of one step fail and back off indep
 per agent attempt; the task shows its most recent one, and its decision resolves once no role
 is still failing. The backoff carries over a restart: the retry runs when the journal's
 `next_retry_at` says, and stopped retries stay stopped until someone answers "retry now".
+
+**Launches whose outcome is unknown.** A launch can fail without saying whether it created
+anything: the cmux CLI gives up on its own (`Error: Command timed out`) or hits volleyd's bound
+on it (`launch_timeout_ms`, 60 s), exits with no workspace ref, or ssh drops after a remote
+`tmux new-session` was sent. Such a launch may still have opened the workspace and started the
+agent, so before anything retries it volleyd reconciles: it looks the workspace up by the exact
+name it gave it (`cmux list-workspaces`; `tmux has-session` on a remote host) and waits up to
+`launch_reconcile_ms` (30 s) for the agent's hook signals on the watch it subscribed before the
+launch. That name is one per agent id: `<wave> <task> <role>`, with the attempt appended after the
+first (`w1 T1 fixup 2`), so the lookup never finds a workspace an earlier attempt left open.
+
+- The agent registered: it is **adopted**. The journal gets `spawn_adopted { agent_id, role,
+  attempt, workspace, after: "launch_unknown", waited_ms }`, then the usual `agent_spawned`
+  with `adopted: true`; nothing is launched a second time and verification goes on as for any
+  launch. If neither lookup found its workspace, `spawn_adopted` says `workspace: "unknown"` and
+  `agent_spawned` carries an empty `workspace`: the agent runs and is supervised through its
+  messages, but volleyd cannot read its screen, send it keys or close its workspace on retire (a
+  human closes it).
+- A workspace is there but no agent registered: volleyd closes it (`launch_orphan_closed {
+  agent_id, workspace }`) and the spawn fails as above; its retry may reuse the agent id, since
+  that session is known gone.
+- Nothing is there and the host answered: the spawn fails as above.
+- The host could not be asked (the lookup failed or timed out), more than one workspace carries
+  the name (which one is this launch's cannot be told) or the workspace could not be closed:
+  the attempt is **burned** (`spawn_identity_burned { agent_id, role, attempt, why }`), its
+  login revoked, and the retry takes the next attempt number, so no retry ever reuses an agent
+  id that may be live. Its branch follows (`-2` after a never-used `-1`). The failure still
+  counts toward `spawn_retry_max`.
+
+A launch cmux refused (not running, not installed, refusing volleyd) created nothing and fails
+straight away. Launches are serialized per host: one `cmux new-workspace` (or remote
+`tmux new-session`) is in flight at a time, so a slow cmux does not stack them.
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
@@ -1178,14 +1211,42 @@ reconnect with a fresh `spawning` (SPEC §6.5). Retiring deletes the agent's log
 it): volleyd publishes the agent's retained `status: reaped { reason: "credentials_deleted" }`,
 then empty retained payloads on its `registry`, `status`, `progress`, `result`, `capability`,
 `screen` and `usage` topics, then the batched `deleteClient` (journaled `agent_reaped_by_supervisor`
-and `credentials_revoked`); then the lock is released, the agent's workspace closed (its cmux
-workspace, or its tmux session on an ssh host: `agent_retired { workspace, workspace_closed }`),
-and `agent_retired { status, terminal, result }` journaled. `terminal` is the
+and `credentials_revoked`); then the lock is released, the agent's session ended, and
+`agent_retired { status, terminal, result }` journaled. `terminal` is the
 terminal status payload (`summary`, `pr_url`, `reason`, …) and `result` is the retained result,
-so the cleared records live on in the journal. Only the wave's own agents, only terminal ones. Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes any workspace a retire could not close and runs `git worktree remove` with the fence's
-consent token (`--force` for dirty worktrees); worktrees of agents not yet retired are skipped,
-and branches are never deleted.
+so the cleared records live on in the journal. Only the wave's own agents, only terminal ones.
+
+**The retired marker.** Before the login is deleted, volleyd writes
+`<worktree>/.volley/retired.json` `{ agent_id, status, at }` through the agent's host (so a
+remote box gets it too). The agent's hooks read it: a marker naming their own agent id makes them
+end quietly (exit 0, no broker connect, a one-time `{ code: "RETIRED" }` note in
+`hooks-error.json`) instead of reporting the refused login as `AUTH_FAILED`. A marker naming
+another id (a reused worktree) is ignored.
+
+**Ending the session.** With `retire_close_session` on (the default) the retire then closes the
+agent's workspace (its cmux workspace, bounded by a 15 s timeout, or its tmux session on an ssh
+host) and, on this machine, stops whatever process still runs under the agent's worktree: a
+closed cmux workspace does not always end its `claude`. A process counts only by its argv (the
+launch script's `--mcp-config=<worktree>/.volley/mcp.json`; volleyd lists processes with the
+fenced `ps -axo pid=,command=` and signals them itself: SIGTERM, a 5 s grace, SIGKILL). It is
+journaled `agent_session_closed { agent_id, workspace, how, pids }` (`how`: `close-workspace`,
+`kill-session`, `signal` when only a process was stopped, or `none`) before
+`agent_retired { workspace, workspace_closed }`. An agent retired after a daemon restart has
+only a journaled ref; a short cmux ref (`workspace:<n>`) may name another workspace by then, so
+volleyd re-finds the workspace by its `<wave> <task> <role>` title (`cmux list-workspaces`,
+exactly one match) and, when it cannot, closes nothing and still stops the processes under the
+worktree. A worktree or title another live agent of the wave now holds (a relaunch into the same
+worktree) is left alone. With `retire_close_session: false` finished sessions stay open for
+inspection (`workspace_closed: false`; the marker is still written).
+
+Nothing on disk is deleted: `volleyd cleanup <wave>
+--yes` closes any workspace a retire could not close, runs `git worktree remove` with the fence's
+consent token (`--force` for dirty worktrees), and stops the retired agents' processes still
+running on this machine: every process whose `--mcp-config=` lies inside the worktree of a
+target whose every agent is retired, never one under any other worktree (an agent not yet
+retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
+id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
+deleted.
 
 Answering a `repo_untrusted` decision with `volleyd resolve <id> trust` (owner only) records
 exactly `projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`; it re-checks the
@@ -2059,8 +2120,9 @@ have a stored review with a verdict that holds for the **current head** — a re
 head, or of one it descends from only through fixups that ran after that review (they worked
 from its round or a later one) and branch updates (rebase or merge). A head pushed outside the
 pipeline (`pr_head_moved`, re-verified) was reviewed by nobody, so reviews of the heads before
-it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
-(`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
+it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`,
+or `accept` for a merge of the release branch only (`moves[].accepted_by`, and `how:
+"release_merge"`, in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals
 `alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
@@ -2086,12 +2148,16 @@ push under "Pushes outside the pipeline" (the reviews keep the heads they name).
 evidence_path }` and `stage_entered merge_ready`: the task appears in the wave state's `gates`
 with its `evidence_path`.
 
-**volleyd never merges.** A human merges the PR. The pipeline polls the gated PR read-only
-(`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`);
-once it is `MERGED` into the release branch it journals `artifact_verified { role: "merged",
-head_sha, merge_sha }` and `stage_entered done`, which releases the task's dependents. Merged at
-another head than the gated one → also `alarm_raised { alarm: "merged_unverified_head", gated,
-merged }`, and the merge record describes the commit that merged: `gated_head_sha`,
+**volleyd never merges.** A human merges the PR. The pipeline polls every task's PR read-only
+(`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`),
+in any stage short of `done` and `cancelled` — at `merge_ready`, and also while the task waits
+on a decision, while the reviews run or during a fixup. Once it is `MERGED` into the release
+branch, the task's open decisions are resolved first (`superseded_by_merge`, by `volleyd`, with
+the merge commit in the rationale; a parked task would otherwise stay parked), its live agents
+are retired, and it journals `artifact_verified { role: "merged", head_sha, merge_sha }` and
+`stage_entered done`, which releases the task's dependents. Merged at another head than the
+gated one, or before the task reached `merge_ready` → also `alarm_raised { alarm:
+"merged_unverified_head", gated, merged }` (`gated`: the task's verified head, `null` if none), and the merge record describes the commit that merged: `gated_head_sha`,
 `merged_head_sha` and `merged_ci`, the CI of that head (read with `gh run list --commit`;
 `unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
@@ -2143,7 +2209,16 @@ is marked stale (`stale: { from, to, at }` and a banner), nothing downstream is 
 the new head is awaited (`ci_pending`, as above), then decision `pr_head_moved` asks
 `rereview` (the reviewers again on the new head, a new review round, then the fixup and the
 gate), `fixup` (a fixup agent at the next attempt on the new head; the reviews of the old head
-hold for it on the owner's word) or `cancel`. The fixup's `.volley/findings.md` opens with a
+hold for it on the owner's word), `accept` or `cancel`. `accept` is offered only when CI on the
+new head is green and the move is a merge of the release branch only: the new head's parents
+are the old head and a commit on `origin/<release>` (`git log -n 1 --format=%P`, `git merge-base
+--is-ancestor`), and every file the move changed (`git diff --name-only <old> <new>`) is one the
+release branch changed since the PR branched from it (a conflict resolved inside such a file, the
+CHANGELOG case, still counts). `accept` verifies the head role again at the new head
+(`artifact_verified { adopted: true, accepted_by, move: { how: "release_merge", parent, touched
+} }`), keeps the reviews of the old head (like a branch update) and goes on to the rebase check
+and the gate; the evidence says "Accepted by <who>: a merge of the release branch only". An
+`accept` the decision did not offer is asked again. The fixup's `.volley/findings.md` opens with a
 directive: CI on the new head, and when it is red its failed jobs and the failing test ids read
 from `gh run view <id> --log-failed`, plus the diff since the gated head. A red CI on a moved
 head is routed there, not into a `ci_failed` dead end, and a fixup is never skipped while that
@@ -2209,6 +2284,8 @@ ALLOW (program by bare name only — never a path):
     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
   (agent logins are minted and deleted over volleyd's own Dynamic Security control
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+  ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
+    agent's claude by `process.kill`, never by a spawned `kill`)
   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
     retains no $SYS/broker/version)
   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>

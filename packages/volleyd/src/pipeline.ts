@@ -6,6 +6,7 @@ import {
   type MovedHeadFacts,
   type OperatorMergeCheck,
   type RebaseCheck,
+  type ReleaseMerge,
   type SupersededRun,
   artifactOutcome,
   checkRebase,
@@ -153,9 +154,18 @@ export interface TaskPipeline {
   rebases: { from?: string; to: string; touched: string[] }[];
   /**
    * Heads pushed to the PR outside the pipeline after a verification. `accepted_by`: the owner
-   * answered a pr_head_moved decision with `fixup`, so the reviews of `from` still hold for `to`.
+   * answered a pr_head_moved decision with `fixup`, or with `accept` for a merge of the release
+   * branch only (`how: release_merge`, `parent`: the release commit merged), so the reviews of
+   * `from` still hold for `to`.
    */
-  moves: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  moves: {
+    from: string;
+    to: string;
+    touched: string[];
+    accepted_by?: string;
+    how?: "release_merge";
+    parent?: string;
+  }[];
   /** Reviewers to re-run because the last rebase touched files they flagged. */
   rereview: ReviewerRole[];
   /** The owner's answer to a `reviewers_disagree` decision, for the round it was asked in. */
@@ -202,6 +212,8 @@ export interface Directive {
   superseded?: SupersededRun[];
   /** The owner chose `fixup`: the fixup works from this directive only (no review findings). */
   only?: boolean;
+  /** The move merges a release-branch commit into `from` (probeMovedHead). */
+  release_merge?: ReleaseMerge;
 }
 
 /** A `ci_pending` event's facts: whose head, how far its runs are, when it is checked again. */
@@ -259,6 +271,9 @@ const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
 ]);
 
 /** Answers are free text: only an exact option (case and surrounding space aside) counts. */
+/** The answer volleyd closes a task's open decisions with when its PR is seen merged. */
+export const SUPERSEDED_BY_MERGE = "superseded_by_merge";
+
 export const isAnswer = (answer: string, option: string): boolean =>
   answer.trim().toLowerCase() === option;
 
@@ -373,7 +388,21 @@ export function reducePipeline(
         if (run !== undefined) run.adopt = false;
         if (from !== undefined && typeof d.head_sha === "string") {
           const touched = Array.isArray(d.touched) ? (d.touched as string[]) : [];
-          p.moves.push({ from, to: d.head_sha, touched });
+          // A pr_head_moved answered `accept`: the owner took a merge of the release branch.
+          const mv = d.move as { how?: string; parent?: string; touched?: string[] } | undefined;
+          const accepted = mv?.how === "release_merge" && typeof d.accepted_by === "string";
+          p.moves.push({
+            from,
+            to: d.head_sha,
+            touched: accepted ? (mv.touched ?? []) : touched,
+            ...(accepted
+              ? {
+                  accepted_by: d.accepted_by as string,
+                  how: "release_merge" as const,
+                  ...(typeof mv.parent === "string" ? { parent: mv.parent } : {}),
+                }
+              : {}),
+          });
         }
       } else if (isReviewerRole(role) && d.review !== undefined) {
         const result = d.review as ReviewResult;
@@ -503,7 +532,12 @@ export function reducePipeline(
             p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
-        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+        } else if (
+          isAnswer(answer, "cancel") ||
+          (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept"))
+        )
+          // accept: the head moves with the artifact_verified onResolved journals next.
+          p.moved = undefined;
       }
       break;
     }
@@ -713,9 +747,10 @@ export type MergeReadyCheck =
  * a verdict that holds for the current head — a review of the head itself, or of a head the
  * current one descends from only through fixups that worked from that review's round or later
  * (they ran after it), rebases, and heads pushed outside the pipeline that the owner accepted
- * without a re-review (a `pr_head_moved` answered `fixup`: `moves[].accepted_by`, kept in the
- * evidence; SPEC §4.6.8). Any other outside push (`moves`) was reviewed by nobody. A pipeline
- * without review stages passes, as `skippedByPlan`: the wave file said so.
+ * without a re-review (a `pr_head_moved` answered `fixup`, or `accept` for a merge of the release
+ * branch only: `moves[].accepted_by`, kept in the evidence; SPEC §4.6.8). Any other outside
+ * push (`moves`) was reviewed by nobody. A pipeline without review stages passes, as
+ * `skippedByPlan`: the wave file said so.
  */
 export function mergeReadyCheck(stages: PipelineStage[][], p: TaskPipeline): MergeReadyCheck {
   const planned = REVIEWER_ROLES.filter((r) =>
@@ -744,7 +779,8 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
     head =
       fixup?.from ??
       p.rebases.find((r) => r.to === to)?.from ??
-      // A head moved outside the pipeline that the owner sent straight to a fixup.
+      // A head moved outside the pipeline that the owner sent straight to a fixup, or accepted as
+      // a merge of the release branch only (SPEC §4.6.8: a merge of it keeps the reviews).
       p.moves.find((m) => m.to === to && m.accepted_by !== undefined)?.from;
   }
   return false;
@@ -853,10 +889,13 @@ function onMergeChecked(
 ): PipelineAction[] {
   const { view } = ev;
   const { pr, head } = v.p;
-  if (v.stage !== "merge_ready" || pr === undefined) return [];
+  if (v.stage === "done" || v.stage === "cancelled" || pr === undefined) return [];
+  // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    const unverified = merged !== undefined && merged !== head;
+    // Not through the gate: merged at another head, or before the task reached merge_ready.
+    const other = merged !== undefined && merged !== head;
+    const unverified = other || v.stage !== "merge_ready";
     return [
       ...(unverified
         ? [
@@ -865,7 +904,12 @@ function onMergeChecked(
               event: {
                 type: "alarm_raised" as const,
                 task: v.task,
-                data: { alarm: "merged_unverified_head", pr: pr.url, gated: head, merged },
+                data: {
+                  alarm: "merged_unverified_head",
+                  pr: pr.url,
+                  gated: head ?? null,
+                  merged,
+                },
               },
             },
           ]
@@ -873,10 +917,11 @@ function onMergeChecked(
       ...mergedActions(
         v,
         { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
-        unverified ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
+        other ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
       ),
     ];
   }
+  if (v.stage !== "merge_ready") return [];
   // Closed unmerged on GitHub — but a local squash + push closes it that way too.
   if (view.state === "CLOSED") return [{ kind: "check_landed" }];
   // Still open, at another head than the gate saw (e.g. the release branch merged into it).
@@ -979,6 +1024,9 @@ function onMovedCi(
   // A red head only reaches the gate through a fixup: rereview needs a fixup stage after it.
   const hasFixup = v.stages.some((g) => g.includes("fixup"));
   const review = ci.state === "red" && !hasFixup ? null : reviewStep(v.stages);
+  const merge = ev.facts.release_merge;
+  // A green merge of the release branch only keeps the reviews: the owner may take it as it is.
+  const acceptable = ci.state === "green" && merge?.only_release === true;
   const directive: Directive = {
     from: m.from,
     to: m.to,
@@ -989,7 +1037,11 @@ function onMovedCi(
     diffstat: ev.facts.diffstat,
     runs: ci.runs,
     ...(ci.superseded.length > 0 ? { superseded: ci.superseded } : {}),
+    ...(merge !== undefined ? { release_merge: merge } : {}),
   };
+  const accept = acceptable
+    ? `accept: the move is a merge of ${v.release_branch} only (files: ${merge.moved_files.join(", ") || "none"}; they may carry content resolved by hand, which no reviewer saw), so the reviews of ${at(m.from)} hold; the gate again at ${at(m.to)}; `
+    : "";
   return [
     {
       kind: "decide",
@@ -997,9 +1049,14 @@ function onMovedCi(
       decision: {
         kind: "pr_head_moved",
         task: v.task,
-        question: `PR #${ev.pr.number}'s head moved from ${at(m.from)} to ${at(m.to)} outside the pipeline (during ${m.during}); CI on ${at(m.to)} is ${ci.state}${failure}. The reviews saw ${at(m.from)}. ${review !== null ? "rereview: the reviewers again on the new head, then the fixup and the gate; " : ""}fixup: a fixup agent on ${at(m.to)} with the CI result and the ${at(m.from)}..${at(m.to)} diff as its directive, then the gate; or cancel?`,
+        question: `PR #${ev.pr.number}'s head moved from ${at(m.from)} to ${at(m.to)} outside the pipeline (during ${m.during}); CI on ${at(m.to)} is ${ci.state}${failure}. The reviews saw ${at(m.from)}. ${review !== null ? "rereview: the reviewers again on the new head, then the fixup and the gate; " : ""}fixup: a fixup agent on ${at(m.to)} with the CI result and the ${at(m.from)}..${at(m.to)} diff as its directive, then the gate; ${accept}or cancel?`,
         pointers: { pr: ev.pr.url },
-        options: [...(review !== null ? ["rereview"] : []), "fixup", "cancel"],
+        options: [
+          ...(review !== null ? ["rereview"] : []),
+          "fixup",
+          ...(acceptable ? ["accept"] : []),
+          "cancel",
+        ],
       },
       data: {
         from: m.from,
@@ -1069,6 +1126,8 @@ function mergedActions(
         },
       },
     },
+    // Merged mid-pipeline: whoever is still at work on it stops.
+    ...Object.values(v.p.runs).flatMap(retireIfLive),
     {
       kind: "journal",
       event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
@@ -1667,6 +1726,8 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         const i = v.stages.findIndex((g) => g.includes("fixup"));
         return [...live, ...enterStep(v, i >= 0 ? i : Math.max(v.p.step, 0), ["fixup"])];
       }
+      if (isAnswer(answer, "accept") && (d.options ?? []).includes("accept"))
+        return acceptReleaseMerge(v, d, m);
       const review = reviewStep(v.stages);
       // Offered only when the decision listed it (a red head needs a fixup stage after it).
       if (isAnswer(answer, "rereview") && review !== null && (d.options ?? []).includes("rereview"))
@@ -1718,6 +1779,69 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/**
+ * A pr_head_moved answered `accept` (offered only for a green merge of the release branch only):
+ * the role whose head the gate saw is verified again at the moved head, with the move and who
+ * accepted it; the reviews of `from` hold at `to` (mergeReadyCheck), so the next advance goes on
+ * to the rebase check and the gate at `to`.
+ */
+function acceptReleaseMerge(
+  v: PipelineView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+): PipelineAction[] {
+  const dir = (d as { directive?: Directive }).directive;
+  const merge = dir?.release_merge;
+  const from = m.from ?? dir?.from;
+  const to = m.head ?? dir?.to;
+  const role = headRole(v.p) ?? lastPublisher(v.p);
+  const run = role !== undefined ? v.p.runs[role] : undefined;
+  // Without who accepted, the reducer would record a move that voids the reviews at the gate.
+  const by = d.resolved?.by;
+  if (
+    merge === undefined ||
+    from === undefined ||
+    to === undefined ||
+    run === undefined ||
+    by === undefined
+  )
+    return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "artifact_verified",
+        task: v.task,
+        data: {
+          role,
+          agent_id: run.agent_id,
+          head_sha: to,
+          branch: v.p.branch,
+          ...(v.p.pr !== undefined ? { pr: { ...v.p.pr, head_sha: to, ci: "green" } } : {}),
+          ci_runs: dir?.runs ?? [],
+          ...(dir?.superseded !== undefined ? { ci_superseded: dir.superseded } : {}),
+          adopted: true,
+          accepted_by: by,
+          move: {
+            from,
+            to,
+            how: "release_merge",
+            parent: merge.parent,
+            touched: merge.moved_files,
+          },
+        },
+      },
+    },
+  ];
+}
+
+/** The publishing role whose run started last (a moved head with no verified role to carry it). */
+function lastPublisher(p: TaskPipeline): Role | undefined {
+  return [...PUBLISHING_ROLES]
+    .filter((r) => p.runs[r] !== undefined)
+    .sort((a, b) => (p.runs[b]?.spawned_seq ?? 0) - (p.runs[a]?.spawned_seq ?? 0))[0];
 }
 
 /** Facts kept on a decision beside its payload (decisions.ts decisionPayload drops them). */
@@ -2119,6 +2243,11 @@ export interface PipelineDeps {
   ) => Promise<unknown>;
   /** Open a decision; `extra` facts (the `pipeline` marker) are kept on it. */
   decide: (input: DecisionInput, extra: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Resolve every open decision of `task` with `answer` (by volleyd), on the queue: a PR merged
+   * on GitHub closes them before the task leaves for `done` (a parked task stays parked else).
+   */
+  resolveOpen: (task: TaskId, answer: string, rationale: string) => Promise<unknown>;
   /** Retire an agent (`status`: a DAEMON_ENDED one when it never ended itself; default done). */
   retire: (agentId: string, status?: string) => Promise<unknown>;
   /** The agent id and attempt the next spawn of `role` on `task` takes. */
@@ -2246,6 +2375,10 @@ export class PipelineDriver {
       }
       try {
         await this.handle(t.id, { kind: "advance" });
+        // A human may merge the PR in any stage (merge_ready's advance asks for this too).
+        const w = this.view(t.id);
+        if (w !== null && w.p.pr !== undefined && w.stage !== "done" && w.stage !== "cancelled")
+          await this.run(t.id, [{ kind: "check_merged" }], false);
       } catch (e) {
         await this.alarmError(t.id, "tick", e);
       }
@@ -2287,6 +2420,8 @@ export class PipelineDriver {
     key: string,
     fail: Omit<Extract<PipelineEvent, { kind: "io_failed" }>, "kind" | "message" | "timed_out">,
     check: () => Promise<PipelineEvent | null>,
+    /** Run on the queue before the result is handled. */
+    prelude?: (ev: PipelineEvent) => Promise<void>,
   ): void {
     if (this.inflight.has(key)) return;
     this.inflight.add(key);
@@ -2306,6 +2441,7 @@ export class PipelineDriver {
         if (ev === null) return;
         await this.deps.enqueue(async () => {
           try {
+            await prelude?.(ev);
             await this.handle(task, ev);
           } catch (e) {
             await this.alarmError(task, fail.what, e);
@@ -2397,7 +2533,13 @@ export class PipelineDriver {
           const v = this.view(task);
           const key = `${task}/check_merged`;
           if (v?.p.pr === undefined || this.inflight.has(key) || !this.due(key)) break;
-          this.beside(task, key, { what: "check_merged" }, () => this.mergeCheck(v));
+          this.beside(
+            task,
+            key,
+            { what: "check_merged" },
+            () => this.mergeCheck(v),
+            (ev) => this.supersedeOnMerge(task, ev),
+          );
           break;
         }
         case "watch_head": {
@@ -2585,6 +2727,23 @@ export class PipelineDriver {
     return { kind: "merge_checked", view };
   }
 
+  /**
+   * On the queue, before a merged PR is handled: close the task's open decisions as
+   * `superseded_by_merge` (the reducer keeps a parked task parked on a stage change).
+   */
+  private async supersedeOnMerge(task: TaskId, ev: PipelineEvent): Promise<void> {
+    const v = this.view(task);
+    if (ev.kind !== "merge_checked" || v === null || v.p.pr === undefined) return;
+    if (v.stage === "done" || v.stage === "cancelled") return;
+    if (ev.view.state !== "MERGED" || ev.view.baseRefName !== v.release_branch) return;
+    const at = ev.view.mergeCommit?.oid?.slice(0, 7) ?? "an unknown commit";
+    await this.deps.resolveOpen(
+      task,
+      SUPERSEDED_BY_MERGE,
+      `PR #${v.p.pr.number} merged into ${v.release_branch} at ${at}`,
+    );
+  }
+
   // --- Merge nudge (SPEC §4.6.15): volleyd never rebases; it tells the implementers. ---
 
   /**
@@ -2752,6 +2911,7 @@ export class PipelineDriver {
       branch,
       from: moved.from,
       to: moved.to,
+      release_branch: v.release_branch,
     });
     const key = `${v.task}/${moved.to}`;
     let waited = 0;

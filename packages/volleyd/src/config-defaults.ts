@@ -44,6 +44,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
+  retire_close_session: true,
   placement: {
     nudge_on_merge: "files",
     // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
@@ -142,6 +143,13 @@ export const DAEMON_DEFAULTS = {
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
    * `spawn_retry_max_s` tunable. */
   spawn_retry_base_ms: 30_000,
+  /** Bound on one `cmux new-workspace`: a launch still pending then has an unknown outcome. */
+  launch_timeout_ms: 60_000,
+  /** After a launch with an unknown outcome: how long to wait for the agent's registration
+   * signals before deciding it never started (spawn.ts reconcileLaunch). */
+  launch_reconcile_ms: 30_000,
+  /** Bound on one workspace lookup (`cmux list-workspaces`); a lookup still pending then fails. */
+  workspace_lookup_timeout_ms: 10_000,
   /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
    * treated as failed (an ssh remote with no agent, a credential prompt). */
   git_fetch_timeout_ms: 30_000,
@@ -208,6 +216,12 @@ export const DAEMON_DEFAULTS = {
   worktree_scan_max_entries: 2000,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
+  /** Hard bound on one `cmux close-workspace` (a retire's, or cleanup's). */
+  workspace_close_timeout_ms: 15_000,
+  /** Between SIGTERM and SIGKILL when volleyd stops a retired agent's process (procs.ts). */
+  proc_kill_grace_ms: 5_000,
+  /** Hard bound on the `ps` that lists processes (procs.ts). */
+  ps_timeout_ms: 10_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
   /** Consecutive failed captures that back the agent off and mark its screen stale. */

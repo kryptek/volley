@@ -8,6 +8,7 @@ import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hos
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
+import { SpawnError } from "../../src/spawn-error";
 import type { NewEvent, Wave } from "../../src/types";
 import type { AgentWatch, SignalState } from "../../src/verify";
 import { parseWaveFile } from "../../src/wave-file";
@@ -24,10 +25,24 @@ export interface FakeHost extends Host {
   texts: { workspace: string; text: string }[];
   /** Workspaces closed (retire, cleanup). */
   closed: string[];
+  /** Sessions ended (retire): the workspace (null: unknown) and worktree it was asked about. */
+  sessionsEnded: { workspace: string | null; worktree: string | null }[];
+  /** What findWorkspace answers for these titles (any other: `found`). */
+  workspaceTitles: Record<string, string>;
   /** Screens returned by successive readScreen calls (the last one repeats); null = unreadable. */
   screens: (string | null)[];
   /** Called after each launch, e.g. to publish the hook signals a real agent would. */
   onLaunch?: (spec: LaunchSpec, workspace: string) => void | Promise<void>;
+  /**
+   * How launches end: `ok` (default); `unknown`, the session starts (onLaunch runs) but launch
+   * throws LAUNCH_FAILED with `outcome: "unknown"`, as a timed-out cmux does; `refused`, launch
+   * throws `outcome: "refused"` and nothing starts.
+   */
+  launchOutcome: "ok" | "unknown" | "refused";
+  /** What findWorkspace answers (an Error: it rejects, the host cannot be asked). */
+  found: string | null | Error;
+  /** findWorkspace calls, in order. */
+  finds: { name: string; candidate?: string }[];
 }
 
 /**
@@ -46,7 +61,12 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     keys: [],
     texts: [],
     closed: [],
+    sessionsEnded: [],
+    workspaceTitles: {},
     screens: [],
+    launchOutcome: "ok",
+    found: null,
+    finds: [],
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
       mkdirSync(spec.path, { recursive: true });
@@ -60,9 +80,26 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async launch(spec) {
       host.launches.push(spec);
+      if (host.launchOutcome === "refused") {
+        throw new SpawnError("LAUNCH_FAILED", "cmux refused", { outcome: "refused" });
+      }
       const workspace = `workspace:${++n}`;
       await host.onLaunch?.(spec, workspace);
+      if (host.launchOutcome === "unknown") {
+        throw new SpawnError(
+          "LAUNCH_FAILED",
+          "cmux new-workspace failed: Error: Command timed out",
+          {
+            outcome: "unknown",
+          },
+        );
+      }
       return { workspace };
+    },
+    async findWorkspace(name, candidate) {
+      host.finds.push({ name, ...(candidate !== undefined ? { candidate } : {}) });
+      if (host.found instanceof Error) throw host.found;
+      return host.workspaceTitles[name] ?? host.found;
     },
     async readScreen(workspace, lines) {
       host.screenReads.push({ workspace, lines });
@@ -77,6 +114,12 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async close(workspace: string, _consent: ConsentToken) {
       host.closed.push(workspace);
+    },
+    async endSession(workspace, worktree, consent) {
+      host.sessionsEnded.push({ workspace, worktree });
+      if (workspace === null) return { closed: false, pids: [], how: "none" };
+      await host.close(workspace, consent);
+      return { closed: true, pids: [], how: "close-workspace" };
     },
   };
   return host;
