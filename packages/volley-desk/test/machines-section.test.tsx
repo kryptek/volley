@@ -188,7 +188,7 @@ describe("reducer: the machines slice", () => {
   });
 
   it("the Desk subscribes to the machine records and the account-op answers", () => {
-    expect(DESK_SUBSCRIPTIONS).toContain("volley/_system/machines/+");
+    expect(DESK_SUBSCRIPTIONS).toContain("volley/_system/machines/#");
     expect(DESK_SUBSCRIPTIONS).toContain("volley/_system/auth/replies/+");
   });
 });
