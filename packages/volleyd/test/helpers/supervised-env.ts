@@ -277,7 +277,10 @@ export const ARTIFACTS_OK: NonNullable<SupervisedEnvOptions["exec"]> = [
       ]),
     },
   ],
-  [["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD }) }],
+  [
+    ["gh", "pr", "view"],
+    { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD, baseRefName: "release/w1" }) },
+  ],
 ];
 
 /** The `_system` journal of an env. */

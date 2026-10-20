@@ -756,8 +756,9 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onVerified(v, ev);
     case "rebase_checked":
       if (v.stage === "cancelled" || ev.head !== v.p.head) return [];
-      // Gated already: only a gate that lost its MergeToken (a restart) is re-run, to re-mint it.
-      if (v.stage === "merge_ready") return remintWanted(v) ? guardedGate(v, ev) : [];
+      // Gated already: only a gate that lost its MergeToken (a restart) is re-run, to re-mint it,
+      // and only while the head is still up to date (a moved release branch is rebased onto).
+      if (v.stage === "merge_ready" && !remintWanted(v)) return [];
       return ev.check.behind === 0 ? guardedGate(v, ev) : enterRebase(v);
     case "head_moved":
       return onHeadMoved(v, ev);
@@ -2491,6 +2492,8 @@ export class PipelineDriver {
    * checks to mint it again). Only `gate()` adds one.
    */
   private readonly mergeTokens = new Map<TaskId, MergeToken>();
+  /** The head a MergeToken could not be minted for, per task: that head is a human's to merge. */
+  private readonly mintFailed = new Map<TaskId, string>();
 
   constructor(
     private readonly wave: WaveId,
@@ -2527,7 +2530,8 @@ export class PipelineDriver {
       p: rec.pipeline[task] ?? emptyPipeline(),
       ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),
       ...(this.deps.hygiene !== undefined ? { hygiene: this.deps.hygiene() } : {}),
-      merge: this.mergeMode(rec),
+      merge:
+        this.mintFailed.get(task) === rec.pipeline[task]?.head ? "manual" : this.mergeMode(rec),
       ...(token !== undefined ? { merge_token: token } : {}),
       ...(this.deps.mergeRetryMax !== undefined
         ? { merge_retry_max: this.deps.mergeRetryMax() }
@@ -2908,6 +2912,11 @@ export class PipelineDriver {
       if (pr === null) throw new Error(`gh pr view ${p.pr.number} failed: ${r.stderr.trim()}`);
       if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
         return { kind: "head_moved", expected: head, actual: pr.headRefOid };
+      // `gh pr merge` merges into whatever the PR targets now: a retargeted PR never gates.
+      if (pr.baseRefName !== v.release_branch)
+        throw new Error(
+          `PR #${p.pr.number} targets ${String(pr.baseRefName)}, not ${v.release_branch}`,
+        );
     }
     const check = await checkRebase(io, {
       cwd,
@@ -3209,6 +3218,7 @@ export class PipelineDriver {
       return mintMergeToken({ wave: this.wave, task, pr, head, release_branch: v.release_branch });
     } catch (e) {
       this.deps.log?.(`pipeline ${this.wave}/${task} merge token: ${String(e)}`);
+      this.mintFailed.set(task, head);
       return undefined;
     }
   }

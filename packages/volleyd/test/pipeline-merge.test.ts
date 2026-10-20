@@ -191,6 +191,81 @@ describe("merge: auto", () => {
     expect(h.task()?.stage).toBe("done");
   });
 
+  it("after a restart a release branch that moved is rebased onto, not merged at a stale gate", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    h.world.mergeRefuse = "required checks pending";
+    await h.start();
+    h.openPr(H);
+    await h.finish("implementer", { head: H, ci: "green" });
+    expect(mergeCalls()).toHaveLength(1);
+    h.restart();
+    h.world.mergeRefuse = undefined;
+    h.world.mergeBase[H] = sha(0x0b5); // the release branch moved past the gated head's base
+    await due();
+    await due();
+    expect(mergeCalls()).toHaveLength(1);
+    expect(h.task()?.stage).not.toBe("done");
+    expect(h.events.some((e) => e.type === "merged_by_supervisor")).toBe(false);
+    expect(
+      h.events.some(
+        (e) => e.type === "stage_entered" && (e.data as { rebase?: boolean }).rebase === true,
+      ),
+    ).toBe(true);
+  });
+
+  it("a PR retargeted away from the release branch before the gate is never merged", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    await h.start();
+    h.openPr(H);
+    h.world.prView[7] = { baseRefName: "main" };
+    await h.finish("implementer", { head: H, ci: "green" });
+    await due();
+    expect(mergeCalls()).toEqual([]);
+    // The gate does not pass: no evidence, no token, an alarm naming the base.
+    expect(h.events.some((e) => e.type === "stage_entered" && e.data.stage === "merge_ready")).toBe(
+      false,
+    );
+    const alarm = h.events.find(
+      (e) => e.type === "alarm_raised" && String(e.data.message).includes("main"),
+    );
+    expect(alarm).toBeDefined();
+    expect(h.events.some((e) => e.type === "merged_by_supervisor")).toBe(false);
+    expect(h.task()?.stage).not.toBe("done");
+  });
+
+  it("a PR retargeted after the gate is refused before gh pr merge runs", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    h.world.mergeRefuse = "required checks pending";
+    await h.start();
+    h.openPr(H);
+    await h.finish("implementer", { head: H, ci: "green" });
+    expect(mergeCalls()).toHaveLength(1);
+    h.world.mergeRefuse = undefined;
+    h.world.prView[7] = { baseRefName: "main" };
+    await due();
+    expect(mergeCalls()).toHaveLength(1);
+    expect(refusals()).toHaveLength(2);
+    expect(String(refusals()[1]?.data.stderr)).toContain("main");
+    expect(h.events.some((e) => e.type === "merged_by_supervisor")).toBe(false);
+  });
+
+  it("a head the fence cannot match exactly is left to a human, without re-gating every tick", async () => {
+    const odd = "ABCDEF".repeat(7).slice(0, 40); // not lowercase hex: no MergeToken for it
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    await h.start();
+    h.openPr(odd);
+    await h.finish("implementer", { head: odd, ci: "green" });
+    expect(h.task()?.stage).toBe("merge_ready");
+    const rebaseChecks = () => h.calls.filter((a) => a.includes("merge-base")).length;
+    const before = rebaseChecks();
+    await due();
+    await due();
+    expect(mergeCalls()).toEqual([]);
+    expect(rebaseChecks()).toBe(before);
+    const md = readFileSync(h.task()?.evidence_path as string, "utf-8");
+    expect(md).toContain("volleyd never merges");
+  });
+
   it("a wave with more than one task is not merged here (A6's queue decides)", async () => {
     await gated({ merge: "auto", dependents: { T2: ["T1"] } });
     expect(mergeCalls()).toEqual([]);

@@ -60,7 +60,11 @@ All workspace packages share one version. Dates are release-tag dates.
   `manual` or `cancel`. New wave-file key `merge: auto | manual` (default: the new tunable
   `autopilot.merge`, default `auto`); under `manual` nothing changes. For now volleyd merges only
   in a wave of one task (the merge queue that orders merges across tasks comes next). The
-  evidence package says who merges. (#198)
+  evidence package says who merges. Before the gate and again right before `gh pr merge` the PR
+  is re-read: a PR retargeted away from the release branch, or whose head moved, is never
+  merged. **Behaviour change:** a one-task wave with no `merge:` key is now merged by volleyd
+  after upgrading; set `merge: manual` in the wave file (or `autopilot.merge: manual`) to keep
+  merging by hand. (#198)
 
 - volley-desk: the agent window's title bar is two rows that never bunch: the status mark, the
   wave, role, stage and machine chips and the actions on the first; the headline in full (at
