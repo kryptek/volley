@@ -141,7 +141,7 @@ describe("endedAt and the auto-archive verdict", () => {
       data: { by: "x" },
     });
     expect(endedAt(resumed)).toBeNull();
-    expect(replay(resumed).ended_at).toBeUndefined();
+    expect(replay(resumed).ended_at).toBeNull();
     expect(endedAt(journal(submitted, queued))).toBeNull();
   });
 
@@ -182,7 +182,7 @@ describe("endedAt and the auto-archive verdict", () => {
     const evs = journal(submitted, queued, stopped);
     const { ended_at: _e, ...legacy } = replay(evs);
     expect(archiveFacts(legacy).endedAt).toBeNull();
-    expect(archiveFacts(legacy, () => evs).endedAt).toBe(evs[2]?.at);
+    expect(archiveFacts(legacy, () => endedAt(evs)).endedAt).toBe(evs[2]?.at);
   });
 });
 
@@ -198,11 +198,8 @@ describe("indexPayload", () => {
     const p = indexPayload(entries, 2, "2026-10-24T00:00:00.000Z");
     expect(p.archived.map((e) => e.wave)).toEqual(["w3", "w2"]);
     expect(p.updated_at).toBe("2026-10-24T00:00:00.000Z");
-    expect(
-      schemaErrors(
-        "archive.schema.json",
-        envelope("_waves/_archive", "archive", p),
-      ),
-    ).toEqual([]);
+    expect(schemaErrors("archive.schema.json", envelope("_waves/_archive", "archive", p))).toEqual(
+      [],
+    );
   });
 });

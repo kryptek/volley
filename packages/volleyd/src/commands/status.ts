@@ -7,11 +7,12 @@ import { resolveCaller } from "../ownership";
 import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
 
-const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd status [wave] [--all] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
 
-Print every wave the daemon owns (or one wave) from the daemon's live state, with open
+Print every live wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
-else the session registered for this directory).
+else the session registered for this directory). Archived waves (\`volleyd archive\`) are left
+out; --all lists them too, with when, by whom and why each was archived.
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.
@@ -38,7 +39,10 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
   }
   const wave = parsed.positionals[0];
   return withClient(target, io, "volleyd status", async (client) => {
-    const res = await client.request("status", wave !== undefined ? { wave } : {});
+    const res = await client.request(
+      "status",
+      wave !== undefined ? { wave } : parsed.values.all === true ? { all: true } : {},
+    );
     if (!res.ok) {
       io.stderr(`volleyd status: ${res.error ?? "failed"}\n`);
       return EXIT.ERROR;
@@ -97,6 +101,7 @@ function parseStatus(argv: string[]) {
     args: argv,
     options: {
       json: { type: "boolean", default: false },
+      all: { type: "boolean", default: false },
       by: { type: "string" },
       "broker-url": { type: "string" },
       namespace: { type: "string" },
@@ -145,6 +150,10 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  const archived =
+    s.archived !== undefined
+      ? `  archived ${s.archived.at} by ${s.archived.by}: ${s.archived.reason}\n`
+      : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -162,7 +171,7 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + preface + hygiene + rows.join("") + decisions.join("");
+  return header + archived + preface + hygiene + rows.join("") + decisions.join("");
 }
 
 /**

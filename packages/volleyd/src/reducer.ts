@@ -59,8 +59,8 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
-  /** When the wave last ended (`wave_stopped` / `wave_complete`); cleared by a resume. */
-  ended_at?: string;
+  /** When the wave last ended (`wave_stopped` / `wave_complete`); null after a resume. */
+  ended_at?: string | null;
   /** Set by `wave_archived` (archive.ts): when, by whom, why, and how the wave had ended. */
   archived?: { at: string; by: string; reason: string; from: "stopped" | "complete" };
 }
@@ -449,7 +449,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       const status = WAVE_STATUS[ev.type];
       if (status !== undefined) state.status = status;
       if (ev.type === "wave_stopped" || ev.type === "wave_complete") next.ended_at = ev.at;
-      if (ev.type === "wave_resumed") delete next.ended_at;
+      if (ev.type === "wave_resumed") next.ended_at = null;
     }
   }
 

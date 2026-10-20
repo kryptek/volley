@@ -64,10 +64,10 @@ export function endedAt(events: Iterable<JournalEvent>): string | null {
 }
 
 /**
- * The facts of a record; `events` reads the journal for a record whose snapshot predates
- * `ended_at`.
+ * The facts of a record; `legacyEndedAt` reads the end time from the journal (`endedAt`) for a
+ * record whose snapshot predates `ended_at`.
  */
-export function archiveFacts(rec: WaveRecord, events?: () => Iterable<JournalEvent>): ArchiveFacts {
+export function archiveFacts(rec: WaveRecord, legacyEndedAt?: () => string | null): ArchiveFacts {
   const s = rec.state;
   const status = s?.status ?? null;
   const ended = status !== null && ENDED.has(status);
@@ -75,9 +75,8 @@ export function archiveFacts(rec: WaveRecord, events?: () => Iterable<JournalEve
   return {
     wave: s?.wave ?? null,
     status,
-    endedAt: !ended ? null : (rec.ended_at ?? (events !== undefined ? endedAt(events()) : null)),
-    waveCompleteResolved:
-      wc?.resolved !== undefined && wc.resolved.answer !== ARCHIVED_ANSWER,
+    endedAt: !ended ? null : (rec.ended_at ?? legacyEndedAt?.() ?? null),
+    waveCompleteResolved: wc?.resolved !== undefined && wc.resolved.answer !== ARCHIVED_ANSWER,
   };
 }
 

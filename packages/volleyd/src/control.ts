@@ -23,6 +23,8 @@ import type { PathError } from "./schemas";
 export const DAEMON_AGENT_ID = "volleyd";
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
+/** The retained index of archived waves (SPEC §4.6.16); `_` keeps it out of the wave id space. */
+export const ARCHIVE_TOPIC = "volley/_waves/_archive";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 export const ADMISSION_TOPIC = "volley/_system/admission";
@@ -43,6 +45,8 @@ export type ControlOp =
   | "pause"
   | "resume"
   | "stop"
+  // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
+  | "archive"
   | "steer"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"

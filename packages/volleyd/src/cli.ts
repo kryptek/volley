@@ -27,6 +27,7 @@ Commands:
   pause       Stop admitting new tasks in a wave
   resume      Resume a wave, or release the kill switch (--all)
   stop        Stop a wave and cancel its agents; --all is the kill switch
+  archive     Retire an ended wave: close its decisions, drop it from status (--yes)
   steer       Send mailbox steering to a task's agent and report the ack
   merged      Record a gated task merged outside GitHub's merge button (verified; owner only)
 
@@ -61,6 +62,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   pause: async () => (await import("./commands/pause")).pause,
   resume: async () => (await import("./commands/resume")).resume,
   stop: async () => (await import("./commands/stop")).stop,
+  archive: async () => (await import("./commands/archive")).archive,
   steer: async () => (await import("./commands/steer")).steer,
   merged: async () => (await import("./commands/merged")).merged,
 };

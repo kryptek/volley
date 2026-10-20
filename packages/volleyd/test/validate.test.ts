@@ -70,6 +70,12 @@ describe("volleyd validate: the release branch", () => {
     expect(r.exitCode).toBe(0);
   });
 
+  it("notes that volleyd run needs an owner", async () => {
+    const r = await runCli(["validate", waveFile(repo, "{ issue: 1, host: build-box.lan }")]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("note: `volleyd run` needs an owner");
+  });
+
   /** An origin remote (never contacted: validate stays offline). */
   const addOrigin = () => git(repo, "remote", "add", "origin", "https://example.com/repo.git");
 
