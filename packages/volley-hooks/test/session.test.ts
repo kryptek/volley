@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BrokerConnectOptions, VolleyBroker } from "volley-mcp/broker";
@@ -7,6 +6,7 @@ import type { HookIdentity } from "../src/lib/identity";
 import { connectDrain, hooksClientId, resolveSessionExpiry } from "../src/lib/session";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { connectClient, publishEnvelope } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 let broker: TestBroker;
 let client: VolleyBroker;
@@ -15,7 +15,7 @@ let identity: HookIdentity;
 beforeEach(async () => {
   broker = await startTestBroker();
   client = await connectClient(broker.url);
-  const dir = mkdtempSync(join(tmpdir(), "volley-hooks-session-"));
+  const dir = tempDir("volley-hooks-session-");
   mkdirSync(join(dir, ".volley"));
   identity = {
     mode: "agent",

@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { deskPortListeners, parseLsof, parseSs } from "../../src/setup/desk-port";
 import { planServices } from "../../src/setup/services";
@@ -8,6 +5,7 @@ import type { ExecResult, SetupExec } from "../../src/setup/step";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 
@@ -109,14 +107,13 @@ describe("setup: the Desk's port", () => {
       for (const c of (await planServices(m.ctx)).changes) await c.apply();
     };
     beforeEach(async () => {
-      dir = mkdtempSync(join(tmpdir(), "volley-setup-port-"));
+      dir = tempDir("volley-setup-port-");
       fake = await startFakeDynsec();
       listeners = "";
       deskPid = null;
     });
     afterEach(async () => {
       await fake.close();
-      rmSync(dir, { recursive: true, force: true });
     });
 
     const withPort = (platform: NodeJS.Platform) => {

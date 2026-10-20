@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -16,6 +15,7 @@ import {
   runHook,
   tick,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const NS = "ns";
@@ -121,7 +121,7 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     env = {
       VOLLEY_HOOKS_COORDINATOR: "1",
       VOLLEY_BROKER_URL: broker.url,
-      VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
       VOLLEY_SESSION_URL: "https://claude.ai/code/session_0123",
       VOLLEY_WORKSPACE: "workspace:7",
     };

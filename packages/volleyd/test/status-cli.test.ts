@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { stableServicePath } from "volley-cli/setup/service-path";
 import pkg from "../package.json";
 import type { AdmissionSummary } from "../src/admission";
@@ -26,15 +25,13 @@ import { makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { memoryCredentials } from "./helpers/fake-dynsec";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 
 let home: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-cli-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-cli-");
 });
 
 describe("volleyd (top level)", () => {

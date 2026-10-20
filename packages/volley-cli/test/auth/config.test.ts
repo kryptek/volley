@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -12,6 +11,7 @@ import {
   sameConfig,
   writeConfig,
 } from "../../src/auth/config";
+import { tempDir } from "../helpers/tmp";
 
 const lines = (s: string) =>
   s
@@ -165,7 +165,7 @@ describe("detectLayout", () => {
 
 describe("writeConfig", () => {
   it("writes atomically, backs the old file up, and is a no-op when unchanged", () => {
-    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const dir = tempDir("vly-conf-");
     const path = join(dir, "mosquitto.conf");
     writeFileSync(path, "listener 1883\n");
     const now = new Date("2026-10-18T12:00:00Z");
@@ -178,7 +178,7 @@ describe("writeConfig", () => {
   });
 
   it("leaves a config that differs only in the header naming its writer", () => {
-    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const dir = tempDir("vly-conf-");
     const path = join(dir, "mosquitto.conf");
     const byInit = generateConfig(LAYOUTS["brew-arm64"]);
     writeFileSync(path, byInit);
@@ -191,7 +191,7 @@ describe("writeConfig", () => {
   });
 
   it("a new file needs no backup", () => {
-    const dir = mkdtempSync(join(tmpdir(), "vly-conf-"));
+    const dir = tempDir("vly-conf-");
     const path = join(dir, "mosquitto.conf");
     expect(writeConfig(path, "x\n", new Date())).toEqual({ written: true, backup: null });
     expect(existsSync(path)).toBe(true);

@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { generateAgentId, loadConfig, resolveBrokerAuth } from "../src/config";
+import { tempDir } from "./helpers/tmp";
 
 describe("generateAgentId", () => {
   it("derives a conforming id from the cwd basename plus a 4-char suffix", () => {
@@ -102,11 +102,8 @@ describe("VOLLEY_AGENT_ID is a prefix; agent_id auto-suffixes", () => {
 describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
   let cwd: string;
   beforeEach(() => {
-    cwd = mkdtempSync(join(tmpdir(), "volley-identity-"));
+    cwd = tempDir("volley-identity-");
     mkdirSync(join(cwd, ".volley"));
-  });
-  afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
   });
   const writeIdentity = (body: string) => writeFileSync(join(cwd, ".volley", "agent.json"), body);
 
@@ -222,10 +219,7 @@ describe(".volley/agent.json assigned identity (SPEC §6.5)", () => {
 describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)", () => {
   let cwd: string;
   beforeEach(() => {
-    cwd = mkdtempSync(join(tmpdir(), "volley-auth-"));
-  });
-  afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+    cwd = tempDir("volley-auth-");
   });
   const writeIdentity = (body: unknown) => {
     mkdirSync(join(cwd, ".volley"), { recursive: true });

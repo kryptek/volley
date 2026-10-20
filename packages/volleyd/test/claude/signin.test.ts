@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { addAccount, profileDir, readRegistry } from "../../src/claude/profiles";
@@ -17,6 +16,7 @@ import {
 import { renderSigninScript } from "../../src/claude/signin-script";
 import { FenceError, assertAllowed, sealSigninScript } from "../../src/fence";
 import { fakeExec } from "../helpers/fake-exec";
+import { tempDir } from "../helpers/tmp";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`../fixtures/claude/${name}`, import.meta.url), "utf-8");
@@ -115,7 +115,7 @@ describe("the sign-in script and its fence seal", () => {
 
 /** A fake world: tmux runs the sign-in, $BROWSER writes the url file, auth status flips. */
 function world(opts: { browser?: boolean; signInAfter?: number; exitAfter?: number } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "volley-signin-"));
+  const root = tempDir("volley-signin-");
   addAccount(root, { label: "work" }, "2026-10-18T12:00:00.000Z");
   let polls = 0;
   const fx = fakeExec()

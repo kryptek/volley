@@ -1,7 +1,5 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, rmSync } from "node:fs";
+import { beforeEach, describe, expect, it } from "vitest";
 import { acquireLock, lockPath } from "../src/locks";
 import {
   CREDENTIALS_DELETED,
@@ -15,6 +13,7 @@ import {
 import { SpawnError } from "../src/spawn-error";
 import type { NewEvent } from "../src/types";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
+import { tempDir } from "./helpers/tmp";
 
 const ID = "w1-t1-implementer-1";
 
@@ -59,13 +58,12 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
   const cleared = () => log.filter((l) => l.startsWith("clear ")).map((l) => l.slice(6));
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "volleyd-retire-"));
+    home = tempDir("volleyd-retire-");
     log = [];
     published = [];
     events = [];
     creds = memoryCredentials();
   });
-  afterEach(() => rmSync(home, { recursive: true, force: true }));
 
   it("publishes `reaped { credentials_deleted }`, clears every record, THEN deletes the login (and clears again)", async () => {
     expect(await reapAndRevoke(ID, "ns", deps(), "T1")).toBe(true);

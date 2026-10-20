@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import { SpawnError } from "../src/spawn-error";
 import { addWorktree, checkReleaseBranch, resolveReleaseBase } from "../src/worktree";
 import { fakeExec } from "./helpers/fake-exec";
+import { tempDir } from "./helpers/tmp";
 
 const REPO = "/src/repo";
 const B = "release/x";
@@ -131,10 +131,9 @@ describe("release base resolution", () => {
 describe("addWorktree", () => {
   let dir: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-wt-")));
+    dir = realpathSync(tempDir("volleyd-wt-"));
     mkdirSync(join(dir, "repo"));
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("a release base present only as origin/<b>: fetch, track, then worktree add from it", async () => {
     const repo = join(dir, "repo");

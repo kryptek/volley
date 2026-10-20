@@ -1,9 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   REQUIRED_SECTIONS,
   REQUIRED_VOLLEYD_PATH,
@@ -16,6 +15,7 @@ import {
   validateVolleydPath,
   volleydPathSection,
 } from "../scripts/validate-skill";
+import { tempDir } from "./helpers/tmp";
 
 const GOOD_FRONTMATTER = `---
 name: volley-issues
@@ -155,15 +155,10 @@ describe("skill version", () => {
 describe("install.sh --check", () => {
   const INSTALL = fileURLToPath(new URL("../scripts/install.sh", import.meta.url));
   const SKILL_DIR = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
-  const homes: string[] = [];
-  afterAll(() => {
-    for (const h of homes) rmSync(h, { recursive: true, force: true });
-  });
 
   /** A throwaway $HOME, optionally with an installed copy of the skill at the given version. */
   function home(installed?: string | "symlink"): string {
-    const h = mkdtempSync(join(tmpdir(), "volley-issues-home-"));
-    homes.push(h);
+    const h = tempDir("volley-issues-home-");
     const skills = join(h, ".claude", "skills");
     mkdirSync(skills, { recursive: true });
     if (installed === "symlink") symlinkSync(SKILL_DIR, join(skills, "volley-issues"));

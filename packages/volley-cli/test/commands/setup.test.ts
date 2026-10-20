@@ -1,13 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
@@ -26,6 +17,7 @@ import { readSetupInstall } from "../../src/setup/journal";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 /** Commands that only read state. */
 const READ_ONLY = (a: string[]) =>
@@ -45,7 +37,7 @@ describe("volley setup", () => {
   let m: FakeMachine;
   let probes: string[];
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-"));
+    dir = tempDir("volley-setup-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir);
     probes = [];
@@ -57,7 +49,6 @@ describe("volley setup", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const env = () => ({

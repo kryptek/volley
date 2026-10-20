@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Role } from "../../src/brief";
 import { type DecisionRecord, openEvent, resolveEvent } from "../../src/decisions";
 import type { ExecFn, ExecOptions, ExecResult } from "../../src/exec";
@@ -11,6 +8,7 @@ import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
 import type { BranchUpdate, JournalEvent, NewEvent } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
+import { tempDir } from "./tmp";
 
 /**
  * The pipeline driver on an in-memory journal and a scripted git/GitHub "world": no broker, no
@@ -94,7 +92,7 @@ export interface HarnessOptions {
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
-  const home = mkdtempSync(join(tmpdir(), "volleyd-pipeline-"));
+  const home = tempDir("volleyd-pipeline-");
   const wave = parseWaveFile(
     [
       "wave: w1",
@@ -478,7 +476,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     openDecisions: () =>
       (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),
-    cleanup: () => rmSync(home, { recursive: true, force: true }),
+    /** Nothing left to release: `home` is a tempDir, removed when the test ends. */
+    cleanup: () => {},
   };
   return h;
 }

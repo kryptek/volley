@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
@@ -17,6 +16,7 @@ import { encodeQr, renderQr } from "../../src/setup/qr";
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 describe("setup: accounts", () => {
   let dir: string;
@@ -48,12 +48,11 @@ describe("setup: accounts", () => {
   };
 
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-accounts-"));
+    dir = tempDir("volley-setup-accounts-");
     fake = await startFakeDynsec();
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("is blocked until the broker takes the admin login", async () => {
@@ -296,7 +295,7 @@ describe("setup: phone", () => {
     for (const c of plan.changes) await c.apply();
   };
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-phone-"));
+    dir = tempDir("volley-setup-phone-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir, { lan: true });
     await applyAll(await planSecurity(m.ctx));
@@ -305,7 +304,6 @@ describe("setup: phone", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("issues a steer sign-in link for the phone and prints it as a QR code and a URL", async () => {
