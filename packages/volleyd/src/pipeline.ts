@@ -37,7 +37,15 @@ import {
   parseReviewResult,
   renderFindingsMd,
 } from "./reviews";
-import type { JournalEvent, NewEvent, PipelineStage, TaskId, TaskStage, WaveId } from "./types";
+import type {
+  BranchUpdate,
+  JournalEvent,
+  NewEvent,
+  PipelineStage,
+  TaskId,
+  TaskStage,
+  WaveId,
+} from "./types";
 
 /**
  * The pipeline: drives a task through its stage groups — implement → [spec_review ∥
@@ -112,6 +120,11 @@ export interface TaskPipeline {
   roles: Role[];
   /** The current step is a rebase onto the moved release branch. */
   rebasing: boolean;
+  /**
+   * The rebase step merges the release branch in instead (`branch_update: merge`, fixed when the
+   * step started): a normal push, and its head must descend from the step's start.
+   */
+  branch_update?: "merge" | undefined;
   runs: Partial<Record<Role, RoleRun>>;
   /** The PR's head branch (the implementer's). */
   branch?: string;
@@ -278,6 +291,7 @@ export function reducePipeline(
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
         p.rebasing = d.rebase === true;
+        p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
         for (const r of p.roles) delete p.runs[r];
@@ -287,6 +301,7 @@ export function reducePipeline(
         p.step = i >= 0 ? i : 0;
         p.roles = ["implementer"];
         p.rebasing = false;
+        p.branch_update = undefined;
       }
       break;
     case "steering_sent": {
@@ -465,6 +480,8 @@ export interface PipelineView {
   stage: TaskStage;
   release_branch: string;
   p: TaskPipeline;
+  /** The `branch_update` tunable now (absent: rebase): read when a rebase step starts. */
+  branch_update?: BranchUpdate;
 }
 
 export type PipelineEvent =
@@ -549,7 +566,13 @@ export interface SpawnStart {
 
 export type PipelineAction =
   | { kind: "journal"; event: NewEvent }
-  | { kind: "spawn"; role: Role; start?: SpawnStart; files: Record<string, string> }
+  | {
+      kind: "spawn";
+      role: Role;
+      start?: SpawnStart;
+      files: Record<string, string>;
+      branch_update?: "merge";
+    }
   | { kind: "verify"; role: Role; result?: FixupResult }
   /** Journal an alarm once per driver (`key`): repeats of the same condition stay quiet. */
   | { kind: "alarm"; key: string; event: NewEvent }
@@ -1109,7 +1132,7 @@ function onDone(
         decision: {
           kind: "agent_blocked",
           task: v.task,
-          question: `${ev.agent_id} (${ev.role}) failed. Respawn the ${ev.role}, or cancel the task?`,
+          question: `${ev.agent_id} (${roleLabel(v.p, ev.role)}) failed. Respawn the ${roleLabel(v.p, ev.role)}, or cancel the task?`,
           options: ["respawn", "cancel"],
         },
       },
@@ -1220,12 +1243,21 @@ function onVerified(
             role: ev.role,
             agent_id: run.agent_id,
             reason: "artifacts",
-            text: missingSteer(
-              ev.role,
-              out.detail,
-              v.p.branch ?? "the PR branch",
-              v.release_branch,
-            ),
+            text:
+              ev.report.kind === "missing" && ev.report.rewritten_from !== undefined
+                ? rewrittenSteer(
+                    out.detail,
+                    ev.report.rewritten_from,
+                    v.p.branch ?? "the PR branch",
+                    v.release_branch,
+                  )
+                : missingSteer(
+                    ev.role,
+                    out.detail,
+                    v.p.branch ?? "the PR branch",
+                    v.release_branch,
+                    v.p.branch_update,
+                  ),
           },
         ];
       }
@@ -1238,7 +1270,7 @@ function onVerified(
           decision: {
             kind: "agent_blocked",
             task: v.task,
-            question: `${ev.role} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). Fix it by hand and answer re-verify, or cancel the task.`,
+            question: `${roleLabel(v.p, ev.role)} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). Fix it by hand and answer re-verify, or cancel the task.`,
             options: ["re-verify", "cancel"],
           },
         },
@@ -1363,15 +1395,36 @@ function holdFor(
 }
 
 /** The missing-artifact steer: what this role publishes, and where. */
-function missingSteer(role: Role, detail: string, branch: string, release: string): string {
+function missingSteer(
+  role: Role,
+  detail: string,
+  branch: string,
+  release: string,
+  update?: "merge",
+): string {
   const what =
     role === "implementer"
       ? `Push \`${branch}\` and make sure an open PR from it targets \`${release}\` (gh pr create --base ${release})`
       : role === "fixup"
         ? `Publish your commits to the PR branch as \`.volley/findings.md\` says (git push origin HEAD:${branch})`
-        : `Publish the rebased branch as \`.volley/rebase.md\` says (its lease-guarded push to ${branch})`;
+        : update === "merge"
+          ? `Publish the merged branch as \`.volley/rebase.md\` says (merge, never rebase; a normal push to ${branch}, never a force-push)`
+          : `Publish the rebased branch as \`.volley/rebase.md\` says (its lease-guarded push to ${branch})`;
   return `volleyd could not verify your work: ${detail}. ${what}, then publish done again.`;
 }
+
+/**
+ * A merge-mode update whose push rewrote the PR history (it does not descend from the step's
+ * start): rebuild the merge on top of that start, merge the rewritten branch in so nothing it
+ * carries is lost, and push forward. Never a force-push.
+ */
+function rewrittenSteer(detail: string, start: string, branch: string, release: string): string {
+  return `volleyd could not verify your work: ${detail}. Do not force-push. Rebuild the merge on the PR history: \`git fetch origin && git checkout -B fix ${start} && git merge --no-edit origin/${release} && git merge --no-edit origin/${branch}\`, then \`git push origin HEAD:${branch}\` (a normal push), then publish done again.`;
+}
+
+/** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
+const roleLabel = (p: TaskPipeline, role: Role): string =>
+  role === "rebase" && p.branch_update === "merge" ? "merge (branch update)" : role;
 
 /** The prefix a re-ask puts before the original question (dropped before it is asked again). */
 const ASKED_AGAIN = /^".*?" (is not one of|needs the commit that carries it:) [^.]*\. /;
@@ -1642,6 +1695,15 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
       },
     };
   }
+  if (v.p.branch_update === "merge") {
+    return {
+      kind: "spawn",
+      role,
+      start: { ref: head, detach: false },
+      files: { "rebase.md": renderMergeMd(base) },
+      branch_update: "merge",
+    };
+  }
   return {
     kind: "spawn",
     role,
@@ -1760,16 +1822,26 @@ function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] 
 }
 
 function enterRebase(v: PipelineView): PipelineAction[] {
+  const merge = v.branch_update === "merge";
+  // spawnFor reads the step's mode, which the stage_entered below fixes.
+  const after: PipelineView = { ...v, p: { ...v.p, branch_update: merge ? "merge" : undefined } };
   return [
     {
       kind: "journal",
       event: {
         type: "stage_entered",
         task: v.task,
-        data: { stage: ROLE_STAGE.rebase, step: v.p.step, roles: ["rebase"], rebase: true },
+        data: {
+          stage: ROLE_STAGE.rebase,
+          step: v.p.step,
+          roles: ["rebase"],
+          rebase: true,
+          // The mode is the step's from here on: a config change reaches the next step only.
+          ...(merge ? { branch_update: "merge" } : {}),
+        },
       },
     },
-    spawnFor(v, "rebase"),
+    spawnFor(after, "rebase"),
   ];
 }
 
@@ -1863,6 +1935,26 @@ function renderRebaseMd(c: BriefCtx): string {
   ].join("\n");
 }
 
+/**
+ * `.volley/rebase.md` under `branch_update: merge`: bring the PR branch up to date by merging the
+ * release branch in, and publish it with a normal push (no force-push of any kind).
+ */
+function renderMergeMd(c: BriefCtx): string {
+  return [
+    "# Merge",
+    "",
+    `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
+    "",
+    `    git fetch origin ${c.release_branch}`,
+    `    git merge --no-edit origin/${c.release_branch}`,
+    "    # resolve conflicts, keep the PR's intent; commit the merge; run the repository's gates",
+    `    git push origin HEAD:${c.pr_branch}`,
+    "",
+    `That push moves \`${c.pr_branch}\` forward: its new head must descend from \`${c.head}\`. Never rewrite the branch's history. PR: ${c.pr_url}.`,
+    "",
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------------------------
 // The driver
 // ---------------------------------------------------------------------------------------------
@@ -1881,7 +1973,7 @@ export interface PipelineDeps {
   spawn: (
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string> },
+    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
   ) => Promise<unknown>;
   steer: (
     task: TaskId,
@@ -1901,6 +1993,8 @@ export interface PipelineDeps {
    * and hand their results back through this, so the queue never waits on the network.
    */
   enqueue: (fn: () => Promise<void>) => Promise<void>;
+  /** The wave's effective `branch_update` tunable (default: rebase). */
+  branchUpdate?: () => BranchUpdate;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -1973,6 +2067,7 @@ export class PipelineDriver {
       stage: t.stage,
       release_branch: rec.state.release_branch,
       p: rec.pipeline[task] ?? emptyPipeline(),
+      ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),
     };
   }
 
@@ -2098,6 +2193,7 @@ export class PipelineDriver {
           await this.deps.spawn(task, a.role, {
             ...(a.start !== undefined ? { start: a.start } : {}),
             files: a.files,
+            ...(a.branch_update !== undefined ? { branch_update: a.branch_update } : {}),
           });
           break;
         case "steer": {
@@ -2222,13 +2318,42 @@ export class PipelineDriver {
     if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
-    const report = await verifyArtifacts(this.io(task), {
+    let report = await verifyArtifacts(this.io(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
       ...(since !== undefined ? { since } : {}),
       ...(run.adopt === true ? { adopt: true } : {}),
     });
+    // A merge-mode update moves the branch forward: a head that does not descend from the step's
+    // start was force-pushed (a rebase), which `branch_update: merge` forbids.
+    if (
+      report.kind === "ok" &&
+      role === "rebase" &&
+      v.p.branch_update === "merge" &&
+      run.adopt !== true &&
+      run.start !== undefined &&
+      report.head !== run.start
+    ) {
+      const r = await this.io(task)([
+        "git",
+        "-C",
+        run.worktree,
+        "merge-base",
+        "--is-ancestor",
+        run.start,
+        report.head,
+      ]);
+      if (r.code !== 0 && r.code !== 1)
+        throw new Error(`git merge-base --is-ancestor failed: ${r.stderr.trim()}`);
+      if (r.code === 1)
+        report = {
+          kind: "missing",
+          missing: "push",
+          detail: `origin/${v.p.branch} is ${report.head.slice(0, 12)}, which does not descend from ${run.start.slice(0, 12)} (the PR head this merge started at): the branch was rewritten, and branch_update: merge allows no force-push`,
+          rewritten_from: run.start,
+        };
+    }
     let waited: number | undefined;
     if (report.kind === "ok" && report.ci.state === "none") {
       const key = `${task}/${report.head}`;

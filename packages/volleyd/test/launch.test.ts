@@ -19,10 +19,12 @@ import {
   HOOKS_DIR,
   LAUNCH_COMMAND,
   MCP_ENTRY,
+  VOLLEY_MCP_SERVER,
   hooksSettingsPath,
   mcpConfigPath,
   renderLaunchScript,
   renderMcpConfig,
+  strayVolleyServers,
 } from "../src/launch";
 import { spawnAgent } from "../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
@@ -108,6 +110,36 @@ describe("launch.sh", () => {
     // The primary profile: no CLAUDE_CONFIG_DIR line at all.
     expect(script).not.toContain("CLAUDE_CONFIG_DIR");
   }
+
+  it("agent_mcp: inherit drops --strict-mcp-config but keeps volleyd's own `volley` server", () => {
+    const vars = {
+      hooksDir: "/opt/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree: "/wt/w1/T1-implementer",
+      agentMcp: "inherit" as const,
+    };
+    const s = renderLaunchScript(vars);
+    const exec = s.split("\n").find((l) => l.startsWith("exec claude ")) as string;
+    // The user's MCP servers (plugins, connectors) load beside volleyd's...
+    expect(exec).not.toContain("--strict-mcp-config");
+    expect(exec).toContain(" --mcp-config='/wt/w1/T1-implementer/.volley/mcp.json' ");
+    expect(exec.endsWith(' -- "$(cat .volley/brief.md)"')).toBe(true);
+    // ...and that server is named `volley`, the name Claude Code lets an --mcp-config entry take
+    // over from a user-scope one: an everyday `volley` (the coordinator's) never starts.
+    expect(Object.keys(JSON.parse(renderMcpConfig(MCP_ENTRY)).mcpServers)).toEqual([
+      VOLLEY_MCP_SERVER,
+    ]);
+    expect(VOLLEY_MCP_SERVER).toBe("volley");
+    // `strict` (and absent) is the script as before.
+    expect(renderLaunchScript({ ...vars, agentMcp: "strict" })).toBe(script);
+    // The fence seals both; a script whose strict flag was swapped for another is refused.
+    expect(() => sealLaunchScript(vars.worktree, s)).not.toThrow();
+    expect(() => sealLaunchScript(vars.worktree, script)).not.toThrow();
+    expect(() =>
+      sealLaunchScript(vars.worktree, script.replace("--strict-mcp-config", "--debug")),
+    ).toThrow(FenceError);
+  });
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
     expect(JSON.parse(readFileSync(hooksSettingsPath(HOOKS_DIR), "utf-8")).hooks).toBeDefined();
@@ -228,6 +260,80 @@ describe("launch (local cmux host)", () => {
     expect(again.split("\n").filter((l) => l === ".volley/")).toHaveLength(1);
   });
 
+  it("agent_mcp: inherit (tunable) drops --strict-mcp-config; mcp.json's one server is `volley` and agent.json holds the agent's own id", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit" };
+    const out = await spawnAgent(env.request(), env.deps);
+    expect(out.kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).not.toContain("--strict-mcp-config");
+    expect(script).toContain(`--mcp-config='${join(env.worktree, ".volley", "mcp.json")}'`);
+    // volleyd's server is named `volley` (it takes over a user-scope `volley` entry), and the
+    // identity it reads is the agent's own, never a coordinator's.
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(Object.keys(mcp.mcpServers)).toEqual(["volley"]);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.agent_id).toBe("w1-t1-implementer-1");
+    expect(agent.agent_id).not.toMatch(/^coordinator/);
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      agent_mcp: "inherit",
+    });
+  });
+
+  it("agent_mcp: inherit warns (journal + log) about a volley-mcp server under another name", async () => {
+    env = await makeSpawnEnv();
+    const lines: string[] = [];
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit" };
+    env.deps.log = (line) => lines.push(line);
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    cfg.mcpServers = {
+      volley: { command: "bunx", args: ["volley-mcp"] },
+      "volley-coord": {
+        command: "bun",
+        args: ["run", "/opt/volley/packages/volley-mcp/src/index.ts"],
+      },
+      other: { command: "npx", args: ["some-server"] },
+    };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    mkdirSync(env.worktree, { recursive: true });
+    writeFileSync(
+      join(env.worktree, ".mcp.json"),
+      JSON.stringify({ mcpServers: { vol: { command: "volley-mcp" } } }),
+    );
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const alarm = env.events.find(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_stray_volley",
+    );
+    expect(alarm?.data).toMatchObject({
+      role: "implementer",
+      agent_id: "w1-t1-implementer-1",
+      servers: [
+        { source: env.claudeJson, name: "volley-coord" },
+        { source: ".mcp.json", name: "vol" },
+      ],
+    });
+    expect(lines).toEqual([expect.stringContaining("'volley-coord'")]);
+  });
+
+  it("agent_mcp: strict never warns: no user server starts", async () => {
+    env = await makeSpawnEnv();
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    cfg.mcpServers = { "volley-coord": { command: "bunx", args: ["volley-mcp"] } };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    expect(env.events.filter((e) => e.type === "alarm_raised")).toEqual([]);
+  });
+
+  it("agent_mcp defaults to strict", async () => {
+    env = await makeSpawnEnv();
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).toContain(" --strict-mcp-config ");
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).not.toHaveProperty(
+      "agent_mcp",
+    );
+  });
+
   it("launch.sh, run by bash, execs claude with the brief as one positional argument", async () => {
     await launchWithCmux();
     // A stand-in claude that records its argv and env.
@@ -258,6 +364,32 @@ describe("launch (local cmux host)", () => {
       "w1-t1-implementer-1",
       "--",
       brief.replace(/\n+$/, ""), // $(…) strips trailing newlines
+    ]);
+  });
+});
+
+describe("strayVolleyServers", () => {
+  it("finds volley-mcp entries not named `volley`; skips `volley`, URL servers and others", () => {
+    expect(
+      strayVolleyServers([
+        {
+          source: "a",
+          config: {
+            mcpServers: {
+              volley: { command: "bunx", args: ["volley-mcp"] },
+              coord: { command: "bunx", args: ["volley-mcp@0.3.0"] },
+              remote: { type: "http", url: "https://example.test/volley-mcp" },
+              other: { command: "npx", args: ["x"] },
+            },
+          },
+        },
+        { source: "b", config: null },
+        { source: "c", config: { mcpServers: "nope" } },
+        { source: "d", config: { mcpServers: { v: { command: "/usr/bin/volley-mcp" } } } },
+      ]),
+    ).toEqual([
+      { source: "a", name: "coord" },
+      { source: "d", name: "v" },
     ]);
   });
 });

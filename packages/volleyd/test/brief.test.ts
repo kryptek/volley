@@ -79,6 +79,52 @@ describe("brief templates", () => {
     expect(render("spec_reviewer")).toMatch(/detached checkout of the PR head/);
   });
 
+  it("the rebase role's merge brief (branch_update: merge): the protocol block, and never a force-push", () => {
+    const merge = renderBrief(loadTemplate("rebase", undefined, "merge"), {
+      ...VARS,
+      role: "rebase",
+      issue_title: "Plain",
+    });
+    const rebase = renderBrief(loadTemplate("rebase"), { ...VARS, role: "rebase" });
+    expect(merge).toMatch(/^# Merge for issue #42/);
+    expect(merge).toContain(".volley/rebase.md");
+    expect(merge).toContain("Merge `origin/release/w1` into the PR branch (never rebase it)");
+    expect(merge).toContain("Never force-push, in any form");
+    expect(merge).not.toMatch(/lease-guarded|The only force-push allowed/);
+    expect(rebase).toContain("The only force-push allowed");
+    // The protocol block is the rebase brief's, byte for byte.
+    const protocol = (b: string) => b.slice(b.indexOf("## Volley protocol (mandatory)"));
+    expect(protocol(merge)).toBe(
+      protocol(
+        renderBrief(loadTemplate("rebase"), { ...VARS, role: "rebase", issue_title: "Plain" }),
+      ),
+    );
+    expect(merge).not.toMatch(/vol_register/);
+    expect(merge).not.toContain("{{");
+  });
+
+  it("a merge-mode rebase spawn renders the merge brief", async () => {
+    const env = await makeSpawnEnv();
+    try {
+      const out = await spawnAgent(
+        env.request({
+          role: "rebase",
+          start: { ref: "a".repeat(40), detach: false },
+          branch_update: "merge",
+        }),
+        env.deps,
+      );
+      expect(out.kind).toBe("launched");
+      const wt = env.events.find((e) => e.type === "agent_spawned")?.data.worktree as string;
+      expect(readFileSync(join(wt, ".volley", "brief.md"), "utf-8")).toMatch(/^# Merge for issue/m);
+      expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+        branch_update: "merge",
+      });
+    } finally {
+      env.cleanup();
+    }
+  });
+
   it("substitutes in one pass (placeholders inside values stay literal)", () => {
     const brief = renderBrief(loadTemplate("implementer"), VARS);
     expect(brief).toContain("Title with {{agent_id}} inside");
