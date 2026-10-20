@@ -2,7 +2,7 @@ import type { ExecFn } from "../exec";
 import type { MergeToken } from "../fence";
 
 /**
- * Autopilot merging (SPEC §4.6.16): the ONE module that may build `gh pr merge`
+ * Autopilot merging (SPEC §4.6.17): the ONE module that may build `gh pr merge`
  * (test/no-merge.test.ts exempts exactly this file). The argv is the only shape the fence allows,
  * and only with the gate's MergeToken for exactly that PR and head: GitHub refuses the merge when
  * the head moved since the gate (`--match-head-commit`). Never --admin or --auto: a refused merge

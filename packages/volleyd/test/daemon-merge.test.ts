@@ -9,7 +9,7 @@ import {
 } from "./helpers/supervised-env";
 
 /**
- * The daemon wires autopilot merging (SPEC §4.6.16): a wave file without `merge:` takes the
+ * The daemon wires autopilot merging (SPEC §4.6.17): a wave file without `merge:` takes the
  * `autopilot.merge` tunable (default auto), and the merge runs through the real fence (the fake
  * exec checks every argv with its options, so the gate's MergeToken must reach it).
  */

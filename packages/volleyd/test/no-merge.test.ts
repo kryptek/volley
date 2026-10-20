@@ -6,7 +6,7 @@ import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * volleyd never pushes or re-runs CI, and merges only under autopilot merging (`merge: auto`,
- * SPEC §4.6.16): exactly `gh pr merge <n> --squash --match-head-commit <gated head>`, built only
+ * SPEC §4.6.17): exactly `gh pr merge <n> --squash --match-head-commit <gated head>`, built only
  * by src/autopilot/merge.ts. The fence (T3) denies everything else at exec time; this holds the
  * pipeline to it statically (no other source builds such an argv) and dynamically (a fake exec
  * WITHOUT the fence, that would happily run anything, sees only that one merge, and only under

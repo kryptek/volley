@@ -9,7 +9,7 @@ import {
 } from "./helpers/pipeline-harness";
 
 /**
- * Autopilot merging (A5, SPEC §4.6.16): under `merge: auto` the gate mints a MergeToken and the
+ * Autopilot merging (A5, SPEC §4.6.17): under `merge: auto` the gate mints a MergeToken and the
  * pipeline merges exactly the gated head (`gh pr merge <n> --squash --match-head-commit <head>`),
  * journaled as merged_by_supervisor. Under `merge: manual` nothing changes: a human merges.
  */

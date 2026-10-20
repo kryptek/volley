@@ -60,7 +60,7 @@ export interface EvidenceInput {
   base_sha?: string;
   /** The release-branch check the gate passed. */
   release: RebaseCheck;
-  /** Who merges: volleyd itself (`auto`, SPEC §4.6.16) or a human (`manual`). */
+  /** Who merges: volleyd itself (`auto`, SPEC §4.6.17) or a human (`manual`). */
   merge: "auto" | "manual";
   generated_at: string;
 }

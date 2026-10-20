@@ -45,6 +45,9 @@ All workspace packages share one version. Dates are release-tag dates.
   the task's open decisions are resolved `superseded_by_merge`, its live agents retired, and it
   becomes `done` with `merged_unverified_head`, releasing its dependents. Before, a merged task
   waited on its decision and could only be recorded as `cancelled`. (#195)
+- volley-desk: Arrange & fit and the first fit framed only the arranged (unpinned) windows, so a
+  window pinned in place could be left off-screen; the view now frames the pinned windows with
+  the rest, and the layout is chosen to fit beside them. (#221)
 
 ### Added
 

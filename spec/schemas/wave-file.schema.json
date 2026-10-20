@@ -54,7 +54,7 @@
     },
     "merge": {
       "enum": ["auto", "manual"],
-      "description": "Who merges a gated PR (spec section 4.6.16): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."
+      "description": "Who merges a gated PR (spec section 4.6.17): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."
     },
     "placement": {
       "enum": ["auto", "local"],

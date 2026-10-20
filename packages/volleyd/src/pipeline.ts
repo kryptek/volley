@@ -72,7 +72,7 @@ import type {
  *     control ops or shutdown.
  *
  * volleyd never pushes or re-runs CI, and merges only under autopilot merging (`merge: auto`,
- * SPEC §4.6.16): the one `merge` action, with the gate's MergeToken, runs exactly
+ * SPEC §4.6.17): the one `merge` action, with the gate's MergeToken, runs exactly
  * `gh pr merge <n> --squash --match-head-commit <gated head>` (src/autopilot/merge.ts). Every
  * other command the driver runs is a read-only verb of artifacts.ts (test/no-merge.test.ts).
  */
@@ -977,7 +977,7 @@ function onMergeChecked(
   return mergeExhausted(v) ? mergeRefusedDecision(v) : [];
 }
 
-// --- Autopilot merging (SPEC §4.6.16) ---
+// --- Autopilot merging (SPEC §4.6.17) ---
 
 /** volleyd merges this task itself: `merge: auto` and the owner did not take it back. */
 const autoMergeOn = (v: PipelineView): boolean =>

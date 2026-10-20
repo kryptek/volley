@@ -238,7 +238,7 @@ export function mintScriptToken(path: string): ScriptToken {
 const merges = new WeakSet<object>();
 
 /**
- * Permission to merge one gated PR at exactly its gated head (autopilot merging, SPEC §4.6.16).
+ * Permission to merge one gated PR at exactly its gated head (autopilot merging, SPEC §4.6.17).
  * Only `mintMergeToken` creates one (checked by identity).
  */
 export interface MergeToken {
