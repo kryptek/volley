@@ -182,6 +182,8 @@ describe("agent window header: the stylesheet holds the no-overlap rules", () =>
     [desk, ".win-bar .chip", /text-overflow: ellipsis/],
     [desk, ".win-bar .chip", /max-width: \d+px/],
     [desk, ".win--compact .acct-pick", /(^|[ ;])width: \d+px/],
+    // The machine chip keeps "this machine" readable in compact form (a phone has no hover tooltip).
+    [desk, ".win--compact .win-bar .m-chip", /max-width: 120px/],
     [agent, ".win-sub .t-name", /-webkit-line-clamp: 2/],
     [agent, ".win-sub .t-name", /text-wrap: balance/],
   ])("%#: a rule declares it", (sheet, selector, re) => {

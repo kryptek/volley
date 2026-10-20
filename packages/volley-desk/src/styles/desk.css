@@ -263,6 +263,10 @@ code {
 .win--compact .win-bar .chip {
   max-width: 72px;
 }
+/* The machine chip keeps its name readable ("this machine"): a phone cannot hover for the tooltip. */
+.win--compact .win-bar .m-chip {
+  max-width: 120px;
+}
 /* Compact: the account picker is an icon (its name and options unchanged). */
 .win--compact .acct-pick {
   width: 30px;

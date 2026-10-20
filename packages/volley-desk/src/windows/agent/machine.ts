@@ -38,6 +38,9 @@ export function machineFor(
 ): AgentMachine | null {
   if (!agent.task) return null;
   const task = wave?.state?.tasks.find((t) => t.id === agent.task);
+  // `host` is authoritative: it is the machine the effective plan spawns on (volleyd's reducer
+  // sets it in the same step as `placement`, and a wave file's own host has no placement). It is
+  // absent for the supervisor's own machine, which only `placement.host` names.
   const name = task?.host ?? task?.placement?.host;
   if (!task || !name) return null;
   const record = state.machines?.[name];
