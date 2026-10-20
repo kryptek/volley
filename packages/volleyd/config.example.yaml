@@ -127,3 +127,5 @@
 #   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
 #                                # (decision merge_refused: retry, manual or cancel)
 #   delete_branch: false         # autopilot merges also delete the PR's head branch
+#   reconnect_grace_s: 900       # a wave owned by a coordinator name whose session went away reads
+#                                # coordinator.state "reconnecting" this long (60..86400), then "gone"

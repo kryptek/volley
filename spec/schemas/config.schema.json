@@ -505,6 +505,13 @@
               "type": "boolean",
               "default": false,
               "description": "Autopilot merges also delete the PR's head branch (gh pr merge --delete-branch)."
+            },
+            "reconnect_grace_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
             }
           }
         }

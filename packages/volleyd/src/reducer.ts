@@ -62,6 +62,12 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+  /**
+   * The agent last journaled as bound to the wave's coordinator-name owner (`owner_reconnected`),
+   * so a daemon restart replaying the registry does not journal the same reconnect again; null
+   * once a claim gave the wave another owner.
+   */
+  owner_agent?: string | null;
   /** What autopilot answered and escalated (SPEC §4.6.16); absent in older snapshots. */
   autopilot?: AutopilotRecord;
 }
@@ -457,6 +463,10 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
+      next.owner_agent = null;
+      break;
+    case "owner_reconnected":
+      next.owner_agent = ev.data.agent_id as string;
       break;
     default: {
       const status = WAVE_STATUS[ev.type];

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T09:12:04.000Z",
+  "channel": "_waves/events",
+  "type": "owner_reconnected",
+  "payload": {
+    "wave": "w1",
+    "seq": 42,
+    "at": "2026-10-20T09:12:04.000Z",
+    "data": {
+      "owner": "coord-main",
+      "agent_id": "coordinator-c7d9",
+      "previous_agent_id": "coordinator-ab12"
+    }
+  }
+}

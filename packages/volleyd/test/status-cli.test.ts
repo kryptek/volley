@@ -256,6 +256,31 @@ describe("volleyd status formatting", () => {
     expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
   });
 
+  it("names the agent a coordinator-name owner acts through; it needs you when you are that agent", () => {
+    const named = {
+      ...plain,
+      owner: "coord-main",
+      open_decisions: ["d1"],
+      coordinator: {
+        agent_id: "coordinator-c7d9",
+        state: "working" as const,
+        last_seen: "2026-10-18T12:00:00.000Z",
+      },
+    };
+    const header = formatWave(named, { caller: "coordinator-c7d9" }).split("\n")[0];
+    expect(header).toContain("owner: coord-main (via coordinator-c7d9)  tasks:");
+    expect(header).toContain("needs you: 1");
+    expect(formatWave(named, { caller: "coord-main" }).split("\n")[0]).toContain("needs you: 1");
+    expect(
+      formatWave({ ...named, coordinator: { ...named.coordinator, state: "reconnecting" } }).split(
+        "\n",
+      )[0],
+    ).toContain("owner: coord-main (via coordinator-c7d9, reconnecting)");
+    // An agent-id owner reads as before.
+    const own = { ...named, owner: "coordinator-c7d9" };
+    expect(formatWave(own).split("\n")[0]).toContain("owner: coordinator-c7d9  tasks:");
+  });
+
   it("shows a task's queued steers", () => {
     const out = formatWave({
       ...plain,

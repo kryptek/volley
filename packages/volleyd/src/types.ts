@@ -161,6 +161,11 @@ export interface AutopilotConfig {
   merge_retry_max: number;
   /** Autopilot merges also delete the PR's head branch (`gh pr merge --delete-branch`). */
   delete_branch: boolean;
+  /**
+   * How long a wave owned by a coordinator name reads `reconnecting` after the agent bound to
+   * the name went away, before `gone` (SPEC §4.6.1).
+   */
+  reconnect_grace_s: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -393,10 +398,14 @@ export interface AutopilotState {
   budgets: Record<string, { used: number; max: number }>;
 }
 
-/** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
+/**
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
+ * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
+ * agent went away less than `autopilot.reconnect_grace_s` ago.
+ */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "gone";
+  state: "working" | "awaiting_input" | "reconnecting" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;
@@ -416,6 +425,7 @@ export const WAVE_EVENT_TYPES = [
   "wave_stopped",
   "wave_complete",
   "owner_claimed",
+  "owner_reconnected",
   "task_queued",
   "task_admitted",
   "task_cancelled",

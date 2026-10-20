@@ -70,6 +70,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     merge: "auto",
     merge_retry_max: 2,
     delete_branch: false,
+    reconnect_grace_s: 900,
   },
 };
 
