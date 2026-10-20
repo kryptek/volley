@@ -294,6 +294,7 @@ export function checkLiveness(
           { ...evidence, background_wait: evidence.background_wait ?? s.background_wait },
           now,
           tunables,
+          s.activity_at,
         )
       : null;
   // Waiting on its own work (the harness wakes it when that ends): neither nudged nor a stall.

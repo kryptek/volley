@@ -43,6 +43,20 @@ describe("ownWorkReason", () => {
     expect(ownWorkReason(ev({ worktree_write_at: NOW - 10 * 60_000 }), NOW, T)).toBeNull();
     expect(ownWorkReason(ev({ background_wait: { since: NOW - 7201_000 } }), NOW, T)).toBeNull();
   });
+
+  it("no evidence holds off the nudge once the idle is older than background_wait_max_s", () => {
+    const idleSince = NOW - 7201_000;
+    for (const e of [
+      ev({ lease_held: true, lease_pool: "it" }),
+      ev({ shells_running: 1 }),
+      ev({ worktree_write_at: NOW - 40_000 }),
+      ev({ background_wait: { since: NOW - 60_000 } }),
+    ])
+      expect(ownWorkReason(e, NOW, T, idleSince)).toBeNull();
+    expect(ownWorkReason(ev({ shells_running: 1 }), NOW, T, NOW - 7199_000)).toBe(
+      "1 shell still running",
+    );
+  });
 });
 
 describe("newestWrite", () => {

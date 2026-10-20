@@ -416,6 +416,19 @@ describe("liveness: an idle agent waiting on its own work", () => {
     const r = run(start.state, [check(T0 + 121 * MIN), check(T0 + 124 * MIN)]);
     expect(kinds(r.actions)).toEqual(["steer", "agent_stalled"]);
   });
+
+  it("a running shell or a held lease holds the nudge for at most background_wait_max_s of idle", () => {
+    const idle = run(fresh(), [signal("idle-stop.json", T0)]).state;
+    for (const evidence of [{ shells_running: 1 }, { lease_held: true, lease_pool: "it" }]) {
+      const held = run(idle, [check(T0 + 60 * MIN, "working", evidence)]);
+      expect(held.actions).toEqual([]);
+      const r = run(held.state, [
+        check(T0 + 121 * MIN, "working", evidence),
+        check(T0 + 124 * MIN, "working", evidence),
+      ]);
+      expect(kinds(r.actions)).toEqual(["steer", "agent_stalled"]);
+    }
+  });
 });
 
 describe("whyWaiting", () => {

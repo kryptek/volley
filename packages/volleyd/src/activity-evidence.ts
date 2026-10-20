@@ -34,13 +34,18 @@ export interface EvidenceTunables {
   background_wait_max_s: number;
 }
 
-/** Why the idle agent is busy with its own work, or null when nothing says it is. */
+/**
+ * Why the idle agent is busy with its own work, or null when nothing says it is. `idleSince` is
+ * when the idle began: past `background_wait_max_s` of it no evidence counts, so a background task
+ * that never exits (a dev server, a hung watch, a lease never granted) still ends in a nudge.
+ */
 export function ownWorkReason(
   e: ActivityEvidence,
   now: number,
   t: EvidenceTunables,
+  idleSince?: number,
 ): string | null {
-  // A background task that never exits still ends in a nudge.
+  if (idleSince !== undefined && now - idleSince >= secondsMs(t.background_wait_max_s)) return null;
   if (
     e.background_wait !== null &&
     now - e.background_wait.since < secondsMs(t.background_wait_max_s)
