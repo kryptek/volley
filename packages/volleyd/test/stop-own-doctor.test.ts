@@ -28,13 +28,13 @@ describe("stop() and an own doctor still running", () => {
         localDoctor: (_repo, s) => {
           signal = s;
           started();
-          // Like exec: the run ends only when its child is gone, a moment after the abort.
+          // Like exec: the run ends only when its child is gone, a turn after the abort.
           return new Promise<DoctorReport | null>((resolve) => {
             s?.addEventListener("abort", () =>
-              setTimeout(() => {
+              setImmediate(() => {
                 settled = true;
                 resolve(GREEN_DOCTOR);
-              }, 50),
+              }),
             );
           });
         },
