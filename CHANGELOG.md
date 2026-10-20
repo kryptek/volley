@@ -2,6 +2,18 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Added
+
+- **Desk sound themes:** twelve themes of short generated clips (Synthwave by default) for 28 Desk events: clicks, drags,
+  tethers, panels, agents spawning, finishing and failing, reviews, decisions, CI, gates, merges, waves, steering, account
+  limits, machines and the broker, and anything that needs you. Settings › Sound picks a theme, plays any clip of any theme,
+  and has master volume, mute, per-event switches, only-when-hidden, quiet hours, reduced motion and vibrate. A burst plays
+  once and is read out ("12 agents completed"). The clips are generated with the ElevenLabs Sound Effects API from
+  `sounds/prompts.yaml` (`bun run sounds:generate`, `sounds:pick`, `sounds:check`). The Desk's old chime is gone; the
+  legacy dashboard keeps its own. (#171)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a

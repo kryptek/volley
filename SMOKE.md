@@ -6,6 +6,30 @@ This file collects feature-level smoke recipes that span multiple packages — t
 
 ---
 
+## Desk sound themes (#171)
+
+**Done means:** every theme sounds right to the owner, and the Desk's sound rules hold in a real
+browser. About 15 minutes, in the Desk's demo mode (`volley dash`, then add `?demo=1`), with the
+speakers on.
+
+1. Open Settings › Sound. Pick **Arcade 8-bit**: its card lights up, a thin bar runs until it has
+   loaded, and the browser's Network panel shows one `manifest.json` and up to 28 `.ogg` clips from
+   `sounds/arcade/` (under 200 KB) and nothing from any other theme.
+2. On every theme card, press each chip of its audition row. Each plays once, in that theme, and the
+   picked theme does not change. Note any clip to re-roll as `<theme>/<event>` in a comment on
+   #171; the comment that has none reads "audition passed".
+3. Close Settings, click a dock item and drag a window by its title bar: a click, a lift and a drop.
+   Toggle the tethers in the dock: on and off sound differently.
+4. Wait for the demo wave to put something into Needs you (the top-bar pill counts up): the
+   Needs-you sound plays once, however many items arrived together.
+5. Turn on **Only when the Desk tab is hidden**. Agent and wave sounds stop while the tab is in
+   front; switch to another tab and they play again; clicks never play there. Turn it off.
+6. Turn on **Mute all**: nothing plays, but the audition chips still do. Turn it off.
+7. Turn on reduced motion in the OS: nothing plays. Turn off **Follow reduced motion**: sounds
+   play again.
+
+---
+
 ## Plan 11 — Onboarding (v0.3.0)
 
 **Done means:** a fresh machine gets to a Desk signed in on a phone, with a paired second machine
