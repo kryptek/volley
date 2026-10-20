@@ -13,6 +13,7 @@ import {
   type LeaseBook,
   type LeaseInput,
   type LeaseStepContext,
+  capFor,
   emptyBook,
   heldOn,
   poolPayload,
@@ -458,6 +459,47 @@ describe("leases: per-machine cap", () => {
 // The daemon over MQTT (in-process Aedes broker)
 // ---------------------------------------------------------------------------------------------
 
+describe("leases: per-machine overrides (SPEC §4.6.5)", () => {
+  const POOL = { js: { capacity: 4, per_machine: 2, per_machine_overrides: { laptop: 1 } } };
+
+  it("a machine's override caps it in place of per_machine; another machine keeps per_machine", () => {
+    const h = harness(POOL);
+    h.acquireOn("laptop", "js", "l-1", "agent-a");
+    h.acquireOn("laptop", "js", "l-2", "agent-b");
+    h.acquireOn("box-a", "js", "l-3", "agent-c");
+    h.acquireOn("box-a", "js", "l-4", "agent-d");
+    expect(h.held("js")).toEqual(["l-1", "l-3", "l-4"]);
+    expect(h.queued("js")).toEqual(["l-2"]);
+    const p = h.payload("js");
+    expect(p.reasons).toEqual(["queued l-2: 1/1 js leases held on laptop (per machine)"]);
+    expect(p).toMatchObject({ capacity: 4, per_machine: 2, per_machine_overrides: { laptop: 1 } });
+    expect(
+      schemaErrors("lease-pool.schema.json", envelope("_system/leases", "lease_pool", p)),
+    ).toEqual([]);
+  });
+
+  it("an override of 0 queues the first request on that machine; an override alone is a cap", () => {
+    const h = harness({ js: { capacity: 4, per_machine_overrides: { laptop: 0 } } });
+    h.acquireOn("laptop", "js", "l-1", "agent-a");
+    h.acquireOn("box-a", "js", "l-2", "agent-b");
+    h.acquireOn("box-a", "js", "l-3", "agent-c");
+    expect(h.held("js")).toEqual(["l-2", "l-3"]);
+    expect(h.queued("js")).toEqual(["l-1"]);
+    expect(h.payload("js").reasons).toEqual([
+      "queued l-1: 0/0 js leases held on laptop (per machine)",
+    ]);
+  });
+
+  it("capFor: the override, else per_machine; none for a holder on no known machine", () => {
+    const cfg = { capacity: 4, per_machine: 2, per_machine_overrides: { laptop: 1, "box-b": 0 } };
+    expect(capFor(cfg, "laptop")).toBe(1);
+    expect(capFor(cfg, "box-b")).toBe(0);
+    expect(capFor(cfg, "box-a")).toBe(2);
+    expect(capFor(cfg, null)).toBeUndefined();
+    expect(capFor({ capacity: 4 }, "box-a")).toBeUndefined();
+  });
+});
+
 describe("volleyd daemon: lease requests over MQTT", () => {
   let t: DaemonEnv;
   let daemon: Daemon;
@@ -747,7 +789,11 @@ describe("config.example.yaml", () => {
   const uncommented = example.replace(/^# (\s*[a-z_-]+:(?: |$).*)$/gm, "$1");
 
   it("loads as shipped (everything commented: the built-in defaults)", () => {
-    expect(load(example).effective()).toEqual(CONFIG_DEFAULTS);
+    // `fleet.local_agents: null` resolves to `always` with no hosts.
+    expect(load(example).effective()).toEqual({
+      ...CONFIG_DEFAULTS,
+      fleet: { ...CONFIG_DEFAULTS.fleet, local_agents: "always" },
+    });
   });
 
   it("documents every top-level tunable", () => {
@@ -757,7 +803,11 @@ describe("config.example.yaml", () => {
 
   it("uncommented, it is valid, documents the real defaults, and defines the example pools", () => {
     const eff = load(uncommented).effective();
-    expect({ ...eff, lease_pools: {}, hosts: {} }).toEqual(CONFIG_DEFAULTS);
+    // With a host configured, `fleet.local_agents: null` resolves to `fallback`.
+    expect({ ...eff, lease_pools: {}, hosts: {} }).toEqual({
+      ...CONFIG_DEFAULTS,
+      fleet: { ...CONFIG_DEFAULTS.fleet, local_agents: "fallback" },
+    });
     expect(eff.hosts.buildbox).toMatchObject({
       target: "me@buildbox",
       repo: "/home/me/src/myrepo",

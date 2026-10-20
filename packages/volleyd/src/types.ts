@@ -37,6 +37,11 @@ export interface LeasePoolConfig {
   capacity: number;
   /** The most leases holders on one machine may hold at once (1..capacity); unset: capacity. */
   per_machine?: number;
+  /**
+   * Per machine name (a `hosts.<name>` key, the supervisor's `fleet.local_name`, or `local`), the
+   * cap in place of `per_machine` there (0..capacity). `effective()` resolves `local`.
+   */
+  per_machine_overrides?: Record<string, number>;
   ttl_s?: number;
   match?: string[];
 }
@@ -170,9 +175,24 @@ export interface AutopilotConfig {
   reconnect_grace_s: number;
 }
 
+/** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
+export type LocalAgentsMode = "always" | "fallback" | "never";
+
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
 export interface FleetConfig {
   local_name: string | null;
+  /** null: `fallback` when any `hosts.<name>` is configured, else `always` (`effective()` resolves it). */
+  local_agents: LocalAgentsMode | null;
+  /** The own machine's profile while it is the fallback (no paired machine eligible). */
+  fallback: FallbackProfile;
+}
+
+/** Config `fleet.fallback`. */
+export interface FallbackProfile {
+  /** The most supervised agents on the own machine while it is the fallback. */
+  max_agents: number;
+  /** Per heavy pool, the own machine's slots while it is the fallback; unnamed: 1 (when the pool sets `per_machine`). */
+  per_machine: Record<string, number>;
 }
 
 /** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */

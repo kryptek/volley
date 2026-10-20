@@ -369,6 +369,18 @@ backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it le
     held    l-1  hand-1  since 2026-10-19T12:00:00.000Z
 ```
 
+A pool with `per_machine_overrides` (a machine's cap in force in place of `per_machine`, set with
+`lease_pools.<pool>.per_machine_overrides` in the supervisor's config) lists them in the header,
+and every overridden machine gets a line, even before it holds a lease. A machine with no cap in
+force shows only its count:
+
+```text
+js-suite  3/4 held  max 2 per machine (box-a 3, laptop 1)  1 queued
+  box-a  2/3 held
+  box-b  0/2 held
+  laptop  1/1 held
+```
+
 - **Holder** = `--holder`, else the `agent_id` in `<--project-dir or cwd>/.volley/agent.json`, else a
   random `lease-xxxxxx` (`acquire` prints it so `release` can name it). The supervisor only accepts
   requests whose holder is the sender, and frees a holder's leases when its `status` turns

@@ -22,11 +22,16 @@ const leasePool = schema.$defs?.leasePool as JsonSchema;
 const values: Tunables = {
   hard_ceiling: 12,
   lease_pools: {
-    "backend-it": { capacity: 2, ttl_s: 1800, match: ["mvn .*verify"] },
+    "backend-it": { capacity: 2, per_machine: 1, ttl_s: 1800, match: ["mvn .*verify"] },
     build: { capacity: 3 },
   },
   hosts: { box: { target: "dev@box", repo: "~/src/app", volley_dir: "~/src/volley" } },
 };
+
+/** The heavy pools (those that set `per_machine`): `fleet.fallback.per_machine` has a row each. */
+const heavyPools = Object.entries(values.lease_pools ?? {})
+  .filter(([, p]) => p.per_machine !== undefined)
+  .map(([pool]) => pool);
 
 /** A map whose entries are structured records (e.g. `hosts`), not per-entry capacities. */
 const isRecordMap = (v: JsonSchema): boolean => {
@@ -34,7 +39,8 @@ const isRecordMap = (v: JsonSchema): boolean => {
   if (typeof entry !== "object") return false;
   const ref = entry.$ref?.replace("#/$defs/", "");
   const target = ref !== undefined ? (schema.$defs?.[ref] as JsonSchema) : entry;
-  return target.properties?.capacity === undefined;
+  // A map of plain numbers (`fleet.fallback.per_machine`) is not a record map.
+  return target.type !== "integer" && target.properties?.capacity === undefined;
 };
 
 /** The leaf tunables of the schema, as dotted paths (map entries expand per value). */
@@ -46,6 +52,9 @@ function expectedLeaves(s: Record<string, JsonSchema>, prefix = ""): string[] {
     if (v.type === "array") return [];
     if (v.properties) return expectedLeaves(v.properties as Record<string, JsonSchema>, `${p}.`);
     if (v.additionalProperties) {
+      // A top-level map is `lease_pools` (a capacity row per pool); a nested map of integers
+      // (`fleet.fallback.per_machine`) has a row per heavy pool.
+      if (prefix !== "") return heavyPools.map((pool) => `${p}.${pool}`);
       return Object.keys(values.lease_pools ?? {}).map((pool) => `${p}.${pool}.capacity`);
     }
     return [p];
@@ -76,7 +85,12 @@ describe("schemaRows", () => {
               ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
               : v.type === "array"
                 ? []
-                : [[`${pre}${k}`, v]],
+                : v.additionalProperties
+                  ? heavyPools.map((pool) => [
+                      `${pre}${k}.${pool}`,
+                      v.additionalProperties as JsonSchema,
+                    ])
+                  : [[`${pre}${k}`, v]],
           ),
         );
       const leaves = Object.entries(
@@ -110,6 +124,10 @@ describe("schemaRows", () => {
           expect(row.control).toEqual({ kind: "toggle" });
         } else if (Array.isArray(leaf.enum)) {
           expect(row.control).toEqual({ kind: "choice", options: leaf.enum });
+        } else if ((leaf.oneOf as JsonSchema[] | undefined)?.some((o) => Array.isArray(o.enum))) {
+          // an enum or null (fleet.local_agents): the retained config carries the resolved value
+          const e = (leaf.oneOf as JsonSchema[]).find((o) => Array.isArray(o.enum));
+          expect(row.control).toEqual({ kind: "choice", options: e?.enum });
         } else {
           // strings, and string-or-null (fallback_model)
           const nullable = Array.isArray(leaf.oneOf);
@@ -166,6 +184,34 @@ describe("schemaRows", () => {
       control: { kind: "slider", min: 0, max: 100, step: 1 },
     });
     expect(at.has("placement.weights")).toBe(false);
+  });
+
+  it("puts the fleet rows under Admission: local agents a choice, the fallback profile stepped", () => {
+    expect(at.get("fleet.local_agents")).toMatchObject({
+      section: "Admission",
+      label: "Fleet local agents",
+      control: { kind: "choice", options: ["always", "fallback", "never"] },
+    });
+    expect(at.get("fleet.fallback.max_agents")).toMatchObject({
+      section: "Admission",
+      label: "Fleet fallback max agents",
+      control: { kind: "slider", min: 1, max: 100, step: 1 },
+    });
+  });
+
+  it("gives fleet.fallback.per_machine one stepped row per heavy pool (one that sets per_machine)", () => {
+    const fallbackRows = rows.filter((r) => r.path.startsWith("fleet.fallback.per_machine"));
+    expect(fallbackRows.map((r) => r.path)).toEqual(["fleet.fallback.per_machine.backend-it"]);
+    expect(fallbackRows[0]).toMatchObject({
+      section: "Admission",
+      label: "backend-it fallback per machine",
+      control: { kind: "slider", min: 0, max: 64, step: 1 },
+      // a heavy pool not named in the map gets 1 (SPEC §4.6.15)
+      default: 1,
+    });
+    expect(
+      schemaRows(schema, null).some((r) => r.path.startsWith("fleet.fallback.per_machine")),
+    ).toBe(false);
   });
 
   it("falls back to the bounds as the hint when the schema has no description", () => {
