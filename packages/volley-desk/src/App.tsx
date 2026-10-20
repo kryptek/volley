@@ -88,7 +88,7 @@ import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTranspo
 import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
-import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
+import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
@@ -117,7 +117,7 @@ import {
   CoordinatorsWindow,
   ENDED_LABEL,
 } from "./windows/coordinators/CoordinatorsWindow";
-import { AttentionLine, NeedsYou } from "./windows/wave/NeedsYou";
+import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
@@ -964,16 +964,35 @@ export default function App() {
                 onChat={toggleSteer}
                 steerOpen={steerOpen === id}
                 banner={
-                  needsYou &&
-                  coordinator && (
-                    <NeedsYou
-                      wave={id}
-                      coordinator={coordinator}
-                      openDecisions={openDecisions(wave).length}
-                      now={now}
-                      claim={<ClaimButton wave={id} transport={steering.transport} />}
-                    />
-                  )
+                  <>
+                    {needsYou && coordinator && (
+                      <NeedsYou
+                        wave={id}
+                        coordinator={coordinator}
+                        openDecisions={openDecisions(wave).length}
+                        now={now}
+                        claim={<ClaimButton wave={id} transport={steering.transport} />}
+                      />
+                    )}
+                    {openDecisions(wave)
+                      .filter((d) => d.kind === "machine_down")
+                      .map((d) => (
+                        <MachineDown
+                          key={d.decision_id}
+                          decision={d}
+                          onAnswer={
+                            control
+                              ? (answer) =>
+                                  control(
+                                    "resolve",
+                                    resolveFields(d, answer),
+                                    `volleyd resolve ${d.decision_id}`,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ))}
+                  </>
                 }
                 onSettings={setSettings}
               >
