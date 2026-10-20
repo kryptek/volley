@@ -36,9 +36,12 @@ export function isTyping(target: EventTarget | null): boolean {
   );
 }
 
-/** A modal dialog owns the keyboard: `f` and `+` / `-` must not act on the canvas behind it. */
+/**
+ * A modal dialog, or a Terminal popout holding focus, owns the keyboard: `f`
+ * and `+` / `-` must not act on the canvas behind it.
+ */
 export const inModal = (target: EventTarget | null): boolean =>
-  target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+  target instanceof Element && target.closest('[aria-modal="true"], .popout') !== null;
 
 export interface DeskKeys {
   stageRef: RefObject<HTMLElement | null>;

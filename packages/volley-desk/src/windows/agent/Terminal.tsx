@@ -7,7 +7,10 @@
  * An agent with no signal says so in the empty state. Only agents volleyd
  * spawned have a screen: for one that registered on its own (no wave task)
  * the empty state says why, instead of a `no screen yet` that never comes.
+ * The popout (`TerminalPopout`) renders the same lines with its own `className`
+ * and `style` (no wrapping, its own text size).
  */
+import type { CSSProperties } from "react";
 import type { ScreenPayload } from "../../store/types";
 import { useFollow } from "./Feed";
 
@@ -28,17 +31,27 @@ export function Terminal({
   stale,
   noSignal = false,
   selfRegistered = false,
+  className,
+  style,
 }: {
   screen: ScreenPayload | null;
   stale: boolean;
   noSignal?: boolean;
   /** No wave task: volleyd did not launch it, so no screen will come. */
   selfRegistered?: boolean;
+  /** Extra classes on the root (the popout's `term--popout`). */
+  className?: string;
+  style?: CSSProperties;
 }) {
   const { ref, onScroll } = useFollow<HTMLDivElement>(screen);
 
   return (
-    <div className={`term recessed${stale ? " term--stale" : ""}`} ref={ref} onScroll={onScroll}>
+    <div
+      className={`term recessed${stale ? " term--stale" : ""}${className ? ` ${className}` : ""}`}
+      style={style}
+      ref={ref}
+      onScroll={onScroll}
+    >
       {stale && (
         <span className="term-stale" title="The supervisor could not refresh this screen">
           stale
