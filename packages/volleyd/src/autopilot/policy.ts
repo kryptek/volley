@@ -196,7 +196,7 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
   {
     policy: "agent_question/unattended",
     kinds: ["agent_question"],
-    condition: "first ask of the run",
+    condition: "within question_max per run",
     answer: QUESTION_ANSWER,
     budget: { name: "question_max", per: "run" },
     rationale: "what a hand coordinator answered",

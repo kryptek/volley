@@ -701,7 +701,7 @@ autopilot: on
     agent_blocked/respawn-result: a fresh agent publishes the result; skip would lose a review
   agent_blocked · pipeline.on === "merge_ready_invariant" · rereview · rereview_max per <task> · max 2
     agent_blocked/rereview-stale: a re-review is the safe way past a stale review
-  agent_question · first ask of the run · Proceed with your best judgement and the issue as written; you are running unattended. If you truly cannot continue, publish blocked with the reason. · question_max per <task>/<role>/<attempt> · max 1
+  agent_question · within question_max per run · Proceed with your best judgement and the issue as written; you are running unattended. If you truly cannot continue, publish blocked with the reason. · question_max per <task>/<role>/<attempt> · max 1
     agent_question/unattended: what a hand coordinator answered
   spawn_budget_exhausted · used + n <= derived budget × budget_raise_max · raise by <n> (n from the option) · budget_raise_max (× derived budget) · max 2
     spawn_budget_exhausted/raise: retries are the normal cost of a long wave

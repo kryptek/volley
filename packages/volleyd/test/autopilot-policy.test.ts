@@ -188,7 +188,7 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
   });
 
-  it("agent_question, first ask of the run: the unattended answer, under question_max", () => {
+  it("agent_question, within question_max per run: the unattended answer, under question_max", () => {
     const d = rec("agent_question", undefined, {
       class: "agent_question",
       agent_id: "w1-t1-implementer-1",

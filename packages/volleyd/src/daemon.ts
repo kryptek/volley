@@ -6202,8 +6202,9 @@ export class Daemon {
         return false;
       }
       // The answer was refused (an account that cannot take the wave, …): the owner's, now.
+      // Nothing was spent, so no budget is journaled.
       this.log(`autopilot ${d.decision_id}: ${msg}`);
-      return this.escalate(wave, d, "unattended_safety", v.budget);
+      return this.escalate(wave, d, "unattended_safety", undefined);
     }
     this.log(`autopilot answered ${d.decision_id} (${v.policy}): ${v.answer}`);
     return false;

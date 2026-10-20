@@ -221,6 +221,24 @@ describe("autopilot in the daemon (SPEC §4.6.16)", () => {
     await b.close();
   });
 
+  it("a refused answer under a budget journals no budget it never spent", async () => {
+    s = await makeSupervisedEnv({ daemon: AUTOPILOT_ON });
+    (s.daemon as unknown as { resolveNow: () => Promise<void> }).resolveNow = async () => {
+      throw new Error("refused");
+    };
+    const d = await s.daemon.openDecision("w1", {
+      kind: "spawn_budget_exhausted",
+      task: null,
+      question: "raise by 1, or cancel?",
+      options: ["raise by 1", "cancel"],
+    });
+    const esc = s.journal().filter((e) => e.type === "decision_escalated");
+    expect(esc.map((e) => e.data)).toEqual([
+      expect.objectContaining({ decision_id: d.decision_id, why: "unattended_safety" }),
+    ]);
+    expect(esc[0]?.data).not.toHaveProperty("budget");
+  });
+
   it("a failure after the answer is journaled never escalates or re-publishes the decision", async () => {
     s = await makeSupervisedEnv({ daemon: AUTOPILOT_ON });
     const b = await bridge();
