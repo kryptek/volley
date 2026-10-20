@@ -1,3 +1,4 @@
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
 import type { ExecFn, ExecResult } from "./exec";
 import type { NewEvent, TaskId } from "./types";
@@ -58,6 +59,9 @@ export interface CiFacts {
   superseded: SupersededRun[];
   failed_jobs: string[];
   infra: InfraReason | null;
+  /** Red only (verifyArtifacts): failing test ids and the tail of the failed runs' logs. */
+  failing_tests?: string[];
+  log?: string;
 }
 
 export interface PrRef {
@@ -180,6 +184,8 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
   const ci = await ciOn(exec, spec.cwd, head);
   // GitHub has not caught up with the push yet: the PR's checks are not this head's.
   if (pr.headRefOid !== head) ci.state = ci.state === "red" ? "red" : "running";
+  // What a CI fixup works from: the failed runs' logs (each call bounded by the driver's timeout).
+  if (ci.state === "red") Object.assign(ci, await failedLogs(exec, spec.cwd, ci.runs));
   const report: ArtifactReport = { kind: "ok", head, branch: spec.branch, pr: prRef, ci };
   if (spec.since !== undefined && spec.since !== head) {
     const d = await git("diff", "--name-only", spec.since, head);
@@ -322,6 +328,28 @@ export type ArtifactOutcome =
   | { kind: "ci_pending"; state: "running" | "none"; head: string }
   | { kind: "verified"; event: NewEvent & { data: Record<string, unknown> } };
 
+/**
+ * `gh run view <id> --log-failed` of each failed run: the failing tests (failingTests) and the
+ * logs' tail (each log headed `== <name> (run <id>) ==`), clipped to `ci_log_max_chars`. A log
+ * that cannot be read is skipped.
+ */
+async function failedLogs(
+  exec: ExecFn,
+  cwd: string,
+  runs: CiRun[],
+): Promise<{ failing_tests: string[]; log: string }> {
+  const tests: string[] = [];
+  const logs: string[] = [];
+  for (const run of failedRuns(runs)) {
+    const r = await exec(["gh", "run", "view", String(run.id), "--log-failed"], { cwd });
+    if (r.code !== 0) continue;
+    logs.push(`== ${run.name} (run ${run.id}) ==\n${r.stdout.trimEnd()}`);
+    for (const t of failingTests(r.stdout)) if (!tests.includes(t)) tests.push(t);
+  }
+  const log = logs.join("\n");
+  return { failing_tests: tests, log: log.slice(-DAEMON_DEFAULTS.ci_log_max_chars) };
+}
+
 /** What a verification report means for the pipeline. Pure. */
 export function artifactOutcome(
   task: TaskId,
@@ -361,19 +389,23 @@ export function artifactOutcome(
       decision: {
         kind: "ci_failed",
         task,
-        question: `CI failed on ${head.slice(0, 12)} (PR #${pr.number}): ${urls.join(" ")} — failed jobs: ${jobs}.${infra} volleyd never re-runs CI; fix or re-run it, then answer re-verify (or cancel).`,
+        question: `CI failed on ${head.slice(0, 12)} (PR #${pr.number}): ${urls.join(" ")} — failed jobs: ${jobs}.${infra} volleyd never re-runs CI. fixup: a fixup agent at ${head.slice(0, 12)} with the CI result as its directive; re-verify: you fixed or re-ran it; or cancel?`,
         pointers: { pr: pr.url },
-        options: ["re-verify", "cancel"],
+        options: ["fixup", "re-verify", "cancel"],
       },
       data: {
         head_sha: head,
         run_urls: urls,
         failed_jobs: ci.failed_jobs,
+        failing_tests: ci.failing_tests ?? [],
+        log: ci.log ?? "",
+        ci_runs: ci.runs,
         infra: ci.infra !== null,
         infra_reason: ci.infra,
         ...(ci.superseded.length > 0
           ? { superseded_run_urls: ci.superseded.map((r) => r.url) }
           : {}),
+        ...(report.touched !== undefined ? { touched: report.touched } : {}),
         role,
         pr: { number: pr.number, url: pr.url },
       },
@@ -675,14 +707,7 @@ export async function probeMovedHead(
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await git("fetch", "origin", o.branch);
   const ci = await ciOn(exec, o.cwd, o.to);
-  const tests: string[] = [];
-  if (ci.state === "red") {
-    for (const run of failedRuns(ci.runs)) {
-      const r = await exec(["gh", "run", "view", String(run.id), "--log-failed"], { cwd: o.cwd });
-      if (r.code === 0)
-        for (const t of failingTests(r.stdout)) if (!tests.includes(t)) tests.push(t);
-    }
-  }
+  const tests = ci.state === "red" ? (await failedLogs(exec, o.cwd, ci.runs)).failing_tests : [];
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
   const stat = await git("diff", "--stat", o.from, o.to);
   const merge =

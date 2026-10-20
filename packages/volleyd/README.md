@@ -670,10 +670,10 @@ left for you, with one push.
   `options` escalates `no_policy` (a free-text decision, `agent_question`, offers none and takes
   any answer).
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
-  `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` per task,
-  and `budget_raise_max`, a multiple of the wave's derived spawn budget that `raise by <n>`
-  answers may reach. Each is reduced from the journal's `decision_auto_resolved` events, so a
-  restart keeps them.
+  `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
+  `ci_fixup_max` (CI fixups, default 2) per task, and `budget_raise_max`, a multiple of the
+  wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
+  journal's `decision_auto_resolved` events, so a restart keeps them.
 - **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
   enabled: false } }`) takes effect at the next decision: nothing is answered or escalated, and
   every decision waits for you as before.
@@ -700,9 +700,11 @@ autopilot: on
   agent_stalled · asked === 1 · nudge again · nudge_max per <task>/<role>/<attempt> · max 1
     agent_stalled/nudge: one more nudge
   agent_stalled · asked > 1 · respawn · respawn_max per <task>/<role> · max 1
-    agent_stalled/respawn: a second stall needs a fresh agent (escalated no_policy while the decision does not offer respawn)
+    agent_stalled/respawn: a second stall needs a fresh agent: an implementer continues its pushed branch and PR
   agent_blocked · pipeline.on === "agent_failed" or class: respawn_needed · respawn · respawn_max per <task>/<role> · max 1
     agent_blocked/respawn-failed: a fresh agent picks the work up where the failed one left it
+  agent_blocked · pipeline.on === "verify" · respawn · respawn_max per <task>/<role> · max 1
+    agent_blocked/respawn-unverifiable: re-verifying a retired agent's missing work fails the same way; a fresh one finishes it
   agent_blocked · pipeline.on === "review_result" or "fixup_result" · respawn · respawn_max per <task>/<role> · max 1
     agent_blocked/respawn-result: a fresh agent publishes the result; skip would lose a review
   agent_blocked · pipeline.on === "merge_ready_invariant" · rereview · rereview_max per <task> · max 2
@@ -723,8 +725,10 @@ autopilot: on
     pr_head_moved/rereview: nobody reviewed the new head
   wave_complete · always · acknowledged · no budget
     wave_complete/acknowledge: the end of a wave needs no answer; the owner reads its outcome
-  ci_failed · always (ci_none included) · escalate no_policy · no budget
-    ci_failed/owner: a CI fixup and the flake route need pipeline work; a repository without workflows is the owner's
+  ci_failed · pipeline.on === "ci_failed" and classification: own_change (unclassified: infra === false) · fixup · ci_fixup_max per <task> · max 2
+    ci_failed/fixup-own-change: a fixup agent with the CI result as its directive is what a person would do
+  ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
+    ci_failed/owner: an infra-shaped red head and a repository without workflows are the owner's
   pr_closed, remote_repo_missing, merge_conflict · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
@@ -2015,7 +2019,7 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 |---|---|---|
 | `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the Stop text of the current idle (never an earlier turn's: `resumed` clears it; else the notification text) and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
 | `idle` (Stop) with no terminal status and no `resumed` for `idle_grace_s` (default 3 min; an `idle_prompt` confirms the idle sooner) | one steer: "Continue; publish done/blocked/failed when finished" | — |
-| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge; each further decision of the same idle waits twice as long after the answer (`idle_grace_s` × 2, × 4, …, at most `stall_backoff_max_s`, default 30 min) and says how many times it asked; `resumed` resets the count, so an agent the answer wakes starts again from one grace at its next idle; `stop task` cancels it |
+| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `respawn`, `stop task`) | `respawn` stops the agent (a mailbox `cancel` and an interrupt), retires it `relaunched` and spawns its role at the next attempt (an implementer continues its pushed branch and PR; a fixup or rebase starts again from the head with the same `.volley/` inputs); any other answer is steered to the agent and counts as the next nudge; each further decision of the same idle waits twice as long after the answer (`idle_grace_s` × 2, × 4, …, at most `stall_backoff_max_s`, default 30 min) and says how many times it asked; `resumed` resets the count, so an agent the answer wakes starts again from one grace at its next idle; `stop task` cancels it |
 | `idle` while the agent waits on its own work: the hooks' `background_wait` (a background shell still running), a lease it holds or waits on, a terminal footer counting running shells, or (local agents) a file under its worktree written within `idle_grace_s` (`.git`, `.volley`, `node_modules`, `target`, `build`, `dist`, `.venv`, `.next`, `coverage`, `.turbo` skipped; at most 2000 entries walked, a larger tree gives no write evidence); none of it counts once the idle is older than `background_wait_max_s` (default 2 h), so a shell that never exits still ends in a nudge | nothing: no steer, no `agent_stalled`; the task's `why_waiting` says `idle N min: <reason>` (e.g. `waiting on its own background task`, `holds lease <pool>`, `waits on lease <pool>`, `2 shells still running`, `worktree written in the last 3 min`) | — |
 | `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
 | `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
@@ -2188,7 +2192,8 @@ equals `origin/<PR branch>` after a `git fetch`; `gh pr list --head <branch>` ha
 release branch; CI on exactly that head (`gh run list --commit <sha>`) is green. A missing
 artifact is journaled (`alarm_raised { alarm: "artifact_missing", missing: push|pr|base }`), the
 agent is steered once ("push + open PR, then publish done again") and re-waited; still missing →
-an `agent_blocked` decision. Success journals `artifact_verified { role, head_sha, pr, ci_runs }`.
+an `agent_blocked` decision (`respawn`: the role again at the next attempt, an implementer
+continuing its pushed branch and PR / `re-verify`: you fixed it by hand / `cancel`). Success journals `artifact_verified { role, head_sha, pr, ci_runs }`.
 The steer names what the role publishes: the implementer its branch and PR, the fixup its
 `git push origin HEAD:<PR branch>`, the rebase its lease-guarded push (under `branch_update: merge`,
 its merge and normal push).
@@ -2202,7 +2207,15 @@ decision with the run URLs and failed job names (`data.infra`, and `data.infra_r
 `startup` \| `steps` \| `cancelled` \| `null`). A run that never started, or failed only in
 runner, checkout or network steps, adds "check the hosting provider's status page first"; when
 every failed run was cancelled and nothing replaced it, the decision says to re-run it (or push
-again) instead. Pending CI is re-checked every
+again) instead. The decision also carries `failing_tests` and `log` (the tail of `gh run view <id>
+--log-failed` of each failed run, `ci_log_max_chars`) and offers `fixup` first: a fixup agent at
+the red head whose `.volley/findings.md` opens with `# Directive: CI failed on your head` (the
+failed jobs, the failing tests, the log) as its only job. It is journaled as `stage_entered {
+stage: fixup, directive: { to, ci: red, failed_jobs, failing_tests, log, runs, only: true } }`
+and `volleyd status` labels the stage `fixup (CI directive)`. The fixup's verified green head goes
+on from the red head's step: after a CI failure on the implementer's first head, to the reviews;
+on a fixup's or rebase's head, to the gate (the reviews of the head it fixed still hold).
+`re-verify` is for a fix or re-run you did yourself. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
 `ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
@@ -2255,7 +2268,8 @@ was still running at its `done` — the usual case — still has its resolutions
 round with no findings skips the fixup.
 
 **Decision answers** are matched exactly (case and surrounding space aside): `cancel` cancels,
-`re-verify` re-verifies (as does any other answer to a `verify` / `ci_failed` decision), and any
+`re-verify` re-verifies (as does any other answer to a `verify` / `ci_failed` decision, but
+`respawn` / `fixup`), and any
 other answer that is not one of the decision's options re-asks the question. A `respawn` drops the
 role's run, so the spawn is retried on every tick until it goes through. A role whose agent is
 reaped (its LWT, past the reap grace) is handled like a `failed` one: retired, then a
