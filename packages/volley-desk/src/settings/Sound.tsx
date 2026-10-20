@@ -4,9 +4,10 @@
  * volume and Mute all, the per-event switches grouped as in `EVENT_GROUPS`
  * (each with a play button that auditions the current theme), and when
  * sounds play: only while the tab is hidden, quiet hours, reduced motion and
- * vibration (offered only where the browser can vibrate). Everything persists through `useSoundSettings`; an audition
- * ignores mute, quiet hours and the hidden-tab rule (it is asked for) but
- * keeps the master volume. Leaving the section drops the auditioned themes.
+ * vibration (offered only where the browser can vibrate). Everything persists
+ * through `useSoundSettings`; an audition ignores mute, quiet hours and the
+ * hidden-tab rule (it is asked for) but keeps the master volume. Leaving the
+ * section drops the auditioned themes.
  */
 import { PlayCircleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";

@@ -22,7 +22,7 @@ function fakePlayer() {
   const p: Player & { played: SoundEventId[] } = {
     played,
     loadTheme: vi.fn(async () => {}),
-    isLoaded: () => true,
+    has: () => true,
     theme: () => "synthwave",
     play: vi.fn(async (id: SoundEventId) => {
       played.push(id);
@@ -155,14 +155,15 @@ describe("useSoundManager", () => {
     expect(player.played).toEqual(["ui_drag_start"]);
   });
 
-  it("clicks for a marked control, and unlocks the context on the first gesture only", () => {
+  it("clicks for a marked control, and asks the context to start on every gesture", () => {
     mount();
     const { getByRole } = render(<Toggle on={false} onChange={() => {}} label="Thing" />);
     fireEvent.pointerDown(getByRole("switch", { name: "Thing" }));
     fireEvent.pointerDown(document.body);
     fireEvent.keyDown(document.body, { key: "a" });
     expect(player.played).toEqual(["ui_click"]);
-    expect(player.unlock).toHaveBeenCalledTimes(1);
+    // A refused or later-suspended context gets another try; unlock() is a no-op once running.
+    expect(player.unlock).toHaveBeenCalledTimes(3);
   });
 
   it("a Frame drag plays drag start and drop", () => {
@@ -185,8 +186,41 @@ describe("useSoundManager", () => {
     );
     const bar = container.querySelector(".win-bar") as HTMLElement;
     fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
-    fireEvent.pointerUp(bar, { clientX: 50, clientY: 10 });
+    fireEvent.pointerMove(bar, { clientX: 12, clientY: 10 });
+    expect(player.played).toEqual([]);
+    fireEvent.pointerMove(bar, { clientX: 50, clientY: 10 });
+    fireEvent.pointerMove(bar, { clientX: 60, clientY: 10 });
+    fireEvent.pointerUp(bar, { clientX: 60, clientY: 10 });
     expect(player.played).toEqual(["ui_drag_start", "ui_drop"]);
+  });
+
+  it("a Frame tap (no drag) plays neither drag start nor drop", () => {
+    mount();
+    const onCollapse = vi.fn();
+    const { container } = render(
+      <Frame
+        id="w"
+        title="wave-1"
+        accent="#6ee7f9"
+        pos={{ x: 0, y: 0 }}
+        width={300}
+        z={1}
+        scale={1}
+        chrome="glass"
+        onMove={() => {}}
+        onFocus={() => {}}
+        onCollapse={onCollapse}
+      >
+        body
+      </Frame>,
+    );
+    const bar = container.querySelector(".win-bar") as HTMLElement;
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(bar, { clientX: 11, clientY: 10 });
+    expect(onCollapse).toHaveBeenCalled();
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+    fireEvent.pointerCancel(bar, { clientX: 10, clientY: 10 });
+    expect(player.played).toEqual([]);
   });
 
   it("a panel plays open on mount and close on unmount; tethers flip on and off", () => {

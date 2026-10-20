@@ -108,9 +108,9 @@ describe("audition rows", () => {
     fireEvent.click(screen.getByRole("button", { name: "Play Click in Arcade 8-bit" }));
     await flush();
     await flush();
-    expect(player.isLoaded("arcade")).toBe(true);
+    expect(player.has("arcade")).toBe(true);
     unmount();
-    expect(player.isLoaded("arcade")).toBe(false);
-    expect(player.isLoaded("synthwave")).toBe(true);
+    expect(player.has("arcade")).toBe(false);
+    expect(player.has("synthwave")).toBe(true);
   });
 });

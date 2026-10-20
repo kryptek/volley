@@ -34,11 +34,15 @@ export interface PlayOptions {
 export interface Player {
   /** Loads a theme and makes it current; `keep` loads it beside the current one instead. */
   loadTheme(theme: string, opts?: { keep?: boolean }): Promise<void>;
-  isLoaded(theme: string): boolean;
+  /** True once a load of the theme has started (and was not dropped), decoded or not. */
+  has(theme: string): boolean;
   /** The current theme, once one was asked for. */
   theme(): string | null;
   play(id: SoundEventId, opts?: PlayOptions): Promise<void>;
-  /** Plays one event of any theme now: loads it into the side cache, unlocks the context. */
+  /**
+   * Plays one event of any theme now: loads it into the side cache (dropping any other
+   * side-cached theme, so at most two are decoded at once), unlocks the context.
+   */
   audition(theme: string, id: SoundEventId): Promise<void>;
   /** Drops every side-cached theme. */
   disposeAudition(): void;
@@ -188,12 +192,14 @@ export function createPlayer({ baseUrl }: { baseUrl: string }): Player {
 
   return {
     loadTheme: (theme, opts = {}) => load(theme, opts.keep === true),
-    isLoaded: (theme) => buffers.has(theme) && !loading.get(theme)?.abort.signal.aborted,
+    has: (theme) => buffers.has(theme) && !loading.get(theme)?.abort.signal.aborted,
     theme: () => current,
     play,
     audition: async (theme, id) => {
       await unlock();
-      await load(theme, current !== null && theme !== current);
+      for (const t of [...buffers.keys(), ...loading.keys()])
+        if (t !== current && t !== theme) drop(t);
+      await load(theme, theme !== current);
       await play(id, { theme });
     },
     disposeAudition: () => {

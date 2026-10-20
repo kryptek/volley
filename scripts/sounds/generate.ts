@@ -79,7 +79,15 @@ export function parseArgs(argv: readonly string[]): Args {
   return a;
 }
 
-/** A RIFF/WAVE header around raw 16-bit little-endian PCM (the API's `pcm_44100` is stereo). */
+/**
+ * The channel count of raw 16-bit 44.1 kHz PCM asked for `duration_s`, read off its length
+ * (about 2 bytes a frame for mono, 4 for stereo), so a wrong guess never plays at double speed.
+ */
+export function pcmChannels(pcm: Uint8Array, duration_s: number, rate = 44100): 1 | 2 {
+  return pcm.length / (rate * 2 * duration_s) > 1.5 ? 2 : 1;
+}
+
+/** A RIFF/WAVE header around raw 16-bit little-endian PCM. */
 export function wav(pcm: Uint8Array, rate = 44100, channels = 2): Uint8Array {
   const out = new Uint8Array(44 + pcm.length);
   const v = new DataView(out.buffer);
@@ -144,7 +152,7 @@ async function generateOne(job: Job, key: string, s: RunState, io: Io, log: stri
       const pcm = format.startsWith("pcm_");
       const file = `${job.base}.${pcm ? "wav" : "mp3"}`;
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, pcm ? wav(bytes) : bytes);
+      writeFileSync(file, pcm ? wav(bytes, 44100, pcmChannels(bytes, job.duration_s)) : bytes);
       s.done++;
       return;
     }
@@ -223,6 +231,7 @@ export async function run(
   };
   const queue = [...jobs];
   let aborted: Error | null = null;
+  let finished = 0;
   const worker = async () => {
     for (let job = queue.shift(); job && !aborted; job = queue.shift()) {
       try {
@@ -234,7 +243,7 @@ export async function run(
           io.err(`${job.theme}/${job.event}.${job.variant}: ${(e as Error).message}`);
         }
       }
-      if ((s.done + s.failed) % 25 === 0) io.out(`… ${s.done + s.failed}/${jobs.length}`);
+      if (++finished % 25 === 0) io.out(`… ${finished}/${jobs.length}`);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, args.concurrency) }, worker));

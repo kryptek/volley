@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SOUND_EVENTS, SOUND_EVENT_IDS } from "volley-desk/sounds-events";
 import { THEMES } from "volley-desk/sounds-themes";
-import { ENDPOINT, type Io, run, wav } from "./generate";
+import { ENDPOINT, type Io, pcmChannels, run, wav } from "./generate";
 import { composePrompt, loadPrompts, parsePrompts, plan, planSize } from "./prompts";
 
 const dirs: string[] = [];
@@ -236,5 +236,14 @@ describe("wav", () => {
     expect(v.getUint32(24, true)).toBe(44100);
     expect(v.getUint32(28, true)).toBe(44100 * 4);
     expect(v.getUint32(40, true)).toBe(10);
+  });
+});
+
+describe("pcmChannels", () => {
+  test("reads the channel count off the byte length for the asked duration", () => {
+    expect(pcmChannels(new Uint8Array(44100), 0.5)).toBe(1);
+    expect(pcmChannels(new Uint8Array(88200), 0.5)).toBe(2);
+    // A clip a little short of its duration is still stereo.
+    expect(pcmChannels(new Uint8Array(86000), 0.5)).toBe(2);
   });
 });

@@ -58,7 +58,7 @@ describe("createPlayer", () => {
     expect(ctx().decodeAudioData).toHaveBeenCalledTimes(2);
     await p.loadTheme("synthwave");
     expect(net.calls).toHaveLength(3);
-    expect(p.isLoaded("synthwave")).toBe(true);
+    expect(p.has("synthwave")).toBe(true);
   });
 
   it("switching themes fetches only the new one and drops the old unless kept", async () => {
@@ -70,13 +70,13 @@ describe("createPlayer", () => {
     const p = createPlayer({ baseUrl: "/sounds" });
     await p.loadTheme("synthwave");
     await p.loadTheme("arcade", { keep: true });
-    expect(p.isLoaded("synthwave")).toBe(true);
+    expect(p.has("synthwave")).toBe(true);
     expect(p.theme()).toBe("synthwave");
     await p.loadTheme("glass");
     expect(net.calls.filter((u) => u.includes("glass"))).toHaveLength(2);
     expect(p.theme()).toBe("glass");
-    expect(p.isLoaded("synthwave")).toBe(false);
-    expect(p.isLoaded("arcade")).toBe(false);
+    expect(p.has("synthwave")).toBe(false);
+    expect(p.has("arcade")).toBe(false);
   });
 
   it("a 404 manifest, a 404 clip or a failed decode is silence, logged once per id", async () => {
@@ -156,8 +156,32 @@ describe("createPlayer", () => {
     await p.audition("arcade", "ui_click");
     expect(net.calls.filter((u) => u.includes("arcade/manifest"))).toHaveLength(1);
     p.disposeAudition();
-    expect(p.isLoaded("arcade")).toBe(false);
-    expect(p.isLoaded("synthwave")).toBe(true);
+    expect(p.has("arcade")).toBe(false);
+    expect(p.has("synthwave")).toBe(true);
+  });
+
+  it("keeps at most one auditioned theme beside the current one", async () => {
+    net = installFetch({
+      ...themeRoutes("synthwave", ["ui_click"]),
+      ...themeRoutes("arcade", ["ui_click"]),
+      ...themeRoutes("glass", ["ui_click"]),
+    });
+    const p = createPlayer({ baseUrl: "/sounds" });
+    await p.loadTheme("synthwave");
+    await p.audition("arcade", "ui_click");
+    await p.audition("glass", "ui_click");
+    expect(p.has("arcade")).toBe(false);
+    expect(p.has("glass")).toBe(true);
+    expect(p.has("synthwave")).toBe(true);
+    expect(p.theme()).toBe("synthwave");
+  });
+
+  it("auditions into the side cache even before a current theme is loaded", async () => {
+    net = installFetch(themeRoutes("arcade", ["ui_click"]));
+    const p = createPlayer({ baseUrl: "/sounds" });
+    await p.audition("arcade", "ui_click");
+    expect(p.theme()).toBeNull();
+    expect(ctx().sources[0]?.buffer).toEqual({ decoded: "arcade/ui_click" });
   });
 });
 

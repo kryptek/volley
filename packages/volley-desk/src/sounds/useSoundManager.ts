@@ -130,12 +130,10 @@ export function useSoundManager({
     player.setVolume(settings.volume);
   }, [player, settings.volume]);
 
-  // The first gesture starts the context; a marked control clicks.
+  // Every gesture asks the context to start (a no-op once running, a retry after a refusal or
+  // a suspension); a marked control clicks.
   useEffect(() => {
-    let unlocked = false;
     const gesture = () => {
-      if (unlocked) return;
-      unlocked = true;
       void player.unlock();
     };
     const down = (e: PointerEvent) => {
