@@ -58,7 +58,9 @@ export function loadTemplate(role: Role, dir: string = BRIEFS_DIR, variant?: "me
  * Fill `{{name}}` placeholders in one pass, so text substituted in (an issue title that itself
  * contains `{{…}}`) is never expanded again. An unknown placeholder is an error: a template and
  * this module never silently drift apart. A placeholder alone on its line that fills to "" drops
- * the line (and, between two blank lines, one of them), so it leaves no gap behind.
+ * the line (and, between two blank lines, one of them), so it leaves no gap behind. That holds
+ * for every placeholder in every template, e.g. an empty `{{extra}}` (no repo notes) as well as
+ * `{{hygiene_rule}}` / `{{hygiene_contract}}` under `off`.
  */
 export function renderBrief(template: string, vars: BriefVars): string {
   const table = vars as unknown as Record<string, string | number>;
