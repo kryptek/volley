@@ -52,6 +52,12 @@
       "items": { "$ref": "#/$defs/id" },
       "description": "Lease pools (config lease_pools keys) this wave's heavy operations draw from."
     },
+    "playbook": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^-]",
+      "description": "The repository's release playbook (spec section 4.6.18): a path relative to repo, or absolute, or none (the wave has no release train). Absent: .volley/release.yaml in repo, when it exists."
+    },
     "merge": {
       "enum": ["auto", "manual"],
       "description": "Who merges a gated PR (spec section 4.6.17): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."

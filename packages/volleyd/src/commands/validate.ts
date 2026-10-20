@@ -5,6 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { randomSuffix } from "volley-mcp/util";
 import { parse } from "yaml";
+import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
 import { authFields } from "../broker-auth";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
@@ -42,6 +43,11 @@ It also prints the brief preface every agent of the wave would get — its path,
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
 brief_preface_max_bytes (the wave's config: value, else $VOLLEYD_HOME/config.yaml's, else the
 default; \`run\` re-checks it against the running daemon's config).
+
+And the release playbook (\`playbook:\`, else .volley/release.yaml in the repo): "release
+playbook: <path> (N stages, M owner-gated)", or "none" (\`playbook: none\`, or no file at the
+default path); an invalid one, or a configured one that does not exist, fails with
+RELEASE_PLAYBOOK_INVALID and its path-qualified errors.
 `;
 
 /**
@@ -149,6 +155,8 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       preface === null
         ? `${formatBriefPreface(null)} (no ${prefacePath})`
         : formatBriefPreface(preface);
+    const playbook = wavePlaybook(wave);
+    const playbookLine = formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null);
     const cp = criticalPaths(wave);
     const longest = Math.max(...Object.values(cp));
     let placement = "";
@@ -161,7 +169,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n${placement}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n${note}${prefaceLine}\n${playbookLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {

@@ -155,7 +155,7 @@ export interface WaveStatePayload {
   owner: string | null;
   repo: string;
   release_branch: string;
-  status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+  status: "running" | "paused" | "awaiting_decision" | "releasing" | "complete" | "stopped";
   tasks: WaveTask[];
   open_decisions: string[];
   gates: string[];
@@ -189,6 +189,8 @@ export const DECISION_KINDS = [
   "account_limit",
   "machine_down",
   "merge_refused",
+  "release_go",
+  "stage_go",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

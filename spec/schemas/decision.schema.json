@@ -45,7 +45,9 @@
                 "spawn_budget_exhausted",
                 "account_limit",
                 "machine_down",
-                "merge_refused"
+                "merge_refused",
+                "release_go",
+                "stage_go"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
@@ -61,6 +63,24 @@
               }
             },
             "opened_at": { "type": "string", "format": "date-time" },
+            "stage": {
+              "type": "string",
+              "minLength": 1,
+              "description": "stage_go: the release playbook stage (spec section 4.6.18) that runs only on go."
+            },
+            "stages": {
+              "type": "array",
+              "description": "release_go: every release playbook stage (spec section 4.6.18), each verified, with where its evidence lives.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "evidence": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
             "host": {
               "type": "string",
               "minLength": 1,

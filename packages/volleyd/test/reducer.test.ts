@@ -359,3 +359,86 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
   });
 });
+
+describe("the release train (SPEC §4.6.18)", () => {
+  const last = events.at(-1) as JournalEvent;
+  let seq = last.seq;
+  const ev = (type: string, data: Record<string, unknown> = {}): JournalEvent =>
+    ({ seq: ++seq, at: last.at, type, data }) as JournalEvent;
+  const started = ev("release_started", {
+    done: ["T0"],
+    cancelled: [],
+    playbook: {
+      path: "/r/.volley/release.yaml",
+      sha256: "a".repeat(64),
+      stages: [
+        { name: "smoke", brief: "Run the smoke.", run: [], gate: "auto" },
+        { name: "deploy", brief: "Deploy.", run: [], gate: "owner" },
+      ],
+    },
+  });
+  const valid = (s: unknown) =>
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", s)),
+    ).toEqual([]);
+
+  it("release_started → status releasing, every stage pending; schema-valid", () => {
+    const s = reduce([...events, started]);
+    expect(s.status).toBe("releasing");
+    expect(s.release).toEqual({
+      stage: null,
+      stages: [
+        { name: "smoke", state: "pending" },
+        { name: "deploy", state: "pending" },
+      ],
+    });
+    valid(s);
+  });
+
+  it("stages move as they are entered and verified; release_done → complete", () => {
+    const run = [
+      ...events,
+      started,
+      ev("release_stage_entered", { stage: "smoke" }),
+      ev("release_stage_verified", { stage: "smoke" }),
+      ev("release_stage_entered", { stage: "deploy" }),
+    ];
+    const mid = reduce(run);
+    expect(mid.release?.stage).toBe("deploy");
+    expect(mid.release?.stages.map((x) => x.state)).toEqual(["verified", "running"]);
+    valid(mid);
+    const done = reduce([
+      ...run,
+      ev("release_stage_verified", { stage: "deploy" }),
+      ev("release_done", { by: "coord-a", decision_id: "release_go-1" }),
+    ]);
+    expect(done.status).toBe("complete");
+    expect(done.release).toEqual({
+      stage: null,
+      stages: [
+        { name: "smoke", state: "verified" },
+        { name: "deploy", state: "verified" },
+      ],
+    });
+    valid(done);
+  });
+
+  it("a paused releasing wave resumes releasing, not running", () => {
+    const s = reduce([
+      ...events,
+      started,
+      ev("wave_paused", { by: "coord-a" }),
+      ev("wave_resumed", { by: "coord-a" }),
+    ]);
+    expect(s.status).toBe("releasing");
+  });
+
+  it("a snapshot taken mid-release continues where it was (and replaying again is a no-op)", () => {
+    const first = replay([...events, started]);
+    const snap = JSON.parse(JSON.stringify(first));
+    const entered = ev("release_stage_entered", { stage: "smoke" });
+    const rec = replay([started, entered], snap);
+    expect(rec.state?.release?.stage).toBe("smoke");
+    expect(replay([entered], rec)).toEqual(rec);
+  });
+});

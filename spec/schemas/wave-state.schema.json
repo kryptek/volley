@@ -37,7 +37,17 @@
             },
             "repo": { "type": "string", "minLength": 1 },
             "release_branch": { "type": "string", "minLength": 1 },
-            "status": { "enum": ["running", "paused", "awaiting_decision", "complete", "stopped"] },
+            "status": {
+              "enum": [
+                "running",
+                "paused",
+                "awaiting_decision",
+                "releasing",
+                "complete",
+                "stopped"
+              ],
+              "description": "releasing: every task is settled and the release train (spec section 4.6.18) runs; complete once the owner answers release_go go (or, without a train, once every task is settled)."
+            },
             "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
             "open_decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionId" } },
             "gates": {
@@ -84,6 +94,29 @@
                     "properties": {
                       "used": { "type": "number", "minimum": 0 },
                       "max": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            },
+            "release": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stage", "stages"],
+              "description": "The release train (spec section 4.6.18), from release_started on: the stage running or awaiting its go (null when none is), and every playbook stage in order with its state. Absent for a wave without a train.",
+              "properties": {
+                "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "stages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "state"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "state": {
+                        "enum": ["pending", "awaiting_go", "running", "verified", "failed"]
+                      }
                     }
                   }
                 }
