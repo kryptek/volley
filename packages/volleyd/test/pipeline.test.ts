@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
 import type { HygieneLevel } from "../src/reviews";
+import { eventually } from "./helpers/broker-wait";
 import { FIXTURES } from "./helpers/fake-host";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
@@ -560,7 +561,7 @@ describe("pipeline: the merge nudge", () => {
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.driver.tick();
     // Not settled (the file list hangs): the merge folds back in on the queue soon after.
-    await vi.waitFor(() => expect(stage()).toBe("done"));
+    await eventually(() => stage() === "done");
     expect(nudges()).toEqual([]);
     h.world.hang = undefined;
     h.restart();
