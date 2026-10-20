@@ -188,6 +188,19 @@ describe("endedAt and the auto-archive verdict", () => {
     expect(archivable(open, now, CFG).ok).toBe(false);
   });
 
+  it("archive_on_ack counts only an answer from outside volleyd (autopilot's ack is not the owner's)", () => {
+    const autoAck: NewEvent = {
+      type: "decision_resolved",
+      data: { decision_id: WC, answer: "acknowledged", by: "volleyd", at: T0 },
+    };
+    const evs = journal(submitted, queued, done, wcOpened, complete, autoAck);
+    const facts = archiveFacts(replay(evs));
+    expect(facts.waveCompleteResolved).toBe(false);
+    const ended = Date.parse(evs[4]?.at as string);
+    expect(archivable(facts, ended + 60_000, CFG).ok).toBe(false);
+    expect(archivable(facts, ended + 24 * H, CFG).ok).toBe(true);
+  });
+
   it("archiveFacts falls back to the journal when the record predates ended_at", () => {
     const evs = journal(submitted, queued, stopped);
     const { ended_at: _e, ...legacy } = replay(evs);

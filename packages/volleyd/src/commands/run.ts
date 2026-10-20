@@ -29,7 +29,7 @@ tasks would go if admitted now (as \`volleyd validate\` does); each is placed at
 
 /** Printed when `run` submits a wave with no owner (SPEC §4.6.17). */
 export const noOwnerWarning = (wave: string) =>
-  `wave ${wave} has no owner: nobody can answer its decisions (pass --owner, set VOLLEY_AGENT_ID, or run from a registered session); it is archived automatically once ended`;
+  `wave ${wave} has no owner: nobody can answer its decisions (pass --owner, set VOLLEY_AGENT_ID, or run from a registered session); it is archived automatically once ended (archive_ended_after_h)`;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseRun>;

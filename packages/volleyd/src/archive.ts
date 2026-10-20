@@ -1,3 +1,4 @@
+import { DAEMON_AGENT_ID } from "./control";
 import { openDecisions, resolveEvent, waveDecisionId } from "./decisions";
 import type { WaveRecord } from "./reducer";
 import type { JournalEvent, NewEvent, Tunables, WaveId, WaveStatus } from "./types";
@@ -22,7 +23,11 @@ export interface ArchiveFacts {
   status: WaveStatus | null;
   /** When the wave last ended; null while it runs. */
   endedAt: string | null;
-  /** Its `wave_complete` decision was answered (by anything but an archive). */
+  /**
+   * Its `wave_complete` decision was answered by someone outside volleyd: autopilot's own
+   * `acknowledged` (by `volleyd`) is not the owner reading the outcome, and an archive's close is
+   * not an answer.
+   */
   waveCompleteResolved: boolean;
 }
 
@@ -76,7 +81,10 @@ export function archiveFacts(rec: WaveRecord, legacyEndedAt?: () => string | nul
     wave: s?.wave ?? null,
     status,
     endedAt: !ended ? null : (rec.ended_at ?? legacyEndedAt?.() ?? null),
-    waveCompleteResolved: wc?.resolved !== undefined && wc.resolved.answer !== ARCHIVED_ANSWER,
+    waveCompleteResolved:
+      wc?.resolved !== undefined &&
+      wc.resolved.answer !== ARCHIVED_ANSWER &&
+      wc.resolved.by !== DAEMON_AGENT_ID,
   };
 }
 

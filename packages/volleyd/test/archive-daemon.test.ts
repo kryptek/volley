@@ -8,7 +8,7 @@ import type { Daemon } from "../src/daemon";
 import { decisionTopic, waveDecisionId } from "../src/decisions";
 import type { WaveState } from "../src/types";
 import { eventually } from "./helpers/broker-wait";
-import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { fakeExec } from "./helpers/fake-exec";
 import { schemaErrors } from "./helpers/schema";
@@ -278,6 +278,22 @@ describe("auto-archive", () => {
     expect(index.payload.archived).toEqual([
       expect.objectContaining({ wave: WAVE, status: "complete" }),
     ]);
+  });
+
+  it("archive_on_ack: autopilot's own ack of wave_complete does not archive it; the TTL does", async () => {
+    await client.close();
+    await daemon.stop();
+    daemon = await t.start({ ...AUTOPILOT_ON, clock, authExec: auth.exec });
+    client = await ControlClient.connect(t.broker.url, NS);
+    await complete();
+    const id = waveDecisionId("wave_complete", WAVE);
+    expect(daemon.record(WAVE)?.decisions[id]?.resolved).toMatchObject({ by: "volleyd" });
+    await daemon.tick();
+    expect(types()).not.toContain("wave_archived");
+    expect(daemon.record(WAVE)?.state?.status).toBe("complete");
+    await clock.advance(24 * H);
+    await daemon.tick();
+    expect(types()).toContain("wave_archived");
   });
 
   it("archive_on_ack: false waits for the TTL", async () => {

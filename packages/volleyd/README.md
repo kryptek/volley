@@ -812,7 +812,9 @@ The daemon archives on its own, as `volleyd`:
   `wave_stopped`, a complete wave that long after its `wave_complete` (`reason: "ended <N> h ago
   (archive_ended_after_h)"`). Checked on every tick, on the daemon's clock.
 - `archive_on_ack` (default true): a complete wave as soon as its `wave_complete` decision is
-  answered, in the same `resolve` (`reason: "wave_complete acknowledged (archive_on_ack)"`).
+  answered, in the same `resolve` (`reason: "wave_complete acknowledged (archive_on_ack)"`). Only
+  an answer from outside volleyd counts: autopilot's own `acknowledged` leaves the wave on the
+  Desk until `archive_ended_after_h`, so the owner still sees how it ended.
 
 ## Steering
 
