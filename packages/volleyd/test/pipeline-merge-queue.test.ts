@@ -328,6 +328,89 @@ describe("mergeNow (volleyd merge)", () => {
     expect(h.task("T1")?.stage).toBe("merge_ready");
   });
 
+  it("under merge: auto, the queue's turn never merges the task a running volleyd merge is merging", async () => {
+    const { held, lock } = sharedLock();
+    await threeGated({ releaseLock: lock });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((r) => {
+      entered = r;
+    });
+    h.world.gate = (a) => {
+      if (a[1] !== "pr" || a[2] !== "merge") return undefined;
+      entered?.();
+      return gate;
+    };
+    const pending = h.driver.mergeNow("T1", "coord-1");
+    await started; // the owner's `gh pr merge` of T1 is running, held
+    for (let i = 0; i < 3; i++) {
+      h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+      await h.driver.tick();
+    }
+    expect(mergedPrs()).toEqual([7]);
+    expect(held.get(BRANCH)).toBe("w1/T1");
+    release?.();
+    expect(await pending).toEqual({ ok: true, merge_sha: MERGED[7] });
+    await h.driver.settled();
+    expect(ofType("merge_ended")).toEqual([]);
+    expect(ofType("merge_refused")).toEqual([]);
+    expect(mergedPrs().filter((n) => n === 7)).toEqual([7]);
+    expect(h.task("T1")?.stage).toBe("done");
+  });
+
+  it("under merge: auto, a turn check that comes back during volleyd merge does not merge again", async () => {
+    const { held, lock } = sharedLock();
+    await threeGated({ releaseLock: lock });
+    const hold = () => {
+      let open: (() => void) | undefined;
+      const p = new Promise<void>((r) => {
+        open = r;
+      });
+      let enter: (() => void) | undefined;
+      const entered = new Promise<void>((r) => {
+        enter = r;
+      });
+      return { p, entered, open: () => open?.(), enter: () => enter?.() };
+    };
+    const check = hold();
+    const merge = hold();
+    let checkHeld = false;
+    h.world.gate = (a) => {
+      if (a[0] === "git" && a[3] === "merge-base" && a[4] !== "--is-ancestor" && !checkHeld) {
+        checkHeld = true;
+        check.enter();
+        return check.p;
+      }
+      if (a[1] === "pr" && a[2] === "merge") {
+        merge.enter();
+        return merge.p;
+      }
+      return undefined;
+    };
+    const ticked = h.driver.tick();
+    await check.entered; // T1 holds the turn; its rebase check is running, held
+    await ticked;
+    const pending = h.driver.mergeNow("T1", "coord-1");
+    await merge.entered; // the owner's `gh pr merge` of T1 is running, held
+    check.open();
+    for (let i = 0; i < 3; i++) {
+      h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+      await h.driver.tick();
+    }
+    expect(mergedPrs()).toEqual([7]);
+    expect(held.get(BRANCH)).toBe("w1/T1");
+    merge.open();
+    expect(await pending).toEqual({ ok: true, merge_sha: MERGED[7] });
+    await h.driver.settled();
+    expect(ofType("merge_ended")).toEqual([]);
+    expect(ofType("merge_refused")).toEqual([]);
+    expect(mergedPrs().filter((n) => n === 7)).toEqual([7]);
+    expect(h.task("T1")?.stage).toBe("done");
+  });
+
   it("a merge that fails to run answers not merged and releases the release branch", async () => {
     const { held, lock } = sharedLock();
     await threeGated({ merge: "manual", releaseLock: lock });

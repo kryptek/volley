@@ -93,6 +93,11 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
  * only when no other waits. Across waves sharing a branch, each wave's first candidate competes
  * by readiness. (Each pipeline driver passes its own wave only: across waves the release-branch
  * lock goes to whichever wave asks first.)
+ *
+ * An ungated (updating) entry is skipped, so a gated entry behind it can go first: the "never
+ * ahead of a task it comes after" order holds only because a dependent is admitted after its
+ * dependency is done. Stacked PRs (a dependent gated while its dependency still queues) would
+ * need this to stop at an ungated dependency instead.
  */
 export function nextToMerge(
   queues: Record<string, QueueEntry[]>,

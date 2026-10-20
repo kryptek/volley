@@ -2984,7 +2984,7 @@ export class PipelineDriver {
       // acquire is idempotent for the holder: it only re-asserts the lock.
       if (holds && this.lock.acquire(branch, key)) {
         // The turn's rebase check did not come back usable (an error, a head that moved): again.
-        if (v.stage === "merge_ready" && !turn.fresh)
+        if (v.stage === "merge_ready" && !turn.fresh && !this.merging.has(turn.task))
           await this.run(turn.task, [{ kind: "check_rebase" }], false);
         return;
       }
@@ -3284,6 +3284,8 @@ export class PipelineDriver {
           // `retry` is event-driven: at once).
           const key = `${task}/merge`;
           if (this.inflight.has(key) || this.inflight.has(`${task}/check_merged`)) break;
+          // The owner's `volleyd merge` of it is running (mergeNow): one `gh pr merge` at a time.
+          if (this.merging.has(task)) break;
           if (!eventDriven && !this.due(key)) break;
           if (eventDriven) this.lastCheck.set(key, this.now());
           const v = this.view(task);
