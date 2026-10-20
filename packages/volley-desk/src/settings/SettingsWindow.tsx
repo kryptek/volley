@@ -18,7 +18,7 @@ import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import type { AuthOps } from "../store/control";
 import type { AdminStatus } from "../store/peerOps";
-import type { ConfigPayload } from "../store/types";
+import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
 import { BrokerAccounts } from "./BrokerAccounts";
@@ -53,6 +53,8 @@ export interface SettingsWindowProps {
   config: ConfigPayload | null;
   /** `null` = no broker credentials: the Supervisor rows are read-only. */
   transport: ConfigTransport | null;
+  /** The retained lease pools (Settings › Supervisor's lease card). */
+  leases?: Record<string, LeasePoolPayload>;
   onArrange: () => void;
   /** Settings › General › Reset layout: clear every window pin (C12). */
   onResetLayout?: () => void;
@@ -223,7 +225,9 @@ export function SettingsWindow(p: SettingsWindowProps) {
             {sec === "appearance" && (
               <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
             )}
-            {sec === "supervisor" && <Supervisor config={p.config} transport={p.transport} />}
+            {sec === "supervisor" && (
+              <Supervisor config={p.config} transport={p.transport} leases={p.leases ?? {}} />
+            )}
             {sec === "claude" && (
               <ClaudeAccounts
                 accounts={p.claude?.accounts ?? {}}

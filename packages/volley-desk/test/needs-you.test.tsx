@@ -2,7 +2,14 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EffectiveCoordinator } from "../src/attention";
 import { Frame } from "../src/canvas/Frame";
-import { AttentionLine, COPY_RESET_MS, NeedsYou, firstLines } from "../src/windows/wave/NeedsYou";
+import type { DecisionPayload } from "../src/store/types";
+import {
+  AttentionLine,
+  COPY_RESET_MS,
+  MachineDown,
+  NeedsYou,
+  firstLines,
+} from "../src/windows/wave/NeedsYou";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
@@ -197,5 +204,70 @@ describe("Frame attention wrapper", () => {
     );
     expect(container.querySelector(".custom > .win-inner")).not.toBeNull();
     expect(container.querySelector(".win-attn-pulse")).toBeNull();
+  });
+});
+
+describe("MachineDown (a machine_down decision)", () => {
+  const down: DecisionPayload = {
+    decision_id: "w1-machine_down-box-b-1",
+    wave: "w1",
+    task: null,
+    kind: "machine_down",
+    question: "box-b has been down for 5 min. Re-place its 2 queued tasks on box-a?",
+    options: ["wait", "re-place queued tasks", "cancel"],
+    opened_at: "2026-10-18T11:55:00.000Z",
+    host: "box-b",
+    down_since: "2026-10-18T11:50:00.000Z",
+    tasks: ["T3", "T4"],
+  };
+
+  it("pre-selects re-place queued tasks and names the tasks", () => {
+    render(<MachineDown decision={down} onAnswer={vi.fn()} />);
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Needs you: box-b is down");
+    expect(banner).toHaveTextContent(down.question);
+    expect(screen.getByText("T3")).toBeInTheDocument();
+    expect(screen.getByText("T4")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "re-place queued tasks" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "wait" })).not.toBeChecked();
+  });
+
+  it("an unknown machine state falls back to is down", () => {
+    render(
+      <MachineDown decision={{ ...down, machine: "rebooting" } as never} onAnswer={vi.fn()} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Needs you: box-b is down");
+  });
+
+  it("Answer sends the chosen option", async () => {
+    const onAnswer = vi.fn(async () => ({ ok: true }));
+    render(<MachineDown decision={down} onAnswer={onAnswer} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    });
+    expect(onAnswer).toHaveBeenCalledWith("re-place queued tasks");
+    fireEvent.click(screen.getByRole("radio", { name: "wait" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    });
+    expect(onAnswer).toHaveBeenLastCalledWith("wait");
+  });
+
+  it("a draining machine says so; a refused answer shows why; read-only offers no Answer", async () => {
+    const onAnswer = vi.fn(async () => ({ ok: false, error: "box-a is not eligible now" }));
+    const { unmount } = render(
+      <MachineDown
+        decision={{ ...down, machine: "draining", options: ["wait", "re-place queued tasks"] }}
+        onAnswer={onAnswer}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Needs you: box-b is draining");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("box-a is not eligible now");
+    unmount();
+    render(<MachineDown decision={down} />);
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
   });
 });

@@ -80,7 +80,7 @@ import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
-import { sshHost } from "./settings/Machines";
+import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
@@ -88,7 +88,7 @@ import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTranspo
 import type { SectionKey } from "./settings/sections";
 import { ClaimButton } from "./steer/SteerPanel";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
-import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
+import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
@@ -97,6 +97,7 @@ import {
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isLiveAgent,
   isSession,
   isSupervisorId,
   localAgentCount,
@@ -116,7 +117,7 @@ import {
   CoordinatorsWindow,
   ENDED_LABEL,
 } from "./windows/coordinators/CoordinatorsWindow";
-import { AttentionLine, NeedsYou } from "./windows/wave/NeedsYou";
+import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 
@@ -963,16 +964,35 @@ export default function App() {
                 onChat={toggleSteer}
                 steerOpen={steerOpen === id}
                 banner={
-                  needsYou &&
-                  coordinator && (
-                    <NeedsYou
-                      wave={id}
-                      coordinator={coordinator}
-                      openDecisions={openDecisions(wave).length}
-                      now={now}
-                      claim={<ClaimButton wave={id} transport={steering.transport} />}
-                    />
-                  )
+                  <>
+                    {needsYou && coordinator && (
+                      <NeedsYou
+                        wave={id}
+                        coordinator={coordinator}
+                        openDecisions={openDecisions(wave).length}
+                        now={now}
+                        claim={<ClaimButton wave={id} transport={steering.transport} />}
+                      />
+                    )}
+                    {openDecisions(wave)
+                      .filter((d) => d.kind === "machine_down")
+                      .map((d) => (
+                        <MachineDown
+                          key={d.decision_id}
+                          decision={d}
+                          onAnswer={
+                            control
+                              ? (answer) =>
+                                  control(
+                                    "resolve",
+                                    resolveFields(d, answer),
+                                    `volleyd resolve ${d.decision_id}`,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ))}
+                  </>
                 }
                 onSettings={setSettings}
               >
@@ -1104,6 +1124,7 @@ export default function App() {
           demo={demo}
           config={state.config}
           transport={configTransport}
+          leases={state.leases}
           claude={{
             accounts: state.claudeAccounts ?? {},
             signins: state.signins ?? {},
@@ -1118,6 +1139,14 @@ export default function App() {
             hubAgents: localAgentCount(state),
             ops: peerOps,
             host: sshHost(brokerUrl),
+            readiness: state.readiness ?? {},
+            localName: state.config?.fleet?.local_name,
+            configTransport,
+            accounts: state.claudeAccounts ?? {},
+            agentsOn: agentsOnMachines(
+              Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
+              (id) => isLiveAgent(state, id),
+            ),
           }}
           onboarding={{
             ops: authOps,

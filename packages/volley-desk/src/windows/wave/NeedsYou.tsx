@@ -6,6 +6,11 @@
  * how long it has been gone and the copyable `volleyd claim <wave>` command
  * (plus D4's claim button in the `claim` slot when the Desk can write). `AttentionLine` is the
  * agent window's `Needs you · …` / `Coordinator handling · …` line.
+ *
+ * `MachineDown` is a wave's `machine_down` decision (SPEC §4.6.15): the host,
+ * why it cannot take work, the wave's tasks there, and its options with
+ * `re-place queued tasks` pre-selected (the owner's default); nothing is
+ * re-placed until someone answers.
  */
 import {
   Alert02Icon,
@@ -16,6 +21,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import type { Attn, EffectiveCoordinator } from "../../attention";
+import type { DecisionPayload } from "../../store/types";
 import "../../styles/attention.css";
 
 const Icon = ({ i, s }: { i: typeof Alert02Icon; s: number }) => (
@@ -147,6 +153,89 @@ export function NeedsYou({ wave, coordinator: c, openDecisions, now, claim }: Ne
     );
   }
   return null;
+}
+
+/** The `machine_down` option the decision opens with (SPEC §4.6.15, owner decision). */
+export const REPLACE_OPTION = "re-place queued tasks";
+
+const MACHINE_STATE: Record<string, string> = {
+  down: "is down",
+  draining: "is draining",
+  removing: "is being removed",
+  removed: "was removed",
+};
+
+export function MachineDown({
+  decision: d,
+  onAnswer,
+}: {
+  decision: DecisionPayload;
+  /** Sends the answer (volleyd `resolve`); absent when the Desk is read-only. */
+  onAnswer?: ((answer: string) => Promise<{ ok: boolean; error?: string }>) | undefined;
+}) {
+  const options = d.options ?? [];
+  const [choice, setChoice] = useState(
+    options.includes(REPLACE_OPTION) ? REPLACE_OPTION : (options[0] ?? ""),
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const host = d.host ?? "a machine";
+  const answer = async () => {
+    if (!onAnswer || !choice) return;
+    setBusy(true);
+    setError(null);
+    const r = await onAnswer(choice);
+    setBusy(false);
+    if (!r.ok) setError(r.error ?? "volleyd refused the answer");
+  };
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
+    <div className="needs-you" role="status">
+      <div className="ny-head">
+        <Icon i={Alert02Icon} s={14} /> Needs you: {host}{" "}
+        {MACHINE_STATE[d.machine ?? "down"] ?? MACHINE_STATE.down}
+      </div>
+      <p className="ny-q">{d.question}</p>
+      {d.tasks && d.tasks.length > 0 && (
+        <ul className="ny-tasks mono" aria-label={`Tasks on ${host}`}>
+          {d.tasks.map((t) => (
+            <li key={t}>{t}</li>
+          ))}
+        </ul>
+      )}
+      <fieldset className="ny-options" aria-label={`Answer for ${host}`}>
+        {options.map((o) => (
+          <label key={o}>
+            <input
+              type="radio"
+              name={d.decision_id}
+              value={o}
+              checked={choice === o}
+              onChange={() => setChoice(o)}
+            />
+            {o}
+          </label>
+        ))}
+      </fieldset>
+      {error && (
+        <p className="s-error" role="alert">
+          {error}
+        </p>
+      )}
+      {onAnswer && (
+        <div className="ny-actions">
+          <button
+            type="button"
+            className="btn btn--hot"
+            disabled={busy || !choice}
+            onClick={() => void answer()}
+          >
+            Answer
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 const TIER_LABEL = { you: "Needs you", coordinator: "Coordinator handling" } as const;

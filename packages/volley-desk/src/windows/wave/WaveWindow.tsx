@@ -15,7 +15,8 @@
  * CI` in the graph, a `waiting for CI` chip in the title and a row under the
  * graph with its pipeline (`implement ✓ · CI ⟳ · review`) and the reason; no
  * agent window is needed for it. On a phone the graph wraps to the window's
- * width (`dagWidthFor`).
+ * width (`dagWidthFor`). Under the graph each placed task has a host chip
+ * whose popover says why it runs there (`HostChips`).
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -25,7 +26,7 @@ import { Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
 import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
 import { Clawd } from "./Clawd";
-import { Dag, type DagNode } from "./Dag";
+import { Dag, type DagNode, HostChips } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor } from "./accent";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
@@ -266,6 +267,7 @@ export function WaveWindow(p: WaveWindowProps) {
               labels={ciLabels}
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
+            <HostChips tasks={s.tasks} />
             {!ended && ci.length > 0 && (
               <ul className="wave-ci">
                 {ci.map((t) => (
