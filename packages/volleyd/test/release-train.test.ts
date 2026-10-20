@@ -233,6 +233,27 @@ describe("a settled wave whose repo has a playbook", () => {
     expect(ofType("decision_opened")).toHaveLength(0);
   });
 
+  it("a releasing wave pauses and resumes releasing; paused, it asks nothing; resume when releasing is a no-op", async () => {
+    await start();
+    await submit();
+    await settle();
+    const noop = await ctl().request("resume", { wave: WAVE, by: "coord-a" });
+    expect(noop.error).toBeUndefined();
+    expect(noop.result).toMatchObject({ status: "releasing", changed: false });
+    expect(ofType("wave_resumed")).toHaveLength(0);
+    const paused = await ctl().request("pause", { wave: WAVE, by: "coord-a" });
+    expect(paused.error).toBeUndefined();
+    expect((await retainedState()).status).toBe("paused");
+    await verify("smoke");
+    await verify("notes");
+    await daemon.tick();
+    expect(ofType("decision_opened")).toHaveLength(0);
+    const resumed = await ctl().request("resume", { wave: WAVE, by: "coord-a" });
+    expect(resumed.error).toBeUndefined();
+    expect((await retainedState()).status).toBe("releasing");
+    expect(ofType("decision_opened")[0]?.data).toMatchObject({ kind: "release_go" });
+  });
+
   it("an invalid playbook refuses the wave with RELEASE_PLAYBOOK_INVALID and its errors", async () => {
     writeFileSync(
       join(repo, ".volley", "release.yaml"),

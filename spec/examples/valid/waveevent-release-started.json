@@ -14,7 +14,7 @@
       ],
       "cancelled": [],
       "playbook": {
-        "path": "/home/me/src/example-repo/.volley/release.yaml",
+        "path": "/srv/repos/example/.volley/release.yaml",
         "sha256": "9f2c000000000000000000000000000000000000000000000000000000000000",
         "stages": [
           {

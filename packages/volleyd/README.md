@@ -770,6 +770,9 @@ stages:
   `verified` or `failed`; `volleyd status` prints `release: <stage> (k/N verified)`. No
   `wave_complete` decision opens for it. A releasing wave admits no tasks and takes no new
   version; it can be paused (and resumes releasing) or stopped.
+  The playbook is read from the repo's working tree (whatever is checked out there) when the
+  wave is submitted and again when it settles; `release_started` records the path and sha256 of
+  the file used.
 - **The end is always yours**: once every stage is `verified`, volleyd opens `release_go`
   (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
   owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,

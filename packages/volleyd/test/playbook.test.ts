@@ -106,6 +106,12 @@ describe("playbookPath / readPlaybook", () => {
     expect(() => readPlaybook(path)).toThrow(PlaybookError);
   });
 
+  it("a playbook path that cannot be read (a directory) throws PlaybookError, not a raw error", () => {
+    const dir = tempDir("volleyd-playbook-");
+    expect(() => readPlaybook(dir)).toThrow(PlaybookError);
+    expect(() => readPlaybook(dir)).toThrow(/^RELEASE_PLAYBOOK_INVALID: .*: cannot read: EISDIR/);
+  });
+
   it("wavePlaybook: none, the default absent, or a repo not here → null; a configured one missing → error", () => {
     const repo = tempDir("volleyd-playbook-repo-");
     expect(wavePlaybook({ repo, playbook: "none" })).toBeNull();

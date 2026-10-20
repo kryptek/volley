@@ -110,7 +110,13 @@ export function playbookPath(repo: string, configured: string | undefined): stri
 /** Read the playbook at `path`: null when there is none; throws `PlaybookError` when invalid. */
 export function readPlaybook(path: string): ReadPlaybook | null {
   if (!existsSync(path)) return null;
-  const bytes = readFileSync(path);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch (e) {
+    // A directory or an unreadable file is refused like an invalid one, not thrown raw.
+    throw new PlaybookError([], path, `cannot read: ${(e as Error).message}`);
+  }
   return {
     playbook: parsePlaybook(bytes.toString("utf-8"), path),
     sha256: createHash("sha256").update(bytes).digest("hex"),

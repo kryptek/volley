@@ -7709,17 +7709,18 @@ export class Daemon {
     });
     if (op === "pause") {
       if (state.status === "paused") return done(false);
-      if (state.status !== "running")
+      // A releasing wave pauses too, and resumes releasing (SPEC §4.6.18).
+      if (state.status !== "running" && state.status !== "releasing")
         return {
           ok: false,
-          error: `wave '${w.wave}' is ${state.status}; only a running wave can be paused`,
+          error: `wave '${w.wave}' is ${state.status}; only a running or releasing wave can be paused`,
         };
       await this.append(w.wave, { type: "wave_paused", data: { by } });
       await this.tickNow();
       return done(true);
     }
     if (op === "resume") {
-      if (state.status === "running") return done(false);
+      if (state.status === "running" || state.status === "releasing") return done(false);
       if (this.killSwitch)
         return { ok: false, error: `${KILL_SWITCH_REASON}: \`volleyd resume --all\` first` };
       if (state.status === "complete") return { ok: false, error: `wave '${w.wave}' is complete` };
