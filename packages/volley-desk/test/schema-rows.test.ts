@@ -88,9 +88,9 @@ describe("schemaRows", () => {
                     `${pre}${k}.${pool}`,
                     v.additionalProperties as JsonSchema,
                   ])
-              : v.type === "array"
-                ? []
-                : [[`${pre}${k}`, v]],
+                : v.type === "array"
+                  ? []
+                  : [[`${pre}${k}`, v]],
           ),
         );
       const leaves = Object.entries(
