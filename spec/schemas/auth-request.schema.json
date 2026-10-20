@@ -46,7 +46,7 @@
             },
             "clone": {
               "type": "boolean",
-              "description": "peer_doctor: with fix, also `--clone` (clone the wave repo where the host's clone is missing). Needs fix: true."
+              "description": "peer_doctor: with fix, also `--clone --origin <the running wave's origin>` (clone the wave repo where the host's clone is missing). Needs fix: true; refused while the wave repo's origin is not known."
             },
             "step": {
               "enum": ["detect", "security", "accounts", "services", "phone"],

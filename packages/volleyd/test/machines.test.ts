@@ -1,14 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
-import { authOpsTopic } from "../src/accounts";
+import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import { type Daemon, type DaemonOptions, realLocalDoctor } from "../src/daemon";
 import { assertAllowed } from "../src/fence";
-import type { RemoteHost, RemoteHostSpec } from "../src/hosts/ssh-tmux";
+import type { RemoteHostSpec } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import {
   MACHINE_CHANNEL,
@@ -238,7 +239,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
   let peer: VolleyBroker;
   let client: ControlClient;
   let local: FakeHost;
-  let box: (FakeHost & RemoteHost) | undefined;
+  let box: FakeRemoteHost | undefined;
   let daemon: Daemon;
   let clock: FakeClock;
   let waits: JournalWait;
@@ -246,6 +247,8 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
   let beats: number;
   /** Every argv the supervisor's own doctor ran (each passed the fence first). */
   let doctorArgv: string[][];
+  /** When set, the supervisor's own doctor fails (the last report stays). */
+  let doctorFails: boolean;
 
   const verdict = async (name: string) =>
     (await env.retained(`${machineTopic(name)}/readiness`)) as {
@@ -318,10 +321,12 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     );
     clock = fakeClock(1_000_000);
     doctorArgv = [];
+    doctorFails = false;
     // The production doctor (realLocalDoctor) over an exec that answers like the real CLI.
     const doctorExec = async (argv: readonly string[]) => {
       assertAllowed(argv);
       doctorArgv.push([...argv]);
+      if (doctorFails) throw new Error("doctor unavailable");
       const at = argv.indexOf("--repo");
       const report = at === -1 ? noRepoReport() : repoReport(argv[at + 1] as string);
       return {
@@ -331,8 +336,17 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
         timedOut: false,
       };
     };
+    // Repair's peer_doctor is an admin op: `volley auth list` says who is one.
+    const auth = fakeExec().on(["volley", "auth", "list"], {
+      stdout: JSON.stringify({
+        accounts: [
+          { name: "admin-1", role: "admin", kind: "human", created: "2026-10-19T09:00:00.000Z" },
+        ],
+      }),
+    });
     daemon = await env.start({
       clock,
+      authExec: auth.exec,
       fleet: {
         version: FLEET_VERSION,
         localDoctor: realLocalDoctor(doctorExec),
@@ -493,6 +507,79 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     expect((await verdict("box"))?.payload.reasons).toEqual([
       `repo origin differs from the host's (github.com/example-org/fork, host: ${ORIGIN})`,
     ]);
+  });
+
+  it("Repair's clone runs the box's doctor with --origin: the running wave's origin, as the supervisor's own doctor read it", async () => {
+    /** `peer_doctor` as admin-1 on the account-op topic, answered on its reply topic. */
+    const repair = async (payload: Record<string, unknown>) => {
+      const admin = new VolleyBroker();
+      await admin.connect({ url: env.broker.url, agentId: `admin-${randomUUID().slice(0, 6)}` });
+      try {
+        const cid = randomUUID();
+        let resolve!: (p: Record<string, unknown>) => void;
+        const reply = new Promise<Record<string, unknown>>((r) => {
+          resolve = r;
+        });
+        await admin.subscribeStream(authReplyTopic(cid), ({ payload: raw }) => {
+          const e = parseEnvelope(raw);
+          if (e?.type === "ack" && e.correlation_id === cid) {
+            resolve(e.payload as Record<string, unknown>);
+          }
+        });
+        const env0 = buildEnvelope({
+          agentId: "admin-1",
+          parentId: null,
+          channel: "_system/auth",
+          type: "query",
+          correlationId: cid,
+          payload: { op: "peer_doctor", name: "box", ...payload },
+        });
+        await admin.publish(authOpsTopic("admin-1"), JSON.stringify(env0), {
+          qos: 1,
+          retain: false,
+        });
+        return await reply;
+      } finally {
+        await admin.disconnect();
+      }
+    };
+    await heartbeat();
+    // No wave runs: the wave repo's origin is not known, so nothing can be cloned.
+    expect(await repair({ fix: true, clone: true })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/origin.*not known/),
+    });
+    expect(box?.doctorRuns ?? []).toEqual([]);
+
+    await submit("w1");
+    await eventually(async () => {
+      await tick();
+      const own = (await env.retained(machineTopic("control"))) as {
+        payload: MachineRecord;
+      } | null;
+      return own?.payload.repo?.origin === ORIGIN;
+    });
+    expect(await repair({ fix: true, clone: true })).toMatchObject({ ok: true });
+    expect(box?.doctorRuns.at(-1)).toEqual({ fix: true, clone: `https://${ORIGIN}` });
+    // Without clone, no --origin: the fence admits it only beside --clone.
+    expect(await repair({ fix: true })).toMatchObject({ ok: true });
+    expect(box?.doctorRuns.at(-1)).toEqual({ fix: true });
+
+    // The wave ends and the own doctor's next run fails: its last report is of the ended wave's
+    // clone, so its origin is no longer the wave repo's and nothing is cloned from it.
+    doctorFails = true;
+    expect((await runCli(["stop", "w1", "--by", "tester"], env.env)).exitCode).toBe(0);
+    const runs = doctorArgv.length;
+    await eventually(async () => {
+      await tick();
+      return doctorArgv.slice(runs).some((a) => !a.includes("--repo"));
+    });
+    const cloned = box?.doctorRuns.length;
+    expect(await repair({ fix: true, clone: true })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/origin.*not known/),
+    });
+    expect(box?.doctorRuns).toHaveLength(cloned ?? 0);
   });
 
   it("the own machine's verdict counts every live supervised agent, on any machine, against hard_ceiling", async () => {

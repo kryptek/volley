@@ -1513,9 +1513,12 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
 `{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
-`--fix --yes` with `fix: true` and `--clone` with `clone: true` (which needs `fix`), in the box's
-`volley_dir` as one fenced remote step; the fence allows exactly those argv on a box and no other
-`volley` command. The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
+`--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
+in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
+and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
+read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
+fence admits no credentials, port or other form); while no wave runs, or its origin has a port,
+`clone: true` is refused before ssh (`the wave repo's origin is not known …`). The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
 `fix` it also carries `plan`, each failing check with its fix, so the sheet shows what a fix would
 do before anyone runs it. An ssh failure answers `ok: false` with ssh's reason. The run (up to
 `peer_doctor_timeout_ms`, 15 min, for a `--fix`) happens outside volleyd's serial queue, so ticks
@@ -2226,8 +2229,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
-    the `peer_doctor` op); no other volley argv runs on a box
+  volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+    (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
+    credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json
