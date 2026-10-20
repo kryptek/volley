@@ -4,48 +4,48 @@
     "bucket": "cancel",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:00Z"
+    "link": "https://github.com/example/repo/actions/runs/601/job/9000"
   },
   {
     "name": "Backend IT — shard 1/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9001"
   },
   {
     "name": "Backend IT — shard 2/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9002"
   },
   {
     "name": "Backend IT — shard 3/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9003"
   },
   {
     "name": "Backend IT — shard 4/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9004"
   },
   {
     "name": "Backend IT — shard 5/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9005"
   },
   {
     "name": "Backend IT — shard 6/6",
     "bucket": "pass",
     "workflow": "CI",
     "event": "pull_request",
-    "startedAt": "2026-10-20T10:00:05Z"
+    "link": "https://github.com/example/repo/actions/runs/602/job/9006"
   }
 ]

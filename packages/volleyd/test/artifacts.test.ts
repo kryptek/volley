@@ -131,6 +131,17 @@ describe("artifact verification", () => {
       isInfraFailure([{ conclusion: "failure" }], [{ name: "test", steps: ["Checkout"] }]),
     ).toBe("steps");
     expect(isInfraFailure([{ conclusion: "cancelled" }], [])).toBe("cancelled");
+    // Cancelled during checkout is still a cancel, not an outage.
+    expect(
+      isInfraFailure([{ conclusion: "cancelled" }], [{ name: "test", steps: ["Checkout"] }]),
+    ).toBe("cancelled");
+    // A real failure beside a cancel: a re-run of the cancelled one cannot turn the head green.
+    expect(
+      isInfraFailure(
+        [{ conclusion: "cancelled" }, { conclusion: "failure" }],
+        [{ name: "test", steps: ["Run tests"] }],
+      ),
+    ).toBeNull();
     expect(
       isInfraFailure([{ conclusion: "failure" }], [{ name: "test", steps: ["Run tests"] }]),
     ).toBeNull();
@@ -218,16 +229,26 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
   });
 
   it("a cancelled run nothing replaced stays red, and says to re-run it (no status page)", async () => {
-    const fake = allGood().on(["gh", "run", "list"], {
-      stdout: fx("gh-run-list-cancelled-only.json"),
-    });
+    // Cancelled early, in checkout: still a cancel, not an outage.
+    const cancelledInCheckout = {
+      jobs: [
+        {
+          name: "test",
+          conclusion: "cancelled",
+          steps: [{ name: "Checkout", conclusion: "cancelled" }],
+        },
+      ],
+    };
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-cancelled-only.json") })
+      .on(["gh", "run", "view"], { stdout: JSON.stringify(cancelledInCheckout) });
     const report = await verifyArtifacts(fake.exec, SPEC);
     expect(report).toMatchObject({ kind: "ok", ci: { state: "red", superseded: [] } });
     const out = artifactOutcome("T1", "implementer", report);
     expect(out.kind).toBe("ci_failed");
     if (out.kind !== "ci_failed") return;
     expect(out.decision.question).toContain(
-      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again), then answer re-verify.",
+      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again). volleyd never re-runs CI; fix or re-run it, then answer re-verify (or cancel).",
     );
     expect(out.decision.question).not.toMatch(/status page/);
     expect(out.data).toMatchObject({ infra: true, infra_reason: "cancelled" });

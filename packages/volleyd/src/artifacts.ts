@@ -212,7 +212,8 @@ interface RawRun {
 /**
  * Split a head's runs into the effective ones and the superseded ones. Runs of one workflow for
  * one trigger event are a replacement chain (a concurrency cancel-in-progress, a re-push of the
- * same sha): the highest id wins, `createdAt` breaking a tie. Runs of another event (`push`
+ * same sha): the highest id wins (`gh run list` lists one row per run, its latest attempt, so ids are
+ * unique; `createdAt` only breaks a tie between duplicate rows). Runs of another event (`push`
  * beside `pull_request`) are distinct CI, never a replacement. Order is kept. Pure.
  */
 export function latestRuns<T extends RawRun>(runs: T[]): { effective: T[]; superseded: T[] } {
@@ -268,6 +269,8 @@ async function ciOn(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
       }>(v.stdout)?.jobs ?? [];
     for (const j of jobs.filter((j) => FAILED.has(j.conclusion))) {
       failedJobs.push(`${run.workflowName ?? run.name} / ${j.name}`);
+      // A cancelled run's steps say where the cancel landed, not what broke.
+      if (run.conclusion === "cancelled") continue;
       jobSteps.push({
         name: j.name,
         steps: (j.steps ?? []).filter((s) => FAILED.has(s.conclusion)).map((s) => s.name),
@@ -289,21 +292,22 @@ async function ciOn(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
 
 /**
  * Why a red head looks infra-shaped (InfraReason), or null: a run never started (`startup`);
- * every failed job failed in a step about the runner, checkout or network rather than in the
- * project's own steps (`steps`); a run was cancelled — given effective runs only, nothing
- * replaced it (`cancelled`).
+ * every failed run was cancelled — given effective runs only, nothing replaced it (`cancelled`);
+ * every failed job of the other runs failed in a step about the runner, checkout or network
+ * rather than in the project's own steps (`steps`). A cancel beside a failure in the project's
+ * own steps is null: re-running the cancelled run cannot turn the head green.
  */
 export function isInfraFailure(
   runs: { conclusion: string | null }[],
   failedJobs: { name: string; steps: string[] }[],
 ): InfraReason | null {
   if (runs.some((r) => r.conclusion === "startup_failure")) return "startup";
+  if (runs.length > 0 && runs.every((r) => r.conclusion === "cancelled")) return "cancelled";
   if (
     failedJobs.length > 0 &&
     failedJobs.every((j) => j.steps.length > 0 && j.steps.every((s) => INFRA_STEP.test(s)))
   )
     return "steps";
-  if (runs.some((r) => r.conclusion === "cancelled")) return "cancelled";
   return null;
 }
 
@@ -346,7 +350,9 @@ export function artifactOutcome(
     const cancelled = failedRuns.filter((r) => r.conclusion === "cancelled").map((r) => r.url);
     const infra =
       ci.infra === "cancelled"
-        ? ` Run ${cancelled.join(" ")} was cancelled and nothing replaced it: re-run it (or push again), then answer re-verify.`
+        ? cancelled.length === 1
+          ? ` Run ${cancelled[0]} was cancelled and nothing replaced it: re-run it (or push again).`
+          : ` Runs ${cancelled.join(" ")} were cancelled and nothing replaced them: re-run them (or push again).`
         : ci.infra !== null
           ? " This looks infra-shaped (runner lost, checkout or network error): check the hosting provider's status page first."
           : "";

@@ -155,7 +155,7 @@ describe("execProbes (git / gh through the fence)", () => {
       ci: "green",
     });
     expect(fake.argvs(["gh", "pr", "checks"])).toEqual([
-      ["gh", "pr", "checks", "7", "--json", "bucket,workflow,event,startedAt"],
+      ["gh", "pr", "checks", "7", "--json", "bucket,workflow,event,link"],
     ]);
   });
 
@@ -182,6 +182,9 @@ describe("execProbes (git / gh through the fence)", () => {
     expect(ciOf(JSON.stringify([{ bucket: "cancel" }, { bucket: "pass" }]))).toBe("red");
     // A failing sibling still fails the head.
     expect(ciOf(JSON.stringify([...checks, { ...checks[1], bucket: "fail" }]))).toBe("red");
+    // A run cancelled after some of its jobs passed, with nothing replacing it, is red.
+    const sameRun = [checks[0], { ...checks[1], link: checks[0].link }];
+    expect(ciOf(JSON.stringify(sameRun))).toBe("red");
   });
 });
 
