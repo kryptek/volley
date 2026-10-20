@@ -1481,6 +1481,9 @@ export class Daemon {
         // A decision opened before the inbox existed gets its item now.
         if (d.resolved === undefined && !this.inbox.has(decisionItemId(wave, d.decision_id)))
           await this.openDecisionItem(wave, d);
+        // Resolved without closing its item (a crash between the two): closed now, as answered.
+        else if (d.resolved !== undefined)
+          await this.closeDecisionItem(wave, d, { by: d.resolved.by });
       }
     }
     // The journal is the record: every item is re-published (an answered one until its ttl).
@@ -6555,18 +6558,16 @@ export class Daemon {
       const decision = item.source.decision_id;
       if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
         return { refused: `inbox item '${id}' names no open decision` };
+      // The owner check `resolve` applies: the inbox is no way around it.
+      const state = this.waves.get(wave)?.record.state;
+      const refused = state != null ? guardMutation(state, req.by, "inbox_answer") : null;
+      if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;
       if (r.already_resolved) {
         // Resolved without closing its item (a crash between the two): closed now, as answered.
         const first = r.decision.resolved;
-        if (first !== undefined && this.inbox.get(id)?.answered === undefined)
-          await this.recordInboxAnswer(item, {
-            version: item.version,
-            answer: first.answer,
-            by: first.by,
-            where: first.by === DAEMON_AGENT_ID ? { kind: "autopilot" } : { kind: "cli" },
-          });
+        if (first !== undefined) await this.closeDecisionItem(wave, r.decision, { by: first.by });
         const now = this.inbox.get(id)?.answered;
         return {
           refused: `already answered on ${now !== undefined ? whereLabel(now.where) : "cli"}`,

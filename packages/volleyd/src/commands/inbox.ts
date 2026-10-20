@@ -114,7 +114,9 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
         (i) => i.id === id,
       );
       if (item === undefined) {
-        io.stderr(`volleyd inbox answer: unknown inbox item '${id}'\n`);
+        io.stderr(
+          `volleyd inbox answer: ${list.ok ? `unknown inbox item '${id}'` : (list.error ?? "inbox request failed")}\n`,
+        );
         return EXIT.ERROR;
       }
       version = item.version;

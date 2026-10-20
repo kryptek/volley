@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
@@ -201,6 +203,51 @@ describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
     expect((await retainedItem(ia))?.type).toBe("inbox_item");
     expect((await retainedItem(ib))?.payload.answered?.where).toEqual({ kind: "cli" });
     expect(d2.inboxItem(ib)?.version).toBe(2);
+  });
+
+  it("a restart closes the item of a decision resolved just before a crash", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    await runCli(["resolve", d.decision_id, "fine", "--by", "owner"], s.env.env);
+    await s.daemon.stop();
+    // The crash came between journaling decision_resolved and inbox_answered.
+    const file = join(s.env.home, "waves", "w1", "journal.jsonl");
+    const lines = readFileSync(file, "utf8").split("\n");
+    writeFileSync(file, lines.filter((l) => !l.includes('"inbox_answered"')).join("\n"));
+    expect(s.journal().filter((e) => e.type === "inbox_answered")).toHaveLength(0);
+    const d2 = await s.restart();
+    expect(d2.inboxItem(id)?.answered).toMatchObject({ answer: "fine", where: { kind: "cli" } });
+    expect((await retainedItem(id))?.type).toBe("inbox_answered");
+    const r = await runCli(["inbox", "--json"], s.env.env);
+    expect(JSON.parse(r.stdout).items).toEqual([]);
+  });
+
+  it("an inbox_answer on a decision in a wave owned by someone else is refused", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-a" })).ok).toBe(true);
+    const r = await c.request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "fine",
+      where: phone,
+      by: "someone-else",
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("is owned by coord-a");
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+    const ok = await c.request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "fine",
+      where: phone,
+      by: "coord-a",
+    });
+    expect(ok.ok).toBe(true);
   });
 
   it("an answered item is cleared once inbox_answered_ttl_s has passed", async () => {

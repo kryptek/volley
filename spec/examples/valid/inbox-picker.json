@@ -20,6 +20,6 @@
     "multi": false,
     "pointers": {},
     "opened_at": "2026-10-20T12:05:00.000Z",
-    "source": { "tool_use_id": "toolu_01AbCdEf", "machine": "athena" }
+    "source": { "tool_use_id": "toolu_01AbCdEf", "machine": "laptop" }
   }
 }
