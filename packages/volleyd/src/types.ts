@@ -128,15 +128,41 @@ export interface Tunables {
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
-  /** Wave owners named by a stable coordinator name (SPEC §4.6.1). */
+  /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16), and autopilot merging (SPEC §4.6.17). */
   autopilot: AutopilotConfig;
 }
 
+/** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
+export type MergeMode = "auto" | "manual";
+
 /**
- * Config `autopilot`: `reconnect_grace_s`, how long a coordinator name whose bound agent went
- * away shows `reconnecting` (waiting for the session to come back) before `gone`.
+ * Config `autopilot` (SPEC §4.6.16): whether volleyd answers routine decisions itself, the kinds
+ * it never answers, and its remediation budgets (each `*_max` is per wave, per budget key).
  */
 export interface AutopilotConfig {
+  enabled: boolean;
+  /** Decision kinds only the owner answers (`release_go` / `stage_go` arrive with the release train). */
+  owner_only: string[];
+  /** Relaunches of one `<task>/<role>` after a bad launch. */
+  relaunch_max: number;
+  /** Extra nudges of one stalled run (`<task>/<role>/<attempt>`). */
+  nudge_max: number;
+  /** Respawns of one `<task>/<role>`. */
+  respawn_max: number;
+  /** Re-reviews of one task (a moved head, a stale review at the gate). */
+  rereview_max: number;
+  /** Agent questions answered for one run. */
+  question_max: number;
+  /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
+  budget_raise_max: number;
+  /** The merge mode for a wave file without `merge:` (SPEC §4.6.17). */
+  merge: MergeMode;
+  /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
+  merge_retry_max: number;
+  /**
+   * How long a wave owned by a coordinator name reads `reconnecting` after the agent bound to
+   * the name went away, before `gone` (SPEC §4.6.1).
+   */
   reconnect_grace_s: number;
 }
 
@@ -243,6 +269,8 @@ export interface Wave {
   /** Machines placement ranks first, and uses only when nothing else is eligible. */
   placement_prefer?: string[];
   placement_avoid?: string[];
+  /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
+  merge?: MergeMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +372,18 @@ export interface WaveState {
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
   hygiene_level?: HygieneLevel;
+  /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
+  autopilot?: AutopilotState;
   updated_at: string;
+}
+
+/** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
+export interface AutopilotState {
+  enabled: boolean;
+  auto_resolved: number;
+  escalated: number;
+  /** Each budget key autopilot answered under: answers given (or spawns allowed) and its max. */
+  budgets: Record<string, { used: number; max: number }>;
 }
 
 /**
@@ -433,6 +472,8 @@ export const WAVE_EVENT_TYPES = [
   "ci_green",
   "pr_head_moved",
   "merged_by_operator",
+  // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
+  "merged_by_supervisor",
   "agent_force_retired",
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
@@ -457,6 +498,9 @@ export const WAVE_EVENT_TYPES = [
   "peer_drain_started",
   // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
   "repo_visibility_detected",
+  // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
+  "decision_auto_resolved",
+  "decision_escalated",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

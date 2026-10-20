@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T12:10:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "w1-t1-merge_refused-1",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "merge_refused",
+    "question": "GitHub refused to merge PR #7 at 1a2b3c4d5e6f 2 time(s) (last: Pull request is not mergeable: required status checks are expected). retry: try the merge once more; manual: a human merges this PR (volleyd waits at the gate); or cancel the task?",
+    "options": ["retry", "manual", "cancel"],
+    "pointers": {
+      "pr": "https://github.com/example-org/example-repo/pull/7"
+    },
+    "opened_at": "2026-10-20T12:10:00.000Z"
+  }
+}

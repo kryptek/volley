@@ -84,6 +84,13 @@ export interface World {
   timeout?: ((argv: string[]) => boolean) | undefined;
   /** An argv this answers true for rejects (e.g. `gh` not on PATH). */
   fail?: ((argv: string[]) => boolean) | undefined;
+  /**
+   * `gh pr merge` (autopilot merging): set, it exits 1 with this stderr (head moved, checks
+   * required); unset, the PR merges: `prState` MERGED, the release tip moves to its merge commit.
+   */
+  mergeRefuse?: string | undefined;
+  /** The merge commit per PR number once merged (default sha(0xa11)). */
+  mergeCommit: Record<number, string>;
 }
 
 export interface Spawned {
@@ -117,6 +124,10 @@ export interface HarnessOptions {
   branchUpdate?: BranchUpdate;
   /** The wave's hygiene level the driver reads (default: absent, i.e. `p1`). */
   hygiene?: HygieneLevel;
+  /** The wave's effective `merge` mode the driver reads (default: absent, i.e. manual). */
+  merge?: "auto" | "manual";
+  /** `autopilot.merge_retry_max` the driver reads (default: the config default). */
+  mergeRetryMax?: number;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -168,6 +179,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     prView: {},
     prFiles: {},
     runLog: "",
+    mergeCommit: {},
   };
   const calls: string[][] = [];
   /** The exec options of every call, parallel to `calls`. */
@@ -179,7 +191,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     timedOut: false,
   });
   const exec: ExecFn = async (argv, opts = {}) => {
-    if (o.fence !== false) assertAllowed(argv);
+    if (o.fence !== false) assertAllowed(argv, opts);
     calls.push([...argv]);
     callOpts.push(opts);
     const a = [...argv];
@@ -232,6 +244,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       const branch = a[a.indexOf("--head") + 1];
       return out(JSON.stringify(world.prs.filter((p) => p.headRefName === branch)));
     }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "merge") {
+      if (world.mergeRefuse !== undefined)
+        return { ...out(""), code: 1, stderr: world.mergeRefuse };
+      const n = Number(a[3]);
+      world.prState[n] = "MERGED";
+      world.mergeCommit[n] ??= sha(0xa11);
+      world.releaseTip = world.mergeCommit[n];
+      return out("");
+    }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "view" && a.at(-1) === "files") {
       const n = Number(a[3]);
       return out(
@@ -246,7 +267,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
           state,
           headRefOid: world.prs.find((p) => p.number === n)?.headRefOid ?? null,
           mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
-          mergeCommit: state === "MERGED" ? { oid: sha(0xa11) } : null,
+          mergeCommit: state === "MERGED" ? { oid: world.mergeCommit[n] ?? sha(0xa11) } : null,
           baseRefName: wave.release_branch,
           ...world.prView[n],
         }),
@@ -371,6 +392,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
     branchUpdate: () => branchUpdate ?? "rebase",
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
+    ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),
+    ...(o.mergeRetryMax !== undefined ? { mergeRetryMax: () => o.mergeRetryMax as number } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);

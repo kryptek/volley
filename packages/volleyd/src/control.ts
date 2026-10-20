@@ -39,6 +39,8 @@ export type ControlOp =
   // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
   | "decisions"
   | "resolve"
+  // Autopilot's effective policy table (autopilot/policy.ts).
+  | "policy"
   | "claim"
   | "pause"
   | "resume"

@@ -66,6 +66,29 @@
               "enum": ["p1", "p3", "off"],
               "description": "How the reviewers treat public hygiene for the current plan version (spec section 4.6.8): p1 (every hit blocks the merge; public, or visibility unknown), p3 (non-blocking notes; private or internal) or off. Absent: not recorded, which a supervisor treats as p1."
             },
+            "autopilot": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "auto_resolved", "escalated", "budgets"],
+              "description": "What the supervisor's autopilot did in this wave (spec section 4.6.16): whether it is on for the wave, the decisions it answered itself and those it left for the owner, and each remediation budget it answered under. Absent: a supervisor that predates autopilot.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "auto_resolved": { "type": "integer", "minimum": 0 },
+                "escalated": { "type": "integer", "minimum": 0 },
+                "budgets": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["used", "max"],
+                    "properties": {
+                      "used": { "type": "number", "minimum": 0 },
+                      "max": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
