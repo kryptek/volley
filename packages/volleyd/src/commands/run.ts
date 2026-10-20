@@ -10,13 +10,15 @@ import { parseWaveFile } from "../wave-file";
 import { formatWave } from "./status";
 import { places, previewPlacement } from "./validate";
 
-const HELP = `Usage: volleyd run <wave.yaml> [--owner <agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd run <wave.yaml> [--owner <name|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
 Validate a wave file locally, then submit it to the running daemon. Returns as soon as the
 daemon has journaled the wave; tasks start as the scheduler admits them.
 
 The wave's owner (the one coordinator allowed to resolve, pause, stop and steer it) is --owner,
-else VOLLEY_AGENT_ID, else the session registered for this directory (printed as "(auto)").
+else VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR
+(printed as "(auto)"); a session whose MCP server sets VOLLEY_COORDINATOR owns it by that name,
+so the session keeps its waves when its MCP server restarts under a new agent id.
 Paths a task shares with a running wave's task are printed as overlap warnings (advisory).
 If the daemon already runs a wave with this id, the file is that wave's next plan version: the
 daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
