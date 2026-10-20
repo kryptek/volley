@@ -24,7 +24,13 @@ export type TaskStage =
   | "awaiting_decision"
   | "cancelled";
 
-export type WaveStatus = "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+export type WaveStatus =
+  | "running"
+  | "paused"
+  | "awaiting_decision"
+  | "releasing"
+  | "complete"
+  | "stopped";
 
 /** One pipeline entry as written: a stage, or a group of stages that run in parallel. */
 export type PipelineStep = PipelineStage | PipelineStage[];
@@ -297,6 +303,8 @@ export interface Wave {
   placement_avoid?: string[];
   /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
   merge?: MergeMode;
+  /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
+  playbook?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +410,8 @@ export interface WaveState {
   autopilot?: AutopilotState;
   /** The merge queue in merge order (SPEC §4.6.17); absent while it is empty. */
   merge_queue?: MergeQueueEntry[] | undefined;
+  /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
+  release?: ReleaseState;
   updated_at: string;
 }
 
@@ -411,6 +421,15 @@ export interface MergeQueueEntry {
   state: "merging" | "updating" | "queued" | "refused";
   /** When the task entered the queue. */
   since: string;
+}
+
+/** One release stage's state in the wave state (SPEC §4.6.1, §4.6.19). */
+export type ReleaseStageState = "pending" | "awaiting_go" | "running" | "verified" | "failed";
+
+/** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
+export interface ReleaseState {
+  stage: string | null;
+  stages: { name: string; state: ReleaseStageState }[];
 }
 
 /** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
@@ -543,6 +562,13 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
+  // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
+  "release_started",
+  "release_stage_entered",
+  "release_stage_verified",
+  "release_stage_failed",
+  "release_done",
   // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
   "inbox_opened",
   "inbox_answered",

@@ -182,6 +182,12 @@ export function formatWave(
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
       : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
+  // The release train (SPEC §4.6.19): the stage running or awaiting its go, and how far it is.
+  const r = s.release;
+  const release =
+    r !== undefined
+      ? `  release: ${r.stage ?? "-"} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
+      : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -199,7 +205,9 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + queue + autopilot + preface + hygiene + rows.join("") + decisions.join("");
+  return (
+    header + queue + release + autopilot + preface + hygiene + rows.join("") + decisions.join("")
+  );
 }
 
 /**

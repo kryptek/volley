@@ -89,6 +89,11 @@
             "repo_visibility_detected",
             "decision_auto_resolved",
             "decision_escalated",
+            "release_started",
+            "release_stage_entered",
+            "release_stage_verified",
+            "release_stage_failed",
+            "release_done",
             "inbox_opened",
             "inbox_answered"
           ]
