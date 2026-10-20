@@ -83,6 +83,61 @@ describe("retire closes the agent's workspace", () => {
     expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: false });
   });
 
+  /** Stop w1, halt the daemon past the stop's grace: the restart force-retires through retireAny. */
+  async function stoppedThenDown(): Promise<FakeClock> {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    expect((await runCli(["stop", "w1", "--by", "t"], s.env.env)).exitCode).toBe(0);
+    await s.settled();
+    await s.daemon.stop();
+    await clock.advance(31_000);
+    return clock;
+  }
+
+  /** Another live agent of the wave, journaled while the daemon was down (never retired). */
+  const liveAgent = (data: { worktree: string; workspace: string }) =>
+    Journal.open(join(s.env.home, "waves", "w1")).append({
+      type: "agent_spawned",
+      task: "T2",
+      data: { agent_id: "w1-t2-implementer-1", role: "implementer", ...data },
+    });
+
+  it("an unsupervised agent's retire (retireAny) re-finds its short ref by title and closes it", async () => {
+    await stoppedThenDown();
+    s.host.workspaceTitles["w1 T1 implementer"] = "workspace:7";
+    await s.restart();
+    const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.host.finds).toEqual([{ name: "w1 T1 implementer" }]);
+    expect(s.host.closed).toEqual(["workspace:7"]);
+    expect(s.host.sessionsEnded).toEqual([{ workspace: "workspace:7", worktree: worktreeOf() }]);
+    expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
+    const ended = s.journal().find((e) => e.type === "agent_session_closed");
+    expect(ended?.data).toMatchObject({ workspace: "workspace:7", how: "close-workspace" });
+  });
+
+  it("another live agent holds the worktree (a relaunch): the retire stops nothing there, closes nothing", async () => {
+    await stoppedThenDown();
+    s.host.workspaceTitles["w1 T1 implementer"] = "workspace:7";
+    liveAgent({ worktree: worktreeOf(), workspace: "workspace:7" });
+    await s.restart();
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.host.sessionsEnded[0]).toEqual({ workspace: null, worktree: null });
+    expect(s.host.finds).not.toContainEqual({ name: "w1 T1 implementer" });
+    const ended = s
+      .journal()
+      .find((e) => e.type === "agent_session_closed" && e.data.agent_id === AGENT);
+    expect(ended?.data).toMatchObject({ workspace: null, how: "none", pids: [] });
+  });
+
+  it("the title now names another live agent's workspace: it is not closed, the worktree's processes are", async () => {
+    await stoppedThenDown();
+    s.host.workspaceTitles["w1 T1 implementer"] = "workspace:7";
+    liveAgent({ worktree: "/elsewhere/T1-implementer", workspace: "workspace:7" });
+    await s.restart();
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.host.sessionsEnded[0]).toEqual({ workspace: null, worktree: worktreeOf() });
+  });
+
   it("a force-retired agent at stop: its workspace is closed too", async () => {
     const clock: FakeClock = fakeClock(Date.now());
     s = await makeSupervisedEnv({ daemon: { clock } });
