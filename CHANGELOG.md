@@ -48,6 +48,11 @@ Owner smoke: [`SMOKE.md`](SMOKE.md) Plan 12.
   the length of the sign-in (one fenced, transient `ssh -L`), with a phone fallback that types
   the code into a terminal, never into Volley. (#122)
 
+### Known issues
+
+- Repair's **Also clone the wave repo** cannot clone yet: volleyd runs the doctor with `--clone`
+  but no `--origin`. Clone the repo on the machine by hand until it is fixed. (#188)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a

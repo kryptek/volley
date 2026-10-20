@@ -66,21 +66,23 @@ lease_pools:
   the Stepper) or **Repair…** without applying (both run a dry doctor; a Repair also has volleyd
   probe the PATH again on its next re-compute).
   **Pass:** the row turns ✓ and the reason is gone. Time it.
-- [ ] **Break the install and the clone.** On `box-a`: `rm <volley checkout>/node_modules/.volley-lock-sha256`
-  (what a `git pull` without a reinstall looks like to the doctor) and
-  `mv <clone> <clone>.bak`. On the next heartbeat `volley.installed` and `repo.clone` are ✗.
+- [ ] **Break the install and the clone.** On `box-a`:
+  `rm <volley checkout>/node_modules/.volley-lock-sha256` (what a `git pull` without a reinstall
+  looks like to the doctor) and `mv <clone> <clone>.bak`. On the next heartbeat `volley.installed` and `repo.clone` are ✗.
   **Repair…** opens the plan sheet: "This will:" lists `bun install --frozen-lockfile` in the
   volley checkout; "You run on box-a:" lists the rest (the Claude sign-in). Turn on **Also clone
   the wave repo**, **Apply**.
   **Pass:** the sheet waits (a doctor run may take minutes), then the rows re-render:
   `volley.installed` ✓, `repo.clone` / `repo.origin` ✓ (a fresh clone at the path), nothing new
-  red; `volleyd events _system | tail` has `peer_doctor_run { … fix: true, clone: true, ok: true }`.
+  red; `volleyd events _system | tail` has
+  `peer_doctor_run { … fix: true, clone: true, ok: true }`.
   Time it. Remove `<clone>.bak`.
   **Expected red, read from source before the run:** volleyd's `peer_doctor` passes `--clone`
   but no `--origin`, and the doctor clones only from `--origin`, so the switch cannot clone yet:
-  `repo.clone` stays ✗ with the manual `git clone <the wave repo's URL> …` line. Fix it in its
-  own PR (volleyd passes the running wave's origin, or the doctor takes it from the
-  supervisor's readiness requirements), then re-run this step.
+  `repo.clone` stays ✗ with the manual `git clone <the wave repo's URL> …` line. Filed as
+  [#188](https://github.com/kryptek/volley/issues/188); fix it in its own PR (volleyd passes the
+  running wave's origin, or the doctor takes it from the supervisor's readiness requirements),
+  then re-run this step.
 - [ ] **Repair…** again and **Apply**. **Pass:** every fix says "already done".
 
 ### (b) Provisioning rows
@@ -110,9 +112,9 @@ lease_pools:
 
 ### (d) Phone fallback
 
-- [ ] Sign `box-a` out of Claude (`/logout` in a `claude` session there), wait for the card's line to say so (or
-  **Repair…** without Apply to refresh), then **Sign in on box-a** again and open **From a
-  phone instead**.
+- [ ] Sign `box-a` out of Claude (`/logout` in a `claude` session there), wait for the card's
+  line to say so (or **Repair…** without Apply to refresh), then **Sign in on box-a** again and
+  open **From a phone instead**.
   **Pass:** the sheet shows the phone link and the copyable
   `ssh <box-a> -t tmux attach -t volley-signin-primary`, and has no text field of any kind.
 - [ ] Open the link on the phone and sign in; run the attach command in a terminal on the Mac;
@@ -173,8 +175,8 @@ One of T1 / T2 is running on `box-a` and T3 is pinned there, waiting behind its 
 ### (g) Overload
 
 - [ ] `volleyd config set hosts.box-a.max_agents 4` again. With an agent running on `box-a`
-  (from (e), or a new one-task wave with `host: box-a`), load it: `for i in $(seq $(nproc 2>/dev/null ||
-  sysctl -n hw.ncpu)); do yes > /dev/null & done`. **Pass:** within two heartbeats the card
+  (from (e), or a new one-task wave with `host: box-a`), load it:
+  `for i in $(seq $(nproc 2>/dev/null || sysctl -n hw.ncpu)); do yes > /dev/null & done`. **Pass:** within two heartbeats the card
   reads `overloaded: load … on … cores · no new agents`; a task that becomes ready meanwhile
   goes to the Mac or waits (`why_waiting` names `box-a: overloaded …`), never to `box-a`; the
   running agent keeps narrating.
