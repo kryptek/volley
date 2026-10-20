@@ -169,6 +169,39 @@ describe("merge-ready evidence package", () => {
     );
   });
 
+  it("a move the owner accepted as a merge of the release branch only says so", () => {
+    const j = evidenceJson({
+      wave: "w1",
+      task: "T1",
+      issue: 42,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+      head: H2,
+      branch: "w1/T1-implementer-1",
+      release_branch: "release/w1",
+      ci: "green",
+      ci_runs: [],
+      reviews: {},
+      fixups: [],
+      rebases: [],
+      moves: [
+        {
+          from: H1,
+          to: H2,
+          touched: ["CHANGELOG.md"],
+          accepted_by: "owner",
+          how: "release_merge",
+          parent: sha(9),
+        },
+      ],
+      release: { release_sha: sha(9), merge_base: sha(9), behind: 0 },
+      generated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(j.moves[0]).toMatchObject({ how: "release_merge", accepted_by: "owner" });
+    expect(renderEvidenceMd(j)).toContain(
+      "Accepted by owner: a merge of the release branch only (touched: CHANGELOG.md).",
+    );
+  });
+
   it("a gated task's package carries the base its implementer's worktree was cut from", async () => {
     await gated();
     const base = h.task()?.base_sha as string;

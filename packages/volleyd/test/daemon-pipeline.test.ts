@@ -2,9 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { decisionTopic } from "../src/decisions";
 import { NS } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
-import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
+import {
+  AGENT,
+  ARTIFACTS_OK,
+  PR_HEAD,
+  type SupervisedEnv,
+  makeSupervisedEnv,
+} from "./helpers/supervised-env";
 
 /**
  * The daemon's side of the pipeline (T6): which statuses reach it, and how. The pipeline itself
@@ -59,5 +66,52 @@ describe("daemon → pipeline", () => {
     await s.settled();
     expect(s.journal().filter((e) => e.type === "steering_sent")).toHaveLength(1);
     expect(s.journal().some((e) => e.type === "decision_opened")).toBe(false);
+  });
+
+  it("a PR merged on GitHub while its task is parked on a decision (in review): superseded_by_merge, then done", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({
+      exec: ARTIFACTS_OK,
+      daemon: { clock },
+      pipeline: "[implement, spec_review, merge_ready]",
+    });
+    await s.status("done");
+    await s.event((e) => e.type === "stage_entered" && e.data.stage === "spec_review");
+    await s.settled();
+    const d = await s.daemon.openDecision("w1", {
+      kind: "agent_blocked",
+      task: "T1",
+      question: "anything?",
+      options: ["yes", "no"],
+    });
+    expect(s.daemon.record("w1")?.state?.tasks[0]?.stage).toBe("awaiting_decision");
+    s.host.fake.on(["gh", "pr", "view"], {
+      stdout: JSON.stringify({
+        state: "MERGED",
+        mergedAt: "2026-10-20T12:00:00Z",
+        mergeCommit: { oid: "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" },
+        baseRefName: "release/w1",
+        headRefOid: PR_HEAD,
+      }),
+    });
+    await clock.advance(DAEMON_DEFAULTS.ci_poll_ms);
+    await s.daemon.tick();
+    await s.event((e) => e.type === "stage_entered" && e.data.stage === "done");
+    await s.settled();
+    const j = s.journal();
+    const at = (pred: (e: (typeof j)[number]) => boolean) => j.findIndex(pred);
+    const resolved = at((e) => e.type === "decision_resolved");
+    expect(j[resolved]?.data).toMatchObject({
+      decision_id: d.decision_id,
+      answer: "superseded_by_merge",
+      by: "volleyd",
+      rationale: "PR #7 merged into release/w1 at 5a5a5a5",
+    });
+    expect(resolved).toBeLessThan(
+      at((e) => e.type === "artifact_verified" && e.data.role === "merged"),
+    );
+    expect(s.daemon.record("w1")?.state?.tasks[0]?.stage).toBe("done");
+    expect(s.daemon.record("w1")?.state?.open_decisions).toEqual([]);
+    expect(await s.env.retained(decisionTopic("w1", d.decision_id))).toBeNull();
   });
 });

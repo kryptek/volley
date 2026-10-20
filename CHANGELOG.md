@@ -2,6 +2,22 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+### Unreleased
+
+#### Fixed
+
+- **volleyd: a `pr_head_moved` that only merged the release branch can be accepted.** When CI
+  on the new head is green and the move is a merge of the release branch whose changed files the
+  release branch changed too (a CHANGELOG conflict resolved in the merge counts), the decision
+  offers `accept`: the gate moves to the new head with the reviews of the old one, and the
+  evidence records who accepted it and the files the merge touched. A move that adds the PR's own
+  changes is still `rereview | fixup | cancel`. (#195)
+- **volleyd: a PR merged while its task is not at `merge_ready` is noticed.** The merge check
+  runs in every stage short of `done` / `cancelled` (an open decision, the reviews, a fixup):
+  the task's open decisions are resolved `superseded_by_merge`, its live agents retired, and it
+  becomes `done` with `merged_unverified_head`, releasing its dependents. Before, a merged task
+  waited on its decision and could only be recorded as `cancelled`. (#195)
+
 ## 0.4.0 — 2026-10-20
 
 The Fleet release: volleyd judges which machines can run an agent, places a wave's tasks across

@@ -4521,6 +4521,13 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      // A PR merged on GitHub settles every open question about its task (already on the queue).
+      resolveOpen: async (task, answer, rationale) => {
+        for (const d of openDecisions(log.record)) {
+          if (d.task !== task) continue;
+          await this.resolveNow(wave, d.decision_id, { answer, by: DAEMON_AGENT_ID, rationale });
+        }
+      },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
       retire: async (agentId, status) => {

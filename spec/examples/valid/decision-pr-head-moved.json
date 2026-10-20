@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T11:40:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "w1-t1-pr_head_moved-1",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "pr_head_moved",
+    "question": "PR #7's head moved from 1a2b3c4 to 5d6e7f8 outside the pipeline (during merge_ready); CI on 5d6e7f8 is green. The reviews saw 1a2b3c4. rereview: the reviewers again on the new head, then the fixup and the gate; fixup: a fixup agent on 5d6e7f8 with the CI result and the 1a2b3c4..5d6e7f8 diff as its directive, then the gate; accept: the move is a merge of release/w1 only (files: CHANGELOG.md), so the reviews of 1a2b3c4 hold; the gate again at 5d6e7f8; or cancel?",
+    "options": ["rereview", "fixup", "accept", "cancel"],
+    "pointers": {
+      "pr": "https://github.com/example-org/example-repo/pull/7"
+    },
+    "opened_at": "2026-10-20T11:40:00.000Z"
+  }
+}

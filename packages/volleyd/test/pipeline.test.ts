@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
@@ -559,7 +559,8 @@ describe("pipeline: the merge nudge", () => {
     h.world.prState[7] = "MERGED";
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.driver.tick();
-    expect(stage()).toBe("done");
+    // Not settled (the file list hangs): the merge folds back in on the queue soon after.
+    await vi.waitFor(() => expect(stage()).toBe("done"));
     expect(nudges()).toEqual([]);
     h.world.hang = undefined;
     h.restart();
@@ -843,6 +844,44 @@ describe("pipeline: rebase without CI", () => {
 });
 
 describe("pipeline: the PR head at the gate and at the merge", () => {
+  it("a PR merged on GitHub while the reviews run → done, the reviewers retired, merged_unverified_head", async () => {
+    await implemented();
+    expect(stage()).toBe("spec_review");
+    const reviewers = h.spawns.filter((s) => s.role !== "implementer").map((s) => s.agent_id);
+    expect(reviewers).toHaveLength(2);
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("done");
+    expect(h.retired.map((r) => r.agent_id)).toEqual(expect.arrayContaining(reviewers));
+    expect(
+      h.events.find((e) => e.type === "alarm_raised" && e.data.alarm === "merged_unverified_head")
+        ?.data,
+    ).toMatchObject({ gated: H1, merged: H1 });
+    expect(
+      h.events.find((e) => e.type === "stage_entered" && e.data.stage === "done")?.data,
+    ).toMatchObject({ merged: true });
+    // A reviewer reporting after the merge changes nothing.
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("done");
+  });
+
+  it("an open PR outside merge_ready is only read: no gate, no move", async () => {
+    await implemented();
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("spec_review");
+    expect(h.calls).toContainEqual([
+      "gh",
+      "pr",
+      "view",
+      "7",
+      "--json",
+      "state,mergedAt,mergeCommit,baseRefName,headRefOid",
+    ]);
+    expect(h.events.some((e) => e.type === "pr_head_moved")).toBe(false);
+  });
+
   it("a push after verification is re-verified before the gate; the evidence names both heads", async () => {
     h = pipelineHarness({ pipeline: "[implement, merge_ready]" });
     await h.start();
@@ -899,12 +938,14 @@ describe("pipeline: the PR head at the gate and at the merge", () => {
     expect(d?.question).toMatch(/spec_reviewer, quality_reviewer/);
     expect(stage()).toBe("awaiting_decision");
     expect(h.task()?.why_waiting).toMatch(/awaiting decision/);
-    // Parked: later ticks neither ask again nor poll GitHub.
+    // Parked: later ticks do not ask again; they only look for a merge of the PR.
     const calls = h.calls.length;
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
     expect(h.openDecisions()).toHaveLength(1);
-    expect(h.calls.length).toBe(calls);
+    expect(h.calls.slice(calls)).toEqual([
+      ["gh", "pr", "view", "7", "--json", "state,mergedAt,mergeCommit,baseRefName,headRefOid"],
+    ]);
 
     await h.resolve(d?.decision_id as string, "rereview");
     const reviewers = h.spawns.filter((s) => s.role !== "implementer" && s.start?.ref === H3);

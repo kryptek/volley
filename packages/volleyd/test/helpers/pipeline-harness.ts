@@ -60,6 +60,8 @@ export interface World {
   diffNames: Record<string, string[]>;
   /** `git merge-base --is-ancestor a b` per `a..b` (default: not an ancestor). */
   ancestor: Record<string, boolean>;
+  /** `git log -n 1 --format=%P <sha>`: a commit's parents (default: none known). */
+  parents: Record<string, string[]>;
   /** `git log --left-right --cherry-pick --format=%m%H <release>...<head>` per head. */
   cherry: Record<string, string>;
   /** `git log --format=%H %s <base>..<release>`: the release branch's new commits. */
@@ -159,6 +161,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     prState: {},
     diffNames: {},
     ancestor: {},
+    parents: {},
     cherry: {},
     releaseLog: "",
     patches: {},
@@ -208,6 +211,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         return out(world.cherry[head] ?? `>${head}\n`);
       }
       if (verb === "log" && rest.includes("--format=%H %s")) return out(world.releaseLog);
+      if (verb === "log" && rest.includes("--format=%P")) {
+        const parents = world.parents[rest.at(-1) as string];
+        return parents !== undefined ? out(`${parents.join(" ")}\n`) : out("", 128);
+      }
       if (verb === "show" && rest[0] === "--format=")
         return out(world.patches[rest[1] as string] ?? "");
       if (verb === "diff" && rest.length === 2 && !(rest[0] as string).startsWith("-"))
@@ -391,6 +398,14 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       if ("error" in r) throw new Error(r.error);
       await journal({ ...r.event, data: { ...extra, ...r.event.data } });
     },
+    // The daemon's resolveNow: journaled; a done task acts on no answer, so no hand-back here.
+    resolveOpen: async (task, answer, rationale) => {
+      for (const id of rec.state?.open_decisions ?? []) {
+        if (rec.decisions[id]?.task !== task) continue;
+        const r = resolveEvent(rec, id, { answer, by: "volleyd", rationale }, new Date());
+        if ("event" in r) await journal(r.event);
+      }
+    },
     nextAgent: (_task, role) => {
       const attempt = (attempts[role] ?? 0) + 1;
       return { agent_id: agentIdFor("w1", "T1", role, attempt), attempt };
@@ -533,8 +548,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await driver.settled();
     },
     /** Resolve an open decision and hand the resolution to the pipeline. */
-    async resolve(id: string, answer: string) {
-      const r = resolveEvent(rec, id, { answer, by: "coord-1" }, new Date());
+    async resolve(id: string, answer: string, by = "coord-1") {
+      const r = resolveEvent(rec, id, { answer, by }, new Date());
       if (!("event" in r)) throw new Error(`cannot resolve ${id}`);
       await journal(r.event);
       await driver.handle("T1", {
