@@ -26,6 +26,7 @@ import type { WaveRecord } from "./reducer";
 import {
   type Disagreement,
   type FixupResult,
+  type HygieneLevel,
   REVIEWER_ROLES,
   type ReviewResult,
   type ReviewerRole,
@@ -37,6 +38,7 @@ import {
   parseFixupResult,
   parseReviewResult,
   renderFindingsMd,
+  resultSteerText,
 } from "./reviews";
 import type {
   BranchUpdate,
@@ -490,6 +492,8 @@ export interface PipelineView {
   p: TaskPipeline;
   /** The `branch_update` tunable now (absent: rebase): read when a rebase step starts. */
   branch_update?: BranchUpdate;
+  /** How review results treat public hygiene (absent: p1): reviews.ts parseReviewResult. */
+  hygiene?: HygieneLevel;
 }
 
 export type PipelineEvent =
@@ -1147,7 +1151,7 @@ function onDone(
     ];
   }
   if (isReviewerRole(ev.role)) {
-    const review = parseReviewResult(ev.result);
+    const review = parseReviewResult(ev.result, v.hygiene ?? "p1");
     if (review === null) {
       if ((run.steers.result ?? 0) < 1) {
         return [
@@ -1156,7 +1160,7 @@ function onDone(
             role: ev.role,
             agent_id: ev.agent_id,
             reason: "result",
-            text: 'Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested", "hygiene": { "checked": true, "findings": [<public-hygiene P1s, same shape>] } }) — then publish done again.',
+            text: resultSteerText(v.hygiene ?? "p1"),
           },
         ];
       }
@@ -2003,6 +2007,8 @@ export interface PipelineDeps {
   enqueue: (fn: () => Promise<void>) => Promise<void>;
   /** The wave's effective `branch_update` tunable (default: rebase). */
   branchUpdate?: () => BranchUpdate;
+  /** The wave's hygiene level (default: p1). */
+  hygiene?: () => HygieneLevel;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -2076,6 +2082,7 @@ export class PipelineDriver {
       release_branch: rec.state.release_branch,
       p: rec.pipeline[task] ?? emptyPipeline(),
       ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),
+      ...(this.deps.hygiene !== undefined ? { hygiene: this.deps.hygiene() } : {}),
     };
   }
 

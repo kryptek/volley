@@ -93,6 +93,23 @@ describe("ConfigStore layering", () => {
     ).toEqual([]);
   });
 
+  it("public_hygiene: auto | on | off, default auto, per-wave override, in the retained payload", () => {
+    writeFileSync(join(home, "config.yaml"), "public_hygiene: on\n");
+    const c = open();
+    expect(CONFIG_DEFAULTS.public_hygiene).toBe("auto");
+    expect(c.get("public_hygiene")).toBe("on");
+    c.setWaveOverrides("w1", { public_hygiene: "off" });
+    expect(c.effective("w1").public_hygiene).toBe("off");
+    expect(c.effective().public_hygiene).toBe("on");
+    expect(c.applyPatch({ public_hygiene: "yes" } as never, "x").applied).toBe(false);
+    expect(c.applyPatch({ public_hygiene: "auto" }, "x").applied).toBe(true);
+    expect(c.effective().public_hygiene).toBe("auto");
+    expect(c.retainedPayload()).toMatchObject({ public_hygiene: "auto" });
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
   it("rejects Object prototype names as config paths", () => {
     for (const p of ["constructor", "toString", "__proto__", "hasOwnProperty.x"]) {
       expect(() => open().get(p)).toThrow(/unknown config path/);

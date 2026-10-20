@@ -43,7 +43,7 @@
     },
     "review": {
       "type": "object",
-      "required": ["findings", "verdict", "hygiene"],
+      "required": ["findings", "verdict"],
       "properties": {
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "verdict": { "enum": ["approve", "changes_requested"] },
@@ -53,7 +53,7 @@
     },
     "hygiene": {
       "type": "object",
-      "description": "The reviewer's public-hygiene check of the diff, commit messages and PR text: person names, local usernames, machine paths, private hostnames or IPs. Every finding is a P1. A review without checked: true is not a review result.",
+      "description": "The reviewer's public-hygiene check of the diff, commit messages and PR text: person names, local usernames, machine paths, private hostnames or IPs (spec section 4.6.8). Optional in the schema: a supervisor whose public_hygiene setting resolves to public (a public repository, or one whose visibility it could not read) requires it, treats a review without checked: true as no review result and counts every finding as a P1; for a private repository it may accept a review without it and count its findings as P3s, or ignore it.",
       "required": ["checked", "findings"],
       "properties": {
         "checked": { "const": true },

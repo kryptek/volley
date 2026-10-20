@@ -5,6 +5,7 @@ import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
+import type { HygieneLevel } from "../../src/reviews";
 import type { BranchUpdate, JournalEvent, NewEvent } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
@@ -93,6 +94,8 @@ export interface HarnessOptions {
   dependents?: Record<string, string[]>;
   /** The `branch_update` tunable the driver reads (default: absent, i.e. `rebase`). */
   branchUpdate?: BranchUpdate;
+  /** The wave's hygiene level the driver reads (default: absent, i.e. `p1`). */
+  hygiene?: HygieneLevel;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -328,6 +331,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     spawn: async (_task, role, req) =>
       holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
     branchUpdate: () => branchUpdate ?? "rebase",
+    ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);

@@ -10,6 +10,7 @@ import {
   renderBrief,
 } from "../src/brief";
 import { exec } from "../src/exec";
+import { hygieneText } from "../src/reviews";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
@@ -29,6 +30,8 @@ const VARS: BriefVars = {
   branch: "w1/T1-implementer-1",
   worktree: "/wt/w1/T1-implementer",
   extra: "",
+  hygiene_rule: hygieneText("p1").rule,
+  hygiene_contract: hygieneText("p1").contract,
 };
 
 describe("brief templates", () => {

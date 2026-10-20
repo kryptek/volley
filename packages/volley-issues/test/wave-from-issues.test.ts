@@ -504,6 +504,8 @@ describe("brief preface", () => {
     ])
       expect(text).toMatch(rule);
     expect(text).toContain("## Repository rules");
+    expect(text).toMatch(/P1\s+for public repositories, P3 for private ones/);
+    expect(text).toContain("`public_hygiene`");
   });
 
   it("writes the template when the preface is absent", () => {

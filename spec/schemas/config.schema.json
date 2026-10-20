@@ -253,6 +253,12 @@
           "default": "strict",
           "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "public_hygiene": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "auto",
+          "description": "What a supervisor's reviewers flag as public hygiene (spec section 4.6.8): auto (read the repository's visibility once per wave version; a public repository, or one whose visibility could not be read, gets the P1 check, a private or internal one a non-blocking P3 note), on (always the P1 check) or off (no hygiene check). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "hosts": {
           "type": "object",
           "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",

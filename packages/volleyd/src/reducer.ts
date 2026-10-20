@@ -1,7 +1,10 @@
 import { type DecisionRecord, parksTask } from "./decisions";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import { hygieneLevel } from "./reviews";
 import type {
   JournalEvent,
+  PublicHygiene,
+  RepoVisibility,
   TaskAgents,
   TaskId,
   TaskStage,
@@ -365,6 +368,15 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
         task.reviews_skipped_by_plan = true;
       break;
+    case "repo_visibility_detected": {
+      const visibility = (ev.data.visibility as RepoVisibility | null | undefined) ?? null;
+      state.repo_visibility = visibility;
+      state.hygiene_level = hygieneLevel(
+        (ev.data.public_hygiene as PublicHygiene | undefined) ?? "auto",
+        visibility,
+      );
+      break;
+    }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
