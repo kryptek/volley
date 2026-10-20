@@ -128,6 +128,7 @@
 #   nudge_max: 1                 # extra nudges of one stalled run (<task>/<role>/<attempt>)
 #   respawn_max: 1               # respawns of one <task>/<role>
 #   rereview_max: 2              # re-reviews of one task (moved head, stale review at the gate)
+#   ci_fixup_max: 2              # CI fixups of one task (CI red on its own change)
 #   question_max: 1              # agent questions answered for one run
 #   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
 #                                # multiple of the wave's derived budget
