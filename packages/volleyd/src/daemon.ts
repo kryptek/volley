@@ -242,7 +242,13 @@ import type {
 import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
-import { PipelineDriver, type SpawnStart, blockedReason, roleSpawnHold } from "./pipeline";
+import {
+  PipelineDriver,
+  SUPERSEDED_BY_MERGE,
+  type SpawnStart,
+  blockedReason,
+  roleSpawnHold,
+} from "./pipeline";
 
 import {
   type BriefPrefaceInfo,
@@ -4565,6 +4571,15 @@ export class Daemon {
           { reason },
         ),
       decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      // A PR merged on GitHub settles every open question about its task (already on the queue).
+      // resolveNow only enqueues the pipeline's decision_resolved, so it runs after the task is
+      // done and onResolved returns [] for it: a superseded decision is never asked again.
+      resolveOpen: async (task, answer, rationale) => {
+        for (const d of openDecisions(log.record)) {
+          if (d.task !== task) continue;
+          await this.resolveNow(wave, d.decision_id, { answer, by: DAEMON_AGENT_ID, rationale });
+        }
+      },
       // --- Fleet merge nudge (SPEC §4.6.15): the wave's nudge_on_merge, read at each merge. ---
       nudgeOnMerge: () => this.config.get("placement.nudge_on_merge", wave) as NudgeOnMerge,
       retire: async (agentId, status) => {
@@ -5264,6 +5279,8 @@ export class Daemon {
     if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
     const { answer, by } = d.resolved;
     if (by === agentId) return;
+    // Closed because the PR merged: not an answer for the agent, whose run the merge retires.
+    if (by === DAEMON_AGENT_ID && answer === SUPERSEDED_BY_MERGE) return;
     const why = `${by} stopped the task (decision ${d.decision_id})`;
     if (cls === "respawn_needed") {
       const a = answer.trim().toLowerCase();

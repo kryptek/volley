@@ -17,6 +17,19 @@ import type { TaskId, WaveId } from "./types";
  * merges — so every line is a verified fact about one exact head.
  */
 
+/**
+ * A head pushed outside the pipeline. `accepted_by`: the owner kept the reviews for it (a
+ * `fixup` answer, or `accept` of a merge of the release branch only: `how`, `parent`).
+ */
+export interface EvidenceMove {
+  from: string;
+  to: string;
+  touched: string[];
+  accepted_by?: string;
+  how?: "release_merge";
+  parent?: string;
+}
+
 export interface EvidenceInput {
   wave: WaveId;
   task: TaskId;
@@ -37,7 +50,7 @@ export interface EvidenceInput {
   fixups: { round: number; from?: string; to: string; result?: FixupResult; diffstat?: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
   /** Heads pushed to the PR outside the pipeline after a verification (CI re-verified on each). */
-  moves?: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  moves?: EvidenceMove[];
   /** Every head this task was gated at or moved to before this one, oldest first, then `head`. */
   head_history?: string[];
   /** P1s the owner ruled not blockers (`reviewers_disagree` → fine), and who ruled. */
@@ -82,7 +95,7 @@ export interface EvidenceJson {
   unresolved_p1: string[];
   fixups: { round: number; diffstat: string | null; from: string | null; to: string }[];
   rebases: { from?: string; to: string; touched: string[] }[];
-  moves: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  moves: EvidenceMove[];
   /** Present when the gate saw more than one head: each of them, oldest first. */
   head_history?: string[];
   /** Set when the PR head moved after this package was written: it no longer describes the PR. */
@@ -252,9 +265,11 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     out.push("", "## Pushes outside the pipeline", "");
     for (const m of j.moves) {
       const owner =
-        m.accepted_by !== undefined
-          ? ` Accepted without a re-review by ${m.accepted_by} (fixup).`
-          : "";
+        m.accepted_by === undefined
+          ? ""
+          : m.how === "release_merge"
+            ? ` Accepted by ${m.accepted_by}: a merge of the release branch only (touched: ${m.touched.join(", ") || "(nothing)"}; they may carry content resolved by hand, which no reviewer saw).`
+            : ` Accepted without a re-review by ${m.accepted_by} (fixup).`;
       out.push(
         `- \`${m.from}\` → \`${m.to}\`: pushed outside the pipeline after verification; CI re-verified on the new head, the reviews above stay at the heads they name; touched: ${m.touched.length > 0 ? m.touched.join(", ") : "(nothing)"}.${owner}`,
       );

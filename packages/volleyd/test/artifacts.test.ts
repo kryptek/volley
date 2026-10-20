@@ -6,6 +6,7 @@ import {
   artifactOutcome,
   checkRebase,
   isInfraFailure,
+  probeMovedHead,
   verifyArtifacts,
 } from "../src/artifacts";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
@@ -309,5 +310,80 @@ describe("rebase check", () => {
     expect(behind.argvs(["git", "-C", WT, "log"])).toEqual([
       ["git", "-C", WT, "log", "--oneline", `${OTHER}..${TIP}`],
     ]);
+  });
+});
+
+describe("moved head: a merge of the release branch only", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const X = "c".repeat(40);
+  const MB = "d".repeat(40);
+  /** B merges X (on the release branch) into A; the release branch changed two files since MB. */
+  const releaseMerge = (moved: string) =>
+    fakeExec()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-green.json") })
+      .on(["git", "-C", WT, "log", "-n", "1", "--format=%P", B], { stdout: `${A} ${X}\n` })
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor"], { code: 0 })
+      .on(["git", "-C", WT, "merge-base", A, X], { stdout: `${MB}\n` })
+      .on(["git", "-C", WT, "diff", "--name-only", A, B], { stdout: moved })
+      .on(["git", "-C", WT, "diff", "--name-only", MB, X], {
+        stdout: "CHANGELOG.md\nsrc/x.ts\n",
+      });
+  const probe = (fake: FakeExec) =>
+    probeMovedHead(fake.exec, {
+      cwd: WT,
+      branch: BRANCH,
+      from: A,
+      to: B,
+      release_branch: "release/w1",
+    });
+
+  it("touching only files the release branch changed → only_release", async () => {
+    const fake = releaseMerge("CHANGELOG.md\n");
+    const facts = await probe(fake);
+    expect(facts.release_merge).toEqual({
+      parent: X,
+      moved_files: ["CHANGELOG.md"],
+      release_files: ["CHANGELOG.md", "src/x.ts"],
+      only_release: true,
+    });
+    expect(fake.argvs(["git", "-C", WT, "merge-base", "--is-ancestor"])).toEqual([
+      ["git", "-C", WT, "merge-base", "--is-ancestor", X, "origin/release/w1"],
+    ]);
+    expect(fake.argvs(["git", "-C", WT, "fetch"])).toContainEqual([
+      "git",
+      "-C",
+      WT,
+      "fetch",
+      "origin",
+      "release/w1",
+    ]);
+  });
+
+  it("a file of the PR's own in the move → not only_release", async () => {
+    const facts = await probe(releaseMerge("CHANGELOG.md\nsrc/mine.ts\n"));
+    expect(facts.release_merge).toMatchObject({
+      moved_files: ["CHANGELOG.md", "src/mine.ts"],
+      only_release: false,
+    });
+  });
+
+  it("a single-parent head, or a parent off the release branch → no release_merge", async () => {
+    const single = releaseMerge("CHANGELOG.md\n").on(
+      ["git", "-C", WT, "log", "-n", "1", "--format=%P", B],
+      { stdout: `${A}\n` },
+    );
+    expect((await probe(single)).release_merge).toBeUndefined();
+    const elsewhere = releaseMerge("CHANGELOG.md\n").on(
+      ["git", "-C", WT, "merge-base", "--is-ancestor"],
+      { code: 1 },
+    );
+    expect((await probe(elsewhere)).release_merge).toBeUndefined();
+    // The gated head is not a parent: not a merge into the PR as it was.
+    const other = releaseMerge("CHANGELOG.md\n").on(
+      ["git", "-C", WT, "log", "-n", "1", "--format=%P", B],
+      { stdout: `${MB} ${X}\n` },
+    );
+    expect((await probe(other)).release_merge).toBeUndefined();
   });
 });
