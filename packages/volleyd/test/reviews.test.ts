@@ -205,6 +205,9 @@ describe("public hygiene (reviewer backstop)", () => {
         expect(off).not.toContain("hygiene");
         expect(off).not.toContain("Public hygiene");
         expect(off).not.toContain('"hygiene":');
+        // An empty placeholder on its own line leaves no blank paragraph or list gap.
+        expect(off).not.toMatch(/\n\n\n/);
+        expect(off).toMatch(/`"verdict": "approve"`\.\n\n## Rules/);
       }
       for (const brief of reviewer ? [] : [p1, p3, off]) {
         expect(brief).not.toContain(HYGIENE_CHECK);

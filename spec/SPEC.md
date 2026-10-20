@@ -294,6 +294,8 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `coordinator` | object | `{ agent_id, state, question?, session_url?, workspace?, last_seen }`; `state` is `working` \| `awaiting_input` \| `gone`, maintained by the supervisor from the owner's `status` and `progress` topics (§4.3). |
 | `effective_config` | object | The §4.6.4 tunables with this wave's overrides applied. |
 | `brief_preface` | object \| null | `{ path, sha256, bytes }` of the brief preface the current plan version's agents get (§4.6.9), or `null` when the wave has none. Absent from a supervisor that predates it. |
+| `repo_visibility` | enum \| null | `public` \| `private` \| `internal` \| `unknown`: the repository's visibility as read for the current plan version (§4.6.8), or `null` when `public_hygiene` is `on` or `off` and nothing was read. Absent from a supervisor that predates it. |
+| `hygiene_level` | enum | `p1` \| `p3` \| `off`: how the review roles treat public hygiene for the current plan version (§4.6.8). Absent from a supervisor that predates it, which is read as `p1`. |
 | `updated_at` | date-time | Time of the last change. |
 
 #### 4.6.2 Decisions

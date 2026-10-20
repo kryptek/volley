@@ -115,6 +115,12 @@ export type PublicHygiene = "auto" | "on" | "off";
 /** `gh repo view --json visibility`, lowercased; `unknown` when it could not be read. */
 export type RepoVisibility = "public" | "private" | "internal" | "unknown";
 
+/**
+ * How the reviewers treat public hygiene: `p1` (every hit blocks the merge, the result's
+ * `hygiene` block is required), `p3` (hits are non-blocking notes, the block optional) or `off`.
+ */
+export type HygieneLevel = "p1" | "p3" | "off";
+
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
 export type TunablesPatch = {
   [K in keyof Tunables]?: Tunables[K] extends string | number | null
@@ -255,7 +261,7 @@ export interface WaveState {
   /** The repository's visibility as journaled for this version (null: set by config, not read). */
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
-  hygiene_level?: "p1" | "p3" | "off";
+  hygiene_level?: HygieneLevel;
   updated_at: string;
 }
 

@@ -1,7 +1,7 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
 import { validator } from "./schemas";
-import type { PublicHygiene, RepoVisibility, TaskId } from "./types";
+import type { HygieneLevel, PublicHygiene, RepoVisibility, TaskId } from "./types";
 
 /**
  * Review results (review-result.schema.json): parsing what reviewers and the fixup publish on
@@ -36,11 +36,7 @@ export interface ReviewResult {
 export const HYGIENE_CHECK =
   "Public hygiene: flag as P1 any person name, local username, machine path (home directories, temp paths), private hostname or IP in the diff, commit messages or PR text.";
 
-/**
- * How the reviewers treat public hygiene: `p1` (every hit blocks the merge, the result's
- * `hygiene` block is required), `p3` (hits are non-blocking notes, the block optional) or `off`.
- */
-export type HygieneLevel = "p1" | "p3" | "off";
+export type { HygieneLevel };
 
 /** The `public_hygiene` tunable and the repo's visibility (null/unknown: as public). */
 export function hygieneLevel(mode: PublicHygiene, visibility: RepoVisibility | null): HygieneLevel {
