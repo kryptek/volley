@@ -321,8 +321,9 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     );
     expect(task().next_retry_at).toBeNull();
 
-    // No automatic retry, however long it waits — nor after a restart.
-    await clock.advance(24 * 3_600_000);
+    // No automatic retry, however long it waits — nor after a restart. Twice the longest backoff
+    // is long enough; a simulated day fires every interval timer in it and took seconds.
+    await clock.advance(2 * CONFIG_DEFAULTS.spawn_retry_max_s * 1000);
     await daemon.tick();
     await settle();
     expect(of("spawn_failed")).toHaveLength(2);

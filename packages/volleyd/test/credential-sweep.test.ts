@@ -282,3 +282,36 @@ describe("the daemon sweeps at start and on the interval", () => {
     }
   });
 });
+
+describe("the live count is never set back by a stale sweep", () => {
+  it("a sweep that read the logins before a newer recount does not overwrite it", async () => {
+    const creds = memoryCredentials();
+    await creds.mint("w1-t1-implementer-1");
+    let judged!: () => void;
+    const judging = new Promise<void>((r) => {
+      judged = r;
+    });
+    const sweeper = new CredentialSweeper({
+      credentials: creds,
+      // The sweep reads the logins, then waits on liveness (broker round-trips, slow under load).
+      live: async (candidates) => {
+        await judging;
+        return new Set(candidates);
+      },
+      reap: async () => false,
+      journal: () => {},
+      graceMs: () => 0,
+      now: () => Date.now(),
+    });
+    const sweep = sweeper.sweep();
+    await new Promise((r) => setImmediate(r));
+    await creds.revoke("w1-t1-implementer-1");
+    sweeper.refreshSoon();
+    await sweeper.refreshed();
+    expect(sweeper.counts.live).toBe(0);
+    judged();
+    await sweep;
+    await sweeper.refreshed();
+    expect(sweeper.counts.live).toBe(0);
+  });
+});
