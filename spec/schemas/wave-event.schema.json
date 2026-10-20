@@ -18,6 +18,7 @@
             "wave_stopped",
             "wave_complete",
             "owner_claimed",
+            "owner_reconnected",
             "task_queued",
             "task_admitted",
             "task_cancelled",
@@ -166,6 +167,30 @@
                     }
                   },
                   "wave": { "const": "_system" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "owner_reconnected" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["owner", "agent_id", "previous_agent_id"],
+                    "properties": {
+                      "owner": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "agent_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "previous_agent_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      }
+                    }
+                  }
                 }
               }
             }

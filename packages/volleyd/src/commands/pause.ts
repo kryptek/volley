@@ -3,7 +3,7 @@ import { opCommand } from "../controls";
 const HELP = `Usage: volleyd pause <wave> [--by <agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
 Stop admitting new tasks in the wave; agents already running carry on. Owner only (--by, else
-VOLLEY_AGENT_ID, else the session registered for this directory). Undo with \`volleyd resume\`.
+VOLLEY_COORDINATOR, else VOLLEY_AGENT_ID, else the session registered for this directory). Undo with \`volleyd resume\`.
 `;
 
 export const pause = opCommand({
