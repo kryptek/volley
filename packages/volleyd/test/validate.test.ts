@@ -229,6 +229,82 @@ describe("volleyd validate: the brief preface", () => {
   });
 });
 
+describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
+  let dir: string;
+  let repo: string;
+  beforeEach(() => {
+    dir = realpathSync(tempDir("volleyd-validate-playbook-"));
+    repo = join(dir, "repo");
+    mkdirSync(join(repo, ".volley"), { recursive: true });
+    git(repo, "init", "--quiet", "-b", "main");
+    git(
+      repo,
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.com",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "init",
+    );
+    git(repo, "remote", "add", "origin", "https://example.com/repo.git");
+    git(repo, "update-ref", "refs/remotes/origin/release/x", "HEAD");
+  });
+
+  const waveFile = (extra = "") => {
+    const file = join(dir, "w.yaml");
+    writeFileSync(
+      file,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\n${extra}tasks:\n  T1: { issue: 1 }\n`,
+    );
+    return file;
+  };
+  const PLAYBOOK =
+    "version: 1\nstages:\n  - { name: smoke, brief: Run the smoke. }\n  - { name: deploy, brief: Deploy., gate: owner }\n";
+
+  it("the default .volley/release.yaml: its path, stage count and owner-gated count", async () => {
+    writeFileSync(join(repo, ".volley", "release.yaml"), PLAYBOOK);
+    const r = await runCli(["validate", waveFile()]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "release playbook: .volley/release.yaml (2 stages, 1 owner-gated)\n",
+    );
+  });
+
+  it("playbook: <path> overrides it; playbook: none and no file both print none", async () => {
+    writeFileSync(join(repo, "release.yaml"), PLAYBOOK);
+    const r = await runCli(["validate", waveFile(`playbook: ${join(repo, "release.yaml")}\n`)]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      `release playbook: ${join(repo, "release.yaml")} (2 stages, 1 owner-gated)\n`,
+    );
+    for (const extra of ["playbook: none\n", ""]) {
+      const n = await runCli(["validate", waveFile(extra)]);
+      expect(n.exitCode).toBe(0);
+      expect(n.stdout).toContain("release playbook: none\n");
+    }
+  });
+
+  it("an invalid playbook fails validate with its path-qualified error", async () => {
+    const file = join(repo, "release.yaml");
+    writeFileSync(file, "version: 1\nstages:\n  - { name: smoke, brief: a, gate: later }\n");
+    const r = await runCli(["validate", waveFile(`playbook: ${file}\n`)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(`RELEASE_PLAYBOOK_INVALID: ${file}: invalid release playbook:`);
+    expect(r.stderr).toContain("  stages[0].gate: ");
+  });
+
+  it("a configured playbook that does not exist is refused (only the default may be absent)", async () => {
+    const r = await runCli(["validate", waveFile(`playbook: ${join(repo, "nope.yaml")}\n`)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      `RELEASE_PLAYBOOK_INVALID: ${join(repo, "nope.yaml")}: no such file`,
+    );
+  });
+});
+
 describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
   let dir: string;
   let broker: TestBroker;

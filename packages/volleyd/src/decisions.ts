@@ -35,6 +35,8 @@ export const DECISION_KINDS = [
   "account_limit",
   "machine_down",
   "merge_refused",
+  "release_go",
+  "stage_go",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -73,6 +75,10 @@ export interface DecisionPayload {
   tasks?: TaskId[];
   /** machine_down: what is wrong with `host` (absent: down). */
   machine?: MachineTrouble;
+  /** stage_go: the release playbook stage that runs only on go (SPEC §4.6.19). */
+  stage?: string;
+  /** release_go: every release stage, verified, with where its evidence lives. */
+  stages?: { name: string; evidence?: string }[];
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -241,6 +247,10 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
           ...(typeof d.machine === "string" ? { machine: d.machine } : {}),
         }
       : {};
+  const release = {
+    ...(d.kind === "stage_go" && typeof d.stage === "string" ? { stage: d.stage } : {}),
+    ...(d.kind === "release_go" && Array.isArray(d.stages) ? { stages: d.stages } : {}),
+  };
   return {
     decision_id: d.decision_id,
     wave: d.wave,
@@ -261,6 +271,7 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     ...str("acct"),
     ...limit,
     ...down,
+    ...release,
   };
 }
 
