@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
+import { tempDir } from "./tmp";
 
 export const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const FIXTURES = join(PACKAGE_ROOT, "test", "fixtures");
@@ -18,7 +18,8 @@ export type HookName =
   | "stop"
   | "notification"
   | "pre-compact"
-  | "pre-tool-use-lease";
+  | "pre-tool-use-lease"
+  | "pre-tool-use";
 
 export const HOOK_NAMES: HookName[] = [
   "session-start",
@@ -29,6 +30,7 @@ export const HOOK_NAMES: HookName[] = [
   "notification",
   "pre-compact",
   "pre-tool-use-lease",
+  "pre-tool-use",
 ];
 
 /** A hook stdin sample from test/fixtures with `cwd` pointed at `cwd`. */
@@ -41,9 +43,14 @@ export function fixture(
   return JSON.stringify({ ...raw, cwd, ...overrides });
 }
 
-/** A temp working directory; with `agent`, it holds `.volley/agent.json`. */
-export function makeWorkdir(agent?: Record<string, unknown>): string {
-  const dir = mkdtempSync(join(tmpdir(), "volley-hooks-"));
+/**
+ * A working directory, by default a temp one removed after the test (pass `dir` from a
+ * `tempDirForAll` to share one across a describe); with `agent`, it holds `.volley/agent.json`.
+ */
+export function makeWorkdir(
+  agent?: Record<string, unknown>,
+  dir: string = tempDir("volley-hooks-"),
+): string {
   if (agent !== undefined) {
     mkdirSync(join(dir, ".volley"), { recursive: true });
     writeFileSync(join(dir, ".volley", "agent.json"), JSON.stringify(agent));
@@ -51,17 +58,14 @@ export function makeWorkdir(agent?: Record<string, unknown>): string {
   return dir;
 }
 
-/** An empty VOLLEY_AUTH_DIR, made once per test process. */
-let emptyAuthDir: string | undefined;
-
 /**
  * The parent environment minus anything that would leak the developer's own session into a
  * hook under test (Claude Code / cmux / Volley variables), plus `extra`. VOLLEY_AUTH_DIR
- * defaults to an empty temp dir, so a coordinator-mode hook never reads (or sends to a test
- * broker) the host's real `<mosquitto etc>/volley/coordinator.json`.
+ * defaults to an empty temp dir (removed after the test), so a coordinator-mode hook never reads
+ * (or sends to a test broker) the host's real `<mosquitto etc>/volley/coordinator.json`. That dir
+ * is a `tempDir`: call this (and `runHook` / `runScript`) inside a test or a `beforeEach`.
  */
 export function hookEnv(extra: Record<string, string> = {}): Record<string, string> {
-  emptyAuthDir ??= mkdtempSync(join(tmpdir(), "volley-hooks-noauth-"));
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
@@ -69,7 +73,12 @@ export function hookEnv(extra: Record<string, string> = {}): Record<string, stri
     env[k] = v;
   }
   // Aedes speaks MQTT 3.1.1 only.
-  return { VOLLEY_HOOKS_MQTT_VERSION: "4", VOLLEY_AUTH_DIR: emptyAuthDir, ...env, ...extra };
+  return {
+    VOLLEY_HOOKS_MQTT_VERSION: "4",
+    VOLLEY_AUTH_DIR: tempDir("volley-hooks-noauth-"),
+    ...env,
+    ...extra,
+  };
 }
 
 export interface HookRun {

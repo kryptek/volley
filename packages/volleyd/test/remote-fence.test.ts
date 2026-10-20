@@ -1,7 +1,6 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -13,6 +12,7 @@ import {
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
+import { tempDirForAll } from "./helpers/tmp";
 
 /** The one local argv a remote command runs as. */
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
@@ -137,6 +137,35 @@ describe("remote allow-list (ssh … bash -s)", () => {
 
   it.each(ALLOWED)("allows %s … in a remote script", (...argv) => {
     expect(() => assertAllowed(SSH, remote({ argv }))).not.toThrow();
+  });
+
+  it("the box's PATH for its tmux server: printenv PATH and set-environment -g PATH only", () => {
+    const ok = (...argv: string[]) => {
+      try {
+        assertAllowed(SSH, remote(step(...argv)));
+        return "allow";
+      } catch (e) {
+        if (e instanceof FenceError) return "deny";
+        throw e;
+      }
+    };
+    expect(ok("printenv", "PATH")).toBe("allow");
+    expect(ok("printenv")).toBe("deny");
+    expect(ok("printenv", "HOME")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/home/dev/.local/bin:/usr/bin")).toBe(
+      "allow",
+    );
+    expect(ok("tmux", "set-environment", "-g", "LD_PRELOAD", "/tmp/x.so")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "relative/bin:/usr/bin")).toBe("deny");
+    // An empty entry is the current directory.
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin::/bin")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", ":/usr/bin")).toBe("deny");
+    // Reading the server's PATH first (to add to it, never drop from it).
+    expect(ok("tmux", "show-environment", "-g", "PATH")).toBe("allow");
+    expect(ok("tmux", "show-environment", "-g")).toBe("deny");
+    expect(ok("tmux", "show-environment", "-g", "SSH_AUTH_SOCK")).toBe("deny");
+    expect(ok("tmux", "set-environment", "PATH", "/usr/bin")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin", "x")).toBe("deny");
   });
 
   it("names the refused remote verb", () => {
@@ -588,11 +617,12 @@ describe("renderRemoteScript", () => {
 });
 
 describe("exec + the remote fence", () => {
+  const tmp = tempDirForAll("volleyd-remote-fence-");
   let dir: string;
   let marker: string;
   let env: Record<string, string>;
   beforeAll(() => {
-    dir = mkdtempSync(join(tmpdir(), "volleyd-remote-fence-"));
+    dir = tmp();
     marker = join(dir, "ssh-ran");
     // A stand-in `ssh` on PATH: records that it ran and the script it was given on stdin.
     const fake = join(dir, "ssh");
@@ -600,7 +630,6 @@ describe("exec + the remote fence", () => {
     chmodSync(fake, 0o755);
     env = { PATH: `${dir}:/usr/bin:/bin` };
   });
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
   // Each case starts with no record of ssh running (an allowed script leaves one behind).
   beforeEach(() => rmSync(marker, { force: true }));
 

@@ -81,7 +81,28 @@ can be confirmed. `--help` lists every option.
 narration contract. The legacy path runs it before every launch; it can also be
 installed as volleyd's `$VOLLEYD_HOME/brief-gate`, and accepts volleyd's own
 briefs (whose session hooks register the agent instead of a `vol_register`
-step). `test/validate-brief.test.ts` runs it against volleyd's templates.
+step). `test/validate-brief.test.ts` runs it against volleyd's templates. A hand-written brief
+whose `vol_register` step carries no `title` still passes, with
+`WARNING: vol_register without title` on stderr (a volleyd brief, already
+registered by its hooks, gets no such warning).
+
+## Brief title helper
+
+`scripts/brief-title.ts` makes the agent's one-line title (the `vol_register`
+`title` the Desk shows, and the cmux workspace name) from an issue title. The
+raw title goes in on stdin, never on a command line:
+
+```sh
+gh issue view 22 --json title -q .title | bun scripts/brief-title.ts 22 implementer
+# #22 O0: Cache prefetch — implementer
+```
+
+It removes every character special inside shell quotes (`'` `"` `` ` `` `$`
+`\`), turns control characters and newlines into spaces, collapses whitespace
+and cuts the line to 120 characters, so the output is safe inside the spawn
+brief's single-quoted prompt within the double-quoted `--command`. A
+non-numeric issue number is refused (exit 2). `validate-skill.ts` fails a
+SKILL.md that puts a raw issue title on a shell line.
 
 ## Parity vs. legacy
 

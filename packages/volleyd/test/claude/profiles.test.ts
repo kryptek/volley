@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   ClaudeAccountError,
   PRIMARY_ACCOUNT,
@@ -13,8 +12,9 @@ import {
   registryPath,
   selectAccount,
 } from "../../src/claude/profiles";
+import { tempDir, tempDirForAll } from "../helpers/tmp";
 
-const root = () => mkdtempSync(join(tmpdir(), "volley-claude-"));
+const root = () => tempDir("volley-claude-");
 const NOW = "2026-10-18T12:00:00.000Z";
 
 describe("profiles: the accounts.json registry", () => {
@@ -71,11 +71,17 @@ describe("profiles: the accounts.json registry", () => {
 });
 
 describe("selectAccount: task > wave > config default > primary", () => {
-  const r = root();
-  addAccount(r, { label: "work" }, NOW);
-  markSignedIn(r, "work", { plan: "max" }, NOW);
-  addAccount(r, { label: "fresh" }, NOW);
-  const reg = readRegistry(r);
+  // One registry shared by every case here.
+  const shared = tempDirForAll("volley-claude-");
+  let r: string;
+  let reg: ReturnType<typeof readRegistry>;
+  beforeAll(() => {
+    r = shared();
+    addAccount(r, { label: "work" }, NOW);
+    markSignedIn(r, "work", { plan: "max" }, NOW);
+    addAccount(r, { label: "fresh" }, NOW);
+    reg = readRegistry(r);
+  });
 
   it("nothing set → the primary profile (no CLAUDE_CONFIG_DIR)", () => {
     expect(selectAccount(r, reg, {})).toEqual({

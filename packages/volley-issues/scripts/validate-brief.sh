@@ -5,6 +5,8 @@
 # It also serves as volleyd's brief gate ($VOLLEYD_HOME/brief-gate): volleyd's briefs carry the
 # same narration contract, and their session hooks register the agent, so for them an "already
 # registered" statement stands in for the vol_register step.
+# A hand-written brief whose vol_register step carries no `title` (on its line or the three after)
+# still passes, with a warning on stderr: the Desk then names the window after the bare agent id.
 #   usage: validate-brief.sh <brief-file>
 f="$1"
 [ -f "$f" ] || { echo "validate-brief: no such brief file: $f" >&2; exit 2; }
@@ -23,5 +25,9 @@ if [ "$fail" -ne 0 ]; then
   echo "  Fix: append brief/NARRATION_BLOCK.txt (in the volley-issues skill directory) to the brief," >&2
   echo "  with vol_register as step 1 (a volleyd brief must not ask to register: keep its protocol block)." >&2
   exit 1
+fi
+if ! grep -qi 'already registered' "$f" && grep -qi 'vol_register' "$f" \
+  && ! grep -i -A3 'vol_register' "$f" | grep -qiE '\btitle *[=:]'; then
+  echo "WARNING: vol_register without title — add title=\"#<N> <issue title> — <role>\" (scripts/brief-title.ts) so the Desk can name the agent's window." >&2
 fi
 echo "validate-brief: OK — '$f' satisfies the Volley narration contract."

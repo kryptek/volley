@@ -1,15 +1,12 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { addAccount, profileDir } from "../src/claude/profiles";
@@ -17,6 +14,7 @@ import { FenceError, sealLaunchScript } from "../src/fence";
 import { LocalCmuxHost } from "../src/hosts/local-cmux";
 import {
   HOOKS_DIR,
+  LAUNCH_CLAUDE_CHECK,
   LAUNCH_COMMAND,
   MCP_ENTRY,
   VOLLEY_MCP_SERVER,
@@ -28,6 +26,7 @@ import {
 } from "../src/launch";
 import { spawnAgent } from "../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { tempDir } from "./helpers/tmp";
 import { stubEnv } from "./helpers/with-env";
 
 describe("launch.sh", () => {
@@ -60,6 +59,26 @@ describe("launch.sh", () => {
     expect(mcpConfigPath("/wt/w1/T1-implementer")).toBe("/wt/w1/T1-implementer/.volley/mcp.json");
   });
 
+  it("checks claude is on the session's PATH first: a missing one leaves the reason on screen", async () => {
+    const lines = script.split("\n");
+    expect(lines.at(-3)).toBe(LAUNCH_CLAUDE_CHECK);
+    expect(LAUNCH_CLAUDE_CHECK).toContain("~/.zshenv");
+    expect(() => sealLaunchScript("/wt/w1/T1-implementer", script)).not.toThrow();
+    // Run it in bash with a PATH that has no claude: the reason is printed, and the session stays.
+    const dir = tempDir("launch-check-");
+    const probe = `${LAUNCH_CLAUDE_CHECK.replace("exec tail -f /dev/null", "exit 127")}\necho started\n`;
+    const r = spawnSync("/bin/bash", ["-c", probe], {
+      encoding: "utf-8",
+      env: { PATH: dir },
+    });
+    expect(r.status).toBe(127);
+    expect(r.stderr).toContain(
+      "volleyd: cannot start the agent: claude is not on this session's PATH",
+    );
+    expect(r.stderr).toContain(dir);
+    expect(r.stdout).not.toContain("started");
+  });
+
   it("mcp.json runs this checkout's volley-mcp and holds no credential", () => {
     expect(MCP_ENTRY.endsWith("/packages/volley-mcp/src/index.ts")).toBe(true);
     expect(existsSync(MCP_ENTRY)).toBe(true);
@@ -70,7 +89,7 @@ describe("launch.sh", () => {
 
   it("under a Claude account profile: exports CLAUDE_CONFIG_DIR and strips credential env", () => {
     // A registered profile in the profiles root: the only CLAUDE_CONFIG_DIR the fence seals.
-    const root = join(realpathSync(mkdtempSync(join(tmpdir(), "launch-profile-"))), "claude");
+    const root = join(realpathSync(tempDir("launch-profile-")), "claude");
     const restore = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(root, "..", "vd") });
     try {
       underProfile(
@@ -78,7 +97,6 @@ describe("launch.sh", () => {
       );
     } finally {
       restore();
-      rmSync(join(root, ".."), { recursive: true, force: true });
     }
   });
 

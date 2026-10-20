@@ -54,6 +54,8 @@ export interface SettingsWindowProps {
   /** `null` = no broker credentials: the Supervisor rows are read-only. */
   transport: ConfigTransport | null;
   onArrange: () => void;
+  /** Settings › General › Reset layout: clear every window pin (C12). */
+  onResetLayout?: () => void;
   onClose: () => void;
   /** The section shown first; General by default. */
   initial?: SectionKey;
@@ -215,6 +217,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 notify={p.notify}
                 setNotify={p.setNotify}
                 onArrange={p.onArrange}
+                {...(p.onResetLayout ? { onResetLayout: p.onResetLayout } : {})}
               />
             )}
             {sec === "appearance" && (

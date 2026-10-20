@@ -14,6 +14,12 @@
  * own account has no actions (volleyd refuses to rotate it over the control
  * channel, and revoking it would lock this browser out).
  *
+ * Every admin-token sign-in makes a device admin account. One volleyd has not seen for over a day
+ * (its last auth request, else its creation, never before volleyd's `seen_since`) is flagged
+ * **stale**: a sign-in nobody uses keeps admin rights, so the section offers to revoke every
+ * stale one at once, after a confirm. An open Desk signed in as an admin checks in hourly
+ * (`keepAdminSeen`), so one in use is never stale.
+ *
  * A browser that is not an admin cannot list accounts (only an admin may send
  * account ops), so it sees only its own row and the Agents row, and how to
  * become an admin.
@@ -66,9 +72,38 @@ export function lastSeen(iso: string | undefined, now: number): string {
   return `${Math.floor(s / 86_400)}d ago`;
 }
 
+/** How long a device admin sign-in may go unseen before it is flagged stale. */
+export const STALE_AFTER_MS = 86_400_000;
+
+/**
+ * A device's admin sign-in (an admin token redeemed in a browser) that volleyd has not seen for
+ * over a day: its last auth request, else when it was created, but never before `seenSince`
+ * (account_list's `seen_since`: volleyd keeps auth requests in memory, so a restart forgets
+ * them). Without `seenSince` only a `last_seen` counts. Never this browser's own.
+ */
+export function isStale(
+  a: BrokerAccount,
+  identity: string | null,
+  now: number,
+  seenSince?: string,
+): boolean {
+  if (a.role !== "admin" || a.kind !== "device" || a.name === identity) return false;
+  const since = seenSince === undefined ? Number.NaN : Date.parse(seenSince);
+  if (Number.isNaN(since) && a.last_seen === undefined) return false;
+  const t = Date.parse(a.last_seen ?? a.created);
+  if (Number.isNaN(t)) return false;
+  return now - Math.max(t, Number.isNaN(since) ? t : since) > STALE_AFTER_MS;
+}
+
+/** account_list's `seen_since`, when volleyd says it. */
+const seenSinceOf = (result: unknown): { seenSince?: string } => {
+  const v = (result as { seen_since?: unknown } | undefined)?.seen_since;
+  return typeof v === "string" ? { seenSince: v } : {};
+};
+
 type List =
   | { state: "loading" }
-  | { state: "ready"; accounts: BrokerAccount[] }
+  | { state: "ready"; accounts: BrokerAccount[]; seenSince?: string }
   | { state: "failed"; error: string };
 
 export interface BrokerAccountsProps {
@@ -94,6 +129,7 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [sweep, setSweep] = useState<"idle" | "confirm" | "busy">("idle");
   const { ops } = p;
 
   const load = useCallback(async () => {
@@ -103,7 +139,7 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
     setList(
       accounts === null
         ? { state: "failed", error: r.error ?? "volleyd's account list could not be read" }
-        : { state: "ready", accounts },
+        : { state: "ready", accounts, ...seenSinceOf(r.result) },
     );
   }, [ops]);
 
@@ -131,6 +167,33 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
     }
     const pw = r.secret?.password;
     ok(typeof pw === "string" ? { password: pw } : {});
+    void load();
+  };
+
+  const stale =
+    list.state === "ready"
+      ? list.accounts.filter((a) => isStale(a, p.identity, now, list.seenSince))
+      : [];
+
+  /** Revoke every stale sign-in, one op each; stops at the first refusal and says which. */
+  const revokeStale = async () => {
+    if (ops === null) return;
+    setSweep("busy");
+    setError(null);
+    setNotice(null);
+    let done = 0;
+    for (const a of stale) {
+      const r = await ops.request("account_revoke", { name: a.name });
+      if (!r.ok) {
+        setError(
+          `${a.name}: ${r.error ?? "volleyd refused"}${done > 0 ? ` (revoked ${done} before it)` : ""}`,
+        );
+        break;
+      }
+      done++;
+    }
+    setSweep("idle");
+    if (done === stale.length) setNotice(`Revoked ${done} stale sign-in${done === 1 ? "" : "s"}`);
     void load();
   };
 
@@ -194,6 +257,36 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
           </button>
         </div>
       )}
+      {stale.length > 0 && (
+        <div className="stale-note" role="note">
+          <p>
+            {stale.length} admin sign-in{stale.length === 1 ? "" : "s"} on devices{" "}
+            {stale.length === 1 ? "has" : "have"} not checked in with volleyd for over a day (an
+            open Desk checks in every hour). A sign-in nobody uses keeps admin rights: revoke the
+            ones you do not use (a device signs in again with a new one-time token).
+          </p>
+          {sweep === "confirm" ? (
+            <div className="row-actions">
+              <span className="confirm-line">They stop connecting at once.</span>
+              <button type="button" className="btn btn--danger" onClick={() => void revokeStale()}>
+                Revoke {stale.length}
+              </button>
+              <button type="button" className="btn" onClick={() => setSweep("idle")}>
+                Keep
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="btn"
+              disabled={sweep === "busy"}
+              onClick={() => setSweep("confirm")}
+            >
+              {`Revoke the ${stale.length} stale sign-in${stale.length === 1 ? "" : "s"}…`}
+            </button>
+          )}
+        </div>
+      )}
       {list.state === "ready" && (
         <table className="acct-table">
           <thead>
@@ -218,7 +311,20 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
                   <RoleChip role={a.role} />
                 </td>
                 <td className="dim">{a.label ?? KIND_WORD[a.kind] ?? a.kind}</td>
-                <td className="dim mono">{lastSeen(a.last_seen, now)}</td>
+                <td className="dim mono">
+                  {lastSeen(a.last_seen, now)}
+                  {isStale(a, p.identity, now, list.seenSince) && (
+                    <>
+                      {" "}
+                      <span
+                        className="role role--stale"
+                        title="no check-in with volleyd for over a day"
+                      >
+                        stale
+                      </span>
+                    </>
+                  )}
+                </td>
                 <td>
                   {a.name !== p.identity && (
                     <div className="row-actions">

@@ -488,3 +488,61 @@ describe("App no-signal (fake timers)", () => {
     expect(screen.queryByText(/^quiet for/)).toBeNull();
   });
 });
+
+describe("App stale-progress badge (fake timers)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a working agent with no progress of its own for 10 min gets the amber badge in its window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const handlers = new Set<(m: DeskMessage) => void>();
+    const emit = (m: DeskMessage) => {
+      for (const h of handlers) h(m);
+    };
+    const factory = (): DeskMqttClient => {
+      const none = () => () => {};
+      return {
+        connect: async () => {
+          setTimeout(() => {
+            emit(registry("loner", NOW));
+            emit(status("loner", "working", NOW));
+          }, 0);
+        },
+        disconnect: async () => {},
+        publish: async () => {},
+        onMessage: (h) => {
+          handlers.add(h);
+          return () => handlers.delete(h);
+        },
+        onConnect: none,
+        onDisconnect: none,
+        onError: none,
+      };
+    };
+    const { container } = render(
+      <DeskStoreProvider demo={false} brokerUrl="ws://test.invalid" clientFactory={factory}>
+        <App />
+      </DeskStoreProvider>,
+    );
+    act(() => {
+      vi.advanceTimersByTime(9 * 60 * S);
+    });
+    expect(container.querySelector(".chip--stale")).toBeNull();
+    act(() => {
+      // Its hooks keep heartbeating: alive, just not reporting.
+      emit(
+        progress("loner", "heartbeat", Date.now(), {
+          source: "harness-hook",
+          seq: 1,
+          hook_event: "PostToolUse",
+        }),
+      );
+      vi.advanceTimersByTime(2 * 60 * S);
+    });
+    expect(container.querySelector(".chip--stale")).toHaveTextContent(
+      /^no progress reported for 1\d m$/,
+    );
+  });
+});

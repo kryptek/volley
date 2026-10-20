@@ -1,16 +1,8 @@
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-} from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { addAccount, profileDir } from "../src/claude/profiles";
 import { exec } from "../src/exec";
 import {
@@ -24,6 +16,7 @@ import {
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { tempDirForAll } from "./helpers/tmp";
 import { withEnvSync } from "./helpers/with-env";
 
 /** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
@@ -773,9 +766,10 @@ describe("the launch command needs the token of a launch script volleyd sealed",
 
 describe("exec", () => {
   // A throwaway repo, so these tests do not depend on running inside a git checkout.
+  const repoDir = tempDirForAll("volleyd-exec-");
   let repo: string;
   beforeAll(() => {
-    repo = mkdtempSync(join(tmpdir(), "volleyd-exec-"));
+    repo = repoDir();
     const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "ignore" });
     git("init", "-q");
     for (let i = 0; i < 20; i++) {
@@ -791,9 +785,6 @@ describe("exec", () => {
         `c${i}`,
       );
     }
-  });
-  afterAll(() => {
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("refuses a denied command before spawning anything", async () => {
@@ -914,14 +905,14 @@ describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () =>
   const account = (r: string, label: string) =>
     profileDir(r, addAccount(r, { label }, "2026-10-19T00:00:00.000Z").id);
 
+  const baseDir = tempDirForAll("fence-profiles-");
   beforeAll(() => {
-    base = realpathSync(mkdtempSync(join(tmpdir(), "fence-profiles-")));
+    base = realpathSync(baseDir());
     WT = join(base, "wt", "w1-T1-implementer");
     mkdirSync(WT, { recursive: true });
     root = join(base, ".volley", "claude");
     account(root, "work");
   });
-  afterAll(() => rmSync(base, { recursive: true, force: true }));
 
   it("the primary (no CLAUDE_CONFIG_DIR) is unchanged", () => {
     expect(() => seal(undefined)).not.toThrow();

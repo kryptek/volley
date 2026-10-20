@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { claudeRoot } from "../../src/claude/profiles";
 import { ControlClient } from "../../src/control";
 import { NS } from "../helpers/daemon-env";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import { tempDir } from "../helpers/tmp";
 import { withEnv } from "../helpers/with-env";
 
 /** agent_move_account through a real daemon: cancel, stop, retire, respawn under the profile. */
@@ -92,14 +92,14 @@ async function moveToWork(customRoot: string | undefined, base: string): Promise
 describe("agent_move_account (daemon)", () => {
   it("retires the agent as moved and respawns it with the target profile's CLAUDE_CONFIG_DIR", async () => {
     // A custom root (the daemon's `claude.root`) is the one $VOLLEY_CLAUDE_DIR names: the fence's.
-    const base = mkdtempSync(join(tmpdir(), "volleyd-move-"));
+    const base = tempDir("volleyd-move-");
     const root = join(base, "claude");
     await withEnv({ VOLLEY_CLAUDE_DIR: root }, () => moveToWork(root, base));
   }, 20_000);
 
   it("moves to a profile in the DEFAULT root (~/.volley/claude/<acct>) through the real fence", async () => {
     // The owner's smoke: the respawn under a profile there was FENCE_DENIED (launch.sh).
-    const base = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-move-")));
+    const base = realpathSync(tempDir("volleyd-move-"));
     await withEnv(
       { HOME: base, VOLLEY_CLAUDE_DIR: undefined, VOLLEYD_HOME: undefined },
       async () => {

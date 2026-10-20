@@ -58,6 +58,34 @@ export const REQUIRED_VOLLEYD_PATH = [
   "--yes",
 ] as const;
 
+/**
+ * The brief title (P2-2): an issue title is attacker-controlled text, and the cmux line nests it
+ * in a single-quoted prompt inside a double-quoted `--command`, so a quote ends the prompt early
+ * and a backtick or `$(…)` runs in the coordinator's shell. SKILL.md must route the title through
+ * `scripts/brief-title.ts` (stdin in, shell-safe line out) and use only that output on the line.
+ */
+export const BRIEF_TITLE_RULES = [
+  "gh issue view <N> --json title -q .title | bun <skill-dir>/scripts/brief-title.ts <N> implementer",
+  '--name "<brief-title>"',
+  'title=\\"<brief-title>\\"',
+] as const;
+
+/** A raw issue-title placeholder on a shell line: the cmux name/command, a commit or PR title. */
+const RAW_TITLE_ON_SHELL_LINE =
+  /(--name|--title|rename-workspace|title=|-m )[^\n]*<(short[- ])?title>/;
+
+export function validateBriefTitle(source: string): ValidationResult {
+  const { body } = splitFrontmatter(source);
+  const errors: string[] = BRIEF_TITLE_RULES.filter((needle) => !body.includes(needle)).map(
+    (needle) => `brief title must use the helper: ${needle}`,
+  );
+  const raw = RAW_TITLE_ON_SHELL_LINE.exec(body);
+  if (raw !== null) {
+    errors.push(`raw issue title on a shell line (use the brief-title.ts output): ${raw[0]}`);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 /** Split a markdown file into its frontmatter block and body. */
 export function splitFrontmatter(source: string): { frontmatter: string | null; body: string } {
   if (!source.startsWith("---\n")) return { frontmatter: null, body: source };
@@ -151,6 +179,7 @@ export function validateSkill(source: string): ValidationResult {
     validateFrontmatter(source),
     validateSections(source),
     validateVolleydPath(source),
+    validateBriefTitle(source),
   ];
   return { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
 }

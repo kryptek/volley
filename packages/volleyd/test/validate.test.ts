@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
@@ -13,7 +13,7 @@ describe("volleyd validate: the release branch", () => {
   let dir: string;
   let repo: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-")));
+    dir = realpathSync(tempDir("volleyd-validate-"));
     repo = join(dir, "repo");
     mkdirSync(repo);
     git(repo, "init", "--quiet", "-b", "main");
@@ -30,7 +30,6 @@ describe("volleyd validate: the release branch", () => {
       "init",
     );
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const waveFile = (repoPath: string, task = "{ issue: 1 }") => {
     const file = join(dir, "w.yaml");
@@ -88,11 +87,10 @@ describe("volleyd validate: the brief preface", () => {
   let dir: string;
   let repo: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-preface-")));
+    dir = realpathSync(tempDir("volleyd-validate-preface-"));
     repo = join(dir, "repo");
     mkdirSync(join(repo, ".volley"), { recursive: true });
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   // A repo dir that is not a git repository is fine here: the release branch check is not under test.
   const waveFile = (extra = "") => {

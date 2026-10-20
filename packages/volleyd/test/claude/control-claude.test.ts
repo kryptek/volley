@@ -1,5 +1,4 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -14,6 +13,7 @@ import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
 import { journalWait } from "../helpers/journal-wait";
+import { tempDir } from "../helpers/tmp";
 
 /** The claude_* control ops end to end: a real daemon on Aedes, a fake tmux / claude. */
 
@@ -30,7 +30,7 @@ const PRIMARY_STATUS = { loggedIn: true, subscriptionType: "pro" };
 
 async function setup(opts: { signInAfter?: number; primary?: Record<string, unknown> } = {}) {
   env = await makeDaemonEnv();
-  const base = mkdtempSync(join(tmpdir(), "volleyd-claude-"));
+  const base = tempDir("volleyd-claude-");
   const root = join(base, "claude");
   const primary = join(base, ".claude");
   const primaryJson = join(base, ".claude.json");

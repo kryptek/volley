@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   BRIEF_PREFACE_TEMPLATE,
   DEFAULT_BRIEF_PREFACE,
@@ -14,17 +14,17 @@ import {
   taskIdFor,
   waveFromIssues,
 } from "../scripts/wave-from-issues";
+import { tempDir, tempDirForAll } from "./helpers/tmp";
 
 const VOLLEYD_CLI = fileURLToPath(new URL("../../volleyd/src/cli.ts", import.meta.url));
 const HELPER_CLI = fileURLToPath(new URL("../scripts/wave-from-issues.ts", import.meta.url));
 
-const tmp = mkdtempSync(join(tmpdir(), "wave-from-issues-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = tempDirForAll("wave-from-issues-");
 
 const OPTS: WaveOptions = {
   wave: "2026-10-18-example",
   // Never created: the CLI writes a brief preface into a --repo that exists.
-  repo: join(tmp, "example-repo"),
+  repo: join(tmpdir(), "wave-from-issues-never-created", "example-repo"),
   releaseBranch: "release/2026-10-18-example",
   model: "claude-opus-5-5",
 };
@@ -40,12 +40,12 @@ const THREE: IssueInput[] = [
 ];
 
 function volleydValidate(yaml: string): { code: number | null; out: string } {
-  const file = join(tmp, `wave-${Math.random().toString(36).slice(2)}.yaml`);
+  const file = join(tmp(), `wave-${Math.random().toString(36).slice(2)}.yaml`);
   writeFileSync(file, yaml);
   const r = spawnSync("bun", [VOLLEYD_CLI, "validate", file], {
     encoding: "utf-8",
     // Not the operator's config.yaml (validate reads its brief_preface_max_bytes).
-    env: { ...process.env, VOLLEYD_HOME: join(tmp, "no-volleyd-home") },
+    env: { ...process.env, VOLLEYD_HOME: join(tmp(), "no-volleyd-home") },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -322,7 +322,7 @@ describe("task ids from title tags", () => {
   });
 
   it("CLI: a repeated tag still writes the wave and warns on stderr", () => {
-    const input = join(tmp, "dup-issues.json");
+    const input = join(tmp(), "dup-issues.json");
     writeFileSync(
       input,
       JSON.stringify([
@@ -355,8 +355,8 @@ describe("task ids from title tags", () => {
 
 describe("wave-from-issues CLI", () => {
   it("reads issues JSON and writes the wave file", () => {
-    const input = join(tmp, "issues.json");
-    const out = join(tmp, "cli-wave.yaml");
+    const input = join(tmp(), "issues.json");
+    const out = join(tmp(), "cli-wave.yaml");
     writeFileSync(input, JSON.stringify(THREE));
     const r = spawnSync(
       "bun",
@@ -383,7 +383,7 @@ describe("wave-from-issues CLI", () => {
   });
 
   it("exits 1 naming the outside dependency", () => {
-    const input = join(tmp, "bad.json");
+    const input = join(tmp(), "bad.json");
     writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: #8" }]));
     const r = spawnSync(
       "bun",
@@ -395,7 +395,7 @@ describe("wave-from-issues CLI", () => {
   });
 
   it("exits 2 on a --pipeline that is not a JSON array", () => {
-    const input = join(tmp, "pipe.json");
+    const input = join(tmp(), "pipe.json");
     writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: none" }]));
     for (const pipeline of ["[implement", '{"a":1}']) {
       const r = spawnSync(
@@ -422,7 +422,7 @@ describe("wave-from-issues CLI", () => {
   });
 
   it("passes --repo-slug through to dependency parsing", () => {
-    const input = join(tmp, "slug.json");
+    const input = join(tmp(), "slug.json");
     writeFileSync(
       input,
       JSON.stringify([
@@ -454,7 +454,7 @@ describe("wave-from-issues CLI", () => {
   });
 
   it("exits 2 on a --satisfied entry that is not an issue number", () => {
-    const input = join(tmp, "one.json");
+    const input = join(tmp(), "one.json");
     writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: #8" }]));
     const r = spawnSync(
       "bun",
@@ -507,28 +507,28 @@ describe("brief preface", () => {
   });
 
   it("writes the template when the preface is absent", () => {
-    const repo = mkdtempSync(join(tmp, "repo-"));
+    const repo = tempDir("wave-from-issues-repo-");
     const r = ensureBriefPreface(repo);
     expect(r).toEqual({ path: join(repo, ".volley", "brief-preface.md"), created: true });
     expect(readFileSync(r.path).equals(template)).toBe(true);
   });
 
   it("never overwrites an existing preface (byte for byte)", () => {
-    const repo = mkdtempSync(join(tmp, "repo-"));
+    const repo = tempDir("wave-from-issues-repo-");
     mkdirSync(join(repo, ".volley"));
     const mine = Buffer.from("# Our rules\n\nOnly ours.\n\u00e9\n");
     writeFileSync(join(repo, ".volley", "brief-preface.md"), mine);
     expect(ensureBriefPreface(repo).created).toBe(false);
     expect(readFileSync(join(repo, ".volley", "brief-preface.md")).equals(mine)).toBe(true);
     // Another path (relative to the repo, or absolute) is honoured the same way.
-    const abs = join(tmp, `rules-${Math.random().toString(36).slice(2)}.md`);
+    const abs = join(tmp(), `rules-${Math.random().toString(36).slice(2)}.md`);
     expect(ensureBriefPreface(repo, abs)).toEqual({ path: abs, created: true });
     expect(ensureBriefPreface(repo, "docs/rules.md").path).toBe(join(repo, "docs", "rules.md"));
   });
 
   it("a ~/ path is under the home directory, as volleyd reads it (not under the repo)", () => {
-    const repo = mkdtempSync(join(tmp, "repo-"));
-    const home = mkdtempSync(join(tmp, "home-"));
+    const repo = tempDir("wave-from-issues-repo-");
+    const home = tempDir("wave-from-issues-home-");
     expect(ensureBriefPreface(repo, "~/rules.md", home)).toEqual({
       path: join(home, "rules.md"),
       created: true,
@@ -537,8 +537,8 @@ describe("brief preface", () => {
   });
 
   it("the CLI writes the preface into a repo on this machine, and says so", () => {
-    const repo = mkdtempSync(join(tmp, "repo-"));
-    const input = join(tmp, "issues-preface.json");
+    const repo = tempDir("wave-from-issues-repo-");
+    const input = join(tmp(), "issues-preface.json");
     writeFileSync(input, JSON.stringify(THREE));
     const run = () =>
       spawnSync(

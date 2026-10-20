@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -21,6 +20,7 @@ import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const WAVE = "w-ctl";
 const yaml = (wave: string) => `wave: ${wave}
@@ -62,7 +62,7 @@ beforeEach(async () => {
   interrupted.length = 0;
   clock = fakeClock();
   broker = await startTestBroker();
-  home = mkdtempSync(join(tmpdir(), "volleyd-controls-"));
+  home = tempDir("volleyd-controls-");
   daemon = await start();
   client = await ControlClient.connect(broker.url, NS);
   agent = new VolleyBroker();
@@ -87,7 +87,6 @@ afterEach(async () => {
   await client.close();
   await daemon.stop();
   await broker.close();
-  rmSync(home, { recursive: true, force: true });
 });
 
 const task = (id: string) => daemon.snapshot(WAVE)?.tasks.find((x) => x.id === id);

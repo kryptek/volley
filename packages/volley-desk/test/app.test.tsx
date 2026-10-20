@@ -3,7 +3,7 @@ import path from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { ARRANGE_ANIM_MS } from "../src/layout/useAutoArrange";
+import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
 import { DeskStoreProvider } from "../src/store/context";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
@@ -328,7 +328,9 @@ describe("App attention (live store)", () => {
     expect(container.querySelector(".needs-you")).toBeNull();
     expect(container.querySelector(".topbar .ny-pill")).toBeNull();
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    fireEvent.click(within(coords).getByRole("button", { name: "Ended · 1" }));
     expect(within(coords).getByText("Complete")).toBeInTheDocument();
+    expect(within(coords).getByText("completed")).toHaveClass("st-chip--completed");
     expect(within(coords).queryByText(/claim it/)).toBeNull();
   });
 });
@@ -369,7 +371,8 @@ describe("App auto-arrange (live store)", () => {
     const world = () => container.querySelector(".world") as HTMLElement;
     await c.deliver(retained());
     await settle();
-    await wait(ARRANGE_ANIM_MS);
+    // The held replay reaches the canvas in one batch; the first arrange follows it (C11).
+    await wait(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
     expect(world()).not.toHaveClass("world--anim");
     const bar = screen.getByRole("region", { name: "w1" }).querySelector(".win-bar") as Element;
     fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
@@ -470,5 +473,112 @@ describe("App tethers (live store, D10)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------- purpose labels (C14)
+
+describe("App purpose labels and sessions (live store)", () => {
+  let notification: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    notification = vi.fn();
+    Object.defineProperty(notification, "permission", { value: "granted", configurable: true });
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      writable: true,
+      value: notification,
+    });
+    localStorage.setItem(
+      "volley-dash:notify",
+      JSON.stringify({ enabled: true, sound: false, on: ["blocked", "failed", "reaped"] }),
+    );
+  });
+  afterEach(() => {
+    (globalThis as { Notification?: unknown }).Notification = undefined;
+    localStorage.clear();
+  });
+
+  const mount = (c: ReturnType<typeof scriptedClient>) =>
+    render(
+      <DeskStoreProvider
+        demo={false}
+        brokerUrl="ws://test.invalid"
+        clientFactory={c.factory}
+        settleMs={SETTLE}
+      >
+        <App />
+      </DeskStoreProvider>,
+    );
+
+  const TITLE = "#155 C13 parity — spec review";
+  const reg = (id: string, payload: object, parent: string | null) =>
+    msg(
+      `volley/_system/registry/${id}`,
+      {
+        ...env(id, "_system/registry", "registered", {
+          capabilities: [],
+          started_at: iso(T0),
+          ...payload,
+        }),
+        parent_id: parent,
+      } as Envelope,
+      true,
+    );
+  const status = (id: string, type: string, payload: object = {}) =>
+    msg(`volley/default/${id}/status`, env(id, "status", type, payload), true);
+  const adhoc = () => [
+    reg("coordinator-8fb2", { title: TITLE }, "coordinator-ab12"),
+    status("coordinator-8fb2", "working"),
+    reg("coordinator-9c1d", { cwd: "/some/where/vly-review-167-spec" }, "coordinator-ab12"),
+    status("coordinator-9c1d", "working"),
+    reg(
+      "coordinator-t7j0",
+      {
+        model_source: "harness-hook",
+        workspace_title: "Release triage",
+        cwd: "/home/someone/repos/volley",
+      },
+      null,
+    ),
+    status("coordinator-t7j0", "working"),
+  ];
+
+  it("the unassigned card lists each agent by its label; sessions get their own card", async () => {
+    const c = scriptedClient();
+    mount(c);
+    await c.deliver(adhoc());
+    await settle();
+    const card = screen.getByRole("region", { name: "unassigned" });
+    expect(within(card).getByText(TITLE)).toBeInTheDocument();
+    expect(within(card).getByText("vly-review-167-spec")).toBeInTheDocument();
+    expect(within(card).queryByText("Release triage · volley")).toBeNull();
+    const sessions = screen.getByRole("region", { name: "Sessions" });
+    expect(within(sessions).getByText("Release triage · volley")).toBeInTheDocument();
+    expect(within(sessions).getByText("1 interactive session")).toBeInTheDocument();
+    const win = screen.getByRole("region", { name: "Release triage · volley" });
+    expect(within(win).getByText("session")).toHaveClass("chip--session");
+  });
+
+  it("the steering panel and the Needs-you notification use the registered title", async () => {
+    const c = scriptedClient();
+    mount(c);
+    await c.deliver(adhoc());
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: `Message ${TITLE}` }));
+    expect(screen.getByRole("dialog", { name: `Message ${TITLE}` })).toBeInTheDocument();
+    // Blocked with no wave coordinator: it needs you.
+    await c.deliver([
+      { ...status("coordinator-8fb2", "blocked", { reason: "needs a decision" }), retained: false },
+    ]);
+    await waitFor(() =>
+      expect(notification).toHaveBeenCalledWith(
+        `Volley: ${TITLE} needs you`,
+        expect.objectContaining({ tag: "agent:coordinator-8fb2" }),
+      ),
+    );
+    expect(notification).not.toHaveBeenCalledWith(
+      "Volley: coordinator-8fb2 needs you",
+      expect.anything(),
+    );
   });
 });

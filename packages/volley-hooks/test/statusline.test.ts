@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -19,6 +18,7 @@ import {
   retainedEnvelope,
   runScript,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const USAGE_TOPIC = `volley/default/${AGENT}/usage`;
@@ -109,7 +109,7 @@ describe("statusLine publisher (Aedes)", () => {
   beforeEach(async () => {
     broker = await startTestBroker();
     observer = await connectClient(broker.url);
-    stateRoot = mkdtempSync(join(tmpdir(), "volley-hooks-state-"));
+    stateRoot = tempDir("volley-hooks-state-");
   });
 
   afterEach(async () => {

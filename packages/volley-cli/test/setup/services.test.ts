@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -10,7 +9,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -24,6 +22,7 @@ import {
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HOOKED_SETTINGS, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 /** The change that puts `volley` and `volleyd` on a PATH (volleyd runs `volley auth`). */
 const LINK_SUMMARY = (m: FakeMachine) =>
@@ -51,12 +50,11 @@ describe("setup: services", () => {
     return out;
   };
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-services-"));
+    dir = tempDir("volley-setup-services-");
     fake = await startFakeDynsec();
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   describe("macOS (launchd)", () => {
@@ -143,6 +141,75 @@ describe("setup: services", () => {
       ]);
       await applyAll(p);
       expect(m.loaded.has("systems.volley.desk")).toBe(true);
+    });
+
+    describe("a rerun with the Desk loaded (launchd's bootout is asynchronous)", () => {
+      const DESK = "systems.volley.desk";
+      let plist: string;
+      /** prints left before a booted-out Desk is gone; while it is, bootstrap fails with EIO. */
+      let teardown: number;
+      /** A bootstrap of a plist with this text is refused (not EIO). */
+      let refuse: string | null;
+      beforeEach(async () => {
+        await applyAll(await planServices(m.ctx));
+        plist = join(m.ctx.home, "Library", "LaunchAgents", `${DESK}.plist`);
+        teardown = 0;
+        refuse = null;
+        const inner = m.ctx.deps.exec;
+        m.ctx.deps.exec = async (argv, o) => {
+          if (argv[0] === "launchctl" && (argv[2] ?? "").endsWith(DESK)) {
+            m.execCalls.push([...argv]);
+            if (argv[1] === "print" && teardown > 0 && --teardown === 0) m.loaded.delete(DESK);
+            if (argv[1] === "print") {
+              return { code: m.loaded.has(DESK) ? 0 : 113, stdout: "", stderr: "" };
+            }
+            if (argv[1] === "bootout" && m.loaded.has(DESK)) {
+              if (teardown === 0) teardown = 6;
+              return { code: 0, stdout: "", stderr: "" };
+            }
+          }
+          if (argv[0] === "launchctl" && argv[1] === "bootstrap" && argv[3] === plist) {
+            m.execCalls.push([...argv]);
+            if (m.loaded.has(DESK)) {
+              return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
+            }
+            if (refuse !== null && readFileSync(plist, "utf-8").includes(refuse)) {
+              return {
+                code: 1,
+                stdout: "",
+                stderr: "Bootstrap failed: 1: Operation not permitted",
+              };
+            }
+            m.loaded.add(DESK);
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          return inner(argv, o);
+        };
+      });
+
+      it("waits for the old Desk to go, then loads the new one", async () => {
+        writeFileSync(plist, "<plist>older</plist>\n");
+        const p = await planServices(m.ctx);
+        expect(p.changes.map((c) => c.summary)).toEqual([
+          "Install `volley desk serve` as a launchd service on 0.0.0.0:5199",
+        ]);
+        await applyAll(p);
+        expect(m.loaded.has(DESK)).toBe(true);
+        expect(readFileSync(plist, "utf-8")).toContain("<string>0.0.0.0</string>");
+        expect((await planServices(m.ctx)).changes).toEqual([]);
+      });
+
+      it("a new plist launchd refuses: the previous one is restored and loaded, and the change fails", async () => {
+        writeFileSync(plist, "<plist>older</plist>\n");
+        refuse = "<string>0.0.0.0</string>";
+        const c = (await planServices(m.ctx)).changes[0];
+        await expect(c?.apply()).rejects.toThrow(
+          /Operation not permitted.*Restored the previous .*systems\.volley\.desk\.plist and loaded it again/s,
+        );
+        expect(readFileSync(plist, "utf-8")).toBe("<plist>older</plist>\n");
+        // Never left down.
+        expect(m.loaded.has(DESK)).toBe(true);
+      });
     });
 
     it("backs a changed unit file up before rewriting it", async () => {

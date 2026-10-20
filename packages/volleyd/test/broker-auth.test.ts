@@ -1,5 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -22,16 +21,14 @@ import { Daemon } from "../src/daemon";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const NS = "volleyd-auth";
 const USERS = { volleyd: "volleyd-pw", coordinator: "coordinator-pw" };
 
 let home: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-auth-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-auth-");
 });
 
 function writeBrokerFile(contents: string, mode = 0o600): string {
@@ -51,24 +48,20 @@ describe("daemonAdminAuth: the dynsec admin login volleyd mints with", () => {
 
   it("reads $VOLLEYD_HOME/dynsec-admin.json, else $VOLLEY_AUTH_DIR/admin.json, else none", () => {
     expect(daemonAdminAuth(home, {})).toBeNull();
-    const authDir = mkdtempSync(join(tmpdir(), "volleyd-authdir-"));
-    try {
-      admin(authDir, "admin.json");
-      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })).toEqual({
-        username: "dynsec-admin",
-        password: "a",
-      });
-      writeFileSync(
-        join(home, ADMIN_FILE),
-        JSON.stringify({ username: "dynsec-admin", password: "h" }),
-        {
-          mode: 0o600,
-        },
-      );
-      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })?.password).toBe("h");
-    } finally {
-      rmSync(authDir, { recursive: true, force: true });
-    }
+    const authDir = tempDir("volleyd-authdir-");
+    admin(authDir, "admin.json");
+    expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })).toEqual({
+      username: "dynsec-admin",
+      password: "a",
+    });
+    writeFileSync(
+      join(home, ADMIN_FILE),
+      JSON.stringify({ username: "dynsec-admin", password: "h" }),
+      {
+        mode: 0o600,
+      },
+    );
+    expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })?.password).toBe("h");
   });
 
   it("refuses a file other users can read", () => {

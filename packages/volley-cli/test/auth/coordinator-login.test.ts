@@ -1,7 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { resolveAuth } from "../../src/args";
 import {
   type SavedLoginDeps,
@@ -13,6 +12,7 @@ import {
   savedCoordinatorLogin,
   savedLoginSource,
 } from "../../src/auth/coordinator-login";
+import { tempDir } from "../helpers/tmp";
 
 const LOCAL = "mqtt://localhost:1883";
 
@@ -40,11 +40,10 @@ describe("the coordinator login on the supervisor machine", () => {
     chmodSync(f, mode);
   };
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "volley-coord-login-"));
+    dir = tempDir("volley-coord-login-");
     keychainCalls = 0;
     fileCalls = 0;
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("reads the keychain item setup stores, by service and account, never a password on argv", () => {
     expect(keychainReadArgv).toEqual([

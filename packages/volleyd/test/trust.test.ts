@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnAgent } from "../src/spawn";
 import { isRepoTrusted, recordRepoTrust, trustDecisionId } from "../src/trust";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { tempDir } from "./helpers/tmp";
 
 describe("isRepoTrusted", () => {
   it("is true only when the repo root (or a parent) has hasTrustDialogAccepted: true", () => {
@@ -27,9 +27,8 @@ describe("isRepoTrusted", () => {
 describe("recordRepoTrust", () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "volleyd-trust-"));
+    dir = tempDir("volleyd-trust-");
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("writes exactly projects[root].hasTrustDialogAccepted and nothing else", () => {
     const path = join(dir, "claude.json");

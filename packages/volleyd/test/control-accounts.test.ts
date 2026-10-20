@@ -1,6 +1,4 @@
 import { constants, generateKeyPairSync, privateDecrypt, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -13,6 +11,7 @@ import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
+import { tempDir } from "./helpers/tmp";
 
 const NS = "accounts-test";
 const pw = (u: string) => `${u}-pw`;
@@ -165,7 +164,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
       canPublish,
     });
-    home = mkdtempSync(join(tmpdir(), "volleyd-accounts-"));
+    home = tempDir("volleyd-accounts-");
     auth = fakeAuth();
     daemon = await startDaemon();
   });
@@ -178,7 +177,6 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     }
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   /** Publish one auth request as `user` on `topic`; resolve with the reply payload (or null). */
@@ -334,6 +332,16 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(accounts.find((a) => a.name === "steer-1")?.last_seen).toBe("2026-10-18T11:30:00.000Z");
     // The admin's own request counts as being seen.
     expect(typeof accounts.find((a) => a.name === "admin-1")?.last_seen).toBe("string");
+  });
+
+  it("account_list says since when volleyd has kept auth requests (seen_since: its start)", async () => {
+    await daemon.stop();
+    const clock = fakeClock();
+    const t0 = new Date(clock.now()).toISOString();
+    daemon = await startDaemon({ clock });
+    await clock.advance(3_600_000);
+    const list = await op("admin-1", { op: "account_list" });
+    expect((list?.result as { seen_since?: string }).seen_since).toBe(t0);
   });
 
   it("account_list's last_seen also takes the account's newer retained status", async () => {

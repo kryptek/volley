@@ -1,6 +1,6 @@
 {
   "name": "volley-cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Volley CLI — `volley pub / sub / wait / list` for shell scripts and CI",
   "license": "Apache-2.0",
@@ -21,6 +21,7 @@
     "./setup/broker": "./src/setup/broker.ts",
     "./setup/cmux": "./src/setup/cmux.ts",
     "./setup/journal": "./src/setup/journal.ts",
+    "./setup/launchd": "./src/setup/launchd.ts",
     "./setup/service-path": "./src/setup/service-path.ts",
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",

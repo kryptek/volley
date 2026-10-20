@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PACKAGE_ROOT, hookEnv } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const install = (settings: string, ...args: string[]) =>
   execFileSync(join(PACKAGE_ROOT, "scripts", "install.sh"), args, {
@@ -16,7 +16,7 @@ const read = (p: string) => JSON.parse(readFileSync(p, "utf-8")) as Settings;
 
 describe("scripts/install.sh", () => {
   it("merges the hooks with the package path and coordinator mode, keeping other settings", () => {
-    const dir = mkdtempSync(join(tmpdir(), "volley-hooks-install-"));
+    const dir = tempDir("volley-hooks-install-");
     const settings = join(dir, "settings.json");
     writeFileSync(
       settings,
@@ -44,6 +44,11 @@ describe("scripts/install.sh", () => {
     const stop = merged.hooks.Stop?.[1]?.hooks[0]?.command;
     expect(stop).toBe(`VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/stop.ts"`);
     expect(merged.hooks.PostToolUse?.[0]?.matcher).toBe("");
+    // PreToolUse: the Bash lease hook, then the activity hook on every tool.
+    expect(merged.hooks.PreToolUse?.map((g) => g.matcher)).toEqual(["Bash", ""]);
+    expect(merged.hooks.PreToolUse?.[1]?.hooks[0]?.command).toBe(
+      `VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/pre-tool-use.ts"`,
+    );
     expect(readdirSync(dir).some((f) => f.startsWith("settings.json.bak-"))).toBe(true);
 
     // Idempotent, and --uninstall restores the user's own hooks only.
@@ -56,13 +61,13 @@ describe("scripts/install.sh", () => {
   });
 
   it("creates the settings file when missing", () => {
-    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    const settings = join(tempDir("volley-hooks-install-"), "s.json");
     install(settings);
     expect(Object.keys(read(settings).hooks)).toHaveLength(8);
   });
 
   it("installs the usage statusLine and keeps the user's own as its chained command", () => {
-    const dir = mkdtempSync(join(tmpdir(), "volley-hooks-install-"));
+    const dir = tempDir("volley-hooks-install-");
     const settings = join(dir, "settings.json");
     const own = { type: "command", command: "~/bin/my-status", padding: 1 };
     writeFileSync(settings, JSON.stringify({ statusLine: own }));
@@ -84,7 +89,7 @@ describe("scripts/install.sh", () => {
   });
 
   it("removes its statusLine on uninstall when the user had none", () => {
-    const settings = join(mkdtempSync(join(tmpdir(), "volley-hooks-install-")), "s.json");
+    const settings = join(tempDir("volley-hooks-install-"), "s.json");
     install(settings);
     install(settings, "--uninstall");
     expect(read(settings) as unknown).toEqual({});

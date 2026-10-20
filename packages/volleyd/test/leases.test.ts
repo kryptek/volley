@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -22,6 +21,7 @@ import { type JournalEvent, type LeasePoolConfig, SYSTEM_WAVE } from "../src/typ
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { envelope, schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const T0 = Date.parse("2026-10-18T15:00:00.000Z");
 const at = (s: number) => new Date(T0 + s * 1000);
@@ -445,13 +445,9 @@ describe("volleyd daemon: lease requests over MQTT", () => {
 describe("config.example.yaml", () => {
   const example = readFileSync(new URL("../config.example.yaml", import.meta.url), "utf-8");
   const load = (yaml: string) => {
-    const home = mkdtempSync(join(tmpdir(), "volleyd-example-"));
-    try {
-      writeFileSync(join(home, "config.yaml"), yaml);
-      return ConfigStore.load({ home, system: Journal.open(join(home, "waves", SYSTEM_WAVE)) });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
+    const home = tempDir("volleyd-example-");
+    writeFileSync(join(home, "config.yaml"), yaml);
+    return ConfigStore.load({ home, system: Journal.open(join(home, "waves", SYSTEM_WAVE)) });
   };
   /** Uncomment every commented-out YAML key (prose comment lines are left alone). */
   const uncommented = example.replace(/^# (\s*[a-z_-]+:(?: |$).*)$/gm, "$1");

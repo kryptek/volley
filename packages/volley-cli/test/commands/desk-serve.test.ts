@@ -1,16 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type DeskServer, desk, startDeskServer } from "../../src/commands/desk-serve";
 import { makeBufferIO } from "../../src/io";
+import { tempDir } from "../helpers/tmp";
 
 describe("volley desk serve", () => {
   let root: string;
   let server: DeskServer | null = null;
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "volley-desk-serve-"));
-    mkdirSync(join(root, "assets"));
+    // The root sits one level down, so the file "outside the root" below is still in a temp dir.
+    root = join(tempDir("volley-desk-serve-"), "root");
+    mkdirSync(join(root, "assets"), { recursive: true });
     writeFileSync(join(root, "index.html"), "<!doctype html><title>Desk</title>");
     writeFileSync(join(root, "assets", "index-abc123.js"), "console.log('desk')");
     writeFileSync(join(root, "assets", "index-abc123.css"), "body{}");
@@ -19,7 +20,6 @@ describe("volley desk serve", () => {
   afterEach(async () => {
     await server?.close();
     server = null;
-    rmSync(root, { recursive: true, force: true });
   });
 
   const serve = async () => {
@@ -69,7 +69,6 @@ describe("volley desk serve", () => {
       const r = await fetch(`${url}${path}`);
       expect(await r.text(), path).not.toContain("secret");
     }
-    rmSync(join(root, "..", `${root.split("/").pop()}-secret.txt`));
   });
 
   it("answers only GET and HEAD", async () => {

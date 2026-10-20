@@ -1,7 +1,7 @@
 {
   "name": "volley",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Volley — agent messaging standard",
   "license": "Apache-2.0",
   "type": "module",
@@ -10,7 +10,8 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit && bun run --filter='*' typecheck",
-    "test": "bun run test:scripts && bun run --filter='*' test",
+    "test": "bun scripts/check-tmp-leaks.ts -- bun run test:suites",
+    "test:suites": "bun run test:scripts && bun run --filter='*' test",
     "test:scripts": "bun test ./scripts",
     "validate:schemas": "bun run scripts/validate-schemas.ts",
     "check:spec-refs": "bun run scripts/check-spec-refs.ts"

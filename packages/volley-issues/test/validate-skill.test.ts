@@ -1,21 +1,23 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
+  BRIEF_TITLE_RULES,
   REQUIRED_SECTIONS,
   REQUIRED_VOLLEYD_PATH,
   SKILL_VERSION,
   parseSimpleYaml,
   splitFrontmatter,
+  validateBriefTitle,
   validateFrontmatter,
   validateSections,
   validateSkill,
   validateVolleydPath,
   volleydPathSection,
 } from "../scripts/validate-skill";
+import { tempDir } from "./helpers/tmp";
 
 const GOOD_FRONTMATTER = `---
 name: volley-issues
@@ -29,7 +31,8 @@ const VOLLEYD_NEEDLES = REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`).j
 const ALL_SECTIONS = REQUIRED_SECTIONS.map((h) =>
   h === "## Volleyd path" ? `${h}\n\n${VOLLEYD_NEEDLES}` : `${h}\n\nbody\n`,
 ).join("\n");
-const FULL_OK = `${GOOD_FRONTMATTER}\n# /volley-issues\n\n${ALL_SECTIONS}`;
+const BRIEF_TITLE_NEEDLES = BRIEF_TITLE_RULES.map((needle) => `- ${needle}\n`).join("");
+const FULL_OK = `${GOOD_FRONTMATTER}\n# /volley-issues\n\n${ALL_SECTIONS}\n${BRIEF_TITLE_NEEDLES}`;
 
 describe("splitFrontmatter", () => {
   it("returns the frontmatter and body when both present", () => {
@@ -129,6 +132,29 @@ describe("validateVolleydPath", () => {
   );
 });
 
+describe("validateBriefTitle (P2-2 regression guard)", () => {
+  it("accepts a body that pipes the issue title through the helper", () => {
+    expect(validateBriefTitle(FULL_OK).errors).toEqual([]);
+  });
+  it.each([...BRIEF_TITLE_RULES])("flags a body that loses %s", (needle) => {
+    expect(validateBriefTitle(FULL_OK.replace(`- ${needle}\n`, "")).errors).toContain(
+      `brief title must use the helper: ${needle}`,
+    );
+  });
+  it.each(["<short-title>", "<short title>", "<title>"])(
+    "flags a raw issue title (%s) placed in the cmux line",
+    (raw) => {
+      const bad = `${FULL_OK}\n   --name "Issue-<N>: ${raw}" \\\n`;
+      expect(validateBriefTitle(bad).errors.join(" ")).toContain("raw issue title");
+    },
+  );
+  it("guards the shipped SKILL.md", () => {
+    expect(validateBriefTitle(SHIPPED).errors).toEqual([]);
+    const raw = SHIPPED.replace('--name "<brief-title>"', '--name "Issue-<N>: <short-title>"');
+    expect(validateBriefTitle(raw).ok).toBe(false);
+  });
+});
+
 describe("validateSkill (end-to-end)", () => {
   it("returns ok:true on a fully valid SKILL.md", () => {
     expect(validateSkill(FULL_OK).ok).toBe(true);
@@ -155,15 +181,10 @@ describe("skill version", () => {
 describe("install.sh --check", () => {
   const INSTALL = fileURLToPath(new URL("../scripts/install.sh", import.meta.url));
   const SKILL_DIR = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
-  const homes: string[] = [];
-  afterAll(() => {
-    for (const h of homes) rmSync(h, { recursive: true, force: true });
-  });
 
   /** A throwaway $HOME, optionally with an installed copy of the skill at the given version. */
   function home(installed?: string | "symlink"): string {
-    const h = mkdtempSync(join(tmpdir(), "volley-issues-home-"));
-    homes.push(h);
+    const h = tempDir("volley-issues-home-");
     const skills = join(h, ".claude", "skills");
     mkdirSync(skills, { recursive: true });
     if (installed === "symlink") symlinkSync(SKILL_DIR, join(skills, "volley-issues"));

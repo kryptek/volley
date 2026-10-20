@@ -207,6 +207,7 @@ export async function accountOp(
   sender: string,
   p: Fields,
   lastSeen: (name: string) => string | undefined = () => undefined,
+  seenSince?: string,
 ): Promise<AuthOutcome> {
   const op = typeof p.op === "string" ? p.op : "";
   const accounts = await listAccounts(exec);
@@ -223,7 +224,9 @@ export async function accountOp(
       const seen = lastSeen(a.name);
       return seen === undefined ? a : { ...a, last_seen: seen };
     });
-    return { reply: reply(op, { ok: true, result: { accounts: result } }) };
+    // Auth requests are kept in memory: before `seen_since` nothing says whether one was seen.
+    const since = seenSince !== undefined ? { seen_since: seenSince } : {};
+    return { reply: reply(op, { ok: true, result: { accounts: result, ...since } }) };
   }
 
   if (op === "signin_link") return signinLink(exec, sender, p);

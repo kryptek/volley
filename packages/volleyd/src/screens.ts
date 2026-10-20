@@ -1,3 +1,5 @@
+import { DAEMON_DEFAULTS } from "./config-defaults";
+
 /**
  * Pre-hook screen classification. Screens are read only while a spawn waits for the hooks'
  * SessionStart signal — once the hooks run they are the source of truth. Each class maps to one
@@ -97,4 +99,30 @@ export function modelFromScreen(text: string | null): string | null {
     }
   }
   return null;
+}
+
+/**
+ * The session's last output, for a decision that says why an agent did not start: its last
+ * non-blank screen lines, joined, cut to a readable length; null when nothing is on screen.
+ */
+export function lastOutput(screen: string | null): string | null {
+  const lines = (screen ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+    .slice(-DAEMON_DEFAULTS.decision_output_lines);
+  if (lines.length === 0) return null;
+  const text = lines.join(" ");
+  const max = DAEMON_DEFAULTS.decision_output_chars;
+  return text.length > max ? `…${text.slice(text.length - max + 1)}` : text;
+}
+
+/**
+ * ` Last output: “…”.`, or what an empty screen means, for a decision's question. `out` is
+ * `lastOutput(screen)`.
+ */
+export function lastOutputNote(out: string | null, remote: boolean): string {
+  return out !== null
+    ? ` Last output: “${out}”.`
+    : ` There is nothing on screen: its session may have ended at once${remote ? " (on a remote machine, check that claude and bun are on its non-interactive ssh PATH)" : ""}.`;
 }

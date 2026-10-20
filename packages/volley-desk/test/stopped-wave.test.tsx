@@ -1,6 +1,6 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "../src/App";
+import App, { DISMISSED_WAVES_KEY } from "../src/App";
 import { agentAttention, waveAttention } from "../src/attention";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
@@ -149,7 +149,7 @@ describe("stopped wave — App fold under Show finished", () => {
       f.emit(progress("impl-1", "narration", NOW - 2 * S, { msg: "still here" }));
       vi.advanceTimersByTime(100);
     });
-    return view;
+    return { ...view, f };
   }
 
   it("hides the stopped wave and its agents by default", () => {
@@ -157,8 +157,9 @@ describe("stopped wave — App fold under Show finished", () => {
     expect(screen.queryByRole("region", { name: "w1" })).toBeNull();
     expect(screen.queryByRole("region", { name: "w1 · T1 · implementer" })).toBeNull();
     expect(screen.getByRole("region", { name: "w2" })).toBeInTheDocument();
-    // The coordinators window still lists it, as Stopped, and offers the toggle.
+    // The coordinators window still lists it, as Stopped, in its Ended group, and offers the toggle.
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
+    fireEvent.click(within(coords).getByRole("button", { name: "Ended · 1" }));
     expect(within(coords).getByText("Stopped")).toBeInTheDocument();
     expect(coords).toHaveTextContent(/1 ended wave/);
   });
@@ -175,5 +176,69 @@ describe("stopped wave — App fold under Show finished", () => {
     expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "w1 · T1 · implementer" })).toBeInTheDocument();
     expect(container.querySelectorAll("svg.tethers path.tether-core")).toHaveLength(0);
+  });
+
+  const coords = () => screen.getByRole("region", { name: "Wave coordinators" });
+  const openEnded = () =>
+    fireEvent.click(within(coords()).getByRole("button", { name: /^Ended · / }));
+
+  it("Show puts that one ended wave back on the canvas, with its agents", () => {
+    mount();
+    openEnded();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Show w1 on the canvas" }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "w1 · T1 · implementer" })).toBeInTheDocument();
+    expect(within(coords()).getByRole("listitem", { name: "w1" })).not.toHaveTextContent(
+      "· hidden",
+    );
+    expect(coords()).not.toHaveTextContent(/ended wave hidden/);
+  });
+
+  it("Dismiss drops it from this Desk (kept in this browser) until brought back", () => {
+    mount();
+    openEnded();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss w1 from the Desk" }));
+    expect(within(coords()).queryByRole("listitem", { name: "w1" })).toBeNull();
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w1"]);
+    expect(within(coords()).getByRole("button", { name: "Ended · 0" })).toBeInTheDocument();
+    // Not even "Show finished" brings a dismissed wave back onto the canvas.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Show finished agents/ }));
+    expect(screen.queryByRole("region", { name: "w1" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Bring back" }));
+    expect(within(coords()).getByRole("listitem", { name: "w1" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+  });
+
+  it("a dismissal lasts while the wave stays ended: a reused id that runs and ends again is back", () => {
+    const { f } = mount();
+    openEnded();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss w1 from the Desk" }));
+    act(() => {
+      vi.advanceTimersByTime(5000); // the replay settles; w1 is still ended, so still dismissed
+    });
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w1"]);
+    act(() => {
+      f.emit({ ...waveMsg(waveState()), retained: false }); // w1 is reused and runs
+      vi.advanceTimersByTime(100);
+    });
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual([]);
+    act(() => {
+      f.emit({ ...waveMsg(stopped()), retained: false }); // …and ends again
+      vi.advanceTimersByTime(100);
+    });
+    expect(within(coords()).getByRole("button", { name: "Ended · 1" })).toBeInTheDocument();
+  });
+
+  it("keeps a dismissal whose wave has not been replayed yet (a slow link)", () => {
+    localStorage.setItem(DISMISSED_WAVES_KEY, JSON.stringify(["w9"]));
+    mount();
+    act(() => {
+      vi.advanceTimersByTime(40_000);
+    });
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w9"]);
   });
 });

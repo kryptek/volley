@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +7,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { runCli } from "../helpers/run-cli";
+import { tempDir } from "../helpers/tmp";
 
 const CLI_ENTRY = `${dirname(dirname(dirname(fileURLToPath(import.meta.url))))}/src/cli.ts`;
 
@@ -193,34 +193,30 @@ describe("volley lease", () => {
   });
 
   it("run --coordinator: the default holder is a fresh id, never .volley/agent.json's", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "volley-lease-coord-"));
-    try {
-      mkdirSync(join(dir, ".volley"));
-      writeFileSync(
-        join(dir, ".volley", "agent.json"),
-        JSON.stringify({ agent_id: "w1-t1-implementer-1", namespace: "default" }),
-      );
-      const r = await runCli({
-        argv: [
-          "lease",
-          "run",
-          "--pool",
-          "p",
-          "--coordinator",
-          "--project-dir",
-          dir,
-          ...base(),
-          "--",
-          "true",
-        ],
-        env: { VOLLEY_AUTH_DIR: dir },
-      });
-      expect(r.exitCode).toBe(0);
-      await eventually(() => sup.requests.length === 2);
-      expect(sup.requests.every((q) => /^lease-[a-z0-9]{6}$/.test(q.holder))).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = tempDir("volley-lease-coord-");
+    mkdirSync(join(dir, ".volley"));
+    writeFileSync(
+      join(dir, ".volley", "agent.json"),
+      JSON.stringify({ agent_id: "w1-t1-implementer-1", namespace: "default" }),
+    );
+    const r = await runCli({
+      argv: [
+        "lease",
+        "run",
+        "--pool",
+        "p",
+        "--coordinator",
+        "--project-dir",
+        dir,
+        ...base(),
+        "--",
+        "true",
+      ],
+      env: { VOLLEY_AUTH_DIR: dir },
+    });
+    expect(r.exitCode).toBe(0);
+    await eventually(() => sup.requests.length === 2);
+    expect(sup.requests.every((q) => /^lease-[a-z0-9]{6}$/.test(q.holder))).toBe(true);
   });
 
   it("run: waits while the pool is full, says why, and runs once the holder releases", async () => {
@@ -303,72 +299,62 @@ describe("volley lease", () => {
   });
 
   it("run: SIGTERM while the command runs reaches the whole process group, not just the shell", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "lease-pg-"));
+    const dir = tempDir("lease-pg-");
     const pidFile = join(dir, "pid");
-    try {
-      const c = spawnCli([
-        "lease",
-        "run",
-        "--pool",
-        "p",
-        "--holder",
-        "agent-a",
-        ...base(),
-        "--",
-        "sh",
-        "-c",
-        `sleep 60 & echo $! > ${pidFile}; wait`,
-      ]);
-      await eventually(
-        () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
-        10_000,
-      );
-      const grandchild = Number(readFileSync(pidFile, "utf-8").trim());
-      c.proc.kill("SIGTERM");
-      expect(await c.exited).toBe(143);
-      await eventually(() => !pidAlive(grandchild));
-      await eventually(() => sup.requests.some((q) => q.op === "release"));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const c = spawnCli([
+      "lease",
+      "run",
+      "--pool",
+      "p",
+      "--holder",
+      "agent-a",
+      ...base(),
+      "--",
+      "sh",
+      "-c",
+      `sleep 60 & echo $! > ${pidFile}; wait`,
+    ]);
+    await eventually(
+      () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
+      10_000,
+    );
+    const grandchild = Number(readFileSync(pidFile, "utf-8").trim());
+    c.proc.kill("SIGTERM");
+    expect(await c.exited).toBe(143);
+    await eventually(() => !pidAlive(grandchild));
+    await eventually(() => sup.requests.some((q) => q.op === "release"));
   });
 
   it("run: killed outright (SIGKILL) while holding, its will releases the lease and the command stops", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "lease-kill-"));
+    const dir = tempDir("lease-kill-");
     const pidFile = join(dir, "pid");
-    try {
-      const c = spawnCli([
-        "lease",
-        "run",
-        "--pool",
-        "p",
-        "--holder",
-        "agent-a",
-        ...base(),
-        "--",
-        "sh",
-        "-c",
-        `echo $$ > ${pidFile}; exec sleep 30`,
-      ]);
-      await eventually(
-        () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
-        10_000,
-      );
-      const command = Number(readFileSync(pidFile, "utf-8").trim());
-      expect(sup.pools.p?.held.length).toBe(1);
-      // Wait for the process itself, not `close`: a surviving command would hold its stdio open.
-      const killed = new Promise((r) => c.proc.once("exit", r));
-      c.proc.kill("SIGKILL");
-      await killed;
-      await eventually(() =>
-        sup.requests.some((q) => q.op === "release" && q.sender === "agent-a"),
-      );
-      expect(sup.pools.p?.held).toEqual([]);
-      // The slot is free, so the leased command must not keep running unleased.
-      await eventually(() => !pidAlive(command));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const c = spawnCli([
+      "lease",
+      "run",
+      "--pool",
+      "p",
+      "--holder",
+      "agent-a",
+      ...base(),
+      "--",
+      "sh",
+      "-c",
+      `echo $$ > ${pidFile}; exec sleep 30`,
+    ]);
+    await eventually(
+      () => existsSync(pidFile) && readFileSync(pidFile, "utf-8").trim() !== "",
+      10_000,
+    );
+    const command = Number(readFileSync(pidFile, "utf-8").trim());
+    expect(sup.pools.p?.held.length).toBe(1);
+    // Wait for the process itself, not `close`: a surviving command would hold its stdio open.
+    const killed = new Promise((r) => c.proc.once("exit", r));
+    c.proc.kill("SIGKILL");
+    await killed;
+    await eventually(() => sup.requests.some((q) => q.op === "release" && q.sender === "agent-a"));
+    expect(sup.pools.p?.held).toEqual([]);
+    // The slot is free, so the leased command must not keep running unleased.
+    await eventually(() => !pidAlive(command));
   });
 
   it("run: queued when volleyd dies → notices at the next probe and runs unleased", async () => {
@@ -587,11 +573,10 @@ describe("volley lease against a broker that requires credentials", () => {
   let work: string;
   beforeEach(async () => {
     tb = await startTestBroker({ credentials: CREDS });
-    work = mkdtempSync(join(tmpdir(), "volley-lease-auth-"));
+    work = tempDir("volley-lease-auth-");
   });
   afterEach(async () => {
     await tb.close();
-    rmSync(work, { recursive: true, force: true });
   });
 
   const marker = () => join(work, "ran");

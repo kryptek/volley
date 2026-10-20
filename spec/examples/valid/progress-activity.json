@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "parent_id": null,
+  "wall_time": "2026-10-18T14:05:00.000Z",
+  "channel": "progress",
+  "type": "activity",
+  "payload": {
+    "msg": "Bash: gh pr checks 153",
+    "tool_calls": 17,
+    "seq": 43,
+    "source": "harness-hook",
+    "hook_event": "PreToolUse"
+  }
+}

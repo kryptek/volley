@@ -1,18 +1,17 @@
 import {
   existsSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { breakStaleLock, drainLockStaleMs, nextSeq, releaseLock, tryLock } from "../src/lib/seq";
+import { tempDir } from "./helpers/tmp";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "volley-hooks-seq-"));
+const tmp = () => tempDir("volley-hooks-seq-");
 
 describe("seq counter", () => {
   it("is monotonic and persisted", async () => {

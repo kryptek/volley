@@ -113,6 +113,9 @@ export const DAEMON_DEFAULTS = {
   spawn_request_timeout_ms: 120_000,
   /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
   screen_lines: 40,
+  /** A did-not-start decision quotes this many last non-blank screen lines, up to this many chars. */
+  decision_output_lines: 3,
+  decision_output_chars: 300,
   /** After pressing Enter on an update prompt, how long the original launch gets to continue. */
   relaunch_settle_ms: 3_000,
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the

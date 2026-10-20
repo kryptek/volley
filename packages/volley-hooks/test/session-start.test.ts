@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -17,6 +17,7 @@ import {
   runHook,
   tick,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const NS = "ns";
@@ -224,5 +225,162 @@ describe("post-model-switch", () => {
       model_source: "harness-hook",
       started_at: "2026-10-18T10:00:00.000Z",
     });
+  });
+});
+
+describe("session-start workspace_title (coordinator registry only)", () => {
+  const COORD = "coordinator-ab12";
+  let cdir: string;
+  let env: Record<string, string>;
+
+  beforeEach(async () => {
+    cdir = makeWorkdir();
+    env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
+    };
+    await publishRegistry(client, COORD, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: new Date().toISOString(),
+    });
+  });
+
+  const start = (extra: Record<string, string>) =>
+    runHook("session-start", fixture("session-start-startup.json", cdir), {
+      cwd: cdir,
+      env: { ...env, ...extra },
+    });
+
+  it("takes VOLLEY_WORKSPACE_TITLE when set", async () => {
+    const run = await start({ VOLLEY_WORKSPACE_TITLE: "  #169 C14 desk purpose  " });
+    expect(run.exitCode).toBe(0);
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace_title: "#169 C14 desk purpose",
+      model_source: "harness-hook",
+    });
+  });
+
+  it("else asks cmux list-workspaces for the session's workspace title", async () => {
+    const bin = join(tempDir("volley-hooks-cmux-"), "cmux");
+    const list = JSON.stringify({
+      workspaces: [
+        { ref: "workspace:1", id: "aaaa-1", index: 0, title: "other", selected: false },
+        { ref: "workspace:2", id: "bbbb-2", index: 1, title: "issue 169 work", selected: true },
+      ],
+    });
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+case "$1" in
+  identify) echo '{"caller":{"workspace_ref":"workspace:2"}}' ;;
+  list-workspaces) echo '${list}' ;;
+esac
+`,
+    );
+    chmodSync(bin, 0o755);
+    await start({ CMUX_WORKSPACE_ID: "bbbb-2", CMUX_BUNDLED_CLI_PATH: bin });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace: "workspace:2",
+      workspace_title: "issue 169 work",
+    });
+  });
+
+  it("with the real cmux shape, the prompt fields never reach any published message", async () => {
+    const bin = join(tempDir("volley-hooks-cmux-"), "cmux");
+    const list = join(__dirname, "fixtures", "cmux-list-workspaces.json");
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+case "$1" in
+  identify) echo '{"caller":{"workspace_ref":"workspace:1515"}}' ;;
+  list-workspaces) cat '${list}' ;;
+esac
+`,
+    );
+    chmodSync(bin, 0o755);
+    const raw: string[] = [];
+    const stop = await client.subscribeStream("#", (m) => {
+      raw.push(String(m.payload));
+    });
+    const run = await start({
+      CMUX_WORKSPACE_ID: "6f1c2a10-0000-4000-8000-000000000002",
+      CMUX_BUNDLED_CLI_PATH: bin,
+    });
+    expect(run.exitCode).toBe(0);
+    await tick(200);
+    await stop();
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      workspace: "workspace:1515",
+      workspace_title: "Release triage",
+    });
+    expect(raw.length).toBeGreaterThan(0);
+    for (const text of [...raw, run.stdout, JSON.stringify(reg)]) {
+      expect(text).not.toMatch(/PROMPT-MARKER|CONVO-MARKER/);
+      expect(text).not.toMatch(/latest_submitted|latest_conversation/);
+    }
+  });
+
+  it("a drain hook restores workspace_title and model_source after the MCP server re-registers", async () => {
+    await start({
+      VOLLEY_WORKSPACE_TITLE: "release triage",
+      VOLLEY_SESSION_URL: "https://claude.example.test/session/1",
+      VOLLEY_WORKSPACE: "workspace:7",
+    });
+    // The MCP server's own register replaces the whole entry.
+    await publishRegistry(client, COORD, "default", {
+      capabilities: ["coordinates"],
+      cwd: cdir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    const run = await runHook("post-tool-use", fixture("post-tool-use.json", cdir), {
+      cwd: cdir,
+      env,
+    });
+    expect(run.exitCode).toBe(0);
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({
+      capabilities: ["coordinates"],
+      started_at: "2026-10-18T10:00:00.000Z",
+      model: "claude-opus-5-5",
+      model_source: "harness-hook",
+      workspace_title: "release triage",
+      session_url: "https://claude.example.test/session/1",
+      workspace: "workspace:7",
+    });
+  });
+
+  it("restores the persisted fields even when the model is unknown", async () => {
+    await runHook("session-start", fixture("session-start-no-model.json", cdir), {
+      cwd: cdir,
+      env: { ...env, VOLLEY_WORKSPACE_TITLE: "no model here" },
+    });
+    await publishRegistry(client, COORD, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    await runHook("post-tool-use", fixture("post-tool-use.json", cdir), { cwd: cdir, env });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).toMatchObject({ workspace_title: "no model here" });
+  });
+
+  it("no title source: no workspace_title", async () => {
+    await start({ VOLLEY_WORKSPACE_TITLE: "" });
+    const reg = await retainedEnvelope(client, registryTopic(COORD));
+    expect(reg.payload).not.toHaveProperty("workspace_title");
+  });
+
+  it("agent mode never carries workspace_title", async () => {
+    await runHook("session-start", fixture("session-start-startup.json", dir), {
+      cwd: dir,
+      env: { VOLLEY_WORKSPACE_TITLE: "should not appear" },
+    });
+    const reg = await retainedEnvelope(client, registryTopic(AGENT));
+    expect(reg.payload).not.toHaveProperty("workspace_title");
   });
 });

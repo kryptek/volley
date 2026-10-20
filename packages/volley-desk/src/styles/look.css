@@ -140,12 +140,55 @@
   );
   backdrop-filter: blur(20px) saturate(1.35);
   -webkit-backdrop-filter: blur(20px) saturate(1.35);
-  border: 0;
   /* SpotlightCard clips its content: the wrapper carries the lift. */
   box-shadow: none;
 }
+/* The spotlight is applied to the panel itself: the card adds no padding, surface or radius of
+   its own around it (React Bits' defaults are 2rem, #111 and 1.5rem), so the edges are the
+   default style's and only the light differs. */
 .spotlight-card.win-wrap {
+  padding: 0;
+  background-color: transparent;
+  border-radius: 14px;
   box-shadow: var(--win-shadow);
+}
+/*
+ * Border glow draws on the border ring only. React Bits paints its colour mesh, its edge fill
+ * and the glow's inset shadows inside the card too, under the panel's translucent body, where
+ * fast pointer circles showed the cone's centre as a pinwheel. Clip them to the ring: the mesh
+ * (::before) to its 1px border, the outer glow to outside the panel, and no interior fill.
+ * The inner wrapper never scrolls: the hover tilt transforms the window inside it, and an
+ * `overflow: auto` box grew scrollbars around it. Nothing here changes the layout box.
+ */
+.border-glow-card.win-wrap > .border-glow-inner {
+  overflow: visible;
+}
+.border-glow-card.win-wrap::after {
+  display: none;
+}
+.border-glow-card.win-wrap::before {
+  mask-image: conic-gradient(
+      from var(--cursor-angle) at center,
+      black calc(var(--cone-spread) * 1%),
+      transparent calc((var(--cone-spread) + 15) * 1%),
+      transparent calc((100 - var(--cone-spread) - 15) * 1%),
+      black calc((100 - var(--cone-spread)) * 1%)
+    ), linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+  mask-clip: border-box, padding-box, border-box;
+  mask-composite: intersect, exclude, add;
+}
+.border-glow-card.win-wrap > .edge-light {
+  /* The ring's inside edge, so the content-box mask layer is exactly the panel's inside. */
+  padding: calc(var(--glow-padding) + 1px);
+  mask-image: conic-gradient(
+      from var(--cursor-angle) at center,
+      black 2.5%,
+      transparent 10%,
+      transparent 90%,
+      black 97.5%
+    ), linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+  mask-clip: border-box, content-box, border-box;
+  mask-composite: intersect, exclude, add;
 }
 .win-inner.chrome-glow {
   background-color: transparent;
