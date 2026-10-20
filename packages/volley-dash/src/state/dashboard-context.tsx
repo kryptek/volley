@@ -4,7 +4,8 @@
  *
  * Wiring on mount:
  *   1. `createMqttClient` with the broker URL from `VITE_VOLLEY_BROKER_URL`
- *      (default `ws://localhost:9001` — mosquitto's WebSocket listener).
+ *      (default `ws://localhost:9001` — mosquitto's WebSocket listener) and
+ *      the LoginGate's credentials, if any.
  *   2. `connect()` → subscribe to all 5 wildcards (handled inside the client).
  *   3. `onMessage` → `actionsFromMessage` → `dispatch` (one event + at most
  *      one agent action per inbound message).
@@ -24,7 +25,12 @@ import {
   useState,
 } from "react";
 import { useFlipOnAgentTransition } from "../hooks/useFlipOnAgentTransition";
-import { type VolleyMqttClient, createMqttClient } from "../lib/mqtt-client";
+import {
+  AuthFailedError,
+  type BrokerCredentials,
+  type VolleyMqttClient,
+  createMqttClient,
+} from "../lib/mqtt-client";
 import { parseTopic } from "../lib/parse-topic";
 import type { DashState } from "../types";
 import { actionsFromMessage } from "./envelope-to-actions";
@@ -56,10 +62,16 @@ export interface DashboardProviderProps {
    * Optional client factory override — lets tests inject a mock without
    * spinning the real mqtt.js client.
    */
-  clientFactory?: ((url: string) => VolleyMqttClient) | undefined;
+  clientFactory?: ClientFactory | undefined;
+  /** Broker credentials from the LoginGate; omit to connect anonymously. */
+  auth?: BrokerCredentials | undefined;
+  /** Called when the broker refuses `auth` (CONNACK 4/5), so the gate can ask again. */
+  onAuthFailed?: ((message: string) => void) | undefined;
 }
 
-function resolveBrokerUrl(override: string | undefined): string {
+export type ClientFactory = (url: string, auth?: BrokerCredentials) => VolleyMqttClient;
+
+export function resolveBrokerUrl(override: string | undefined): string {
   if (override !== undefined) return override;
   const envUrl = (import.meta as ImportMeta & { env?: Record<string, string> }).env
     ?.VITE_VOLLEY_BROKER_URL;
@@ -70,6 +82,8 @@ export function DashboardProvider({
   children,
   brokerUrl,
   clientFactory,
+  auth,
+  onAuthFailed,
 }: DashboardProviderProps): JSX.Element {
   const [state, rawDispatch] = useReducer(reducer, initialState);
   // Wrap raw dispatch so AGENT_TRANSITION actions trigger a GSAP Flip
@@ -82,10 +96,19 @@ export function DashboardProvider({
   // forcing a reconnect on every state change.
   const stateRef = useRef(state);
   stateRef.current = state;
+  // Ref, not an effect dependency: a new callback identity must not reconnect.
+  const onAuthFailedRef = useRef(onAuthFailed);
+  onAuthFailedRef.current = onAuthFailed;
+  const username = auth?.username;
+  const password = auth?.password;
 
   useEffect(() => {
-    const factory = clientFactory ?? ((u: string) => createMqttClient({ url: u }));
-    const client = factory(resolvedUrl);
+    const factory: ClientFactory =
+      clientFactory ?? ((u, a) => createMqttClient({ url: u, auth: a }));
+    const client =
+      username !== undefined && password !== undefined
+        ? factory(resolvedUrl, { username, password })
+        : factory(resolvedUrl);
     let cancelled = false;
     let ageTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -111,7 +134,10 @@ export function DashboardProvider({
     });
 
     client.connect().catch((err) => {
-      if (!cancelled) {
+      if (!cancelled && err instanceof AuthFailedError) {
+        setBrokerStatus("disconnected");
+        onAuthFailedRef.current?.(err.message);
+      } else if (!cancelled) {
         console.warn("volley-dash: mqtt connect failed", err);
         setBrokerStatus("disconnected");
       }
@@ -125,7 +151,7 @@ export function DashboardProvider({
       if (ageTimer !== null) clearTimeout(ageTimer);
       void client.disconnect();
     };
-  }, [resolvedUrl, clientFactory, dispatch]);
+  }, [resolvedUrl, clientFactory, dispatch, username, password]);
 
   const value = useMemo<DashboardContextValue>(
     () => ({ state, dispatch, brokerStatus, brokerUrl: resolvedUrl }),

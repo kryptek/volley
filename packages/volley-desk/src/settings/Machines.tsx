@@ -1,0 +1,558 @@
+/**
+ * Settings › Machines, ported from the prototype `MachinesBody` (SPEC
+ * §4.6.14): the machines that can run agents for the waves. This machine (the
+ * one with the broker and volleyd, "this one") comes first, then one card per
+ * paired machine's retained record on `volley/_system/machines/+`: name,
+ * os/arch and cores, the tunnel with its heartbeat dot, the 1-minute load, its
+ * agents and when it was last heard from (why it is down, when it is). Only
+ * configured hosts are machines: every account may publish its own record.
+ * This machine publishes no record, so its card has only its agents; its os,
+ * cores and load wait on volleyd publishing one.
+ *
+ * An admin Desk can pair and unpair. **+ Add a machine** creates a pairing
+ * code at once (`peer_invite`) and opens a Stepper on "Run this on the other
+ * machine": the copyable `volley peer join <code> --to <ssh address>` (the
+ * address of this machine, which the owner types) and the code's countdown,
+ * waiting until a record for a host that was not there before arrives
+ * (joined), then Done. **Remove…** asks first, then sends `peer_remove`,
+ * which revokes the machine's account and clears its record. Any other
+ * session (not signed in, not an admin, demo, a browser that cannot make a
+ * reply key at all) is read-only and is shown the terminal commands instead.
+ * A plain-http LAN page can pair: its reply key comes from `lib/rsa.ts`.
+ */
+import { Copy01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { plural } from "../lib/plural";
+import Stepper, { Step } from "../rb/Stepper/Stepper";
+import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
+import type { MachinePayload } from "../store/types";
+import "../styles/machines.css";
+
+const MACHINES_TINT = "#34c759";
+/** How often the clock ticks: every second while a code counts down, else for the "seen" ages. */
+const COUNTDOWN_TICK_MS = 1000;
+const AGE_TICK_MS = 15_000;
+const COPIED_MS = 2000;
+
+export interface MachinesProps {
+  /** Machine records, by name (`volley/_system/machines/+`); only `hosts` are shown. */
+  machines: Record<string, MachinePayload>;
+  /** The configured hosts (`_waves/_config` `hosts`): the names that are machines; none by default. */
+  hosts?: readonly string[];
+  /** Whether volleyd, on this machine, is live: this machine's dot. */
+  hubUp: boolean;
+  /** This machine's live agents. */
+  hubAgents?: number;
+  /** `null` = no op channel (not signed in, demo): read-only. */
+  ops: PeerOps | null;
+  /** Clock override (tests); otherwise the section ticks. */
+  now?: number;
+  /** This machine's host as the Desk reaches it, for the ssh address's placeholder. */
+  host?: string;
+  /** Told what the admin check found (Settings' account row shows an admin as one). */
+  onAdmin?: (admin: AdminStatus) => void;
+}
+
+/** The clock, ticking every `ms`; a fixed `now` (tests) never ticks. */
+function useNow(fixed: number | undefined, ms: number): number {
+  const [now, setNow] = useState(() => fixed ?? Date.now());
+  useEffect(() => {
+    if (fixed !== undefined) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [fixed, ms]);
+  return fixed ?? now;
+}
+
+/**
+ * Whether `ops` may pair: what is already known at once, else `null` until
+ * volleyd answers. Asked again when volleyd comes up, since no answer is kept.
+ */
+function useAdmin(ops: PeerOps | null, hubUp: boolean): AdminStatus | null {
+  const [admin, setAdmin] = useState<AdminStatus | null>(() => (ops ? ops.known() : "not-admin"));
+  useEffect(() => {
+    if (!ops) {
+      setAdmin("not-admin");
+      return;
+    }
+    const known = ops.known();
+    if (known) {
+      setAdmin(known);
+      return;
+    }
+    let live = true;
+    setAdmin((a) => (a === "no-answer" && !hubUp ? a : null));
+    void ops.admin().then((a) => {
+      if (live) setAdmin(a);
+    });
+    return () => {
+      live = false;
+    };
+  }, [ops, hubUp]);
+  return admin;
+}
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/**
+ * The ssh address's hint: the host the Desk reaches the broker on, which the
+ * other machine can likely reach too; "" for a loopback address (the Desk
+ * runs on this machine) or no broker. Only a hint: the ssh user is unknown
+ * here, and a TLS proxy's host may not take ssh at all.
+ */
+export function sshHost(brokerUrl: string | null): string {
+  if (!brokerUrl) return "";
+  try {
+    const host = new URL(brokerUrl).hostname;
+    return LOOPBACK.has(host) ? "" : host;
+  } catch {
+    return "";
+  }
+}
+
+/** `20s`, `5m`, `3h`, `2d`: how long ago `iso` was. */
+export function ago(iso: string, now: number): string {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (Number.isNaN(s)) return "a while";
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86_400)}d`;
+}
+
+/** `m:ss` left until `iso`. */
+const countdown = (iso: string, now: number) => {
+  const left = Math.max(0, Math.ceil((Date.parse(iso) - now) / 1000));
+  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+};
+
+const DOWN_REASON: Record<string, string> = {
+  heartbeat_timeout: "no heartbeat",
+  disconnect: "disconnected",
+};
+
+/** One load average as the record has it, at most two decimals. */
+const load = (n: number | undefined) => (n === undefined ? "—" : String(Number(n.toFixed(2))));
+
+type Removing = { phase: "confirm" } | { phase: "busy" } | { phase: "failed"; error: string };
+
+function MachineCard({
+  m,
+  now,
+  admin,
+  onRemoved,
+  ops,
+}: {
+  m: MachinePayload;
+  now: number;
+  admin: boolean;
+  onRemoved: (name: string) => void;
+  ops: PeerOps | null;
+}) {
+  const [removing, setRemoving] = useState<Removing | null>(null);
+  const down = m.tunnel === "down";
+  const remove = async () => {
+    if (!ops) return;
+    setRemoving({ phase: "busy" });
+    const r = await ops.remove(m.name);
+    if (r.ok) {
+      setRemoving(null);
+      onRemoved(m.name);
+    } else {
+      setRemoving({ phase: "failed", error: r.error ?? "volleyd refused" });
+    }
+  };
+  return (
+    <article className="machine" aria-label={m.name}>
+      <div className="m-head">
+        <b>{m.name}</b>
+      </div>
+      <div className="dim">
+        {m.os}
+        {m.arch ? ` ${m.arch}` : ""} · {plural(m.cores, "core")}
+      </div>
+      <div className="m-stats">
+        <span className={`hb${down ? " hb--stale" : ""}`}>
+          <i />
+          tunnel {m.tunnel}
+        </span>
+        <span className="mono">load {load(m.load[0])}</span>
+        <span>{plural(m.agents, "agent")}</span>
+      </div>
+      <div className="s-hint">
+        {down
+          ? `${DOWN_REASON[m.reason ?? ""] ?? "tunnel down"} · last seen ${ago(m.last_seen, now)} ago`
+          : `seen ${ago(m.last_seen, now)} ago`}
+      </div>
+      {down && (
+        <p className="s-hint m-note">
+          New agents for it wait until it is back; the ones already running keep going.
+        </p>
+      )}
+      {admin && removing === null && (
+        <button
+          type="button"
+          className="btn m-remove"
+          onClick={() => setRemoving({ phase: "confirm" })}
+        >
+          Remove…
+        </button>
+      )}
+      {admin && removing !== null && (
+        <div className="m-confirm">
+          <p className="s-hint">
+            Remove {m.name}? This revokes its broker account, takes it out of volleyd’s hosts and
+            clears its record. Its tunnel stops at its next check; pairing it again takes a new
+            code.
+          </p>
+          {removing.phase === "failed" && (
+            <p className="s-error" role="alert">
+              {removing.error}
+            </p>
+          )}
+          <div className="ny-actions">
+            <button
+              type="button"
+              className="btn btn--danger"
+              disabled={removing.phase === "busy"}
+              onClick={() => void remove()}
+            >
+              {removing.phase === "busy" ? "Removing…" : `Remove ${m.name}`}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={removing.phase === "busy"}
+              onClick={() => setRemoving(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+/** This machine: the broker and volleyd run here, so it has no tunnel and no record. */
+function HubCard({ up, agents }: { up: boolean; agents: number }) {
+  return (
+    <article className="machine machine--hub" aria-label="This machine">
+      <div className="m-head">
+        <b>This machine</b>
+        <span className="chip chip--mine">this one</span>
+      </div>
+      <div className="dim">Runs the broker and volleyd</div>
+      <div className="m-stats">
+        <span className={`hb${up ? "" : " hb--stale"}`}>
+          <i />
+          local
+        </span>
+        <span>{plural(agents, "agent")}</span>
+      </div>
+      <div className="s-hint">{up ? "volleyd running" : "volleyd not running"}</div>
+    </article>
+  );
+}
+
+function CopyCommand({ text, ready }: { text: string; ready: boolean }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  useEffect(() => {
+    if (state === "idle") return;
+    const t = setTimeout(() => setState("idle"), COPIED_MS);
+    return () => clearTimeout(t);
+  }, [state]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  };
+  return (
+    <div className="m-command recessed">
+      <code className="mono">
+        {text.split(" ").map((w, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: the words of one fixed command
+          <Fragment key={i}>
+            {i > 0 && " "}
+            {w.startsWith("-") ? <span className="m-flag">{w}</span> : w}
+          </Fragment>
+        ))}
+      </code>
+      <button type="button" className="btn" disabled={!ready} onClick={() => void copy()}>
+        <HugeiconsIcon icon={Copy01Icon} size={13} strokeWidth={1.8} />
+        {state === "copied" ? "Copied" : state === "failed" ? "Select it to copy" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+type Pairing =
+  | { phase: "creating" }
+  | { phase: "failed"; error: string }
+  | { phase: "waiting"; code: string; expiresAt: string; before: string[]; joined?: string };
+
+/** The Add a machine Stepper: code created → the command to run there → joined. */
+function AddMachine({
+  ops,
+  machines,
+  now,
+  host,
+  onClose,
+}: {
+  ops: PeerOps;
+  machines: Record<string, MachinePayload>;
+  now: number;
+  host: string;
+  onClose: () => void;
+}) {
+  const [s, setS] = useState<Pairing>({ phase: "creating" });
+  const [to, setTo] = useState("");
+  const panel = useRef<HTMLDivElement>(null);
+  // The panel opens below the cards: bring it into view (jsdom has no scrollIntoView).
+  useEffect(() => panel.current?.scrollIntoView?.({ block: "nearest" }), []);
+  // Latched once seen: the record going away again must not step back to a spent code.
+  const newcomer =
+    s.phase === "waiting" ? Object.keys(machines).find((n) => !s.before.includes(n)) : undefined;
+  useEffect(() => {
+    if (newcomer)
+      setS((p) => (p.phase === "waiting" && !p.joined ? { ...p, joined: newcomer } : p));
+  }, [newcomer]);
+  const joined = s.phase === "waiting" ? (s.joined ?? newcomer) : undefined;
+  const expired = s.phase === "waiting" && !joined && Date.parse(s.expiresAt) <= now;
+
+  const machinesNow = useRef(machines);
+  machinesNow.current = machines;
+  const create = useCallback(async () => {
+    const before = Object.keys(machinesNow.current);
+    setS({ phase: "creating" });
+    const r = await ops.invite();
+    setS(
+      r.ok
+        ? { phase: "waiting", code: r.code, expiresAt: r.expiresAt, before }
+        : { phase: "failed", error: r.error },
+    );
+  }, [ops]);
+  // + Add a machine is the intent: the code is created at once, as in the prototype.
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    void create();
+  }, [create]);
+
+  const step = joined ? 3 : s.phase === "waiting" ? 2 : 1;
+  return (
+    <div ref={panel} className="pair pair--machine">
+      <Stepper
+        theme="dark"
+        accentColor={MACHINES_TINT}
+        indicator="numbers"
+        linear
+        frame={false}
+        width="100%"
+        step={step}
+        disableStepIndicators
+        showFooter={false}
+      >
+        <Step title="Code" description={s.phase === "waiting" ? "Created" : "One-time"}>
+          {s.phase === "failed" ? (
+            <>
+              <p className="s-error" role="alert">
+                No code: {s.error}. Check that volleyd is running on this machine, then try again.
+              </p>
+              <div className="ny-actions">
+                <button type="button" className="btn btn--hot" onClick={() => void create()}>
+                  Try again
+                </button>
+                <button type="button" className="btn" onClick={onClose}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="dim">
+                <span className="spinner" aria-hidden="true" /> Creating a one-time pairing code…
+              </p>
+              <div className="ny-actions">
+                <button type="button" className="btn" disabled onClick={onClose}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+        </Step>
+        <Step title="Join" description="On the other machine">
+          <h3>Run this on the other machine</h3>
+          {!expired && (
+            <>
+              <label className="m-to">
+                <span className="s-hint">
+                  This machine’s ssh address (user@host), as the other machine reaches it
+                </span>
+                <input
+                  className="recessed"
+                  aria-label="This machine's ssh address"
+                  placeholder={`you@${host || "hub-hostname"}`}
+                  required
+                  value={to}
+                  onChange={(e) => setTo(e.target.value)}
+                />
+              </label>
+              {s.phase === "waiting" && (
+                <CopyCommand text={joinCommand(s.code, to)} ready={to.trim() !== ""} />
+              )}
+              {to.trim() === "" && (
+                <p className="s-hint">
+                  Enter this machine’s ssh address first: usually you@ its hostname, as{" "}
+                  <code className="mono">volley peer invite</code> prints it.
+                </p>
+              )}
+            </>
+          )}
+          {expired ? (
+            <>
+              <p className="s-error" role="alert">
+                The code expired before a machine used it. Create a new one to keep pairing.
+              </p>
+              <div className="ny-actions">
+                <button type="button" className="btn btn--hot" onClick={() => void create()}>
+                  Create a new code
+                </button>
+                <button type="button" className="btn" onClick={onClose}>
+                  Close
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="dim">
+                It checks ssh back to this machine, creates the machine’s account, installs its
+                tunnel service, checks the repo is trusted and registers the machine. The code works
+                once and expires in{" "}
+                <span className="mono">
+                  {s.phase === "waiting" ? countdown(s.expiresAt, now) : ""}
+                </span>
+                .
+              </p>
+              <div className="waiting">
+                <span className="spinner" aria-hidden="true" /> Waiting for the machine to join…
+              </div>
+              <div className="ny-actions">
+                <button type="button" className="btn" onClick={onClose}>
+                  Stop waiting
+                </button>
+              </div>
+            </>
+          )}
+        </Step>
+        <Step title="Ready" description="Joined">
+          <h3>
+            <HugeiconsIcon icon={Tick02Icon} size={15} strokeWidth={1.8} /> {joined} joined
+          </h3>
+          <p className="dim">
+            Its tunnel is up and it reports its health here. New waves can now place agents on{" "}
+            {joined}.
+          </p>
+          <div className="ny-actions">
+            <button type="button" className="btn btn--hot" onClick={onClose}>
+              Done
+            </button>
+          </div>
+        </Step>
+      </Stepper>
+    </div>
+  );
+}
+
+/** Why this session cannot pair, said before the terminal commands. */
+function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
+  if (!secure) {
+    return "Read-only here: this browser cannot make the key that keeps the pairing code private.";
+  }
+  if (admin === null) return "Checking whether this Desk may pair machines…";
+  if (admin === "no-answer") {
+    return "volleyd did not answer, so this Desk cannot tell whether it may pair machines: pairing needs volleyd running on this machine.";
+  }
+  return "Read-only: pairing and removing machines takes an admin account. To pair from here, sign in to the Desk with an admin account.";
+}
+
+export function Machines(p: MachinesProps) {
+  const [adding, setAdding] = useState(false);
+  const now = useNow(p.now, adding ? COUNTDOWN_TICK_MS : AGE_TICK_MS);
+  // A browser that cannot make a reply key at all (not even lib/rsa's): read-only.
+  const secure = pairingSupported();
+  const admin = useAdmin(secure ? p.ops : null, p.hubUp);
+  const { onAdmin } = p;
+  useEffect(() => {
+    if (admin !== null) onAdmin?.(admin);
+  }, [admin, onAdmin]);
+  const [notice, setNotice] = useState<string | null>(null);
+  const shown = useMemo(() => {
+    const hosts = new Set(p.hosts ?? []);
+    return Object.fromEntries(Object.entries(p.machines).filter(([n]) => hosts.has(n)));
+  }, [p.machines, p.hosts]);
+  const machines = Object.values(shown).sort((a, b) => a.name.localeCompare(b.name));
+  const canPair = secure && admin === "admin" && p.ops !== null;
+
+  return (
+    <div className="machines-section">
+      <p className="dim">
+        Machines that can run agents for your waves. Agents on another machine report back through a
+        private tunnel.
+      </p>
+      {notice && <output className="s-hint m-notice">{notice}</output>}
+      <div className="machines">
+        <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />
+        {machines.map((m) => (
+          <MachineCard
+            key={m.name}
+            m={m}
+            now={now}
+            admin={canPair}
+            ops={p.ops}
+            onRemoved={(name) => setNotice(`${name} removed: its account was revoked.`)}
+          />
+        ))}
+        {canPair && !adding && (
+          <button
+            type="button"
+            className="machine machine--add"
+            onClick={() => {
+              setNotice(null);
+              setAdding(true);
+            }}
+          >
+            + Add a machine
+          </button>
+        )}
+      </div>
+      {machines.length === 0 && (
+        <p className="s-hint">
+          No other machines yet. Pair one and waves can place agents on it too.
+        </p>
+      )}
+      {canPair && adding && p.ops && (
+        <AddMachine
+          ops={p.ops}
+          machines={shown}
+          now={now}
+          host={p.host ?? ""}
+          onClose={() => setAdding(false)}
+        />
+      )}
+      {!canPair && (
+        <p className="s-hint m-readonly">
+          {readOnlyReason(secure, admin)} From a terminal on this machine,{" "}
+          <code className="mono">volley peer invite</code> makes a pairing code and{" "}
+          <code className="mono">volley peer remove &lt;name&gt;</code> unpairs one.
+        </p>
+      )}
+    </div>
+  );
+}

@@ -21,7 +21,8 @@ export interface SubscribeResult {
 
 /**
  * vol_subscribe — block until `max_messages` (default 1) arrive on `topic_pattern` or
- * `timeout_ms` (default 60000) elapses. Synchronous one-shot collection (design doc §5.2).
+ * `timeout_ms` (default 60000) elapses. Synchronous one-shot collection (the v0.1 tool set;
+ * the async variants are reserved, SPEC §10).
  */
 export async function volSubscribe(
   state: ServerState,

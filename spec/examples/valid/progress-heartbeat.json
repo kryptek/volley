@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "parent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T14:05:00.000Z",
+  "channel": "progress",
+  "type": "heartbeat",
+  "payload": {
+    "seq": 42,
+    "source": "harness-hook",
+    "hook_event": "PostToolUse"
+  }
+}

@@ -1,0 +1,249 @@
+/*
+ * The sign-in (D9), ported from the prototype's sign-in rules: Line Waves (or
+ * the plain gradient) behind a vignette, a deep glass card tilted by
+ * --rx/--ry with a sheen at --gx/--gy, recessed `f3d` fields and the
+ * Specular Button in its gradient `spec-wrap` frame.
+ */
+.signin-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #05060c;
+  overflow: hidden;
+}
+.signin-bg {
+  position: absolute;
+  inset: 0;
+}
+.signin-bg > * {
+  position: absolute;
+  inset: 0;
+}
+.signin-bg--plain {
+  background: radial-gradient(1200px 700px at 15% 0%, rgba(110, 231, 249, 0.1), transparent 60%),
+    radial-gradient(900px 600px at 90% 100%, rgba(139, 92, 246, 0.12), transparent 60%),
+    radial-gradient(700px 500px at 50% 60%, rgba(244, 114, 182, 0.05), transparent 70%), #05060c;
+}
+.signin-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 50% 45%,
+    rgba(5, 6, 12, 0) 0%,
+    rgba(5, 6, 12, 0.35) 55%,
+    rgba(5, 6, 12, 0.85) 100%
+  );
+}
+.signin-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 51;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  perspective: 1400px;
+  overflow: auto;
+}
+.signin-card {
+  position: relative;
+  box-sizing: border-box;
+  width: min(420px, 100%);
+  padding: 28px 28px 24px;
+  border-radius: 22px;
+  background: linear-gradient(
+    160deg,
+    rgba(34, 38, 58, 0.78),
+    rgba(14, 16, 28, 0.86) 55%,
+    rgba(10, 11, 20, 0.92)
+  );
+  backdrop-filter: blur(26px) saturate(1.4);
+  -webkit-backdrop-filter: blur(26px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(110, 231, 249, 0.04), 0 2px 4px rgba(0, 0, 0, 0.35),
+    0 12px 24px -6px rgba(0, 0, 0, 0.55), 0 40px 80px -20px rgba(0, 0, 0, 0.85),
+    0 0 120px -30px rgba(139, 92, 246, 0.45);
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateZ(0);
+  transform-style: preserve-3d;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.signin-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    circle at var(--gx, 50%) var(--gy, 30%),
+    rgba(255, 255, 255, 0.1),
+    transparent 45%
+  );
+  mix-blend-mode: screen;
+}
+.signin-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transform: translateZ(30px);
+}
+.signin-word {
+  margin: 0;
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: 26px;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+.signin-word span {
+  font-family: var(--f-mono);
+  font-size: 14px;
+  font-weight: 400;
+  color: #6ee7f9;
+  letter-spacing: 0;
+}
+.signin-sub {
+  color: var(--mute);
+  font-size: 13px;
+}
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transform: translateZ(20px);
+}
+.signin-broker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font: 12px var(--f-mono);
+  color: var(--mute);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.signin-broker .dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34c759;
+  box-shadow: 0 0 8px #34c759;
+}
+.signin-broker[data-state="busy"] .dot {
+  background: #ffcc00;
+  box-shadow: 0 0 8px #ffcc00;
+  animation: signin-pulse 1s ease-in-out infinite alternate;
+}
+@keyframes signin-pulse {
+  to {
+    opacity: 0.35;
+  }
+}
+.f3d {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--mute);
+  letter-spacing: 0.02em;
+}
+.f3d input {
+  font: inherit;
+  font-size: 15px;
+  color: var(--ink);
+  padding: 12px 14px;
+  border-radius: 12px;
+  outline: none;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
+    rgba(255, 255, 255, 0.08);
+  transition: box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.f3d input::placeholder {
+  color: rgba(163, 171, 192, 0.4);
+}
+.f3d input:focus {
+  border-color: rgba(110, 231, 249, 0.55);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
+    rgba(110, 231, 249, 0.18), 0 0 22px rgba(110, 231, 249, 0.22);
+}
+.signin-err {
+  font-size: 12.5px;
+  color: #ffb4a1;
+  background: rgba(255, 90, 90, 0.1);
+  border: 1px solid rgba(255, 90, 90, 0.3);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.spec-wrap {
+  position: relative;
+  margin-top: 6px;
+  border-radius: 16px;
+  padding: 1px;
+  background: linear-gradient(120deg, #6ee7f9, #7c6cf6 50%, #c264f0);
+  box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.7), 0 0 44px -10px rgba(139, 92, 246, 0.75), 0 0 30px
+    -12px rgba(110, 231, 249, 0.6);
+}
+.spec-wrap > .spec-signin {
+  width: 100%;
+  display: block;
+}
+.spec-wrap.is-busy {
+  filter: saturate(0.7) brightness(0.9);
+}
+.signin-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+/* Phone: the card fills the width inside the 16px gutter, and it doesn't tilt. */
+@media (max-width: 699px) {
+  .signin-screen {
+    perspective: none;
+  }
+  .signin-card {
+    width: 100%;
+    padding: 22px 18px 18px;
+    transform: none;
+  }
+  .signin-brand,
+  .signin-form {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .signin-card {
+    transition: none;
+    transform: none;
+  }
+  .signin-broker[data-state="busy"] .dot {
+    animation: none;
+  }
+}
+
+/* Settings › Setup & Security › Preview: the sign-in screen over everything, with a way out. */
+.signin-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.signin-preview .signin-screen {
+  z-index: 61;
+}
+.signin-preview-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 62;
+}

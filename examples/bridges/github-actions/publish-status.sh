@@ -8,6 +8,10 @@
 #   GITHUB_RUN_ID       required, e.g. "7891234567"
 #   VOLLEY_BROKER_URL   optional, defaults to mqtt://localhost:1883 (forwarded to volley CLI)
 #   VOLLEY_NAMESPACE    optional, defaults to "ci"
+#   VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD
+#                       optional broker credentials (store them as repo secrets).
+#                       The volley CLI reads them itself; the mosquitto_pub
+#                       fallback passes them as -u/-P.
 #
 # Computes a deterministic agent_id: gh-<owner>-<repo>-<run-id>, sanitised per
 # SPEC §2.2 grammar [a-z0-9][a-z0-9_-]{0,62} (lowercased, slashes → hyphens,
@@ -98,9 +102,16 @@ host="$(printf '%s' "$BROKER_URL" | sed -E 's#^mqtts?://([^:/]+).*#\1#')"
 port="$(printf '%s' "$BROKER_URL" | sed -nE 's#^mqtts?://[^:/]+:([0-9]+).*#\1#p')"
 port="${port:-1883}"
 
+auth=()
+if [[ -n "${VOLLEY_AUTH_USERNAME:-}" ]]; then
+  auth=(-u "$VOLLEY_AUTH_USERNAME")
+  [[ -n "${VOLLEY_AUTH_PASSWORD:-}" ]] && auth+=(-P "$VOLLEY_AUTH_PASSWORD")
+fi
+
 mosquitto_pub \
   -h "$host" \
   -p "$port" \
+  ${auth[@]+"${auth[@]}"} \
   -q 1 \
   -r \
   -t "$TOPIC" \

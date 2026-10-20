@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/progress.schema.json",
   "title": "Volley Progress Channel Message",
-  "description": "Fire-and-forget progress event published on the progress channel. See spec section 4.",
+  "description": "Fire-and-forget progress event published on the progress channel. See spec section 4. The type stays an open string; the hook activity types (heartbeat, idle, awaiting_input, resumed; steering_applied is reserved, the reference hooks never publish it) and steering_acked are documented in spec section 4.3.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -12,17 +12,88 @@
         "type": {
           "type": "string",
           "minLength": 1,
-          "description": "Free-form progress event tag (e.g. tests-green, mvn-verify-done, diff-ready)."
+          "description": "Free-form progress event tag (e.g. tests-green, mvn-verify-done, diff-ready). Documented types: heartbeat, idle, awaiting_input, resumed (hook activity, payload.source = harness-hook; steering_applied is reserved and never published by the reference hooks) and steering_acked (correlation_id names the acknowledged mailbox message).",
+          "examples": [
+            "tests-green",
+            "heartbeat",
+            "idle",
+            "awaiting_input",
+            "resumed",
+            "steering_applied",
+            "steering_acked"
+          ]
         },
         "payload": {
           "type": "object",
           "properties": {
             "detail": { "type": "string" },
-            "elapsed_ms": { "type": "integer", "minimum": 0 }
-          }
+            "elapsed_ms": { "type": "integer", "minimum": 0 },
+            "progress": {
+              "description": "Advisory percent-complete in [0, 100]; receivers tolerate null or non-numeric values (spec section 4.3)."
+            },
+            "msg": {
+              "type": "string",
+              "description": "Short human-readable narration of what the agent is doing now."
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Hook activity: per-agent monotonic sequence number."
+            },
+            "source": {
+              "type": "string",
+              "description": "Hook activity: harness-hook when published by a harness hook rather than the model."
+            },
+            "hook_event": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Hook activity: the harness hook event that fired (e.g. Stop, Notification, PostToolUse)."
+            },
+            "text": {
+              "type": "string",
+              "description": "Hook activity: last assistant line or notification text."
+            },
+            "notification_type": {
+              "type": "string",
+              "description": "Hook activity: harness notification type (e.g. agent_needs_input)."
+            },
+            "screen_tail": { "type": "array", "items": { "type": "string" } },
+            "question": {
+              "type": "string",
+              "description": "awaiting_input: what the agent is asking. The harness hooks send the question paragraph whole (an excerpt of its end beyond 8192 characters); a supervisor's wave-state coordinator.question carries its first one or two lines."
+            },
+            "class": {
+              "type": "string",
+              "description": "awaiting_input: why the harness is waiting when it is not a question, e.g. credit (a provider usage limit; the harness resumes on its own when it resets)."
+            },
+            "background_wait": {
+              "type": "boolean",
+              "description": "idle / awaiting_input: true when the session ended its turn without a question while a background task it started is still running; it waits on that task's events, not on a human (spec section 4.3). Never set on a permission_prompt."
+            },
+            "completed": {
+              "type": "boolean",
+              "description": "idle: true when the harness reported the agent's task completed (notification agent_completed)."
+            },
+            "session_url": {
+              "type": "string",
+              "format": "uri",
+              "description": "awaiting_input: link to the waiting session, when known."
+            },
+            "workspace": {
+              "type": "string",
+              "description": "awaiting_input: terminal workspace hosting the session, when known."
+            }
+          },
+          "if": { "properties": { "source": { "const": "harness-hook" } }, "required": ["source"] },
+          "then": { "required": ["seq", "hook_event"] }
         }
       },
-      "required": ["channel", "type"]
+      "required": ["channel", "type"],
+      "if": { "properties": { "type": { "const": "steering_acked" } } },
+      "then": {
+        "properties": { "correlation_id": { "type": "string", "minLength": 1 } },
+        "required": ["correlation_id"]
+      }
     }
   ]
 }

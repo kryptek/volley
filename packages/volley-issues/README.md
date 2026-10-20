@@ -20,6 +20,9 @@ is swapped from claude-peers/ScheduleWakeup to Volley.
   CLI processes).
 - `cmux` CLI installed and on `$PATH` (the dispatched workspaces are cmux
   workspaces).
+- For the default **volleyd path**: the [`volleyd`](../volleyd/) supervisor
+  running (`volleyd status` exits 0). Without it the skill falls back to the
+  legacy path.
 
 ## Install
 
@@ -42,15 +45,50 @@ In a Claude Code session:
 /volley-issues --label enhancement  # dispatch every open issue with that label
 ```
 
-The full surface is in [`SKILL.md`](./SKILL.md). The skill's coordinator
-loop is what handles the "watch for terminal status, pick up the PR" cycle;
-just dispatch and let Claude work.
+The full surface is in [`SKILL.md`](./SKILL.md). Two dispatch paths:
+
+- **Volleyd path** (default when `volleyd status` succeeds): the skill turns
+  the issues into a wave file at `.volley/waves/<date>-<theme>.yaml`
+  (`after:` lists come from `Depends on:` / `deps:` lines in the issue
+  bodies), runs `volleyd validate` then `volleyd run --owner <coordinator id>`,
+  and waits on the wave's decisions and merge-ready gates.
+- **Legacy path**: the skill launches each agent itself and runs the
+  per-agent "watch for terminal status, pick up the PR" loop.
+
+## Wave file helper
+
+`scripts/wave-from-issues.ts` is the pure helper behind the volleyd path:
+issues JSON in, wave YAML out.
+
+```sh
+for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
+bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
+  --repo "$(git rev-parse --show-toplevel)" --release-branch release/2026-10-18-example \
+  --model claude-opus-4-7 --out .volley/waves/2026-10-18-example.yaml
+```
+
+Each issue becomes a task named by its title's task tag (`O0: …` → `O0`), else `i<N>`; `Depends on: #101` becomes `after: [i101]` (or the tag of #101).
+`--repo-slug <owner/repo>` also accepts `owner/repo#N` references and issue
+URLs for this repository. A dependency outside the set is an error naming it,
+unless it is listed in `--satisfied` (already merged); so is a dependency line
+the helper cannot read (`Depends on: T3`): a dependency is never silently
+dropped. Issues with no dependency line are reported on stderr so their order
+can be confirmed. `--help` lists every option.
+
+## Brief gate
+
+`scripts/validate-brief.sh <brief>` refuses a spawn brief that lacks the
+narration contract. The legacy path runs it before every launch; it can also be
+installed as volleyd's `$VOLLEYD_HOME/brief-gate`, and accepts volleyd's own
+briefs (whose session hooks register the agent instead of a `vol_register`
+step). `test/validate-brief.test.ts` runs it against volleyd's templates.
 
 ## Parity vs. legacy
 
 The [`parity-report.md`](./parity-report.md) committed at tag time records
 the measured wake-latency comparison vs. the legacy claude-peers polling
-loop. See [`SMOKE.md`](./SMOKE.md) for the manual downstream-repo validation
+loop. The parity test runs with every `bun run test` but only rewrites the
+report when asked: `bun run parity:update` (at tag time). See [`SMOKE.md`](./SMOKE.md) for the manual downstream-repo validation
 procedure run before each release.
 
 ## License

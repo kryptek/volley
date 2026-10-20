@@ -1,8 +1,9 @@
 import { parseArgs } from "node:util";
+import type { BrokerAuth } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { isValidTopicFilter } from "volley-mcp/topics";
-import { parsePositiveInt, resolveBrokerUrl } from "../args";
+import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -20,6 +21,8 @@ export async function sub({ argv, env, io }: SubArgs): Promise<ExitCode> {
       args: argv,
       options: {
         "broker-url": { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
         pattern: { type: "string" },
         "max-messages": { type: "string", default: "100" },
         timeout: { type: "string", default: "30" },
@@ -51,16 +54,26 @@ export async function sub({ argv, env, io }: SubArgs): Promise<ExitCode> {
   let max: number;
   let timeoutSec: number;
   let brokerUrl: string;
+  let auth: BrokerAuth | null;
   try {
     max = parsePositiveInt(parsed.values["max-messages"] as string, "--max-messages");
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
     brokerUrl = resolveBrokerUrl(parsed.values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: parsed.values.username as string | undefined,
+        password: parsed.values.password as string | undefined,
+      },
+      env,
+      process.cwd(),
+      brokerUrl,
+    );
   } catch (e) {
     io.stderr(`volley sub: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.USAGE;
   }
 
-  const broker = await connectAsClient(brokerUrl, io);
+  const broker = await connectAsClient(brokerUrl, io, auth);
   if (broker === null) return EXIT.ERROR;
   try {
     const collected = await broker.subscribeCollect(pattern, max, timeoutSec * 1000);
@@ -92,6 +105,8 @@ Optional:
   --max-messages <n>     Stop after N messages (default: 100)
   --timeout <seconds>    Stop after N seconds even if --max-messages not reached (default: 30)
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
+  --password <pw>        Broker password (env: VOLLEY_AUTH_PASSWORD)
   --help                 Show this help
 
 Output:

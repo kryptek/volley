@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/config.schema.json",
+  "title": "Volley Supervisor Effective Config",
+  "description": "Retained effective global supervisor config published to volley/_waves/_config. See spec section 4.6.4. The tunable model lives in $defs/tunables (every key optional, every key bounded, no other keys) so a wave file's config: overrides and a config_set patch can reference it; the retained topic requires every tunable to be present.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/_config" },
+        "type": { "const": "config" },
+        "payload": {
+          "unevaluatedProperties": false,
+          "allOf": [
+            { "$ref": "#/$defs/tunableProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Monotonic; bumped on every applied change."
+                },
+                "updated_at": { "type": "string", "format": "date-time" },
+                "updated_by": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "admission": {
+                  "required": [
+                    "memory_pressure_max_level",
+                    "cmux_ping_max_ms",
+                    "container_max",
+                    "api_overload_window_s",
+                    "api_overload_max",
+                    "ci_queue_max",
+                    "hysteresis_samples"
+                  ]
+                },
+                "mailbox": { "required": ["session_expiry_s"] }
+              },
+              "required": [
+                "version",
+                "updated_at",
+                "updated_by",
+                "hard_ceiling",
+                "spawn_budget_multiplier",
+                "lease_pools",
+                "admission",
+                "claim_after_s",
+                "heartbeat_alarm_s",
+                "fallback_model",
+                "mailbox",
+                "worktree_root",
+                "spawn_timeout_s",
+                "spawn_retry_max_s",
+                "spawn_retry_max",
+                "wake_grace_s",
+                "idle_grace_s",
+                "screen_tail_interval_s",
+                "hosts"
+              ]
+            }
+          ]
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "tunables": {
+      "description": "Every runtime-tunable supervisor setting, all keys optional, no other keys. Reference this from overrides (a wave file's config: block, wave-state effective_config, a config_set patch).",
+      "$ref": "#/$defs/tunableProperties",
+      "unevaluatedProperties": false
+    },
+    "tunableProperties": {
+      "type": "object",
+      "description": "The tunable keys and their bounds, left open so the retained payload can add its metadata fields (version, updated_at, updated_by). Consumers other than the retained payload use the closed $defs/tunables.",
+      "properties": {
+        "hard_ceiling": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 12,
+          "description": "Runaway fuse: maximum concurrently live supervised agents across all waves."
+        },
+        "spawn_budget_multiplier": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 3,
+          "description": "Raises a wave's derived spawn budget (every task's pipeline roles plus retry headroom) to multiplier x task count when that is more. Counts retries and reviewers; spawn_budget in the wave file overrides both."
+        },
+        "lease_pools": {
+          "type": "object",
+          "description": "Heavy-operation lease pools, keyed by pool name (topic-segment grammar).",
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/leasePool" }
+        },
+        "admission": {
+          "type": "object",
+          "description": "Load-aware spawn admission thresholds.",
+          "additionalProperties": false,
+          "properties": {
+            "memory_pressure_max_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4,
+              "description": "Highest OS memory-pressure level (1 normal, 2 warn, 4 critical) at which spawns are still admitted."
+            },
+            "cmux_ping_max_ms": { "type": "integer", "minimum": 10, "maximum": 60000 },
+            "container_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "api_overload_window_s": { "type": "integer", "minimum": 10, "maximum": 86400 },
+            "api_overload_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "ci_queue_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "hysteresis_samples": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        "claim_after_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "default": 1800,
+          "description": "Seconds a wave owner may be gone before another coordinator may claim the wave."
+        },
+        "heartbeat_alarm_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 600,
+          "description": "Seconds without a hook heartbeat (while working and alive) before a hooks_silent alarm."
+        },
+        "idle_grace_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400,
+          "default": 180,
+          "description": "Seconds an agent may sit idle (its turn ended, no terminal status) before it is nudged once; still idle another grace later opens an agent_stalled decision."
+        },
+        "fallback_model": {
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
+          "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."
+        },
+        "mailbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "session_expiry_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2592000,
+              "default": 604800,
+              "description": "MQTT v5 session expiry for persistent mailbox sessions (new connections only)."
+            }
+          }
+        },
+        "worktree_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Directory under which the supervisor creates agent worktrees (applies to later spawns)."
+        },
+        "spawn_timeout_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "Seconds to wait for a spawned agent's registration before retrying."
+        },
+        "spawn_retry_max_s": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 86400,
+          "default": 900,
+          "description": "Cap, in seconds, on the automatic retry delay of a failed spawn (the delay starts at 30 s and doubles per failure)."
+        },
+        "spawn_retry_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 8,
+          "description": "Failed spawn attempts in a row after which the supervisor stops retrying automatically (its spawn_failed decision then says so)."
+        },
+        "brief_preface_max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 16384,
+          "description": "Largest brief preface (spec section 4.6.9) the supervisor accepts, in bytes; a larger one refuses the wave (BRIEF_PREFACE_TOO_LARGE). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "wake_grace_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 120,
+          "description": "Seconds after a detected host sleep/wake during which liveness alarms are held and reaped statuses are re-verified: a reap is accepted only if no heartbeat arrives within it."
+        },
+        "screen_tail_interval_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
+        },
+        "stop_grace_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Seconds a stopped wave's agents get to publish a terminal status after their cancel; any still running then is force-retired (records cleared, login deleted)."
+        },
+        "dynsec_batch_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 50,
+          "description": "Milliseconds the supervisor collects broker login changes (mints, deletes) before sending them as one Dynamic Security control message, so the broker rewrites its state file once per batch (spec section 4.6.13). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "credential_sweep_interval_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400,
+          "default": 600,
+          "description": "Seconds between credential sweeps, which delete the broker logins of agents that are no longer live (spec section 4.6.13). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "claude": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Claude account profiles (spec section 4.6.11). Optional in the retained payload: a supervisor that predates them omits it.",
+          "properties": {
+            "default_account": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+              ],
+              "default": null,
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (the signed-in account with the lowest 5-hour usage, spec section 4.6.12; primary when none has usage data). null: primary."
+            },
+            "warn_at_pct": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 90,
+              "description": "When an account's 5-hour window reaches this used percentage, the supervisor opens an account_limit decision for each wave with agents on it (spec section 4.6.12). It never moves a wave on its own."
+            }
+          }
+        },
+        "branch_update": {
+          "type": "string",
+          "enum": ["rebase", "merge"],
+          "default": "rebase",
+          "description": "How the pipeline's rebase step brings a PR branch up to date when the release branch moved (spec section 4.6.4): rebase (rebase onto the release branch, then a lease-guarded force-push) or merge (merge the release branch in, then a normal push: no force-push of any kind; the new head must descend from the old one). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "agent_mcp": {
+          "type": "string",
+          "enum": ["strict", "inherit"],
+          "default": "strict",
+          "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "hosts": {
+          "type": "object",
+          "description": "Remote hosts a wave task may name with host: <name>: agents run in tmux on another machine over SSH, reaching the broker through a reverse tunnel. A wave file's inline host: { type: ssh, ... } is layered over the entry it names.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+            "not": { "const": "local" }
+          },
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/remoteHost" }
+        }
+      }
+    },
+    "remoteHost": {
+      "type": "object",
+      "$ref": "#/$defs/remoteHostProperties",
+      "properties": { "type": { "const": "ssh" } },
+      "unevaluatedProperties": false
+    },
+    "remoteHostProperties": {
+      "description": "The settings of one SSH + tmux host, left open so the wave file's inline host can add type and name. Paths are on the remote machine and must be absolute. Object keywords only (no type), so the wave file can apply it to a string-or-object host.",
+      "properties": {
+        "target": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$",
+          "description": "ssh destination, [user@]host (an ssh config alias works). Never starts with '-', so it can never be read as an option."
+        },
+        "repo": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "The wave repository's clone on the remote machine; the release branch is fetched into it before each worktree is cut."
+        },
+        "worktree_root": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "Directory on the remote machine under which agent worktrees are created (default: .volley-worktrees beside repo)."
+        },
+        "volley_dir": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/[^\\n\\r]*$",
+          "description": "The volley checkout on the remote machine; its packages/volley-hooks is the agents' VOLLEY_HOOKS_DIR."
+        },
+        "tunnel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "remote_port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535,
+              "default": 21883,
+              "description": "Port on the remote machine's 127.0.0.1 that reaches the broker; agents get broker_url mqtt://127.0.0.1:<remote_port>. Not 1883 by default: a remote machine running its own broker has that port taken."
+            },
+            "supervise": {
+              "type": "boolean",
+              "default": true,
+              "description": "true: the supervisor keeps ssh -N -R <remote_port>:<broker> up itself (one per target and remote_port). false: the tunnel is operator-managed and only checked."
+            }
+          }
+        }
+      }
+    },
+    "leasePool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity"],
+      "properties": {
+        "capacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "ttl_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "match": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "format": "regex", "minLength": 1, "maxLength": 256 },
+          "description": "Regular expressions over a command line; a match requires a lease from this pool."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-spec_reviewer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-18T12:00:00.000Z",
+  "channel": "result",
+  "type": "review",
+  "payload": {
+    "findings": [
+      {
+        "severity": "P1",
+        "file": "src/batch.ts",
+        "line": 42,
+        "text": "Empty batches are sent to the API; the issue requires a short-circuit."
+      },
+      { "severity": "P3", "file": "src/batch.ts", "text": "Name the magic number." }
+    ],
+    "verdict": "changes_requested",
+    "hygiene": {
+      "checked": true,
+      "findings": [
+        {
+          "severity": "P1",
+          "file": "docs/setup.md",
+          "line": 12,
+          "text": "A home-directory path with a local username; write a placeholder instead."
+        }
+      ]
+    },
+    "summary": "One blocker: the empty-batch short-circuit is missing."
+  }
+}

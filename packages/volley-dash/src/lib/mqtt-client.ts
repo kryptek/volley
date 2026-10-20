@@ -9,9 +9,34 @@ import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import { type ParsedEnvelope, parseEnvelope } from "./parse-envelope";
 import { parseTopic } from "./parse-topic";
 
+/** Broker credentials (mosquitto `password_file` identity, e.g. `desk`). */
+export interface BrokerCredentials {
+  username: string;
+  password: string;
+}
+
 export interface CreateMqttClientOptions {
   url: string;
   clientId?: string;
+  /** Omit to connect anonymously. */
+  auth?: BrokerCredentials | undefined;
+}
+
+/** CONNACK codes meaning "credentials refused": MQTT 3.1.1 (4, 5) and MQTT 5 (134, 135). */
+const AUTH_REFUSED_CODES = new Set([4, 5, 134, 135]);
+
+/** `connect()` rejects with this when the broker refuses the credentials (SPEC §9 AUTH_FAILED). */
+export class AuthFailedError extends Error {
+  readonly code = "AUTH_FAILED";
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthFailedError";
+  }
+}
+
+function isAuthRefusal(err: Error): boolean {
+  const code = (err as Error & { code?: unknown }).code;
+  return typeof code === "number" && AUTH_REFUSED_CODES.has(code);
 }
 
 export type MessageHandler = (topic: string, envelope: ParsedEnvelope) => void;
@@ -62,6 +87,9 @@ export function createMqttClient(options: CreateMqttClientOptions): VolleyMqttCl
         const connectOptions: IClientOptions = {
           clientId,
           reconnectPeriod: 0,
+          ...(options.auth !== undefined
+            ? { username: options.auth.username, password: options.auth.password }
+            : {}),
         };
         const instance = mqtt.connect(options.url, connectOptions);
         client = instance;
@@ -91,7 +119,8 @@ export function createMqttClient(options: CreateMqttClientOptions): VolleyMqttCl
         instance.once("error", (err) => {
           // First-error before connect rejects connect(); subsequent errors
           // flow through errorHandlers above.
-          if (!instance.connected) reject(err);
+          if (instance.connected) return;
+          reject(isAuthRefusal(err) ? new AuthFailedError(err.message) : err);
         });
       });
     },

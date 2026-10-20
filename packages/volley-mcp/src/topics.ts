@@ -21,7 +21,7 @@ export function registryTopic(agentId: string): string {
 
 /** True if a topic targets a reserved namespace (SPEC.md §2.4) — must not be written from user space. */
 export function isReservedTopic(topic: string): boolean {
-  return topic.startsWith("volley/_system/") || topic.startsWith("volley/_meta/");
+  return ["volley/_system/", "volley/_meta/", "volley/_waves/"].some((p) => topic.startsWith(p));
 }
 
 /** Basic MQTT topic-filter validation: non-empty, no spaces, wildcards used legally. */

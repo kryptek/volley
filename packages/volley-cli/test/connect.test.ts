@@ -29,3 +29,29 @@ describe("connectAsClient", () => {
     expect(io.readStderr()).toContain(MOSQUITTO_INSTALL_HINT);
   });
 });
+
+describe("connectAsClient against a broker that requires credentials", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker({ credentials: { username: "desk", password: "right" } });
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("connects with the given credentials", async () => {
+    const io = makeBufferIO();
+    const broker = await connectAsClient(tb.url, io, { username: "desk", password: "right" });
+    if (broker === null) throw new Error(`expected a connected broker: ${io.readStderr()}`);
+    await broker.disconnect();
+  });
+
+  it("on refused credentials, prints AUTH_FAILED with the volley auth hint (not the install hint)", async () => {
+    const io = makeBufferIO();
+    const broker = await connectAsClient(tb.url, io, { username: "desk", password: "wrong" });
+    expect(broker).toBeNull();
+    expect(io.readStderr()).toContain('refused the credentials for user "desk"');
+    expect(io.readStderr()).toContain("volley auth init");
+    expect(io.readStderr()).not.toContain(MOSQUITTO_INSTALL_HINT);
+  });
+});

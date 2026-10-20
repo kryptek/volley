@@ -1,0 +1,707 @@
+/* Settings window and a wave's settings — ported from the prototype styles.css (modal, cfg-*). */
+
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(3, 4, 8, 0.55);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.modal {
+  width: min(720px, 100%);
+  max-height: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
+  background-color: rgba(12, 14, 23, 0.96);
+  --win-body: linear-gradient(
+    160deg,
+    rgba(34, 38, 58, 0.5),
+    rgba(14, 16, 28, 0) 55%,
+    rgba(0, 0, 0, 0.3)
+  );
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.modal-body {
+  padding: 6px 16px 16px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 4px 24px;
+}
+.modal-body .s-group {
+  margin-top: 12px;
+}
+.modal-body .s-group h3 {
+  font-family: var(--f-display);
+  font-size: 13px;
+  color: var(--acc);
+}
+.modal-global {
+  margin-left: auto;
+}
+.cfg-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.cfg-lbl {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+.cfg-hint {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+/* Live Desk additions: the scope / read-only note, text fields, acks, copy lines. */
+.modal-note {
+  margin: 0;
+  padding: 10px 16px 0;
+  font-size: 12px;
+  color: var(--mute);
+}
+.cfg-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+.cfg-text:disabled {
+  color: var(--mute);
+}
+.cfg-ack {
+  font-size: 11.5px;
+  font-family: var(--f-mono);
+}
+.cfg-ack--ok {
+  color: var(--ok);
+}
+.cfg-ack--bad {
+  color: #ff8f7a;
+}
+.cfg-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cfg-copy code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.btn--sm {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+/* The config rows inside a Settings card (Supervisor, a wave's settings). */
+.s-card .cfg-row {
+  margin: 0;
+  padding: 10px 14px;
+}
+.s-card .cfg-row + .cfg-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* --------------------------------------------- Settings window (macOS style) */
+/* Ported from the prototype styles.css (.mac-settings, .ms-*, .s-*, .switch, .about). */
+.mac-settings {
+  width: min(940px, 100%);
+  height: min(640px, calc(100% - 32px));
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
+  background-color: #1e1f24;
+  --win-body: linear-gradient(160deg, #262833, #1b1c22 55%, #141519);
+  outline: none;
+}
+.mac-settings fieldset {
+  margin: 0;
+  min-width: 0;
+}
+/* Pickers: React Bits Gooey Nav (primitives `Seg`, D10) in a recessed track, as the agent tabs. */
+.gooey-seg {
+  font-size: 12.5px;
+}
+.gooey-seg.gooey-nav--framed {
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08);
+  --gn-muted: var(--mute);
+  --gn-ink: var(--ink);
+}
+.gooey-seg .gooey-nav__fallback {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--gn-pill) 72%, white),
+    var(--gn-pill) 55%,
+    color-mix(in srgb, var(--gn-pill) 80%, black)
+  );
+}
+.ms-side {
+  background: rgba(38, 39, 46, 0.92);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border-right: 1px solid rgba(0, 0, 0, 0.35);
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+.ms-traffic {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px 4px;
+}
+.ms-traffic i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: block;
+}
+.ms-traffic .r {
+  background: #ff5f57;
+}
+.ms-traffic .y {
+  background: #febc2e;
+}
+.ms-traffic .g {
+  background: #28c840;
+}
+.ms-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--mute);
+}
+.ms-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.ms-account {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 6px;
+}
+.avatar {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #6ee7f9, #8b5cf6);
+  color: #0b0d16;
+  font-weight: 700;
+  font-size: 13px;
+}
+.ms-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ms-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ms-list:last-of-type {
+  border-bottom: 0;
+}
+.ms-list button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.ms-list button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ms-list button.on {
+  background: #0a84ff;
+  color: #fff;
+}
+.ms-none {
+  padding: 0 8px;
+}
+.tile {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  flex: none;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.2);
+}
+.tile--lg {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.ms-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #1e1f24;
+}
+.ms-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ms-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  font-family: var(--f-ui);
+}
+.ms-close {
+  margin-left: auto;
+}
+.ms-body {
+  padding: 16px 20px 24px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ms-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+.s-group h3 {
+  margin: 0 0 6px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mute);
+}
+.s-card {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.s-foot {
+  margin: 6px 4px 0;
+  font-size: 11.5px;
+  color: var(--dim);
+  max-width: 70ch;
+}
+.s-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mute);
+}
+.s-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  min-height: 44px;
+}
+.s-row + .s-row,
+.s-pad + .s-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.s-row-l {
+  font-size: 13px;
+  min-width: 0;
+}
+.s-hint {
+  font-size: 11.5px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+.s-row-r {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  max-width: 100%;
+}
+.s-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 260px;
+}
+.s-slider > *:first-child {
+  flex: 1;
+}
+.s-slider input[type="range"] {
+  width: 100%;
+  accent-color: #0a84ff;
+}
+.s-val {
+  min-width: 48px;
+  text-align: right;
+  color: var(--mute);
+}
+.s-pad {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bg-grid--3 {
+  grid-template-columns: repeat(3, 1fr);
+  max-height: 220px;
+}
+.switch {
+  width: 38px;
+  height: 22px;
+  flex: none;
+  border-radius: 999px;
+  border: 0;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.18);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s;
+}
+.switch.on {
+  background: #34c759;
+}
+.switch.on i {
+  transform: translateX(16px);
+}
+.switch:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 2px;
+}
+.about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 0;
+  text-align: center;
+}
+.about p {
+  margin: 0;
+  max-width: 52ch;
+}
+.about-mark {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: 44px;
+  letter-spacing: -0.03em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch i {
+    transition: none;
+  }
+}
+/* Phone (below NARROW_PX, as the rest of the Desk): the sidebar becomes a scrolling strip. */
+@media (max-width: 699.98px) {
+  .mac-settings {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: calc(100% - 24px);
+  }
+  .ms-side {
+    flex-direction: row;
+    overflow-x: auto;
+    align-items: center;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  }
+  .ms-traffic {
+    display: none;
+  }
+  /* The account shrinks to its avatar (name and role in its title); the text stays for screen readers. */
+  .ms-account {
+    flex: none;
+    padding: 0;
+  }
+  .ms-account .avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 11px;
+  }
+  .ms-account .min0 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ms-search {
+    flex: none;
+    width: 120px;
+  }
+  .ms-side nav {
+    display: flex;
+    gap: 4px;
+  }
+  .ms-list {
+    flex-direction: row;
+    border: 0;
+    padding: 0;
+  }
+  .ms-list button {
+    white-space: nowrap;
+  }
+  .ms-body {
+    padding: 12px 12px 20px;
+  }
+  .s-slider {
+    width: 160px;
+  }
+  .s-row {
+    flex-wrap: wrap;
+  }
+  .bg-grid--3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Settings › Claude accounts & usage (prototype `ClaudeAccounts`). */
+.claude-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.claude-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  min-width: 0;
+}
+.claude-card--add {
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--mute);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  min-height: 180px;
+}
+.claude-card--add:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(217, 119, 87, 0.6);
+}
+.claude-card--add:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.cc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cc-head .chip {
+  margin-left: auto;
+}
+.cc-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.meter-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+.meter-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  margin: 4px 0 2px;
+}
+.meter-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.8s ease;
+}
+.meter-bar .meter-ok {
+  background: #34c759;
+}
+.meter-bar .meter-warn {
+  background: #ffcc00;
+}
+.meter-bar .meter-hot {
+  background: #ff453a;
+}
+.meter-pct.meter-ok {
+  color: #7ee2a0;
+}
+.meter-pct.meter-warn {
+  color: #ffd60a;
+}
+.meter-pct.meter-hot {
+  color: #ff8f86;
+}
+.cc-move,
+.modal-acct {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cc-move select,
+.modal-acct select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 8px;
+}
+.modal-acct {
+  flex-wrap: wrap;
+  padding: 0 18px 10px;
+  font-size: 12.5px;
+}
+.pair {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(217, 119, 87, 0.45);
+}
+.pair .stepper {
+  background: transparent;
+}
+.pair h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+.claude-add-label {
+  width: 100%;
+  max-width: 320px;
+  margin: 4px 0 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.btn--blue {
+  background: #0a84ff;
+  border-color: #0a84ff;
+  color: #fff;
+}
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  color: var(--mute);
+  font-size: 13px;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(217, 119, 87, 0.25);
+  border-top-color: #d97757;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.s-error {
+  margin: 6px 0;
+  font-size: 12.5px;
+  color: #ff8f86;
+}

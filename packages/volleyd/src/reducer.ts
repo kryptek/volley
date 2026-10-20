@@ -1,0 +1,528 @@
+import { type DecisionRecord, parksTask } from "./decisions";
+import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import type {
+  JournalEvent,
+  TaskAgents,
+  TaskId,
+  TaskStage,
+  TaskState,
+  TunablesPatch,
+  Wave,
+  WaveState,
+  WaveStatus,
+} from "./types";
+
+/**
+ * Everything a wave's journal reduces to: the published wave state (T1 wave-state payload) plus
+ * the bookkeeping the scheduler needs that the wire shape does not carry.
+ */
+export interface WaveRecord {
+  /** Highest seq applied; events with seq ≤ this are no-ops (idempotent replay). */
+  seq: number;
+  /** null until `wave_submitted`. */
+  state: WaveState | null;
+  /**
+   * The effective plan (normalised): what the scheduler and spawner use. Equal to `plan` until a
+   * versioned re-submission keeps something of an older version running (plan-apply.ts).
+   */
+  wave: Wave | null;
+  /** The latest submitted wave file (normalised). Absent in snapshots that predate versioning. */
+  plan?: Wave | null;
+  /** Tasks the scheduler has admitted, in admission order. */
+  admitted: TaskId[];
+  /** Agents spawned for this wave (retries and reviewers included) — counts against spawn_budget. */
+  spawns: number;
+  /** This wave's `config:` overrides. */
+  overrides: TunablesPatch;
+  /** Every decision opened in this wave (open and resolved), by id. */
+  decisions: Record<string, DecisionRecord>;
+  /** The last steering message sent per task — numbers the next one and fills `supersedes`. */
+  steers: Record<TaskId, { seq: number; message_id: string }>;
+  /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
+  pipeline: Record<TaskId, TaskPipeline>;
+  /**
+   * Each task's unrecovered spawn failures, one per role (two roles of a step spawn at once):
+   * `spawn_failed` until that role spawns (`agent_spawned`, `spawn_recovered`), the task is
+   * cancelled or done.
+   */
+  spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
+  /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
+  budget_raised?: number;
+}
+
+/** A role's latest failed spawn: what failed, how often in a row, and when it is retried. */
+export interface SpawnFailure {
+  role: string;
+  code: string;
+  message: string;
+  at: string;
+  /** The journal seq of the failure (orders a task's roles). */
+  seq: number;
+  /** Failed attempts in a row. */
+  attempt: number;
+  /** The agent attempt (its branch's `-<n>`) the failures are for; null in older journals. */
+  spawn_attempt: number | null;
+  /** The next automatic retry; null once retries stopped (`spawn_retry_max`). */
+  next_retry_at: string | null;
+}
+
+/** A task's most recent unrecovered spawn failure, any role. */
+export function latestSpawnFailure(rec: WaveRecord, task: TaskId): SpawnFailure | undefined {
+  let latest: SpawnFailure | undefined;
+  for (const f of Object.values(rec.spawnFailures[task] ?? {})) {
+    if (latest === undefined || f.seq > latest.seq) latest = f;
+  }
+  return latest;
+}
+
+/** Forget `role`'s spawn failure on `task` (and the task's entry once it has none). */
+function clearSpawnFailure(rec: WaveRecord, task: TaskId, role: string): void {
+  const roles = rec.spawnFailures[task];
+  if (roles === undefined) return;
+  delete roles[role];
+  if (Object.keys(roles).length === 0) delete rec.spawnFailures[task];
+}
+
+/**
+ * A snapshot record as read from disk, with fields added after it was written defaulted (e.g.
+ * `decisions`/`steers` in snapshots from before decisions existed).
+ */
+export function normalizeRecord(rec: Partial<WaveRecord>): WaveRecord {
+  return { ...emptyRecord(), ...rec };
+}
+
+export function emptyRecord(): WaveRecord {
+  return {
+    seq: 0,
+    state: null,
+    wave: null,
+    plan: null,
+    admitted: [],
+    spawns: 0,
+    overrides: {},
+    decisions: {},
+    steers: {},
+    pipeline: {},
+    spawnFailures: {},
+    budget_raised: 0,
+  };
+}
+
+const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
+  wave_paused: "paused",
+  wave_resumed: "running",
+  wave_stopped: "stopped",
+  wave_complete: "complete",
+};
+
+/**
+ * Apply one journal event. Pure: returns a new record, or the same record object when the event
+ * is a duplicate (seq already applied) — re-applying an event is a no-op.
+ */
+export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
+  if (ev.seq <= rec.seq) return rec;
+  const next = structuredClone(rec);
+  next.seq = ev.seq;
+
+  if (ev.type === "wave_submitted") {
+    const wave = ev.data.wave as Wave;
+    next.wave = wave;
+    next.plan = wave;
+    next.overrides = wave.config;
+    next.state = {
+      wave: wave.wave,
+      version: wave.version,
+      owner: (ev.data.owner as string | null | undefined) ?? null,
+      repo: wave.repo,
+      release_branch: wave.release_branch,
+      status: "running",
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      spec: specOf(wave),
+      ...briefPrefaceOf(ev),
+      updated_at: ev.at,
+    };
+    return next;
+  }
+
+  const state = next.state;
+  if (state === null) return next; // events before submission carry no wave state
+  state.updated_at = ev.at;
+  const task = ev.task !== undefined ? state.tasks.find((t) => t.id === ev.task) : undefined;
+
+  switch (ev.type) {
+    case "wave_versioned": {
+      // plan-apply.ts: `plan` is the file as submitted, `wave` the effective plan.
+      const wave = ev.data.wave as Wave;
+      const plan = (ev.data.plan as Wave | undefined) ?? wave;
+      next.wave = wave;
+      next.plan = plan;
+      next.overrides = plan.config;
+      state.version = plan.version;
+      state.release_branch = plan.release_branch;
+      state.spec = specOf(plan);
+      Object.assign(state, briefPrefaceOf(ev));
+      for (const t of state.tasks) {
+        const issue = wave.tasks[t.id]?.issue;
+        if (issue !== undefined) t.issue = issue;
+      }
+      break;
+    }
+    case "task_queued": {
+      if (ev.task === undefined) break;
+      const queued: TaskState = {
+        id: ev.task,
+        issue: (ev.data.issue as number | undefined) ?? next.wave?.tasks[ev.task]?.issue ?? 0,
+        stage: "queued",
+        agents: {},
+      };
+      if (task === undefined) state.tasks.push(queued);
+      else if (task.stage === "cancelled") {
+        // Re-added by a later plan version, or restarted on a new issue: starts over, on the
+        // issue the event names.
+        state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
+        next.admitted = next.admitted.filter((id) => id !== ev.task);
+        const def = next.wave?.tasks[ev.task];
+        if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
+      }
+      break;
+    }
+    case "task_admitted":
+      if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
+      break;
+    case "agent_spawned":
+      next.spawns += 1;
+      if (task !== undefined) {
+        task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+      }
+      // That spawn launched: its failures are over (spawn_recovered reports them).
+      if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
+      break;
+    case "stage_entered":
+      if (task === undefined) break;
+      if (task.stage === "awaiting_decision" && ev.data.stage !== "awaiting_decision") {
+        // Parked on a decision: the task stays parked; the stage is where it resumes once its
+        // last open decision is resolved.
+        for (const d of Object.values(next.decisions)) {
+          if (d.task === task.id && d.resolved === undefined && parksTask(d)) {
+            d.resume_stage = ev.data.stage as TaskStage;
+          }
+        }
+        break;
+      }
+      task.stage = ev.data.stage as TaskStage;
+      if (task.stage === "done") delete next.spawnFailures[task.id];
+      break;
+    case "spawn_failed":
+      if (ev.task !== undefined) {
+        const role = String(ev.data.role);
+        next.spawnFailures[ev.task] = {
+          ...next.spawnFailures[ev.task],
+          [role]: {
+            role,
+            code: String(ev.data.code),
+            message: String(ev.data.message ?? ""),
+            at: ev.at,
+            seq: ev.seq,
+            attempt: Number(ev.data.attempt),
+            spawn_attempt: typeof ev.data.spawn_attempt === "number" ? ev.data.spawn_attempt : null,
+            next_retry_at: (ev.data.next_retry_at as string | null | undefined) ?? null,
+          },
+        };
+      }
+      break;
+    case "spawn_recovered":
+      if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
+      break;
+    case "task_cancelled":
+      if (ev.task !== undefined) delete next.spawnFailures[ev.task];
+      if (task !== undefined) task.stage = "cancelled";
+      // A cancelled task gives back its admission (it may have been admitted but not spawned).
+      if (ev.task !== undefined) next.admitted = next.admitted.filter((id) => id !== ev.task);
+      break;
+    case "artifact_verified":
+      if (task !== undefined) {
+        if (ev.data.pr !== undefined) task.pr = ev.data.pr as NonNullable<TaskState["pr"]>;
+        if (typeof ev.data.evidence_path === "string") task.evidence_path = ev.data.evidence_path;
+      }
+      break;
+    case "decision_opened": {
+      const id = ev.data.decision_id as string;
+      if (!state.open_decisions.includes(id)) state.open_decisions.push(id);
+      const d: DecisionRecord = {
+        ...(ev.data as Omit<DecisionRecord, "wave" | "task">),
+        decision_id: id,
+        wave: state.wave,
+        task: ev.task ?? null,
+        pointers: (ev.data.pointers as DecisionRecord["pointers"] | undefined) ?? {},
+        opened_at: (ev.data.opened_at as string | undefined) ?? ev.at,
+      };
+      // CI failed on a head (T6's ci_failed): the task's PR says so.
+      const marker = ev.data.pipeline as { on?: string } | undefined;
+      const failedPr = ev.data.pr as { number: number; url: string } | undefined;
+      if (task !== undefined && marker?.on === "ci_failed" && (task.pr ?? failedPr) !== undefined) {
+        const { checks: _c, ...pr } = (task.pr ?? failedPr) as NonNullable<TaskState["pr"]>;
+        task.pr = {
+          ...pr,
+          ...(typeof ev.data.head_sha === "string" ? { head_sha: ev.data.head_sha } : {}),
+          ci: "red",
+        };
+      }
+      if (task !== undefined && parksTask(d)) {
+        // Park the task; a second open decision keeps the stage the first one saved.
+        const parked = Object.values(next.decisions).find(
+          (o) => o.task === task.id && o.resolved === undefined && o.resume_stage !== undefined,
+        );
+        d.resume_stage = parked?.resume_stage ?? task.stage;
+        task.stage = "awaiting_decision";
+      }
+      next.decisions[id] = d;
+      break;
+    }
+    case "decision_resolved": {
+      const id = ev.data.decision_id as string;
+      state.open_decisions = state.open_decisions.filter((d) => d !== id);
+      const d = next.decisions[id];
+      if (d !== undefined) {
+        d.resolved = {
+          answer: ev.data.answer as string,
+          by: ev.data.by as string,
+          at: (ev.data.at as string | undefined) ?? ev.at,
+        };
+        if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
+        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
+        // Only a parking decision keeps the task parked (one opened with `park: false` never does).
+        const stillOpen = state.open_decisions.some((o) => {
+          const x = next.decisions[o];
+          return x !== undefined && x.task === d.task && parksTask(x);
+        });
+        const parked = task !== undefined && task.stage === "awaiting_decision";
+        if (task !== undefined && parked && parksTask(d) && !stillOpen) {
+          task.stage = d.resume_stage ?? "queued";
+        }
+      }
+      break;
+    }
+    case "steering_sent":
+      if (ev.task !== undefined && ev.data.type === "steering") {
+        next.steers[ev.task] = {
+          seq: ev.data.seq as number,
+          message_id: ev.data.message_id as string,
+        };
+      }
+      break;
+    case "alarm_raised":
+      // Gated without reviews: the wave file's pipeline for the task lists none.
+      if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
+        task.reviews_skipped_by_plan = true;
+      break;
+    case "owner_claimed":
+      state.owner = (ev.data.owner as string | null | undefined) ?? null;
+      break;
+    default: {
+      const status = WAVE_STATUS[ev.type];
+      if (status !== undefined) state.status = status;
+    }
+  }
+
+  if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {
+    const decision =
+      ev.type === "decision_resolved" ? next.decisions[ev.data.decision_id as string] : undefined;
+    next.pipeline[ev.task] = reducePipeline(next.pipeline[ev.task] ?? emptyPipeline(), ev, {
+      stages: next.wave.tasks[ev.task]?.stages ?? [],
+      ...(decision !== undefined ? { decision } : {}),
+    });
+  }
+
+  derive(state, next);
+  return next;
+}
+
+/** wave-state `brief_preface` from a submit / version event (absent in older journals). */
+function briefPrefaceOf(ev: JournalEvent): Pick<WaveState, "brief_preface"> {
+  return Object.hasOwn(ev.data, "brief_preface")
+    ? { brief_preface: (ev.data.brief_preface as WaveState["brief_preface"]) ?? null }
+    : {};
+}
+
+/** The wave-state `spec`: the submitted file's shape. */
+function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
+  return {
+    version: wave.version,
+    release_branch: wave.release_branch,
+    model: wave.model,
+    pipeline: wave.pipeline,
+    tasks: Object.fromEntries(
+      wave.task_order.map((id) => {
+        const t = wave.tasks[id];
+        return [
+          id,
+          {
+            issue: t?.issue ?? 0,
+            ...(t?.title !== undefined ? { title: t.title } : {}),
+            after: t?.after ?? [],
+          },
+        ];
+      }),
+    ),
+  };
+}
+
+/**
+ * Recompute the fields that follow from task stages, open decisions and spawn failures:
+ * waiting_on/why_waiting, last_error/attempt/next_retry_at and gates. (A spawn failure's
+ * why_waiting counts down to its retry, so the daemon adds it when it publishes.)
+ */
+function derive(state: WaveState, rec: WaveRecord): void {
+  const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
+  const openOn = (task: TaskId) =>
+    state.open_decisions.filter((id) => rec.decisions[id]?.task === task);
+  state.tasks = state.tasks.map(
+    ({ last_error: _e, attempt: _a, next_retry_at: _n, ...t }): TaskState => {
+      const f = latestSpawnFailure(rec, t.id);
+      return f === undefined
+        ? t
+        : {
+            ...t,
+            last_error: { code: f.code, message: f.message, at: f.at },
+            attempt: f.attempt,
+            next_retry_at: f.next_retry_at,
+          };
+    },
+  );
+  state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
+    withStageGroup(t, rec.pipeline[t.id]),
+  );
+  state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, alarms: _a, ...t }) => {
+    if (t.stage === "awaiting_decision") {
+      const ids = openOn(t.id);
+      return ids.length > 0
+        ? { ...t, waiting_on: ids, why_waiting: `awaiting decision ${ids.join(", ")}` }
+        : t;
+    }
+    // Blocked on purpose (a cancelled relaunch decision): its stage_entered says why.
+    const blockedWhy = t.stage === "blocked" ? rec.pipeline[t.id]?.why : undefined;
+    if (blockedWhy !== undefined) return { ...t, why_waiting: blockedWhy };
+    // Held for CI on a pushed head (the agent is already retired): say so, with the PR's state.
+    const hold = rec.pipeline[t.id]?.ci_hold;
+    if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
+      const at = hold.sha.slice(0, 7);
+      const why =
+        hold.checks.total === 0
+          ? `CI pending on ${at} (no run yet)`
+          : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
+      const pr = hold.pr ?? t.pr;
+      return {
+        ...t,
+        why_waiting: why,
+        ...(pr !== undefined
+          ? {
+              pr: {
+                number: pr.number,
+                url: pr.url,
+                head_sha: hold.sha,
+                ci: hold.checks.total === 0 ? ("none" as const) : ("running" as const),
+                checks: hold.checks,
+              },
+            }
+          : {}),
+      };
+    }
+    const pending =
+      t.stage === "queued"
+        ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
+        : [];
+    if (pending.length === 0) {
+      // A done task's merge that went in at another head than the gate saw (merged_unverified_head).
+      const alarms = surfacedAlarms(rec.pipeline[t.id]);
+      const first = alarms[0];
+      if (first === undefined) return t;
+      return { ...t, alarms, ...(t.stage === "done" ? { why_waiting: first.message } : {}) };
+    }
+    // A dependency parked on a decision parks its dependents, naming the decision.
+    const parked = pending.filter((d) => stageOf.get(d) === "awaiting_decision");
+    const ids = parked.flatMap(openOn);
+    const why =
+      ids.length > 0
+        ? `awaiting decision ${ids.join(", ")} (${parked.join(", ")})`
+        : `after: ${pending.join(", ")}`;
+    return { ...t, waiting_on: pending, why_waiting: why };
+  });
+  state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+}
+
+/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
+export function raiseBy(answer: string): number | null {
+  const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
+  const n = m !== null ? Number(m[1]) : 0;
+  return n >= 1 ? n : null;
+}
+
+/** Alarms the wave state carries per task (the Desk and `volleyd status` show them). */
+function surfacedAlarms(p: TaskPipeline | undefined): NonNullable<TaskState["alarms"]> {
+  const m = p?.alarms?.merged_unverified_head;
+  if (m === undefined) return [];
+  const short = (x: unknown) => (typeof x === "string" ? x.slice(0, 7) : "?");
+  return [
+    {
+      alarm: "merged_unverified_head",
+      message: `merged with an unverified head: gated ${short(m.gated)}, merged ${short(m.merged)}`,
+    },
+  ];
+}
+
+/** Role → its short name in a stage group's label. */
+const GROUP_NAME: Record<string, string> = {
+  spec_reviewer: "spec",
+  quality_reviewer: "quality",
+  fixup: "fixup",
+  implementer: "implement",
+};
+
+/**
+ * While a parallel stage group runs (more than one role in the step), the task carries the
+ * group's label — `review (spec + quality)` — and each role with its agent and state. The
+ * closed stage enum is unchanged: `stage` is the group's first stage.
+ */
+function withStageGroup(t: TaskState, p: TaskPipeline | undefined): TaskState {
+  if (p === undefined || p.roles.length < 2 || p.rebasing) return t;
+  const groupStages = new Set(["spec_review", "quality_review", "fixup", "implement"]);
+  if (!groupStages.has(t.stage)) return t;
+  const reviewing = p.roles.every((r) => r === "spec_reviewer" || r === "quality_reviewer");
+  const names = p.roles.map((r) => GROUP_NAME[r] ?? r).join(" + ");
+  return {
+    ...t,
+    stage_label: reviewing ? `review (${names})` : names,
+    stage_group: p.roles.map((role) => {
+      const run = p.runs[role];
+      const state =
+        run === undefined
+          ? ("pending" as const)
+          : run.accepted
+            ? ("done" as const)
+            : run.retired !== undefined
+              ? ("retired" as const)
+              : ("running" as const);
+      return { role, ...(run !== undefined ? { agent_id: run.agent_id } : {}), state };
+    }),
+  };
+}
+
+/** Fold events onto a record (default: empty). */
+export function replay(
+  events: Iterable<JournalEvent>,
+  from: WaveRecord = emptyRecord(),
+): WaveRecord {
+  let rec = from;
+  for (const ev of events) rec = apply(rec, ev);
+  return rec;
+}
+
+/** Reduce a wave journal to its wave state. Throws if the journal never submitted a wave. */
+export function reduce(events: Iterable<JournalEvent>): WaveState {
+  const { state } = replay(events);
+  if (state === null) throw new Error("journal has no wave_submitted event");
+  return state;
+}

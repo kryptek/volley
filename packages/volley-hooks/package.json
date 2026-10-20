@@ -1,0 +1,21 @@
+{
+  "name": "volley-hooks",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Volley Claude Code hooks \u2014 registry model, mailbox drain + inject + ack, idle/awaiting-input, heartbeats",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:integration": "VOLLEY_INTEGRATION=1 vitest run test/integration",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:template": "bun run scripts/check-template.ts"
+  },
+  "dependencies": {
+    "volley-mcp": "workspace:*"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.0",
+    "vitest": "^2.1.0"
+  }
+}

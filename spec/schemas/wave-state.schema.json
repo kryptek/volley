@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/wave-state.schema.json",
+  "title": "Volley Wave State",
+  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. See spec section 4.6.1.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/state" },
+        "type": { "const": "wave_state" },
+        "payload": {
+          "type": "object",
+          "required": [
+            "wave",
+            "version",
+            "owner",
+            "repo",
+            "release_branch",
+            "status",
+            "tasks",
+            "open_decisions",
+            "gates",
+            "updated_at"
+          ],
+          "properties": {
+            "wave": { "$ref": "#/$defs/waveId" },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Wave file version (bumped on a versioned re-submission)."
+            },
+            "owner": {
+              "oneOf": [{ "$ref": "#/$defs/agentId" }, { "type": "null" }],
+              "description": "Owning coordinator agent id, or null when the wave is orphaned."
+            },
+            "repo": { "type": "string", "minLength": 1 },
+            "release_branch": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["running", "paused", "awaiting_decision", "complete", "stopped"] },
+            "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+            "open_decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionId" } },
+            "gates": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/taskId" },
+              "description": "Task ids that are merge-ready and await a human merge."
+            },
+            "spec": { "$ref": "#/$defs/spec" },
+            "coordinator": { "$ref": "#/$defs/coordinator" },
+            "effective_config": {
+              "$ref": "config.schema.json#/$defs/tunables",
+              "description": "Global config with this wave's config: overrides applied."
+            },
+            "brief_preface": {
+              "oneOf": [{ "$ref": "#/$defs/briefPreface" }, { "type": "null" }],
+              "description": "The brief preface every agent of the current plan version gets (spec section 4.6.9), or null when the wave has none."
+            },
+            "updated_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "waveId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "decisionId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$",
+      "description": "Task id from the wave file (e.g. T1). Case-preserving; lowercase it when deriving an agent id."
+    },
+    "stage": {
+      "enum": [
+        "queued",
+        "implement",
+        "spec_review",
+        "quality_review",
+        "fixup",
+        "merge_ready",
+        "done",
+        "blocked",
+        "awaiting_decision",
+        "cancelled"
+      ]
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "issue", "stage", "agents"],
+      "properties": {
+        "id": { "$ref": "#/$defs/taskId" },
+        "issue": { "type": "integer", "minimum": 1 },
+        "stage": { "$ref": "#/$defs/stage" },
+        "agents": {
+          "type": "object",
+          "description": "Current agent id per pipeline role.",
+          "properties": {
+            "implementer": { "$ref": "#/$defs/agentId" },
+            "spec_reviewer": { "$ref": "#/$defs/agentId" },
+            "quality_reviewer": { "$ref": "#/$defs/agentId" },
+            "fixup": { "$ref": "#/$defs/agentId" },
+            "rebase": { "$ref": "#/$defs/agentId" }
+          }
+        },
+        "waiting_on": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "why_waiting": { "type": "string" },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The remote host the task's agents run on (its name from the wave file); absent for the supervisor's own host."
+        },
+        "host_down": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Set while the task's host is a paired machine whose tunnel is down (SPEC §4.6.14): why, e.g. 'no heartbeat for 90 s'. Covers running agents too, not only parked spawns; absent while the machine is up."
+        },
+        "screen_stale": {
+          "type": "boolean",
+          "description": "True while the supervisor's screen capture for one of the task's agents is backed off (slow or failing), so its retained screen topic may be out of date."
+        },
+        "pr": {
+          "type": "object",
+          "required": ["number", "url"],
+          "properties": {
+            "number": { "type": "integer", "minimum": 1 },
+            "url": { "type": "string", "format": "uri" },
+            "head_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+            "ci": { "enum": ["green", "red", "running", "none"] },
+            "checks": {
+              "type": "object",
+              "required": ["done", "total"],
+              "description": "While the supervisor holds the task for CI on head_sha: its runs completed, and all of them.",
+              "properties": {
+                "done": { "type": "integer", "minimum": 0 },
+                "total": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        },
+        "stage_label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "While a parallel stage group runs, its label (e.g. 'review (spec + quality)'); stage stays the group's first stage."
+        },
+        "stage_group": {
+          "type": "array",
+          "description": "While a parallel stage group runs: each role, its agent and its state.",
+          "items": {
+            "type": "object",
+            "required": ["role", "state"],
+            "properties": {
+              "role": { "type": "string", "minLength": 1 },
+              "agent_id": { "$ref": "#/$defs/agentId" },
+              "state": { "enum": ["pending", "running", "done", "retired"] }
+            }
+          }
+        },
+        "alarms": {
+          "type": "array",
+          "description": "Alarms on the task that still hold (e.g. merged_unverified_head), each with a human-readable line.",
+          "items": {
+            "type": "object",
+            "required": ["alarm", "message"],
+            "properties": {
+              "alarm": { "type": "string", "minLength": 1 },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "evidence_path": { "type": "string", "minLength": 1 },
+        "last_error": {
+          "type": "object",
+          "required": ["code", "message", "at"],
+          "description": "The most recent of the task's unrecovered spawn failures (counted per role): present while any role's spawn has failed and not spawned since; gone once each such role spawns, or the task is cancelled or done.",
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Spawn attempts in a row that failed (with last_error)."
+        },
+        "next_retry_at": {
+          "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+          "description": "When the supervisor retries the failed spawn on its own; null once it stopped retrying (with last_error)."
+        },
+        "reviews_skipped_by_plan": {
+          "type": "boolean",
+          "description": "True once the task reached merge_ready without reviews because its wave-file pipeline lists no review stage (spec section 4.6.8)."
+        }
+      }
+    },
+    "briefPreface": {
+      "type": "object",
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The preface file, as resolved on the supervisor's host."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the file's bytes."
+        },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "pipelineStep": {
+      "description": "A stage name, or a nested array of stage names that run in parallel.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      ]
+    },
+    "spec": {
+      "type": "object",
+      "description": "The submitted wave file, so a client can render the dependency graph without reading YAML.",
+      "required": ["version", "tasks"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "release_branch": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "pipeline": { "type": "array", "items": { "$ref": "#/$defs/pipelineStep" } },
+        "tasks": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["issue", "after"],
+            "properties": {
+              "issue": { "type": "integer", "minimum": 1 },
+              "title": { "type": "string" },
+              "after": { "type": "array", "items": { "$ref": "#/$defs/taskId" } }
+            }
+          }
+        }
+      }
+    },
+    "coordinator": {
+      "type": "object",
+      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics.",
+      "required": ["agent_id", "state", "last_seen"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "state": { "enum": ["working", "awaiting_input", "gone"] },
+        "question": { "type": "string" },
+        "session_url": { "type": "string", "format": "uri" },
+        "workspace": { "type": "string" },
+        "last_seen": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

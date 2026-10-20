@@ -7,6 +7,11 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
 const DEFAULT_BROKER_URL = "ws://localhost:9001";
+/** Dev-only Desk sign-in variables: Vite inlines `VITE_*` into a built bundle, so a build drops them. */
+const DEV_ONLY_CREDENTIALS = [
+  "VITE_VOLLEY_BROKER_USERNAME",
+  "VITE_VOLLEY_BROKER_PASSWORD",
+] as const;
 
 /**
  * Injectable child-process surface — production calls `node:child_process.spawn`;
@@ -43,7 +48,9 @@ export async function dash({
       args: argv,
       options: {
         build: { type: "boolean" },
+        legacy: { type: "boolean" },
         port: { type: "string" },
+        host: { type: "string" },
         "broker-url": { type: "string" },
         open: { type: "boolean" },
         "no-open": { type: "boolean" },
@@ -63,6 +70,8 @@ export async function dash({
   }
 
   const buildMode = parsed.values.build === true;
+  // The Desk replaced the dashboard; `--legacy` keeps the old one reachable until its removal.
+  const pkg = parsed.values.legacy === true ? "volley-dash" : "volley-desk";
   const openFlag = parsed.values.open === true;
   const noOpenFlag = parsed.values["no-open"] === true;
   if (openFlag && noOpenFlag) {
@@ -80,7 +89,16 @@ export async function dash({
     port = Number.parseInt(portStr, 10);
   }
 
-  const brokerUrl = (parsed.values["broker-url"] as string | undefined) ?? DEFAULT_BROKER_URL;
+  const host = parsed.values.host as string | undefined;
+  if (host === "") {
+    io.stderr("volley dash: --host needs an address, e.g. --host 0.0.0.0\n");
+    return EXIT.USAGE;
+  }
+  // Served on the LAN without --broker-url, the Desk connects to port 9001 on the host its page
+  // came from, so a phone reaches the laptop's broker instead of its own localhost.
+  const explicitBroker = parsed.values["broker-url"] as string | undefined;
+  const pageHostBroker = host !== undefined && pkg === "volley-desk";
+  const brokerUrl = explicitBroker ?? (pageHostBroker ? undefined : DEFAULT_BROKER_URL);
 
   // Default: open in dev, don't open in build. Explicit flags override.
   let shouldOpen = !buildMode;
@@ -93,48 +111,47 @@ export async function dash({
     return EXIT.ERROR;
   }
 
+  const cwd = resolve(repoRoot, "packages", pkg);
+  // The flag (or default) replaces an inherited VITE_VOLLEY_BROKER_URL; under --host without
+  // --broker-url it is dropped, since a stale shell export would defeat the page-host default.
+  const { VITE_VOLLEY_BROKER_URL: _inherited, ...inherited } = env;
   const childEnv: Record<string, string | undefined> = {
-    ...env,
-    VITE_VOLLEY_BROKER_URL: brokerUrl,
+    ...inherited,
+    ...(brokerUrl !== undefined ? { VITE_VOLLEY_BROKER_URL: brokerUrl } : {}),
   };
+  if (buildMode) {
+    const dropped = DEV_ONLY_CREDENTIALS.filter((k) => childEnv[k] !== undefined);
+    for (const k of dropped) delete childEnv[k];
+    if (dropped.length > 0) {
+      io.stderr(
+        `volley dash: --build ignores ${dropped.join(", ")} (Vite would inline it into the bundle); sign in from the browser instead\n`,
+      );
+    }
+  }
 
   // Vite-level passthrough args (forwarded after `--` so bun's `run` doesn't eat them).
   const viteArgs: string[] = [];
   if (port !== null) viteArgs.push("--port", String(port));
+  if (host !== undefined) viteArgs.push("--host", host);
   if (shouldOpen) viteArgs.push("--open");
 
-  if (buildMode) {
-    const buildExit = await runChild(
+  // `bun run <script>` in the package directory runs its Vite; bun forwards
+  // everything after the script name (dropping the `--`) to the script.
+  const run = (script: string, extra: string[] = []) =>
+    runChild(
       spawn,
       "bun",
-      ["run", "--filter", "volley-dash", "build"],
-      { cwd: repoRoot, env: childEnv, stdio: "inherit" },
+      ["run", script, ...(extra.length > 0 ? ["--", ...extra] : [])],
+      { cwd, env: childEnv, stdio: "inherit" },
       io,
     );
-    if (buildExit !== 0) return EXIT.ERROR;
 
-    const previewArgs = ["run", "--filter", "volley-dash", "preview"];
-    if (viteArgs.length > 0) previewArgs.push("--", ...viteArgs);
-    const previewExit = await runChild(
-      spawn,
-      "bun",
-      previewArgs,
-      { cwd: repoRoot, env: childEnv, stdio: "inherit" },
-      io,
-    );
-    return previewExit === 0 ? EXIT.OK : EXIT.ERROR;
+  if (buildMode) {
+    if ((await run("build")) !== 0) return EXIT.ERROR;
+    return (await run("preview", viteArgs)) === 0 ? EXIT.OK : EXIT.ERROR;
   }
 
-  const devArgs = ["run", "--filter", "volley-dash", "dev"];
-  if (viteArgs.length > 0) devArgs.push("--", ...viteArgs);
-  const devExit = await runChild(
-    spawn,
-    "bun",
-    devArgs,
-    { cwd: repoRoot, env: childEnv, stdio: "inherit" },
-    io,
-  );
-  return devExit === 0 ? EXIT.OK : EXIT.ERROR;
+  return (await run("dev", viteArgs)) === 0 ? EXIT.OK : EXIT.ERROR;
 }
 
 function runChild(
@@ -168,7 +185,7 @@ function runChild(
  * bin shim, so try both `import.meta.url` (the source file's location) and
  * `realpathSync(process.argv[1])` (the entry point's real path).
  */
-function findRepoRoot(): string | null {
+export function findRepoRoot(): string | null {
   const candidates: string[] = [];
   try {
     candidates.push(fileURLToPath(import.meta.url));
@@ -203,16 +220,35 @@ function walkUpToBunLock(start: string): string | null {
 
 const DASH_HELP = `Usage: volley dash [options]
 
-Launches the Volley dashboard (Vite dev server by default).
+Launches the Volley Desk (packages/volley-desk; Vite dev server by default).
 
 Options:
+  --legacy             Launch the old dashboard (packages/volley-dash) instead;
+                       deprecated, removed in a later release
   --build              Run vite build + preview the production bundle
-  --port <N>           Override Vite's port (default: Vite's default 5173)
-  --broker-url <url>   MQTT broker URL passed to the dashboard via
+  --port <N>           Override Vite's port (dev default: 5174, 5173 with --legacy;
+                       --build: Vite preview's 4173)
+  --host <addr>        Listen on <addr> (e.g. 0.0.0.0) to open the Desk from a
+                       phone or another machine; without --broker-url the
+                       Desk then connects to port 9001 on the host it was
+                       loaded from (see LAN use below)
+  --broker-url <url>   MQTT broker URL passed to the Desk via
                        VITE_VOLLEY_BROKER_URL (default: ws://localhost:9001)
   --open               Open browser on start (default in dev mode)
   --no-open            Don't open browser
   --help               Show this help
+
+The Desk asks for broker credentials on first load (the desk identity from
+volley auth init). VITE_VOLLEY_BROKER_USERNAME/PASSWORD skip that in dev mode
+only; --build drops them so no password is inlined into the bundle.
+
+LAN use (--host): the phone also needs the broker. examples/mosquitto-localhost.conf
+binds its WebSocket listener to 127.0.0.1, so add one on the LAN interface
+(listener 9001 <this-machine's LAN IP>, protocol websockets) and keep
+allow_anonymous false with the volley auth password file: the LAN can then
+reach your broker, and only broker accounts get in. ws:// sends the password
+in cleartext, so use a trusted network. Open the page by IP
+(http://<LAN IP>:5174); Vite refuses other host names.
 
 Exit codes:
   0    Vite exited cleanly

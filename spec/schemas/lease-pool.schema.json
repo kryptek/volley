@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/lease-pool.schema.json",
+  "title": "Volley Lease Pool State",
+  "description": "Retained state of one heavy-operation lease pool, published by a supervisor to volley/_system/leases/<pool>. See spec section 4.6.5.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/leases" },
+        "type": { "const": "lease_pool" },
+        "payload": {
+          "type": "object",
+          "required": ["pool", "capacity", "held", "queue", "reasons"],
+          "properties": {
+            "pool": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "capacity": { "$ref": "config.schema.json#/$defs/leasePool/properties/capacity" },
+            "held": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["lease_id", "holder", "since", "ttl_s"],
+                "properties": {
+                  "lease_id": { "$ref": "#/$defs/leaseId" },
+                  "holder": { "$ref": "#/$defs/agentId" },
+                  "since": { "type": "string", "format": "date-time" },
+                  "ttl_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
+                }
+              }
+            },
+            "queue": {
+              "type": "array",
+              "description": "FIFO: the first entry is granted next.",
+              "items": {
+                "type": "object",
+                "required": ["lease_id", "holder", "since"],
+                "properties": {
+                  "lease_id": { "$ref": "#/$defs/leaseId" },
+                  "holder": { "$ref": "#/$defs/agentId" },
+                  "since": { "type": "string", "format": "date-time" }
+                }
+              }
+            },
+            "reasons": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Human-readable reasons for the current queue (e.g. 'queued: 3/3 backend-it leases held')."
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "leaseId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" }
+  }
+}

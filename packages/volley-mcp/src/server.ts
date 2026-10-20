@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import pkg from "../package.json";
 import { toToolError } from "./errors";
 import type { ServerState } from "./state";
 import { volListAgents } from "./tools/list-agents";
@@ -22,7 +23,7 @@ interface McpToolResponse {
 
 /** Build the MCP server with all seven Volley tools bound to the given ServerState. */
 export function createServer(state: ServerState): McpServer {
-  const server = new McpServer({ name: "volley-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "volley-mcp", version: pkg.version });
 
   /**
    * Wraps a typed tool function for MCP registration. The input is typed as `unknown`
@@ -125,12 +126,20 @@ export function createServer(state: ServerState): McpServer {
   server.registerTool(
     "vol_send_mailbox",
     {
-      description: "Deliver a mailbox message to another agent. Requires prior vol_register.",
+      description:
+        "Deliver a mailbox message to another agent. Returns message_id (the envelope correlation_id); with wait_ack_ms, also waits for the recipient's ack. Requires prior vol_register.",
       inputSchema: {
         to_agent_id: z.string(),
-        type: z.enum(["steering", "cancel", "nudge", "query"]),
-        payload: z.object({ text: z.string() }).passthrough(),
-        correlation_id: z.string().nullable().optional(),
+        type: z.enum(["steering", "cancel", "nudge", "query", "ack"]),
+        payload: z
+          .object({
+            text: z.string(),
+            seq: z.number().int().nonnegative().optional(),
+            supersedes: z.string().uuid().optional(),
+          })
+          .passthrough(),
+        correlation_id: z.string().uuid().nullable().optional(),
+        wait_ack_ms: z.number().int().positive().optional(),
       },
     },
     wrap(volSendMailbox),

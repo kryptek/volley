@@ -1,0 +1,75 @@
+/*
+ * Phone width (D8): below 700 px (the JS `NARROW_PX`) the top bar keeps the
+ * brand, the needs-you pill and its tools (`TopBar compact` drops the counts),
+ * windows are clamped in JS (`clampWindowWidth`), and the steering bar, a
+ * wave's settings and the Needs-you actions fit the viewport (the Settings
+ * window's own phone layout is in settings.css). Loaded after desk.css (main.tsx).
+ */
+@media (max-width: 699.98px) {
+  .topbar {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+  .topbar-tools {
+    margin-left: auto;
+  }
+  .ny-pill {
+    padding: 6px 10px;
+  }
+
+  .steer,
+  .prompt-bar {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .modal-scrim {
+    padding: 8px;
+  }
+  .modal {
+    max-height: calc(100% - 16px);
+  }
+  .modal-body {
+    grid-template-columns: 1fr;
+  }
+
+  .claude-cards {
+    grid-template-columns: 1fr;
+  }
+  .acct-pick {
+    max-width: 96px;
+  }
+
+  .needs-you .ny-actions,
+  .pair .ny-actions {
+    flex-wrap: wrap;
+  }
+  .needs-you .ny-actions > * {
+    flex: 1 1 auto;
+  }
+}
+
+/*
+ * Reduced motion (D8): the prototype's list in one place (each stylesheet
+ * also stops its own). The React Bits effects read the media query
+ * themselves; the narration effects drop to plain text (`useReducedMotion`).
+ */
+@media (prefers-reduced-motion: reduce) {
+  .tether,
+  .clawd--wait,
+  .win-attn-pulse,
+  .caret,
+  .spinner,
+  .win--born {
+    animation: none !important;
+  }
+  .meter-bar > span,
+  .ctx-bar > span {
+    transition: none !important;
+  }
+  .world--anim,
+  .world--anim .win,
+  .tethers {
+    transition: none !important;
+  }
+}

@@ -1,0 +1,84 @@
+# volleyd config: copy to $VOLLEYD_HOME/config.yaml (default ~/.volley/volleyd/config.yaml).
+# Every key is optional and layers over the built-in defaults (src/config-defaults.ts); a wave
+# file's `config:` block layers over this. All of it is hot-reloadable: change it with
+# `volleyd config set <path> <value>` (validated, journaled, applied without a restart) rather
+# than by editing this file while the daemon runs. Bounds: spec/schemas/config.schema.json.
+
+# hard_ceiling: 12              # max live supervised agents across all waves (runaway fuse)
+# spawn_budget_multiplier: 3    # raises the derived spawn budget to multiplier x task count
+
+# Heavy-operation lease pools. A command matching a pool's `match` regex (checked by the
+# volley-hooks PreToolUse lease hook) runs inside `volley lease run --pool <pool> -- ...` and
+# waits for one of `capacity` leases. Lowering a capacity never preempts a holder; removing a
+# pool keeps its holders and rejects new requests.
+# lease_pools:
+#   backend-it:
+#     capacity: 3
+#     ttl_s: 3600               # lease expiry unless renewed (default 3600)
+#     match: ["mvn .*verify", "mvn .*test", "gradle .*integrationTest"]
+#   build:
+#     capacity: 2
+#     match: ["npm run build", "vite build"]
+#   browser:
+#     capacity: 2
+#     match: ["playwright"]
+
+# Load-aware spawn admission: a signal above its max holds new starts (never running work)
+# until it has been clear for `hysteresis_samples` consecutive samples (one sample per tick).
+# admission:
+#   memory_pressure_max_level: 2   # macOS level: 1 normal, 2 warn, 4 critical
+#   cmux_ping_max_ms: 2000         # `cmux ping` wall time
+#   container_max: 20              # running containers (`docker info`)
+#   api_overload_window_s: 300     # window for provider overload / rate-limit signals
+#   api_overload_max: 3            #   ... and how many of them are tolerated in it
+#   ci_queue_max: 10               # queued workflow runs of the wave's repo (`gh api`)
+#   hysteresis_samples: 3
+
+# claim_after_s: 1800
+# heartbeat_alarm_s: 600        # no heartbeat this long while working -> screen check
+# idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
+# fallback_model: null
+# mailbox: { session_expiry_s: 604800 }
+# worktree_root: ~/.volley/worktrees  # default $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set
+# spawn_timeout_s: 120
+# spawn_retry_max_s: 900        # cap on a failed spawn's retry delay (30 s, doubling)
+# spawn_retry_max: 8            # failed attempts in a row before retries stop (decision says so)
+# brief_preface_max_bytes: 16384  # largest brief preface; a larger one refuses run / the spawn
+# wake_grace_s: 120
+# screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+# stop_grace_s: 30              # after `volleyd stop`: seconds agents get to end; then force-retired
+# dynsec_batch_ms: 50           # window collecting simultaneous mints / deletes into ONE broker
+#                               # control message (one Dynamic Security state-file rewrite)
+# credential_sweep_interval_s: 600  # seconds between sweeps deleting logins of agents no longer live
+
+# Claude account profiles (README "Claude accounts"): the account an agent runs under when its
+# task and wave name none — an id from `volley claude list`, primary (your own ~/.claude), or
+# most_headroom (the signed-in account with the lowest 5-hour usage; the primary without usage
+# data). null: primary. warn_at_pct: the 5-hour usage at which each wave on that account gets an
+# account_limit decision (README "Usage metering"); nothing moves unless you answer it.
+# claude:
+#   default_account: null
+#   warn_at_pct: 90
+
+# How the pipeline's rebase step updates a PR branch when the release branch moved (README
+# "Rebase rule"): rebase (rebase + a lease-guarded force-push) or merge (merge it in + a normal
+# push; for repositories that allow no force-push of any kind).
+# branch_update: rebase
+
+# The MCP servers a launched agent loads (README "MCP wiring"): strict (only the `volley` server
+# volleyd gives it, a reproducible and minimal agent) or inherit (your own servers too, such as
+# plugin servers and connectors).
+# agent_mcp: strict
+
+# Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
+# over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and
+# must be absolute. See README "Remote hosts (ssh + tmux)".
+# hosts:
+#   buildbox:
+#     target: me@buildbox          # ssh destination ([user@]host or an ssh config alias)
+#     repo: /home/me/src/myrepo    # the wave repo's clone there
+#     volley_dir: /home/me/src/volley
+#     worktree_root: /home/me/src/.volley-worktrees   # default: .volley-worktrees beside repo
+#     tunnel:
+#       remote_port: 21883         # remote 127.0.0.1 port that reaches the broker
+#       supervise: true            # volleyd keeps `ssh -N -R` up itself

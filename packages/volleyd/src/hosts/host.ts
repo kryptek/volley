@@ -1,0 +1,79 @@
+import type { ExecFn } from "../exec";
+import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
+
+/** The fence tokens typed text needs (src/fence.ts TYPED_TEXT): a sealed launch, a switch. */
+export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch">;
+
+/** Where and how one agent's worktree is cut. */
+export interface WorktreeSpec {
+  /** The wave's repository (a local checkout on the host). */
+  repo: string;
+  /** `<worktree_root>/<wave>/<task>-<role>`. */
+  path: string;
+  /** `<wave>/<task>-<role>-<attempt>`. */
+  branch: string;
+  /** What the worktree is cut from: the wave's release branch, or a pipeline role's start commit. */
+  base: string;
+  /** Check `base` out detached (`--detach`, no branch): reviewers' read-only worktrees. */
+  detach?: boolean;
+  /**
+   * `base` is the wave's release branch: fetch it from origin first and cut from whichever of
+   * the local branch and `origin/<base>` is current (worktree.ts `resolveReleaseBase`).
+   */
+  releaseBase?: boolean;
+}
+
+export interface WorktreeResult {
+  path: string;
+  branch: string;
+  /** True when the worktree already existed (a relaunch into the same lock) and was reused. */
+  reused: boolean;
+}
+
+/** One terminal to open: the command is run by the pane's shell, nothing else is typed. */
+export interface LaunchSpec {
+  cwd: string;
+  /** Workspace title, e.g. `<wave> <task> <role>`. */
+  name: string;
+  command: string;
+  /** The sealed `.volley/launch.sh` in `cwd` (sealLaunchScript): the fence starts it only so. */
+  launch?: LaunchToken;
+}
+
+/**
+ * A machine agents run on. `local-cmux` (this package) runs them in cmux workspaces on the
+ * daemon's own host; a remote host (ssh + tmux) implements the same interface. Every child
+ * process a host starts goes through the fenced `exec`.
+ */
+export interface Host {
+  /** `local`, or a remote host's name from the wave file's per-task `host:` key. */
+  readonly name: string;
+  /** The fenced exec this host runs commands with. */
+  readonly exec: ExecFn;
+  /** `git worktree add` (or reuse) and keep `.volley/` out of the repo's status. */
+  prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult>;
+  /** Write a file on the host, creating parent directories. */
+  writeFile(path: string, content: string, mode?: number): Promise<void>;
+  /** Open a terminal running `spec.command`; resolves with the workspace ref. */
+  launch(spec: LaunchSpec): Promise<{ workspace: string }>;
+  /** The last `lines` lines of the workspace's screen, or null when it cannot be read. */
+  readScreen(workspace: string, lines: number): Promise<string | null>;
+  /** Press one key (e.g. `Enter`, `Escape`) in the workspace. */
+  sendKeys(workspace: string, key: string): Promise<void>;
+  /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
+  sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
+  /**
+   * Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`, or a
+   * retire's for the retired agent's own workspace.
+   */
+  close(workspace: string, consent: ConsentToken): Promise<void>;
+  /** The screen channel's `source` for this host's captures (default `cmux`). */
+  readonly screenSource?: string;
+  /**
+   * Read a file on the host (null when it does not exist). Remote hosts only: without it, files
+   * such as `.volley/brief-extra.md` are read from the daemon's own filesystem.
+   */
+  readFile?(path: string): Promise<string | null>;
+  /** Extra launch.sh exports for an agent (remote hosts: broker URL, namespace, agent id). */
+  launchEnv?(id: { agent_id: string; namespace: string }): Record<string, string>;
+}

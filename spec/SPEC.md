@@ -68,7 +68,8 @@ Topics follow this structure:
 #### Agent identity at runtime (informative)
 
 A conforming Volley MCP server MUST produce a unique `agent_id` per
-process start. The recommended mechanism is:
+process start, unless an assigned identity (§6.5) is present. The
+recommended mechanism is:
 
 1. Read the `VOLLEY_AGENT_ID` environment variable as a **prefix** (not
    a literal agent_id). The prefix MUST match the SPEC §2.2 grammar
@@ -94,7 +95,9 @@ entry. The auto-suffix makes the user-scope-MCP-shared-across-sessions
 case correct by default.
 
 **Discovering an agent_id.** Because the suffix is fresh per process,
-the agent_id is not knowable ahead of time. Discovery options:
+the agent_id is not knowable ahead of time (unless an assigned identity
+(§6.5) is present, in which case the supervisor that wrote it already
+knows it). Discovery options:
 
 - The MCP server's `vol_register` tool returns `{ agent_id, namespace }`
   so the calling Claude session learns its own id immediately.
@@ -117,9 +120,14 @@ the only NORMATIVE constraint. A non-MCP Volley client (a CLI, a shell
 publisher) MAY use any other mechanism to pick a grammar-conforming
 `agent_id`.
 
+**Assigned identity.** When a supervisor has written `.volley/agent.json`
+into the agent's working directory, the MCP server uses the literal
+`agent_id` from that file instead of the prefix + suffix mechanism above —
+see §6.5.
+
 ### 2.3 Channel
 
-`channel` is one of the reserved channel names listed in §4.1, OR a user-defined channel under the `_user/*` prefix.
+`channel` is one of the reserved channel names listed in §4.1, OR a user-defined channel under the `_user/*` prefix, OR a supervisor channel defined in §4.6 (informative in 0.1).
 
 ### 2.4 Reserved namespaces
 
@@ -127,8 +135,10 @@ The following top-level namespace prefixes are reserved:
 
 - `volley/_system/*` — protocol-level state (registry, broker health, federation config)
 - `volley/_meta/*` — implementation tooling (debug taps, replay logs, capture files)
+- `volley/_waves/*` — supervisor state: wave snapshots, decisions, journal events, effective supervisor config (§4.6)
+- `volley-auth/*` — one-time token redemption (§4.6.10), outside the `volley/` root so a broker ACL can confine a token's login to its own two topics
 
-Implementations MUST NOT publish user-space messages under these prefixes.
+Implementations MUST NOT publish user-space messages under these prefixes. One exception: any agent MAY publish lease requests to `volley/_system/leases/<pool>/requests` (§4.6.5). Every other topic under these prefixes is written only by the broker, the implementation's own tooling, or a supervisor (§4.6).
 
 ---
 
@@ -154,7 +164,7 @@ All Volley messages share a common JSON envelope:
 - **`schema_version`** (string) — semver of the Volley protocol. v0.1 implementations MUST emit `"0.1"` and MUST reject envelopes whose major version does not match a supported major. See §8.
 - **`agent_id`** (string) — sender's agent ID, MUST match the grammar in §2.2.
 - **`wall_time`** (string, ISO-8601 UTC with milliseconds) — sender's wall-clock at publish time. Receivers MUST NOT rely on this for ordering; it is informational.
-- **`channel`** (string) — one of the reserved channels (§4.1) or a `_user/*`-prefixed user channel.
+- **`channel`** (string) — one of the reserved channels (§4.1), a `_user/*`-prefixed user channel, or a supervisor channel defined in §4.6.
 - **`type`** (string) — channel-specific event type (e.g. `done` on the `status` channel, `tests-green` on `progress`).
 
 ### 3.2 Optional fields
@@ -177,7 +187,7 @@ Receivers MUST accept envelopes containing unknown fields and MUST NOT error on 
 |---|---|---|---|
 | `status` | 1 | yes | Last-known lifecycle state of an agent (see §5). |
 | `progress` | 0 | no | Streaming progress events (e.g. `tests-green`, `mvn-verify-done`). Fire-and-forget. |
-| `mailbox` | 1 | no | Inbound requests / commands directed at this agent. Must-deliver. The topic's `<agent_id>` segment identifies the recipient; the envelope's `agent_id` (§3.1) identifies the sender. |
+| `mailbox` | 1 | no | Inbound requests / commands directed at this agent. Must-deliver. The topic's `<agent_id>` segment identifies the recipient; the envelope's `agent_id` (§3.1) identifies the sender. Not retained, so the broker only holds a message for a recipient with a persistent session (see §4.4); delivery is confirmed end-to-end by an `ack`, not by PUBACK. |
 | `control` | 1 | no | Reserved for agent control (`kill`, `pause`, `resume`, `nudge`). Reserved in v0.1; semantics deferred to v0.2+. |
 | `result` | 1 | yes | Final artifact pointer (PR URL, log path, deploy summary). |
 | `capability` | 1 | yes | Tools / models this agent advertises. |
@@ -199,6 +209,8 @@ Conforming agents SHOULD:
 - When the agent can estimate a percent-complete, include `payload.progress` as a number in `[0, 100]` on `progress` and/or `status` envelopes — dashboards and coordinators use it to render determinate progress bars instead of indeterminate sweeps. Implementations MUST treat the field as advisory (an estimate from the agent itself) and MUST tolerate `null`, missing, or non-numeric values by falling back to the last seen value or to an indeterminate display.
 - Publish a `result` retained message before terminal `status` so late-attaching tools can see the artifact pointer
 
+**Hook activity events (informative).** The `status` state machine (§5.3) is linear, so non-terminal attention states are not status types. A harness hook (e.g. a Claude Code hook running beside the agent) reports them on the `progress` channel instead, with `payload.source: "harness-hook"`, a per-agent monotonic `payload.seq`, and the `payload.hook_event` that fired. The documented types are `heartbeat` (the agent is alive and doing something), `idle` (the turn ended; `payload.text` carries the last assistant line, and `payload.completed: true` says the harness reported the task completed), `awaiting_input` (the harness is waiting on a human; `payload.text` / `payload.notification_type` carry the notification, `payload.screen_tail` MAY carry the last terminal lines, and `payload.class` says why the harness is waiting when it is not a question, e.g. `credit` for a provider usage limit that the harness resumes from on its own; `payload.background_wait: true` says the session ended its turn without a question while a background task it started is still running, so it is waiting on that task's events, not on a human: a dashboard SHOULD NOT present it as needing a person. `background_wait` MAY also be set on the `idle` that ended such a turn, and is never set on a `permission_prompt` or on an `awaiting_input` that carries a question the turn ended on), `resumed` (the agent is working again; it clears any earlier `awaiting_input`) and `steering_applied` (reserved: a hook MAY publish it when it injects mailbox steering into the session; the reference hooks ack the mailbox message instead and do not publish it). For a coordinator session, `awaiting_input` additionally carries `payload.question` (what it is asking: the reference hooks send the question paragraph whole, or an excerpt of its end beyond 8192 characters; a supervisor's wave-state `coordinator.question`, §4.6.1, carries only its first one or two lines), `payload.session_url` and `payload.workspace` when known, so a dashboard can surface and link the waiting session; the coordinator's registry entry carries the same `session_url` / `workspace` when known. When the model itself has acted on a steering message it publishes `type: "steering_acked"` with `correlation_id` set to that mailbox message's id. A hook that re-publishes the registry entry with the harness-reported model sets `payload.model_source: "harness-hook"`, or `"unknown"` when the hook input carries no model. A registry entry without `model_source` (an agent's own `vol_register`, including the reference MCP server's auto-registration) carries a self-reported `model`, if any; the value `"self-reported"` is reserved for publishers that want to say so explicitly. The `type` field stays an open string; observers ignore progress types they do not recognise. A broker delivers one copy of a message per matching subscription, so an observer MAY treat byte-identical `progress` messages as one delivery; a publisher that can send the same content twice includes `seq` to keep them distinct. See `spec/schemas/progress.schema.json`.
+
 ### 4.4 Mailbox message types
 
 The `mailbox` channel's `type` field is one of:
@@ -207,8 +219,196 @@ The `mailbox` channel's `type` field is one of:
 - `cancel` — request the agent to abort its current task
 - `nudge` — a lightweight prod to re-evaluate or report status
 - `query` — a question expecting a response (typically correlated via `correlation_id`)
+- `ack` — the recipient's confirmation that it received a mailbox message (see below)
 
 This list matches the `type` enum in `spec/schemas/mailbox.schema.json`.
+
+**Message ids.** A mailbox message's `correlation_id` is its message id. Senders SHOULD set it to a fresh UUID unless they are deliberately correlating with an earlier message (a `query` reply, an `ack`); a message without one cannot be acked. The reference `vol_send_mailbox` generates it when the caller omits it and returns it as `message_id`.
+
+**Optional payload fields.** In addition to the required `text`:
+
+- `seq` — a non-negative integer, monotonic per sender, so a recipient can order messages and drop duplicates
+- `supersedes` — the message id of an earlier message from the same sender that this one replaces; a recipient that has not yet acted on the earlier message SHOULD act on this one instead
+
+**Acks.** A recipient acknowledges a message by publishing `type: "ack"` to the **sender's** mailbox (`volley/<ns>/<sender agent_id>/mailbox`) with `correlation_id` set to the acknowledged message id. `correlation_id` is REQUIRED on an `ack`. The payload SHOULD be `{ "text": "ACKED", "acked_type": "<type of the acknowledged message>" }`, plus `seq` when the acknowledged message carried one. A sender waiting for an ack MUST only accept one whose envelope `agent_id` is the recipient it addressed. An ack means *received*, not *obeyed*: acting on the message is reported through the agent's normal channels. Recipients MUST NOT ack an `ack`. A broker that enforces ACLs (§11.5) must let a recipient write each sender's mailbox for its ack to arrive: the reference roles (§4.6.13) let an agent login write the mailboxes of the fixed steering identities, `volleyd` and `desk`, and no other, with no per-agent grant; the broker silently drops any other ack. A coordinator session's agent id is random-suffixed (`coordinator-ab12`), which no static role can name, so an agent's ack to a coordinator is dropped and the coordinator's `wait_ack_ms` reports `acked: false`; steering that must be confirmed goes through the supervisor (whose mailbox every agent can ack) or the Desk.
+
+**Delivery.** Because mailbox messages are not retained, the broker drops a message published while the recipient holds no subscription to its mailbox. An agent that honours its mailbox (§11.3) MUST therefore keep its mailbox subscription in a **persistent MQTT session** (a live subscription on a clean session still loses whatever arrives before it subscribes or while it reconnects): connect with `clean: false` (MQTT 3.1.1) or a non-zero session expiry interval (MQTT 5), with a stable clientId it owns exclusively, and subscribe at QoS 1. The broker then queues messages while the agent is offline and delivers them on its next connect. Two clients that connect with the same clientId kick each other off, so each persistent consumer of one agent (e.g. the MCP server and a hooks drain client) MUST use its own clientId, such as `volley-<agent_id>-mcp` vs `volley-<agent_id>-hooks`. A session expiry interval applies to new connections only: an existing persistent session keeps the expiry it was created with until the client reconnects. A sender that needs confirmation SHOULD wait for the `ack` rather than trust PUBACK, which only confirms receipt by the broker.
+
+### 4.5 Reserved
+
+This section number is intentionally unused, so that references to §4.6 and its subsections stay stable.
+
+### 4.6 Supervisor topics (informative in 0.1)
+
+A **supervisor** (e.g. the `volleyd` daemon) is an agent that spawns other agents in *waves* — a set of tasks with dependencies, each driven through a review pipeline — and publishes their state for dashboards, panes and coordinators. Supervisor state lives under the reserved `volley/_waves/*` prefix and, for machine-global resources, under `volley/_system/leases/*` and `volley/_system/admission`. These topics are informative in 0.1: a deployment without a supervisor never sees them, and nothing in §11 requires them.
+
+Every message on these topics is a standard envelope (§3) whose `agent_id` is the publisher; the field tables below describe `payload`. Clearing a retained topic means publishing a zero-length retained payload (the MQTT convention), which is not an envelope and is not schema-validated. Ids that appear as topic segments (`<wave>`, `<decision_id>`, `<pool>`) use the §2.1 grammar. Wave ids and lease-pool names MUST NOT be a reserved channel name (§4.1): ACLs that grant per-channel writes through a namespace wildcard (`volley/+/<agent>/status`) would otherwise also match `volley/_waves/<wave>/<channel>` or `volley/_system/leases/<channel>`. Task ids come from the wave file and are case-preserving (`[A-Za-z0-9][A-Za-z0-9_-]{0,62}`, e.g. `T1`).
+
+| Topic | QoS | Retained? | `channel` / `type` | Schema |
+|---|---|---|---|---|
+| `volley/_waves/<wave>/state` | 1 | yes | `_waves/state` / `wave_state` | `wave-state.schema.json` |
+| `volley/_waves/<wave>/decisions/<decision_id>` | 1 | yes, while open | `_waves/decisions` / `decision_opened` \| `decision_resolved` | `decision.schema.json` |
+| `volley/_waves/<wave>/events` | 1 | no | `_waves/events` / journal event type | `wave-event.schema.json` |
+| `volley/_waves/_config` | 1 | yes | `_waves/_config` / `config` | `config.schema.json` |
+| `volley/_system/leases/<pool>` | 1 | yes | `_system/leases` / `lease_pool` | `lease-pool.schema.json` |
+| `volley/_system/leases/<pool>/requests` | 1 | no | `_system/leases/requests` / `lease_request` | `lease-request.schema.json` |
+| `volley/_system/admission` | 1 | yes | `_system/admission` / `admission` | `admission.schema.json` |
+| `volley/<ns>/<agent_id>/screen` | 0 | yes | `screen` / `screen_tail` | `screen.schema.json` |
+| `volley/_system/auth/ops/<username>` | 1 | no | `_system/auth` / `query` | `auth-request.schema.json` |
+| `volley-auth/redeem/<token_id>` | 1 | no | `_system/auth` / `query` | `auth-request.schema.json` |
+| `volley-auth/redeem/<token_id>/reply` | 1 | no | `_system/auth` / `ack` | — (§4.6.10) |
+| `volley/_system/auth/replies/<correlation_id>` | 1 | no | `_system/auth` / `ack` | — (§4.6.10) |
+| `volley/_system/claude/<acct>/signin` | 1 | no | `_system/claude` / `claude_signin_url` \| `claude_signin_done` \| `claude_signin_failed` | — (§4.6.11) |
+| `volley/<ns>/<agent_id>/usage` | 1 | yes | `usage` / `usage` | `usage.schema.json` |
+| `volley/_system/claude-accounts/<acct>` | 1 | yes | `_system/claude-accounts` / `claude_account` | `claude-account.schema.json` |
+| `volley/_system/machines/<name>` | 1 | yes | `_system/machines` / `machine` | `machine.schema.json` |
+
+`_config` is not a valid wave id (wave ids start with `[a-z0-9]`), so the config topic cannot collide with a wave.
+
+#### 4.6.1 Wave state
+
+`volley/_waves/<wave>/state` holds the full current snapshot of one wave, re-published after every change. A late-attaching client needs nothing else to render the wave.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `wave` | string | Wave id. |
+| `version` | integer ≥ 1 | Wave file version (bumped by a versioned re-submission). |
+| `owner` | agent id \| null | Coordinator that owns the wave; `null` when orphaned. |
+| `repo`, `release_branch` | string | Where the wave's PRs land. |
+| `status` | enum | `running` \| `paused` \| `awaiting_decision` \| `complete` \| `stopped`. |
+| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, host_down?, pr?, evidence_path?, screen_stale?, last_error?, attempt?, next_retry_at?, reviews_skipped_by_plan?, stage_label?, stage_group?, alarms? }`. |
+| `tasks[].stage` | enum (closed) | `queued` \| `implement` \| `spec_review` \| `quality_review` \| `fixup` \| `merge_ready` \| `done` \| `blocked` \| `awaiting_decision` \| `cancelled`. |
+| `tasks[].agents` | object | Current agent id per role: `implementer?`, `spec_reviewer?`, `quality_reviewer?`, `fixup?`, `rebase?`. |
+| `tasks[].waiting_on`, `why_waiting` | string[], string | What the task is blocked on, and a human-readable reason (e.g. `tunnel down to <target>` while a remote host's broker tunnel is down). |
+| `tasks[].host` | string | The remote host the task's agents run on (its name from the wave file or the `hosts` tunable); absent for the supervisor's own host. Per task: every agent of a task runs on the same host. |
+| `tasks[].host_down` | string | While the task's host is a paired machine that is down (§4.6.14): why (`disconnected`, `no heartbeat for 90 s`). Set on every unfinished task on that host, running ones included; absent otherwise. |
+| `tasks[].screen_stale` | boolean | `true` while the supervisor's screen capture for any of the task's agents is backed off (§4.6.6), so the retained `screen` topic may be out of date. Per task, not per agent; absent otherwise. |
+| `tasks[].last_error`, `attempt`, `next_retry_at` | object, integer, date-time \| null | While a spawn of the task has failed and that role has not spawned since: `last_error` `{ code, message, at }`, `attempt` (failed attempts in a row) and `next_retry_at` (the supervisor's next automatic retry; `null` once it stopped retrying). Failures are counted per role (two roles of one step may fail at once); these fields show the most recent one. Absent otherwise. |
+| `tasks[].pr` | object | `{ number, url, head_sha?, ci?, checks? }`; `ci` is `green` \| `red` \| `running` \| `none`. While the supervisor holds the task for CI on `head_sha`, `ci` is `running` and `checks` is `{ done, total }` (its CI runs completed, and all of them); `why_waiting` then reads e.g. `CI pending on <sha7> (2/5 checks)`. |
+| `tasks[].reviews_skipped_by_plan` | boolean | `true` once the task reached `merge_ready` without reviews because its wave-file pipeline lists no review stage (§4.6.8); absent otherwise. |
+| `tasks[].stage_label`, `stage_group` | string, object[] | While a parallel stage group runs (e.g. both reviews at once): its label (e.g. `review (spec + quality)`) and one `{ role, agent_id?, state }` per role, `state` being `pending` \| `running` \| `done` \| `retired`. `stage` stays the group's first stage (the enum is unchanged). Absent otherwise. |
+| `tasks[].alarms` | object[] | Alarms on the task that still hold, each `{ alarm, message }` with a human-readable `message` — e.g. `merged_unverified_head` (`merged with an unverified head: gated <sha7>, merged <sha7>`), whose message is also the task's `why_waiting`. Absent when none holds. |
+| `open_decisions` | string[] | Ids of open decisions (§4.6.2). |
+| `gates` | string[] | Task ids that are merge-ready and await a human merge. |
+| `spec` | object | The submitted wave file: `{ version, release_branch?, model?, pipeline?, tasks: { <id>: { issue, title?, after[] } } }`; `pipeline` is an array of stage names where a nested array runs stages in parallel. |
+| `coordinator` | object | `{ agent_id, state, question?, session_url?, workspace?, last_seen }`; `state` is `working` \| `awaiting_input` \| `gone`, maintained by the supervisor from the owner's `status` and `progress` topics (§4.3). |
+| `effective_config` | object | The §4.6.4 tunables with this wave's overrides applied. |
+| `brief_preface` | object \| null | `{ path, sha256, bytes }` of the brief preface the current plan version's agents get (§4.6.9), or `null` when the wave has none. Absent from a supervisor that predates it. |
+| `updated_at` | date-time | Time of the last change. |
+
+#### 4.6.2 Decisions
+
+A decision is a question only a human (or the owning coordinator) can answer. It is published retained to `volley/_waves/<wave>/decisions/<decision_id>` while open, MAY be re-published once with `type: "decision_resolved"` and `resolved` set, and is then cleared.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `decision_id`, `wave` | string | Identity. |
+| `task` | task id \| null | `null` for a wave-level decision. |
+| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `mcp_not_registered` \| `spawn_failed` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change` \| `pr_closed` \| `pr_head_moved` \| `spawn_budget_exhausted` \| `account_limit`. A `repo_untrusted` or `remote_repo_missing` decision carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. A `plan_change` decision carries `change`: `removed` (the new wave version dropped the task) \| `issue` (it moved the task to another issue). A `pr_closed` decision asks about a gated PR closed without a merge whose head the release branch does not carry (`landed` \| `abandoned`); a `pr_head_moved` decision asks about a PR head that moved after a gate (`rereview` \| `fixup` \| `cancel`); a `spawn_budget_exhausted` decision asks about a spawn the wave's spawn budget holds (`raise by <n>` \| `cancel`). An `account_limit` decision (§4.6.12) carries `acct`, `pct`, `resets_at` and `suggested`. |
+| `question` | string | What needs answering. |
+| `options` | string[] | Suggested answers (optional; free text is always allowed). |
+| `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
+| `opened_at` | date-time | |
+| `resolved` | object | `{ answer, by, at }`; required when `type` is `decision_resolved`. |
+
+#### 4.6.3 Wave events
+
+`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `spawn_failed`, `spawn_recovered`, `stage_entered`, `decision_opened`, `lease_granted`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`.
+
+#### 4.6.4 Supervisor config
+
+`volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits:
+
+`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `spawn_retry_max_s`, `spawn_retry_max`, `brief_preface_max_bytes`, `wake_grace_s`, `screen_tail_interval_s`, `stop_grace_s`, `dynsec_batch_ms`, `credential_sweep_interval_s` (§4.6.13), `claude: { default_account, warn_at_pct }` (`default_account`, string \| null: the Claude account an agent runs under when its task and wave name none, §4.6.11; `warn_at_pct`, default 90: the 5-hour usage that opens an `account_limit` decision, §4.6.12), `branch_update` (`rebase` \| `merge`, default `rebase`: below), `agent_mcp` (`strict` \| `inherit`, default `strict`: below), `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise } } }` (remote SSH + tmux hosts a wave task names with `host:`; `<name>` is never `local`).
+
+**Branch updates and agent MCP servers.** `branch_update` is how a supervisor's pipeline brings a PR branch up to date when the release branch moved before the gate. Under `rebase` the agent rebases onto the release branch and publishes with a lease-guarded force-push. Under `merge` it merges the release branch into the PR branch and publishes with a normal push: the supervisor MUST NOT instruct any force-push, and accepts the new head only if it descends from the head the update started at. The mode is fixed when the update starts (a supervisor records it with the step), so a change applies to later updates only. `agent_mcp` is which MCP servers a supervisor-launched agent loads. Under `strict` it loads only the supervisor's own Volley server. Under `inherit` it also loads the user's own servers (plugins, connectors). The supervisor MUST name its own Volley server `volley`, so that it takes over a user-scope entry of the same name (such as a coordinator's), and every Volley server in the session carries the agent's identity from `.volley/agent.json` (§6.5), never a coordinator's. A user entry under another name that runs a Volley server still starts, a second Volley server in the session: at spawn under `inherit` the supervisor SHOULD warn (journal and log) when the profile's `~/.claude.json` `mcpServers` or the worktree's `.mcp.json` has such an entry. `strict` gives a minimal, reproducible agent; `inherit` gives it more tools, at the cost of depending on the machine it runs on.
+
+Per-wave overrides use the same shape with every key optional (a wave file's `config:` block) and appear in the wave state as `effective_config`. The exception is `lease_pools`: pools are machine-global (§4.6.5), so a supervisor rejects a wave file that overrides them rather than accept an override it cannot apply.
+
+**Changing config.** A client sends a mailbox message (§4.4) to the supervisor with `type: "query"`, a fresh `correlation_id`, and `payload: { op: "config_set", patch, by, text }`, where `patch` is a partial tunables object (`config-set-request.schema.json`). Senders MUST include `text` (a one-line human summary), so the request is also a well-formed mailbox message (`mailbox.schema.json`), and MUST set a non-null `correlation_id` so they can match the acknowledgement. The supervisor answers with a mailbox acknowledgement correlated to the request carrying `{ applied, rejected: [{ path, reason }] }`; a patch with an unknown key or an out-of-bounds value is rejected as a whole. On success the supervisor re-publishes the retained `_config` topic with `version` incremented.
+
+#### 4.6.5 Leases
+
+Heavy operations (integration test suites, builds, browsers) are gated by machine-global lease pools. `volley/_system/leases/<pool>` holds the retained pool state `{ pool, capacity, held: [{ lease_id, holder, since, ttl_s }], queue: [{ lease_id, holder, since }], reasons[] }`; `queue` is FIFO and `reasons` explains the queue in human terms (e.g. `"queued: 3/3 backend-it leases held"`). Agents ask on `volley/_system/leases/<pool>/requests` with `payload: { op: "acquire" | "release" | "renew", lease_id, holder, ttl_s? }` (the one user-space publish §2.4 allows under a reserved prefix); the supervisor answers by re-publishing the pool state, and expires leases on TTL or when the holder's `status` turns terminal. The supervisor ignores a request whose `holder` differs from the envelope `agent_id`, so an agent can only acquire, renew or release its own leases. Requests are not retained, so one sent while the supervisor is down is lost: an agent that does not see its `lease_id` in `held` or `queue` within 30 seconds SHOULD re-send `acquire`, and the supervisor treats a repeated `acquire` for a `lease_id` it already holds or queues as a no-op. When a pool is removed from config, the supervisor keeps its holders (nothing is preempted) but drops its queued requests, adding `rejected <lease_id>: <why>` to the pool's `reasons` (or clearing the topic once the pool is empty); a client whose queued `lease_id` leaves the pool state without a grant SHOULD treat the request as rejected.
+
+#### 4.6.6 Screen channel
+
+`screen` is a reserved per-agent channel in addition to those in §4.1: QoS 0, **retained**, published by a supervisor *on the agent's behalf* (the envelope `agent_id` is the supervisor; the topic's `<agent_id>` segment names the agent). `payload: { lines (≤ 40 strings), captured_at, workspace, hash, source }` is the tail of the agent's terminal (`source` is the capture mechanism, a closed enum: `cmux` for the supervisor's own host, `tmux` for a remote SSH + tmux host); publishers SHOULD skip captures whose `hash` is unchanged. The supervisor clears the topic when the agent is retired. A supervisor whose capture is slow or failing SHOULD back off and set `tasks[].screen_stale` in the wave state (§4.6.1) until a capture succeeds in time. Agents MUST NOT publish their own `screen` channel.
+
+#### 4.6.7 Spawn admission
+
+A supervisor throttles *starts* (never running work) by measured machine load. `volley/_system/admission` holds its latest verdict, re-published after every pressure sample: `{ sampled_at, allow, throttled, reasons[], signals, waves? }`, where `allow` is how many more agents may start now (`null`: pressure sets no limit; the hard ceiling and per-wave spawn budget still apply), `reasons` has one human-readable line per signal holding starts back (e.g. `"memory pressure critical (level 4 > max 2)"`), and `signals.<name>` is `{ state, value?, max?, clean_samples?, error? }` for `memory_pressure`, `cmux_ping`, `containers`, `api_overload` and `ci_queue`, with `state` one of `clear` \| `over` \| `recovering` \| `unknown`. Thresholds and the hysteresis sample count are the §4.6.4 `admission.*` tunables: a signal over its threshold sets `allow` to 0, and must then be clear for `hysteresis_samples` consecutive samples (`recovering`) before the allowance rises again; a signal that cannot be measured is `unknown` and never trips; on a signal already tripped, an unmeasurable sample counts toward its clean samples (so a measurement tool that breaks cannot hold starts back forever), and the signal reports `recovering` with `clean_samples` and the `error` until the count is reached. A supervisor admits nothing before its first sample. `waves.<wave>` is the same verdict with that wave's overrides and its repository's CI queue applied; the supervisor also copies those reasons into `why_waiting` of the wave's ready-but-unstarted tasks (§4.6.1).
+
+#### 4.6.8 Pipeline results and the merge-ready gate
+
+A supervisor that reviews work before a human merges it MAY ask its review roles for a structured retained `result` (§4.1) published before their terminal `done`: `type: "review"` with `payload: { findings: [{ severity, file, line?, text }], verdict }`, where `severity` is `P1` (blocks the merge) \| `P2` \| `P3` and `verdict` is `approve` \| `changes_requested`, and `hygiene: { checked: true, findings: [...] }` — the reviewer's check of the diff, commit messages and PR text for person names, local usernames, machine paths, private hostnames or IPs, each hit a `P1` finding (a review without `hygiene.checked` is not a review result) — and `type: "fixup"` with `payload: { resolved: [{ finding, how }] }` (`review-result.schema.json`). A supervisor SHOULD treat an agent's `done` as a claim and verify it (pushed head, the PR for exactly that head branch, CI on exactly that head) before acting on it, and SHOULD re-check that the PR is still at the verified head before gating it; a task whose claims are verified enters stage `merge_ready`, is listed in `gates`, and carries `evidence_path`, a supervisor-local file describing that head. The supervisor does not merge: a task leaves `merge_ready` for `done` only when the supervisor observes that a human merged its PR.
+
+A supervisor that runs review roles MUST NOT move a task to `merge_ready` unless every review role in that task's pipeline has a recorded review with a verdict that holds for the head being gated: a review of that head, or of a head it descends from only through fix-ups that ran after that review, branch updates from the release branch (a rebase onto it or, under `branch_update: merge`, a merge of it, §4.6.4), and heads pushed outside the pipeline that the owner explicitly accepted without a re-review (a `pr_head_moved` decision answered `fixup`, §4.6.1), each such acceptance recorded, with who gave it, in the gated head's evidence. Any other push to the PR after a review voids that review. A pipeline without review stages is honoured only when the wave file lists it explicitly; the supervisor then sets `tasks[].reviews_skipped_by_plan` (§4.6.1).
+
+#### 4.6.9 Brief preface
+
+A supervisor that writes briefs for the agents it spawns SHOULD let a repository set rules every one of them gets. The **brief preface** is a file — `<repo>/.volley/brief-preface.md` by default, or the path in the wave file's `brief_preface` key (relative to `repo`, or absolute) — whose bytes the supervisor puts verbatim (no placeholder expansion) at the top of every brief it writes for that wave, for every role, above the role's own text and separated from it by a rule. The file MUST be UTF-8; a supervisor refuses one that is not, rather than alter its bytes. A blank file (only whitespace) counts as no preface. A supervisor bounds its size (`brief_preface_max_bytes`, §4.6.4) and refuses a wave whose preface is larger. The wave state's `brief_preface` (§4.6.1) is `{ path, sha256, bytes }` of the file as read for the current plan version (`sha256` over its bytes), or `null` when there is none, so a client can show which rules the agents got.
+
+#### 4.6.10 Accounts and one-time tokens
+
+A deployment with broker authentication keeps **accounts**: broker logins with a **role** that selects the shared broker roles they hold (§4.6.13). `admin` may do everything a coordinator may, plus the account ops below; `steer` reads everything and writes mailboxes (steering, control requests) and lease requests; `watch` adds no writes of its own; `supervisor` (a volleyd) reads and writes everything except the account-op and answer topics below (its role denies publishing to `volley/_system/auth/ops/#` and `volley/_system/auth/replies/#`, so it can neither impersonate an admin nor forge an answer); `peer` (a paired machine) writes its own agent channels and `volley/_system/machines/<username>[/#]`, which is exactly what the shared `account` role grants, so it adds nothing beyond it. Every account holds that `account` role (read `volley/#`; write its own channels and registry entry, lease requests and its own machine record `volley/_system/machines/<username>[/#]`), so even a `watch` account may write its own identity's records. Agent logins minted for dispatched agents are not accounts. The registry is a file kept by the account tool (`account.schema.json`: `{ name, role, kind, created, label? }`); it never holds a password. `account_list` adds `last_seen`: the newest of the account's retained registry entry, its retained `status` (where its LWT lands) and its last auth request to this supervisor process.
+
+**Account ops.** An admin sends `payload: { op, ... }` (`auth-request.schema.json`) in an envelope with `channel: "_system/auth"`, `type: "query"` and a fresh `correlation_id` to `volley/_system/auth/ops/<username>`, where `<username>` is its own broker username. The broker ACL grants that topic only to admin accounts and only for their own username, so the topic names the sender; the supervisor MUST also check that the named account has the `admin` role and refuse any other sender with a reason. The mailbox is not used for these ops: anyone who may steer may write the supervisor's mailbox, so it cannot name the sender. Requests MUST NOT be retained; the supervisor clears a request topic's retained message so it is never replayed. Ops: `account_list`; `account_create { name, role, kind? }`; `account_rotate { name }` (refused for the sender's own account: setting a new password disconnects the client holding the old one before the answer arrives, so an admin rotates itself from a terminal or through another admin); `account_revoke { name }`; `signin_link { role, label, ttl_s?, desk_url? }`, where `role` is `steer` or `watch`; with `desk_url` its `result` carries `link_base` (the URL without a fragment) and the client builds the link `<link_base>#signin=<token>`. A supervisor journals each successful op in the `_system` journal (§4.6.3: `account_created`, `account_rotated`, `account_revoked`, `signin_link_issued`, each with `by`; `at` is the event's) and never writes a password itself: the account tool does.
+
+**Setup ops.** The same topic, admin check and answers carry the setup ops, which run the account tool's own first-run setup (`volley setup`: the steps `detect`, `security`, `accounts`, `services`, `phone`, in that order) for a client such as the Desk; the supervisor runs the same planners and steps, never a second implementation. `setup_plan { lan?, repair? }` plans every step fresh (never cached) and answers `result: { steps: [{ step, title, found, notes?, changes: [{ summary, detail?, terminal? }], blocked?, skipped?, plan_id, lan? }], last_setup?, broker? }` (`setup-result.schema.json`, `$defs/plan`): what each step found, what the supervisor notes but cannot check itself (`notes`, such as the macOS keychain, which only the logged-in session reads: neither a check that passed nor a change), the changes it would make, why it cannot run (`blocked`, which also stops every later step) or is left out (`skipped`), and `plan_id`, which names that plan of the step (a digest of its changes). `lan` feeds the security step's plan exactly as the terminal's `--lan` / `--no-lan` (omitted: what the broker config has), and that step reports the choice it planned for as `lan: { planned, current }`, `current` being what the config has now (`null` when it is not Volley's), so the plan a client shows is the plan it applies. `repair` is `--repair`: no new admin token, no phone link. `broker: { accounts_required, listeners: [{ port, anonymous }] }` carries the detect step's probes as data (`anonymous` is `refused`, `accepted` or `unreachable`), so a client never parses `found`, which is display text. `setup_apply { step, plan_id, lan?, repair?, reply_key }` plans that step again and applies it only when the fresh plan's `plan_id` is the one sent, else refuses with an error that starts with `plan changed` before anything changes; it also refuses while an earlier step is `blocked` or another `setup_apply` runs. It answers `result: { step, lines, problems, terminal?, restarting? }` (`$defs/applied`): what each change reported and what the step's checks found afterwards. A change only a terminal can make (one that needs `sudo`, or that would stop the supervisor answering) carries `terminal: { reason, command }` in the plan and is never applied by `setup_apply`, which applies the step's other changes and lists the rest in `terminal`. A broker restart is applied last, after the answer is published, which says so with `restarting: true`; the restart drops every client's connection, an answer is not retained, so a client re-plans once it has reconnected rather than assuming the step failed. Over this topic the accounts step's one-time admin token is in `sealed: { token }` only, never in `result`, a log or the journal; the phone step's link is not made by `setup_apply` (a client asks `signin_link`). `admin_token { reply_key }` issues a one-time admin token to an admin: `result: { token_id, expires_at }`, the token in `sealed: { token }`. Sealing it to an admin adds no privilege (an admin may already create an admin account). Over this topic a new identity's password is never shown: the supervisor's and the coordinator's go to their credential files, and the shared `desk` login (which no file keeps) gets one only through `desk_password { reply_key }`, which gives it a new password and answers `result: { username: "desk" }` with `sealed: { username, password }`; it signs out whatever used the old one. The `_system` journal records `setup_step_applied { by, step, summaries }` for a `setup_apply` that applied (or, for a restart, scheduled) at least one change, `admin_token_issued { by, token_id, expires_at }`, never the token, and `desk_password_issued { by }`, never the password. A supervisor that does not implement an op answers `unknown op '<op>'`.
+
+**One-time tokens.** An operator's terminal prints a single-use token (`vly_admin_<id>_<secret>`, by default valid 10 minutes), or an admin asks for one with `admin_token` and receives it sealed; `signin_link` yields a `vly_signin_<id>_<secret>` token for one device (a Desk link carries it as `<desk_url>#signin=<token>`). Only a hash of each token is stored. A token is also the password of a short-lived broker login whose username is the token id `<id>`, so the broker can keep refusing anonymous clients. That login holds only the `token` role (§4.6.13), which grants exactly two things through `%u`: write its own request topic `volley-auth/redeem/<id>` and read its own answer topic `volley-auth/redeem/<id>/reply`. It cannot read anything under `volley/` (the broker refuses the subscription), nor another token's topics. These two topics are the one exception to the `volley/` root, so that no grant any other role holds under `volley/` reaches them. Only the supervisor reads the request topics and writes the answer topics. The login is removed once the token has expired, or about a minute after it was redeemed, by the account tool's next run; the supervisor runs it periodically (`token_prune_ms`) so an unused token stops being a login soon after it expires. The client publishes `payload: { op: "token_redeem", token, label, reply_key }` on its request topic; the supervisor refuses a token whose id is not the topic's, burns the token and creates an account with the token's role (`admin` for an admin token) bound to `label`, journaled as `token_redeemed`. Redemption does not remove the token's login at once: deleting a login disconnects the client using it, and the redeeming client is still connected as that login, waiting for its answer. A used, expired or unknown token is refused. There is no other way to obtain an admin account from a browser.
+
+**Answers.** The supervisor answers an account op on `volley/_system/auth/replies/<correlation_id>` and a `token_redeem` on `volley-auth/redeem/<id>/reply` (QoS 1, not retained) with `type: "ack"`, the request's `correlation_id`, and `payload: { text: "ACKED", acked_type: "query", op, ok, error?, result?, sealed? }`. Every account may read the account-op answer topics, so a secret (a password, a sign-in token and link) MUST NOT appear in clear text: it is in `sealed`, the base64url RSA-OAEP (SHA-256) encryption of `{ username, password }` or `{ token }` to the request's `reply_key`, an RSA public JWK of at least 2048 bits whose private half only the requester holds. A request whose answer would carry a secret and that has no usable `reply_key` is refused before anything is created. Clients MUST accept an answer only from `agent_id: "volleyd"` (§4.4); the broker ACL lets no account but the fixed `volleyd` identity write the answer topics.
+
+**Owner decisions (2026-10-18).** The redemption path uses per-token broker logins, not an anonymous redeem topic; account ops use the dedicated `volley/_system/auth/ops/<username>` topic, not the supervisor's mailbox; every request whose answer carries a secret MUST carry `reply_key`; a token login reaches only its own two topics.
+
+
+#### 4.6.11 Claude account profiles
+
+A supervisor that launches Claude Code agents MAY run them under several Claude accounts. Each account is a separate Claude Code profile: its own configuration directory, passed to the agent as `CLAUDE_CONFIG_DIR` (one canonical absolute path with no trailing slash; Claude Code keys the profile's login to that exact string). `primary` names the user's own default profile (no `CLAUDE_CONFIG_DIR`). A profile is signed in only through Claude Code's own sign-in flow. A supervisor MUST NOT collect, store, forward or relay a Claude credential, session token or authorization code: it never reads a profile's credential store, never uses a flow that prints a bearer token, never sets a credential variable (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) in an agent's environment, and never offers a field that would pass a code to the sign-in process.
+
+**Selection.** An agent runs under its task's `account` (wave file), else the wave's `account`, else the `claude.default_account` tunable (§4.6.4), else `primary`. `most_headroom` asks the supervisor for the account with the most usage left (§4.6.12); a supervisor without usage data resolves it to `primary`. A spawn under an unknown account, or one whose sign-in has not finished, is refused with a reason. The agent's `.volley/agent.json` and its registry entry carry `claude_account` (§6.2, §6.5). Folder trust is per profile, so a `repo_untrusted` decision (§4.6.2) for such an agent carries `claude_config_dir` and is answered in that profile.
+
+**Sign-in.** `claude_account_add { label, machine?, by }` creates the profile and starts Claude Code's sign-in for it in the background; `claude_signin { acct }` restarts it for an existing profile. The supervisor publishes the authorize URL Claude Code produced, as `claude_signin_url { acct, url, flow, attach }`, on `volley/_system/claude/<acct>/signin`, then `claude_signin_done { acct, plan? }` or `claude_signin_failed { acct, reason }` there. The topic is not retained: whoever opens the URL first chooses the account bound to the profile. Not retaining it does not confine it: every client that may read the topic while the sign-in runs sees the URL, and under the example broker ACL every authenticated client, agents included, may read all of `volley/#`. A deployment that must keep the URL from its agents restricts reads of `volley/_system/claude/#` to the owner's clients in its broker ACL. `flow` is `browser_callback` (the URL redirects to Claude Code's own listener on the supervisor's machine, so it must be opened in a browser there) or `manual_code` (the page shows a code the user pastes into the sign-in terminal named by `attach`, never into a Volley client). The URL is not journaled; while a sign-in waits, `claude_accounts` returns it, so a client that attached late can still show it.
+
+**Ops.** Mailbox control queries (§4.6.4's request/acknowledgement shape): `claude_accounts` (the registry: `{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }`, plus the sharing modes and `primary: { plan? }`, the plan of Claude Code's default profile on the supervisor's machine as `claude auth status` reports it when asked, absent when it is not known); `claude_account_add`; `claude_signin`; `claude_sync { acct? }`; `agent_move_account { agent, acct }`. A move is never silent: the supervisor journals `agent_account_moved { agent_id, role, from, to, by }` first, cancels the agent (§4.4), and only once it has stopped retires it and respawns its role under the other account, as a new attempt in the same working directory with a resume note in its brief. An agent that does not stop is not respawned.
+
+**Sharing.** What a profile shares with the primary is chosen per item (`settings.json`, `CLAUDE.md`, `skills`, `agents`, `commands`, `plugins`, `mcp`): `linked` (a symbolic link to the primary's; Claude Code writes through it), `copy` (copied once) or `own`. `mcp` is the `mcpServers` section of the profile's `.claude.json`, copied from the primary's and re-synced by `claude_sync` and before each spawn; it is never linked. The profile's `.claude.json` holds its own account and is never linked or copied whole. MCP server entries can hold third-party secrets, so a supervisor never publishes or journals them.
+
+The `_system` journal (§4.6.3) records `claude_account_added`, `claude_signin_started`, `claude_signin_done`, `claude_signin_failed` and `claude_profile_synced`; a move is journaled in its wave.
+
+#### 4.6.12 Usage metering
+
+`usage` is a reserved per-agent channel in addition to those in §4.1: QoS 1, **retained**, published by the agent's own harness (the reference publisher is a Claude Code `statusLine` command in the hooks' settings, so Claude Code hands it the session's usage after each assistant message). `payload: { account, config_dir?, model, context_window: { used_percentage, used, size }, rate_limits: { five_hour?, weekly? }, captured_at }` (`usage.schema.json`), where each window is `{ pct, resets_at }` (`resets_at` a date-time or `null`). `account` is the Claude account the session runs under (§4.6.11: the `claude_account` of its identity, `primary` for a session without `CLAUDE_CONFIG_DIR`); when the publisher cannot tell, it is `null` and `config_dir` carries the session's `CLAUDE_CONFIG_DIR`, which the supervisor maps to its profile. A window is absent until the harness reports it (subscriptions only, after the first response). A publisher SHOULD throttle: the reference one publishes at most once per 15 seconds unless a percentage moved by more than one point (or the account, model or a reset time changed). A supervisor clears the topic when it retires the agent. Under an ACL that grants per-channel writes through a namespace wildcard, agent ids MUST NOT be `usage` or `claude-accounts`, for the same reason wave ids must not be channel names (§4.6).
+
+**Per account.** The rate-limit windows belong to the account, not to the agent. A supervisor folds every agent's samples into one retained record per account on `volley/_system/claude-accounts/<acct>` (`claude-account.schema.json`): `{ account, label?, plan?, five_hour, weekly, agents, waves, sampled_at, sampled_by? }`, where each window is the one from the newest sample that carried it (`null` while none has), `agents` are the agents whose latest sample is on the account and `waves` the waves they belong to. The record outlives its agents: an account's windows stay known when nothing runs on it, and across a supervisor restart (the reference supervisor keeps them in a state file, not on the broker). An agent's wave is the one its spawn was journaled in, so its retained sample is attributed (and can open a decision) as soon as the supervisor reads it, before the agent is supervised again. A remote host's agent (`tasks[].host`, §4.6.1) runs under that host's own Claude login, which is not the supervisor's account of the same name: its samples are folded into a record of their own, `<acct>@<host>`, never into a local account. `most_headroom` (§4.6.11) resolves to the signed-in local account (or `primary`) with the lowest 5-hour percentage, then the lowest weekly; a window whose reset has passed counts as empty, and an account without usage data is not ranked.
+
+**Threshold.** When an account's 5-hour window reaches `claude.warn_at_pct` (§4.6.4; a wave's own override applies to that wave), the supervisor opens a wave-level `account_limit` decision (§4.6.2) for each wave with agents on that account, carrying `acct`, `pct`, `resets_at` and `suggested` (the account with the most headroom among those under the threshold in both windows; failing that, a signed-in account that has no 5-hour usage data yet, which counts as available and is labelled "no usage yet" in the question and in a client's picker ("no 5-hour usage yet" when it has reported weekly usage), a signed-in profile before `primary` (interactive sessions use the owner's own login without reporting usage, so its lack of data says least about its headroom); or `null`, when only `not now` is offered), with the options `move wave <wave> to <suggested>` and `not now`. It does not open another for the same wave and account while one is open, nor after one was answered for the same window (`resets_at`). The weekly window is informational: it opens no decision, and so is a remote host's record (a wave move cannot reach its agents). **Nothing switches on its own.** Only the answer `move wave <wave> to <acct>` moves the wave: the supervisor checks that a spawn could use the account (an unknown or not signed-in account is refused and the decision stays open), journals `wave_account_moved { from, to, by, decision_id }` in the wave, and from then on starts the wave's new agents that would have run under `from` under `to`. Running agents finish where they are; an agent moved on its own (`agent_move_account`) keeps its own move.
+
+#### 4.6.13 Broker logins
+
+The reference deployment authenticates every client with mosquitto's Dynamic Security plugin and therefore requires **mosquitto 2.1 or newer**: its roles scope per-identity grants with `%u` (the client's username), which mosquitto substitutes in Dynamic Security ACLs only from 2.1 on. Tools that manage logins (the account tool, the supervisor) read the broker's version from the retained `$SYS/broker/version`, else from the local `mosquitto -h`, and refuse an older or unknown broker (`BROKER_TOO_OLD`, `BROKER_VERSION_UNKNOWN`) before changing anything.
+
+**Shared roles.** Eight roles are created once and are never edited while clients hold them, because an ACL change on a role disconnects every client holding it: `agent` (read `volley/#`; write its own channels `volley/+/%u/{status,progress,result,capability,usage,control,_user/#}`, its registry entry `volley/_system/registry/%u`, lease requests, and the mailboxes of `volleyd` and `desk` for its acks, §4.4), `account` (the same reads and own-identity writes, plus `volley/_system/machines/%u[/#]`), `desk` (write any mailbox; read `volley/_system/desk-probe/%c`, `%c` the client id, for a browser client's resume probe), `coordinator` (operator-level: any mailbox and any agent's standard channels and registry entry), `admin` (`coordinator` plus its own `volley/_system/auth/ops/%u`), `supervisor` (the whole tree except the account-op and answer topics), `volleyd` (the whole tree and `volley-auth/#`) and `token` (its own two `volley-auth/redeem/%u` topics). The fixed identities hold `volleyd`, `account` + `desk`, and `account` + `coordinator`; accounts hold `account` plus their role's (§4.6.10). Changing a role is an explicit, announced operation that reconnects its holders.
+
+**One login per agent.** A supervisor mints each agent's login as one client (username = agent id, password random, role `agent`) and gives it to the agent in its identity file (§6.5). Logins created or deleted at the same moment (a wave's parallel spawns, a sweep) go to the broker as one control message: mosquitto rewrites its whole state file per message, so the batch window (`dynsec_batch_ms`, §4.6.4) turns N rewrites into one, and each command's answer is matched to its own agent (one failed element fails only that spawn).
+
+**Deleting a login.** Deleting (or disabling) a client disconnects it without publishing its will, so no LWT reports the agent gone. Whenever a supervisor deletes an agent's login (retiring the agent, stopping its wave, a sweep) it first publishes the agent's retained `status` as `reaped` with `payload.reason: "credentials_deleted"`, then clears the agent's retained records (registry entry, `status`, `progress`, `result`, `capability`, `screen`, `usage`), then deletes the login, and journals `agent_reaped_by_supervisor` and `credentials_revoked`. Stopping a wave deletes the logins of all its agents that have not ended by the end of its grace (`stop_grace_s`) at once.
+
+**Sweep.** Logins never expire, and every change costs a rewrite of a file that grows with the number of logins, so a supervisor sweeps: at start and every `credential_sweep_interval_s` it lists the logins holding only the `agent` role and deletes, through the sequence above, each one with no live agent behind it (none of its tasks' agents running in a wave that is neither stopped nor complete, no worktree lock, no non-terminal retained status) that it did not mint within `spawn_timeout_s`; journaled `credentials_swept { agent_ids }` in the `_system` journal. It never touches a login holding any other role.
+
+#### 4.6.14 Machines and pairing
+
+A supervisor MAY run agents on other machines (§4.6.1 `tasks[].host`). **Pairing** turns a machine into such a host with one code: the operator asks the supervisor for a pairing code, and one command on the new machine uses it.
+
+**Who may call them.** `peer_invite` and `peer_remove` create and revoke broker accounts' access, so they are admin ops: an admin sends them exactly like an account op (§4.6.10: `payload: { op, ... }` on `volley/_system/auth/ops/<username>`, answered on `volley/_system/auth/replies/<correlation_id>`), and the supervisor applies the same admin-role check. It refuses them on its mailbox, which does not name the sender. `peer_join` and `peers` are mailbox control queries (§4.6.4's request/acknowledgement shape): a join's credential is its code.
+
+**Ops.** `peer_invite { reply_key, ttl_s? }` answers with a single-use code `XXXX-XXXX` (by default valid 10 minutes, at most that), sealed in `sealed` to `reply_key` as `{ code }` exactly like an account op's secret (§4.6.10), since every account may read the answers; `result` carries only `{ expires_at, ttl_s }`. The supervisor keeps only a salted hash of each code. `peer_join { code, name, target, volley_dir, repo?, worktree_root?, port?, os?, cores?, reply_key }` burns the code, creates an account `name` with role `peer` and kind `machine` (§4.6.10), adds `hosts.<name>` to its configuration (§4.6.4) with `target`, `repo`, `worktree_root`, `volley_dir` and `tunnel: { remote_port: <port>, supervise: false }`, and answers `result: { name, namespace, broker: { host, port }, remote_port }` with the new account's `{ username, password }` in `sealed`. `name` uses the §2.1 grammar and is never `local` or a fixed identity (`volleyd`, `desk`, `coordinator`); a name that is already a configured host is refused. An unknown, used or expired code is refused (`invalid or expired pairing code`); after `peer_join_max_failures` wrong codes every outstanding code is revoked, so a code cannot be guessed. The supervisor remembers the names it paired. `peer_remove { name }` revokes the account (refused for an account whose role is not `peer`), removes `hosts.<name>` and clears the machine's retained record; it is refused for a name that is neither a paired machine nor a `peer` account, so a host configured by hand is never removed. `peers` lists the paired machines' names (`hosts`) and their records (`machines`). The `_system` journal records `peer_invited { by, expires_at }` (never the code), `peer_joined { by, name, target, os?, cores? }` and `peer_removed { by, name, revoked, host_removed }`; the configuration change is a `config_changed` as usual (a removal's patch reads `{ hosts: { <name>: null } }`).
+
+**The tunnel.** A paired machine keeps its own way to the broker: a service on the machine (the reference one runs `volley peer run` under systemd or launchd) holds `ssh -N -L 127.0.0.1:<remote_port>:<broker host>:<broker port> <supervisor's machine>`, so its `127.0.0.1:<remote_port>` is the broker, as a supervised reverse tunnel would make it (§4.6.1, `supervise: false`: the supervisor only checks it). Every remote step of the join runs on the supervisor's machine as a script on stdin to `ssh <host> bash -s`; the code travels in that script, never on a command line.
+
+**Machine records.** `volley/_system/machines/<name>` (QoS 1, retained, `machine.schema.json`) holds `{ name, os, arch?, cores, tunnel, reason?, load, agents, remote_port?, last_seen }`, where `load` is the 1, 5 and 15 minute load averages, `agents` the machine's agent sessions and `tunnel` `up` or `down`. The machine publishes it as itself (`agent_id` = `name`; the shared `account` role grants `volley/_system/machines/%u`, §4.6.13) through its tunnel every `machine_heartbeat_ms` (30 s), so a record that arrives means the tunnel works; its LWT is the same record with `tunnel: "down"` and `reason: "disconnect"`, retained. An LWT is set when the machine connects, so its `last_seen`, `load` and `agents` are the connection's; a supervisor keeps the values of the last `up` record it received when an LWT arrives. Only records for a configured host count (every account may publish its own). A supervisor folds the records in on its own clock (a machine's clock may be skewed) and marks a machine whose record has not arrived for `machine_down_after_ms` (90 s) down: it republishes the record as itself with `tunnel: "down"` and `reason: "heartbeat_timeout"`. While a machine is down, new spawns on its host park (`why_waiting: "tunnel down to <name>: no heartbeat for 90 s"` or `...: disconnected`) and each wave with unfinished tasks there journals `alarm_raised { code: MACHINE_DOWN, host, reason, last_seen, tasks }`; the next record with `tunnel: "up"` resumes them. Running agents are never touched, but the wave state shows them: every unfinished task on the host carries `tasks[].host_down` (§4.6.1) until the machine is back. A machine whose account is revoked stops its tunnel service when the broker next refuses it.
 
 ---
 
@@ -228,7 +428,7 @@ Agents publish lifecycle state transitions on the `status` channel. The retained
 - **`done`** — agent completed its task successfully. Terminal state.
 - **`blocked`** — agent cannot proceed without external input. Terminal state, but agent process MAY remain alive awaiting mailbox guidance.
 - **`failed`** — agent encountered an unrecoverable error. Terminal state.
-- **`reaped`** — agent's broker connection terminated (clean shutdown OR crash detected via LWT). Terminal state, published by the broker (via LWT) or by the agent itself.
+- **`reaped`** — agent's broker connection terminated (clean shutdown OR crash detected via LWT). Terminal state, published by the broker (via LWT), by the agent itself, or by a supervisor that deletes the agent's login (§4.6.13, no LWT follows a delete). In the last case the supervisor then clears the agent's retained `status`, so only live subscribers and its journal see the `reaped`.
 
 ### 5.3 Transition rules
 
@@ -267,6 +467,8 @@ Agents register themselves on a reserved retained topic so observers can enumera
 }
 ```
 
+An agent a supervisor launched under a Claude account profile (§4.6.11) adds `claude_account` (the account id, or `primary`), from its assigned identity (§6.5).
+
 ### 6.3 Requirements
 
 - Conforming agents MUST publish a registry entry retained, QoS 1, before publishing any channel other than the initial `spawning` status.
@@ -280,6 +482,32 @@ To enumerate all registered agents, subscribe to:
     volley/_system/registry/+
 
 The broker delivers all retained registry entries; filter by namespace on the `payload.namespace` field.
+
+### 6.5 Assigned identity
+
+A supervisor that spawns an agent usually needs to know the agent's id *before* the agent registers (to wait on its status, address its mailbox, or render it). The §2.2 prefix + random-suffix mechanism makes that impossible, so a supervisor MAY pre-assign a literal id by writing `.volley/agent.json` into the agent's working directory before starting it (`spec/schemas/agent-identity.schema.json`):
+
+```json
+{
+  "agent_id": "w1-t1-implementer-1",
+  "namespace": "dispatch",
+  "parent_id": "coordinator-ab12",
+  "wave": "w1",
+  "task": "T1",
+  "role": "implementer",
+  "broker_url": "mqtt://localhost:1883"
+}
+```
+
+- Only `agent_id` is required. A conforming MCP server that finds this file in its working directory MUST use `agent_id` verbatim (no suffix) and MUST use `namespace`, `parent_id` and `broker_url` when present.
+- Values in the file take precedence over the corresponding environment variables (`VOLLEY_AGENT_ID`, `VOLLEY_NAMESPACE`, `VOLLEY_PARENT_ID`, `VOLLEY_BROKER_URL`); keys absent from the file fall back to the environment, then to defaults.
+- `agent_id`, `namespace` and `parent_id` MUST satisfy the §2 grammar. A server MUST refuse to start on an out-of-grammar `agent_id` (`INVALID_AGENT_ID`) or on a malformed file, naming the file path in the error, rather than fall back silently to a generated id.
+- Uniqueness is the supervisor's responsibility. The RECOMMENDED form is `<wave>-<task>-<role>-<attempt>`, lowercased (e.g. `w1-t1-implementer-1`); a supervisor retry increments `<attempt>` so a dead agent's retained topics are never overwritten by its successor.
+- An assigned identity is the one exception to §2.2's unique-id-per-process-start rule. A restart of the MCP server in the same working directory (a harness reconnect, a crash and restart) reuses the assigned id and starts a new session in the §5.3 sense; supervisors MUST tolerate a fresh `spawning` after a terminal status on an assigned id. The file pins one id to one working directory, so do not run two agent sessions there at once.
+- Supervisors SHOULD keep the file out of commits by adding `.volley/` to the repository's `info/exclude` (`git rev-parse --git-path info/exclude`) when the working directory is a git worktree.
+- `broker` (`{ "username", "password" }`, both strings) carries broker credentials minted for this agent by the supervisor, conventionally with `username` equal to `agent_id` so an ACL can pin the agent to its own topics (§11.5). Every client that runs with the identity (MCP server, CLI, hooks) MUST prefer it over `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`. The file then holds a secret: supervisors SHOULD create it mode `0600` and revoke the credentials when the agent retires.
+- `wave`, `task` and `role` are informational for tools that read the file (hooks, the supervisor itself); the MCP server does not interpret them.
+- `claude_account` names the Claude account profile the supervisor launched the agent under (§4.6.11; `primary` for the default profile). A conforming MCP server that finds it copies it into its registry entry (§6.2).
 
 ---
 
@@ -344,6 +572,7 @@ Conforming implementations MUST return one of the following error codes on failu
 | `SCHEMA_VERSION_MISMATCH` | Envelope `schema_version` major version is unsupported. |
 | `NOT_REGISTERED` | An operation requiring prior registration was attempted before `vol_register`. |
 | `RESERVED_TOPIC_WRITE` | Attempt to publish to a reserved namespace from user space. |
+| `AUTH_FAILED` | Broker refused the connection's credentials, or anonymous access (MQTT CONNACK 4/5, MQTT 5 reason 0x86/0x87). Distinct from `BROKER_DOWN` so a client can tell "fix your credentials" from "start your broker". |
 
 ---
 
@@ -385,7 +614,7 @@ A conforming Volley implementation MUST satisfy all MUST-level requirements in t
 
 ### 11.3 Conforming agents MAY
 
-- Subscribe to their own `mailbox` and respond to steering messages (§4.1)
+- Subscribe to their own `mailbox` and respond to steering messages (§4.1). An agent that does MUST keep a persistent subscription or drain on a stable clientId, and SHOULD `ack` each message it receives (§4.4)
 - Spawn sub-agents with `parent_id` set to their own `agent_id` (§3.2)
 - Define user channels under `_user/*` (§4.2)
 
@@ -393,12 +622,14 @@ A conforming Volley implementation MUST satisfy all MUST-level requirements in t
 
 - Be an MQTT v3.1.1 or v5 broker, or equivalent (transport-agnostic — see §1)
 - Support retained messages, wildcard subscriptions (`+`, `#`), QoS 1, and LWT
-- Permit anonymous localhost connections (deployment MAY require auth elsewhere)
+- Support username/password authentication in CONNECT (it MAY also admit anonymous clients, §11.5)
+
+The reference localhost deployment (non-normative) requires authentication on every listener (`examples/mosquitto-auth/`), because any local process and any web page (through a WebSocket listener) can reach a localhost broker.
 
 ### 11.5 Conforming brokers MAY
 
-- Require username/password or mTLS authentication (clients MUST honor `VOLLEY_AUTH_*` env vars when set)
-- Enforce ACLs on reserved namespaces
+- Require username/password or mTLS authentication. Clients MUST honor `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` when set, and the `broker` block of an assigned identity (§6.5), which takes precedence over them. A refused CONNECT is `AUTH_FAILED` (§9) and MUST NOT echo the password
+- Enforce ACLs on reserved namespaces and per-agent channels. The reference roles (`examples/mosquitto-auth/roles.json`, §4.6.13) let an **agent login** (username = agent id) write only its own channels and registry entry, lease requests, and the mailboxes of the fixed steering identities it acks (§4.4); let steering clients write any mailbox; treats the `coordinator` identity as operator-level (it may also write any agent's standard channels and registry entry, because a coordinator's agent id is random-suffixed); and keeps every topic §4.6 defines under `volley/_waves/*` (including `_waves/_config`) writable by the supervisor only. Because mosquitto's `+` also matches the `_waves` and `_system` levels, that protection covers the topics §4.6 defines, not arbitrary topics under those prefixes. A denied publish is dropped silently by MQTT 3.1.1 brokers, so a client cannot rely on a publish error to detect it
 
 ---
 

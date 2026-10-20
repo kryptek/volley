@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/lease-request.schema.json",
+  "title": "Volley Lease Request",
+  "description": "Non-retained acquire / release / renew request published to volley/_system/leases/<pool>/requests. The supervisor answers by re-publishing the retained pool state. See spec section 4.6.5.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/leases/requests" },
+        "type": { "const": "lease_request" },
+        "payload": {
+          "type": "object",
+          "required": ["op", "lease_id", "holder"],
+          "properties": {
+            "op": { "enum": ["acquire", "release", "renew"] },
+            "lease_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" },
+            "holder": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "ttl_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

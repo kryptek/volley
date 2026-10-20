@@ -5,19 +5,57 @@ export interface ValidationResult {
   errors: string[];
 }
 
+/**
+ * The skill's frontmatter `version:`: the `major.minor` of this package's version, so a release
+ * bump of `package.json` is what moves it (SKILL.md's field must follow). `scripts/install.sh
+ * --check` compares an installed copy's version with this repo's.
+ */
+export const SKILL_VERSION = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: string;
+  }
+).version
+  .split(".")
+  .slice(0, 2)
+  .join(".");
+
 /** Major section headings that must be present in the SKILL.md body. */
 export const REQUIRED_SECTIONS = [
   "## Prerequisites",
   "## Usage",
+  // The volleyd path is the default dispatch path; the hand-launched flow stays, labelled legacy.
+  "## Choosing a dispatch path",
+  "## Volleyd path",
+  "## Legacy path",
   "## Batch setup",
   "## Workflow per issue",
   "## Coordinator loop",
   "## Release branch merge",
   "## Cleanup",
-  // Conformance is the audit-trail anchor mapping SPEC §7.5 clauses to spawn-brief
+  // Conformance is the audit-trail anchor mapping SPEC §11 clauses to spawn-brief
   // behaviors. Required so a future editor can't accidentally drop the "yes, we
   // ship a conforming Volley agent" claim without the validator catching it.
   "## Conformance with Volley v0.1",
+] as const;
+
+/**
+ * Strings the volleyd path (the text from `## Volleyd path` to `## Legacy path`) must name
+ * verbatim: the helper, where the wave file goes, and the exact commands of each step, so an
+ * edit can't silently drop one.
+ */
+export const REQUIRED_VOLLEYD_PATH = [
+  "scripts/wave-from-issues.ts",
+  ".volley/waves/",
+  "volleyd status",
+  "volleyd validate",
+  "volleyd run",
+  "--owner",
+  "volley sub --pattern",
+  "volley/_waves/",
+  "volleyd decisions",
+  "volleyd resolve",
+  "volleyd cleanup",
+  "--yes",
 ] as const;
 
 /** Split a markdown file into its frontmatter block and body. */
@@ -28,7 +66,7 @@ export function splitFrontmatter(source: string): { frontmatter: string | null; 
   return { frontmatter: source.slice(4, closeIdx), body: source.slice(closeIdx + 5) };
 }
 
-/** Tiny YAML parser — same scope as volley-skill's: 3 fields, no nesting. */
+/** Tiny YAML parser — same scope as volley-skill's: flat scalar fields, no nesting. */
 export function parseSimpleYaml(yaml: string): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (const rawLine of yaml.split("\n")) {
@@ -68,6 +106,11 @@ export function validateFrontmatter(source: string): ValidationResult {
   if (parsed.user_invocable !== true) {
     errors.push("frontmatter.user_invocable must be true");
   }
+  if (parsed.version !== SKILL_VERSION) {
+    errors.push(
+      `frontmatter.version must be "${SKILL_VERSION}", got ${JSON.stringify(parsed.version)}`,
+    );
+  }
   return { ok: errors.length === 0, errors };
 }
 
@@ -85,10 +128,31 @@ export function validateSections(source: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
+/** The body text from the `## Volleyd path` heading up to `## Legacy path`, or null. */
+export function volleydPathSection(body: string): string | null {
+  const start = /^## Volleyd path\b.*$/m.exec(body);
+  if (start === null) return null;
+  const rest = body.slice(start.index);
+  const end = /^## Legacy path\b/m.exec(rest);
+  return end === null ? rest : rest.slice(0, end.index);
+}
+
+export function validateVolleydPath(source: string): ValidationResult {
+  const section = volleydPathSection(splitFrontmatter(source).body);
+  if (section === null) return { ok: false, errors: ["missing the ## Volleyd path section"] };
+  const errors = REQUIRED_VOLLEYD_PATH.filter((needle) => !section.includes(needle)).map(
+    (needle) => `volleyd path must mention: ${needle}`,
+  );
+  return { ok: errors.length === 0, errors };
+}
+
 export function validateSkill(source: string): ValidationResult {
-  const fm = validateFrontmatter(source);
-  const sections = validateSections(source);
-  return { ok: fm.ok && sections.ok, errors: [...fm.errors, ...sections.errors] };
+  const results = [
+    validateFrontmatter(source),
+    validateSections(source),
+    validateVolleydPath(source),
+  ];
+  return { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
 }
 
 if (import.meta.main) {

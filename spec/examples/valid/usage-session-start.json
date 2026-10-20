@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "wall_time": "2026-10-18T14:00:00.000Z",
+  "channel": "usage",
+  "type": "usage",
+  "payload": {
+    "account": null,
+    "config_dir": "/path/to/profiles/personal",
+    "model": "claude-opus-5-5",
+    "context_window": { "used_percentage": null, "used": null, "size": 1000000 },
+    "rate_limits": {},
+    "captured_at": "2026-10-18T14:00:00.000Z"
+  }
+}

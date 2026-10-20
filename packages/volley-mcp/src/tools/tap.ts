@@ -15,7 +15,7 @@ export interface TapResult {
 
 /**
  * vol_tap — debugging wildcard subscription. Same collection mechanism as vol_subscribe
- * but with debug-tuned defaults: up to 100 messages, 5-second window (design doc §5.2).
+ * but with debug-tuned defaults: up to 100 messages, 5-second window.
  */
 export async function volTap(state: ServerState, input: TapInput): Promise<TapResult> {
   if (!isValidTopicFilter(input.topic_pattern)) {

@@ -1,11 +1,13 @@
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { isValidTopicFilter } from "volley-mcp/topics";
 import {
   parseLifecycleEventCsv,
   parseSurfaceCsv,
+  resolveAuth,
   resolveBrokerUrl,
   resolveNamespace,
   resolveWebhookUrl,
@@ -84,6 +86,8 @@ export async function notify({
       args: argv,
       options: {
         "broker-url": { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
         namespace: { type: "string" },
         pattern: { type: "string" },
         on: { type: "string" },
@@ -118,6 +122,7 @@ export async function notify({
   let onTypes: string[];
   let webhookUrl: string | null;
   let brokerUrl: string;
+  let auth: BrokerAuth | null;
   try {
     // Order matches the spec: surface → on → webhook URL. Each helper throws with a
     // human-readable message; we prefix `volley notify:` and exit 2.
@@ -136,6 +141,15 @@ export async function notify({
     // pattern already encodes the namespace, so we don't otherwise consume the result.
     resolveNamespace(parsed.values.namespace as string | undefined, env);
     brokerUrl = resolveBrokerUrl(parsed.values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: parsed.values.username as string | undefined,
+        password: parsed.values.password as string | undefined,
+      },
+      env,
+      process.cwd(),
+      brokerUrl,
+    );
   } catch (e) {
     io.stderr(`volley notify: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.USAGE;
@@ -159,7 +173,7 @@ export async function notify({
   const onSet = new Set(onTypes);
 
   const connect = connectFn ?? connectAsClient;
-  const broker = (await connect(brokerUrl, io)) as NotifyBrokerLike | null;
+  const broker = (await connect(brokerUrl, io, auth)) as NotifyBrokerLike | null;
   if (broker === null) return EXIT.ERROR;
 
   let unsubscribe: (() => Promise<void>) | null = null;
@@ -239,6 +253,8 @@ Optional:
                            (env: VOLLEY_NOTIFY_WEBHOOK_URL)
   --namespace <ns>         Informational; volley namespace (env: VOLLEY_NAMESPACE; default: default)
   --broker-url <url>       MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --username <user>        Broker username (env: VOLLEY_AUTH_USERNAME)
+  --password <pw>          Broker password (env: VOLLEY_AUTH_PASSWORD)
   --help                   Show this help
 
 Behavior:

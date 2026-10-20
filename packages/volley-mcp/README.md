@@ -54,17 +54,34 @@ Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — you 
 | `vol_subscribe` | Block until N messages arrive on a topic pattern, or timeout. The synchronous wait primitive. |
 | `vol_list_agents` | Enumerate registered agents from `volley/_system/registry/+`. Filterable by namespace; `reaped` agents excluded by default. |
 | `vol_tap` | Wildcard subscription with debug-tuned defaults (longer timeout, larger collect cap). For "what's flying past on the broker?" introspection. |
-| `vol_send_mailbox` | Deliver a `mailbox` message to another agent. Type one of `steering | cancel | nudge | query`. |
+| `vol_send_mailbox` | Deliver a `mailbox` message to another agent. Type one of `steering | cancel | nudge | query | ack`. Returns `message_id`, which is the envelope's `correlation_id` (generated unless you pass one; required for `ack`). Optional `payload.seq` / `payload.supersedes`. With `wait_ack_ms`, it also waits for the recipient's `ack` and returns `acked` / `acked_by`. `delivered` only means the broker sent PUBACK. |
 
 All seven satisfy the SPEC §10 reserved-name list. Three more names (`vol_subscribe_async`, `vol_recv`, `vol_unsubscribe`) are reserved for v0.2+ async paths and **MUST NOT** be redefined by conforming v0.1 implementations.
 
 For the full input schemas, see [`src/server.ts`](src/server.ts) (Zod-defined) or call `tools/list` over the MCP wire.
 
+### Mailbox delivery
+
+Mailbox messages are QoS 1 and **not retained**. The broker only holds one for a recipient that has a persistent session subscribed to its mailbox. The MCP server's own connection is a clean session with a random clientId suffix, and the server does not read its own mailbox, so a recipient needs a separate drain client. `VolleyBroker` supports one:
+
+```ts
+await broker.connect({
+  url, agentId,
+  clientId: `volley-${agentId}-hooks`, // required with cleanSession:false; used verbatim
+  cleanSession: false,
+  protocolVersion: 5,                   // 4 (default) also works; expiry is v5-only
+  sessionExpirySeconds: 604800,         // default DEFAULT_SESSION_EXPIRY_S (7 days)
+});
+const queued = await broker.drainQueued(`volley/${ns}/${agentId}/mailbox`, { idleMs: 250 });
+```
+
+`drainQueued` subscribes at QoS 1, collects until no message has arrived for `idleMs`, and keeps the subscription, so the broker goes on queueing while the client is away. Each persistent consumer needs its own clientId, because a same-clientId connect kicks the older client off. Without a `clientId`, `cleanSession: false` throws `IMPL_CLIENT_ID_REQUIRED`. `VolleyBroker` itself only takes `sessionExpirySeconds`; the hooks drain client (forthcoming) will read it from the runtime tunable `mailbox.session_expiry_s`, with `VOLLEY_SESSION_EXPIRY_S` as the fallback. Dedicate a persistent `VolleyBroker` to draining: messages no other helper claims are buffered until drained, and another helper's release on a not-yet-drained filter would UNSUBSCRIBE the restored subscription. **A changed value applies to new connections only**: an existing session keeps the expiry it was created with until its client reconnects. See SPEC §4.4 for the ack protocol.
+
 ---
 
 ## Configuration (env vars)
 
-All four are optional; sensible defaults apply.
+All are optional; sensible defaults apply.
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -72,8 +89,12 @@ All four are optional; sensible defaults apply.
 | `VOLLEY_NAMESPACE` | `default` | Logical grouping for the agent's topics. Two namespaces are isolated from each other (e.g. `prod` vs `staging`). Must match `[a-z0-9][a-z0-9_-]{0,62}`; cannot start with `_`. |
 | `VOLLEY_BROKER_URL` | `mqtt://localhost:1883` | MQTT connection URL. Use `mqtts://` for TLS. |
 | `VOLLEY_PARENT_ID` | `null` | If this agent was spawned by another Volley agent, the parent's `agent_id`. Used to build dispatch trees in `vol_list_agents` output. Subagents should embed this in their spawn brief; don't try to pass it via env when spawning, since Claude Code doesn't propagate parent-process env to MCP subprocesses (see below). |
+| `VOLLEY_AUTH_USERNAME` | unset (anonymous) | Broker username (SPEC §11.5). The reference broker config requires one: use `coordinator` for a coordinator session (`volley auth init` prints its password). |
+| `VOLLEY_AUTH_PASSWORD` | unset | Broker password for `VOLLEY_AUTH_USERNAME`. Setting it without a username is a startup error. A refused login fails startup with `AUTH_FAILED` and a `volley auth init` hint; the password is never echoed. |
 
-> **Note on env propagation.** Claude Code's MCP launcher passes the *registration's* `env` block verbatim to spawned MCP subprocesses. Parent-process `export VAR=...` does **NOT** override that block. If you need to give a child agent a different `VOLLEY_AGENT_ID` prefix, embed the desired prefix in the spawn brief text, not the env. The auto-suffix on every MCP startup means same-prefix processes still get distinct ids, so this is a sharp edge to know about, not a footgun.
+> **Assigned identity (`.volley/agent.json`).** If the server's working directory contains `.volley/agent.json` (written by a supervisor before it starts the agent — SPEC §6.5), the server uses its `agent_id` **verbatim, with no random suffix**, and its `namespace`, `parent_id`, `broker_url` and `broker` credentials (`{ "username", "password" }`, minted per agent by `volley auth add-agent`) when present. Values in the file beat the env vars above; keys missing from the file fall back to env, then defaults. A malformed file or an out-of-grammar `agent_id` stops startup with an error naming the file path (`INVALID_AGENT_ID` for a bad id) instead of silently generating an id. Uniqueness of the assigned id is the supervisor's job (recommended form `<wave>-<task>-<role>-<attempt>`). Schema: [`spec/schemas/agent-identity.schema.json`](../../spec/schemas/agent-identity.schema.json).
+
+> **Note on env propagation.** Claude Code's MCP launcher passes the *registration's* `env` block verbatim to spawned MCP subprocesses. Parent-process `export VAR=...` does **NOT** override that block. If you need to give a child agent a different `VOLLEY_AGENT_ID` prefix, embed the desired prefix in the spawn brief text, not the env. The auto-suffix on every MCP startup means same-prefix processes still get distinct ids, so this is a sharp edge to know about, not a footgun — unless `.volley/agent.json` is present (see above), in which case every process started in that directory uses the same assigned id.
 
 ---
 
@@ -128,7 +149,7 @@ bun run test:integration     # opt-in — real mosquitto required (sets VOLLEY_I
 bun run typecheck            # tsc --noEmit
 ```
 
-The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883`. Locally: `brew services start mosquitto`. Without `VOLLEY_INTEGRATION=1` it self-skips.
+The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883` (or `VOLLEY_BROKER_URL`). It also covers MQTT v5 persistent sessions, which the Aedes unit-test broker does not support. Locally: `brew services start mosquitto`. Without `VOLLEY_INTEGRATION=1` it self-skips.
 
 To iterate on a single test:
 

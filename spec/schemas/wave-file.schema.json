@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/wave-file.schema.json",
+  "title": "Volley Wave File",
+  "description": "A wave definition submitted to a supervisor (volleyd run <wave.yaml>). Authored as YAML; this schema validates the parsed document. Not an envelope. Structural rules a schema cannot express (every after target names a task in this file; the after graph is acyclic; task ids are unique) are enforced by the supervisor's parser, which reports them with the same path-qualified errors. See spec section 4.6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wave", "repo", "release_branch", "model", "pipeline", "tasks"],
+  "properties": {
+    "wave": {
+      "$ref": "#/$defs/id",
+      "description": "Wave id (spec section 2.1 grammar); appears as a topic segment in volley/_waves/<wave>/*."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Wave file version; bumped on a versioned re-submission."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^-]",
+      "description": "Repository the wave's tasks work in. Must not start with '-', so it can never be read as a command-line option."
+    },
+    "release_branch": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!-)[^\\s~^:?*\\[\\\\]+$",
+      "description": "Branch the wave's worktrees are cut from and its PRs target. A git ref name: no leading '-' (never read as an option), no whitespace or ~^:?*[\\."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\\[[A-Za-z0-9]{1,16}\\])?$",
+      "description": "Default model for every agent in the wave. One word as /model and claude --model take it (e.g. claude-opus-5-5, opus, claude-x[1m], us.anthropic.claude-x-v1:0): the authority fence's MODEL_ID."
+    },
+    "namespace": {
+      "$ref": "#/$defs/id",
+      "description": "Volley namespace the wave's agents register in (default: the supervisor's)."
+    },
+    "pipeline": { "$ref": "#/$defs/pipeline" },
+    "tasks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/taskId" },
+      "additionalProperties": { "$ref": "#/$defs/task" }
+    },
+    "heavy_pools": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" },
+      "description": "Lease pools (config lease_pools keys) this wave's heavy operations draw from."
+    },
+    "spawn_budget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Maximum agent spawns for the wave (retries and reviewers included); default: every task's pipeline roles plus retry headroom, or spawn_budget_multiplier x task count when that is more."
+    },
+    "config": {
+      "$ref": "config.schema.json#/$defs/tunables",
+      "description": "Per-wave overrides of the supervisor tunables, layered over the global config."
+    },
+    "account": {
+      "$ref": "#/$defs/id",
+      "description": "The Claude account (spec section 4.6.11) every agent of the wave runs under: an id from the supervisor's Claude account registry, primary (the default profile) or most_headroom. Default: the claude.default_account tunable, else primary."
+    },
+    "brief_preface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "The brief preface file (spec section 4.6.9): a path relative to repo, or absolute. Its bytes are prepended verbatim to every brief the supervisor writes for this wave. Default: .volley/brief-preface.md in the repo."
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "taskId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+    "hostName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+    "remoteHost": {
+      "description": "An inline remote host: agents run in tmux on another machine reached over SSH. Every key but type is optional here; layered over hosts.<name> from the supervisor config, the host must end up with target, repo and volley_dir. Its keywords apply to objects only, so host: <name> strings pass through it.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "ssh" },
+        "name": {
+          "$ref": "#/$defs/hostName",
+          "not": { "const": "local" },
+          "description": "Host label (wave state, journal) and the hosts.<name> config entry layered under this one; default: the target."
+        }
+      },
+      "$ref": "config.schema.json#/$defs/remoteHostProperties",
+      "unevaluatedProperties": false
+    },
+    "stageName": { "enum": ["implement", "spec_review", "quality_review", "fixup", "merge_ready"] },
+    "pipeline": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered pipeline stages; a nested array is a group of stages that run in parallel.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/stageName" },
+          {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/stageName" }
+          }
+        ]
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue"],
+      "properties": {
+        "issue": { "type": "integer", "minimum": 1, "description": "GitHub issue number." },
+        "title": { "type": "string" },
+        "after": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/taskId" },
+          "description": "Task ids that must reach done before this task may start."
+        },
+        "pipeline": { "$ref": "#/$defs/pipeline" },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}(\\[[A-Za-z0-9]{1,16}\\])?$"
+        },
+        "host": {
+          "default": "local",
+          "description": "Where the task's agents run: local (the supervisor's own host), the name of a remote host in the supervisor config (hosts.<name>), or an inline remote host (layered over hosts.<name> when it names one).",
+          "type": ["string", "object"],
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+          "$ref": "#/$defs/remoteHost"
+        },
+        "account": {
+          "$ref": "#/$defs/id",
+          "description": "The Claude account this task's agents run under; overrides the wave's account."
+        },
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later."
+        }
+      }
+    }
+  }
+}

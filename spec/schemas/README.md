@@ -10,12 +10,29 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `mailbox.schema.json` | `mailbox` | section 4 |
 | `registry.schema.json` | `_system/registry/<id>` | section 6 |
 | `result.schema.json` | `result` | section 4 |
+| `review-result.schema.json` | `result` (pipeline roles: `review`, `fixup`) | section 4.6.8 |
 | `capability.schema.json` | `capability` | section 4 |
 | `control.schema.json` | `control` (reserved) | section 4 |
+| `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
+| `usage.schema.json` | `usage` (the agent's harness) | section 4.6.12 |
+| `claude-account.schema.json` | `_system/claude-accounts/<acct>` | section 4.6.12 |
+| `wave-state.schema.json` | `_waves/<wave>/state` | section 4.6.1 |
+| `decision.schema.json` | `_waves/<wave>/decisions/<id>` | section 4.6.2 |
+| `wave-event.schema.json` | `_waves/<wave>/events` | section 4.6.3 |
+| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | section 4.6.4 |
+| `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
+| `lease-pool.schema.json` | `_system/leases/<pool>` | section 4.6.5 |
+| `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |
+| `admission.schema.json` | `_system/admission` | section 4.6.7 |
+| `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | section 4.6.10 |
+| `account.schema.json` | `accounts.json` account registry file (not an envelope) | section 4.6.10 |
+| `setup-result.schema.json` | the `result` of a `setup_plan` (`$defs/plan`) or `setup_apply` (`$defs/applied`) answer on `_system/auth/replies/<correlation_id>` | section 4.6.10 |
+| `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |
+| `wave-file.schema.json` | a wave file submitted with `volleyd run` (YAML; not an envelope) | section 4.6 |
 
 ## Validating a payload
 
-The authoritative validator is the Phase 4 script `bun run validate:schemas`, which loads every schema with `ajv` + `ajv-formats` properly wired in. For a one-off check with `ajv-cli`:
+The authoritative validator is `bun run validate:schemas`, which loads every schema with `ajv` + `ajv-formats` properly wired in. For a one-off check with `ajv-cli`:
 
 ```bash
 bunx ajv-cli validate \

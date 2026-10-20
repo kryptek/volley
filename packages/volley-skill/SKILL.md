@@ -6,7 +6,7 @@ user_invocable: true
 
 # /volley
 
-The Volley protocol's Claude Code interface. The volley-mcp server (see `packages/volley-mcp/`) gives this session seven tools for talking to an MQTT broker; this slash exposes them with human-friendly formatting and the agent-handling UX described in the Volley design doc §6.
+The Volley protocol's Claude Code interface. The volley-mcp server (see `packages/volley-mcp/`) gives this session seven tools for talking to an MQTT broker; this slash exposes them with human-friendly formatting and agent-handling commands.
 
 ## Usage
 
@@ -36,7 +36,9 @@ Before running any subcommand:
      "args": ["run", "<volley-repo>/packages/volley-mcp/src/index.ts"],
      "env": {
        "VOLLEY_AGENT_ID": "coordinator",
-       "VOLLEY_NAMESPACE": "default"
+       "VOLLEY_NAMESPACE": "default",
+       "VOLLEY_AUTH_USERNAME": "coordinator",
+       "VOLLEY_AUTH_PASSWORD": "<coordinator password from `volley auth init`>"
      }
    }'
    ```
@@ -53,6 +55,13 @@ Before running any subcommand:
    auto-generated id, call `vol_register` (its response includes
    `agent_id`) or `vol_list_agents` and look for the entry whose
    `capabilities` include `coordinator`.
+
+   Keep `"VOLLEY_AGENT_ID": "coordinator"`. Without it the id is named after the session's
+   working directory (`volley-XXXX` in a volley checkout, `<repo>-XXXX` elsewhere), which
+   reads as just another agent: the `--owner` a `/volley-issues` wave is submitted with, the
+   Desk's owner chip and `★ yours`, and the v0.2 owner smoke (`docs/SMOKE-v0.2.md`) all
+   expect the `coordinator-XXXX` id. For a separate registry (a smoke run, a dispatch batch),
+   change `VOLLEY_NAMESPACE` rather than the prefix.
 
    If `~/.claude/skills/volley/SKILL.md` exists but the MCP isn't registered, also try running `bash <volley-repo>/packages/volley-skill/scripts/install.sh` — the installer prints a ready-to-paste `claude mcp add-json` command with the path already filled in.
 

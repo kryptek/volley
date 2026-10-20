@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
 
 jobs:
   validate-schemas:
@@ -28,6 +28,8 @@ jobs:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
       - run: bun run lint
+      - run: bun run check:spec-refs
+      - run: bun run test:scripts
 
   typecheck:
     name: Typecheck
@@ -41,7 +43,45 @@ jobs:
       - run: bun run typecheck
 
   test:
-    name: Unit tests (Aedes)
+    # Every package's suite is `vitest run`, whose bin is a node script: `bun run test` runs the
+    # vitest suites on Node. The bun version reaches only `bun install`, `bun test ./scripts` and
+    # the tests that spawn `bun`. The bun-runner job below runs volleyd's suite on bun itself.
+    name: Unit tests (vitest on Node, Aedes; bun ${{ matrix.bun-version }} for install + scripts)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every bun in engines.bun: a newer bun can break the suite without anything else changing.
+        bun-version: ["1.3", "1.4"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun-version }}
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+
+  test-bun-runner:
+    # volleyd runs on bun in production; this is the only job that runs its suite on the bun
+    # runtime, under bun's own test runner. A separate job so it runs in parallel with `test`.
+    name: volleyd unit tests (bun test runner, bun ${{ matrix.bun-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bun-version: ["1.3", "1.4"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun-version }}
+      - run: bun install --frozen-lockfile
+      # 15 s per test: the budget volleyd's vitest.config.ts declares (bun's default is 5 s).
+      - run: bun test --timeout 15000
+        working-directory: packages/volleyd
+
+  react-bits:
+    name: React Bits allow-list (volley-desk)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +89,11 @@ jobs:
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun run test
+      - run: bun run --cwd packages/volley-desk check:react-bits
+      # Warns (doesn't fail CI) when React Bits adds a background the picker lacks.
+      - name: React Bits backgrounds are all in the picker
+        continue-on-error: true
+        run: bun run --cwd packages/volley-desk sync:react-bits-backgrounds
 
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
@@ -60,7 +104,18 @@ jobs:
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun --cwd packages/volley-skill run validate:skill
+      - run: bun run --cwd packages/volley-skill validate:skill
+
+  check-hooks-template:
+    name: Hooks template (every hook command resolves)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun --cwd packages/volley-hooks run check:template
 
   test-integration:
     name: Integration tests (mosquitto)
@@ -84,9 +139,81 @@ jobs:
       - name: Run integration tests
         working-directory: packages/volley-mcp
         run: bun run test:integration
+      - name: Run volley-hooks integration tests (MQTT 5 drain)
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_BROKER_URL: mqtt://127.0.0.1:1883
+        run: bun run test:integration
       - name: Stop mosquitto
         if: always()
         run: docker rm -f mosquitto
+
+  test-integration-dynsec:
+    name: Integration tests (mosquitto 2.1 Dynamic Security)
+    runs-on: ubuntu-latest
+    env:
+      DYNSEC_ADMIN_PASSWORD: ci-dynsec-admin-pw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - name: Start mosquitto 2.1 with the shipped Dynamic Security config
+        # examples/mosquitto-auth/mosquitto-dynsec.conf is `volley auth init`'s container layout;
+        # the plugin's state file and its first admin come from `mosquitto_ctrl dynsec init`.
+        run: |
+          mkdir -p /tmp/dynsec-data && chmod 777 /tmp/dynsec-data
+          docker run -d --name mosquitto-dynsec -p 127.0.0.1:1884:1883 -p 127.0.0.1:9002:9001 \
+            -v "$PWD/examples/mosquitto-auth/mosquitto-dynsec.conf:/mosquitto/config/mosquitto.conf:ro" \
+            -v /tmp/dynsec-data:/mosquitto/data -e DYNSEC_ADMIN_PASSWORD eclipse-mosquitto:2.1-alpine \
+            sh -c 'mosquitto_ctrl dynsec init /mosquitto/data/dynamic-security.json dynsec-admin "$DYNSEC_ADMIN_PASSWORD" >/dev/null \
+              && chown -R mosquitto:mosquitto /mosquitto/data \
+              && exec mosquitto -c /mosquitto/config/mosquitto.conf'
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/1884) 2>/dev/null; then echo "mosquitto up"; break; fi
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/1884) 2>/dev/null || { docker logs mosquitto-dynsec; echo "mosquitto did not start in 30s"; exit 1; }
+      - name: Bootstrap Volley's shared roles and the test identities
+        env:
+          VOLLEY_DYNSEC_BROKER_URL: mqtt://127.0.0.1:1884
+          VOLLEY_DYNSEC_ADMIN_PASSWORD: ${{ env.DYNSEC_ADMIN_PASSWORD }}
+        run: bun packages/volley-cli/test/integration/dynsec-fixture.ts
+      - name: Run the role proofs (volley-cli)
+        working-directory: packages/volley-cli
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_DYNSEC_BROKER_URL: mqtt://127.0.0.1:1884
+          VOLLEY_DYNSEC_WS_URL: ws://127.0.0.1:9002
+          VOLLEY_DYNSEC_ADMIN_PASSWORD: ${{ env.DYNSEC_ADMIN_PASSWORD }}
+        run: bunx vitest run test/integration/mosquitto-dynsec.test.ts
+      - name: Run auth integration tests (volley-mcp)
+        working-directory: packages/volley-mcp
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-auth.test.ts
+      - name: Run hooks auth integration tests
+        working-directory: packages/volley-hooks
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+        run: bunx vitest run test/integration/mosquitto-acl.test.ts
+      - name: Run volleyd auth integration tests (daemon, account roles, agent logins)
+        working-directory: packages/volleyd
+        env:
+          VOLLEY_INTEGRATION: "1"
+          VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
+          VOLLEY_DYNSEC_BROKER_URL: mqtt://127.0.0.1:1884
+          VOLLEY_DYNSEC_ADMIN_PASSWORD: ${{ env.DYNSEC_ADMIN_PASSWORD }}
+        run: bunx vitest run test/integration/daemon-auth.test.ts test/integration/mosquitto-roles.test.ts test/integration/dynsec-agents.test.ts
+      - name: Broker log
+        if: failure()
+        run: docker logs mosquitto-dynsec
+      - name: Stop mosquitto
+        if: always()
+        run: docker rm -f mosquitto-dynsec
 
   parity:
     name: Parity test (4 legacy vs 4 volley)
@@ -97,7 +224,8 @@ jobs:
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun --cwd packages/volley-issues run test:parity
+      # Rewrites the report in this throwaway checkout, so the artifact is this run's numbers.
+      - run: bun run --cwd packages/volley-issues parity:update
       - uses: actions/upload-artifact@v4
         with:
           name: parity-report

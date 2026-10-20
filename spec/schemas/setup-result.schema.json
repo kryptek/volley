@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/setup-result.schema.json",
+  "title": "Volley Setup Op Results",
+  "description": "The `result` of the supervisor's answers to the setup ops (spec section 4.6.10): `$defs/plan` for setup_plan, `$defs/applied` for setup_apply. A one-time admin token is never in a result: it travels only in the answer's `sealed`.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/plan"
+    },
+    {
+      "$ref": "#/$defs/applied"
+    }
+  ],
+  "$defs": {
+    "step_name": {
+      "enum": ["detect", "security", "accounts", "services", "phone"]
+    },
+    "line": {
+      "type": "string",
+      "minLength": 1
+    },
+    "terminal": {
+      "type": "object",
+      "required": ["reason", "command"],
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/line",
+          "description": "Why only a terminal can make the change (it needs sudo, or it would stop the supervisor)."
+        },
+        "command": {
+          "$ref": "#/$defs/line",
+          "description": "The command that makes it, run on the supervisor's machine."
+        }
+      },
+      "additionalProperties": false
+    },
+    "change": {
+      "type": "object",
+      "required": ["summary"],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/line"
+        },
+        "detail": {
+          "type": "string",
+          "description": "A diff or the commands it runs; never a secret."
+        },
+        "terminal": {
+          "$ref": "#/$defs/terminal"
+        }
+      },
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "required": ["step", "title", "found", "changes", "plan_id"],
+      "properties": {
+        "step": {
+          "$ref": "#/$defs/step_name"
+        },
+        "title": {
+          "$ref": "#/$defs/line"
+        },
+        "found": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          },
+          "description": "What the supervisor notes but cannot check itself (the macOS keychain, which only the logged-in session reads): neither a check that passed nor a change. A client shows each as a note."
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/change"
+          }
+        },
+        "blocked": {
+          "$ref": "#/$defs/line",
+          "description": "Why this step, and so every later one, cannot run now."
+        },
+        "skipped": {
+          "$ref": "#/$defs/line",
+          "description": "Why this step is left out; the later ones still run."
+        },
+        "plan_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "description": "Names this plan of the step (a digest of its changes); setup_apply sends it back."
+        },
+        "lan": {
+          "type": "object",
+          "required": ["planned", "current"],
+          "properties": {
+            "planned": {
+              "type": "boolean",
+              "description": "The LAN reach this plan was made for."
+            },
+            "current": {
+              "type": ["boolean", "null"],
+              "description": "What the broker config has now; null when it is not Volley's config."
+            }
+          },
+          "additionalProperties": false,
+          "description": "The security step only, when the layout leaves a choice."
+        }
+      },
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "last_setup": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "broker": {
+          "type": "object",
+          "required": ["accounts_required", "listeners"],
+          "properties": {
+            "accounts_required": {
+              "type": "boolean",
+              "description": "Every listener refuses a client without an account."
+            },
+            "listeners": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["port", "anonymous"],
+                "properties": {
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "anonymous": {
+                    "enum": ["refused", "accepted", "unreachable"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "applied": {
+      "type": "object",
+      "required": ["step", "lines", "problems"],
+      "properties": {
+        "step": {
+          "$ref": "#/$defs/step_name"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          }
+        },
+        "problems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          }
+        },
+        "terminal": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["summary", "reason", "command"],
+            "properties": {
+              "summary": {
+                "$ref": "#/$defs/line"
+              },
+              "reason": {
+                "$ref": "#/$defs/line"
+              },
+              "command": {
+                "$ref": "#/$defs/line"
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "The step's changes the supervisor left for a terminal."
+        },
+        "restarting": {
+          "type": "boolean",
+          "description": "The broker restarts after this answer; clients reconnect and plan again."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

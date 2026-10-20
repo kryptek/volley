@@ -1,0 +1,8 @@
+{
+  "session_id": "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+  "transcript_path": "/tmp/volley-hooks-fixture/transcript.jsonl",
+  "cwd": "/tmp/volley-hooks-fixture",
+  "hook_event_name": "SessionStart",
+  "source": "compact",
+  "model": "claude-opus-5-5"
+}

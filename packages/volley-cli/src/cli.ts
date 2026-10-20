@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
+import pkg from "../package.json";
 import { parseGlobal } from "./args";
+import { realSavedLoginDeps, useSavedLogin } from "./auth/coordinator-login";
 import { EXIT, type ExitCode } from "./exit-codes";
 import { type IO, realIO } from "./io";
 
-const VERSION = "0.1.0-dev";
+const VERSION = pkg.version;
 
 const USAGE = `Usage: volley <subcommand> [options]
 
@@ -12,12 +14,20 @@ Subcommands:
   sub      Subscribe to a wildcard topic pattern (live tail)
   wait     Block until an agent reaches a terminal status
   list     Enumerate agents registered on the broker
-  dash     Launch the Volley dashboard (Vite)
+  dash     Launch the Volley Desk (Vite; --legacy: the old dashboard)
   notify   Long-lived subscriber that fires bell/desktop/webhook on matching events
+  auth     Manage broker credentials (init, agents, accounts, one-time tokens)
+  lease    Heavy-operation leases from volleyd (run, acquire, release, status)
+  claude   Claude account profiles on volleyd (add, signin, list, sync, move)
+  peer     Pair machines with volleyd's (invite, join, list, remove)
+  setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
+  desk     Serve the built Volley Desk (desk serve) for phones and the setup service
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     Volley namespace (env: VOLLEY_NAMESPACE; default: default)
+  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; .volley/agent.json "broker" wins over env)
+  --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD; prefer the env var, argv is visible in ps)
   --help               Show this help and exit
   --version            Print version and exit
 
@@ -53,6 +63,18 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/dash")).dash as Subcommand;
     case "notify":
       return (await import("./commands/notify")).notify as Subcommand;
+    case "auth":
+      return (await import("./commands/auth")).auth as Subcommand;
+    case "lease":
+      return (await import("./commands/lease")).lease as Subcommand;
+    case "claude":
+      return (await import("./commands/claude")).claude as Subcommand;
+    case "peer":
+      return (await import("./commands/peer")).peer as Subcommand;
+    case "setup":
+      return (await import("./commands/setup")).setup as Subcommand;
+    case "desk":
+      return (await import("./commands/desk-serve")).desk as Subcommand;
     default:
       return null;
   }
@@ -93,6 +115,8 @@ export async function main(args: MainArgs): Promise<ExitCode> {
 
 // Real-process entry point. `import.meta.main` is Bun-only; under vitest it stays false.
 if (import.meta.main) {
+  // The operator's own commands may use the coordinator login setup saved (never under a test).
+  useSavedLogin(realSavedLoginDeps);
   main({ argv: process.argv.slice(2), env: process.env, io: realIO })
     .then((code) => {
       process.exit(code);

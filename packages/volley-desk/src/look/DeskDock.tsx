@@ -1,0 +1,81 @@
+/**
+ * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with six
+ * items — the coordinators window (badge: what needs you), tethers, arrange &
+ * fit, zoom in / out and the Settings window (appearance and auto-arrange
+ * live there). Its panel is lifted and lit like the Desk's windows (D10,
+ * `.dock-wrap .dock` in look.css).
+ */
+import {
+  FullScreenIcon,
+  Link02Icon,
+  Settings02Icon,
+  UserGroupIcon,
+  ZoomInAreaIcon,
+  ZoomOutAreaIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import Dock, { type DockItemData } from "../rb/Dock/Dock";
+import "../styles/look.css";
+
+/** Zoom step for the dock's zoom buttons (prototype). */
+export const DOCK_ZOOM = 1.2;
+
+const icon = (i: typeof UserGroupIcon) => <HugeiconsIcon icon={i} size={22} />;
+
+export interface DeskDockProps {
+  coordsOpen: boolean;
+  onToggleCoords: () => void;
+  /** The dock badge: the "N need you" count. */
+  needsYou: number;
+  tethers: boolean;
+  onToggleTethers: () => void;
+  onArrange: () => void;
+  onZoom: (factor: number) => void;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
+}
+
+export function dockItems(p: DeskDockProps): DockItemData[] {
+  return [
+    {
+      icon: icon(UserGroupIcon),
+      label: "Wave coordinators",
+      onClick: p.onToggleCoords,
+      active: p.coordsOpen,
+      ...(p.needsYou > 0 ? { badge: p.needsYou } : {}),
+    },
+    {
+      icon: icon(Link02Icon),
+      label: p.tethers ? "Hide tethers" : "Show tethers",
+      onClick: p.onToggleTethers,
+      active: p.tethers,
+    },
+    { separator: true },
+    { icon: icon(FullScreenIcon), label: "Arrange & fit", onClick: p.onArrange },
+    { icon: icon(ZoomInAreaIcon), label: "Zoom in", onClick: () => p.onZoom(DOCK_ZOOM) },
+    { icon: icon(ZoomOutAreaIcon), label: "Zoom out", onClick: () => p.onZoom(1 / DOCK_ZOOM) },
+    { separator: true },
+    {
+      icon: icon(Settings02Icon),
+      label: "Settings",
+      onClick: p.onToggleSettings,
+      active: p.settingsOpen,
+    },
+  ];
+}
+
+export function DeskDock(p: DeskDockProps) {
+  return (
+    <nav className="dock-wrap" aria-label="Desk controls">
+      <Dock
+        items={dockItems(p)}
+        magnification={62}
+        baseItemSize={44}
+        panelHeight={60}
+        accentColor="#6ee7f9"
+        badgeColor="#ff7a59"
+        showLabels
+      />
+    </nav>
+  );
+}

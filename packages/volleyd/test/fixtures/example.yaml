@@ -1,0 +1,11 @@
+# The example wave from the volleyd epic plan.
+wave: 2026-10-20-example
+repo: ~/repos/example
+release_branch: release/2026-10-20-example
+model: claude-opus-5-5
+pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]
+tasks:
+  T0: { issue: 101 }
+  T1: { issue: 102, after: [T0] }
+  T2: { issue: 103, after: [T0] }
+  T3: { issue: 104, after: [T1, T2], pipeline: [implement, merge_ready] }

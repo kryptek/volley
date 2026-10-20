@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/wave-event.schema.json",
+  "title": "Volley Wave Event",
+  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. See spec section 4.6.3.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/events" },
+        "type": {
+          "enum": [
+            "wave_submitted",
+            "wave_versioned",
+            "wave_paused",
+            "wave_resumed",
+            "wave_stopped",
+            "wave_complete",
+            "owner_claimed",
+            "task_queued",
+            "task_admitted",
+            "task_cancelled",
+            "agent_spawned",
+            "agent_registered",
+            "agent_retired",
+            "spawn_failed",
+            "spawn_recovered",
+            "verify_failed",
+            "stage_entered",
+            "artifact_verified",
+            "steering_sent",
+            "decision_opened",
+            "decision_resolved",
+            "lease_requested",
+            "lease_granted",
+            "lease_released",
+            "lease_expired",
+            "alarm_raised",
+            "wake_detected",
+            "reap_suppressed",
+            "reconciled",
+            "config_changed",
+            "account_created",
+            "account_rotated",
+            "account_revoked",
+            "signin_link_issued",
+            "token_redeemed",
+            "setup_step_applied",
+            "admin_token_issued",
+            "desk_password_issued",
+            "claude_account_added",
+            "claude_signin_started",
+            "claude_signin_done",
+            "claude_signin_failed",
+            "claude_profile_synced",
+            "agent_account_moved",
+            "relaunched",
+            "ci_pending",
+            "ci_green",
+            "pr_head_moved",
+            "merged_by_operator",
+            "agent_force_retired",
+            "alarm_cleared",
+            "wave_account_moved",
+            "agent_reaped_by_supervisor",
+            "credentials_revoked",
+            "credentials_swept",
+            "peer_invited",
+            "peer_joined",
+            "peer_removed"
+          ]
+        },
+        "payload": {
+          "type": "object",
+          "required": ["wave", "seq", "at"],
+          "properties": {
+            "wave": {
+              "type": "string",
+              "oneOf": [{ "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }, { "const": "_system" }],
+              "description": "Wave id, or the pseudo-wave _system for global events."
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Journal sequence number, monotonic per wave."
+            },
+            "at": { "type": "string", "format": "date-time" },
+            "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+            "data": { "type": "object", "description": "Event-type-specific detail." }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

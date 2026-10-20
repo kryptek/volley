@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T15:20:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "w1-t2-merge_conflict-1",
+    "wave": "w1",
+    "task": "T2",
+    "question": "Re-dispatch a fixup or resolve by hand?",
+    "pointers": {},
+    "opened_at": "2026-10-18T15:20:00.000Z"
+  }
+}

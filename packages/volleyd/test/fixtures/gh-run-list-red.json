@@ -1,0 +1,11 @@
+[
+  {
+    "databaseId": 502,
+    "name": "CI",
+    "workflowName": "CI",
+    "status": "completed",
+    "conclusion": "failure",
+    "headSha": "1111111111111111111111111111111111111111",
+    "url": "https://github.com/example/repo/actions/runs/502"
+  }
+]

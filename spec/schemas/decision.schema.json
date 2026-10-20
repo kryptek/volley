@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/decision.schema.json",
+  "title": "Volley Wave Decision",
+  "description": "A question only a human (or the owning coordinator) can answer, published retained to volley/_waves/<wave>/decisions/<decision_id> while open and cleared with an empty retained payload on resolve. See spec section 4.6.2.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/decisions" },
+        "type": { "enum": ["decision_opened", "decision_resolved"] },
+        "payload": {
+          "type": "object",
+          "required": ["decision_id", "wave", "task", "kind", "question", "pointers", "opened_at"],
+          "properties": {
+            "decision_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "wave": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "task": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                { "type": "null" }
+              ],
+              "description": "Task id, or null for a wave-level decision (e.g. wave_complete)."
+            },
+            "kind": {
+              "enum": [
+                "reviewers_disagree",
+                "merge_conflict",
+                "agent_blocked",
+                "agent_question",
+                "agent_stalled",
+                "unknown_screen",
+                "hooks_auth_failed",
+                "mcp_not_registered",
+                "spawn_failed",
+                "model_switch",
+                "repo_untrusted",
+                "remote_repo_missing",
+                "ci_failed",
+                "wave_complete",
+                "plan_change",
+                "pr_closed",
+                "pr_head_moved",
+                "spawn_budget_exhausted",
+                "account_limit"
+              ]
+            },
+            "question": { "type": "string", "minLength": 1 },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "pointers": {
+              "type": "object",
+              "description": "Where the evidence lives. Paths are on the supervisor's host.",
+              "properties": {
+                "diff": { "type": "string", "minLength": 1 },
+                "transcript": { "type": "string", "minLength": 1 },
+                "screen": { "type": "string", "minLength": 1 },
+                "pr": { "type": "string", "minLength": 1 }
+              }
+            },
+            "opened_at": { "type": "string", "format": "date-time" },
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing on a remote host: the host's name (wave file or the hosts tunable)."
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing on a remote host: its ssh destination. A repo_untrusted decision with a target is answered on that host."
+            },
+            "claude_config_dir": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted for an agent under a Claude account profile (spec section 4.6.11): that profile's directory, whose own folder trust answers it."
+            },
+            "change": {
+              "enum": ["removed", "issue"],
+              "description": "plan_change: what the new wave version changed about the task (removed from the plan, or moved to another issue)."
+            },
+            "repo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "repo_untrusted / remote_repo_missing: the repo path the decision is about (on target, when set)."
+            },
+            "acct": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "account_limit: the Claude account whose 5-hour window crossed claude.warn_at_pct (spec section 4.6.12)."
+            },
+            "pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "account_limit: that window's used percentage when the decision opened."
+            },
+            "resets_at": {
+              "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+              "description": "account_limit: when that window resets."
+            },
+            "suggested": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                { "type": "null" }
+              ],
+              "description": "account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
+            },
+            "resolved": {
+              "type": "object",
+              "required": ["answer", "by", "at"],
+              "properties": {
+                "answer": { "type": "string", "minLength": 1 },
+                "by": { "type": "string", "minLength": 1 },
+                "at": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"],
+      "if": { "properties": { "type": { "const": "decision_resolved" } } },
+      "then": { "properties": { "payload": { "required": ["resolved"] } } },
+      "else": { "properties": { "payload": { "not": { "required": ["resolved"] } } } }
+    }
+  ]
+}

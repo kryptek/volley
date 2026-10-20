@@ -1,9 +1,10 @@
 import { parseArgs } from "node:util";
 import { channelConfigFor, isReservedChannelPath } from "volley-mcp/channels";
+import type { BrokerAuth } from "volley-mcp/config";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isReservedTopic, isValidAgentId } from "volley-mcp/topics";
-import { parseJsonPayload, resolveBrokerUrl, resolveNamespace } from "../args";
+import { parseJsonPayload, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -21,6 +22,8 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
       args: argv,
       options: {
         "broker-url": { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
         namespace: { type: "string" },
         "agent-id": { type: "string" },
         "parent-id": { type: "string" },
@@ -58,10 +61,20 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
 
   let namespace: string;
   let brokerUrl: string;
+  let auth: BrokerAuth | null;
   let payload: Record<string, unknown>;
   try {
     namespace = resolveNamespace(parsed.values.namespace as string | undefined, env);
     brokerUrl = resolveBrokerUrl(parsed.values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: parsed.values.username as string | undefined,
+        password: parsed.values.password as string | undefined,
+      },
+      env,
+      process.cwd(),
+      brokerUrl,
+    );
     payload = parseJsonPayload(parsed.values.payload as string | undefined);
   } catch (e) {
     io.stderr(`volley pub: ${e instanceof Error ? e.message : String(e)}\n`);
@@ -95,7 +108,7 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
     now: io.now,
   });
 
-  const broker = await connectAsClient(brokerUrl, io);
+  const broker = await connectAsClient(brokerUrl, io, auth);
   if (broker === null) return EXIT.ERROR; // connectAsClient already printed the diagnostic.
   try {
     await broker.publish(topic, JSON.stringify(envelope), { qos: cfg.qos, retain: cfg.retain });
@@ -125,5 +138,7 @@ Optional:
   --correlation-id <id>  UUID v4 to correlate request/response pairs
   --namespace <ns>       Volley namespace (env: VOLLEY_NAMESPACE; default: default)
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
+  --password <pw>        Broker password (env: VOLLEY_AUTH_PASSWORD)
   --help                 Show this help
 `;

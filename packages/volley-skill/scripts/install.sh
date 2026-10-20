@@ -40,7 +40,7 @@ available across all projects. Claude Code stores MCP servers separately from
 settings.json — DO NOT edit settings.json by hand (it does not accept an
 mcpServers field). Run:
 
-  claude mcp add-json -s user volley '{"command":"bun","args":["run","$MCP_ENTRY"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"default"}}'
+  claude mcp add-json -s user volley '{"command":"bun","args":["run","$MCP_ENTRY"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"default","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password from volley auth init>"}}'
 
 Then quit Claude Code (Cmd-Q) and reopen. Verify with:
 

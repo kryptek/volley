@@ -59,7 +59,7 @@ export function renderReport(
 
 Generated: ${headerDate}
 
-The parity test (design doc §8.5) compares wake latency between the legacy
+The parity test (\`test/parity/parity.test.ts\`) compares wake latency between the legacy
 claude-peers + ScheduleWakeup polling loop and the Volley \`volley wait\`
 notification model. 4 synthetic agents are run through each harness on an
 in-process Aedes broker; latency is measured from each agent's terminal

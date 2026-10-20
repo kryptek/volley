@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-18T12:06:00.000Z",
+  "channel": "progress",
+  "type": "resumed",
+  "payload": {
+    "previous": "awaiting_input",
+    "source": "harness-hook",
+    "seq": 9,
+    "hook_event": "PostToolUse"
+  },
+  "correlation_id": null
+}

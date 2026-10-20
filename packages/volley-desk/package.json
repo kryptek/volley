@@ -1,0 +1,42 @@
+{
+  "name": "volley-desk",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Volley Desk \u2014 an infinite canvas of live wave and agent windows over MQTT (Vite + React 19 + React Bits)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:react-bits": "bun run scripts/check-react-bits.ts",
+    "sync:react-bits-backgrounds": "bun run scripts/sync-react-bits-backgrounds.ts"
+  },
+  "dependencies": {
+    "@hugeicons/core-free-icons": "^4.3.3",
+    "@hugeicons/react": "^1.1.10",
+    "motion": "^12.23.12",
+    "mqtt": "^5.10.0",
+    "ogl": "1.0.11",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "three": "0.180.0",
+    "vgpu": "0.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^25.0.0",
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "@types/three": "0.180.0",
+    "@vitejs/plugin-react": "4.5.2",
+    "aedes": "^0.51.0",
+    "axe-core": "4.10.3",
+    "jsdom": "^25.0.1",
+    "vite": "6.3.5",
+    "vitest": "^3.2.4"
+  }
+}

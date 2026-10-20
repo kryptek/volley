@@ -19,8 +19,8 @@ import { useEffect, useMemo } from "react";
 import { useNotifyOnAgentEvent } from "../hooks/use-notify-on-agent-event";
 import { useNotifySettings } from "../hooks/use-notify-settings";
 import { useNow } from "../hooks/use-now";
-import type { VolleyMqttClient } from "../lib/mqtt-client";
-import { DashboardProvider, useDashboard } from "../state/dashboard-context";
+import type { BrokerCredentials } from "../lib/mqtt-client";
+import { type ClientFactory, DashboardProvider, useDashboard } from "../state/dashboard-context";
 import { AgentDrawer } from "./AgentDrawer";
 import { AgentGrid } from "./AgentGrid";
 import { EmptyState } from "./EmptyState";
@@ -29,12 +29,24 @@ import { TopBar } from "./TopBar";
 
 export interface DashboardProps {
   brokerUrl?: string | undefined;
-  clientFactory?: ((url: string) => VolleyMqttClient) | undefined;
+  clientFactory?: ClientFactory | undefined;
+  auth?: BrokerCredentials | undefined;
+  onAuthFailed?: ((message: string) => void) | undefined;
 }
 
-export function Dashboard({ brokerUrl, clientFactory }: DashboardProps = {}): JSX.Element {
+export function Dashboard({
+  brokerUrl,
+  clientFactory,
+  auth,
+  onAuthFailed,
+}: DashboardProps = {}): JSX.Element {
   return (
-    <DashboardProvider brokerUrl={brokerUrl} clientFactory={clientFactory}>
+    <DashboardProvider
+      brokerUrl={brokerUrl}
+      clientFactory={clientFactory}
+      auth={auth}
+      onAuthFailed={onAuthFailed}
+    >
       <DashboardShell />
     </DashboardProvider>
   );

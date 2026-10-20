@@ -1,8 +1,8 @@
 # Volley v0.1 — parity test report
 
-Generated: 2026-05-16
+Generated: 2026-10-18
 
-The parity test (design doc §8.5) compares wake latency between the legacy
+The parity test (`test/parity/parity.test.ts`) compares wake latency between the legacy
 claude-peers + ScheduleWakeup polling loop and the Volley `volley wait`
 notification model. 4 synthetic agents are run through each harness on an
 in-process Aedes broker; latency is measured from each agent's terminal
@@ -13,7 +13,7 @@ status publish to its coordinator's detection.
 | harness | median | p95 | max | count |
 |---|---|---|---|---|
 | legacy | 4.0s | 5.0s | 5.0s | 4 |
-| volley | 22ms | 23ms | 23ms | 4 |
+| volley | 37ms | 124ms | 124ms | 4 |
 
 **Acceptance:** Volley median < 5s; legacy bounded above by the 270s fallback poll.
 
@@ -25,7 +25,7 @@ status publish to its coordinator's detection.
 | parity-legacy-02 | legacy | 4.0s |
 | parity-legacy-03 | legacy | 3.0s |
 | parity-legacy-04 | legacy | 2.0s |
-| parity-volley-01 | volley | 19ms |
-| parity-volley-02 | volley | 22ms |
-| parity-volley-03 | volley | 21ms |
-| parity-volley-04 | volley | 23ms |
+| parity-volley-01 | volley | 124ms |
+| parity-volley-02 | volley | 37ms |
+| parity-volley-03 | volley | 25ms |
+| parity-volley-04 | volley | 26ms |

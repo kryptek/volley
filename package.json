@@ -1,8 +1,8 @@
 {
   "name": "volley",
   "private": true,
-  "version": "0.1.0-dev",
-  "description": "Volley — agent messaging standard (private MVP)",
+  "version": "0.3.0",
+  "description": "Volley — agent messaging standard",
   "license": "Apache-2.0",
   "type": "module",
   "workspaces": ["packages/*"],
@@ -10,8 +10,10 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit && bun run --filter='*' typecheck",
-    "test": "bun run --filter='*' test",
-    "validate:schemas": "bun run scripts/validate-schemas.ts"
+    "test": "bun run test:scripts && bun run --filter='*' test",
+    "test:scripts": "bun test ./scripts",
+    "validate:schemas": "bun run scripts/validate-schemas.ts",
+    "check:spec-refs": "bun run scripts/check-spec-refs.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
@@ -21,6 +23,6 @@
     "typescript": "^5.6.0"
   },
   "engines": {
-    "bun": ">=1.1.0"
+    "bun": ">=1.3 <1.5"
   }
 }

@@ -1,0 +1,13 @@
+{
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/batch.ts",
+      "line": 42,
+      "text": "Empty batches reach the API; the issue requires a short-circuit."
+    },
+    { "severity": "P2", "file": "src/api.ts", "line": 10, "text": "Error is swallowed." }
+  ],
+  "verdict": "changes_requested",
+  "hygiene": { "checked": true, "findings": [] }
+}

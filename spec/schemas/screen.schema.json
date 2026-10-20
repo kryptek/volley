@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/screen.schema.json",
+  "title": "Volley Screen Channel Message",
+  "description": "Retained tail of an agent's terminal, published by a supervisor on the agent's behalf to volley/<ns>/<agent_id>/screen and cleared with an empty retained payload when the agent is retired. The envelope agent_id is the publisher (the supervisor); the topic segment names the agent. See spec section 4.6.6.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "screen" },
+        "type": { "const": "screen_tail" },
+        "payload": {
+          "type": "object",
+          "required": ["lines", "captured_at", "workspace", "hash", "source"],
+          "properties": {
+            "lines": { "type": "array", "maxItems": 40, "items": { "type": "string" } },
+            "captured_at": { "type": "string", "format": "date-time" },
+            "workspace": { "type": "string", "minLength": 1 },
+            "hash": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Content hash of lines; publishers skip unchanged captures."
+            },
+            "source": {
+              "enum": ["cmux", "tmux"],
+              "description": "Capture mechanism: cmux for agents on the supervisor's own host, tmux for agents on a remote (SSH + tmux) host."
+            }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ]
+}

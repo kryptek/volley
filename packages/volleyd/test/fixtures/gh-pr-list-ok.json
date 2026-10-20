@@ -1,0 +1,9 @@
+[
+  {
+    "number": 7,
+    "url": "https://github.com/example/repo/pull/7",
+    "headRefName": "w1/T1-implementer-1",
+    "baseRefName": "release/w1",
+    "headRefOid": "1111111111111111111111111111111111111111"
+  }
+]

@@ -1,4 +1,4 @@
-/** The seven spec error codes (SPEC.md §9). */
+/** The spec error codes (SPEC.md §9). */
 export type VolleyErrorCode =
   | "BROKER_DOWN"
   | "INVALID_TOPIC"
@@ -6,14 +6,15 @@ export type VolleyErrorCode =
   | "TIMEOUT"
   | "SCHEMA_VERSION_MISMATCH"
   | "NOT_REGISTERED"
-  | "RESERVED_TOPIC_WRITE";
+  | "RESERVED_TOPIC_WRITE"
+  | "AUTH_FAILED";
 
 /** Codes a tool may return: the spec codes plus implementation-defined IMPL_* codes (SPEC.md §9). */
 export type ToolErrorCode = VolleyErrorCode | `IMPL_${string}`;
 
 export class VolleyError extends Error {
-  readonly code: VolleyErrorCode;
-  constructor(code: VolleyErrorCode, message: string) {
+  readonly code: ToolErrorCode;
+  constructor(code: ToolErrorCode, message: string) {
     super(message);
     this.name = "VolleyError";
     this.code = code;

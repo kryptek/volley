@@ -1,9 +1,10 @@
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
+import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
-import { parsePositiveInt, resolveBrokerUrl, resolveNamespace } from "../args";
+import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -33,6 +34,8 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
       args: argv,
       options: {
         "broker-url": { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
         namespace: { type: "string" },
         "all-namespaces": { type: "boolean", default: false },
         "include-reaped": { type: "boolean", default: false },
@@ -58,10 +61,21 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
   const asJson = parsed.values.json === true;
 
   let brokerUrl: string;
+
+  let auth: BrokerAuth | null;
   let timeoutSec: number;
   let nsFilter: string | null;
   try {
     brokerUrl = resolveBrokerUrl(parsed.values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: parsed.values.username as string | undefined,
+        password: parsed.values.password as string | undefined,
+      },
+      env,
+      process.cwd(),
+      brokerUrl,
+    );
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
     nsFilter = allNamespaces
       ? null
@@ -71,7 +85,7 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
     return EXIT.USAGE;
   }
 
-  const broker = await connectAsClient(brokerUrl, io);
+  const broker = await connectAsClient(brokerUrl, io, auth);
   if (broker === null) return EXIT.ERROR; // connectAsClient already printed the diagnostic.
   try {
     // Subscribe to all retained registry entries. There is no max; collect for the
@@ -172,5 +186,7 @@ Optional:
   --json                  Emit a JSON array instead of a human table
   --timeout <seconds>     Time to wait for retained entries to arrive (default: 2)
   --broker-url <url>      MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
+  --username <user>       Broker username (env: VOLLEY_AUTH_USERNAME)
+  --password <pw>         Broker password (env: VOLLEY_AUTH_PASSWORD)
   --help                  Show this help
 `;

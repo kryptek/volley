@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/agent-identity.schema.json",
+  "title": "Volley Assigned Agent Identity",
+  "description": "Contents of .volley/agent.json in an agent's working directory. A supervisor writes it to pre-assign a literal agent id; a conforming MCP server that finds it uses agent_id verbatim (no random suffix). Not an envelope. See spec section 6.5.",
+  "type": "object",
+  "required": ["agent_id"],
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "description": "Literal agent id. Recommended form <wave>-<task>-<role>-<attempt>, lowercased."
+    },
+    "namespace": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "parent_id": {
+      "oneOf": [{ "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }, { "type": "null" }]
+    },
+    "wave": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Pipeline role, e.g. implementer, spec_reviewer, quality_reviewer, fixup."
+    },
+    "broker_url": { "type": "string", "minLength": 1 },
+    "claude_account": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "description": "The Claude account profile the supervisor launched the agent under (spec section 4.6.11); primary for the default profile."
+    },
+    "broker": {
+      "type": "object",
+      "description": "Broker credentials for this agent (spec section 11.5). The supervisor mints them (volley auth add-agent) with username = agent_id. Beats VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD.",
+      "required": ["username", "password"],
+      "properties": {
+        "username": { "type": "string", "minLength": 1 },
+        "password": { "type": "string" }
+      }
+    }
+  }
+}

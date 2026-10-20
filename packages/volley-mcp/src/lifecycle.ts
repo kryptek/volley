@@ -6,13 +6,14 @@ import { volRegister } from "./tools/register";
 import { buildTopic } from "./topics";
 
 /**
- * Start the Volley server lifecycle (design doc §5.1):
+ * Start the Volley server lifecycle (SPEC §5 states, §7 LWT):
  *  1. connect to the broker with the LWT pre-armed (retained status: reaped),
  *  2. publish the initial retained status: spawning,
  *  3. auto-register with default capabilities=[] and cwd=process.cwd() so the
  *     server is SPEC §6.3-compliant by default — agents/skills can re-call
  *     vol_register later to update capabilities/model/cwd (idempotent).
- * Throws VolleyError(BROKER_DOWN) if the broker is unreachable.
+ * Throws VolleyError(BROKER_DOWN) if the broker is unreachable, or
+ * VolleyError(AUTH_FAILED) if it refuses `config.auth` (or anonymous access).
  */
 export async function startLifecycle(config: VolleyConfig): Promise<ServerState> {
   const statusTopic = buildTopic(config.namespace, config.agentId, "status");
@@ -31,6 +32,7 @@ export async function startLifecycle(config: VolleyConfig): Promise<ServerState>
     agentId: config.agentId,
     willTopic: statusTopic,
     willPayload: JSON.stringify(willEnvelope),
+    ...(config.auth !== undefined ? config.auth : {}),
   });
 
   const spawning = buildEnvelope({
