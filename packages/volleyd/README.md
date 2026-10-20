@@ -837,8 +837,9 @@ prompt can only confirm it, never race it. The cost is that a slow carry (a mult
 machine, one ssh round trip per key) holds the queue for its duration, bounded by the screen-read
 timeout and `picker_review_reads`.
 
-**What the screen looks like** (the spike, `scripts/spike-picker.ts`, against Claude Code 2.1;
-the captures are `test/fixtures/screens/picker-*.txt`): the highlighted row starts with `❯`, the
+**What the screen looks like** (the spike against Claude Code 2.1, driven by hand in tmux;
+`scripts/spike-picker.ts` is the re-runnable cmux version; the captures are
+`test/fixtures/screens/picker-*.txt`): the highlighted row starts with `❯`, the
 others with a space; the prompt echoed above the picker starts with `❯` too, so only rows below the
 picker's header chip count. `Down` does not wrap. Keys sent back to back all land. Coordinators ask
 their go/no-go with `AskUserQuestion` (options `go`, `hold`, `cancel`: the volley-issues skill), so

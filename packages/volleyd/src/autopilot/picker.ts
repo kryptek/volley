@@ -4,7 +4,8 @@
  * whether it still shows the item's picker and which keys select an answer, and the host adapter
  * presses them (each key behind the fence's PickerToken).
  *
- * What the spike (scripts/spike-picker.ts, Claude Code 2.1, driven by hand) found:
+ * What the spike found (Claude Code 2.1, driven by hand in tmux; scripts/spike-picker.ts is the
+ * re-runnable cmux version):
  *   - The picker is drawn below a rule: a header chip line (` ☐ Fruit`; multi-select
  *     `←  ☐ Toppings  ✔ Submit  →`), the question, then numbered rows `  1. Apple`, each option's
  *     description indented below it. After the options comes the free-text row
@@ -195,8 +196,9 @@ export function keysFor(p: ParsedPicker, choice: PickerChoice): Key[] | null {
     return keys;
   }
   if (index.length === 0 && !typed) return null;
-  // Only the option rows are made to match: an Other row already ticked is left as it is when
-  // the answer has no free text (one already holding typed text cannot take more: refused above).
+  // An Other row already ticked would be reported too, and Space on the free-text row is not
+  // screen-verified to untick it: refused, so the terminal answers it.
+  if (!typed && p.other.checked === true) return null;
   const want = new Set(index);
   p.options.forEach((o, i) => {
     if ((o.checked === true) === want.has(i)) return;

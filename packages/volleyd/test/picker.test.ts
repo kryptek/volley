@@ -176,6 +176,11 @@ describe("keysFor", () => {
     expect(keysFor(parsed("picker-single"), { labels: [] })).toBeNull();
     expect(keysFor(parsed("picker-other-typed"), { labels: [], other: "x" })).toBeNull();
   });
+
+  it("null: a multi-select whose Other row is already ticked, for an answer without free text", () => {
+    // Left ticked, Claude Code would report more than the answer holds.
+    expect(keysFor(parsed("picker-multi-other"), { labels: ["Olives"] })).toBeNull();
+  });
 });
 
 describe("choiceFor (an inbox answer → what to select)", () => {
