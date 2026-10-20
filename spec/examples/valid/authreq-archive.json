@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "desk-4c2e",
+  "wall_time": "2026-10-19T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "0b7e2c41-5d9a-4f3e-9c18-6a2d4e8f1b07",
+  "payload": {
+    "op": "archive",
+    "wave": "2026-10-19-smoke",
+    "dry_run": false
+  }
+}

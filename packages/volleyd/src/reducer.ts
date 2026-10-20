@@ -59,6 +59,10 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+  /** When the wave last ended (`wave_stopped` / `wave_complete`); cleared by a resume. */
+  ended_at?: string;
+  /** Set by `wave_archived` (archive.ts): when, by whom, why, and how the wave had ended. */
+  archived?: { at: string; by: string; reason: string; from: "stopped" | "complete" };
 }
 
 /** A steer journaled while its task had no live agent: delivered to the next one to register. */
@@ -432,9 +436,20 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
+    case "wave_archived":
+      next.archived = {
+        at: ev.at,
+        by: String(ev.data.by),
+        reason: String(ev.data.reason ?? ""),
+        from: state.status === "complete" ? "complete" : "stopped",
+      };
+      state.status = "archived";
+      break;
     default: {
       const status = WAVE_STATUS[ev.type];
       if (status !== undefined) state.status = status;
+      if (ev.type === "wave_stopped" || ev.type === "wave_complete") next.ended_at = ev.at;
+      if (ev.type === "wave_resumed") delete next.ended_at;
     }
   }
 

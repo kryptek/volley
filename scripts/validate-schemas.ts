@@ -30,6 +30,7 @@
  *   - `claudeaccount-*.json` -> claude-account.schema.json
  *   - `machine-*.json` -> machine.schema.json
  *   - `readiness-*.json` -> readiness.schema.json
+ *   - `archive-*.json` -> archive.schema.json
  *   - `setupplan-*.json` -> setup-result.schema.json `$defs/plan` (a result, not an envelope)
  *   - `setupapply-*.json` -> setup-result.schema.json `$defs/applied` (a result, not an envelope)
  *
@@ -69,6 +70,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   claudeaccount: "claude-account.schema.json",
   machine: "machine.schema.json",
   readiness: "readiness.schema.json",
+  archive: "archive.schema.json",
   setupplan: "setup-result.schema.json#/$defs/plan",
   setupapply: "setup-result.schema.json#/$defs/applied",
 };

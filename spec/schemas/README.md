@@ -16,10 +16,11 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `screen.schema.json` | `screen` (supervisor-published) | section 4.6.6 |
 | `usage.schema.json` | `usage` (the agent's harness) | section 4.6.12 |
 | `claude-account.schema.json` | `_system/claude-accounts/<acct>` | section 4.6.12 |
-| `wave-state.schema.json` | `_waves/<wave>/state` | sections 4.6.1, 4.6.15 |
+| `wave-state.schema.json` | `_waves/<wave>/state` | sections 4.6.1, 4.6.15, 4.6.16 |
 | `decision.schema.json` | `_waves/<wave>/decisions/<id>` | sections 4.6.2, 4.6.15 |
-| `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15 |
-| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | sections 4.6.4, 4.6.15 |
+| `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15, 4.6.16 |
+| `archive.schema.json` | `_waves/_archive` (index of archived waves) | section 4.6.16 |
+| `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | sections 4.6.4, 4.6.15, 4.6.16 |
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
 | `lease-pool.schema.json` | `_system/leases/<pool>` | sections 4.6.5, 4.6.15 |
 | `lease-request.schema.json` | `_system/leases/<pool>/requests` | section 4.6.5 |

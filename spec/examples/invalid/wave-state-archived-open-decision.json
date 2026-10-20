@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T10:00:00.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "version": 1,
+    "owner": "coordinator-ab12",
+    "repo": "example-org/example-repo",
+    "release_branch": "release/2026-10-20-example",
+    "status": "archived",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "done",
+        "agents": {
+          "implementer": "2026-10-20-example-t1-implementer-1"
+        }
+      }
+    ],
+    "open_decisions": [
+      "agent_blocked-3f9a1c2b7d4e"
+    ],
+    "gates": [],
+    "archived": {
+      "at": "2026-10-21T10:00:00.000Z",
+      "by": "coordinator-ab12",
+      "reason": "volleyd archive"
+    },
+    "updated_at": "2026-10-21T10:00:00.000Z"
+  }
+}

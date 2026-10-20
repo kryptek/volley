@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/archive.schema.json",
+  "title": "Volley Archived Waves Index",
+  "description": "Retained index of archived waves, published by a supervisor to volley/_waves/_archive (the leading underscore keeps it out of the wave id space). Newest first, capped by the supervisor. Every client can show how many waves were archived without reading journals. See spec section 4.6.16.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/_archive" },
+        "type": { "const": "archive" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["archived", "updated_at"],
+          "properties": {
+            "archived": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/entry" },
+              "description": "Archived waves, newest archived_at first."
+            },
+            "updated_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wave", "status", "archived_at", "by", "reason"],
+      "properties": {
+        "wave": { "$ref": "wave-state.schema.json#/$defs/waveId" },
+        "status": {
+          "enum": ["stopped", "complete"],
+          "description": "How the wave had ended when it was archived."
+        },
+        "archived_at": { "type": "string", "format": "date-time" },
+        "by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who archived it: the owner or caller, an admin, or the supervisor's agent id (auto-archive)."
+        },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

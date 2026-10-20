@@ -24,7 +24,14 @@ export type TaskStage =
   | "awaiting_decision"
   | "cancelled";
 
-export type WaveStatus = "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+export type WaveStatus =
+  | "running"
+  | "paused"
+  | "awaiting_decision"
+  | "complete"
+  | "stopped"
+  // Retired (archive.ts): published once, then the retained state is cleared.
+  | "archived";
 
 /** One pipeline entry as written: a stage, or a group of stages that run in parallel. */
 export type PipelineStep = PipelineStage | PipelineStage[];
@@ -123,6 +130,11 @@ export interface Tunables {
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
+  // --- Archiving (SPEC §4.6.16) ---
+  /** Hours after its `wave_stopped` / `wave_complete` an ended wave is archived; 0: never. */
+  archive_ended_after_h: number;
+  /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
+  archive_on_ack: boolean;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -329,6 +341,8 @@ export interface WaveState {
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
   hygiene_level?: HygieneLevel;
+  /** When, by whom and why the wave was archived (`volleyd status --all` only). */
+  archived?: { at: string; by: string; reason: string };
   updated_at: string;
 }
 
@@ -354,6 +368,8 @@ export const WAVE_EVENT_TYPES = [
   "wave_resumed",
   "wave_stopped",
   "wave_complete",
+  // An ended wave retired (archive.ts): its open decisions closed, out of the live set.
+  "wave_archived",
   "owner_claimed",
   "task_queued",
   "task_admitted",
