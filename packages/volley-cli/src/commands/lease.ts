@@ -50,6 +50,8 @@ interface PoolState {
   pool: string;
   capacity: number;
   per_machine?: number;
+  /** The per-machine cap in force on a named machine in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
   /** `host`: the holder's machine; null or absent when the supervisor does not know it. */
   held: { lease_id: string; holder: string; host?: string | null; since: string; ttl_s: number }[];
   queue: { lease_id: string; holder: string; host?: string | null; since: string }[];
@@ -747,13 +749,13 @@ async function status(broker: VolleyBroker, r: Resolved, io: IO): Promise<ExitCo
   }
   for (const p of pools) {
     const why = p.reasons.length > 0 ? `  ${p.reasons.join("; ")}` : "";
-    const cap = p.per_machine !== undefined ? `  max ${p.per_machine} per machine` : "";
     io.stdout(
-      `${p.pool}  ${p.held.length}/${p.capacity} held${cap}  ${p.queue.length} queued${why}\n`,
+      `${p.pool}  ${p.held.length}/${p.capacity} held${capSummary(p)}  ${p.queue.length} queued${why}\n`,
     );
     for (const [host, g] of byHost(p)) {
-      // A per-machine cap applies to a known machine only.
-      const n = p.per_machine !== undefined && host !== UNKNOWN_HOST ? `/${p.per_machine}` : "";
+      // A per-machine cap applies to a known machine only: its override, else `per_machine`.
+      const inForce = host === UNKNOWN_HOST ? undefined : capInForce(p, host);
+      const n = inForce !== undefined ? `/${inForce}` : "";
       io.stdout(`  ${host}  ${g.held.length}${n} held\n`);
       for (const h of g.held)
         io.stdout(`    held    ${h.lease_id}  ${h.holder}  since ${h.since}\n`);
@@ -764,9 +766,30 @@ async function status(broker: VolleyBroker, r: Resolved, io: IO): Promise<ExitCo
   return EXIT.OK;
 }
 
-/** A pool's held and queued leases by the holder's machine: hosts by name, unknown host last. */
+/** The per-machine cap in force on `host`: its override, else the pool's `per_machine`. */
+function capInForce(p: PoolState, host: string): number | undefined {
+  return p.per_machine_overrides?.[host] ?? p.per_machine;
+}
+
+/** The header's cap segment: `  max 2 per machine (box-a 3, laptop 1)`, or `""` with no cap. */
+function capSummary(p: PoolState): string {
+  const overrides = Object.entries(p.per_machine_overrides ?? {})
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([host, n]) => `${host} ${n}`)
+    .join(", ");
+  if (p.per_machine !== undefined)
+    return `  max ${p.per_machine} per machine${overrides !== "" ? ` (${overrides})` : ""}`;
+  return overrides !== "" ? `  max per machine: ${overrides}` : "";
+}
+
+/**
+ * A pool's held and queued leases by the holder's machine, plus every machine with a cap override
+ * (so a machine's cap shows before it holds anything): hosts by name, unknown host last.
+ */
 function byHost(p: PoolState): [string, Pick<PoolState, "held" | "queue">][] {
   const groups = new Map<string, Pick<PoolState, "held" | "queue">>();
+  for (const host of Object.keys(p.per_machine_overrides ?? {}))
+    groups.set(host, { held: [], queue: [] });
   const group = (host: string | null | undefined) => {
     const key = host ?? UNKNOWN_HOST;
     let g = groups.get(key);

@@ -843,6 +843,10 @@
   min-width: 96px;
   color: var(--mute);
 }
+.lease-host-count {
+  min-width: 32px;
+  font-variant-numeric: tabular-nums;
+}
 .lease-holder + .lease-holder::before {
   content: " · ";
   color: var(--dim);
@@ -850,4 +854,9 @@
 .lease-reason {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* ConfigRows' wrapper: a lookup root for deep links, no box of its own. */
+.cfg-rows {
+  display: contents;
 }
