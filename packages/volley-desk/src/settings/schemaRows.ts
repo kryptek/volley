@@ -181,6 +181,8 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
           const leaf = resolve(schema, leafRaw);
           const w = wordsAndUnit(sub);
           if (leaf.properties) return leaves(`${path}.${sub}`, `${words}${w.words} `, leaf);
+          // A list (`autopilot.owner_only`) has no row control: set it in config.yaml.
+          if (leaf.type === "array") return [];
           if (typeof leaf.additionalProperties === "object") {
             // A nested map of per-pool caps (`fleet.fallback.per_machine`): a row per heavy pool.
             const entry = resolve(schema, leaf.additionalProperties);
@@ -197,8 +199,6 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
               default: FALLBACK_PER_MACHINE_DEFAULT,
             }));
           }
-          // A list (`autopilot.owner_only`) has no row control: set it in config.yaml.
-          if (leaf.type === "array") return [];
           return [row(`${path}.${sub}`, section, sentence(words + w.words), w.unit, leaf)];
         });
       return leaves(key, prefix, def);

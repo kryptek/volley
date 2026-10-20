@@ -83,13 +83,13 @@ describe("schemaRows", () => {
           Object.entries(o).flatMap(([k, v]) =>
             v.properties
               ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
-              : v.additionalProperties
-                ? heavyPools.map((pool) => [
-                    `${pre}${k}.${pool}`,
-                    v.additionalProperties as JsonSchema,
-                  ])
-                : v.type === "array"
-                  ? []
+              : v.type === "array"
+                ? []
+                : v.additionalProperties
+                  ? heavyPools.map((pool) => [
+                      `${pre}${k}.${pool}`,
+                      v.additionalProperties as JsonSchema,
+                    ])
                   : [[`${pre}${k}`, v]],
           ),
         );
