@@ -501,7 +501,9 @@ export function reducePipeline(
       break;
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
-      if (d.alarm === "merge_refused") p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+      // Only a refusal of the current gated head counts: a late one for an older head says nothing.
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
+        p.merge_refusals = (p.merge_refusals ?? 0) + 1;
       // The PR is no longer at the verified head: that role's acceptance no longer holds.
       const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
       if (run !== undefined) {

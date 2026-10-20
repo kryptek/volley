@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { emptyPipeline, reducePipeline } from "../src/pipeline";
 import {
   type Harness,
   type HarnessOptions,
@@ -288,5 +289,26 @@ describe("merge: manual", () => {
     await due();
     expect(mergeCalls()).toEqual([]);
     expect(h.task()?.stage).toBe("merge_ready");
+  });
+});
+
+describe("merge_refusals", () => {
+  it("counts only refusals of the current gated head; a late one for an older head does not", () => {
+    const p = emptyPipeline();
+    const refused = (seq: number, head: string) =>
+      reducePipeline(
+        p,
+        { seq, at: "", type: "alarm_raised", task: "T1", data: { alarm: "merge_refused", head } },
+        { stages: [] },
+      );
+    p.gated = [H];
+    refused(1, H);
+    expect(p.merge_refusals).toBe(1);
+    p.gated = [H, sha(0x1002)];
+    p.merge_refusals = 0;
+    refused(2, H);
+    expect(p.merge_refusals).toBe(0);
+    refused(3, sha(0x1002));
+    expect(p.merge_refusals).toBe(1);
   });
 });
