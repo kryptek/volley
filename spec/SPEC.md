@@ -234,6 +234,8 @@ This list matches the `type` enum in `spec/schemas/mailbox.schema.json`.
 
 **Delivery.** Because mailbox messages are not retained, the broker drops a message published while the recipient holds no subscription to its mailbox. An agent that honours its mailbox (§11.3) MUST therefore keep its mailbox subscription in a **persistent MQTT session** (a live subscription on a clean session still loses whatever arrives before it subscribes or while it reconnects): connect with `clean: false` (MQTT 3.1.1) or a non-zero session expiry interval (MQTT 5), with a stable clientId it owns exclusively, and subscribe at QoS 1. The broker then queues messages while the agent is offline and delivers them on its next connect. Two clients that connect with the same clientId kick each other off, so each persistent consumer of one agent (e.g. the MCP server and a hooks drain client) MUST use its own clientId, such as `volley-<agent_id>-mcp` vs `volley-<agent_id>-hooks`. A session expiry interval applies to new connections only: an existing persistent session keeps the expiry it was created with until the client reconnects. A sender that needs confirmation SHOULD wait for the `ack` rather than trust PUBACK, which only confirms receipt by the broker.
 
+**No live recipient.** A supervisor asked to steer a task that has no live agent (its last agent retired, the next one not yet registered) MUST NOT publish to a retired agent's mailbox, which nobody drains; it SHOULD queue the message for the task's next agent, deliver it once that agent registers (with the id and `seq` it was queued with), and tell the sender it was queued rather than delivered.
+
 ### 4.5 Reserved
 
 This section number is intentionally unused, so that references to §4.6 and its subsections stay stable.
@@ -276,13 +278,14 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `owner` | agent id \| null | Coordinator that owns the wave; `null` when orphaned. |
 | `repo`, `release_branch` | string | Where the wave's PRs land. |
 | `status` | enum | `running` \| `paused` \| `awaiting_decision` \| `complete` \| `stopped`. |
-| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, host_down?, pr?, evidence_path?, screen_stale?, last_error?, attempt?, next_retry_at?, reviews_skipped_by_plan?, stage_label?, stage_group?, alarms? }`. |
+| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, host_down?, pr?, evidence_path?, screen_stale?, queued_steers?, last_error?, attempt?, next_retry_at?, reviews_skipped_by_plan?, stage_label?, stage_group?, alarms? }`. |
 | `tasks[].stage` | enum (closed) | `queued` \| `implement` \| `spec_review` \| `quality_review` \| `fixup` \| `merge_ready` \| `done` \| `blocked` \| `awaiting_decision` \| `cancelled`. |
 | `tasks[].agents` | object | Current agent id per role: `implementer?`, `spec_reviewer?`, `quality_reviewer?`, `fixup?`, `rebase?`. |
 | `tasks[].waiting_on`, `why_waiting` | string[], string | What the task is blocked on, and a human-readable reason (e.g. `tunnel down to <target>` while a remote host's broker tunnel is down). |
 | `tasks[].host` | string | The remote host the task's agents run on (its name from the wave file or the `hosts` tunable); absent for the supervisor's own host. Per task: every agent of a task runs on the same host. |
 | `tasks[].host_down` | string | While the task's host is a paired machine that is down (§4.6.14): why (`disconnected`, `no heartbeat for 90 s`). Set on every unfinished task on that host, running ones included; absent otherwise. |
 | `tasks[].screen_stale` | boolean | `true` while the supervisor's screen capture for any of the task's agents is backed off (§4.6.6), so the retained `screen` topic may be out of date. Per task, not per agent; absent otherwise. |
+| `tasks[].queued_steers` | integer | Steering messages held for the task's next agent because none was live when they were sent (§4.4); absent when none are held. |
 | `tasks[].last_error`, `attempt`, `next_retry_at` | object, integer, date-time \| null | While a spawn of the task has failed and that role has not spawned since: `last_error` `{ code, message, at }`, `attempt` (failed attempts in a row) and `next_retry_at` (the supervisor's next automatic retry; `null` once it stopped retrying). Failures are counted per role (two roles of one step may fail at once); these fields show the most recent one. Absent otherwise. |
 | `tasks[].pr` | object | `{ number, url, head_sha?, ci?, checks? }`; `ci` is `green` \| `red` \| `running` \| `none`. While the supervisor holds the task for CI on `head_sha`, `ci` is `running` and `checks` is `{ done, total }` (its CI runs completed, and all of them); `why_waiting` then reads e.g. `CI pending on <sha7> (2/5 checks)`. |
 | `tasks[].reviews_skipped_by_plan` | boolean | `true` once the task reached `merge_ready` without reviews because its wave-file pipeline lists no review stage (§4.6.8); absent otherwise. |
@@ -313,7 +316,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 #### 4.6.3 Wave events
 
-`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `spawn_failed`, `spawn_recovered`, `stage_entered`, `decision_opened`, `lease_granted`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`.
+`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `spawn_failed`, `spawn_recovered`, `stage_entered`, `steering_sent`, `steering_queued`, `steering_dropped`, `decision_opened`, `lease_granted`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`.
 
 #### 4.6.4 Supervisor config
 

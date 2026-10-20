@@ -303,6 +303,7 @@ describe("merge_ready invariant: never without both reviews for the current head
         overrides: {},
         decisions: {},
         steers: {},
+        queued_steers: {},
         pipeline: {},
         spawnFailures: {},
       },
