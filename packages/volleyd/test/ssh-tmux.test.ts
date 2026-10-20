@@ -132,16 +132,17 @@ describe("SshTmuxHost", () => {
     ]);
   });
 
-  it("launch gives a running tmux server the ssh session's PATH first (a server keeps its old one)", async () => {
-    const PATH = "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin";
+  /** A launch on a box whose ssh PATH is `ssh` and whose tmux server has `server` (null: none). */
+  async function launchWithPaths(ssh: string, server: string | null) {
     const r = remote((s) =>
       argvIs("tmux", "has-session")(s)
         ? { code: 1 }
         : argvIs("printenv", "PATH")(s)
-          ? { stdout: `${PATH}\n` }
-          : argvIs("tmux", "set-environment")(s)
-            ? // No server running yet: the new one starts with this PATH anyway.
-              { code: 1, stderr: "no server running on /tmp/tmux-501/default" }
+          ? { stdout: `${ssh}\n` }
+          : argvIs("tmux", "show-environment")(s)
+            ? server === null
+              ? { code: 1, stderr: "no server running on /tmp/tmux-501/default" }
+              : { stdout: `PATH=${server}\n` }
             : undefined,
     );
     await r.host.launch({
@@ -150,10 +151,47 @@ describe("SshTmuxHost", () => {
       command: LAUNCH_COMMAND,
       launch: sealed("/wt"),
     });
-    const argvs = r.steps().map((s) => s.argv);
+    return r.steps().map((s) => s.argv);
+  }
+
+  it("launch adds the ssh session's PATH to a running tmux server's first (a server keeps its old one)", async () => {
+    const argvs = await launchWithPaths(
+      "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+      "/usr/bin:/bin",
+    );
+    expect(argvs).toContainEqual(["tmux", "show-environment", "-g", "PATH"]);
     const set = argvs.findIndex((a) => a[1] === "set-environment");
-    expect(argvs[set]).toEqual(["tmux", "set-environment", "-g", "PATH", PATH]);
+    expect(argvs[set]).toEqual([
+      "tmux",
+      "set-environment",
+      "-g",
+      "PATH",
+      "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+    ]);
     expect(set).toBeLessThan(argvs.findIndex((a) => a[1] === "new-session"));
+  });
+
+  it("launch never drops a directory a running tmux server's PATH has (the user's own server)", async () => {
+    // Started from a full terminal: claude is in ~/.local/bin, which the ssh PATH lacks.
+    const argvs = await launchWithPaths(
+      "/opt/homebrew/bin:/usr/bin:/bin",
+      "/home/dev/.local/bin:/usr/bin:/bin",
+    );
+    expect(argvs.find((a) => a[1] === "set-environment")).toEqual([
+      "tmux",
+      "set-environment",
+      "-g",
+      "PATH",
+      "/opt/homebrew/bin:/usr/bin:/bin:/home/dev/.local/bin",
+    ]);
+  });
+
+  it("launch leaves the tmux server alone when it has every directory already, or none runs", async () => {
+    for (const server of ["/home/dev/.local/bin:/usr/bin:/bin", null]) {
+      const argvs = await launchWithPaths("/usr/bin::/home/dev/.local/bin", server);
+      expect(argvs.some((a) => a[1] === "set-environment")).toBe(false);
+      expect(argvs.some((a) => a[1] === "new-session")).toBe(true);
+    }
   });
 
   it("launch picks a free session name when one is taken (the relaunch after an update prompt)", async () => {

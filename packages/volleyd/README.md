@@ -921,7 +921,7 @@ captured to `$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
 | `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
-| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture; its question quotes the session's last output (its last non-blank lines, also in `last_output`), or says the screen was empty and the session may have ended at once |
+| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture; its question quotes the session's last output (its last non-blank lines, also in the journal's `decision_opened` event as `data.last_output`; not on the retained decision), or says the screen was empty and the session may have ended at once |
 
 After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
 signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
@@ -1115,8 +1115,11 @@ the wave repo at `repo` (its `origin` must have the release branch) and a volley
   `~/.local/bin`, which sshd's default `PATH` lacks: set it in `~/.zshenv` (zsh) or at the top of
   `~/.bashrc` (bash), or link it into `/usr/local/bin`. `volley peer join` checks this before it
   pairs and prints the exact line. A tmux server that was already running keeps the `PATH` it
-  started with, so before each launch volleyd gives it the ssh session's own
-  (`printenv PATH`, then `tmux set-environment -g PATH <it>`; nothing to do when no server runs).
+  started with, so before each launch volleyd adds the ssh session's own in front of it
+  (`printenv PATH` and `tmux show-environment -g PATH`, then `tmux set-environment -g PATH` with
+  the ssh session's directories first and every directory the server already had after them;
+  nothing to do when none is missing, or no server runs). volleyd uses tmux's default server, so
+  this may be your own: its PATH only ever gains directories.
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
@@ -1679,7 +1682,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
     the LaunchToken sealed for <dir>) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
-    set-environment -g PATH <absolute dirs> (the box's own PATH, from printenv) —
+    show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+    PATH, from printenv, then the server's own dirs) —
     kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
     nc -z 127.0.0.1 <port> · printenv PATH

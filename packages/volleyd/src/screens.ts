@@ -117,9 +117,11 @@ export function lastOutput(screen: string | null): string | null {
   return text.length > max ? `…${text.slice(text.length - max + 1)}` : text;
 }
 
-/** ` Last output: “…”.`, or what an empty screen means, for a decision's question. */
-export function lastOutputNote(screen: string | null, remote: boolean): string {
-  const out = lastOutput(screen);
+/**
+ * ` Last output: “…”.`, or what an empty screen means, for a decision's question. `out` is
+ * `lastOutput(screen)`.
+ */
+export function lastOutputNote(out: string | null, remote: boolean): string {
   return out !== null
     ? ` Last output: “${out}”.`
     : ` There is nothing on screen: its session may have ended at once${remote ? " (on a remote machine, check that claude and bun are on its non-interactive ssh PATH)" : ""}.`;

@@ -157,6 +157,13 @@ describe("remote allow-list (ssh … bash -s)", () => {
     );
     expect(ok("tmux", "set-environment", "-g", "LD_PRELOAD", "/tmp/x.so")).toBe("deny");
     expect(ok("tmux", "set-environment", "-g", "PATH", "relative/bin:/usr/bin")).toBe("deny");
+    // An empty entry is the current directory.
+    expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin::/bin")).toBe("deny");
+    expect(ok("tmux", "set-environment", "-g", "PATH", ":/usr/bin")).toBe("deny");
+    // Reading the server's PATH first (to add to it, never drop from it).
+    expect(ok("tmux", "show-environment", "-g", "PATH")).toBe("allow");
+    expect(ok("tmux", "show-environment", "-g")).toBe("deny");
+    expect(ok("tmux", "show-environment", "-g", "SSH_AUTH_SOCK")).toBe("deny");
     expect(ok("tmux", "set-environment", "PATH", "/usr/bin")).toBe("deny");
     expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin", "x")).toBe("deny");
   });

@@ -604,18 +604,19 @@ async function verifyAndRecover(
       }
       continue;
     }
+    const last = lastOutput(result.screen);
     const decisionId = await openDecision(
       ctx,
       "unknown_screen",
       decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
-        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(result.screen, deps.host.name !== "local")} Look at its terminal?`,
+        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(last, deps.host.name !== "local")} Look at its terminal?`,
         options: ["relaunch", "cancel"],
         screen,
         data: {
           agent_id: cur.agentId,
           screen_class: result.screen_class,
-          ...(lastOutput(result.screen) !== null ? { last_output: lastOutput(result.screen) } : {}),
+          ...(last !== null ? { last_output: last } : {}),
           pipeline: relaunchMarker(ctx, cur),
         },
       },

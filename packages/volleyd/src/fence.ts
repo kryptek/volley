@@ -116,7 +116,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
  *     the LaunchToken sealed for <dir>) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
- *     set-environment -g PATH <absolute dirs> (the box's own PATH, from printenv) —
+ *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     PATH, from printenv, then the server's own dirs) —
  *     kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
  *     nc -z 127.0.0.1 <port> · printenv PATH
@@ -1480,6 +1481,10 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     const v = checkArgs("tmux kill-session", rest, { valued: ["-t"] });
     return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
   }
+  if (sub === "show-environment") {
+    // Read-only: the server's global PATH, which set-environment then only adds to.
+    return sameArgv(rest, ["-g", "PATH"]) ? ALLOW : deny("tmux show-environment (only -g PATH)");
+  }
   if (sub === "set-environment") {
     // Only the global PATH, to an absolute directory list (the box's own, from `printenv PATH`).
     const [g, name, value, ...more] = rest;
@@ -1487,7 +1492,7 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
       name === "PATH" &&
       more.length === 0 &&
       value !== undefined &&
-      value.split(":").every((d) => d === "" || REMOTE_PATH.test(d))
+      value.split(":").every((d) => REMOTE_PATH.test(d))
       ? ALLOW
       : deny("tmux set-environment (only -g PATH <absolute dirs>)");
   }
