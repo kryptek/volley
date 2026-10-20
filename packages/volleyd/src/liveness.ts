@@ -1,4 +1,5 @@
 import { parseEnvelope } from "volley-mcp/envelope";
+import { type ActivityEvidence, NO_EVIDENCE, ownWorkReason } from "./activity-evidence";
 import { screenHash, screenTail } from "./screen-tail";
 import { classifyScreen } from "./screens";
 import type { TaskId } from "./types";
@@ -14,7 +15,10 @@ import type { TaskId } from "./types";
  *   awaiting_input permission_prompt | agent_needs_input → agent_question, no screen read;
  *                                                         `resumed` closes it
  *   idle (Stop), no terminal status, no `resumed` for idle_grace_s (an `idle_prompt` confirms it
- *     sooner) → one steer "continue…"; still idle another grace later → agent_stalled
+ *     sooner) → one steer "continue…"; still idle another grace later → agent_stalled; each
+ *     answered agent_stalled doubles the wait for the next (capped at stall_backoff_max_s)
+ *   idle while waiting on its own work (activity-evidence.ts: the hooks' `background_wait`, a
+ *     lease, running shells in the footer, a fresh worktree write) → no steer, no agent_stalled
  *   awaiting_input class credit                          → credit_exhausted
  *   no hook signal for heartbeat_alarm_s while the status is `working` → read the screen:
  *     the credit prompt → credit_exhausted · changing → hooks_silent · unchanged on a second read
@@ -49,8 +53,14 @@ export interface AgentLiveness {
   awaiting: { notification_type: string; class?: string; text?: string } | null;
   /** An `idle_prompt` arrived for the current idle. */
   idle_confirmed: boolean;
-  /** The one "continue" steer of the current idle. */
+  /** The one "continue" steer of the current idle (or the last answered `agent_stalled`). */
   steered_at: number | null;
+  /** The hooks said the idle waits on the agent's own background task (SPEC §4.3). */
+  background_wait: { since: number } | null;
+  /** `agent_stalled` decisions opened since the agent last resumed (the backoff exponent). */
+  stalls: number;
+  /** Why the idle agent was last seen waiting on its own work (`ownWorkReason`), else null. */
+  own_work: string | null;
   /** Open liveness decisions; `pending` until the daemon has opened it and noted its id. */
   decisions: Partial<Record<DecisionSlot, string>>;
   /** The silence probe: screen reads since the last hook signal. */
@@ -76,7 +86,15 @@ export type LivenessAction =
     }
   | { kind: "close"; decision_id: string; answer: string }
   | { kind: "steer"; text: string }
-  | { kind: "agent_stalled"; idle_s: number; last_text: string | null }
+  | {
+      kind: "agent_stalled";
+      idle_s: number;
+      last_text: string | null;
+      /** How many times this idle cycle has asked, this one included. */
+      asked: number;
+      /** Seconds after an answer before the next decision. */
+      next_s: number;
+    }
   | { kind: "credit_exhausted"; source: "hook" | "screen"; text: string | null; screen?: string }
   | { kind: "read_screen" }
   | { kind: "hooks_silent"; silent_s: number; screen: string }
@@ -91,6 +109,8 @@ export interface Step {
 export interface LivenessTunables {
   idle_grace_s: number;
   heartbeat_alarm_s: number;
+  background_wait_max_s: number;
+  stall_backoff_max_s: number;
 }
 
 export const PENDING = "pending";
@@ -135,6 +155,9 @@ export function trackAgent(a: { agent_id: string; task: TaskId; now: number }): 
     awaiting: null,
     idle_confirmed: false,
     steered_at: null,
+    background_wait: null,
+    stalls: 0,
+    own_work: null,
     decisions: {},
     silence: null,
     screen: null,
@@ -164,6 +187,7 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
   actions.push(...close(s, ["silent"], "hook signals resumed"));
   const p = sig.payload;
   const text = str(p.text);
+  const backgroundWait = p.background_wait === true;
 
   switch (sig.type) {
     case "idle":
@@ -173,6 +197,8 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
       s.awaiting = null;
       s.idle_confirmed = false;
       s.steered_at = null;
+      s.background_wait = backgroundWait ? { since: sig.at } : null;
+      s.own_work = null;
       break;
     case "awaiting_input": {
       const type = str(p.notification_type) ?? "";
@@ -194,6 +220,8 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
           s.steered_at = null;
         }
         s.idle_confirmed = true;
+        // Older Stop hooks omit the flag; the Notification hook carries it onto the prompt.
+        if (backgroundWait && s.background_wait === null) s.background_wait = { since: sig.at };
       } else if (QUESTION_TYPES.has(type)) {
         s.activity = "awaiting_input";
         s.activity_at = sig.at;
@@ -219,6 +247,9 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
       s.awaiting = null;
       s.idle_confirmed = false;
       s.steered_at = null;
+      s.background_wait = null;
+      s.stalls = 0;
+      s.own_work = null;
       actions.push(...close(s, ["question", "stalled", "credit"], "resumed: the agent went on"));
       break;
     default:
@@ -227,10 +258,26 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
   return { state: s, actions };
 }
 
-/** One monitor tick: idle stalls and silence. `status` is the agent's retained status type. */
+/** The wait after an answer before the next `agent_stalled`: the grace doubled per ask, capped. */
+function stallDelayMs(stalls: number, t: LivenessTunables): number {
+  const grace = secondsMs(t.idle_grace_s);
+  const doubled = grace * 2 ** stalls;
+  return Math.max(grace, Math.min(doubled, secondsMs(t.stall_backoff_max_s)));
+}
+
+/**
+ * One monitor tick: idle stalls and silence. `status` is the agent's retained status type;
+ * `evidence` is what the daemon sees of the agent's own work (the hooks' `background_wait` is
+ * read from the state when the evidence carries none).
+ */
 export function checkLiveness(
   prev: AgentLiveness,
-  sample: { now: number; status: string | null; tunables: LivenessTunables },
+  sample: {
+    now: number;
+    status: string | null;
+    tunables: LivenessTunables;
+    evidence?: ActivityEvidence;
+  },
 ): Step {
   const { now, status, tunables } = sample;
   if (status === null || !STALLABLE.has(status)) return { state: prev, actions: [] };
@@ -240,18 +287,34 @@ export function checkLiveness(
 
   // An open question or credit prompt is a wait on the human: never steered or called a stall.
   const waiting = s.decisions.question !== undefined || s.decisions.credit !== undefined;
-  if (s.activity === "idle" && !waiting) {
+  const evidence = sample.evidence ?? NO_EVIDENCE;
+  s.own_work =
+    s.activity === "idle"
+      ? ownWorkReason(
+          { ...evidence, background_wait: evidence.background_wait ?? s.background_wait },
+          now,
+          tunables,
+        )
+      : null;
+  // Waiting on its own work (the harness wakes it when that ends): neither nudged nor a stall.
+  if (s.activity === "idle" && !waiting && s.own_work === null) {
     if (s.steered_at === null) {
       if (s.idle_confirmed || now - s.activity_at >= graceMs) {
         s.steered_at = now;
         actions.push({ kind: "steer", text: CONTINUE_TEXT });
       }
-    } else if (s.decisions.stalled === undefined && now - s.steered_at >= graceMs) {
+    } else if (
+      s.decisions.stalled === undefined &&
+      now - s.steered_at >= stallDelayMs(s.stalls, tunables)
+    ) {
       s.decisions.stalled = PENDING;
+      s.stalls += 1;
       actions.push({
         kind: "agent_stalled",
         idle_s: Math.floor((now - s.activity_at) / 1000),
         last_text: s.last_text,
+        asked: s.stalls,
+        next_s: stallDelayMs(s.stalls, tunables) / 1000,
       });
     }
   }
@@ -335,8 +398,8 @@ export function noteDecision(
 
 /**
  * A decision was resolved (by anyone) at `now`: free its slot. An answered `agent_stalled` counts
- * as the nudge of a new idle cycle (the answer is steered to the agent), so the agent gets a full
- * `idle_grace_s` before another decision instead of one on the next tick.
+ * as the next nudge (the answer is steered to the agent): the next decision waits
+ * `idle_grace_s × 2^stalls` from here (capped), never the next tick. The ask count is kept.
  */
 export function noteResolved(prev: AgentLiveness, id: string, now: number): AgentLiveness {
   const entries = Object.entries(prev.decisions).filter(([, v]) => v !== id);
@@ -378,6 +441,8 @@ export function whyWaiting(s: AgentLiveness, now: number): string | undefined {
     return `no hook signal for ${minutes(now - last)} min, screen unreadable: waiting for the LWT`;
   const st = real(s.decisions.stalled);
   if (st !== undefined) return `stalled: idle ${minutes(now - s.activity_at)} min (decision ${st})`;
+  if (s.activity === "idle" && s.own_work !== null)
+    return `idle ${minutes(now - s.activity_at)} min: ${s.own_work}`;
   if (s.activity === "idle" && s.steered_at !== null)
     return `idle ${minutes(now - s.activity_at)} min: nudged to continue`;
   return undefined;

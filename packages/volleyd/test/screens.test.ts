@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { classifyScreen, modelFromScreen } from "../src/screens";
+import { classifyScreen, modelFromScreen, shellsRunning } from "../src/screens";
 import { FIXTURES } from "./helpers/fake-host";
 
 const screen = (name: string) => readFileSync(join(FIXTURES, "screens", name), "utf-8");
@@ -43,5 +43,18 @@ describe("modelFromScreen", () => {
   it("is null when no model is visible", () => {
     expect(modelFromScreen(screen("shell-prompt.txt"))).toBeNull();
     expect(modelFromScreen(null)).toBeNull();
+  });
+});
+
+describe("shellsRunning", () => {
+  it("reads the status bar's count of background shells or tasks", () => {
+    expect(shellsRunning(["  ⏵⏵ bypass permissions on · 1 shell still running"])).toBe(1);
+    expect(shellsRunning(["3 background tasks running"])).toBe(3);
+    expect(shellsRunning(["· 2 shells running   Opus 5.5"])).toBe(2);
+  });
+
+  it("is 0 for a readable footer without one, and null without a footer", () => {
+    expect(shellsRunning(["  ⏵⏵ running tests (shift+tab to cycle)"])).toBe(0);
+    expect(shellsRunning([])).toBeNull();
   });
 });

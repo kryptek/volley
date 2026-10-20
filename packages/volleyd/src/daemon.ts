@@ -33,6 +33,7 @@ import {
   redeemToken,
   tokenReplyTopic,
 } from "./accounts";
+import { type ActivityEvidence, newestWrite } from "./activity-evidence";
 import {
   type AdmissionState,
   type AdmissionSummary,
@@ -449,6 +450,10 @@ interface Supervised {
   liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
   liveness: AgentLiveness;
+  /** Background shells the latest screen capture's footer counts (null: unreadable). */
+  shellsRunning?: number | null;
+  /** The agent's worktree from its `agent_spawned` record (null: none recorded), once looked up. */
+  worktree?: string | null;
 }
 
 /** The liveness decision slot a decision's `class` fills. */
@@ -951,7 +956,9 @@ export class Daemon {
     // The capture feeds the silence fallback (single reader): when each screen last changed.
     this.screens.onCapture((c) => {
       const a = this.supervised.get(c.agentId);
-      if (a !== undefined && c.tail !== null) {
+      if (a === undefined) return;
+      a.shellsRunning = c.footer.shells_running;
+      if (c.tail !== null) {
         a.liveness = noteCapture(a.liveness, { hash: c.tail.hash, at: this.now() });
       }
     });
@@ -3288,12 +3295,55 @@ export class Daemon {
         retained?.type === "reaped" && retained.wall_time === a.suppressedReap
           ? (a.liveStatus ?? "working")
           : (retained?.type ?? null);
+      const evidence = a.liveness.activity === "idle" ? await this.evidence(a, now) : undefined;
+      if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
       await this.applyLiveness(
         agentId,
         a,
-        checkLiveness(a.liveness, { now, status, tunables: eff }),
+        checkLiveness(a.liveness, {
+          now,
+          status,
+          tunables: eff,
+          ...(evidence !== undefined ? { evidence } : {}),
+        }),
       );
     }
+  }
+
+  /**
+   * What an idle agent shows of its own work (activity-evidence.ts): the hooks' flag, a lease it
+   * holds or waits on, the running shells its terminal footer counts, and, only when none of
+   * those says so, the newest write under its worktree (a local agent's only).
+   */
+  private async evidence(a: Supervised, now: number): Promise<ActivityEvidence> {
+    const id = a.liveness.agent_id;
+    const pool = Object.entries(this.leases).find(([, p]) =>
+      [...p.held, ...p.queue].some((l) => l.holder === id),
+    )?.[0];
+    const e: ActivityEvidence = {
+      background_wait: a.liveness.background_wait,
+      lease_held: pool !== undefined,
+      ...(pool !== undefined ? { lease_pool: pool } : {}),
+      shells_running: a.shellsRunning ?? null,
+      worktree_write_at: null,
+    };
+    if (e.background_wait !== null || e.lease_held || (e.shells_running ?? 0) > 0) return e;
+    if (a.host.name !== "local") return e;
+    if (a.worktree === undefined) {
+      const spawned = this.journalEvents(a.wave)
+        .reverse()
+        .find((ev) => ev.type === "agent_spawned" && ev.data.agent_id === id);
+      a.worktree = typeof spawned?.data.worktree === "string" ? spawned.data.worktree : null;
+    }
+    const worktree = a.worktree;
+    if (worktree === null) return e;
+    const eff = this.config.effective(a.wave);
+    e.worktree_write_at = await newestWrite(worktree, {
+      now,
+      freshMs: secondsMs(eff.idle_grace_s),
+      maxEntries: DAEMON_DEFAULTS.worktree_scan_max_entries,
+    });
+    return e;
   }
 
   /** Adopt a liveness step and carry out its actions (inside the serial queue). */
@@ -3359,11 +3409,11 @@ export class Daemon {
           {
             kind: "agent_stalled",
             task,
-            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.`,
+            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
             options: ["nudge again", STOP_ANSWER],
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
-          { class: "agent_stalled", idle_s: x.idle_s },
+          { class: "agent_stalled", idle_s: x.idle_s, asked: x.asked },
         );
       case "credit_exhausted": {
         const now = this.now();

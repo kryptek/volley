@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { type ActivityEvidence, NO_EVIDENCE } from "../src/activity-evidence";
+import { ControlClient, leasePoolTopic } from "../src/control";
 import {
   type AgentLiveness,
   CONTINUE_TEXT,
@@ -18,13 +21,19 @@ import {
   trackAgent,
   whyWaiting,
 } from "../src/liveness";
+import { NS } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { FIXTURES } from "./helpers/fake-host";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 const MIN = 60_000;
 const T0 = Date.parse("2026-10-18T12:00:00.000Z");
-const TUNABLES = { idle_grace_s: 180, heartbeat_alarm_s: 600 };
+const TUNABLES = {
+  idle_grace_s: 180,
+  heartbeat_alarm_s: 600,
+  background_wait_max_s: 7200,
+  stall_backoff_max_s: 1800,
+};
 
 const hook = (name: string, at: number): HookSignal => {
   const sig = parseHookSignal(readFileSync(join(FIXTURES, "hooks", name), "utf-8"), at);
@@ -50,9 +59,14 @@ function run(
 
 const signal = (name: string, at: number) => (s: AgentLiveness) => observeSignal(s, hook(name, at));
 const check =
-  (at: number, status: string | null = "working") =>
+  (at: number, status: string | null = "working", evidence?: Partial<ActivityEvidence>) =>
   (s: AgentLiveness) =>
-    checkLiveness(s, { now: at, status, tunables: TUNABLES });
+    checkLiveness(s, {
+      now: at,
+      status,
+      tunables: TUNABLES,
+      ...(evidence !== undefined ? { evidence: { ...NO_EVIDENCE, ...evidence } } : {}),
+    });
 const read = (text: string | null, at: number) => (s: AgentLiveness) =>
   observeScreen(s, { now: at, screen: text });
 
@@ -170,29 +184,54 @@ describe("liveness: idle stalls (Stop without a terminal status)", () => {
     expect(rest.actions[0]).toMatchObject({ last_text: expect.stringContaining("schema change") });
   });
 
-  it("an answered agent_stalled (not stopped) gets a full grace again: it never re-opens on the next tick", () => {
+  it("an answered agent_stalled backs off: each re-open waits twice as long, capped at stall_backoff_max_s", () => {
     const stalled = run(fresh(), [
       signal("idle-stop.json", T0),
       check(T0 + 3 * MIN),
       check(T0 + 6 * MIN),
     ]);
     expect(kinds(stalled.actions)).toEqual(["steer", "agent_stalled"]);
-    const answered = T0 + 7 * MIN;
-    const resolved = noteResolved(noteDecision(stalled.state, "stalled", "d-1"), "d-1", answered);
-    expect(resolved.decisions.stalled).toBeUndefined();
-    const after = run(resolved, [
-      check(answered + 10_000),
-      check(answered + 20_000),
-      check(answered + 2 * MIN),
+    expect(stalled.actions[1]).toMatchObject({ asked: 1, next_s: 360 });
+    let s = stalled.state;
+    let answered = T0 + 7 * MIN;
+    const answer = (at: number) => {
+      s = noteResolved(noteDecision(s, "stalled", `d-${at}`), `d-${at}`, at);
+    };
+    answer(answered);
+    expect(s.decisions.stalled).toBeUndefined();
+    // Not one grace after the answer (10 min): twice the grace (13 min).
+    expect(
+      run(s, [check(answered + 10_000), check(T0 + 10 * MIN), check(T0 + 12 * MIN)]).actions,
+    ).toEqual([]);
+    let r = run(s, [check(T0 + 13 * MIN), check(T0 + 13 * MIN + 10_000)]);
+    expect(kinds(r.actions)).toEqual(["agent_stalled"]);
+    expect(r.actions[0]).toMatchObject({ asked: 2, next_s: 720 });
+    s = r.state;
+    answered = T0 + 13 * MIN;
+    answer(answered);
+    expect(run(s, [check(answered + 11 * MIN)]).actions).toEqual([]);
+    r = run(s, [check(answered + 12 * MIN)]);
+    expect(kinds(r.actions)).toEqual(["agent_stalled"]);
+    s = r.state;
+    // Gaps 24 min, then 30 min (the cap), then 30 min again.
+    for (const gap of [24, 30, 30]) {
+      answered += 60 * MIN;
+      answer(answered);
+      expect(run(s, [check(answered + (gap - 1) * MIN)]).actions).toEqual([]);
+      r = run(s, [check(answered + gap * MIN)]);
+      expect(kinds(r.actions)).toEqual(["agent_stalled"]);
+      s = r.state;
+    }
+    // resumed resets the count: a later idle starts from one grace again.
+    const later = answered + 60 * MIN;
+    const again = run(s, [
+      signal("resumed.json", later),
+      signal("idle-stop.json", later + MIN),
+      check(later + 4 * MIN),
+      check(later + 7 * MIN),
     ]);
-    expect(after.actions).toEqual([]);
-    // Still idle a full grace after the answer: exactly one new decision, then nothing more.
-    const again = run(after.state, [
-      check(answered + 3 * MIN),
-      check(answered + 3 * MIN + 10_000),
-      check(answered + 10 * MIN),
-    ]);
-    expect(kinds(again.actions)).toEqual(["agent_stalled"]);
+    expect(kinds(again.actions)).toEqual(["steer", "agent_stalled"]);
+    expect(again.actions.at(-1)).toMatchObject({ asked: 1 });
   });
 
   it("idle_prompt confirms the idle before the grace is up", () => {
@@ -325,6 +364,60 @@ describe("liveness: silence → screen fallback", () => {
   });
 });
 
+describe("liveness: an idle agent waiting on its own work", () => {
+  it("idle with background_wait is never steered or called a stall; resumed ends the wait", () => {
+    const r = run(fresh(), [
+      signal("idle-background-wait.json", T0),
+      check(T0 + 3 * MIN),
+      check(T0 + 6 * MIN),
+      check(T0 + 10 * MIN),
+    ]);
+    expect(r.actions).toEqual([]);
+    expect(whyWaiting(r.state, T0 + 6 * MIN)).toBe(
+      "idle 6 min: waiting on its own background task",
+    );
+    const back = run(r.state, [signal("resumed.json", T0 + 11 * MIN)]);
+    expect(whyWaiting(back.state, T0 + 11 * MIN)).toBeUndefined();
+    // The next plain idle is a plain idle again.
+    const idle = run(back.state, [signal("idle-stop.json", T0 + 12 * MIN), check(T0 + 15 * MIN)]);
+    expect(kinds(idle.actions)).toEqual(["steer"]);
+  });
+
+  it("an idle_prompt carrying background_wait after a plain idle (older Stop hook) also holds the nudge", () => {
+    const r = run(fresh(), [
+      signal("idle-stop.json", T0),
+      signal("idle-prompt-background-wait.json", T0 + MIN),
+      check(T0 + MIN + 1000),
+      check(T0 + 3 * MIN),
+      check(T0 + 6 * MIN),
+    ]);
+    expect(r.actions).toEqual([]);
+  });
+
+  it("a lease, a running shell or a fresh worktree write holds the nudge; a stale write does not", () => {
+    const idle = run(fresh(), [signal("idle-stop.json", T0)]).state;
+    const at = (n: number) => T0 + n * MIN;
+    for (const [evidence, reason] of [
+      [{ lease_held: true, lease_pool: "it" }, "holds lease it"],
+      [{ shells_running: 2 }, "2 shells still running"],
+      [{ worktree_write_at: at(6) - 40_000 }, "worktree written 40 s ago"],
+    ] as const) {
+      const r = run(idle, [check(at(3), "working", evidence), check(at(6), "working", evidence)]);
+      expect(r.actions).toEqual([]);
+      expect(whyWaiting(r.state, at(6))).toBe(`idle 6 min: ${reason}`);
+    }
+    const stale = run(idle, [check(at(3), "working", { worktree_write_at: at(3) - 10 * MIN })]);
+    expect(kinds(stale.actions)).toEqual(["steer"]);
+  });
+
+  it("a background_wait older than background_wait_max_s with no other evidence is nudged again", () => {
+    const start = run(fresh(), [signal("idle-background-wait.json", T0), check(T0 + 60 * MIN)]);
+    expect(start.actions).toEqual([]);
+    const r = run(start.state, [check(T0 + 121 * MIN), check(T0 + 124 * MIN)]);
+    expect(kinds(r.actions)).toEqual(["steer", "agent_stalled"]);
+  });
+});
+
 describe("whyWaiting", () => {
   it("names the question, the credit prompt, the stall and the silence", () => {
     const q = noteDecision(
@@ -438,7 +531,11 @@ describe("daemon: hook-signal liveness", () => {
   });
 
   it("in a wave with its own namespace, the nudge and an answer reach the agent's mailbox there", async () => {
-    s = await makeSupervisedEnv({ namespace: "w1-ns" });
+    // Ahead of the wall clock: the files the spawn just wrote are no fresh worktree write.
+    s = await makeSupervisedEnv({
+      namespace: "w1-ns",
+      daemon: { clock: fakeClock(Date.now() + 10 * MIN) },
+    });
     const got: { type: string; text: string }[] = [];
     await s.agent.subscribeStream(buildTopic("w1-ns", AGENT, "mailbox"), ({ payload }) => {
       const e = JSON.parse(payload) as { type: string; payload: { text: string } };
@@ -469,6 +566,57 @@ describe("daemon: hook-signal liveness", () => {
     await s.daemon.tick();
     await s.consumed();
     expect(got.map((m) => m.text)).toEqual(["Create a new table.", CONTINUE_TEXT]);
+  });
+
+  it("an idle agent holding a lease is never nudged; once it releases the lease it is, once", async () => {
+    const clock = fakeClock(Date.now() + 10 * MIN);
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const client = await ControlClient.connect(s.env.broker.url, NS);
+    try {
+      const ack = await client.request(
+        "config_set",
+        { patch: { lease_pools: { it: { capacity: 1 } } }, by: "tester" },
+        { text: "add the it pool" },
+      );
+      expect(ack.applied).toBe(true);
+    } finally {
+      await client.close();
+    }
+    const lease = async (op: "acquire" | "release") => {
+      const env = buildEnvelope({
+        agentId: AGENT,
+        parentId: null,
+        channel: "_system/leases/requests",
+        type: "lease_request",
+        payload: { op, lease_id: "l-it", holder: AGENT },
+      });
+      await s.agent.publish(`${leasePoolTopic("it")}/requests`, JSON.stringify(env), {
+        qos: 1,
+        retain: false,
+      });
+    };
+    await lease("acquire");
+    await s.event((e) => e.type === "lease_granted", 1, "_system");
+    await s.hook("idle-stop.json");
+    await s.consumed();
+    const steers = () =>
+      s.journal().filter((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    for (let i = 0; i < 3; i++) {
+      await clock.advance(4 * MIN);
+      await s.daemon.tick();
+      await s.settled();
+    }
+    expect(steers()).toEqual([]);
+    expect(decisions("agent_stalled")).toEqual([]);
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe("idle 12 min: holds lease it");
+
+    await lease("release");
+    await s.event((e) => e.type === "lease_released", 1, "_system");
+    await s.daemon.tick();
+    await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    await s.daemon.tick();
+    await s.settled();
+    expect(steers()).toHaveLength(1);
   });
 
   it("silence past heartbeat_alarm_s reads the screen once per tick and opens hooks_silent", async () => {

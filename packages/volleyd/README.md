@@ -679,7 +679,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `wake_grace_s` | next monitor tick | — |
+| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `wake_grace_s` | next monitor tick | — |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
@@ -1299,7 +1299,8 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 |---|---|---|
 | `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the Stop text of the current idle (never an earlier turn's: `resumed` clears it; else the notification text) and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
 | `idle` (Stop) with no terminal status and no `resumed` for `idle_grace_s` (default 3 min; an `idle_prompt` confirms the idle sooner) | one steer: "Continue; publish done/blocked/failed when finished" | — |
-| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge: a further decision only if it is still idle a full `idle_grace_s` later; `stop task` cancels it |
+| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge; each further decision of the same idle waits twice as long after the answer (`idle_grace_s` × 2, × 4, …, at most `stall_backoff_max_s`, default 30 min) and says how many times it asked; `resumed` resets the count; `stop task` cancels it |
+| `idle` while the agent waits on its own work: the hooks' `background_wait` (a background shell still running; trusted for at most `background_wait_max_s`, default 2 h), a lease it holds or waits on, a terminal footer counting running shells, or (local agents) a file under its worktree written within `idle_grace_s` (`.git`, `.volley`, `node_modules`, `target`, `build` skipped; at most 2000 entries walked) | nothing: no steer, no `agent_stalled`; the task's `why_waiting` says `idle N min: <reason>` (e.g. `waiting on its own background task`, `holds lease it`, `2 shells still running`) | — |
 | `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
 | `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
 | no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` | read the screen (bounded, once per tick until decided) and classify it: | |

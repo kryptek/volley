@@ -102,6 +102,27 @@ describe("ScreenPublisher", () => {
     await mq.close();
   });
 
+  it("reads the footer's running shells before the tail cuts it; the published tail is unchanged", async () => {
+    const shells = readFileSync(join(FIXTURES, "screens", "working-shells.txt"), "utf-8");
+    const seen = await collect(reader, SCREEN);
+    host.screens = [shells];
+    publisher.track(target());
+    await publisher.tick();
+    await eventually(() => seen.length === 1);
+    expect(captures[0]?.footer).toEqual({ shells_running: 2 });
+    const payload = JSON.parse(seen[0] as string).payload;
+    expect(payload).not.toHaveProperty("footer");
+    expect(payload.lines.at(-1)).toBe("✳ Sautéing… (34s · ↓ 2.1k tokens · esc to interrupt)");
+
+    // The same screen without the footer count hashes the same: nothing new is published.
+    host.screens = [session];
+    clock += 5_000;
+    await publisher.tick();
+    expect(captures).toHaveLength(2);
+    expect(captures[1]).toMatchObject({ changed: false, footer: { shells_running: 0 } });
+    expect(captures[1]?.tail?.hash).toBe(payload.hash);
+  });
+
   it("publishes a retained screen_tail, then only when the hash changes", async () => {
     const seen = await collect(reader, SCREEN);
     host.screens = [session, session, `${session.split("❯")[0]}● Second step\n─────\n❯ \n─────\n`];

@@ -2,6 +2,16 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- An agent that ends its turn to wait on its own background work (a long test run, `gh run watch`) is no longer nudged or
+  reported as stalled. volleyd reads the hooks' `background_wait` flag, a lease the agent holds, the running shells in its
+  terminal footer, and recent writes under its worktree; `volleyd status` says `idle N min: <reason>`. A real stall's
+  repeated `agent_stalled` decisions back off (each waits twice as long, capped by the new `stall_backoff_max_s`); the new
+  `background_wait_max_s` bounds how long a background wait is trusted (SPEC §4.3, §4.6.4). (#177)
+
 ## 0.3.1 — 2026-10-20
 
 Fixes from the owner's real-machine smoke of 0.3.0, and the first changes found by running a
