@@ -34,6 +34,32 @@ export interface CiRun {
 
 export type CiState = "green" | "red" | "running" | "none";
 
+/** A run a newer run of the same workflow and trigger event replaced on the same head. */
+export interface SupersededRun {
+  id: number;
+  url: string;
+  conclusion: string | null;
+}
+
+/**
+ * Why a red head looks like it is not the code's fault: `startup` (a run never started), `steps`
+ * (every failed job failed in a runner / checkout / network step), `cancelled` (a run was
+ * cancelled and nothing replaced it).
+ */
+export type InfraReason = "startup" | "steps" | "cancelled";
+
+/**
+ * CI on one head. `runs`: the effective runs (the latest per workflow and trigger event), which
+ * every other field is computed over; `superseded`: the runs they replaced, kept as evidence only.
+ */
+export interface CiFacts {
+  state: CiState;
+  runs: CiRun[];
+  superseded: SupersededRun[];
+  failed_jobs: string[];
+  infra: InfraReason | null;
+}
+
 export interface PrRef {
   number: number;
   url: string;
@@ -59,17 +85,16 @@ export type ArtifactReport =
       head: string;
       branch: string;
       pr: PrRef;
-      ci: { state: CiState; runs: CiRun[]; failed_jobs: string[]; infra: boolean };
+      ci: CiFacts;
       touched?: string[];
     };
 
 const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid";
-const RUN_FIELDS = "databaseId,name,workflowName,status,conclusion,url,headSha";
+const RUN_FIELDS =
+  "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
 
 /** Run conclusions that fail a head. */
 const FAILED = new Set(["failure", "cancelled", "timed_out", "startup_failure", "action_required"]);
-/** Run conclusions that are the CI provider's problem, not the code's. */
-const INFRA_CONCLUSIONS = new Set(["cancelled", "startup_failure"]);
 /** Failed steps that point at the runner or the network rather than the code. */
 const INFRA_STEP = /checkout|set up job|runner|network|connection|timed? ?out while|fetch/i;
 
@@ -171,33 +196,54 @@ export async function ciStateOf(exec: ExecFn, cwd: string, head: string): Promis
   return (await ciOn(exec, cwd, head)).state;
 }
 
-/** CI on exactly `head`: its runs, the aggregate state, failed job names, infra-shaped or not. */
-async function ciOn(
-  exec: ExecFn,
-  cwd: string,
-  head: string,
-): Promise<{ state: CiState; runs: CiRun[]; failed_jobs: string[]; infra: boolean }> {
+interface RawRun {
+  databaseId: number;
+  name: string;
+  workflowName?: string;
+  workflowDatabaseId?: number;
+  event?: string;
+  createdAt?: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  headSha?: string;
+}
+
+/**
+ * Split a head's runs into the effective ones and the superseded ones. Runs of one workflow for
+ * one trigger event are a replacement chain (a concurrency cancel-in-progress, a re-push of the
+ * same sha): the highest id wins (`gh run list` lists one row per run, its latest attempt, so ids are
+ * unique; `createdAt` only breaks a tie between duplicate rows). Runs of another event (`push`
+ * beside `pull_request`) are distinct CI, never a replacement. Order is kept. Pure.
+ */
+export function latestRuns<T extends RawRun>(runs: T[]): { effective: T[]; superseded: T[] } {
+  const key = (r: T) => `${r.workflowDatabaseId ?? r.workflowName ?? r.name}\u0000${r.event ?? ""}`;
+  const latest = new Map<string, T>();
+  for (const r of runs) {
+    const cur = latest.get(key(r));
+    const newer =
+      cur === undefined ||
+      r.databaseId > cur.databaseId ||
+      (r.databaseId === cur.databaseId && (r.createdAt ?? "") > (cur.createdAt ?? ""));
+    if (newer) latest.set(key(r), r);
+  }
+  const effective = runs.filter((r) => latest.get(key(r)) === r);
+  return { effective, superseded: runs.filter((r) => latest.get(key(r)) !== r) };
+}
+
+/** CI on exactly `head`: the latest run per workflow and trigger event (latestRuns). */
+async function ciOn(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
   const r = await exec(["gh", "run", "list", "--commit", head, "--json", RUN_FIELDS], { cwd });
-  const raw =
-    r.code === 0
-      ? (parseJson<
-          {
-            databaseId: number;
-            name: string;
-            workflowName?: string;
-            status: string;
-            conclusion: string | null;
-            url: string;
-            headSha?: string;
-          }[]
-        >(r.stdout) ?? [])
-      : [];
-  const own = raw.filter((x) => x.headSha === undefined || x.headSha === head);
+  const raw = r.code === 0 ? (parseJson<RawRun[]>(r.stdout) ?? []) : [];
+  const conclusion = (x: RawRun) => (x.conclusion === "" ? null : x.conclusion);
+  const { effective: own, superseded } = latestRuns(
+    raw.filter((x) => x.headSha === undefined || x.headSha === head),
+  );
   const runs: CiRun[] = own.map((x) => ({
     id: x.databaseId,
     name: x.name,
     status: x.status,
-    conclusion: x.conclusion === "" ? null : x.conclusion,
+    conclusion: conclusion(x),
     url: x.url,
   }));
   const failed = own.filter((x) => x.status === "completed" && FAILED.has(x.conclusion ?? ""));
@@ -223,28 +269,46 @@ async function ciOn(
       }>(v.stdout)?.jobs ?? [];
     for (const j of jobs.filter((j) => FAILED.has(j.conclusion))) {
       failedJobs.push(`${run.workflowName ?? run.name} / ${j.name}`);
+      // A cancelled run's steps say where the cancel landed, not what broke.
+      if (run.conclusion === "cancelled") continue;
       jobSteps.push({
         name: j.name,
         steps: (j.steps ?? []).filter((s) => FAILED.has(s.conclusion)).map((s) => s.name),
       });
     }
   }
-  return { state, runs, failed_jobs: failedJobs, infra: isInfraFailure(failed, jobSteps) };
+  return {
+    state,
+    runs,
+    superseded: superseded.map((x) => ({
+      id: x.databaseId,
+      url: x.url,
+      conclusion: conclusion(x),
+    })),
+    failed_jobs: failedJobs,
+    infra: isInfraFailure(failed, jobSteps),
+  };
 }
 
 /**
- * Infra-shaped: the run was cancelled or never started, or every failed job failed in a step
- * about the runner, checkout or network rather than in the project's own steps.
+ * Why a red head looks infra-shaped (InfraReason), or null: a run never started (`startup`);
+ * every failed run was cancelled — given effective runs only, nothing replaced it (`cancelled`);
+ * every failed job of the other runs failed in a step about the runner, checkout or network
+ * rather than in the project's own steps (`steps`). A cancel beside a failure in the project's
+ * own steps is null: re-running the cancelled run cannot turn the head green.
  */
 export function isInfraFailure(
   runs: { conclusion: string | null }[],
   failedJobs: { name: string; steps: string[] }[],
-): boolean {
-  if (runs.some((r) => INFRA_CONCLUSIONS.has(r.conclusion ?? ""))) return true;
-  return (
+): InfraReason | null {
+  if (runs.some((r) => r.conclusion === "startup_failure")) return "startup";
+  if (runs.length > 0 && runs.every((r) => r.conclusion === "cancelled")) return "cancelled";
+  if (
     failedJobs.length > 0 &&
     failedJobs.every((j) => j.steps.length > 0 && j.steps.every((s) => INFRA_STEP.test(s)))
-  );
+  )
+    return "steps";
+  return null;
 }
 
 export type ArtifactOutcome =
@@ -283,9 +347,15 @@ export function artifactOutcome(
     );
     const urls = failedRuns.map((r) => r.url);
     const jobs = ci.failed_jobs.length > 0 ? ci.failed_jobs.join(", ") : "(no job details)";
-    const infra = ci.infra
-      ? " This looks infra-shaped (runner lost, cancelled, checkout or network error): check the hosting provider's status page first."
-      : "";
+    const cancelled = failedRuns.filter((r) => r.conclusion === "cancelled").map((r) => r.url);
+    const infra =
+      ci.infra === "cancelled"
+        ? cancelled.length === 1
+          ? ` Run ${cancelled[0]} was cancelled and nothing replaced it: re-run it (or push again).`
+          : ` Runs ${cancelled.join(" ")} were cancelled and nothing replaced them: re-run them (or push again).`
+        : ci.infra !== null
+          ? " This looks infra-shaped (runner lost, checkout or network error): check the hosting provider's status page first."
+          : "";
     return {
       kind: "ci_failed",
       decision: {
@@ -299,7 +369,11 @@ export function artifactOutcome(
         head_sha: head,
         run_urls: urls,
         failed_jobs: ci.failed_jobs,
-        infra: ci.infra,
+        infra: ci.infra !== null,
+        infra_reason: ci.infra,
+        ...(ci.superseded.length > 0
+          ? { superseded_run_urls: ci.superseded.map((r) => r.url) }
+          : {}),
         role,
         pr: { number: pr.number, url: pr.url },
       },
@@ -318,6 +392,7 @@ export function artifactOutcome(
         branch: report.branch,
         pr: { number: pr.number, url: pr.url, head_sha: head, ci: "green" },
         ci_runs: ci.runs,
+        ...(ci.superseded.length > 0 ? { ci_superseded: ci.superseded } : {}),
         ...(report.touched !== undefined ? { touched: report.touched } : {}),
       },
     },
@@ -505,11 +580,7 @@ export async function verifyOperatorMerge(
 // ---------------------------------------------------------------------------------------------
 
 /** CI on exactly `head` (runs, aggregate state, failed job names), for a head the pipeline did not push. */
-export async function ciReport(
-  exec: ExecFn,
-  cwd: string,
-  head: string,
-): Promise<{ state: CiState; runs: CiRun[]; failed_jobs: string[]; infra: boolean }> {
+export async function ciReport(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
   return ciOn(exec, cwd, head);
 }
 
@@ -537,7 +608,13 @@ export function failingTests(log: string): string[] {
 
 /** What a moved PR head brings: CI on it (and, when red, the failing tests), and the diff. */
 export interface MovedHeadFacts {
-  ci: { state: CiState; runs: CiRun[]; failed_jobs: string[]; failing_tests: string[] };
+  ci: {
+    state: CiState;
+    runs: CiRun[];
+    superseded: SupersededRun[];
+    failed_jobs: string[];
+    failing_tests: string[];
+  };
   /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
   log: string;
   diffstat: string;
@@ -562,7 +639,13 @@ export async function probeMovedHead(
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
   const stat = await git("diff", "--stat", o.from, o.to);
   return {
-    ci: { state: ci.state, runs: ci.runs, failed_jobs: ci.failed_jobs, failing_tests: tests },
+    ci: {
+      state: ci.state,
+      runs: ci.runs,
+      superseded: ci.superseded,
+      failed_jobs: ci.failed_jobs,
+      failing_tests: tests,
+    },
     log: log.code === 0 ? log.stdout.trim() : "",
     diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",
   };
