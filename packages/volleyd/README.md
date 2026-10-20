@@ -2120,8 +2120,9 @@ have a stored review with a verdict that holds for the **current head** — a re
 head, or of one it descends from only through fixups that ran after that review (they worked
 from its round or a later one) and branch updates (rebase or merge). A head pushed outside the
 pipeline (`pr_head_moved`, re-verified) was reviewed by nobody, so reviews of the heads before
-it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
-(`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
+it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`,
+or `accept` for a merge of the release branch only (`moves[].accepted_by`, and `how:
+"release_merge"`, in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals
 `alarm_raised { alarm: "merge_ready_invariant", head, missing, stale }`, then parks the task on an
@@ -2147,12 +2148,16 @@ push under "Pushes outside the pipeline" (the reviews keep the heads they name).
 evidence_path }` and `stage_entered merge_ready`: the task appears in the wave state's `gates`
 with its `evidence_path`.
 
-**volleyd never merges.** A human merges the PR. The pipeline polls the gated PR read-only
-(`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`);
-once it is `MERGED` into the release branch it journals `artifact_verified { role: "merged",
-head_sha, merge_sha }` and `stage_entered done`, which releases the task's dependents. Merged at
-another head than the gated one → also `alarm_raised { alarm: "merged_unverified_head", gated,
-merged }`, and the merge record describes the commit that merged: `gated_head_sha`,
+**volleyd never merges.** A human merges the PR. The pipeline polls every task's PR read-only
+(`gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName,headRefOid`, every `ci_poll_ms`),
+in any stage short of `done` and `cancelled` — at `merge_ready`, and also while the task waits
+on a decision, while the reviews run or during a fixup. Once it is `MERGED` into the release
+branch, the task's open decisions are resolved first (`superseded_by_merge`, by `volleyd`, with
+the merge commit in the rationale; a parked task would otherwise stay parked), its live agents
+are retired, and it journals `artifact_verified { role: "merged", head_sha, merge_sha }` and
+`stage_entered done`, which releases the task's dependents. Merged at another head than the
+gated one, or before the task reached `merge_ready` → also `alarm_raised { alarm:
+"merged_unverified_head", gated, merged }` (`gated`: the task's verified head, `null` if none), and the merge record describes the commit that merged: `gated_head_sha`,
 `merged_head_sha` and `merged_ci`, the CI of that head (read with `gh run list --commit`;
 `unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
@@ -2204,7 +2209,16 @@ is marked stale (`stale: { from, to, at }` and a banner), nothing downstream is 
 the new head is awaited (`ci_pending`, as above), then decision `pr_head_moved` asks
 `rereview` (the reviewers again on the new head, a new review round, then the fixup and the
 gate), `fixup` (a fixup agent at the next attempt on the new head; the reviews of the old head
-hold for it on the owner's word) or `cancel`. The fixup's `.volley/findings.md` opens with a
+hold for it on the owner's word), `accept` or `cancel`. `accept` is offered only when CI on the
+new head is green and the move is a merge of the release branch only: the new head's parents
+are the old head and a commit on `origin/<release>` (`git log -n 1 --format=%P`, `git merge-base
+--is-ancestor`), and every file the move changed (`git diff --name-only <old> <new>`) is one the
+release branch changed since the PR branched from it (a conflict resolved inside such a file, the
+CHANGELOG case, still counts). `accept` verifies the head role again at the new head
+(`artifact_verified { adopted: true, accepted_by, move: { how: "release_merge", parent, touched
+} }`), keeps the reviews of the old head (like a branch update) and goes on to the rebase check
+and the gate; the evidence says "Accepted by <who>: a merge of the release branch only". An
+`accept` the decision did not offer is asked again. The fixup's `.volley/findings.md` opens with a
 directive: CI on the new head, and when it is red its failed jobs and the failing test ids read
 from `gh run view <id> --log-failed`, plus the diff since the gated head. A red CI on a moved
 head is routed there, not into a `ci_failed` dead end, and a fixup is never skipped while that
