@@ -223,6 +223,19 @@ describe("applyDeploy", () => {
     expect(c.f.lines().at(-1)).toBe(checkout(c.f.repo, "v0.5.0"));
   });
 
+  it("fails the build step when the build wrote no index.html", async () => {
+    const { f, deps, run } = setup({ head: { tag: "v0.4.0" } });
+    const exec = deps.exec;
+    deps.exec = (argv, o) =>
+      argv[1] === "run" && f.versionAt() === "0.5.0"
+        ? Promise.resolve({ code: 0, stdout: "", stderr: "" })
+        : exec(argv, o);
+    const r = await run();
+    expect(r.failed?.step).toBe("build the Desk");
+    expect(r.failed?.why).toMatch(/the build wrote no .*index\.html/);
+    expect(r.rolledBack).toBe(true);
+  });
+
   it("returns the commands to run by hand when the rollback fails too", async () => {
     const { f, lines, run } = setup({ head: { tag: "v0.4.0" } });
     f.fail("launchctl kickstart -k gui/501/systems.volley.volleyd");

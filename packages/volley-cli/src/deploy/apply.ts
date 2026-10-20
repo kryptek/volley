@@ -131,7 +131,11 @@ async function runStep(
       if (v !== version.cli) return `volley --version is ${v || "empty"}, not ${version.cli}`;
     }
   }
-  if (step.id === "build") writeDeskStamp(dist, deskStamp(ctx.repo));
+  if (step.id === "build") {
+    if (!existsSync(join(dist, "index.html")))
+      return `the build wrote no ${join(dist, "index.html")}`;
+    writeDeskStamp(dist, deskStamp(ctx.repo));
+  }
   if (step.id === "self-check") {
     if (!existsSync(join(dist, "index.html")))
       return `no ${join(dist, "index.html")} after the build`;
