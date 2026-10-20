@@ -161,6 +161,13 @@ bun packages/volley-cli/src/cli.ts setup        # interactive; --yes to apply ev
 
 It finds mosquitto (refusing a version older than 2.1), writes the Dynamic Security broker config for your install (Apple Silicon Homebrew: `/opt/homebrew/etc/mosquitto/mosquitto.conf`, the same as [`examples/mosquitto-localhost.conf`](examples/mosquitto-localhost.conf); the diff is shown and the old file backed up), restarts the broker and checks both listeners refuse anonymous clients; creates the roles and the `volleyd`, `desk` and `coordinator` identities, printing their passwords **once** (keep them: you need `coordinator` in step 4 and `desk` in step 7) and a one-time admin token for the Desk; installs volleyd, the Volley hooks for coordinator sessions and the Desk (`volley desk serve` on port 5199) as services; and, when you let devices on your network reach the broker's WebSocket listener (it asks, recommending yes; `--lan` / `--no-lan` decide up front, and `--yes` alone keeps it on this machine), ends with a QR code that signs your phone in to the Desk (10 minutes, single use). Logins are still required from the LAN, but that traffic is not encrypted until TLS is set up, so open it only on a network you trust. With LAN access off it skips the phone step and says how to add it later. Every step is journaled to `~/.volley/volleyd/setup.log`. On **Linux** with the snap the broker config lives under `/var/snap/mosquitto/common/`, so run it as root (`sudo bun …`), then `volley setup --step services` as yourself for the user services. The manual path, step by step, is [`volley auth init`](packages/volley-cli/README.md#volley-auth); details, the container layout and the migration from an older `password_file` / `acl_file` setup (`volley auth migrate`): [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md).
 
+When it finishes:
+
+- **Put `volley` on your `PATH`.** Setup installs `volley` and `volleyd` in `~/.volley/bin`: `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc`, then open a new terminal. The rest of this guide types `volley`.
+- **Open the Desk as admin.** Setup serves the Desk at `http://localhost:5199`. Under *One-time admin token* it prints `Open the Desk with it on this machine: http://localhost:5199/#signin=…`: open that link (in a new tab; the Desk reads a link only when a page loads). The token is single use and lasts 10 minutes; `volley auth token` prints another link. The Desk opens Settings › Setup & Security, where you can rerun any step, issue sign-in links and manage broker accounts.
+- **Your phone.** Scan the QR code (same Wi-Fi). It signs the phone in once, as a `steer` account; a used or expired code says so and what to do next.
+- **More machines and Claude accounts.** `volley peer invite` / `volley peer join` pair a second machine with one code (the Desk: Settings › Machines), and `volley claude add <label>` (Settings › Claude accounts & usage) runs agents under a second Claude account. See the [volleyd README](packages/volleyd/README.md#claude-accounts).
+
 You now have a broker with two listeners on `127.0.0.1` (with `volley setup --lan`, `9001` also listens on your network; `1883` never does):
 - **`1883`** (raw MQTT) — used by `volley-mcp`, `volley-cli`, and any native MQTT client
 - **`9001`** (MQTT-over-WebSocket) — used by the [`volley dash`](packages/volley-cli/README.md#volley-dash) browser dashboard, since browsers can't speak raw MQTT-over-TCP
@@ -181,7 +188,7 @@ cd volley
 bun install
 ```
 
-Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`.
+Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`. Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). CI tests both: on each, it installs with that bun and runs volleyd's suite under `bun test` (bun's own runner, on bun); the packages' vitest suites run on Node.
 
 ### 4. Register the MCP server with Claude Code
 
@@ -200,7 +207,7 @@ claude mcp add-json -s user volley '{
 }'
 ```
 
-The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. Export the same identity in your shell profile too:
+The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. On the machine `volley setup` ran on, those commands find the coordinator login on their own (the macOS keychain, then `coordinator.json` in the auth dir), for a broker on that machine. Anywhere else, export the same identity in that shell:
 
 ```sh
 export VOLLEY_AUTH_USERNAME=coordinator
@@ -243,7 +250,7 @@ From here, look at the [`/volley`](packages/volley-skill/SKILL.md) and [`/volley
 
 ### 7. See everything in one view
 
-Launch the browser dashboard:
+`volley setup` already serves the [Volley Desk](packages/volley-desk/README.md) at `http://localhost:5199` (and at `http://<this machine's LAN address>:5199` for your phone, when you allowed LAN access). Sign in with a one-time link (step 2) or as the `desk` identity. To work on the Desk itself, or without setup's service, launch it from the checkout:
 
 ```sh
 volley dash
@@ -309,6 +316,8 @@ backup-script-1c8f      ops            🔄 working    14s ago
 
 Crash detection comes for free — if any of those processes dies hard, MQTT's Last-Will-and-Testament fires within 60–90 seconds and the registry flips that agent to `reaped`.
 
+For volleyd's waves, a second machine is one pairing code away: `volley peer invite` on the supervisor's machine (as an admin account: `volley auth add <name> --role admin`), `volley peer join <code> --to <that machine>` on the new one. It gets its own broker account, an ssh tunnel to the broker and a health heartbeat; a wave task with `host: <name>` then runs there, and `volley peer remove <name>` revokes it.
+
 ### 3. Cross-vendor coordination
 
 Volley doesn't care what's publishing or subscribing. If your tool can speak MQTT v5 and emit a JSON envelope per `spec/SPEC.md`, it participates. Claude Code can dispatch to Codex agents that publish their own progress; a CI job can be a one-shot Volley agent that announces its result; a long-lived background watcher can be a non-LLM Python script.
@@ -343,7 +352,9 @@ spec/                     The protocol — wire format, conformance, error codes
   examples/               Valid + invalid example envelopes (used for testing)
 
 packages/volley-mcp/      Reference MCP server. The seven vol_* tools.
-packages/volley-cli/      CLI for shell-script agents and broker debugging. Ships the `volley dash` and `volley notify` subcommands.
+packages/volley-cli/      CLI for shell-script agents and broker debugging, and the machine's setup: `volley setup` (first-run wizard),
+                          `volley auth` (broker accounts, sign-in links), `volley peer` (pairing), `volley claude` (Claude accounts),
+                          `volley dash` / `volley desk serve`, `volley notify`.
 packages/volley-dash/     Classic browser dashboard (deprecated; `volley dash --legacy`). Subscribes via WebSocket; no backend.
 packages/volley-desk/     The Desk: infinite canvas of live wave and agent windows (Vite + React 19 + React Bits); `volley dash` opens it, `?demo=1` runs it on sample data.
 packages/volley-skill/    The /volley Claude Code slash command.
@@ -351,7 +362,8 @@ packages/volley-wait/     The /wait Claude Code slash command (event-driven bloc
 packages/volley-issues/   The /volley-issues dispatch skill.
 packages/volley-hooks/    Claude Code hooks: real model in the registry, mailbox drain + inject + ack, idle / awaiting-input, heartbeats.
 packages/volleyd/         Wave supervisor daemon (pre-release): wave files, durable journal, DAG scheduler,
-                          authority fence, runtime-tunable config, launchd service. `volleyd --help`.
+                          authority fence, runtime-tunable config, launchd / systemd service, paired machines,
+                          several Claude accounts, the Desk's setup wizard. `volleyd --help`.
 
 examples/bridges/         Adapters that publish external events (CI, webhooks, ...) onto Volley topics.
   github-actions/         GitHub Actions → mosquitto bridge script.

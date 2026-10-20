@@ -1,0 +1,41 @@
+{
+  "window_ref": "window:1",
+  "workspaces": [
+    {
+      "ref": "workspace:1514",
+      "id": "6f1c2a10-0000-4000-8000-000000000001",
+      "index": 0,
+      "title": "Another workspace",
+      "custom_title": null,
+      "has_custom_title": false,
+      "description": null,
+      "current_directory": "/tmp/example/other",
+      "pinned": false,
+      "selected": false,
+      "remote": false,
+      "listening_ports": [],
+      "latest_submitted_message": "OTHER-PROMPT-MARKER-1c9e",
+      "latest_submitted_at": "2026-10-19T09:58:00Z",
+      "latest_conversation_message": "OTHER-CONVO-MARKER-4b7d",
+      "custom_color": null
+    },
+    {
+      "ref": "workspace:1515",
+      "id": "6f1c2a10-0000-4000-8000-000000000002",
+      "index": 1,
+      "title": "Release triage",
+      "custom_title": "Release triage",
+      "has_custom_title": true,
+      "description": null,
+      "current_directory": "/tmp/example/volley",
+      "pinned": true,
+      "selected": true,
+      "remote": false,
+      "listening_ports": [5173],
+      "latest_submitted_message": "SECRET-PROMPT-MARKER-8a2f please merge the release",
+      "latest_submitted_at": "2026-10-19T10:00:00Z",
+      "latest_conversation_message": "SECRET-CONVO-MARKER-3d6e I merged it",
+      "custom_color": "#7c3aed"
+    }
+  ]
+}

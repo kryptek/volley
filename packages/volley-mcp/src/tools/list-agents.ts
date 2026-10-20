@@ -14,6 +14,8 @@ export interface AgentSummary {
   parent_id: string | null;
   cwd: string | null;
   model: string | null;
+  /** What the agent registered it is working on (SPEC §6.2), else null. */
+  title: string | null;
   capabilities: string[];
   last_seen: string;
 }
@@ -65,6 +67,7 @@ export async function volListAgents(
       parent_id: env.parent_id,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       model: typeof payload.model === "string" ? payload.model : null,
+      title: typeof payload.title === "string" ? payload.title : null,
       capabilities: Array.isArray(payload.capabilities)
         ? payload.capabilities.filter((c): c is string => typeof c === "string")
         : [],

@@ -1,6 +1,4 @@
 import { constants, generateKeyPairSync, privateDecrypt, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -13,6 +11,7 @@ import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
+import { tempDir } from "./helpers/tmp";
 
 const NS = "accounts-test";
 const pw = (u: string) => `${u}-pw`;
@@ -83,6 +82,13 @@ function fakeAuth(): FakeExec & { accounts: Map<string, string>; tokens: Map<str
           username: id,
           expires_at: "2026-10-18T12:10:00.000Z",
         });
+      }
+      case "token": {
+        n++;
+        const id = `0000c0d${n}`;
+        const token = `vly_admin_${id}_t${n}`;
+        tokens.set(token, { id, role: "admin", state: "fresh" });
+        return ok({ token, username: id, expires_at: "2026-10-18T12:10:00.000Z" });
       }
       case "redeem": {
         const t = tokens.get((opts.input ?? "").trim());
@@ -158,7 +164,7 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
       users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
       canPublish,
     });
-    home = mkdtempSync(join(tmpdir(), "volleyd-accounts-"));
+    home = tempDir("volleyd-accounts-");
     auth = fakeAuth();
     daemon = await startDaemon();
   });
@@ -171,7 +177,6 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     }
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   /** Publish one auth request as `user` on `topic`; resolve with the reply payload (or null). */
@@ -237,6 +242,38 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(typeof ev?.at).toBe("string");
   });
 
+  it("admin_token from an admin runs `volley auth token --json`, seals the token, journals its id", async () => {
+    const r = await op("admin-1", { op: "admin_token" });
+    expect(r).toMatchObject({
+      ok: true,
+      op: "admin_token",
+      result: { token_id: "0000c0d1", expires_at: "2026-10-18T12:10:00.000Z" },
+    });
+    expect(JSON.stringify(r)).not.toContain("vly_admin_");
+    expect(unseal(r?.sealed)).toEqual({ token: "vly_admin_0000c0d1_t1" });
+    expect(auth.argvs(["volley", "auth", "token"])).toEqual([
+      ["volley", "auth", "token", "--json"],
+    ]);
+    const ev = systemEvents().find((e) => e.type === "admin_token_issued");
+    expect(ev?.data).toEqual({
+      by: "admin-1",
+      token_id: "0000c0d1",
+      expires_at: "2026-10-18T12:10:00.000Z",
+    });
+    expect(JSON.stringify(systemEvents())).not.toContain("vly_admin_");
+  });
+
+  it("admin_token is refused for a steer sender and without a usable reply_key, before it runs", async () => {
+    const steer = await op("steer-1", { op: "admin_token" });
+    expect(steer).toMatchObject({ ok: false, op: "admin_token" });
+    expect(steer?.error).toMatch(/steer-1.*steer.*admin/);
+    const keyless = await request("admin-1", authOpsTopic("admin-1"), { op: "admin_token" });
+    expect(keyless).toMatchObject({ ok: false, op: "admin_token" });
+    expect(keyless?.error).toContain("reply_key");
+    expect(auth.argvs(["volley", "auth", "token"])).toEqual([]);
+    expect(systemEvents().some((e) => e.type === "admin_token_issued")).toBe(false);
+  });
+
   it("the same op from a steer sender is refused with a reason, and nothing runs", async () => {
     const r = await op("steer-1", { op: "account_create", name: "phone", role: "steer" });
     expect(r).toMatchObject({ ok: false, op: "account_create" });
@@ -295,6 +332,16 @@ describe("account control ops (admin role, sealed secrets, journaled)", () => {
     expect(accounts.find((a) => a.name === "steer-1")?.last_seen).toBe("2026-10-18T11:30:00.000Z");
     // The admin's own request counts as being seen.
     expect(typeof accounts.find((a) => a.name === "admin-1")?.last_seen).toBe("string");
+  });
+
+  it("account_list says since when volleyd has kept auth requests (seen_since: its start)", async () => {
+    await daemon.stop();
+    const clock = fakeClock();
+    const t0 = new Date(clock.now()).toISOString();
+    daemon = await startDaemon({ clock });
+    await clock.advance(3_600_000);
+    const list = await op("admin-1", { op: "account_list" });
+    expect((list?.result as { seen_since?: string }).seen_since).toBe(t0);
   });
 
   it("account_list's last_seen also takes the account's newer retained status", async () => {

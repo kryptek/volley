@@ -11,13 +11,17 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release (v0.2.0).** This package has the wave file, journal, reducer, scheduler,
-> fence, config store, daemon, CLI and launchd service, plus decisions, wave ownership, pause/stop
+> **Status: pre-release (v0.3.1).** This package has the wave file, journal, reducer, scheduler,
+> fence, config store, daemon, CLI and service (launchd on macOS; `volley setup` installs a
+> systemd user unit on Linux), plus decisions, wave ownership, pause/stop
 > and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
 > admission. It spawns each admitted task's agents (worktree, identity, cmux launch, hook-signal
 > verification, per-worktree lock, retire), drives them through the review pipeline to a
 > merge-ready gate and notices the merge, recovers stalled agents, applies mid-wave plan changes,
-> publishes screen tails, and can run agents on a second machine over ssh + tmux.
+> publishes screen tails, and can run agents on a second machine over ssh + tmux. Since v0.3.0 it
+> also answers the Desk's setup wizard and account ops (`setup_plan` / `setup_apply`, one-time
+> sign-in links and admin tokens), pairs machines (`volley peer`) and runs agents under several
+> Claude accounts (`volley claude`).
 
 ---
 
@@ -53,7 +57,9 @@ coordinator session.
 
 ## Quick start
 
-From the repo root, after `bun install`:
+On a machine set up with `volley setup` (root README, quickstart step 2), volleyd is already
+running as a service, logged in to the broker with `$VOLLEYD_HOME/broker.json`, and `volleyd` is
+installed in `~/.volley/bin`. To run it by hand instead, from the repo root, after `bun install`:
 
 ```sh
 # Validate a wave file (no daemon needed)
@@ -321,7 +327,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
-| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], sharing }` |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan? }, sharing }` |
 | `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct`, `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
@@ -362,6 +368,38 @@ before the answer arrives (rotate yourself with `volley auth rotate` or through 
 | `account_rotate` | `name` | `{ name, role }` | `{ username, password }` | `account_rotated { by, name }` |
 | `account_revoke` | `name` | `{ name }` | — | `account_revoked { by, name }` |
 | `signin_link` | `role` (`steer` \| `watch`), `label`, `ttl_s?` (default 600), `desk_url?` | `{ role, label, expires_at, link_base? }` | `{ token }`; the link is `<link_base>#signin=<token>` (sealing the link too could exceed what RSA-OAEP fits) | `signin_link_issued { by, role, label, token_id, expires_at }` |
+| `admin_token` | — | `{ token_id, expires_at }` | `{ token }` (`volley auth token --json`) | `admin_token_issued { by, token_id, expires_at }` |
+| `setup_plan` | `lan?`, `repair?` | `{ steps: [{ step, title, found, changes: [{ summary, detail?, terminal? }], blocked?, skipped?, plan_id, lan? }], last_setup?, broker? }` | — | — |
+| `setup_apply` | `step`, `plan_id`, `lan?`, `repair?` | `{ step, lines, problems, terminal?, restarting? }` | `{ token }` when the accounts step issued the one-time admin token | `setup_step_applied { by, step, summaries }`; `setup.log` lines with `by: "desk:<username>"` |
+| `desk_password` | — | `{ username: "desk" }` | `{ username, password }`: the shared `desk` login's new password | `desk_password_issued { by }` |
+
+**Setup ops** (`src/setup-ops.ts`) run `volley setup`'s own planners and steps (volley-cli's
+`setup/`) for the Desk's wizard; no step logic lives in the daemon. Every command a step runs goes
+through the fenced exec with a setup token (the fence's SETUP rows) behind the terminal's own fence
+(volley-cli's `setupFence`);
+nothing asks (the Desk's `setup_apply` naming a plan is the confirmation). Planning is fresh every
+time, and `setup_apply` plans the step again, refusing with `plan changed` when its `plan_id`
+differs, while an earlier step is `blocked`, or while another `setup_apply` runs (one at a time).
+A change only a terminal can make carries `terminal: { reason, command }` and is never applied:
+anything that needs `sudo` (the `etc` and `snap` layouts' broker config, state file and restart:
+`sudo volley setup --step security [--lan|--no-lan]`), the `container` layout's restart (its own
+command, from the host), volleyd's own service or password (either would stop the volleyd
+answering: `volley setup --step services` / `--step accounts`), and the macOS keychain copy of the
+coordinator's login (the logged-in session's: `volley setup --step accounts`). volleyd never reads
+the keychain, so once the coordinator's login is on file the accounts step plans no keychain change
+at all: its `notes` say that the keychain can't be checked from the Desk and that `volley setup`
+checks it in a terminal (only a login that is new, or gets a new password, plans the copy there).
+A Desk apply logs what it leaves for a terminal (`left` in `setup.log`); while a password the Desk
+gave the coordinator has not been stored by a terminal's `--step accounts` since, the keychain copy
+stays a terminal's change, and the note says it is stale and names the command. On a brew layout the
+broker restart is applied last, after the answer is published (`restarting: true`); its result and
+the step's checks land in `setup.log`, and the Desk re-plans once it has reconnected. Setup ops are
+answered beside the daemon's serial queue, so a long step (the Desk build) never holds up waves.
+Each command a step runs is killed after `setup_apply_timeout_ms` (110 s; the step's error then
+says so). A step runs several commands, so its answer can come after the Desk's 120 s wait: the
+Desk keeps listening for a late answer. Passwords `volley auth init` prints for a new identity
+never reach the answer. The shared `desk` login's password, which no file keeps, is issued only by
+`desk_password` (Setup & Security › New desk password), sealed to the admin who asked.
 
 **Token redemption.** `volley auth token` prints a one-time admin token in the operator's
 terminal; `signin_link` makes one for a phone. Each token is also the password of a short-lived
@@ -396,6 +434,9 @@ profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` move
 the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
 `CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
 `~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
+The primary is never in it: `claude_accounts` asks `claude auth status` of the default profile and
+answers its plan as `primary: { plan? }` (none when it is not logged in or names no plan), and the
+primary's usage record carries that plan from then on.
 SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
 evidence behind each choice below.
 
@@ -441,7 +482,10 @@ at 80% wins over a primary that simply has not reported (it may be at 0%). A spa
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses;
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, so the profile's own login is the one claude uses (the fence
+seals a `CLAUDE_CONFIG_DIR` only when it is exactly `<root>/<acct>` for an account in that root's
+registry: a real directory, not a symlink, never in or above the agent's worktree; a root that is,
+holds or sits in `$VOLLEYD_HOME` admits none);
 `.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
 Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
 `repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
@@ -501,7 +545,10 @@ never the local `primary`, and that record opens no decision (a wave move cannot
 When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
 can override it), each running wave with agents on that account gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
-most headroom among those under the threshold in both windows (none: only `not now`), with
+most headroom among those under the threshold in both windows, else a signed-in account that
+has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
+reported weekly usage; a signed-in profile before `primary`, whose interactive use goes
+unreported; none: only `not now`), with
 the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
 nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
@@ -673,6 +720,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
+| `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
+| `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -700,7 +749,7 @@ lists every key with its default and example pools, commented out.
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
-| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` |
+| 6 | **Launch** `.volley/mcp.json` + `.volley/launch.sh`, then `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` (with the stored cmux socket password in its environment) | `launch.ts`, `hosts/local-cmux.ts` | `LAUNCH_FAILED` (cmux refusing volleyd or not running: says how to fix it) |
 | 7 | **Verify** through the hook signals (below) | `verify.ts`, `screens.ts` | decisions, not refusals |
 
 A refusal releases the lock, revokes credentials minted for the attempt and never launches.
@@ -802,8 +851,12 @@ random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
-`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`.
-The hooks come in through `--settings`.
+`claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
+(without `--strict-mcp-config` under `agent_mcp: inherit`, below).
+The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
+session's `PATH`: if not it prints `volleyd: cannot start the agent: claude is not on this
+session's PATH (<PATH>)` with the fix and keeps the session open, so the screen volleyd reads
+(and the decision it opens) says why instead of an empty, dead session.
 
 **MCP wiring.** The agent's `volley` MCP server is volleyd's, not the user's: volleyd writes
 `.volley/mcp.json` = `{ "mcpServers": { "volley": { "command": "bun", "args": ["run",
@@ -814,7 +867,25 @@ credentials from `.volley/agent.json` in its cwd, so nothing secret is in either
 an older install) out of the session. `--mcp-config` is variadic, so it is passed in the `=`
 form (exactly one value) and `--` ends option parsing before the prompt, which is last: the
 prompt can never be swallowed as a config path. The fence pins this exact form, the path inside
-the sealed worktree, and (remote hosts) the `mcp.json` content. The cmux command starts with two spaces, which keeps it out of shell history and away
+the sealed worktree, and (remote hosts) the `mcp.json` content.
+
+**`agent_mcp: strict | inherit`** (a tunable, like `branch_update`; default `strict`). `strict` is
+the launch above: the agent has volleyd's `volley` server and nothing else, so every agent is
+reproducible and minimal, whatever the machine's user has installed. `inherit` drops
+`--strict-mcp-config`: the user's own MCP servers (plugin servers such as browser tools,
+claude.ai connectors, user- and project-scope servers) load beside volleyd's, as they do in a
+session started by hand. volleyd's server keeps the name `volley`, which Claude Code lets an
+`--mcp-config` server take over from a user-scope server of the same name, so an everyday
+`volley` entry (the coordinator's, with its own `VOLLEY_AGENT_ID`) never starts in an agent's
+session and the agent registers only as itself. A user server under another name that runs
+volley-mcp would start too (and read the agent's `.volley/agent.json`): keep the everyday entry
+named `volley`. volleyd warns at each `inherit` spawn that has one in the profile's `.claude.json`
+`mcpServers` or the worktree's `.mcp.json` (it logs it and journals
+`alarm_raised { alarm: "agent_mcp_stray_volley", servers }`; the spawn goes on). The trade-off:
+more tools, but an agent whose tool set depends on the machine and on servers that may prompt,
+fail to connect or slow its start. The fence accepts both forms and nothing else;
+`agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
+vanished agent keeps the servers it launched with. The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
@@ -917,7 +988,7 @@ captured to `$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
 | `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
-| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture |
+| `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture; its question quotes the session's last output (its last non-blank lines, also in the journal's `decision_opened` event as `data.last_output`; not on the retained decision), or says the screen was empty and the session may have ended at once |
 
 After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
 signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
@@ -1105,16 +1176,21 @@ in), `gh` (authenticated, for `gh issue view`), `git`, `tmux`, `nc`, `base64`, `
 the wave repo at `repo` (its `origin` must have the release branch) and a volley checkout at
 `volley_dir` with `bun install` run. Two that are easy to miss:
 
-- `claude` must be on the `PATH` of a non-interactive ssh session (`ssh <target> bash -s` reads
-  no `~/.bashrc` or `~/.zshrc`), because the tmux session that runs `launch.sh` takes the
-  environment of the ssh session that created it. Claude Code's installer puts it in
-  `~/.local/bin`, which sshd's default `PATH` lacks: link it into `/usr/local/bin`, or set
-  `PATH` for ssh sessions (`SetEnv` in sshd_config, or `~/.ssh/environment` with
-  `PermitUserEnvironment`).
+- `claude` (and `bun`) must be on the `PATH` of a non-interactive ssh session
+  (`ssh <target> bash -s` reads no `~/.zshrc`, and bash stops early in `~/.bashrc`), because the
+  tmux session that runs `launch.sh` takes that environment. Claude Code's installer puts it in
+  `~/.local/bin`, which sshd's default `PATH` lacks: set it in `~/.zshenv` (zsh) or at the top of
+  `~/.bashrc` (bash), or link it into `/usr/local/bin`. `volley peer join` checks this before it
+  pairs and prints the exact line. A tmux server that was already running keeps the `PATH` it
+  started with, so before each launch volleyd adds the ssh session's own in front of it
+  (`printenv PATH` and `tmux show-environment -g PATH`, then `tmux set-environment -g PATH` with
+  the ssh session's directories first and every directory the server already had after them;
+  nothing to do when none is missing, or no server runs). volleyd uses tmux's default server, so
+  this may be your own: its PATH only ever gains directories.
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
-  servers on the box are not loaded (`--strict-mcp-config`). The
+  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`. The
 daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
 or host-key prompt fails the command). `remote_port` (default 21883) must be free on the box's
 loopback: a box that runs its own MQTT broker usually has 1883 taken, and a forward that cannot
@@ -1177,7 +1253,10 @@ agent runs.
 Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
 (SPEC §4.6.14). On the daemon's machine, as an admin account (`invite` and `remove` are admin
 ops: they go to volleyd on the admin's own `volley/_system/auth/ops/<username>` topic, never the
-mailbox, and volleyd checks the admin role as for the account ops):
+mailbox, and volleyd checks the admin role as for the account ops; the broker drops a
+non-admin's op without a word, so `volley peer` first checks the login against this machine's
+`accounts.json` and the fixed identities, and refuses a known non-admin at once instead of
+waiting out `--timeout`):
 
 ```sh
 VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
@@ -1199,11 +1278,18 @@ A failing `block` check (no bun, no tmux, no clone or no `--repo`) stops the joi
 code is used, so it stays valid while you fix things (the join prints the
 `volley peer doctor --fix --repo …` that applies the safe fixes); `warn` checks are printed and the
 join goes on. `claude` and `bun` on the ssh `PATH` are among them: the doctor can only estimate
-that `PATH`, and volleyd's own probe of the real one (readiness `path_ok`) decides. Then it checks ssh to `--to`, then sends a script to `ssh <host> bash -s` that first checks the
-daemon's machine can ssh back to `--target` (`ssh -o BatchMode=yes <target> true`: every spawn
-there needs it; if not, the join stops before the code is used) and then runs
+that `PATH`; the join's own check below and volleyd's probe (readiness `path_ok`) see the real
+one. Then it checks ssh to `--to` (an untrusted host key is reported as such, with the one-time
+`ssh <host> true` to accept it, not as missing key-based ssh), then sends a script to
+`ssh <host> bash -s` that first checks the daemon's machine can ssh back to `--target`
+(`ssh -o BatchMode=yes <target> true`: every spawn there needs it; if not, the join stops before
+the code is used), then that `claude`, `bun` and `tmux` are on the PATH of that non-interactive
+ssh session (what an agent session gets there; if not, the join stops before the code is used,
+names what is missing and prints the line to add, with the directories this shell finds them in:
+`~/.zshenv` for zsh, the top of `~/.bashrc` for bash), and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
-ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
+`VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
 account named after the machine (`--name`, default its short hostname) and adds
 `hosts.<name>`:
 
@@ -1765,7 +1851,7 @@ the box, through that host's exec, where its worktrees are.
 | `implement` | `implementer` | `<task>-implementer`, branch from the release branch | artifacts verified |
 | `spec_review` ∥ `quality_review` | two fresh reviewers | each its own `--detach` worktree at the verified head | a parseable `review` result |
 | `fixup` | `fixup` | its own branch from the head; pushes `HEAD:<PR branch>` | artifacts verified |
-| (rebase) | `rebase` | its own branch from the head; lease-guarded push | artifacts verified |
+| (rebase) | `rebase` | its own branch from the head; lease-guarded push (`branch_update: merge`: a merge and a normal push) | artifacts verified (merge: the new head descends from the old) |
 | `merge_ready` | — | — | evidence written; the task is a gate |
 
 **Artifact verification** (`src/artifacts.ts`, read-only verbs only): the role's local HEAD
@@ -1776,7 +1862,8 @@ artifact is journaled (`alarm_raised { alarm: "artifact_missing", missing: push|
 agent is steered once ("push + open PR, then publish done again") and re-waited; still missing →
 an `agent_blocked` decision. Success journals `artifact_verified { role, head_sha, pr, ci_runs }`.
 The steer names what the role publishes: the implementer its branch and PR, the fixup its
-`git push origin HEAD:<PR branch>`, the rebase its lease-guarded push.
+`git push origin HEAD:<PR branch>`, the rebase its lease-guarded push (under `branch_update: merge`,
+its merge and normal push).
 
 **CI** is never re-run. Red on the head → a `ci_failed` decision with the run URLs and failed
 job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
@@ -1825,13 +1912,30 @@ merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI gre
 the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
 reviewer runs again (then the fixup, if it finds anything), and the check repeats.
 
+**`branch_update: rebase | merge`** (a tunable: `config.yaml`, `config_set` or a wave file's
+`config:`; default `rebase`) is how that step updates the branch. `rebase` is the above: rebase
+onto `origin/<release branch>`, then `git push --force-with-lease=<PR branch>:<old head>`. `merge`
+is for repositories that allow no force-push of any kind: the step's agent gets the merge brief
+(`briefs/rebase-merge.md.tmpl`) and a `.volley/rebase.md` that runs
+`git merge --no-edit origin/<release branch>` and a normal `git push origin HEAD:<PR branch>`, and
+its verification also requires the new head to descend from the head the step started at
+(`git merge-base --is-ancestor <old> <new>`): a rewritten branch (a rebase force-pushed anyway) is
+`artifact_missing` (`push`), steered once with its own fix (no force-push: `git checkout -B fix
+<old>`, merge the release branch and then the rewritten branch into it, a normal push) and then
+put to the owner. The merge commit contains
+the release head, so the gate's check finds the branch current. The mode is read when the step
+starts and journaled on its `stage_entered` (`branch_update: "merge"`), so the agent's brief, its
+`.volley/rebase.md` and the check agree even if the tunable changes meanwhile (an account move
+or the respawn of a vanished agent keeps it too). Steers and decisions call that role's work "merge (branch update)"; the role is
+still `rebase` in the wave state and the journal.
+
 **The merge_ready invariant.** The review stage is load-bearing, so the transition into the gate
 goes through a pure guard (`mergeReadyCheck`): every reviewer role in the task's pipeline must
 have a stored review with a verdict that holds for the **current head** — a review of that
 head, or of one it descends from only through fixups that ran after that review (they worked
-from its round or a later one) and rebases. A head pushed outside the pipeline (`pr_head_moved`,
-re-verified) was reviewed by nobody, so reviews of the heads before it no longer count — unless
-the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
+from its round or a later one) and branch updates (rebase or merge). A head pushed outside the
+pipeline (`pr_head_moved`, re-verified) was reviewed by nobody, so reviews of the heads before
+it no longer count — unless the owner accepted it without a re-review by answering that `pr_head_moved` decision `fixup`
 (`moves[].accepted_by` in the evidence; SPEC §4.6.8). A
 violation gates nothing: the guard runs when the task reaches the end of its pipeline (before
 any GitHub check) and again at the gate, and journals
@@ -1970,7 +2074,8 @@ ALLOW (program by bare name only — never a path):
     list-workspaces · ping
   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
-    `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+    `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
+    left out only under `agent_mcp: inherit`) — or from a
     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
     a profile's login state and plan, never a credential)
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
@@ -1986,6 +2091,7 @@ ALLOW (program by bare name only — never a path):
   volley auth add <agent_id> --role ROLE [--kind KIND] --json
   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+  volley auth token --json   (admin_token: the token sealed to the admin who asked)
     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
     LABEL 1..64 printable characters, not starting with `-`
   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
@@ -1999,6 +2105,24 @@ ALLOW (program by bare name only — never a path):
 
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+
+SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the commands a
+  `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run: the terminal's own
+  commands (volley-cli's `setupFence`) for the detected layout, minus those only a terminal
+  may run:
+    the layout's restart (brew layouts; never one starting with sudo) ·
+    <ctrl> dynsec init <the layout's state file> dynsec-admin <password> (brew layouts) ·
+    mosquitto -h
+    launchctl print gui/<uid>/systems.volley.volleyd | gui/<uid>/systems.volley.desk ·
+      bootout gui/<uid>/systems.volley.desk ·
+      bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.desk.plist
+    systemctl --user daemon-reload | is-active volleyd.service |
+      is-active | enable | restart volley-desk.service
+    bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
+    <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
+      plan's probe only) · <bun> run build in <repo>/packages/volley-desk
+  Never volleyd's own service (installing or restarting it would stop the volleyd answering),
+  sudo, or the keychain (the logged-in session's): those stay terminal-only.
 
 TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
   with its token, checked by identity like consent tokens:
@@ -2021,10 +2145,12 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   gh issue view
   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
     the LaunchToken sealed for <dir>) | capture-pane | has-session |
-    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
-    kill-session = CONSENT; no tmux global options
+    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+    show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+    PATH, from printenv, then the server's own dirs) —
+    kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port>
+    nc -z 127.0.0.1 <port> · printenv PATH
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -2070,16 +2196,40 @@ human merges.
 ## Running as a service (launchd)
 
 ```sh
-volleyd install               # writes the plist and loads it
+volleyd install               # writes the plist and (re)loads it; safe to rerun
 volleyd install --dry-run     # print the plist instead
 launchctl kickstart -k gui/$UID/systems.volley.volleyd   # restart
 volleyd uninstall             # unload + remove the plist
 ```
 
+A rerun with volleyd loaded boots it out, waits until launchd has let it go and bootstraps the
+new plist (retrying launchd's EIO meanwhile); if the new plist will not load, the previous one is
+put back and loaded again and `install` exits non-zero, so volleyd is never left down.
+
 The plist (`launchd/systems.volley.volleyd.plist.tmpl`) runs `bun src/cli.ts daemon` with
 `RunAtLoad` and `KeepAlive`, logs to `$VOLLEYD_HOME/volleyd.log`, and captures `VOLLEYD_HOME`,
-`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` and your `PATH` (so `git`, `gh`, `cmux` and `claude`
-resolve) at install time. Re-run `volleyd install` after changing any of them.
+`VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` and, when set, `VOLLEY_AUTH_DIR` (the auth dir volleyd's
+`volley auth` calls use) at install time. Its `PATH` is a stable list, never your shell's whole
+`PATH` (a terminal's per-session entries, such as cmux's shim directory under the temp dir, would
+make every rerun from another terminal a change): a fixed list of candidates, each kept when it
+exists on this machine: `~/.volley/bin`, bun's directory, Homebrew's `bin` and `sbin`,
+`/usr/local/bin`, the cmux app's `bin`, `~/.local/bin`, `~/.bun/bin`, `~/.claude/local`,
+`~/.npm-global/bin`, `~/.volta/bin`, nix's and snap's `bin`, then `/usr/bin:/bin:/usr/sbin:/sbin`.
+Nothing comes from your shell's `PATH`. Re-run `volleyd install` after changing any of them. `volley
+setup` runs it for you on macOS, with `VOLLEY_AUTH_DIR` set to the auth dir it used (volleyd runs
+`volley auth` by name to redeem the Desk's sign-in links); on Linux it writes the systemd user
+unit `volleyd.service` instead, with the same PATH (`systemctl --user status volleyd.service`).
+
+**cmux from a service.** cmux lets only programs it started use its socket by default, and the
+service is not one, so every local spawn would be refused. `volley setup` (Services) checks this
+the way the service runs cmux, explains where to set a socket password in cmux (Settings… →
+Automation → Socket control mode → Password mode), asks for it hidden and stores it in
+`$VOLLEYD_HOME/cmux.json` (mode 0600; and the keychain, service `volley-cmux`). volleyd reads the
+file each time it runs cmux (spawns, screens, the `cmux ping` pressure sample) and passes it as
+`CMUX_SOCKET_PASSWORD`, so a new password needs no restart; it never goes in the plist. A
+`CMUX_SOCKET_PASSWORD` in volleyd's own environment wins. When cmux still refuses a spawn, the
+`spawn_failed` decision says what to do in those words, then what cmux said (`(cmux said: …)`;
+its full text stays in the journal).
 
 ---
 

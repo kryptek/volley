@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { type SavedLoginDeps, savedCoordinatorLogin } from "volley-cli/auth/coordinator-login";
 import { type BrokerAuth, authFromEnv, resolveBrokerAuth } from "volley-mcp/config";
 
 /**
@@ -73,15 +74,22 @@ function readCredentialsFile(path: string): BrokerAuth {
 
 /**
  * A control client's credentials: the caller's own, resolved like every other Volley client (the
- * identity file's `broker` block in `cwd`, then `VOLLEY_AUTH_*`). The shipped ACL lets only
- * volleyd, the Desk and coordinators write the daemon's mailbox, so this is normally the
- * `coordinator` identity.
+ * identity file's `broker` block in `cwd`, then `VOLLEY_AUTH_*`, then, for an operator (not an
+ * agent) and a broker on this machine, the coordinator login `volley setup` saved: its
+ * coordinator.json, which `cli.ts` turns on; volleyd never asks the keychain itself). The
+ * shipped ACL lets only volleyd, the Desk and coordinators write the daemon's mailbox, so this is
+ * normally the `coordinator` identity.
  */
 export function controlAuth(
   env: Record<string, string | undefined>,
   cwd: string = process.cwd(),
+  brokerUrl?: string,
+  saved?: SavedLoginDeps,
 ): BrokerAuth | null {
-  return resolveBrokerAuth(env, cwd);
+  return (
+    resolveBrokerAuth(env, cwd) ??
+    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
+  );
 }
 
 /** Connect-option fields for `auth` (none for an anonymous connect). */

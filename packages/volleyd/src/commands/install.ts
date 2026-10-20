@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { reloadLaunchd } from "volley-cli/setup/launchd";
+import { stableServicePath } from "volley-cli/setup/service-path";
+import { type Clock, systemClock } from "../clock";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { type ExecFn, exec as realExec } from "../exec";
@@ -23,6 +26,13 @@ $VOLLEYD_HOME/volleyd.log) and loads it with \`launchctl bootstrap gui/$UID\`. -
 the plist instead. Restart the service with:
   launchctl kickstart -k gui/$UID/${SERVICE_LABEL}
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
+The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE and, when set, VOLLEY_AUTH_DIR
+(the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in. Its PATH is
+a fixed list, never your shell's: ~/.volley/bin, bun's directory, Homebrew's, /usr/local/bin, the
+cmux app's bin, ~/.local/bin, ~/.bun/bin and the other install dirs that exist on this machine,
+/usr/bin:/bin:/usr/sbin:/sbin. The same from any terminal.
+The cmux socket password (\`volley setup\` stores it) never goes in the plist either: volleyd
+reads $VOLLEYD_HOME/cmux.json (mode 0600) each time it runs cmux.
 Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,
 written by \`volley auth init --volleyd-file\`).
 `;
@@ -36,6 +46,8 @@ export interface ServicePaths {
   brokerUrl: string;
   namespace: string;
   path: string;
+  /** The auth dir volleyd's `volley auth` calls use (`VOLLEY_AUTH_DIR`); unset: theirs to detect. */
+  authDir?: string;
 }
 
 const xml = (s: string) =>
@@ -56,7 +68,16 @@ export function renderPlist(
     PATH: p.path,
     LOG: join(p.home, "volleyd.log"),
   };
+  // An optional entry: the whole key/string pair, or nothing.
+  const raw: Record<string, string> = {
+    AUTH_DIR_ENTRY:
+      p.authDir === undefined
+        ? ""
+        : `\n    <key>VOLLEY_AUTH_DIR</key>\n    <string>${xml(p.authDir)}</string>`,
+  };
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, k: string) => {
+    const r = raw[k];
+    if (r !== undefined) return r;
     const v = vars[k];
     return v === undefined ? m : xml(v);
   });
@@ -65,20 +86,40 @@ export function renderPlist(
 export const plistPath = (launchAgentsDir: string) =>
   join(launchAgentsDir, `${SERVICE_LABEL}.plist`);
 
-/** Write the plist and (re)load it: bootout any previous instance, then bootstrap. */
+/**
+ * Write the plist and (re)load it: bootout a loaded instance, wait until launchd has let it go,
+ * then bootstrap (retrying launchd's EIO meanwhile: volley-cli's setup/launchd.ts). A plist that
+ * will not load is replaced by the previous one, loaded again, so a rerun never leaves volleyd down.
+ */
 export async function installService(
   p: ServicePaths,
   io: IO,
   run: ExecFn = realExec,
+  // real clock: `volleyd install` is a one-shot command waiting on launchd, not the daemon
+  clock: Clock = systemClock,
 ): Promise<ExitCode> {
   mkdirSync(p.home, { recursive: true });
   mkdirSync(p.launchAgentsDir, { recursive: true });
   const file = plistPath(p.launchAgentsDir);
-  writeFileSync(file, renderPlist(p));
-  await run(["launchctl", "bootout", `gui/${p.uid}/${SERVICE_LABEL}`]); // not loaded yet is fine
-  const r = await run(["launchctl", "bootstrap", `gui/${p.uid}`, file]);
-  if (r.code !== 0) {
-    io.stderr(`volleyd install: launchctl bootstrap failed (${r.code}): ${r.stderr.trim()}\n`);
+  const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
+  const text = renderPlist(p);
+  writeFileSync(file, text);
+  const d = {
+    exec: (argv: string[]) => run(argv),
+    sleep: (ms: number) => new Promise<void>((resolve) => clock.setTimeout(resolve, ms)),
+  };
+  const domain = `gui/${p.uid}`;
+  const r = await reloadLaunchd(d, domain, SERVICE_LABEL, file);
+  if (!r.ok) {
+    let state = `volleyd is not loaded: launchctl bootstrap ${domain} ${file}`;
+    if (before !== "" && before !== text) {
+      writeFileSync(file, before);
+      const back = await reloadLaunchd(d, domain, SERVICE_LABEL, file);
+      state = back.ok
+        ? "restored the previous plist and loaded it again: volleyd runs as before"
+        : `restored the previous plist, but it did not load either (${back.error}): ${state}`;
+    }
+    io.stderr(`volleyd install: ${r.error}; ${state}\n`);
     return EXIT.ERROR;
   }
   io.stdout(`installed ${file}\nlogs: ${join(p.home, "volleyd.log")}\n`);
@@ -113,12 +154,18 @@ function servicePaths(
   env: Record<string, string | undefined>,
 ): ServicePaths {
   const target = resolveTarget(values, env);
+  const userHome = env.HOME ?? homedir();
+  const bun = findBun(env.PATH ?? "", process.execPath);
   return {
-    launchAgentsDir: join(env.HOME ?? homedir(), "Library", "LaunchAgents"),
+    launchAgentsDir: join(userHome, "Library", "LaunchAgents"),
     home: volleydHome(env),
     uid: process.getuid?.() ?? 0,
-    bun: findBun(env.PATH ?? "", process.execPath),
-    path: env.PATH ?? "/usr/bin:/bin",
+    bun,
+    // Never the shell's whole PATH (per-terminal entries would make every rerun a change).
+    path: stableServicePath({ home: userHome, bun, tmpdir: env.TMPDIR }),
+    ...(env.VOLLEY_AUTH_DIR !== undefined && env.VOLLEY_AUTH_DIR !== ""
+      ? { authDir: env.VOLLEY_AUTH_DIR }
+      : {}),
     ...target,
   };
 }

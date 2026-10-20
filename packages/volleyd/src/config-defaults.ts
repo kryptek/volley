@@ -36,6 +36,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   dynsec_batch_ms: 50,
   credential_sweep_interval_s: 600,
   claude: { default_account: null, warn_at_pct: 90 },
+  branch_update: "rebase",
+  agent_mcp: "strict",
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
@@ -129,6 +131,9 @@ export const DAEMON_DEFAULTS = {
   spawn_request_timeout_ms: 120_000,
   /** Terminal lines read when a spawn falls back to the screen (pre-hook window only). */
   screen_lines: 40,
+  /** A did-not-start decision quotes this many last non-blank screen lines, up to this many chars. */
+  decision_output_lines: 3,
+  decision_output_chars: 300,
   /** After pressing Enter on an update prompt, how long the original launch gets to continue. */
   relaunch_settle_ms: 3_000,
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
@@ -149,6 +154,12 @@ export const DAEMON_DEFAULTS = {
   registry_scan_ms: 250,
   /** Kill a `volley auth` account command (accounts.ts) after this long. */
   auth_exec_timeout_ms: 15_000,
+  /**
+   * Kill each command a `setup_apply` step runs (the Desk build, the hooks installer, the broker
+   * restart) after this long. A step runs several, so its answer can come after the Desk's 120 s
+   * wait; the Desk keeps listening for a late answer.
+   */
+  setup_apply_timeout_ms: 110_000,
   /** Lifetime of a `signin_link` whose request names no `ttl_s`. */
   signin_link_ttl_s: 600,
   /** The longest a sign-in link may live (`volley auth` enforces the same bound). */

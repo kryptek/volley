@@ -1,6 +1,6 @@
 {
   "name": "volleyd",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "private": true,
   "description": "volleyd — durable wave supervisor daemon: wave files, journal, DAG scheduler, authority fence",
   "license": "Apache-2.0",

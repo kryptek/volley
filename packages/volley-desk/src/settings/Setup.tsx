@@ -7,7 +7,9 @@
  * (admins only): Issue new token (`admin_token`: the one-time admin token comes
  * back sealed to this browser and is shown once; a volleyd that prints it in
  * its own terminal instead says so, and one without the op gets the `volley
- * auth token` command), Preview the sign-in screen, and Run setup again (the
+ * auth token` command), New desk password (`desk_password`, after asking: the
+ * shared `desk` login, which no file keeps, gets a new password sealed to this
+ * browser and shown once), Preview the sign-in screen, and Run setup again (the
  * wizard in its own modal, `SetupWizard`, as `volley setup --repair`). A
  * browser that is not an admin sees how to become one: a one-time admin
  * token from `volley auth token`, pasted here or opened as `#signin=<token>`.
@@ -94,6 +96,15 @@ type Issue =
   | { state: "unsupported" }
   | { state: "failed"; error: string };
 
+type DeskPassword =
+  | { state: "idle" }
+  /** Asking first: the new password signs out whatever uses the old one. */
+  | { state: "confirm" }
+  | { state: "busy" }
+  | { state: "issued"; password: string }
+  | { state: "unsupported" }
+  | { state: "failed"; error: string };
+
 function reopenWithToken(deskUrl: string) {
   return (token: string) => {
     window.location.assign(`${deskUrl}#signin=${token}`);
@@ -112,6 +123,7 @@ function when(iso: string): string {
 export function Setup(p: SetupProps) {
   const [plan, setPlan] = useState<PlanState>({ state: "none" });
   const [issue, setIssue] = useState<Issue>({ state: "idle" });
+  const [desk, setDesk] = useState<DeskPassword>({ state: "idle" });
   const { ops, admin } = p;
 
   // The broker's state comes from setup's own planners; only an admin may ask.
@@ -148,6 +160,18 @@ export function Setup(p: SetupProps) {
         ? { state: "issued", token, expiresAt }
         : { state: "printed", expiresAt },
     );
+  };
+
+  const issueDeskPassword = async () => {
+    if (ops === null) return;
+    setDesk({ state: "busy" });
+    const r = await ops.request("desk_password");
+    if (isUnknownOp(r)) return setDesk({ state: "unsupported" });
+    const password = r.secret?.password;
+    if (!r.ok || typeof password !== "string") {
+      return setDesk({ state: "failed", error: r.error ?? "volleyd sent no password" });
+    }
+    setDesk({ state: "issued", password });
   };
 
   const ready = plan.state === "ready" ? plan.plan : null;
@@ -251,6 +275,60 @@ export function Setup(p: SetupProps) {
           {issue.state === "failed" && (
             <p className="s-error" role="alert">
               {issue.error}. Try again, or run `volley auth token` in a terminal.
+            </p>
+          )}
+          <Row
+            label="Desk login password"
+            hint="The shared desk login (volley dash, a Desk signed in without a token); shown here once"
+          >
+            <button
+              type="button"
+              className="btn"
+              disabled={desk.state === "busy" || desk.state === "confirm"}
+              onClick={() => setDesk({ state: "confirm" })}
+            >
+              {desk.state === "busy" ? "Asking volleyd…" : "New desk password"}
+            </button>
+          </Row>
+          {desk.state === "confirm" && (
+            <div className="s-note">
+              <p>
+                A new password signs out whatever signs in as desk now: each of those signs in again
+                with the new one.
+              </p>
+              <div className="wiz-actions wiz-actions--inline">
+                <button type="button" className="btn" onClick={() => setDesk({ state: "idle" })}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--blue"
+                  onClick={() => void issueDeskPassword()}
+                >
+                  Issue it
+                </button>
+              </div>
+            </div>
+          )}
+          {desk.state === "issued" && (
+            <div className="s-note">
+              <Once label="desk login password (shown once)" secret={desk.password} qr={false}>
+                <p className="dim">
+                  Username <span className="mono">desk</span>. No file keeps it: copy it now. Lost,
+                  it can only be replaced, here.
+                </p>
+              </Once>
+            </div>
+          )}
+          {desk.state === "unsupported" && (
+            <p className="s-note">
+              This volleyd cannot issue the desk password from the Desk. Sign devices in with a
+              one-time token or a sign-in link instead.
+            </p>
+          )}
+          {desk.state === "failed" && (
+            <p className="s-error" role="alert">
+              {desk.error}. Try again.
             </p>
           )}
           {p.onPreviewSignIn && (

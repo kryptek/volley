@@ -309,6 +309,20 @@ describe("mailbox drain (post-tool-use)", () => {
     expect(contextOf(edit.stdout)).toContain("after the next edit");
   });
 
+  it("user-prompt-submit: a stuck work-log lock never loses drained steering", async () => {
+    // A dead hook's lock, fresh enough that withLock times out on it.
+    writeFileSync(join(dir, ".volley", "work-log.lock"), "4242.held-by-a-dead-hook");
+    const id = await send("coord-a", "stop and rebase first", { seq: 1 });
+    await tick(50);
+    const run = await runHook("user-prompt-submit", fixture("user-prompt-submit.json", dir), {
+      cwd: dir,
+    });
+    expect(run.exitCode).toBe(0);
+    expect(contextOf(run.stdout)).toContain("stop and rebase first");
+    const block = readBlocks(join(dir, ".volley", "STEERING.md")).find((b) => b.id === id);
+    expect(block?.delivered).toBe(true);
+  });
+
   it("user-prompt-submit drains too", async () => {
     await send("coord-a", "pause after this step", { seq: 1 });
     await tick(50);

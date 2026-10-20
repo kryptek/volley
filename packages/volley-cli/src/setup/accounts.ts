@@ -10,6 +10,7 @@ import {
   withAdmin,
   writeSecret,
 } from "../auth/context";
+import { KEYCHAIN_SERVICE } from "../auth/coordinator-login";
 import { type RoleDrift, classify, clientOf, cmd, inspectRoles } from "../auth/dynsec";
 import { type MigrateFlags, initOrMigrate } from "../auth/migrate";
 import {
@@ -19,9 +20,11 @@ import {
   VOLLEY_ROLES,
   type VolleyRole,
   roleName,
+  tokenIdOf,
 } from "../auth/roles";
 import { accountVerb, readAccounts } from "../commands/auth-accounts";
 import { makeBufferIO } from "../io";
+import { type KeychainItem, keychainAddLine, storeInKeychain } from "./keychain";
 import { encodeQr, renderQr } from "./qr";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { lanWsUrl } from "./step";
@@ -34,29 +37,19 @@ import { lanWsUrl } from "./step";
  * passwords and only what is missing is created.
  */
 
-/** The keychain item holding the coordinator's broker login (macOS `security`). */
-export const KEYCHAIN_SERVICE = "volley-broker";
+export { KEYCHAIN_SERVICE };
 
 const list = (xs: readonly string[]) => xs.join(", ");
 
-/** A double-quoted word for `security -i`'s command line (`\` and `"` escaped). */
-const securityQuote = (s: string) => `"${s.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+/** The keychain item holding the coordinator's password. */
+const COORDINATOR_ITEM: KeychainItem = {
+  service: KEYCHAIN_SERVICE,
+  account: "coordinator",
+  label: "Volley broker login (coordinator)",
+};
 
 /** The `security -i` command that stores the coordinator's password (fed on stdin). */
-export function keychainAddCommand(password: string): string {
-  return [
-    "add-generic-password",
-    "-U",
-    "-s",
-    KEYCHAIN_SERVICE,
-    "-a",
-    "coordinator",
-    "-l",
-    securityQuote("Volley broker login (coordinator)"),
-    "-w",
-    securityQuote(password),
-  ].join(" ");
-}
+export const keychainAddCommand = (password: string) => keychainAddLine(COORDINATOR_ITEM, password);
 
 /** `volley auth init`'s flags for setup: no config (step 2 owns it), every credential file. */
 const initFlags = (ctx: SetupContext, extra: Partial<MigrateFlags> = {}): MigrateFlags => ({
@@ -131,8 +124,26 @@ async function brokerState(link: AdminLink): Promise<BrokerState> {
   return { missingRoles, drifted, missingIds, partialIds };
 }
 
+/**
+ * What a new identity's password comes to. The terminal prints each one once; over the Desk
+ * (`remote`) volleyd and coordinator get theirs in their files only, and desk's is never shown:
+ * the Desk issues one when a device needs it (`newDeskPassword`).
+ */
+function passwordNote(missing: readonly FixedIdentity[], remote: boolean): string {
+  if (missing.length === 0) return "";
+  if (!remote) return ` (password${missing.length === 1 ? "" : "s"} shown once)`;
+  return missing.includes("desk")
+    ? " (desk's password is not shown here: Setup & Security › New desk password issues one, shown once)"
+    : "";
+}
+
 /** "Create Volley's 8 shared roles and the identities …" for what is missing. */
-function createSummary(s: BrokerState, adminFileMissing: boolean, adminFile: string): string {
+function createSummary(
+  s: BrokerState,
+  adminFileMissing: boolean,
+  adminFile: string,
+  remote: boolean,
+): string {
   const parts: string[] = [];
   if (s.missingRoles.length === VOLLEY_ROLES.length) {
     parts.push(`Volley's ${VOLLEY_ROLES.length} shared roles`);
@@ -150,9 +161,7 @@ function createSummary(s: BrokerState, adminFileMissing: boolean, adminFile: str
   }
   const what: string[] = [];
   if (parts.length > 0) {
-    what.push(
-      `Create ${parts.join(" and ")}${s.missingIds.length > 0 ? ` (password${s.missingIds.length === 1 ? "" : "s"} shown once)` : ""}`,
-    );
+    what.push(`Create ${parts.join(" and ")}${passwordNote(s.missingIds, remote)}`);
   }
   if (s.partialIds.length > 0) what.push(`Give ${list(s.partialIds)} their missing roles`);
   // init writes it along with the identities; alone, it is the whole change.
@@ -196,7 +205,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
     adminFileMissing
   ) {
     plan.changes.push({
-      summary: createSummary(state, adminFileMissing, adminFile),
+      summary: createSummary(state, adminFileMissing, adminFile, ctx.deliverToken !== undefined),
       detail: "volley auth init --no-config --coordinator-file --volleyd-file",
       apply: () => runInit(ctx),
     });
@@ -214,16 +223,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
     plan.changes.push({
       summary: `New password for ${r.user}, written to ${r.file} (disconnects its sessions)`,
       apply: async () => {
-        const password = deps.generatePassword();
-        const l = await openAdmin(ctx.auth);
-        try {
-          const [a] = await l.session.run([cmd.setClientPassword(r.user, password)]);
-          if (a === undefined || classify(a) !== "ok") {
-            throw new Error(`setClientPassword ${r.user}: ${a?.error ?? "no answer"}`);
-          }
-        } finally {
-          await l.close().catch(() => {});
-        }
+        const password = await newPassword(ctx, r.user);
         const owner = r.user === "volleyd" ? sudoUser(ctx) : null;
         ensureOwnedDir(deps, dirname(r.file), owner);
         writeSecret(r.file, `${JSON.stringify({ username: r.user, password })}\n`);
@@ -268,25 +268,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
         apply: async () => {
           const c = readCredentials(coordinatorFile);
           if (c === null) throw new Error(`${coordinatorFile} does not exist`);
-          // `security -i` reads its commands from stdin: the password never reaches argv (`ps`).
-          const r = await ctx.deps.exec(["security", "-i"], {
-            input: `${keychainAddCommand(c.password)}\n`,
-          });
-          // -i reports a failed command on stderr, not always in its exit code: read it back.
-          const back = await ctx.deps.exec([
-            "security",
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            "coordinator",
-            "-w",
-          ]);
-          if (r.code !== 0 || back.code !== 0 || back.stdout.replace(/\n$/, "") !== c.password) {
-            throw new Error(
-              `security add-generic-password failed (exit ${r.code}): ${(r.stderr || back.stderr).trim()}`,
-            );
-          }
+          await storeInKeychain(ctx.deps.exec, COORDINATOR_ITEM, c.password);
           return [`Stored the coordinator's login in the keychain (service ${KEYCHAIN_SERVICE}).`];
         },
       });
@@ -309,17 +291,73 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
   return plan;
 }
 
+/** Give a fixed identity a new password on the broker (its sessions are disconnected). */
+async function newPassword(ctx: SetupContext, user: FixedIdentity): Promise<string> {
+  const password = ctx.auth.deps.generatePassword();
+  const l = await openAdmin(ctx.auth);
+  try {
+    const [a] = await l.session.run([cmd.setClientPassword(user, password)]);
+    if (a !== undefined && classify(a) === "missing") {
+      throw new Error(`no ${user} login on the broker yet: apply the accounts step first`);
+    }
+    if (a === undefined || classify(a) !== "ok") {
+      throw new Error(`setClientPassword ${user}: ${a?.error ?? "no answer"}`);
+    }
+  } finally {
+    await l.close().catch(() => {});
+  }
+  return password;
+}
+
+/**
+ * A new password for the shared `desk` login (the one `volley dash` and a Desk without a token
+ * sign in as). No file keeps it, so this is how the Desk issues one when a device needs it: the
+ * caller shows it once. Signs out whatever uses the old one.
+ */
+export const newDeskPassword = (ctx: SetupContext): Promise<string> => newPassword(ctx, "desk");
+
 function adminTokenChange(ctx: SetupContext): Change {
   return {
     summary:
       "Issue a one-time admin token (10 minutes, single use) to sign in to the Desk as admin",
-    detail: "volley auth token: printed here only; tokens.json keeps its hash",
+    detail:
+      ctx.deliverToken === undefined
+        ? "volley auth token: printed here only; tokens.json keeps its hash"
+        : "volley auth token: shown once, to this browser only; tokens.json keeps its hash",
     apply: async () => {
-      const code = await accountVerb(ctx.auth, "token", undefined, { json: false }, (fn) =>
-        withAdmin(ctx.auth, fn),
+      const deliver = ctx.deliverToken;
+      if (deliver === undefined) {
+        const code = await accountVerb(
+          ctx.auth,
+          "token",
+          undefined,
+          {
+            json: false,
+            deskUrl: `http://localhost:${ctx.deskPort}/`,
+            deskHost: ctx.deskHost,
+          },
+          (fn) => withAdmin(ctx.auth, fn),
+        );
+        if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
+        return [];
+      }
+      // The token comes back as JSON on a captured stdout and goes to `deliver` only.
+      const capture = makeBufferIO({ now: () => ctx.auth.io.now() });
+      const code = await accountVerb(
+        { ...ctx.auth, io: { ...capture, stderr: ctx.auth.io.stderr } },
+        "token",
+        undefined,
+        { json: true },
+        (fn) => withAdmin(ctx.auth, fn),
       );
       if (code !== 0) throw new Error("`volley auth token` failed (its error is above)");
-      return [];
+      const { token, expires_at } = JSON.parse(capture.readStdout()) as {
+        token: string;
+        expires_at: string;
+      };
+      const tokenId = tokenIdOf(token) ?? "";
+      deliver({ token, token_id: tokenId, expires_at });
+      return [`Issued a one-time admin token (${tokenId}, until ${expires_at}).`];
     },
   };
 }

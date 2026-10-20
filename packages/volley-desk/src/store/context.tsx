@@ -95,6 +95,10 @@ const REVIEWER_AFTER_MS = 22_000;
 const FLUSH_MS = 16;
 /** How long after a reconnect the retained replay is given to arrive. */
 const SETTLE_MS = 3000;
+/** A connect's retained replay is over once no retained message has arrived for this long. */
+const REPLAY_QUIET_MS = 80;
+/** The longest a connect's replay is held back from the store (a broker that never goes quiet). */
+const REPLAY_HOLD_MAX_MS = 1500;
 /** Offline spans kept (older ones are long past any `claim_after_s`). */
 const OFFLINE_KEEP = 50;
 /**
@@ -228,17 +232,33 @@ export function storeReducer(state: DeskState, a: Action): DeskState {
 }
 
 /**
- * Feed a client's deliveries into `dispatch`, coalesced every `flushMs`. A
- * reconnect (every connect after the first) dispatches `resync` in order with
- * the buffered messages, then `prune` once `settleMs` has passed. `onSettling`
- * hears `false` once a connect's replay has settled (`settleMs` after it) and
- * `true` on a disconnect after the first connect. Returns a cleanup that
- * detaches and cancels pending work; it does not disconnect.
+ * Feed a client's deliveries into `dispatch`, coalesced every `flushMs`. Each
+ * connect holds its retained replay (C11): nothing is dispatched until no
+ * retained message has arrived for `quietMs` (live ones do not keep the hold
+ * open), or `holdMaxMs` (at most `settleMs`) has passed. The client runs its
+ * connect handlers when the subscriptions are granted, and the broker sends the
+ * replay straight after that SUBACK, so the quiet window opens with the replay
+ * (never a round trip early at the CONNACK). The replay then lands in one `apply`. So the first frame sees every
+ * registry entry with its status (a broker with hundreds of finished agents
+ * never flashes them onto the canvas), and a reconnect's `resync` is dispatched
+ * together with its replay, however long the link takes to deliver it. A hold a
+ * disconnect interrupts stays open, its timers stopped, so nothing is applied
+ * while offline; the next connect drops its partial replay (the new one resends
+ * every retained topic) and holds again. A reconnect (every connect after the
+ * first) then dispatches `prune` once `settleMs` has passed. `onSettling` hears
+ * `false` once a connect's replay has settled (`settleMs` after it) and `true`
+ * on a disconnect after the first connect. Returns a cleanup that detaches and
+ * cancels pending work; it does not disconnect.
  */
 export function attachClient(
   client: DeskMqttClient,
   dispatch: (a: Action) => void,
-  { flushMs = FLUSH_MS, settleMs = SETTLE_MS }: { flushMs?: number; settleMs?: number } = {},
+  {
+    flushMs = FLUSH_MS,
+    settleMs = SETTLE_MS,
+    quietMs = REPLAY_QUIET_MS,
+    holdMaxMs = REPLAY_HOLD_MAX_MS,
+  }: { flushMs?: number; settleMs?: number; quietMs?: number; holdMaxMs?: number } = {},
   onConnection?: (c: Connection) => void,
   onSettling?: (settling: boolean, at: number) => void,
 ): () => void {
@@ -246,6 +266,11 @@ export function attachClient(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let settle: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
+  /** A connect's replay is being held; `resyncDue` when that connect was a reconnect. */
+  let holding = false;
+  let resyncDue = false;
+  let quiet: ReturnType<typeof setTimeout> | null = null;
+  let bound: ReturnType<typeof setTimeout> | null = null;
   const flush = () => {
     if (timer) clearTimeout(timer);
     timer = null;
@@ -253,22 +278,48 @@ export function attachClient(
     buffer = [];
     if (msgs.length > 0) dispatch({ type: "apply", msgs });
   };
+  const stopHold = () => {
+    if (quiet) clearTimeout(quiet);
+    if (bound) clearTimeout(bound);
+    quiet = bound = null;
+  };
+  const release = () => {
+    stopHold();
+    holding = false;
+    if (resyncDue) dispatch({ type: "resync" });
+    resyncDue = false;
+    flush();
+  };
   const offs = [
     client.onMessage((m) => {
       buffer.push(m);
-      timer ??= setTimeout(flush, flushMs);
+      if (!holding) timer ??= setTimeout(flush, flushMs);
+      else if (m.retained) {
+        if (quiet) clearTimeout(quiet);
+        quiet = setTimeout(release, quietMs);
+      }
     }),
     client.onConnect(() => {
       onConnection?.("connected");
       const reconnect = connected;
       connected = true;
-      if (reconnect) {
-        flush();
-        dispatch({ type: "resync" });
-      }
+      if (holding) {
+        // A hold a disconnect interrupted carries on: this connect's replay resends
+        // every retained topic, so drop the partial one (a topic cleared meanwhile
+        // must not come back from it). A resync it owed is still owed.
+        stopHold();
+        buffer = buffer.filter((m) => !m.retained);
+      } else if (reconnect) flush();
+      if (timer) clearTimeout(timer);
+      timer = null;
+      resyncDue = (holding && resyncDue) || reconnect;
+      holding = true;
+      quiet = setTimeout(release, quietMs);
+      bound = setTimeout(release, Math.min(holdMaxMs, settleMs));
       if (settle) clearTimeout(settle);
       settle = setTimeout(() => {
         settle = null;
+        if (holding) release();
         flush();
         if (reconnect) dispatch({ type: "prune" });
         onSettling?.(false, Date.now());
@@ -276,9 +327,11 @@ export function attachClient(
     }),
     client.onDisconnect(() => {
       onConnection?.("disconnected");
-      // The next connect resyncs and settles again; until then nothing is settled.
+      // The next connect resyncs and settles again; until then nothing is settled,
+      // and an open hold applies nothing while offline.
       if (settle) clearTimeout(settle);
       settle = null;
+      stopHold();
       if (connected) onSettling?.(true, Date.now());
     }),
   ];
@@ -286,6 +339,8 @@ export function attachClient(
     for (const off of offs) off();
     if (timer) clearTimeout(timer);
     if (settle) clearTimeout(settle);
+    if (quiet) clearTimeout(quiet);
+    if (bound) clearTimeout(bound);
   };
 }
 

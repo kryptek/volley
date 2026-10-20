@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { stableServicePath } from "volley-cli/setup/service-path";
 import pkg from "../package.json";
 import type { AdmissionSummary } from "../src/admission";
 import { admissionFor, formatAdmission } from "../src/commands/admission";
@@ -25,15 +25,13 @@ import { makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { memoryCredentials } from "./helpers/fake-dynsec";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 
 let home: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-cli-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-cli-");
 });
 
 describe("volleyd (top level)", () => {
@@ -428,19 +426,54 @@ describe("volleyd install / uninstall", () => {
     expect(xml).not.toMatch(/\{\{[A-Z_]+\}\}/);
   });
 
-  it("writes the plist and bootstraps it through the fenced exec", async () => {
+  /**
+   * launchd for volleyd's label: a bootout takes `teardown` more prints to land, a bootstrap
+   * meanwhile fails with EIO (as on a real Mac), and one of a plist containing `refuse` fails.
+   */
+  const fakeLaunchd = (o: { loaded?: boolean; teardown?: number; refuse?: string } = {}) => {
     const calls: string[][] = [];
-    const fake: ExecFn = async (argv) => {
+    let loaded = o.loaded ?? false;
+    let goingAway = 0;
+    const ok = (code = 0, stderr = "") => ({ code, stdout: "", stderr, timedOut: false });
+    const exec: ExecFn = async (argv) => {
       calls.push([...argv]);
-      return { code: 0, stdout: "", stderr: "", timedOut: false };
+      if (argv[1] === "print") {
+        if (goingAway > 0 && --goingAway === 0) loaded = false;
+        return ok(loaded ? 0 : 113);
+      }
+      if (argv[1] === "bootout") {
+        if (!loaded) return ok(3, "No such process");
+        if (goingAway === 0) goingAway = o.teardown ?? 0;
+        if (goingAway === 0) loaded = false;
+        return ok();
+      }
+      if (loaded) return ok(5, "Bootstrap failed: 5: Input/output error");
+      if (o.refuse !== undefined && readFileSync(argv[3] ?? "", "utf-8").includes(o.refuse)) {
+        return ok(1, "Bootstrap failed: 1: Operation not permitted");
+      }
+      loaded = true;
+      return ok();
     };
+    return { calls, exec, loaded: () => loaded };
+  };
+  /** Timers that fire at once: the reload's waits take no time. */
+  const instant = {
+    ...fakeClock(),
+    setTimeout: (fn: () => void) => {
+      queueMicrotask(fn);
+      return {} as ReturnType<ReturnType<typeof fakeClock>["setTimeout"]>;
+    },
+  };
+
+  it("writes the plist and bootstraps it through the fenced exec", async () => {
+    const { calls, exec: fake } = fakeLaunchd();
     const io = makeBufferIO();
     const p = paths();
-    expect(await installService(p, io, fake)).toBe(0);
+    expect(await installService(p, io, fake, instant)).toBe(0);
     const file = plistPath(p.launchAgentsDir);
     expect(readFileSync(file, "utf-8")).toContain("systems.volley.volleyd");
     expect(calls).toEqual([
-      ["launchctl", "bootout", "gui/501/systems.volley.volleyd"],
+      ["launchctl", "print", "gui/501/systems.volley.volleyd"],
       ["launchctl", "bootstrap", "gui/501", file],
     ]);
 
@@ -448,6 +481,28 @@ describe("volleyd install / uninstall", () => {
     expect(await uninstallService(p, io, fake)).toBe(0);
     expect(calls).toEqual([["launchctl", "bootout", "gui/501/systems.volley.volleyd"]]);
     expect(() => readFileSync(file)).toThrow();
+  });
+
+  it("a rerun with volleyd loaded waits for launchd to let it go, then loads it (no EIO)", async () => {
+    const f = fakeLaunchd({ loaded: true, teardown: 5 });
+    const io = makeBufferIO();
+    expect(await installService(paths(), io, f.exec, instant)).toBe(0);
+    expect(f.loaded()).toBe(true);
+    expect(io.readStderr()).toBe("");
+  });
+
+  it("a plist launchd will not load: the previous one is restored and loaded, exit non-zero", async () => {
+    const p = paths();
+    const file = plistPath(p.launchAgentsDir);
+    mkdirSync(p.launchAgentsDir, { recursive: true });
+    writeFileSync(file, "<plist>previous</plist>\n");
+    const f = fakeLaunchd({ loaded: true, teardown: 2, refuse: "systems.volley.volleyd" });
+    const io = makeBufferIO();
+    expect(await installService(p, io, f.exec, instant)).toBe(1);
+    expect(readFileSync(file, "utf-8")).toBe("<plist>previous</plist>\n");
+    expect(f.loaded()).toBe(true);
+    expect(io.readStderr()).toContain("Operation not permitted");
+    expect(io.readStderr()).toContain("restored the previous plist and loaded it again");
   });
 
   it("puts the first bun on PATH in the plist, not a versioned install path", () => {
@@ -468,6 +523,54 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).toContain("<key>KeepAlive</key>");
   });
 
+  it("--dry-run writes the same stable PATH from two shells (no per-terminal shim dir)", async () => {
+    const bunDir = join(home, "bun-bin");
+    mkdirSync(bunDir);
+    writeFileSync(join(bunDir, "bun"), "");
+    const env = { HOME: home, VOLLEYD_HOME: join(home, "state") };
+    const shim = "/var/folders/xy/abc/T/cmux-cli-shims/1234-5678";
+    const a = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `${shim}:${bunDir}:/some/project/node_modules/.bin:/usr/bin:/bin`,
+    });
+    const b = await runCli(["install", "--dry-run"], {
+      ...env,
+      PATH: `/usr/bin:${bunDir}:/bin:/another/dir`,
+    });
+    expect(a.exitCode).toBe(0);
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.stdout).not.toContain("cmux-cli-shims");
+    expect(a.stdout).not.toContain("node_modules");
+    // The fixed list, probed on this machine (Homebrew or the cmux app join it on a Mac); the
+    // test's home is under the temp dir, so bun's directory there is not baked in.
+    const want = stableServicePath({ home, bun: join(bunDir, "bun") });
+    expect(want).not.toContain(bunDir);
+    expect(a.stdout).toContain(`<string>${want}</string>`);
+  });
+
+  it("renders VOLLEY_AUTH_DIR only when an auth dir is given", () => {
+    const without = renderPlist(paths());
+    expect(without).not.toContain("VOLLEY_AUTH_DIR");
+    expect(without).not.toMatch(/\{\{[A-Z_]+\}\}/);
+    const withDir = renderPlist({ ...paths(), authDir: "/opt/mq/volley&co" });
+    expect(withDir).toContain(
+      "<key>VOLLEY_AUTH_DIR</key>\n    <string>/opt/mq/volley&amp;co</string>",
+    );
+    expect(withDir).not.toMatch(/\{\{[A-Z_]+\}\}/);
+  });
+
+  it("--dry-run carries VOLLEY_AUTH_DIR into the plist (volleyd's `volley auth` uses it)", async () => {
+    const r = await runCli(["install", "--dry-run"], {
+      HOME: home,
+      VOLLEYD_HOME: join(home, "state"),
+      VOLLEY_AUTH_DIR: "/srv/mosquitto/volley",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "<key>VOLLEY_AUTH_DIR</key>\n    <string>/srv/mosquitto/volley</string>",
+    );
+  });
+
   it("never writes broker credentials into the (world-readable) plist", async () => {
     const r = await runCli(["install", "--dry-run"], {
       HOME: home,
@@ -477,7 +580,8 @@ describe("volleyd install / uninstall", () => {
     });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).not.toContain("plist-must-not-hold-this");
-    expect(r.stdout).not.toContain("VOLLEY_AUTH");
+    expect(r.stdout).not.toContain("VOLLEY_AUTH_USERNAME");
+    expect(r.stdout).not.toContain("VOLLEY_AUTH_PASSWORD");
   });
 });
 

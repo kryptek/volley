@@ -37,7 +37,7 @@ describe("stop force-retires agents that never ack", () => {
     const retired = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
     expect(retired.data).toMatchObject({ status: "stopped", credentials_revoked: true });
     expect(s.creds.revoked).toEqual([AGENT]);
-    for (const topic of retainedTopics(NS, AGENT)) expect(await s.env.retained(topic)).toBeNull();
+    expect(await s.env.stillRetained(retainedTopics(NS, AGENT))).toEqual([]);
   });
 
   it("an agent that acks within the grace is retired normally, never forced", async () => {

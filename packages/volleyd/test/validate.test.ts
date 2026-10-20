@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -11,6 +10,7 @@ import { CONFIG_TOPIC } from "../src/control";
 import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
@@ -19,7 +19,7 @@ describe("volleyd validate: the release branch", () => {
   let dir: string;
   let repo: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-")));
+    dir = realpathSync(tempDir("volleyd-validate-"));
     repo = join(dir, "repo");
     mkdirSync(repo);
     git(repo, "init", "--quiet", "-b", "main");
@@ -36,7 +36,6 @@ describe("volleyd validate: the release branch", () => {
       "init",
     );
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const waveFile = (repoPath: string, task = "{ issue: 1 }") => {
     const file = join(dir, "w.yaml");
@@ -156,11 +155,10 @@ describe("volleyd validate: the brief preface", () => {
   let dir: string;
   let repo: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-preface-")));
+    dir = realpathSync(tempDir("volleyd-validate-preface-"));
     repo = join(dir, "repo");
     mkdirSync(join(repo, ".volley"), { recursive: true });
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   // A repo dir that is not a git repository is fine here: the release branch check is not under test.
   const waveFile = (extra = "") => {
@@ -234,7 +232,7 @@ describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
   let broker: TestBroker;
   let pub: VolleyBroker;
   beforeEach(async () => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "volleyd-validate-place-")));
+    dir = realpathSync(tempDir("volleyd-validate-place-"));
     broker = await startTestBroker();
     pub = new VolleyBroker();
     await pub.connect({ url: broker.url, agentId: "volleyd" });
@@ -242,7 +240,6 @@ describe("volleyd validate: placement preview (SPEC §4.6.15)", () => {
   afterEach(async () => {
     await pub.disconnect();
     await broker.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const retain = (

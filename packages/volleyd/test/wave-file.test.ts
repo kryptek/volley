@@ -254,6 +254,19 @@ describe("account: (Claude account profiles)", () => {
       /^config\.claude/,
     );
   });
+
+  it("branch_update and agent_mcp are per-wave config overrides with closed values", () => {
+    const w = parseWaveFile(
+      `${HEADER}config:\n  branch_update: merge\n  agent_mcp: inherit\n${TASKS}`,
+    );
+    expect(w.config).toEqual({ branch_update: "merge", agent_mcp: "inherit" });
+    expect(errorsOf(`${HEADER}config:\n  branch_update: squash\n${TASKS}`)[0]).toMatch(
+      /^config\.branch_update/,
+    );
+    expect(errorsOf(`${HEADER}config:\n  agent_mcp: all\n${TASKS}`)[0]).toMatch(
+      /^config\.agent_mcp/,
+    );
+  });
 });
 
 describe("placement (SPEC §4.6.15)", () => {

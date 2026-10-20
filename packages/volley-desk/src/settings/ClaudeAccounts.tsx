@@ -1,7 +1,8 @@
 /**
  * Settings › Claude accounts & usage, ported from the prototype
  * `ClaudeAccounts` (SPEC §4.6.11–12). One card per account (the supervisor's
- * retained usage records, plus registry profiles that have not reported yet):
+ * retained usage records, plus registry profiles that have not reported yet,
+ * and this machine's own login, the primary, first and from the start):
  * label, machine, plan chip, the 5-hour and weekly meters with their resets,
  * the agents and waves on it, and "Move a wave here…". An open
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
@@ -23,6 +24,7 @@ import {
   LOCAL_MACHINE,
   type RegistryAccount,
   accountList,
+  fiveHourLabel,
   moveAnswer,
   notNowAnswer,
   openLimitDecisions,
@@ -74,19 +76,32 @@ function useNow(fixed: number | undefined): number {
   return fixed ?? now;
 }
 
+/** What `claude_accounts` answers that the Desk shows. */
+export interface ClaudeRegistry {
+  accounts: RegistryAccount[];
+  /** The primary's plan as volleyd's `claude auth status` reported it; absent: not known. */
+  primaryPlan?: string;
+}
+
 /**
  * volleyd's profile registry (`claude_accounts`), fetched when the Desk can ask
  * and again whenever `refresh` changes (a sign-in finished, the dialog closed).
  */
-export function useClaudeRegistry(control: ControlFn | null, refresh = 0): RegistryAccount[] {
-  const [registry, setRegistry] = useState<RegistryAccount[]>([]);
+export function useClaudeRegistry(control: ControlFn | null, refresh = 0): ClaudeRegistry {
+  const [registry, setRegistry] = useState<ClaudeRegistry>({ accounts: [] });
   // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is the re-fetch trigger
   useEffect(() => {
     if (!control) return;
     let live = true;
     void control("claude_accounts", {}, "volley claude list").then((r) => {
-      const rows = (r.result as { accounts?: unknown } | undefined)?.accounts;
-      if (live && r.ok && Array.isArray(rows)) setRegistry(rows as RegistryAccount[]);
+      const result = r.result as { accounts?: unknown; primary?: { plan?: unknown } } | undefined;
+      const rows = result?.accounts;
+      if (!live || !r.ok || !Array.isArray(rows)) return;
+      const plan = result?.primary?.plan;
+      setRegistry({
+        accounts: rows as RegistryAccount[],
+        ...(typeof plan === "string" && plan !== "" ? { primaryPlan: plan } : {}),
+      });
     });
     return () => {
       live = false;
@@ -117,6 +132,39 @@ export interface ClaudeAccountsProps {
 }
 
 const machineName = (m: string) => (m === LOCAL_MACHINE ? "this machine" : m);
+
+/** volleyd's id for Claude Code's default profile on its own machine. */
+const PRIMARY = "primary";
+/** How the primary's card names it: never just "primary", which reads as one more profile. */
+export const PRIMARY_LABEL = "This machine's Claude login";
+
+/**
+ * The list with this machine's own login first. It is always there (agents run on it by
+ * default), but it has a usage record only once it reports usage, so until then one is made up
+ * for it: an owner who adds a profile must not read the missing card as their login gone. Its
+ * plan is the one volleyd reports (its record's, else `claude_accounts`'s), never a guess.
+ */
+function withPrimary(list: AccountInfo[], plan: string | undefined): AccountInfo[] {
+  const own = list.find((a) => a.id === PRIMARY);
+  const primary: AccountInfo =
+    own === undefined
+      ? {
+          id: PRIMARY,
+          label: PRIMARY_LABEL,
+          machine: LOCAL_MACHINE,
+          plan: plan ?? null,
+          fiveHour: null,
+          weekly: null,
+          agents: [],
+          waves: [],
+        }
+      : {
+          ...own,
+          label: own.label === PRIMARY ? PRIMARY_LABEL : own.label,
+          plan: own.plan ?? plan ?? null,
+        };
+  return [primary, ...list.filter((a) => a !== own)];
+}
 
 function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: number }) {
   const pct = w === null ? null : Math.round(w.pct);
@@ -172,7 +220,9 @@ function AccountCard({
         <div className="min0">
           <b>{a.label}</b>
           <div className="s-hint ell">
-            {a.id} · {machineName(a.machine)}
+            {a.id === PRIMARY
+              ? `${PRIMARY} · Claude Code's default login`
+              : `${a.id} · ${machineName(a.machine)}`}
           </div>
         </div>
         {a.plan && <span className="chip">{a.plan}</span>}
@@ -375,12 +425,15 @@ export function ClaudeAccounts({
   const [busy, setBusy] = useState(false);
   const [ack, setAck] = useState<RowState>();
   const now = useNow(fixedNow);
-  const registry = useClaudeRegistry(control, signinsDone(signins) + closed);
+  const { accounts: registry, primaryPlan } = useClaudeRegistry(
+    control,
+    signinsDone(signins) + closed,
+  );
   useEffect(() => {
     if (registry.length) onRegistry?.(registry);
   }, [registry, onRegistry]);
 
-  const list = accountList(records, registry);
+  const list = withPrimary(accountList(records, registry), primaryPlan);
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
@@ -404,12 +457,13 @@ export function ClaudeAccounts({
   };
 
   const warnAt = config?.claude?.warn_at_pct ?? WARN_AT_DEFAULT;
-  const current = config?.claude?.default_account ?? "primary";
+  const current = config?.claude?.default_account ?? PRIMARY;
   const defaults: [string, string][] = [
     ["most_headroom", "Most headroom"],
-    ["primary", labelOf("primary") || "Primary"],
+    // The Seg's options are short; the card names it in full.
+    [PRIMARY, "Primary"],
     ...list
-      .filter((a) => a.machine === LOCAL_MACHINE && a.id !== "primary" && !a.id.includes("@"))
+      .filter((a) => a.machine === LOCAL_MACHINE && a.id !== PRIMARY && !a.id.includes("@"))
       .map((a): [string, string] => [a.id, a.label]),
   ];
   if (!defaults.some(([k]) => k === current)) defaults.push([current, current]);
@@ -434,8 +488,14 @@ export function ClaudeAccounts({
               {d.suggested ? (
                 <>
                   Move wave <b>{d.wave}</b> to <b>{labelOf(d.suggested)}</b>
-                  {target?.fiveHour ? ` (${Math.round(target.fiveHour.pct)}% used)` : ""}? New
-                  agents start on {labelOf(d.suggested)}; running agents finish where they are.
+                  {/* nothing until the Desk has the account (its record may arrive later) */}
+                  {target === undefined
+                    ? ""
+                    : target.fiveHour
+                      ? ` (${Math.round(target.fiveHour.pct)}% used)`
+                      : ` (${fiveHourLabel(null, target.weekly?.pct ?? null)})`}
+                  ? New agents start on {labelOf(d.suggested)}; running agents finish where they
+                  are.
                 </>
               ) : (
                 <>

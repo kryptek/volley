@@ -1,24 +1,34 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  type SavedLoginDeps,
+  readSavedCoordinatorFile,
+  savedLoginSource,
+  useSavedLogin,
+} from "volley-cli/auth/coordinator-login";
 import { VolleyBroker } from "volley-mcp/broker";
-import { ADMIN_FILE, BROKER_FILE, daemonAdminAuth, daemonAuth } from "../src/broker-auth";
+import {
+  ADMIN_FILE,
+  BROKER_FILE,
+  controlAuth,
+  daemonAdminAuth,
+  daemonAuth,
+} from "../src/broker-auth";
 import { daemonStartOptions } from "../src/commands/daemon";
+import { resolveControlTarget } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
+import { tempDir } from "./helpers/tmp";
 
 const NS = "volleyd-auth";
 const USERS = { volleyd: "volleyd-pw", coordinator: "coordinator-pw" };
 
 let home: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-auth-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-auth-");
 });
 
 function writeBrokerFile(contents: string, mode = 0o600): string {
@@ -38,24 +48,20 @@ describe("daemonAdminAuth: the dynsec admin login volleyd mints with", () => {
 
   it("reads $VOLLEYD_HOME/dynsec-admin.json, else $VOLLEY_AUTH_DIR/admin.json, else none", () => {
     expect(daemonAdminAuth(home, {})).toBeNull();
-    const authDir = mkdtempSync(join(tmpdir(), "volleyd-authdir-"));
-    try {
-      admin(authDir, "admin.json");
-      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })).toEqual({
-        username: "dynsec-admin",
-        password: "a",
-      });
-      writeFileSync(
-        join(home, ADMIN_FILE),
-        JSON.stringify({ username: "dynsec-admin", password: "h" }),
-        {
-          mode: 0o600,
-        },
-      );
-      expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })?.password).toBe("h");
-    } finally {
-      rmSync(authDir, { recursive: true, force: true });
-    }
+    const authDir = tempDir("volleyd-authdir-");
+    admin(authDir, "admin.json");
+    expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })).toEqual({
+      username: "dynsec-admin",
+      password: "a",
+    });
+    writeFileSync(
+      join(home, ADMIN_FILE),
+      JSON.stringify({ username: "dynsec-admin", password: "h" }),
+      {
+        mode: 0o600,
+      },
+    );
+    expect(daemonAdminAuth(home, { VOLLEY_AUTH_DIR: authDir })?.password).toBe("h");
   });
 
   it("refuses a file other users can read", () => {
@@ -194,5 +200,67 @@ describe("volleyd against a broker that requires credentials", () => {
     const r = await runCli(["daemon", "--no-spawn"], env);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("chmod 600");
+  });
+});
+
+describe("control clients on the supervisor machine (volleyd config get, status, …)", () => {
+  const linux: SavedLoginDeps = {
+    platform: "linux",
+    keychain: () => null,
+    coordinatorFile: readSavedCoordinatorFile,
+  };
+  let dirs = 0;
+  /** An auth dir holding the coordinator.json `volley setup` writes. */
+  const saved = () => {
+    const authDir = join(home, `auth-${dirs++}`);
+    mkdirSync(authDir);
+    writeFileSync(
+      join(authDir, "coordinator.json"),
+      JSON.stringify({ username: "coordinator", password: "saved-pw" }),
+      { mode: 0o600 },
+    );
+    return { VOLLEY_AUTH_DIR: authDir };
+  };
+
+  it("use the coordinator login setup saved when nothing else names one", () => {
+    expect(controlAuth(saved(), home, "mqtt://localhost:1883", linux)).toEqual({
+      username: "coordinator",
+      password: "saved-pw",
+    });
+    // The macOS keychain item comes first.
+    expect(
+      controlAuth(saved(), home, "mqtt://127.0.0.1:1883", {
+        ...linux,
+        platform: "darwin",
+        keychain: () => "keychain-pw",
+      }),
+    ).toEqual({ username: "coordinator", password: "keychain-pw" });
+  });
+
+  it("keep VOLLEY_AUTH_* first, and never send the saved login to another machine's broker", () => {
+    const env = { ...saved(), VOLLEY_AUTH_USERNAME: "alice", VOLLEY_AUTH_PASSWORD: "a" };
+    expect(controlAuth(env, home, "mqtt://localhost:1883", linux)).toEqual({
+      username: "alice",
+      password: "a",
+    });
+    expect(controlAuth(saved(), home, "mqtt://broker.example:1883", linux)).toBeNull();
+  });
+
+  it("resolveControlTarget passes the broker URL, so the fallback applies once cli.ts turns it on", () => {
+    const env = { ...saved(), VOLLEY_BROKER_URL: "mqtt://localhost:1883" };
+    // Off by default: a test never reads this machine's keychain or auth dir.
+    expect(savedLoginSource()).toBeNull();
+    expect(resolveControlTarget({}, env, home).auth).toBeNull();
+    useSavedLogin(linux);
+    try {
+      expect(resolveControlTarget({}, env, home).auth).toEqual({
+        username: "coordinator",
+        password: "saved-pw",
+      });
+      // Never for an agent: volleyd launches every agent with VOLLEY_HOOKS_DIR set.
+      expect(resolveControlTarget({}, { ...env, VOLLEY_HOOKS_DIR: "/x" }, home).auth).toBeNull();
+    } finally {
+      useSavedLogin(null);
+    }
   });
 });

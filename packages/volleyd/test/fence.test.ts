@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { addAccount, profileDir } from "../src/claude/profiles";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -11,9 +12,12 @@ import {
   mintConsentToken,
   mintModelSwitchToken,
   mintScriptToken,
+  mintSetupToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { tempDirForAll } from "./helpers/tmp";
+import { withEnvSync } from "./helpers/with-env";
 
 /** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
 const PLIST = join(
@@ -474,6 +478,131 @@ describe("assertAllowed", () => {
   });
 });
 
+describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup token)", () => {
+  const repo = "/src/volley";
+  const home = "/home/owner";
+  const inputs = {
+    restart: "brew services restart mosquitto",
+    ctrl: { bin: "mosquitto_ctrl", stateFile: "/opt/homebrew/var/mosquitto/dynamic-security.json" },
+    repoRoot: repo,
+    bun: "/usr/local/bin/bun",
+    home,
+    uid: 501,
+  };
+  const setup = mintSetupToken(inputs);
+  const desk = `${repo}/packages/volley-desk`;
+  const hooks = `${repo}/packages/volley-hooks/scripts/install.sh`;
+  const volleydCli = `${repo}/packages/volleyd/src/cli.ts`;
+  const deskPlist = `${home}/Library/LaunchAgents/systems.volley.desk.plist`;
+
+  // O3's own commands for a brew layout, minus what only a terminal may run.
+  const SETUP_ALLOWED: [string[], string?][] = [
+    [["brew", "services", "restart", "mosquitto"]],
+    [["mosquitto_ctrl", "dynsec", "init", inputs.ctrl.stateFile, "dynsec-admin", "pw-1"]],
+    [["mosquitto", "-h"]],
+    [["launchctl", "print", "gui/501/systems.volley.volleyd"]],
+    [["launchctl", "print", "gui/501/systems.volley.desk"]],
+    [["launchctl", "bootout", "gui/501/systems.volley.desk"]],
+    [["launchctl", "bootstrap", "gui/501", deskPlist]],
+    [["systemctl", "--user", "daemon-reload"]],
+    [["systemctl", "--user", "is-active", "volleyd.service"]],
+    [["systemctl", "--user", "is-active", "volley-desk.service"]],
+    [["systemctl", "--user", "enable", "volley-desk.service"]],
+    [["systemctl", "--user", "restart", "volley-desk.service"]],
+    [["bash", hooks]],
+    [["bash", hooks, "--dry-run"]],
+    [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883", "--dry-run"]],
+    [[inputs.bun, "run", "build"], desk],
+  ];
+  const SETUP_DENIED: [string[], string?][] = [
+    // No setup step runs it (the accounts step issues the token in-process; admin_token runs it
+    // as an account verb, without a setup token).
+    [["volley", "auth", "token", "--json"]],
+    // volleyd's own service: installing or reloading it would stop the volleyd answering.
+    [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883"]],
+    [["volleyd", "install"]],
+    [["launchctl", "bootout", "gui/501/systems.volley.volleyd"]],
+    [["launchctl", "kickstart", "-k", "gui/501/systems.volley.volleyd"]],
+    [
+      [
+        "launchctl",
+        "bootstrap",
+        "gui/501",
+        `${home}/Library/LaunchAgents/systems.volley.volleyd.plist`,
+      ],
+    ],
+    [["systemctl", "--user", "restart", "volleyd.service"]],
+    [["systemctl", "--user", "enable", "volleyd.service"]],
+    // Anything that needs sudo.
+    [["sudo", "systemctl", "restart", "mosquitto"]],
+    [["sudo", "snap", "restart", "mosquitto"]],
+    [["sudo", "volley", "setup"]],
+    // The keychain is a terminal's (the logged-in session's).
+    [["security", "find-generic-password", "-s", "volley-broker", "-a", "coordinator", "-w"]],
+    [["security", "-i"]],
+    // Not O3's exact shapes.
+    [["brew", "services", "stop", "mosquitto"]],
+    [["mosquitto_ctrl", "dynsec", "init", "/tmp/other.json", "dynsec-admin", "pw-1"]],
+    [["mosquitto_ctrl", "dynsec", "createClient", "x"]],
+    [["bun", "run", "build"], desk],
+    [[inputs.bun, "run", "build"], repo],
+    [[inputs.bun, "run", "build"]],
+    [["bash", "/tmp/install.sh"]],
+    [["bash", hooks, "--force"]],
+    [["launchctl", "bootstrap", "gui/501", "/tmp/evil.plist"]],
+    [["launchctl", "print", "gui/501/com.example.other"]],
+    [["volley", "auth", "list", "--json"]],
+    [["git", "status"]],
+    [["rm", "-rf", "/tmp/x"]],
+  ];
+
+  it.each(SETUP_ALLOWED.map(([a, cwd]) => [a.join(" "), a, cwd]))("allows %s", (_l, argv, cwd) => {
+    const opts = { setup, ...(cwd !== undefined ? { cwd: cwd as string } : {}) };
+    expect(() => assertAllowed(argv as string[], opts)).not.toThrow();
+  });
+
+  it.each(SETUP_DENIED.map(([a, cwd]) => [a.join(" "), a, cwd]))("denies %s", (_l, argv, cwd) => {
+    const opts = { setup, ...(cwd !== undefined ? { cwd: cwd as string } : {}) };
+    expect(() => assertAllowed(argv as string[], opts)).toThrow(FenceError);
+  });
+
+  it("needs the token: without it the setup commands are not volleyd's", () => {
+    expect(() => assertAllowed(["brew", "services", "restart", "mosquitto"])).toThrow(FenceError);
+    expect(() => assertAllowed(["bash", hooks])).toThrow(FenceError);
+    const forged = { inputs } as unknown as ReturnType<typeof mintSetupToken>;
+    expect(() =>
+      assertAllowed(["brew", "services", "restart", "mosquitto"], { setup: forged }),
+    ).toThrow(FenceError);
+  });
+
+  it("a layout only a terminal restarts (sudo, a container) gets no restart at all", () => {
+    const etc = mintSetupToken({ ...inputs, restart: null, ctrl: null });
+    expect(() =>
+      assertAllowed(["brew", "services", "restart", "mosquitto"], { setup: etc }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(
+        ["mosquitto_ctrl", "dynsec", "init", inputs.ctrl.stateFile, "dynsec-admin", "x"],
+        {
+          setup: etc,
+        },
+      ),
+    ).toThrow(FenceError);
+    // A sudo restart is never a setup command, whatever the inputs say.
+    const sudo = mintSetupToken({ ...inputs, restart: "sudo systemctl restart mosquitto" });
+    expect(() =>
+      assertAllowed(["sudo", "systemctl", "restart", "mosquitto"], { setup: sudo }),
+    ).toThrow(FenceError);
+  });
+
+  it("`volley auth token --json` is an account verb volleyd may run for admin_token", () => {
+    expect(() => assertAllowed(["volley", "auth", "token", "--json"])).not.toThrow();
+    expect(() => assertAllowed(["volley", "auth", "token", "--ttl", "60", "--json"])).toThrow(
+      FenceError,
+    );
+  });
+});
+
 describe("model switches need an approved model_switch decision's token", () => {
   const send = (text: string, ws = "workspace:3") => ["cmux", "send", "--workspace", ws, text];
 
@@ -600,16 +729,26 @@ describe("the launch command needs the token of a launch script volleyd sealed",
     expect(() => sealLaunchScript("/tmp/../etc", script)).toThrow(FenceError);
   });
 
-  it("pins the MCP wiring: --strict-mcp-config --mcp-config=<this worktree>/.volley/mcp.json --", () => {
+  it("pins the MCP wiring: [--strict-mcp-config] --mcp-config=<this worktree>/.volley/mcp.json --", () => {
     expect(script).toContain("--strict-mcp-config --mcp-config='/tmp/wt/.volley/mcp.json'");
     expect(() => sealLaunchScript("/tmp/wt", script)).not.toThrow();
+    // agent_mcp: inherit — the same script without the strict flag (and only without it).
+    const inherit = renderLaunchScript({ ...vars, agentMcp: "inherit" });
+    expect(inherit).toBe(script.replace("--strict-mcp-config ", ""));
+    expect(() => sealLaunchScript("/tmp/wt", inherit)).not.toThrow();
     // another worktree's mcp.json (or a path outside any worktree) is not this launch's
     expect(() => sealLaunchScript("/tmp/other", script)).toThrow(FenceError);
     const other = renderLaunchScript({ ...vars, worktree: "/tmp/other" });
     expect(() => sealLaunchScript("/tmp/wt", other)).toThrow(FenceError);
     const edits: Record<string, string> = {
       "the variadic space form": script.replace("--mcp-config=", "--mcp-config "),
-      "no --strict-mcp-config": script.replace("--strict-mcp-config ", ""),
+      "--strict-mcp-config out of its place": script
+        .replace("--strict-mcp-config ", "")
+        .replace(" --name ", " --strict-mcp-config --name "),
+      "inherit with a second --mcp-config": inherit.replace(
+        " --mcp-config=",
+        " --mcp-config='/tmp/evil.json' --mcp-config=",
+      ),
       "no -- before the prompt": script.replace(' -- "$(cat', ' "$(cat'),
       "a second --mcp-config": script.replace(
         "--strict-mcp-config ",
@@ -627,9 +766,10 @@ describe("the launch command needs the token of a launch script volleyd sealed",
 
 describe("exec", () => {
   // A throwaway repo, so these tests do not depend on running inside a git checkout.
+  const repoDir = tempDirForAll("volleyd-exec-");
   let repo: string;
   beforeAll(() => {
-    repo = mkdtempSync(join(tmpdir(), "volleyd-exec-"));
+    repo = repoDir();
     const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "ignore" });
     git("init", "-q");
     for (let i = 0; i < 20; i++) {
@@ -645,9 +785,6 @@ describe("exec", () => {
         `c${i}`,
       );
     }
-  });
-  afterAll(() => {
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("refuses a denied command before spawning anything", async () => {
@@ -735,5 +872,145 @@ describe("single spawn point", () => {
       return /child_process|Bun\.spawn|Bun\.\$|execa|\bspawnSync\b/.test(text);
     });
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("sealLaunchScript: a Claude account profile's CLAUDE_CONFIG_DIR", () => {
+  // Real directories: the rule reads the registry and refuses a symlinked profile.
+  let base: string;
+  let WT: string;
+  let root: string;
+  const env = (vars: Record<string, string | undefined> = {}) => ({
+    HOME: base,
+    VOLLEY_CLAUDE_DIR: undefined,
+    VOLLEYD_HOME: undefined,
+    ...vars,
+  });
+  const seal = (
+    claudeConfigDir: string | undefined,
+    vars: Record<string, string | undefined> = {},
+  ) =>
+    withEnvSync(env(vars), () =>
+      sealLaunchScript(
+        WT,
+        renderLaunchScript({
+          hooksDir: "/opt/volley/packages/volley-hooks",
+          model: "claude-opus-5-5",
+          agentId: "w1-t1-implementer-1",
+          worktree: WT,
+          ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
+        }),
+      ),
+    );
+  const account = (r: string, label: string) =>
+    profileDir(r, addAccount(r, { label }, "2026-10-19T00:00:00.000Z").id);
+
+  const baseDir = tempDirForAll("fence-profiles-");
+  beforeAll(() => {
+    base = realpathSync(baseDir());
+    WT = join(base, "wt", "w1-T1-implementer");
+    mkdirSync(WT, { recursive: true });
+    root = join(base, ".volley", "claude");
+    account(root, "work");
+  });
+
+  it("the primary (no CLAUDE_CONFIG_DIR) is unchanged", () => {
+    expect(() => seal(undefined)).not.toThrow();
+  });
+
+  it("allows a registered profile in the default root, ~/.volley/claude/<acct>", () => {
+    expect(() => seal(join(root, "work"))).not.toThrow();
+  });
+
+  it("allows a registered profile in a configured root, normalised like profileDir", () => {
+    const r = join(base, "data", ".volley", "p");
+    account(r, "work");
+    const dir = join(r, "work");
+    for (const VOLLEY_CLAUDE_DIR of [r, `${r}/`, `${r}//`, `${base}/data/.volley/x/../p`])
+      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR }), VOLLEY_CLAUDE_DIR).not.toThrow();
+  });
+
+  it("the worktree boundary is a path segment: <worktree>-2 is not the agent's worktree", () => {
+    const r = `${WT}-2`;
+    account(r, "work");
+    expect(() => seal(join(r, "work"), { VOLLEY_CLAUDE_DIR: r })).not.toThrow();
+  });
+
+  it("refuses anything that is not exactly <root>/<registered account id>", () => {
+    for (const dir of [
+      `${root}/work/`,
+      `${root}//work`,
+      `${root}/./work`,
+      `${root}/x/../work`,
+      root,
+      `${root}/`,
+      `${root}/work/nested`,
+      `${root}/Work`,
+      `${root}/accounts.json`,
+      `${root}/.signin`,
+      `${root}/other`, // a valid id, not in the registry
+      join(base, ".volley", "volleyd", "work"),
+      join(base, ".claude"),
+      join(base, ".ssh"),
+      "/tmp/x",
+      join(base, "wt", "w2-T2-implementer"), // another agent's worktree
+      "work",
+    ]) {
+      expect(() => seal(dir), dir).toThrow(FenceError);
+    }
+  });
+
+  it("refuses a registered id whose profile dir is missing or a symlink", () => {
+    const outside = join(base, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    account(root, "linked");
+    rmSync(join(root, "linked"), { recursive: true });
+    expect(() => seal(join(root, "linked")), "missing").toThrow(FenceError);
+    symlinkSync(outside, join(root, "linked"));
+    expect(() => seal(join(root, "linked")), "symlink").toThrow(FenceError);
+  });
+
+  it("refuses a profile inside the agent's worktree, even with the root configured there", () => {
+    const r = join(WT, ".volley", "claude");
+    account(r, "work");
+    expect(() => seal(join(r, "work"), { VOLLEY_CLAUDE_DIR: r })).toThrow(FenceError);
+    // … or a root symlinked into it
+    const link = join(base, "link-root");
+    symlinkSync(r, link);
+    expect(() => seal(join(link, "work"), { VOLLEY_CLAUDE_DIR: link })).toThrow(FenceError);
+  });
+
+  it("refuses a profile dir the agent's worktree is inside", () => {
+    const r = join(base, "nest");
+    const dir = account(r, "work");
+    const saved = WT;
+    WT = join(dir, "wt");
+    try {
+      expect(() => seal(dir, { VOLLEY_CLAUDE_DIR: r })).toThrow(FenceError);
+    } finally {
+      WT = saved;
+    }
+  });
+
+  it("a root that is, holds or sits in $VOLLEYD_HOME admits nothing", () => {
+    // ~/.volley as the root would admit ~/.volley/volleyd (VOLLEYD_HOME) as a "profile".
+    const dotVolley = join(base, ".volley");
+    account(dotVolley, "volleyd");
+    expect(() => seal(join(dotVolley, "volleyd"), { VOLLEY_CLAUDE_DIR: dotVolley })).toThrow(
+      FenceError,
+    );
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: root })).toThrow(FenceError);
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(root, "work", "state") })).toThrow(
+      FenceError,
+    );
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(base, ".volley") })).toThrow(
+      FenceError,
+    );
+    // a VOLLEYD_HOME beside the root is fine
+    expect(() => seal(join(root, "work"), { VOLLEYD_HOME: join(base, "vd") })).not.toThrow();
+  });
+
+  it("a relative root admits nothing", () => {
+    expect(() => seal(join(root, "work"), { VOLLEY_CLAUDE_DIR: "rel/claude" })).toThrow(FenceError);
   });
 });

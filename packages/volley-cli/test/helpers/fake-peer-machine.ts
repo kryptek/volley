@@ -3,17 +3,16 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExecResult, PeerExec } from "../../src/commands/peer";
 import { type DoctorDeps, LOCK_MARKER, type ToolName, lockHash } from "../../src/peer/doctor";
+import { tempDir } from "./tmp";
 
 /**
  * A fake machine for `volley peer doctor`: real temp directories (home, the volley checkout, the
@@ -137,7 +136,7 @@ export const fakeMcpEntry = (volleyDir: string, url?: string) => ({
 });
 
 export function fakePeerMachine(opts: FakeMachineOptions = {}) {
-  const root = mkdtempSync(join(tmpdir(), "volley-fake-box-"));
+  const root = tempDir("volley-fake-box-");
   const home = join(root, "home");
   const volleyDir = join(root, "volley");
   const repoPath = join(root, "src", "repo");

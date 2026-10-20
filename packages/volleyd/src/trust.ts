@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -12,8 +11,10 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { waveDecisionId } from "./decisions";
 import type { ExecFn } from "./exec";
 import { SpawnError } from "./spawn-error";
+import type { WaveId } from "./types";
 
 /**
  * Repo trust (Claude Code's folder-trust dialog). Claude Code records an accepted dialog as
@@ -135,13 +136,12 @@ function writeTrusted(claudeJsonPath: string, root: string): string {
 }
 
 /**
- * One `repo_untrusted` decision per repo root (a wave's spawns into it all park on it), per
- * machine: a remote host's clone (`target`) is trusted in its own `~/.claude.json`, so it never
+ * One `repo_untrusted` decision per wave and repo root (a wave's spawns into it all park on it),
+ * per machine: a remote host's clone (`target`) is trusted in its own `~/.claude.json`, so it never
  * shares an id with a local clone at the same path.
  */
-export function trustDecisionId(root: string, target?: string): string {
-  const key = target === undefined ? root : `${target}:${root}`;
-  return `repo_untrusted-${createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
+export function trustDecisionId(wave: WaveId, root: string, target?: string): string {
+  return waveDecisionId("repo_untrusted", wave, target === undefined ? root : `${target}:${root}`);
 }
 
 /** The decision's question, as the owner sees it. */

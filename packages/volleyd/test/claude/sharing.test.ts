@@ -2,7 +2,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readlinkSync,
   statSync,
@@ -10,7 +9,6 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -25,10 +23,11 @@ import {
   sharingPath,
   syncMcp,
 } from "../../src/claude/sharing";
+import { tempDir } from "../helpers/tmp";
 
 /** A primary profile (`~/.claude` + `~/.claude.json`) and an empty account profile. */
 function setup() {
-  const base = mkdtempSync(join(tmpdir(), "volley-share-"));
+  const base = tempDir("volley-share-");
   const primary = join(base, "home", ".claude");
   const primaryJson = join(base, "home", ".claude.json");
   const profile = join(base, "claude", "work");

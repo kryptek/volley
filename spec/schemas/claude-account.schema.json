@@ -23,7 +23,7 @@
             "plan": {
               "type": "string",
               "minLength": 1,
-              "description": "The plan label Claude Code reported at sign-in (registry accounts only)."
+              "description": "The plan label Claude Code reports: at sign-in for a registry account, from `claude auth status` of the default profile for `primary`. Absent when it is not known."
             },
             "five_hour": {
               "oneOf": [{ "$ref": "usage.schema.json#/$defs/window" }, { "type": "null" }],

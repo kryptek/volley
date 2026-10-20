@@ -5,7 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { CONFIG_DEFAULTS } from "../src/config-defaults";
-import type { Daemon } from "../src/daemon";
+import { type Daemon, spawnFailedDecisionId } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { apply, emptyRecord } from "../src/reducer";
 import { SpawnError } from "../src/spawn-error";
@@ -225,6 +225,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     const opened = await event("decision_opened");
     expect(opened?.data).toMatchObject({
       kind: "spawn_failed",
+      decision_id: spawnFailedDecisionId("w1", "T1", "implementer"),
       options: ["retry now", "stop task"],
       parks: false,
     });
@@ -559,5 +560,20 @@ describe("spawn failures in the reducer", () => {
     rec = apply(rec, ev("stage_entered", { stage: "done" }));
     expect(rec.spawnFailures.T1).toBeUndefined();
     expect(rec.state?.tasks[0]?.last_error).toBeUndefined();
+  });
+});
+
+describe("spawnFailedDecisionId", () => {
+  it("is unique per wave: the same task and role in two waves never share a decision id", () => {
+    // The owner's smoke: a second wave's spawn_failed reused the first wave's id.
+    const a = spawnFailedDecisionId("w1", "T1", "implementer");
+    const b = spawnFailedDecisionId("w2", "T1", "implementer");
+    expect(a).toMatch(/^spawn_failed-[0-9a-f]{12}$/);
+    expect(b).toMatch(/^spawn_failed-[0-9a-f]{12}$/);
+    expect(a).not.toBe(b);
+    // … and still per task and role within a wave, and stable across calls
+    expect(spawnFailedDecisionId("w1", "T2", "implementer")).not.toBe(a);
+    expect(spawnFailedDecisionId("w1", "T1", "spec_reviewer")).not.toBe(a);
+    expect(spawnFailedDecisionId("w1", "T1", "implementer")).toBe(a);
   });
 });

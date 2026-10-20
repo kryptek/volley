@@ -24,6 +24,7 @@ import {
 } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
+import { countLiveAgents } from "volley-cli/setup/broker";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -126,6 +127,7 @@ import {
   openEvent,
   renderDecisionsMd,
   resolveEvent,
+  waveDecisionId,
   writeDecisionsFile,
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
@@ -214,7 +216,10 @@ import {
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
+import { lastOutput, lastOutputNote } from "./screens";
+import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./setup-ops";
 import type {
+  AgentMcp,
   CoordinatorAttention,
   JournalEvent,
   NewEvent,
@@ -406,6 +411,11 @@ export interface DaemonOptions {
   /** The exec account ops run `volley auth` through (accounts.ts; default: the fenced exec). */
   authExec?: ExecFn;
   /**
+   * The setup ops' planner context (setup-ops.ts; tests): the planners' deps, the auth dir, the
+   * env and the broker they log in to. Default: the real machine, volleyd's own broker URL.
+   */
+  setup?: Partial<Omit<SetupOpsOptions, "exec">>;
+  /**
    * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
    * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
    */
@@ -480,6 +490,10 @@ export interface SpawnerOptions {
 interface SpawnPipelineOptions {
   start?: SpawnStart;
   files?: Record<string, string>;
+  /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
+  branch_update?: "merge";
+  /** A respawn of a moved or vanished agent: its own MCP servers, not the tunable's now. */
+  agent_mcp?: AgentMcp;
   /** An account move's resume note, appended to the brief. */
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
@@ -550,6 +564,13 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/**
+ * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
+ * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
+ */
+export function spawnFailedDecisionId(wave: WaveId, task: TaskId, role: Role): string {
+  return waveDecisionId("spawn_failed", wave, task, role);
+}
 /** How volleyd resolves the decision it supersedes once the automatic retries stop. */
 const SPAWN_RETRIES_STOPPED = { answer: "retries_stopped", by: DAEMON_AGENT_ID };
 
@@ -688,8 +709,8 @@ const LOCK_FILE = "volleyd.lock";
 /** Owner statuses that make its `coordinator.state` `gone`. */
 const OWNER_GONE = new Set(["reaped", "done", "failed"]);
 
-/** The wave_complete decision's id (one per wave). */
-const WAVE_COMPLETE_DECISION = "wave_complete";
+/** The wave_complete decision's id (one per wave, never shared with another wave). */
+const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
 
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
@@ -888,6 +909,10 @@ export class Daemon {
   private readonly claude: ClaudeService;
   /** Paired machines (peers.ts) and their heartbeats (machines.ts). */
   private readonly peers: PeerService;
+  /** `setup_plan` / `setup_apply` (setup-ops.ts), answered beside the serial queue. */
+  private readonly setupOps: SetupOps;
+  /** Setup requests being answered (topic/correlation id): a re-delivery waits for the answer. */
+  private readonly setupInFlight = new Set<string>();
   private readonly machines: MachineHealth;
   /**
    * Usage metering (claude/usage.ts): every agent's latest sample, folded per account. The
@@ -905,8 +930,11 @@ export class Daemon {
   private readonly drainSeen = new Map<string, number>();
   /** When each paired machine was removed (`_system`'s `peer_removed`). */
   private readonly removedAt = new Map<string, number>();
-  /** A `respawn` approved while the task's machine was closed, by `<wave>/<task>`: its role. */
-  private readonly heldRespawn = new Map<string, Role>();
+  /**
+   * A `respawn` approved while the task's machine was closed, by `<wave>/<task>`: its role and
+   * how it continues the vanished agent (moveRespawn).
+   */
+  private readonly heldRespawn = new Map<string, { role: Role; pipeline: SpawnPipelineOptions }>();
   // --- Fleet (F2): the supervisor's own record, readiness verdicts, PATH probes ---
   /** The version a machine must run (its readiness `requirements.volley`). */
   private readonly version: string;
@@ -1060,12 +1088,25 @@ export class Daemon {
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
+      // The primary's record carries its plan (describe) once claude_accounts has asked it.
+      onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
     });
     this.machines = new MachineHealth({
       now: this.now,
       onChange: (name, status, record) => {
         if (this.running) void this.enqueue(() => this.onMachine(name, status, record));
       },
+    });
+    this.setupOps = new SetupOps({
+      exec: opts.authExec ?? realExec,
+      volleydHome: opts.home,
+      brokerUrl: opts.brokerUrl,
+      env: process.env,
+      now: () => dateOf(this.time),
+      sleep: (ms) => new Promise((r) => this.time.setTimeout(r, ms)),
+      liveAgents: () => this.liveAgentCount(),
+      brokerVersion: () => this.dynsec?.version ?? null,
+      ...opts.setup,
     });
     this.peers = new PeerService({
       exec: opts.authExec ?? realExec,
@@ -2339,10 +2380,10 @@ export class Daemon {
       if (k.startsWith(`${key}/`)) this.refused.delete(k);
     }
     // A respawn the owner approved while the machine was closed starts now.
-    const role = this.heldRespawn.get(key);
-    if (role !== undefined) {
+    const held = this.heldRespawn.get(key);
+    if (held !== undefined) {
       this.heldRespawn.delete(key);
-      void this.startSpawn(wave, task, role).catch((e: unknown) =>
+      void this.startSpawn(wave, task, held.role, held.pipeline).catch((e: unknown) =>
         this.log(`respawn ${key}: ${e instanceof Error ? e.message : String(e)}`),
       );
     }
@@ -2835,12 +2876,12 @@ export class Daemon {
     const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
     // The decision first: once wave_complete is journaled the wave is no longer `running` and no
     // later tick comes back here, so a failed open must leave the wave to retry.
-    if (rec.decisions[WAVE_COMPLETE_DECISION] === undefined) {
+    if (rec.decisions[waveCompleteDecisionId(wave)] === undefined) {
       const merged = done.length > 0 ? ` merged into ${state.release_branch}` : "";
       await this.openDecisionNow(wave, {
         kind: "wave_complete",
         task: null,
-        id: WAVE_COMPLETE_DECISION,
+        id: waveCompleteDecisionId(wave),
         question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
         options: ["acknowledged"],
       });
@@ -3079,7 +3120,7 @@ export class Daemon {
       const question = stopped
         ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
         : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
-      const base = `spawn_failed-${createHash("sha256").update(`${task}/${role}`).digest("hex").slice(0, 12)}`;
+      const base = spawnFailedDecisionId(wave, task, role);
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
       await this.openDecisionNow(
@@ -3394,6 +3435,7 @@ export class Daemon {
       mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
       ...(this.credentials !== undefined ? { credentials: this.credentials } : {}),
+      log: (line) => this.log(line),
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
@@ -4120,7 +4162,7 @@ export class Daemon {
     const w = log.record.wave as NonNullable<WaveLog["record"]["wave"]>;
     const { spec } = remote;
     const journal = deps.journal;
-    const decisionId = `remote_repo_missing-${createHash("sha256").update(`${spec.target}:${spec.repo}`).digest("hex").slice(0, 12)}`;
+    const decisionId = waveDecisionId("remote_repo_missing", wave, `${spec.target}:${spec.repo}`);
     const openId = openDecisionFor(log.record.state?.open_decisions ?? [], decisionId);
     // An ssh failure is not a missing clone: it throws a transient LAUNCH_FAILED (backed off).
     const exists = await remote.repoExists().catch(async (e: unknown) => {
@@ -4410,6 +4452,7 @@ export class Daemon {
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
+      branchUpdate: () => this.config.effective(wave).branch_update,
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -4510,8 +4553,9 @@ export class Daemon {
         : 1,
     );
     const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
-    let id = "spawn_budget_exhausted";
-    for (let k = 2; rec.decisions[id] !== undefined; k++) id = `spawn_budget_exhausted-${k}`;
+    const base = waveDecisionId("spawn_budget_exhausted", wave);
+    let id = base;
+    for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
     try {
       await this.openDecisionNow(
         wave,
@@ -4538,7 +4582,7 @@ export class Daemon {
     wave: WaveId,
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string> },
+    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
   ): void {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;
@@ -4831,8 +4875,8 @@ export class Daemon {
             task,
             question:
               x.kind === "hooks_silent"
-                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update. Look at its terminal?`
-                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing. Look at its terminal?`,
+                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update.${lastOutputNote(lastOutput(x.screen), false)} Look at its terminal?`
+                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing.${lastOutputNote(lastOutput(x.screen), false)} Look at its terminal?`,
             options: ["keep running", STOP_ANSWER],
             pointers: { screen },
           },
@@ -5000,16 +5044,20 @@ export class Daemon {
         await this.append(wave, { type: "task_cancelled", task: d.task, data: { by, why } });
         return;
       }
-      // Approved by the owner: a fresh spawn (its own lock check still applies).
+      // Approved by the owner: a fresh spawn (its own lock check still applies). A pipeline role
+      // continues where the vanished agent was, as it was launched: its start point, worktree
+      // and `.volley/` inputs, a merge-mode rebase step's merge brief, its MCP servers.
       const role = String(x.role) as Role;
       const task = d.task;
+      const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
       this.refused.delete(`${wave}/${task}/${role}`);
+      const pipeline = moveRespawn(spawned);
       // Its machine takes no new agents: it starts once the task is re-placed.
       if (this.parkClosed(wave, task)) {
-        this.heldRespawn.set(`${wave}/${task}`, role);
+        this.heldRespawn.set(`${wave}/${task}`, { role, pipeline });
         return;
       }
-      void this.startSpawn(wave, task, role).catch((e: unknown) =>
+      void this.startSpawn(wave, task, role, pipeline).catch((e: unknown) =>
         this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
       );
       return;
@@ -6052,6 +6100,15 @@ export class Daemon {
     // A redelivery of a request still running (peer_doctor): its answer comes when the run ends.
     if (this.authRunning.has(key)) return;
     const payload = (req.payload ?? {}) as Record<string, unknown>;
+    if (tokenId === null && SETUP_OPS.has(payload.op as string)) {
+      // A step can take minutes (the Desk build): answered beside the queue, never blocking it.
+      if (this.setupInFlight.has(key)) return;
+      this.setupInFlight.add(key);
+      void this.answerSetup(topic.split("/")[4] ?? "", payload, key, send)
+        .catch((e: unknown) => this.log(`setup op: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => this.setupInFlight.delete(key));
+      return;
+    }
     const exec = this.opts.authExec ?? realExec;
     const failed = (e: unknown): AuthOutcome => ({
       reply: {
@@ -6088,7 +6145,13 @@ export class Daemon {
             .pop();
         out = PEER_ADMIN_OPS.has(payload.op as string)
           ? await this.peerAdminOp(exec, sender, payload)
-          : await accountOp(exec, sender, payload, lastSeen);
+          : await accountOp(
+              exec,
+              sender,
+              payload,
+              lastSeen,
+              new Date(this.startedAt).toISOString(),
+            );
       }
     } catch (e) {
       out = failed(e);
@@ -6108,6 +6171,59 @@ export class Daemon {
       return;
     }
     await finish(out);
+  }
+
+  /**
+   * `setup_plan` / `setup_apply` from `sender`: answered, journaled, remembered for a
+   * re-delivery like every account op; then what runs after the answer (a broker restart).
+   */
+  private async answerSetup(
+    sender: string,
+    payload: Record<string, unknown>,
+    key: string,
+    send: (r: AuthReply) => Promise<void>,
+  ): Promise<void> {
+    this.authSeen.set(sender, dateOf(this.time).toISOString());
+    let out: SetupOutcome;
+    try {
+      out = await this.setupOps.handle(sender, payload);
+    } catch (e) {
+      out = {
+        reply: authReply(String(payload.op), {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      };
+    }
+    if (out.event !== undefined) this.system.append(out.event, dateOf(this.time));
+    if (!out.reply.ok) this.log(`refused ${out.reply.op}: ${out.reply.error}`);
+    this.authAnswered.set(key, out.reply);
+    if (this.authAnswered.size > DAEMON_DEFAULTS.dedupe_max) {
+      this.authAnswered.delete(this.authAnswered.keys().next().value as string);
+    }
+    try {
+      await send(out.reply);
+    } finally {
+      // The restart drops every connection, ours included: only once the answer is out.
+      if (out.after !== undefined) {
+        this.log("setup: restarting the broker after the answer");
+        await out.after();
+      }
+    }
+  }
+
+  /** Agents with a live (non-terminal) retained status: the setup detect step's count. */
+  private async liveAgentCount(): Promise<number | null> {
+    try {
+      const msgs = await this.broker.subscribeCollect(
+        "volley/+/+/status",
+        Number.POSITIVE_INFINITY,
+        DAEMON_DEFAULTS.registry_scan_ms,
+      );
+      return countLiveAgents(msgs);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -6197,7 +6313,7 @@ export class Daemon {
         return this.manualSpawn(p);
       // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
       case "claude_accounts":
-        return this.claude.list();
+        return { ok: true, defer: this.claude.list() };
       case "claude_account_add":
         return { ok: true, defer: this.claude.add(p, by) };
       case "claude_signin":

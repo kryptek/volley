@@ -35,12 +35,29 @@ export interface AccountInfo {
   waves: string[];
 }
 
+/**
+ * How a picker or a suggestion labels an account that has not reported usage (a newly signed-in
+ * profile): available, never a reason to leave it out (SPEC §4.6.12).
+ */
+export const NO_USAGE_YET = "no usage yet";
+
+/** An account that reported weekly usage but no 5-hour window: "no usage yet" would be untrue. */
+export const NO_FIVE_HOUR_YET = "no 5-hour usage yet";
+
+/** `34%`, or why there is no 5-hour percentage: what a picker or a suggestion shows. */
+export function fiveHourLabel(fivePct: number | null, weeklyPct: number | null): string {
+  if (fivePct !== null) return `${Math.round(fivePct)}%`;
+  return weeklyPct !== null ? NO_FIVE_HOUR_YET : NO_USAGE_YET;
+}
+
 /** What the agent window's picker lists. */
 export interface AccountChoice {
   id: string;
   label: string;
   /** The 5-hour window's pct, or `null` until the account reports usage. */
   fivePct: number | null;
+  /** The weekly window's pct, or `null` until the account reports it. */
+  weeklyPct: number | null;
 }
 
 /** `primary@gpu-box` → `gpu-box`: a remote host's own login. */
@@ -85,7 +102,12 @@ export function accountList(
 }
 
 export function accountChoices(accounts: readonly AccountInfo[]): AccountChoice[] {
-  return accounts.map((a) => ({ id: a.id, label: a.label, fivePct: a.fiveHour?.pct ?? null }));
+  return accounts.map((a) => ({
+    id: a.id,
+    label: a.label,
+    fivePct: a.fiveHour?.pct ?? null,
+    weeklyPct: a.weekly?.pct ?? null,
+  }));
 }
 
 /** Every unresolved `account_limit` decision, oldest first. */

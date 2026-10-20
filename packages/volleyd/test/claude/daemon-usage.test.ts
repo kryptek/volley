@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -11,6 +10,8 @@ import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import { tempDir } from "../helpers/tmp";
+import { stubEnv } from "../helpers/with-env";
 
 /**
  * Usage metering through a real daemon: fold, publish, threshold decision, wave move. The daemon
@@ -19,7 +20,10 @@ import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervi
  */
 
 let s: SupervisedEnv;
+let restoreEnv: (() => void) | undefined;
 afterEach(async () => {
+  restoreEnv?.();
+  restoreEnv = undefined;
   await s?.cleanup();
 });
 
@@ -73,8 +77,10 @@ async function recordWhen(
 }
 
 /** A registry with one signed-in local profile, `spare`; returns its profile dir. */
+/** Profile `spare` in `<base>/claude`, the profiles root the launch fence reads ($VOLLEY_CLAUDE_DIR). */
 function spareProfile(base: string): { root: string; primary: string; spare: string } {
   const root = join(base, "claude");
+  restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
   const primary = join(base, ".claude");
   mkdirSync(join(root, "spare"), { recursive: true });
   mkdirSync(primary, { recursive: true });
@@ -108,7 +114,7 @@ async function limitOnPrimary(): Promise<string> {
 
 describe("usage metering (daemon)", () => {
   it("folds samples per account, opens one account_limit decision, and moves the wave only on an answer", async () => {
-    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
@@ -176,7 +182,7 @@ describe("usage metering (daemon)", () => {
   }, 20_000);
 
   it("after a wave move, the wave's next agent spawns under the target profile", async () => {
-    const { root, primary, spare } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const { root, primary, spare } = spareProfile(tempDir("volleyd-usage-"));
     const clock: FakeClock = fakeClock(T0);
     s = await makeSupervisedEnv({
       daemon: { claude: { root, primaryDir: primary }, clock },
@@ -222,7 +228,7 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   };
 
   it("an account's windows outlive a restart with nothing running on it", async () => {
-    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
@@ -254,7 +260,7 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   }, 20_000);
 
   it("a sample retained while the daemon was down opens account_limit on restart, with no new sample", async () => {
-    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
@@ -274,7 +280,7 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   }, 20_000);
 
   it("a remote host's agent is metered on that host's account, never the local primary", async () => {
-    const { root, primary } = spareProfile(mkdtempSync(join(tmpdir(), "volleyd-usage-")));
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });

@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   BriefPrefaceTooLarge,
@@ -16,6 +15,7 @@ import {
 } from "./brief";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { waveDecisionId } from "./decisions";
 import { sealLaunchScript } from "./fence";
 import type { Host, WorktreeResult } from "./hosts/host";
 import {
@@ -33,13 +33,23 @@ import {
   mcpConfigPath,
   renderLaunchScript,
   renderMcpConfig,
+  strayVolleyServers,
 } from "./launch";
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { reapAndRevoke, retainedTopics } from "./retire";
-import { classifyScreen } from "./screens";
+import { classifyScreen, lastOutput, lastOutputNote } from "./screens";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
-import type { NewEvent, TaskId, Tunables, Wave, WaveTask } from "./types";
+import type {
+  AgentMcp,
+  BranchUpdate,
+  NewEvent,
+  TaskId,
+  Tunables,
+  Wave,
+  WaveId,
+  WaveTask,
+} from "./types";
 import {
   type AgentWatch,
   type VerifyResult,
@@ -78,6 +88,16 @@ export interface SpawnRequest {
   start?: { ref: string; detach: boolean };
   /** Inputs written to `<worktree>/.volley/<name>` before launch (review.md, findings.md, …). */
   files?: Record<string, string>;
+  /**
+   * A rebase role's step under `branch_update: merge` (fixed when the step started): its brief is
+   * the merge one (`briefs/rebase-merge.md.tmpl`). Absent: rebase.
+   */
+  branch_update?: BranchUpdate;
+  /**
+   * The agent's MCP servers, when they must be the earlier agent's (a respawn of a moved or
+   * vanished agent, from its `agent_spawned` record), not the tunable's current value.
+   */
+  agent_mcp?: AgentMcp;
   /**
    * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
    * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
@@ -122,9 +142,15 @@ export interface SpawnDeps {
   mintCredentials: boolean;
   /** Where the logins come from: volleyd's Dynamic Security control connection (dynsec.ts). */
   credentials?: AgentCredentials;
+  /** volleyd's log (a spawn's warnings); absent: journal only. */
+  log?: (line: string) => void;
   tunables: Pick<
     Tunables,
-    "worktree_root" | "spawn_timeout_s" | "heartbeat_alarm_s" | "brief_preface_max_bytes"
+    | "worktree_root"
+    | "spawn_timeout_s"
+    | "heartbeat_alarm_s"
+    | "brief_preface_max_bytes"
+    | "agent_mcp"
   > &
     Partial<Pick<Tunables, "require_fresh_base">>;
   /** The wave owner: the agents' parent (default volleyd). */
@@ -469,9 +495,13 @@ async function launchAttempt(
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }
 
+  if ((req.agent_mcp ?? deps.tunables.agent_mcp) === "inherit")
+    await warnStrayVolley(ctx, agentId, attempt);
+
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
-  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir), {
+  const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,
     namespace: ctx.namespace,
     wave: req.wave.wave,
@@ -516,6 +546,7 @@ async function launchAttempt(
   }
 
   const parent = deps.owner ?? SUPERVISOR;
+  const agentMcp = req.agent_mcp ?? deps.tunables.agent_mcp;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
     // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
@@ -541,6 +572,7 @@ async function launchAttempt(
       agentId,
       worktree: ctx.worktree,
       ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
+      ...(agentMcp === "inherit" ? { agentMcp } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -588,6 +620,8 @@ async function launchAttempt(
         ...(wt.base !== undefined ? { base_sha: wt.base.sha } : {}),
         ...(req.start !== undefined ? { start: req.start.ref, detached: req.start.detach } : {}),
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
+        ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),
+        ...(agentMcp === "inherit" ? { agent_mcp: "inherit" } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),
@@ -645,7 +679,7 @@ async function verifyAndRecover(
       const decisionId = await openDecision(
         ctx,
         "mcp_not_registered",
-        decisionIdFor("mcp_not_registered", cur.agentId),
+        decisionIdFor("mcp_not_registered", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
           options: ["relaunch", "cancel"],
@@ -659,7 +693,7 @@ async function verifyAndRecover(
       const decisionId = await openDecision(
         ctx,
         "hooks_auth_failed",
-        decisionIdFor("hooks_auth_failed", cur.agentId),
+        decisionIdFor("hooks_auth_failed", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}); volleyd paused it. relaunch: retire it (its login deleted), mint a fresh login and start the ${ctx.req.role} again as attempt ${cur.attempt + 1}; or cancel (the task is blocked)?`,
           options: ["relaunch", "cancel"],
@@ -696,17 +730,19 @@ async function verifyAndRecover(
       }
       continue;
     }
+    const last = lastOutput(result.screen);
     const decisionId = await openDecision(
       ctx,
       "unknown_screen",
-      decisionIdFor("unknown_screen", cur.agentId),
+      decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
-        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}). Look at its terminal?`,
+        question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(last, deps.host.name !== "local")} Look at its terminal?`,
         options: ["relaunch", "cancel"],
         screen,
         data: {
           agent_id: cur.agentId,
           screen_class: result.screen_class,
+          ...(last !== null ? { last_output: last } : {}),
           pipeline: relaunchMarker(ctx, cur),
         },
       },
@@ -820,7 +856,7 @@ async function registered(
     const decisionId = await openDecision(
       ctx,
       "model_switch",
-      decisionIdFor("model_switch", cur.agentId),
+      decisionIdFor("model_switch", ctx.req.wave.wave, cur.agentId),
       {
         question: `Needs you: ${cur.agentId} runs ${r.model ?? "an unknown model"}, the wave asks for ${task.model}. Keep it running?`,
         options: ["keep", "cancel"],
@@ -858,8 +894,8 @@ function decision(
   };
 }
 
-export function decisionIdFor(kind: DecisionKind, agentId: string): string {
-  return `${kind}-${createHash("sha256").update(agentId).digest("hex").slice(0, 12)}`;
+export function decisionIdFor(kind: DecisionKind, wave: WaveId, agentId: string): string {
+  return waveDecisionId(kind, wave, agentId);
 }
 
 /** Open a decision (the daemon's store when wired, else the journal); resolves with its id. */
@@ -912,11 +948,12 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
 }
 
 /**
- * The repo_untrusted decision id for the spawn's repo root, on the machine it runs on, in the
- * Claude account profile it runs under (each profile has its own folder trust).
+ * The repo_untrusted decision id for the spawn's wave and repo root, on the machine it runs on, in
+ * the Claude account profile it runs under (each profile has its own folder trust).
  */
 const trustId = (ctx: Ctx) =>
   trustDecisionId(
+    ctx.req.wave.wave,
     ctx.root,
     ctx.deps.remoteTrust?.target ??
       (profileDirOf(ctx.req) !== undefined ? `claude-account:${accountId(ctx.req)}` : undefined),
@@ -950,6 +987,51 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   const path = join(dir, `${agentId}-${stampOf(ctx.deps).replace(/[:.]/g, "-")}.txt`);
   writeFileSync(path, screen);
   return path;
+}
+
+/**
+ * Under `agent_mcp: inherit`, warn (journal + log) when the profile's `.claude.json` or the
+ * worktree's `.mcp.json` runs volley-mcp under a name other than `volley`: volleyd's server does
+ * not take that entry over, so a second Volley server starts in the agent's session. The spawn
+ * goes on; the entry is the owner's to rename or remove.
+ */
+async function warnStrayVolley(ctx: Ctx, agentId: string, attempt: number): Promise<void> {
+  const { deps, req } = ctx;
+  const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
+  const profile =
+    deps.remoteTrust !== undefined ? await deps.remoteTrust.read() : readClaudeJson(profilePath);
+  const mcpJson = join(ctx.worktree, ".mcp.json");
+  const raw =
+    deps.host.readFile !== undefined
+      ? await deps.host.readFile(mcpJson)
+      : existsSync(mcpJson)
+        ? readFileSync(mcpJson, "utf-8")
+        : null;
+  let project: unknown = null;
+  try {
+    project = raw !== null ? JSON.parse(raw) : null;
+  } catch {
+    // Not JSON: Claude Code loads nothing from it either.
+  }
+  const servers = strayVolleyServers([
+    { source: profilePath, config: profile },
+    { source: ".mcp.json", config: project },
+  ]);
+  if (servers.length === 0) return;
+  const message = `agent_mcp: inherit: ${agentId} also loads ${servers.map((s) => `'${s.name}' (${s.source})`).join(", ")}, which runs volley-mcp under a name other than 'volley'; rename it to 'volley' so volleyd's server takes it over, or remove it`;
+  deps.log?.(message);
+  await deps.journal({
+    type: "alarm_raised",
+    task: req.task,
+    data: {
+      alarm: "agent_mcp_stray_volley",
+      role: req.role,
+      attempt,
+      agent_id: agentId,
+      servers,
+      message,
+    },
+  });
 }
 
 /** Journal a refusal and release the lock (no agent holds the worktree). */

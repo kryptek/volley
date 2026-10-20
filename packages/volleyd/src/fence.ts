@@ -1,6 +1,10 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
+import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
 import { SIGNIN_COMMAND, renderSigninScript } from "./claude/signin-script";
+import { volleydHome } from "./config-store";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
 import { AGENT_BRANCH } from "./worktree";
 
@@ -44,7 +48,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     list-workspaces · ping
  *   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
- *     `--strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` — or from a
+ *     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
+ *     left out only under `agent_mcp: inherit`) — or from a
  *     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
  *     a profile's login state and plan, never a credential)
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
@@ -60,6 +65,7 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley auth add <agent_id> --role ROLE [--kind KIND] --json
  *   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
  *   volley auth redeem --label LABEL --json   (the token on stdin, never argv)
+ *   volley auth token --json   (admin_token: the token sealed to the admin who asked)
  *     ROLE admin|steer|watch|supervisor|peer · KIND human|device|machine|service ·
  *     LABEL 1..64 printable characters, not starting with `-`
  *   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
@@ -73,6 +79,24 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
+ *
+ * SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the commands a
+ *   `volley setup` step volleyd runs for the Desk (setup-ops.ts) may run: the terminal's own
+ *   commands (volley-cli's `setupFence`) for the detected layout, minus those only a terminal
+ *   may run:
+ *     the layout's restart (brew layouts; never one starting with sudo) ·
+ *     <ctrl> dynsec init <the layout's state file> dynsec-admin <password> (brew layouts) ·
+ *     mosquitto -h
+ *     launchctl print gui/<uid>/systems.volley.volleyd | gui/<uid>/systems.volley.desk ·
+ *       bootout gui/<uid>/systems.volley.desk ·
+ *       bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.desk.plist
+ *     systemctl --user daemon-reload | is-active volleyd.service |
+ *       is-active | enable | restart volley-desk.service
+ *     bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
+ *     <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
+ *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
+ *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
+ *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
  *
  * TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
  *   with its token, checked by identity like consent tokens:
@@ -95,10 +119,12 @@ import { AGENT_BRANCH } from "./worktree";
  *   gh issue view
  *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
  *     the LaunchToken sealed for <dir>) | capture-pane | has-session |
- *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> —
- *     kill-session = CONSENT; no tmux global options
+ *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     PATH, from printenv, then the server's own dirs) —
+ *     kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
- *     nc -z 127.0.0.1 <port>
+ *     nc -z 127.0.0.1 <port> · printenv PATH
  *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
  *     `/info/exclude`, or `<dir>/.volley/<name>` for a VOLLEY_READS name
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -251,6 +277,97 @@ export function sealSigninScript(dir: string, content: string): SigninToken {
   return token;
 }
 
+const setups = new WeakSet<object>();
+
+/** What one setup run may execute: `setupFence`'s inputs for the detected layout, Desk-safe. */
+export interface SetupFenceInputs {
+  /** The layout's restart command, or null when only a terminal may restart this broker. */
+  restart: string | null;
+  /** `<bin> dynsec init <stateFile> …` (the brew layouts' state file), or null. */
+  ctrl: { bin: string; stateFile: string } | null;
+  /** This Volley checkout, or null (then no hooks installer, Desk build or volleyd probe). */
+  repoRoot: string | null;
+  /** The `bun` the services run (`SetupDeps.bun`): the one program allowed by path. */
+  bun: string;
+  /** The user's home (the Desk service's plist). */
+  home: string;
+  uid: number;
+}
+
+/** Permission to run the SETUP rows for one setup run (`mintSetupToken`; checked by identity). */
+export interface SetupToken {
+  readonly inputs: Readonly<SetupFenceInputs>;
+}
+
+/** Callers: setup-ops.ts, once per setup_plan / setup_apply. */
+export function mintSetupToken(inputs: SetupFenceInputs): SetupToken {
+  const token = Object.freeze({ inputs: Object.freeze({ ...inputs }) });
+  setups.add(token);
+  return token;
+}
+
+const DESK_SERVICE = "systems.volley.desk";
+const DESK_UNIT = "volley-desk.service";
+const VOLLEYD_UNIT = "volleyd.service";
+const same = (argv: readonly string[], want: readonly string[]) =>
+  argv.length === want.length && want.every((w, i) => argv[i] === w);
+
+/**
+ * The SETUP rows (see the header): the only commands a setup token allows, and with one only
+ * they are allowed. `cwd` is the command's working directory (the Desk build's).
+ */
+function setupVerdict(argv: readonly string[], t: SetupFenceInputs, cwd?: string): Verdict {
+  const [a0, a1, a2, a3] = argv;
+  const line = argv.join(" ");
+  const repo = (...p: string[]) => (t.repoRoot === null ? null : join(t.repoRoot, ...p));
+  const hooks = repo("packages", "volley-hooks", "scripts", "install.sh");
+  const volleydCli = repo("packages", "volleyd", "src", "cli.ts");
+  const gui = `gui/${t.uid}`;
+  const ok =
+    (t.restart !== null && !t.restart.startsWith("sudo ") && line === t.restart) ||
+    (t.ctrl !== null &&
+      argv.length === 6 &&
+      a0 === t.ctrl.bin &&
+      a1 === "dynsec" &&
+      a2 === "init" &&
+      a3 === t.ctrl.stateFile &&
+      argv[4] === DYNSEC_ADMIN_USER &&
+      /^[\x21-\x7e]{1,128}$/.test(argv[5] ?? "")) ||
+    same(argv, ["mosquitto", "-h"]) ||
+    (a0 === "launchctl" &&
+      argv.length === 3 &&
+      a1 === "print" &&
+      (a2 === `${gui}/${SERVICE_LABEL}` || a2 === `${gui}/${DESK_SERVICE}`)) ||
+    same(argv, ["launchctl", "bootout", `${gui}/${DESK_SERVICE}`]) ||
+    same(argv, [
+      "launchctl",
+      "bootstrap",
+      gui,
+      join(t.home, "Library", "LaunchAgents", `${DESK_SERVICE}.plist`),
+    ]) ||
+    same(argv, ["systemctl", "--user", "daemon-reload"]) ||
+    same(argv, ["systemctl", "--user", "is-active", VOLLEYD_UNIT]) ||
+    (a0 === "systemctl" &&
+      a1 === "--user" &&
+      ["is-active", "enable", "restart"].includes(a2 ?? "") &&
+      a3 === DESK_UNIT &&
+      argv.length === 4) ||
+    (hooks !== null && (same(argv, ["bash", hooks]) || same(argv, ["bash", hooks, "--dry-run"]))) ||
+    // Only the dry run: installing volleyd's service would stop the volleyd answering.
+    (volleydCli !== null &&
+      argv.length === 6 &&
+      a0 === t.bun &&
+      a1 === volleydCli &&
+      a2 === "install" &&
+      a3 === "--broker-url" &&
+      /^mqtt:\/\/[^\s]+$/.test(argv[4] ?? "") &&
+      argv[5] === "--dry-run") ||
+    (same(argv, [t.bun, "run", "build"]) &&
+      t.repoRoot !== null &&
+      cwd === repo("packages", "volley-desk"));
+  return ok ? ALLOW : deny(`${line.slice(0, 60)} (not a setup command volleyd runs for the Desk)`);
+}
+
 const sealedFor = (opts: FenceOptions, cwd?: string) =>
   opts.launch !== undefined &&
   launches.has(opts.launch) &&
@@ -285,6 +402,10 @@ export interface FenceOptions {
   modelSwitch?: ModelSwitchToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
+  /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
+  setup?: SetupToken;
+  /** The command's working directory; only the SETUP rows read it (the Desk build). */
+  cwd?: string;
 }
 
 type Verdict =
@@ -684,6 +805,13 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
   ) {
     return;
   }
+  if (opts.setup !== undefined) {
+    const v = setups.has(opts.setup)
+      ? setupVerdict(argv, opts.setup.inputs, opts.cwd)
+      : deny(`${argv.slice(0, 2).join(" ")} (a setup token volleyd did not mint)`);
+    if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
+    return;
+  }
   const prog = argv[0];
   const verdicts = prog === "ssh" ? sshVerdicts(argv.slice(1), opts) : [evaluate(argv, opts)];
   for (const v of verdicts) {
@@ -967,6 +1095,7 @@ const ACCOUNT_SHAPES: Record<string, (a: string[]) => boolean> = {
     TTL.test(a[5] ?? "") &&
     a[6] === "--json",
   redeem: (a) => a.length === 3 && a[0] === "--label" && LABEL(a[1]) && a[2] === "--json",
+  token: (a) => a.length === 1 && a[0] === "--json",
 };
 
 /** The own doctor's `--repo`: absolute, normalised (no `.`/`..` segment), no control character. */
@@ -1152,7 +1281,7 @@ const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
 const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
 const LAUNCH_PROFILE = new RegExp(`^export CLAUDE_CONFIG_DIR=(${SHQ})$`);
 const LAUNCH_EXEC = new RegExp(
-  `^exec claude .* --model (${SHQ}) --settings ${SHQ} --strict-mcp-config --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
+  `^exec claude .* --model (${SHQ}) --settings ${SHQ}( --strict-mcp-config)? --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
 /** What a `.volley/mcp.json` may run: some checkout's volley-mcp entry point. */
 const MCP_ENTRY_SUFFIX = "/packages/volley-mcp/src/index.ts";
@@ -1178,27 +1307,70 @@ function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean
 const outsideVolley = (p: string) =>
   absPath(p) && !p.split("/").some((seg) => seg.toLowerCase() === ".volley");
 
+/** `p` is `dir` or anything below it (both clean absolute paths). */
+const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
+
+/** `p` with its symlinks resolved, or `p` itself when it does not exist. */
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+
+/**
+ * A launch script's `CLAUDE_CONFIG_DIR`: exactly `profileDir(claudeRoot(), <id>)` (the configured
+ * profiles root, `$VOLLEY_CLAUDE_DIR`, default `~/.volley/claude`) for an account in that root's
+ * registry, and nothing else: a real directory (not a symlink, not out of the root once resolved),
+ * never inside the agent's worktree (which the agent writes, its `.volley/` included) nor holding
+ * it. A root that is, holds or sits in `$VOLLEYD_HOME` admits nothing (its entries — `volleyd`
+ * among them — would pass as profiles), and a relative one admits nothing.
+ */
+function profileDirAllowed(dir: string, worktree: string): boolean {
+  try {
+    const root = canonicalRoot(claudeRoot());
+    const id = basename(dir);
+    if (dir !== profileDir(root, id)) return false;
+    if (within(dir, worktree) || within(worktree, dir)) return false;
+    const home = resolve(volleydHome(process.env));
+    if (within(root, home) || within(home, root)) return false;
+    if (!readRegistry(root).accounts.some((a) => a.id === id)) return false;
+    if (!lstatSync(dir).isDirectory()) return false;
+    const resolved = realpathSync(dir);
+    const wt = real(worktree);
+    return (
+      resolved === join(realpathSync(root), id) && !within(resolved, wt) && !within(wt, resolved)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
  * bash and point every hook at other code), optional Claude account profile (`CLAUDE_CONFIG_DIR`,
- * absolute and outside any `.volley/`, with its credential env unset) and `worktree` — so
- * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, and
- * `--` before the prompt). Parsed back into its values and re-rendered, so not one byte can
- * differ from a script volleyd writes.
+ * `profileDirAllowed`, with its credential env unset) and `worktree` — so
+ * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, or
+ * without it under `agent_mcp: inherit`, and `--` before the prompt). Parsed back into its
+ * values and re-rendered, so not one byte can differ from a script volleyd writes.
  */
 function isLaunchScript(content: string, worktree: string): boolean {
   const lines = content.split("\n");
   const hooks = LAUNCH_HOOKS.exec(lines[4] ?? "");
   const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
   if (hooks === null || run === null) return false;
-  if (!absPath(worktree) || unshq(run[2] as string) !== mcpConfigPath(worktree)) return false;
+  if (!absPath(worktree) || unshq(run[3] as string) !== mcpConfigPath(worktree)) return false;
   // A Claude account profile: its CLAUDE_CONFIG_DIR export (re-rendered below with its unset).
   const profile = LAUNCH_PROFILE.exec(lines[5] ?? "");
   const claudeConfigDir = profile !== null ? unshq(profile[1] as string) : undefined;
+  // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
+  const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
-  for (const line of lines.slice(profile !== null ? 7 : 5, -2)) {
+  // The exports end before launch.sh's claude check (the line before the exec).
+  for (const line of lines.slice(profile !== null ? 7 : 5, -3)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);
@@ -1206,13 +1378,14 @@ function isLaunchScript(content: string, worktree: string): boolean {
   const vars = {
     hooksDir: unshq(hooks[1] as string),
     model: unshq(run[1] as string),
-    agentId: unshq(run[3] as string),
+    agentId: unshq(run[4] as string),
     worktree,
     env,
     ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
+    ...(strict ? {} : { agentMcp: "inherit" as const }),
   };
   return (
-    (claudeConfigDir === undefined || outsideVolley(claudeConfigDir)) &&
+    (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
@@ -1307,6 +1480,9 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every(writablePath)
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
+    case "printenv":
+      // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch).
+      return sameArgv(args, ["PATH"]) ? ALLOW : deny("printenv (only PATH)");
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -1354,6 +1530,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
   if (sub === "kill-session") {
     const v = checkArgs("tmux kill-session", rest, { valued: ["-t"] });
     return v.kind === "allow" ? { kind: "consent", verb: "tmux kill-session" } : v;
+  }
+  if (sub === "show-environment") {
+    // Read-only: the server's global PATH, which set-environment then only adds to.
+    return sameArgv(rest, ["-g", "PATH"]) ? ALLOW : deny("tmux show-environment (only -g PATH)");
+  }
+  if (sub === "set-environment") {
+    // Only the global PATH, to an absolute directory list (the box's own, from `printenv PATH`).
+    const [g, name, value, ...more] = rest;
+    return g === "-g" &&
+      name === "PATH" &&
+      more.length === 0 &&
+      value !== undefined &&
+      value.split(":").every((d) => REMOTE_PATH.test(d))
+      ? ALLOW
+      : deny("tmux set-environment (only -g PATH <absolute dirs>)");
   }
   if (sub === "send-keys") {
     // `send-keys -t <target> <key>` (a named key) or `send-keys -t <target> -l -- <text>`:

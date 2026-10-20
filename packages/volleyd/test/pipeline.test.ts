@@ -242,6 +242,122 @@ describe("pipeline: rebase before the gate", () => {
   });
 });
 
+describe("pipeline: branch_update: merge (no force-push)", () => {
+  /** As fixedUpBehind, with the `branch_update` tunable set (default `merge`). */
+  async function behindInMergeMode(mode: "merge" | "rebase" = "merge") {
+    h = pipelineHarness({ branchUpdate: mode });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+  }
+
+  it("the update step merges the release branch and pushes without force; the merge commit passes verification", async () => {
+    await behindInMergeMode();
+    const step = h.spawns.find((s) => s.role === "rebase");
+    expect(step?.start).toEqual({ ref: H2, detach: false });
+    expect(step?.branch_update).toBe("merge");
+    const md = step?.files["rebase.md"] as string;
+    expect(md).toContain("# Merge");
+    expect(md).toContain("git merge --no-edit origin/release/w1");
+    expect(md).toContain("git push origin HEAD:w1/T1-implementer-1");
+    expect(md).not.toMatch(/force/i);
+    expect(md).not.toContain("git rebase");
+    const entered = h.events.filter((e) => e.type === "stage_entered").at(-1);
+    expect(entered?.data).toMatchObject({ rebase: true, branch_update: "merge" });
+
+    // H3 is a merge commit: it contains the release tip and descends from H2.
+    h.world.ancestor[`${H2}..${H3}`] = true;
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(
+      h.events.find((e) => e.type === "artifact_verified" && e.data.role === "rebase")?.data,
+    ).toMatchObject({ head_sha: H3 });
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr?.head_sha).toBe(H3);
+    expect(
+      h.calls.some(
+        (c) => c.join(" ") === `git -C /wt/w1/T1-rebase-1 merge-base --is-ancestor ${H2} ${H3}`,
+      ),
+    ).toBe(true);
+    // volleyd itself never pushes, merges or rebases.
+    expect(
+      h.calls.filter((c) => c.includes("push") || c[3] === "merge" || c[3] === "rebase"),
+    ).toEqual([]);
+  });
+
+  it("a head that rewrote the PR history (a force-push) is not accepted in merge mode", async () => {
+    await behindInMergeMode();
+    // H3 does not descend from H2: the branch was rebased and force-pushed.
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(stage()).toBe("fixup");
+    expect(h.events.some((e) => e.type === "artifact_verified" && e.data.role === "rebase")).toBe(
+      false,
+    );
+    const steer = h.steers.find((s) => s.role === "rebase");
+    expect(steer?.text).toContain(`does not descend from ${H2.slice(0, 12)}`);
+    expect(steer?.text).toContain("Do not force-push.");
+    expect(steer?.text).toContain(
+      `\`git fetch origin && git checkout -B fix ${H2} && git merge --no-edit origin/release/w1 && git merge --no-edit origin/${h.record().pipeline.T1?.branch}\``,
+    );
+    expect(steer?.text).toContain(
+      `then \`git push origin HEAD:${h.record().pipeline.T1?.branch}\` (a normal push)`,
+    );
+    expect(steer?.text).not.toMatch(/force-with-lease|lease-guarded|--force\b/);
+
+    // A second miss goes to the owner, worded as the merge step it is.
+    await h.finish("rebase", { head: H3, ci: "green" });
+    const d = Object.values(h.record().decisions).find((x) => x.kind === "agent_blocked");
+    expect(d?.question).toMatch(/^merge \(branch update\) /);
+    expect(d?.question).toContain("does not descend from");
+  });
+
+  it("the mode is fixed when the step starts: a later config change does not reach it", async () => {
+    await behindInMergeMode();
+    h.setBranchUpdate("rebase");
+    h.world.ancestor[`${H2}..${H3}`] = true;
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    expect(h.calls.some((c) => c.includes("--is-ancestor") && c.includes(H3))).toBe(true);
+  });
+
+  it("a step after a config change takes the new mode, even straight after a merge step", async () => {
+    await behindInMergeMode();
+    h.setBranchUpdate("rebase");
+    h.world.ancestor[`${H2}..${H3}`] = true;
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    // The release branch moved again past the merge commit: another update step.
+    h.world.mergeBase[H3] = sha(0xbeef);
+    await h.finish("rebase", { head: H3, ci: "green" });
+    const steps = h.spawns.filter((s) => s.role === "rebase");
+    expect(steps).toHaveLength(2);
+    expect(steps[1]?.branch_update).toBeUndefined();
+    expect(steps[1]?.files["rebase.md"]).toContain("--force-with-lease=");
+    expect(h.events.filter((e) => e.type === "stage_entered").at(-1)?.data).not.toHaveProperty(
+      "branch_update",
+    );
+    expect(h.record().pipeline.T1?.branch_update).toBeUndefined();
+  });
+
+  it("rebase (the default) keeps the lease-guarded push and no ancestry check", async () => {
+    await behindInMergeMode("rebase");
+    const step = h.spawns.find((s) => s.role === "rebase");
+    expect(step?.branch_update).toBeUndefined();
+    expect(step?.files["rebase.md"]).toContain("git rebase origin/release/w1");
+    expect(step?.files["rebase.md"]).toContain("--force-with-lease=");
+    const entered = h.events.filter((e) => e.type === "stage_entered").at(-1);
+    expect(entered?.data).not.toHaveProperty("branch_update");
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(h.calls.some((c) => c.includes("--is-ancestor") && c.includes(H3))).toBe(false);
+    expect(stage()).toBe("merge_ready");
+  });
+});
+
 describe("pipeline: after the gate", () => {
   it("merge_ready → done once a human merged the PR (polled read-only), releasing dependents", async () => {
     await implemented({ pipeline: "[implement, merge_ready]" });

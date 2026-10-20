@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   constants,
   type KeyObject,
@@ -21,6 +21,8 @@ import { randomSuffix } from "volley-mcp/util";
 import { type Sharing, parseSharing } from "volleyd/claude/sharing";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { withSetupAuthDir } from "../auth/coordinator-login";
+import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -38,6 +40,8 @@ import {
   runDoctor,
 } from "../peer/doctor";
 import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
+import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
+import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
 
 export { isRepoTrusted };
@@ -119,7 +123,8 @@ Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; list and redeem: else
-                       coordinator.json). invite and remove need an admin account.
+                       coordinator.json in VOLLEY_AUTH_DIR or the auth dir \`volley setup\`
+                       recorded). invite and remove need an admin account.
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
   --timeout <seconds>  How long to wait for volleyd's answer (default 30)
 `;
@@ -237,6 +242,8 @@ export interface PeerDeps extends DoctorDeps {
     auth: BrokerAuth | null,
     will?: { topic: string; payload: string; retain: boolean },
   ) => Promise<VolleyBroker>;
+  /** Where `cmd` is on this shell's PATH (for the fix join prints), or null. */
+  which?: (cmd: string) => string | null;
 }
 
 /** `~/.volley/peer.json`: what `run` needs (mode 0600: it holds the peer's password). */
@@ -396,9 +403,10 @@ async function ask(
     return EXIT.USAGE;
   }
   try {
-    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves.
+    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves, from
+    // the auth dir `volley setup` recorded when VOLLEY_AUTH_DIR does not name one.
     auth = resolveAuth({ username: v.username, password: v.password }, env);
-    if (!admin) auth ??= readCoordinatorAuth(env);
+    if (!admin) auth ??= readCoordinatorAuth(withSetupAuthDir(env));
   } catch (e) {
     io.stderr(`volley peer ${verb}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
@@ -406,6 +414,15 @@ async function ask(
   if (admin && auth === null) {
     io.stderr(
       `volley peer ${verb}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+    );
+    return EXIT.USAGE;
+  }
+  // The broker drops a non-admin's op without a word: refuse at once when this machine's
+  // account registry already says the login is not an admin, instead of waiting out the timeout.
+  const notAdmin = admin && auth !== null ? localNotAdmin(auth.username, env) : null;
+  if (notAdmin !== null) {
+    io.stderr(
+      `volley peer ${verb}: ${notAdmin}; ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
     );
     return EXIT.USAGE;
   }
@@ -486,6 +503,32 @@ async function request(
 }
 
 const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+
+/**
+ * Why `username` is not an admin account by this machine's own records (a fixed identity, or an
+ * account of another role in the auth dir's accounts.json), or null when they do not say.
+ */
+export function localNotAdmin(
+  username: string,
+  env: Record<string, string | undefined>,
+): string | null {
+  if (
+    (FIXED_IDENTITIES as readonly string[]).includes(username) ||
+    username === DYNSEC_ADMIN_USER
+  ) {
+    return `${username} is a fixed identity, not an admin account`;
+  }
+  const dir = withSetupAuthDir(env).VOLLEY_AUTH_DIR;
+  if (dir === undefined || dir === "") return null;
+  try {
+    const account = readAccounts(dir).find((a) => a.name === username);
+    return account !== undefined && account.role !== "admin"
+      ? `${username} is a ${account.role} account, not an admin one (${join(dir, "accounts.json")})`
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /** An admin op on `username`'s account-op topic, answered on its correlation id's reply topic. */
 async function adminRequest(
@@ -754,8 +797,11 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   io.stdout(`Checking ssh to ${host}...\n`);
   const probe = await remote(deps, host, "echo volley-peer-ok\n");
   if (probe.code !== 0 || !probe.stdout.includes("volley-peer-ok")) {
+    const key = hostKeyHint(probe.stderr, host);
     return fail(
-      `cannot reach ${host} over ssh (${probe.stderr.trim() || `exit ${probe.code}`}); set up key-based ssh to it first`,
+      key !== null
+        ? `${key} Nothing was redeemed: the code is still valid.`
+        : `cannot reach ${host} over ssh (${probe.stderr.trim() || `exit ${probe.code}`}); set up key-based ssh to it first`,
     );
   }
 
@@ -775,8 +821,27 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   const remoteVolley = v["remote-volley"] ?? "volley";
   const redeemed = await remote(deps, host, redeemScript(request, remoteVolley));
   if (redeemed.code === NO_SSH_BACK) {
+    const key = hostKeyHint(redeemed.stderr, target, host);
     return fail(
-      `${host} cannot ssh to ${target}: authorise its key here, or pass --target with an address it can reach. Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`,
+      key !== null
+        ? `${key} Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`
+        : `${host} cannot ssh to ${target}: authorise its key here, or pass --target with an address it can reach. Nothing was redeemed: the code is still valid.\n${redeemed.stderr.trim()}`,
+    );
+  }
+  if (redeemed.code === NO_TOOLS) {
+    return fail(
+      `${missingToolsFix(redeemed.stderr, target, deps)} Nothing was redeemed: the code is still valid.`,
+    );
+  }
+  if (redeemed.code === NO_PROBE) {
+    return fail(
+      `${host} could not check ${AGENT_TOOLS.join(", ").replace(/, ([^,]*)$/, " and $1")} on ${target}'s ssh PATH: ${redeemed.stderr.trim()}. Nothing was redeemed: the code is still valid.`,
+    );
+  }
+  if (redeemed.code === 127) {
+    // The shell found no such command: nothing ran on the host, so the code was not used.
+    return fail(
+      `pairing refused on ${host}: ${redeemed.stderr.trim() || "command not found"}\n${missingCommandHint(redeemed.stderr, host, remoteVolley)} Nothing was redeemed: the code is still valid.`,
     );
   }
   if (redeemed.code !== 0) {
@@ -851,6 +916,53 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   return EXIT.OK;
 }
 
+/**
+ * ssh refusing a host key, in plain words with the one-time fix; null when that is not the
+ * failure. `from`: where the failing ssh ran (unset: this machine).
+ */
+export function hostKeyHint(stderr: string, to: string, from?: string): string | null {
+  const where = from === undefined ? "this machine" : from;
+  const run = from === undefined ? "run" : `on ${from}, run`;
+  if (/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key for .* has changed/i.test(stderr)) {
+    return `${to}'s host key has changed since ${where} last saw it (a reinstall, or someone in between). If you expect the change, ${run} once: ssh-keygen -R ${to}, then ssh ${to} true (check the fingerprint, answer yes), and join again.`;
+  }
+  if (/Host key verification failed|No .*host key is known|host key is not known/i.test(stderr)) {
+    return `${where === "this machine" ? "This machine" : where} does not trust ${to}'s host key yet (ssh has never connected there). ${from === undefined ? "Run" : `On ${from}, run`} once: ssh ${to} true (check the fingerprint, answer yes), then join again.`;
+  }
+  return null;
+}
+
+/**
+ * The fix when this machine's non-interactive ssh PATH lacks what agents run (the redeem
+ * script's NO_TOOLS answer): which file the login shell reads there, and the exact line, with the
+ * directories this shell finds the tools in.
+ */
+export function missingToolsFix(stderr: string, target: string, deps: PeerDeps): string {
+  const missing = (/volley-peer-missing:(.*)$/m.exec(stderr)?.[1] ?? "").trim().split(/\s+/);
+  const shell = (/volley-peer-shell: *(\S*)$/m.exec(stderr)?.[1] ?? "").trim();
+  const found = missing.map((c) => [c, deps.which?.(c) ?? null] as const);
+  const dirs = [...new Set(found.flatMap(([, p]) => (p === null ? [] : [dirname(p)])))];
+  const absent = found.filter(([, p]) => p === null).map(([c]) => c);
+  const file =
+    shell === "zsh"
+      ? "~/.zshenv (zsh reads it for every shell; ~/.zshrc is for interactive ones only)"
+      : shell === "bash"
+        ? "the top of ~/.bashrc (above any line that returns early when the shell is not interactive)"
+        : `the file your login shell (${shell || "unknown"}) reads for non-interactive commands`;
+  return [
+    `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not on the PATH of a non-interactive ssh session on ${target}, which is how volleyd starts agents here: the first spawn would die with "${missing[0]}: not found".`,
+    ...(dirs.length > 0
+      ? [`Add this line to ${file} on this machine:`, `  export PATH="${dirs.join(":")}:$PATH"`]
+      : []),
+    ...(absent.length > 0
+      ? [
+          `Install ${absent.join(", ")} on this machine${dirs.length > 0 ? " too" : ""}, and put ${absent.length === 1 ? "its directory" : "their directories"} on that PATH (${file}).`,
+        ]
+      : []),
+    `Check with: ssh ${target} 'command -v ${missing.join(" ")}'. Then join again.`,
+  ].join("\n");
+}
+
 /** The short hostname, lower-cased, as a valid name. */
 export function defaultName(hostname: string): string {
   return (hostname.split(".")[0] ?? "")
@@ -862,20 +974,42 @@ export function defaultName(hostname: string): string {
 
 /** Exit status of the redeem script when the host cannot ssh to this machine. */
 const NO_SSH_BACK = 3;
+/** Exit status of the redeem script when this machine's ssh PATH lacks what agents need. */
+const NO_TOOLS = 4;
+/** Exit status of the redeem script when the PATH check itself failed (ssh worked). */
+const NO_PROBE = 5;
+
+/** What an agent session on this machine runs: Claude Code, bun (its MCP server, hooks), tmux. */
+export const AGENT_TOOLS = ["claude", "bun", "tmux"] as const;
+
+/**
+ * Run over the host's ssh to this machine, as volleyd's spawns run: from the login shell, not
+ * interactive, so only its non-interactive startup file sets PATH. Run through `sh -c` (as
+ * volleyd runs its steps through bash), so a login shell that is not POSIX (fish) still runs it
+ * with its own PATH. Prints the missing tools and the login shell's name.
+ */
+const TOOLS_PROBE = `missing=; for c in ${AGENT_TOOLS.join(" ")}; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done; echo "volley-peer-missing:$missing"; echo "volley-peer-shell: \${SHELL##*/}"`;
 
 /**
  * The script `join` runs on the host: check that the host reaches this machine over ssh, as
- * volleyd will for every spawn here (before the code is used up), then redeem the code.
- * `ssh -n`: the inner ssh must not read the rest of this script from bash's stdin.
+ * volleyd will for every spawn here, and that what an agent runs is on that ssh session's PATH
+ * (before the code is used up), then redeem the code. `ssh -n`: the inner ssh must not read the
+ * rest of this script from bash's stdin.
  */
 export function redeemScript(request: RedeemRequest, remoteVolley: string): string {
   const t = sq(request.target);
+  const ssh = `ssh -n -o BatchMode=yes -o ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s} ${t}`;
   return [
     "set -o pipefail",
-    `if ! ssh -n -o BatchMode=yes -o ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s} ${t} true; then`,
+    `if ! ${ssh} true; then`,
     `  echo "the supervisor's machine cannot ssh to "${t} >&2`,
     `  exit ${NO_SSH_BACK}`,
     "fi",
+    `tools=$(${ssh} ${sq(`sh -c ${sq(TOOLS_PROBE)}`)}); rc=$?`,
+    // 255: ssh's own failure. Anything else: ssh worked and the check did not.
+    `if [ "$rc" -eq 255 ]; then echo "the supervisor's machine cannot ssh to "${t} >&2; exit ${NO_SSH_BACK}; fi`,
+    `if [ "$rc" -ne 0 ]; then echo "the PATH check exited $rc" >&2; exit ${NO_PROBE}; fi`,
+    `case "$tools" in *"volley-peer-missing: "*) printf '%s\\n' "$tools" >&2; exit ${NO_TOOLS};; esac`,
     `printf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${remoteVolley} peer redeem`,
     "",
   ].join("\n");
@@ -942,21 +1076,39 @@ async function installService(
   if (deps.platform === "darwin") {
     const plist = join(deps.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     mkdirSync(dirname(plist), { recursive: true });
+    // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
+    // user/<uid>. A service from an earlier join is replaced, and put back when the new plist
+    // will not load, so a failed re-join never leaves this machine without its tunnel.
+    // Each bootout is waited out (setup/launchd.ts): a bootstrap while launchd is still letting
+    // the old job go fails with EIO.
+    const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
+    const ld = { exec: (argv: string[]) => deps.exec(argv), sleep: (ms: number) => deps.sleep(ms) };
+    const previous = existsSync(plist) ? readFileSync(plist, "utf-8") : null;
+    let wasIn: string | undefined;
+    for (const d of domains) {
+      if (wasIn === undefined && (await isLoaded(ld, `${d}/${LAUNCHD_LABEL}`))) wasIn = d;
+    }
     writeFileSync(
       plist,
       launchdPlist(argv, join(deps.home, ".volley", "peer.log"), deps.envPath()),
     );
-    // gui/<uid> needs a console login; a Mac paired over ssh with nobody at the console has only
-    // user/<uid>. A service from an earlier join is replaced (bootout fails harmlessly).
-    const domains = [`gui/${deps.uid()}`, `user/${deps.uid()}`];
-    for (const d of domains) await deps.exec(["launchctl", "bootout", `${d}/${LAUNCHD_LABEL}`]);
+    for (const d of domains) await unloadLaunchd(ld, d, LAUNCHD_LABEL);
     const errors: string[] = [];
     for (const domain of domains) {
-      const r = await deps.exec(["launchctl", "bootstrap", domain, plist]);
-      if (r.code === 0) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
-      errors.push(`${domain}: ${r.stderr.trim() || `exit ${r.code}`}`);
+      const r = await reloadLaunchd(ld, domain, LAUNCHD_LABEL, plist);
+      if (r.ok) return { ok: true, what: `launchd agent ${plist} (domain ${domain})` };
+      errors.push(`${domain}: ${r.error}`);
     }
-    return { ok: false, error: `launchctl bootstrap failed (${errors.join("; ")})` };
+    const failed = `launchctl bootstrap failed (${errors.join("; ")})`;
+    if (previous === null || wasIn === undefined) return { ok: false, error: failed };
+    writeFileSync(plist, previous);
+    const back = await reloadLaunchd(ld, wasIn, LAUNCHD_LABEL, plist);
+    return {
+      ok: false,
+      error: back.ok
+        ? `${failed}. Restored the previous ${plist} and loaded it again (domain ${wasIn}), so the tunnel service is up.`
+        : `${failed}. Restored the previous ${plist}, but it did not load either (${back.error}): the tunnel is down until \`launchctl bootstrap ${wasIn} ${plist}\` succeeds.`,
+    };
   }
   return {
     ok: false,
@@ -1433,6 +1585,48 @@ const realExec: PeerExec = (argv, opts = {}) =>
     child.stdin.end(opts.input ?? "");
   });
 
+/** Where `volley setup` installs volley, written for the host's shell to expand. */
+const SETUP_VOLLEY = "~/.volley/bin/volley";
+
+/**
+ * What to do when the redeem command on the host exited 127, from the shell's own words:
+ * `bun` missing (the `#!/usr/bin/env bun` of a volley that is not setup's script), a bare
+ * command not on the PATH, or a path that does not exist. Never suggests what was just passed.
+ */
+export function missingCommandHint(stderr: string, host: string, remoteVolley: string): string {
+  const passedSetups = remoteVolley.split(/\s+/).includes(SETUP_VOLLEY);
+  const onPath = (cmd: string) =>
+    `\`${cmd}\` is not on ${host}'s PATH for a non-interactive ssh command.`;
+  if (
+    /(^|\s|\/)env: ['"]?bun['"]?: No such file/m.test(stderr) ||
+    /\bbun: command not found/.test(stderr)
+  ) {
+    return `${onPath("bun")} Volley needs it: rerun \`volley setup\` on ${host} (its ${SETUP_VOLLEY} runs bun by its full path) and pass --remote-volley '${SETUP_VOLLEY}', or pass bun's full path there: --remote-volley '<full path of bun there> ${passedSetups ? SETUP_VOLLEY : remoteVolley}' (e.g. ~/.bun/bin/bun or /opt/homebrew/bin/bun).`;
+  }
+  const named = /([^\s:]+): (command not found|No such file or directory)/.exec(stderr)?.[1];
+  const suggest = passedSetups
+    ? `Run \`volley setup\` on ${host} (it installs ${SETUP_VOLLEY}), or pass the full path to volley there with --remote-volley.`
+    : `Pass the full path to volley there, quoted so ${host}'s shell expands ~: --remote-volley '${SETUP_VOLLEY}' (where \`volley setup\` installs it).`;
+  if (named?.includes("/")) return `\`${named}\` does not exist on ${host}. ${suggest}`;
+  return `${onPath(named ?? remoteVolley)} ${suggest}`;
+}
+
+/**
+ * This user's login name. Bun's `os.userInfo().username` is only `$USER` (or "unknown" without
+ * it, as in a container or a service), so `id -un` answers then.
+ */
+export function currentUser(
+  info: () => string = () => os.userInfo().username,
+  idUn: () => string | null = () => {
+    const r = spawnSync("id", ["-un"], { encoding: "utf-8" });
+    return r.status === 0 ? r.stdout : null;
+  },
+): string {
+  const name = info();
+  if (name !== "" && name !== "unknown") return name;
+  return idUn()?.trim() || "unknown";
+}
+
 function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
@@ -1440,7 +1634,7 @@ function realDeps(): PeerDeps {
     home: os.homedir(),
     platform: process.platform,
     hostname: () => os.hostname(),
-    user: () => os.userInfo().username,
+    user: () => currentUser(),
     uid: () => os.userInfo().uid,
     arch: process.arch,
     cpus: () => Math.max(1, os.cpus().length),
@@ -1462,6 +1656,7 @@ function realDeps(): PeerDeps {
       return Buffer.concat(chunks).toString("utf-8");
     },
     volleyArgv: [process.execPath, cli],
+    which: (cmd) => Bun.which(cmd),
     // packages/volley-cli/src/commands → the checkout root.
     volleyDir: resolve(dirname(cli), "..", "..", ".."),
     shell: () => os.userInfo().shell ?? process.env.SHELL ?? "/bin/sh",

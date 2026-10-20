@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -36,6 +35,7 @@ import { type Fleet, makeFleet } from "./helpers/fleet-env";
 import { type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const record = (over: Partial<MachineRecord> = {}): MachineRecord => ({
   name: "box",
@@ -611,7 +611,7 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
     });
     clock = fakeClock(1_000_000);
     doctorRuns = 0;
-    claudeRoot = mkdtempSync(join(tmpdir(), "volleyd-claude-root-"));
+    claudeRoot = tempDir("volleyd-claude-root-");
     writeFileSync(join(claudeRoot, "sharing.yaml"), "skills: own\nmcp: own\n");
     startOpts = {
       clock,
@@ -644,7 +644,6 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
   afterEach(async () => {
     await peer.disconnect();
     await env.cleanup();
-    rmSync(claudeRoot, { recursive: true, force: true });
   });
 
   it("publishes its own record as volleyd: kind supervisor, tunnel local, valid, filled by its doctor", async () => {

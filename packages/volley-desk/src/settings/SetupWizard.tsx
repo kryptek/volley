@@ -15,7 +15,9 @@
  * plan again with `lan`, so the diff shown is the diff applied (and a broker
  * with nothing to change can still be opened to the LAN). A change only a
  * terminal can make (`terminal`) shows why and the command, and is never part
- * of Apply. Accounts can issue the one-time admin token, shown once (it is
+ * of Apply, and a step whose changes are all a terminal's has no Apply at all.
+ * What volleyd cannot check (the macOS keychain) is a neutral note, neither a
+ * check that passed nor a warning. Accounts can issue the one-time admin token, shown once (it is
  * gone when the step is left). Applying waits up to `SETUP_APPLY_TIMEOUT_MS`
  * and still takes a late answer (its token included); a broker restart shows
  * "reconnecting" until the plan answers again. Phone ends on a QR code of a
@@ -27,7 +29,12 @@
  * run `volley setup` in a terminal and still offers the phone link. Every
  * error says what to do next; nothing dead-ends.
  */
-import { Alert02Icon, Cancel01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+import {
+  Alert02Icon,
+  Cancel01Icon,
+  InformationCircleIcon,
+  Tick02Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type CSSProperties,
@@ -125,16 +132,18 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   /** A new plan for another LAN answer is on its way. */
   const [replanning, setReplanning] = useState(false);
   const live = useRef(true);
-  useEffect(
-    () => () => {
+  // Set again on every mount: StrictMode mounts, unmounts and mounts again.
+  useEffect(() => {
+    live.current = true;
+    return () => {
       live.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const fetchPlan = useCallback(
     async (lanChoice: boolean | null): Promise<Fetched> => {
-      const r = await ops.request("setup_plan", {
+      // Never left spinning: a request that fails outright shows Try again.
+      const r = await requestOrFail(ops, "setup_plan", {
         ...(lanChoice !== null ? { lan: lanChoice } : {}),
         ...(repair ? { repair: true } : {}),
       });
@@ -194,6 +203,11 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   const steps = load.state === "ready" ? load.plan.steps : [];
   const at = STEPS[current - 1] as (typeof STEPS)[number];
   const stepPlan = steps.find((s) => s.step === at.step);
+  /** A step left behind with changes only a terminal can make is not done: it asks for attention. */
+  const needsTerminal = (n: number) =>
+    steps
+      .find((s) => s.step === STEPS[n - 1]?.step)
+      ?.changes.some((c) => c.terminal !== undefined) === true;
   const blockedBefore = steps.find(
     (s) => s.blocked !== undefined && STEPS.findIndex((x) => x.step === s.step) < current - 1,
   );
@@ -211,7 +225,8 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
   const apply = async (s: SetupStepPlan) => {
     setApplying({ state: "busy" });
     const lanChoice = s.step === "security" && s.lan !== undefined ? (lan ?? s.lan.planned) : lan;
-    const r = await ops.request(
+    const r = await requestOrFail(
+      ops,
       "setup_apply",
       {
         step: s.step,
@@ -311,6 +326,21 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
         step={current}
         disableStepIndicators
         showFooter={false}
+        renderStepIndicator={({ step: n, currentStep }) => (
+          <StepBadge
+            n={n}
+            title={STEPS[n - 1]?.title ?? ""}
+            status={
+              n === currentStep
+                ? "active"
+                : n > currentStep
+                  ? "upcoming"
+                  : needsTerminal(n)
+                    ? "attention"
+                    : "complete"
+            }
+          />
+        )}
       >
         {STEPS.map((s) => (
           <Step key={s.step} title={s.title} description={s.description}>
@@ -370,6 +400,45 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
         </div>
       )}
     </Shell>
+  );
+}
+
+/** `ops.request`, with a request that fails outright answered as a refusal. */
+async function requestOrFail(
+  ops: AuthOps,
+  ...args: Parameters<AuthOps["request"]>
+): Promise<AuthAnswer> {
+  try {
+    return await ops.request(...args);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+type BadgeStatus = "complete" | "attention" | "active" | "upcoming";
+
+/** The Stepper's own badge, plus `attention`: a step passed with a terminal's work still to do. */
+function StepBadge({ n, title, status }: { n: number; title: string; status: BadgeStatus }) {
+  return (
+    <span
+      className="stepper__badge"
+      data-status={status}
+      role="img"
+      aria-label={`Step ${n}: ${title}${status === "attention" ? ", needs a terminal" : ""}`}
+      aria-current={status === "active" ? "step" : undefined}
+    >
+      {status === "complete" ? (
+        <span className="stepper__check">
+          <HugeiconsIcon icon={Tick02Icon} size={16} strokeWidth={2.4} />
+        </span>
+      ) : status === "attention" ? (
+        <span className="stepper__glyph">
+          <HugeiconsIcon icon={Alert02Icon} size={14} strokeWidth={2} />
+        </span>
+      ) : (
+        n
+      )}
+    </span>
   );
 }
 
@@ -539,11 +608,17 @@ function PlanStep({
   return (
     <>
       <h3>{plan.title}</h3>
-      {plan.found.length > 0 && (
+      {plan.found.length + (plan.notes?.length ?? 0) > 0 && (
         <ul className="checks">
           {plan.found.map((f) => (
-            <li key={f}>
+            <li key={f} data-kind="found">
               {icon(Tick02Icon)} <span>{f}</span>
+            </li>
+          ))}
+          {/* What volleyd cannot check (the step's `notes`): neither a tick nor a warning. */}
+          {plan.notes?.map((f) => (
+            <li key={f} className="dim" data-kind="note">
+              {icon(InformationCircleIcon)} <span>{f}</span>
             </li>
           ))}
         </ul>
@@ -655,20 +730,21 @@ function PlanStep({
                 Check again
               </button>
             )}
-            <button
-              type="button"
-              className="btn btn--hot"
-              disabled={applying.state === "busy" || replanning || n === 0}
-              onClick={onApply}
-            >
-              {applying.state === "busy"
-                ? "Applying…"
-                : n === 1
-                  ? "Apply this change"
-                  : n === 0
-                    ? "Apply"
+            {/* Nothing here the Desk can apply: no Apply to press. */}
+            {n > 0 && (
+              <button
+                type="button"
+                className="btn btn--hot"
+                disabled={applying.state === "busy" || replanning}
+                onClick={onApply}
+              >
+                {applying.state === "busy"
+                  ? "Applying…"
+                  : n === 1
+                    ? "Apply this change"
                     : `Apply ${plural(n, "change")}`}
-            </button>
+              </button>
+            )}
           </div>
         </>
       )}
@@ -741,15 +817,28 @@ function PhoneStep({
       expiresAt: typeof expires === "string" ? expires : null,
     });
   };
-  const label = another ? "Make another link" : "Make the phone link";
+  const label = another
+    ? "Make another link"
+    : repair
+      ? "Make a phone link"
+      : "Make the phone link";
   return (
     <>
       <h3>Open the Desk on your phone</h3>
-      {plan?.found.map((f) => (
-        <p key={f} className="dim">
-          {f}
+      {repair ? (
+        // setup's own line says the step is skipped under --repair: true of the terminal's run,
+        // not beside a button that makes the link.
+        <p className="dim">
+          Run setup again checks and fixes; it makes no phone link by itself. If your phone needs
+          one, make it here.
         </p>
-      ))}
+      ) : (
+        plan?.found.map((f) => (
+          <p key={f} className="dim">
+            {f}
+          </p>
+        ))
+      )}
       {link.state === "ready" ? (
         <div className="pair-grid">
           <Qr text={link.link} label="QR code of the phone sign-in link" />

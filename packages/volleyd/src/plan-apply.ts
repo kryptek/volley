@@ -1,5 +1,10 @@
-import { createHash } from "node:crypto";
-import { type DecisionInput, type DecisionRecord, openEvent, resolveEvent } from "./decisions";
+import {
+  type DecisionInput,
+  type DecisionRecord,
+  openEvent,
+  resolveEvent,
+  waveDecisionId,
+} from "./decisions";
 import { type PlanDiff, diffPlans } from "./plan-diff";
 import type { WaveRecord } from "./reducer";
 import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "./types";
@@ -93,11 +98,7 @@ export function planDecisionId(
   change: PlanChangeKind,
   version: number,
 ): string {
-  const h = createHash("sha256")
-    .update(`${wave}/${task}/${change}/v${version}`)
-    .digest("hex")
-    .slice(0, 12);
-  return `plan_change-${h}`;
+  return waveDecisionId("plan_change", wave, task, change, `v${version}`);
 }
 
 /** Answers a plan version gives when it closes its own question (not the owner's answer). */

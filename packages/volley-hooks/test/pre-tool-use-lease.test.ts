@@ -1,6 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,6 +15,7 @@ import {
   publishRegistry,
   runHook,
 } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const POOLS = {
@@ -121,7 +121,7 @@ describe("pre-tool-use-lease hook", () => {
       env: {
         VOLLEY_HOOKS_COORDINATOR: "1",
         VOLLEY_BROKER_URL: broker.url,
-        VOLLEY_HOOKS_STATE_DIR: mkdtempSync(join(tmpdir(), "volley-hooks-state-")),
+        VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
       },
     });
     expect(run.exitCode).toBe(0);

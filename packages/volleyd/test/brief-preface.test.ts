@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -21,6 +20,7 @@ import { parseWaveFile } from "../src/wave-file";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { FIXTURES, type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { tempDir } from "./helpers/tmp";
 
 const PREFACE = readFileSync(join(FIXTURES, "brief-preface.md"));
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
@@ -37,9 +37,8 @@ const put = (repo: string, rel: string, content: Buffer | string) => {
 describe("brief preface: the loader", () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "volleyd-preface-"));
+    dir = tempDir("volleyd-preface-");
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("defaults to <repo>/.volley/brief-preface.md; brief_preface: overrides it (relative or absolute)", () => {
     expect(briefPrefacePath("/r/repo")).toBe("/r/repo/.volley/brief-preface.md");
@@ -186,8 +185,8 @@ describe("brief preface: submit, versions and the wave state (daemon)", () => {
 
   beforeEach(async () => {
     broker = await startTestBroker();
-    home = mkdtempSync(join(tmpdir(), "volleyd-preface-home-"));
-    repo = mkdtempSync(join(tmpdir(), "volleyd-preface-repo-"));
+    home = tempDir("volleyd-preface-home-");
+    repo = tempDir("volleyd-preface-repo-");
     daemon = await Daemon.start({
       brokerUrl: broker.url,
       namespace: NS,
@@ -202,8 +201,6 @@ describe("brief preface: submit, versions and the wave state (daemon)", () => {
     await client.close();
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a preface present: the wave state carries its path, bytes and the sha256 of its bytes", async () => {

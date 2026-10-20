@@ -1,16 +1,7 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo, createServer as createNetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateConfig } from "../../src/auth/config";
@@ -27,19 +18,19 @@ import { unifiedDiff } from "../../src/setup/step";
 import { startTestBroker } from "../helpers/aedes-broker";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { ANONYMOUS_CONFIG, type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 describe("setup: broker", () => {
   let dir: string;
   let fake: FakeDynsec;
   let m: FakeMachine;
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-broker-"));
+    dir = tempDir("volley-setup-broker-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir);
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const applyAll = async (plan: Awaited<ReturnType<typeof planSecurity>>) => {
@@ -129,7 +120,7 @@ describe("setup: broker", () => {
       const p = await planSecurity(m.ctx);
       const out = await applyAll(p);
       expect(readFileSync(m.layout.config, "utf-8")).toBe(
-        generateConfig({ ...m.layout, stateFile: m.layout.stateFile }),
+        generateConfig({ ...m.layout, stateFile: m.layout.stateFile, by: "volley setup" }),
       );
       const backups = readdirSync(dir).filter((f) => f.startsWith("mosquitto.conf.volley-backup-"));
       expect(backups).toEqual(["mosquitto.conf.volley-backup-20261018T120000Z"]);
@@ -140,10 +131,25 @@ describe("setup: broker", () => {
       expect(m.execCalls).toEqual([["brew", "services", "restart", "mosquitto"]]);
       expect(out.join("\n")).toContain("Backed the previous config up");
       expect(await p.verify?.()).toEqual([]);
+      // The promised check, said after it passed.
+      expect(p.verified).toEqual([
+        "Listener 1883: refuses anonymous clients",
+        "Listener 9001: refuses anonymous clients",
+      ]);
       // Planned again: nothing left to do.
       const again = await planSecurity(m.ctx);
       expect(again.changes).toEqual([]);
       expect(again.found.join("\n")).toContain("1883: refuses anonymous clients");
+    });
+
+    it("a config `volley auth init` wrote is in place: only its header differs, nothing is rewritten", async () => {
+      await applyAll(await planSecurity(m.ctx));
+      const byInit = generateConfig({ ...m.layout, stateFile: m.layout.stateFile });
+      writeFileSync(m.layout.config, byInit);
+      const again = await planSecurity(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(again.found.join("\n")).toContain("is Volley's Dynamic Security config");
+      expect(readFileSync(m.layout.config, "utf-8")).toBe(byInit);
     });
 
     it("asks about LAN access (yes by default) when no flag decides, and keeps 1883 on loopback", async () => {
@@ -182,11 +188,21 @@ describe("setup: broker", () => {
       const p = await planSecurity(m.ctx);
       await applyAll(p);
       expect(readFileSync(m.layout.config, "utf-8")).toBe(
-        generateConfig({ ...m.layout, stateFile: m.layout.stateFile, wsBind: "" }),
+        generateConfig({
+          ...m.layout,
+          stateFile: m.layout.stateFile,
+          wsBind: "",
+          by: "volley setup",
+        }),
       );
       expect(readFileSync(m.layout.config, "utf-8")).toContain("not encrypted (no TLS)");
       expect(m.lanWs).toBe(true);
       expect(await p.verify?.()).toEqual([]);
+      expect(p.verified).toEqual([
+        "Listener 1883: refuses anonymous clients",
+        "Listener 9001: refuses anonymous clients",
+        "Listener 9001 from the LAN (ws://desk.example:9001): reachable, refuses anonymous clients",
+      ]);
       expect(probed).toContain("ws://desk.example:9001");
       // A LAN listener the phone cannot reach (a firewall) fails the step.
       m.lanWs = false;

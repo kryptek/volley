@@ -1,15 +1,15 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { connectOpts, resolveHooksAuth } from "../src/lib/auth";
 import { makeWorkdir } from "./helpers/hooks";
+import { tempDir } from "./helpers/tmp";
 
 const AGENT = "w1-t1-implementer-1";
 const ENV_AUTH = { VOLLEY_AUTH_USERNAME: "from-env", VOLLEY_AUTH_PASSWORD: "env-pw" };
 
 function authDir(creds?: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), "volley-hooks-authdir-"));
+  const dir = tempDir("volley-hooks-authdir-");
   if (creds !== undefined) {
     const path = join(dir, "coordinator.json");
     writeFileSync(path, typeof creds === "string" ? creds : JSON.stringify(creds));
@@ -48,7 +48,10 @@ describe("resolveHooksAuth — agent mode", () => {
 });
 
 describe("resolveHooksAuth — coordinator mode", () => {
-  const projectDir = makeWorkdir();
+  let projectDir = "";
+  beforeEach(() => {
+    projectDir = makeWorkdir();
+  });
 
   it("VOLLEY_AUTH_* wins over the coordinator file", () => {
     const env = {

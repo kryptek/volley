@@ -1,11 +1,14 @@
+import { spawnSync } from "node:child_process";
 import { constants, type JsonWebKeyInput, createPublicKey, publicEncrypt } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -23,9 +26,13 @@ import {
   type PeerDeps,
   type PeerExec,
   SYSTEMD_UNIT,
+  currentUser,
   defaultName,
+  hostKeyHint,
+  localNotAdmin,
   machineTopic,
   peerFile,
+  redeemScript,
   runPeer,
   runService,
   tunnelArgv,
@@ -34,6 +41,7 @@ import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { type FakePeerMachine, fakePeerMachine } from "../helpers/fake-peer-machine";
+import { tempDir } from "../helpers/tmp";
 
 const NS = "test";
 
@@ -131,8 +139,10 @@ function fakeExec(reply: (c: Call) => Reply | undefined, machine: FakePeerMachin
       return { code: 143, stdout: "", stderr: "" };
     }
     const r = reply(c);
-    if (r === undefined) return machine.exec(argv, opts);
-    return { code: 0, stdout: "", stderr: "", ...r };
+    // launchd has no job loaded unless a test says so.
+    const base = argv[0] === "launchctl" && argv[1] === "print" ? 113 : 0;
+    if (r === undefined && base === 0) return machine.exec(argv, opts);
+    return { code: base, stdout: "", stderr: "", ...r };
   };
   return { exec, calls };
 }
@@ -474,15 +484,74 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain(
       "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
     );
-    expect(f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv)).toEqual([
-      ["launchctl", "bootout", `gui/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootout", `user/501/${LAUNCHD_LABEL}`],
-      ["launchctl", "bootstrap", "gui/501", plist],
-    ]);
+    // Nothing loaded yet: nothing to boot out.
+    expect(
+      f.calls.filter((c) => c.argv[0] === "launchctl" && c.argv[1] !== "print").map((c) => c.argv),
+    ).toEqual([["launchctl", "bootstrap", "gui/501", plist]]);
     expect(r.stdout).toContain("(domain gui/501)");
     expect(r.stdout).toContain(`Claude Code trusts ${repo} on this machine.`);
     const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
     expect(redeemRequest(ssh[1]?.input as string).volley).toBe("/opt/bin/volley");
+  });
+
+  it("a re-join replaces the loaded agent: boots it out, waits until launchd lets it go, then loads it", async () => {
+    let loaded = true;
+    let teardown = 0;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") {
+        if (gui && teardown > 0 && --teardown === 0) loaded = false;
+        return { code: gui && loaded ? 0 : 113 };
+      }
+      if (c.argv[1] === "bootout" && gui) teardown = 3;
+      if (c.argv[1] === "bootstrap" && loaded) {
+        return { code: 5, stderr: "Bootstrap failed: 5: Input/output error" };
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).toBe(0);
+    const sub = f.calls.filter((c) => c.argv[0] === "launchctl").map((c) => c.argv[1]);
+    expect(sub.filter((s) => s !== "print")).toEqual(["bootout", "bootstrap"]);
+    expect(r.stdout).toContain("(domain gui/501)");
+  });
+
+  it("a re-join whose new plist will not load puts the previous one back, loads it, and says so", async () => {
+    const plist = join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+    mkdirSync(dirname(plist), { recursive: true });
+    writeFileSync(plist, "<plist>previous</plist>");
+    let loaded = true;
+    const f = fakeExec((c) => {
+      if (c.argv[0] !== "launchctl") return hostSsh({ stdout: JSON.stringify(JOINED) })(c);
+      const gui = (c.argv[2] ?? "").startsWith("gui/");
+      if (c.argv[1] === "print") return { code: gui && loaded ? 0 : 113 };
+      if (c.argv[1] === "bootout") {
+        loaded = false;
+        return {};
+      }
+      if (c.argv[1] === "bootstrap") {
+        // launchd refuses the new plist anywhere, and takes the previous one back.
+        if (readFileSync(plist, "utf-8") !== "<plist>previous</plist>") {
+          return { code: 1, stderr: "Bootstrap failed: 122: Path had bad ownership/permissions" };
+        }
+        loaded = gui;
+        return {};
+      }
+      return {};
+    });
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "host", "--repo", box.repoPath],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.exitCode).not.toBe(0);
+    expect(readFileSync(plist, "utf-8")).toBe("<plist>previous</plist>");
+    expect(loaded).toBe(true);
+    expect(r.stderr).toContain("bad ownership/permissions");
+    expect(r.stderr).toContain("Restored the previous");
   });
 
   it("on a Mac with nobody at the console, falls back to the user/<uid> domain and says so", async () => {
@@ -563,6 +632,125 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(f.calls.some((c) => c.argv[0] === "systemctl")).toBe(false);
   });
 
+  it("checks claude, bun and tmux on this machine's non-interactive ssh PATH before redeeming", () => {
+    // Run the real script under bash: a stub `ssh` runs its command with a PATH that has bun
+    // and tmux but no claude, as a zsh login shell without ~/.zshenv would.
+    const box = tempDir("volley-peer-redeem-");
+    const write = (p: string, text: string) => {
+      writeFileSync(p, text);
+      chmodSync(p, 0o755);
+    };
+    mkdirSync(join(box, "bin"));
+    mkdirSync(join(box, "tools"));
+    write(
+      join(box, "bin", "ssh"),
+      // The login shell is fish, which cannot parse POSIX `for … do`: only `sh -c` gets through.
+      '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\ncase "$*" in true|"sh -c "*) ;; *) echo "fish: Unknown command" >&2; exit 127;; esac\nexec /usr/bin/env -i PATH="$TOOLS" SHELL=/usr/bin/fish /bin/sh -c "$*"\n',
+    );
+    symlinkSync("/bin/sh", join(box, "tools", "sh"));
+    write(join(box, "tools", "bun"), "#!/bin/sh\n");
+    write(join(box, "tools", "tmux"), "#!/bin/sh\n");
+    // Like `volley peer redeem`, it reads the whole request from stdin (a stub that does not
+    // could exit first, and base64 then dies of SIGPIPE: exit 141 under pipefail).
+    write(join(box, "volley"), `#!/bin/sh\ncat > ${join(box, "redeemed")}\n`);
+    const script = redeemScript(
+      { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+      join(box, "volley"),
+    );
+    const r = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+    });
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain("volley-peer-missing: claude");
+    expect(r.stderr).toContain("volley-peer-shell: fish");
+    expect(existsSync(join(box, "redeemed"))).toBe(false);
+    // With claude there too, the code is redeemed.
+    write(join(box, "tools", "claude"), "#!/bin/sh\n");
+    const ok = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: { PATH: `${join(box, "bin")}:/usr/bin:/bin`, TOOLS: join(box, "tools") },
+    });
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(box, "redeemed"), "utf-8"))).toMatchObject({
+      code: "ABCD-EFGH",
+      target: "dev@box-a",
+    });
+  });
+
+  it("a PATH check that fails on its own is not reported as the host failing to ssh", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 5, stderr: "sh: 1: Syntax error: end of file unexpected\n" }),
+    );
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("cannot ssh to");
+    expect(r.stderr).toContain(
+      "dev@host could not check claude, bun and tmux on dev@Box-A.lan's ssh PATH",
+    );
+    expect(r.stderr).toContain("Syntax error");
+    expect(r.stderr).toContain("the code is still valid");
+  });
+
+  it("names the missing tools and the exact line for the login shell's file", async () => {
+    const f = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude bun\nvolley-peer-shell: zsh\n" }),
+    );
+    const which = (c: string) =>
+      c === "claude"
+        ? "/Users/dev/.local/bin/claude"
+        : c === "bun"
+          ? "/opt/homebrew/bin/bun"
+          : null;
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec, { which }),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
+    expect(r.stderr).toContain("~/.zshenv");
+    expect(r.stderr).toContain('export PATH="/Users/dev/.local/bin:/opt/homebrew/bin:$PATH"');
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+    // bash: the top of ~/.bashrc; a tool this shell cannot find either: install it.
+    const b = fakeExec(
+      hostSsh({ code: 4, stderr: "volley-peer-missing: claude\nvolley-peer-shell: bash\n" }),
+    );
+    const rb = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(b.exec, { which: () => null }),
+    );
+    expect(rb.stderr).toContain("the top of ~/.bashrc");
+    expect(rb.stderr).toContain("Install claude on this machine");
+  });
+
+  it("an untrusted host key says so, with the one-time command, not 'set up key-based ssh'", async () => {
+    const f = fakeExec((c) =>
+      c.argv[0] === "ssh" ? { code: 255, stderr: "Host key verification failed.\n" } : undefined,
+    );
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("does not trust dev@host's host key yet");
+    expect(r.stderr).toContain("ssh dev@host true");
+    expect(r.stderr).not.toContain("key-based");
+    // The host's ssh back here, refused for the same reason: the command runs there.
+    expect(hostKeyHint("Host key verification failed.", "dev@box-a", "dev@host")).toContain(
+      "On dev@host, run once: ssh dev@box-a true",
+    );
+    expect(
+      hostKeyHint("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", "dev@host"),
+    ).toContain("ssh-keygen -R dev@host");
+    expect(hostKeyHint("Permission denied (publickey).", "dev@host")).toBeNull();
+  });
+
   it("a repo trusted through a parent folder counts as trusted (T4's rule)", async () => {
     writeFileSync(
       join(home, ".claude.json"),
@@ -601,6 +789,102 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stderr).toContain("cannot reach host over ssh");
     expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(1);
     expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
+    const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("volley: command not found");
+    expect(r.stderr).toContain(
+      "`volley` is not on dev@host's PATH for a non-interactive ssh command",
+    );
+    // Quoted, so the host's shell expands ~ (its home, not this machine's).
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    expect(r.stderr).toContain("the code is still valid");
+    expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("bun missing on the host's ssh PATH: names bun, never says volley is missing", async () => {
+    for (const stderr of [
+      "env: bun: No such file or directory\n",
+      "/usr/bin/env: 'bun': No such file or directory\n",
+    ]) {
+      const f = fakeExec(hostSsh({ code: 127, stderr }));
+      const r = await run(
+        [
+          "join",
+          "ABCD-EFGH",
+          "--to",
+          "dev@host",
+          "--repo",
+          box.repoPath,
+          "--remote-volley",
+          "~/.volley/bin/volley",
+        ],
+        deps(f.exec),
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain(
+        "`bun` is not on dev@host's PATH for a non-interactive ssh command",
+      );
+      expect(r.stderr).toContain("rerun `volley setup` on dev@host");
+      expect(r.stderr).toContain("--remote-volley '<full path of bun there> ~/.volley/bin/volley'");
+      expect(r.stderr).not.toContain("does not exist");
+      expect(r.stderr).toContain("the code is still valid");
+    }
+  });
+
+  it("a --remote-volley path that is missing names that path, without suggesting it again", async () => {
+    const g = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /opt/volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const r = await run(
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--repo",
+        box.repoPath,
+        "--remote-volley",
+        "/opt/volley/bin/volley",
+      ],
+      deps(g.exec),
+    );
+    expect(r.stderr).toContain("`/opt/volley/bin/volley` does not exist on dev@host.");
+    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    // The suggested path itself missing: setup has not run there.
+    const h = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 6: /home/dev/.volley/bin/volley: No such file or directory\n",
+      }),
+    );
+    const again = await run(
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--repo",
+        box.repoPath,
+        "--remote-volley",
+        "~/.volley/bin/volley",
+      ],
+      deps(h.exec),
+    );
+    expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
+    expect(again.stderr).toContain(
+      "Run `volley setup` on dev@host (it installs ~/.volley/bin/volley)",
+    );
+    expect(again.stderr).not.toContain("--remote-volley '~/.volley/bin/volley'");
   });
 
   it("a refused code writes nothing and installs nothing", async () => {
@@ -828,6 +1112,47 @@ describe("volley peer on the supervisor's machine", () => {
     }
   });
 
+  it("redeem after a `--dir` setup finds the coordinator's file in the auth dir setup.json recorded", async () => {
+    const locked = await startTestBroker({
+      credentials: { username: "coordinator", password: "c-pw" },
+    });
+    try {
+      // `volley setup --dir <dir>` recorded the dir; ssh gives redeem no VOLLEY_AUTH_DIR.
+      const dir = join(home, "custom-auth");
+      const vhome = join(home, "volleyd");
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(vhome, { recursive: true });
+      writeFileSync(
+        join(dir, "coordinator.json"),
+        JSON.stringify({ username: "coordinator", password: "c-pw" }),
+        { mode: 0o600 },
+      );
+      writeFileSync(
+        join(vhome, "setup.json"),
+        JSON.stringify({
+          layout: "etc",
+          config: "/etc/mosquitto/mosquitto.conf",
+          state_file: "/var/lib/mosquitto/dynamic-security.json",
+          auth_dir: dir,
+        }),
+      );
+      const io = makeBufferIO();
+      const code = await runPeer(
+        {
+          argv: ["redeem"],
+          env: { VOLLEY_BROKER_URL: locked.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: vhome },
+          io,
+        },
+        deps(fakeExec(() => ({})).exec, { readStdin: async () => "{}" }),
+      );
+      // Signed in (it gets as far as finding no volleyd), not refused for want of credentials.
+      expect(io.readStderr()).toContain("volleyd is not running");
+      expect(code).toBe(EXIT.ERROR);
+    } finally {
+      await locked.close();
+    }
+  });
+
   it("invite and remove never sign in with the coordinator's file: they need an admin login", async () => {
     writeFileSync(
       join(home, "coordinator.json"),
@@ -840,6 +1165,32 @@ describe("volley peer on the supervisor's machine", () => {
       expect(r.stderr).toContain("admin");
       expect(r.stderr).toContain("VOLLEY_AUTH_USERNAME");
     }
+  });
+
+  it("invite with a login this machine knows is not an admin refuses at once, without asking volleyd", async () => {
+    writeFileSync(
+      join(home, "accounts.json"),
+      JSON.stringify({
+        accounts: [
+          { name: "steer-1", role: "steer", kind: "device", created: "2026-10-19T00:00:00.000Z" },
+          { name: "boss", role: "admin", kind: "human", created: "2026-10-19T00:00:00.000Z" },
+        ],
+      }),
+    );
+    const started = Date.now();
+    const r = await run(["invite"], deps(fakeExec(() => ({})).exec), {
+      VOLLEY_AUTH_USERNAME: "steer-1",
+      VOLLEY_AUTH_PASSWORD: "s-pw",
+    });
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("steer-1 is a steer account, not an admin one");
+    expect(r.stderr).not.toContain("did not answer");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const env = { VOLLEY_AUTH_DIR: home };
+    expect(localNotAdmin("coordinator", env)).toContain("fixed identity");
+    expect(localNotAdmin("boss", env)).toBeNull();
+    // Not in this machine's registry (another install's admin): volleyd decides.
+    expect(localNotAdmin("someone-else", env)).toBeNull();
   });
 
   it("an unanswered admin op (the broker drops a non-admin's request) says it needs an admin", async () => {
@@ -1209,5 +1560,35 @@ describe("volley peer doctor (the verb)", () => {
     expect(r.report.versions.volley).toBe("0.3.9");
     expect(check(r.report, "volley.installed")?.ok).toBe(false);
     expect(check(r.report, "volley.installed")?.detail).toContain(dir);
+  });
+});
+
+describe("the current user's name", () => {
+  it("uses os.userInfo(), and `id -un` when bun's userInfo has only $USER's fallback", () => {
+    expect(
+      currentUser(
+        () => "dev",
+        () => "other",
+      ),
+    ).toBe("dev");
+    expect(
+      currentUser(
+        () => "unknown",
+        () => "owner\n",
+      ),
+    ).toBe("owner");
+    expect(
+      currentUser(
+        () => "",
+        () => "owner",
+      ),
+    ).toBe("owner");
+    // Neither knows: the name stays unknown rather than empty.
+    expect(
+      currentUser(
+        () => "unknown",
+        () => null,
+      ),
+    ).toBe("unknown");
   });
 });

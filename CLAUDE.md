@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Volley is an agent-messaging protocol — an MQTT topic + JSON envelope convention that lets agents from any vendor (Claude Code, Codex, plain shell scripts) coordinate across machines. This repo ships the spec, a reference MCP server, a CLI, the `volleyd` wave supervisor, Claude Code hooks, the Volley Desk dashboard, and Claude Code skills (`/volley`, `/volley-issues`).
 
-**Status:** public; pre-1.0. The last tagged release is `v0.1.3` (notify subcommand + dashboard browser notifications); `v0.2.0` (volleyd, volley-hooks, broker auth, the Desk) is in release prep — every package is versioned `0.2.0`, and its owner smoke path is `docs/SMOKE-v0.2.md`. Canonical repository URL is in `spec/SPEC.md`.
+**Status:** public; pre-1.0. The last tagged release is `v0.3.1`; every package is versioned `0.3.1`. `v0.3.0` shipped what `v0.2.0` planned (volleyd, volley-hooks, broker auth on mosquitto ≥ 2.1 Dynamic Security, the Desk; owner smoke path `docs/SMOKE-v0.2.md`) plus onboarding: `volley setup`, the Desk's setup wizard and one-time sign-in links, `volley peer` pairing and `volley claude` accounts (owner smoke: `SMOKE.md` Plan 11). Canonical repository URL is in `spec/SPEC.md`.
 
 **Authoritative docs (read these before changing anything substantive):**
 - `spec/SPEC.md` — wire-format contract, MUST/SHOULD/MAY conformance, error codes
@@ -53,7 +53,7 @@ The mosquitto integration test is opt-in because it needs a real broker on `loca
 
 ## Architecture
 
-**Bun workspace.** `volley-mcp` (MCP server), `volley-cli` (CLI), `volley-dash` (dashboard), the skill packages, and `volleyd` (wave supervisor daemon).
+**Bun workspace.** `volley-mcp` (MCP server), `volley-cli` (CLI, including `volley setup` in `src/setup/` and the broker-auth commands in `src/auth/`), `volley-desk` (the Desk, behind `volley dash`), `volley-dash` (the legacy dashboard), `volley-hooks` (Claude Code hooks), the skill packages, and `volleyd` (wave supervisor daemon).
 
 **`packages/volley-mcp/` — the reference MCP server.** Strictly layered, single I/O boundary:
 - `broker.ts` is the **only** file that imports `mqtt`. It wraps the client with `connect` (arms LWT), `publish`, `queryRetained` (subscribes to read the retained value at one topic), `subscribeCollect` (collects N messages or until a timeout), `disconnect`, `simulateCrash`.
@@ -77,6 +77,7 @@ The mosquitto integration test is opt-in because it needs a real broker on `loca
 - **Imports are extensionless.** `moduleResolution: "Bundler"` (in the root `tsconfig.json`) plus Bun's resolver both handle this. Biome enforces `useImportType` and `useNodejsImportProtocol` (so use `node:net`, not `net`).
 - **`exactOptionalPropertyTypes: true`** is on. Optional properties must literally be optional in the type — passing `undefined` to a field typed `string` (not `string | undefined`) is an error. This bites at the MCP SDK boundary; see `server.ts` for the explicit `any` cast at `wrap()` (the SDK validates via Zod *before* the handler runs, so the cast is safe).
 - **`exports` field gates cross-package imports.** When a package needs another's module, expose it via an `exports` map on the producer (the consumer imports `volley-mcp/<subpath>`). Don't reach into `packages/*/src/` via relative paths.
+- **Temp dirs in tests go through `tempDir` / `tempDirForAll`** (each package's `test/helpers/tmp.ts`), never `mkdtemp` directly (`scripts/no-direct-mkdtemp.test.ts` rejects it): they are removed when the test or file ends, pass or fail. The root `test` script runs under `scripts/check-tmp-leaks.ts`, which fails on any Volley-prefixed entry a run leaves in the temp dir.
 - **Commit message style:** see `git log --oneline` — scoped Conventional Commits (`feat(volley-mcp): ...`, `test(volley-mcp): ...`, `ci: ...`, `refactor(volley-mcp): ...`).
 
 ## Workflow rhythm

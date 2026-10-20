@@ -60,6 +60,16 @@
 #   default_account: null
 #   warn_at_pct: 90
 
+# How the pipeline's rebase step updates a PR branch when the release branch moved (README
+# "Rebase rule"): rebase (rebase + a lease-guarded force-push) or merge (merge it in + a normal
+# push; for repositories that allow no force-push of any kind).
+# branch_update: rebase
+
+# The MCP servers a launched agent loads (README "MCP wiring"): strict (only the `volley` server
+# volleyd gives it, a reproducible and minimal agent) or inherit (your own servers too, such as
+# plugin servers and connectors).
+# agent_mcp: strict
+
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and
 # must be absolute. See README "Remote hosts (ssh + tmux)".

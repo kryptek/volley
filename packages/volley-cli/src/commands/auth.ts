@@ -246,8 +246,9 @@ Broker logins on mosquitto >= 2.1 with the Dynamic Security plugin
 file, no ACL file, no reload. Every verb refuses a broker older than 2.1.
 
   volley auth init                 Write the broker config (plugin before the listeners,
-                                   per_listener_settings false, nodelay, raised queue; the old
-                                   one backed up), create the state file with its admin
+                                   per_listener_settings false, nodelay, raised queue; the
+                                   WebSocket listener's LAN bind kept; the diff printed first,
+                                   the old one backed up), create the state file with its admin
                                    login, then — once the broker runs it — Volley's eight
                                    shared roles and the fixed identities (volleyd, desk,
                                    coordinator), printing new passwords once. Idempotent:

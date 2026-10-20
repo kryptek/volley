@@ -14,12 +14,17 @@
  * volleyd over the admin channel (`store/control.ts`); a just-redeemed admin token
  * opens Setup & Security once, its Preview shows the sign-in screen, and Open setup…
  * closes Settings and shows the setup wizard in its own modal (as the prototype).
- * Hardening (D8): the phone layout (`useViewportWidth`), the look degraded
+ * Hardening (D8): the phone layout (`useScreenSize`), the look degraded
  * without WebGL (`degradeLook`), and the keyboard (`a11y/keys.ts`) on a
  * focusable, labelled stage. Desk round 2 (S6): stopped / complete waves fold
  * off the canvas with their agents under "Show finished" (and get no tethers
  * when shown); the reconnect / resume grace (`syncing`) holds every liveness
  * judgement; a task's parallel reviewers carry the `review (spec + quality)` chip.
+ * Pinning (C12, `layout/pins.ts`): each window's title bar cycles it through
+ * pinned in place (arrange skips it) and anchored to the screen (rendered in the
+ * `.hud` layer above the canvas, untouched by pan, zoom, fit and arrange, which
+ * leave room for it; collapsed to its title bar at phone width), saved per
+ * window key and device class; Settings, General, Reset layout clears them.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDeskKeys } from "./a11y/keys";
@@ -32,6 +37,7 @@ import {
   needsYouTargets,
   noSignalFor,
   openDecisions,
+  staleProgressFor,
   waveAttention,
 } from "./attention";
 import { SignInPreview } from "./auth/SignInGate";
@@ -41,12 +47,30 @@ import {
   NARROW_PX,
   type Rect,
   clampWindowWidth,
+  fitToArea,
   phoneMaxWidth,
+  useScreenSize,
   useViewport,
-  useViewportWidth,
 } from "./canvas/useViewport";
-import { CGAP, type Cluster, GAP, arrange as arrangeLayout } from "./layout/arrange";
+import {
+  CGAP,
+  type Cluster,
+  GAP,
+  fitArea as arrangeArea,
+  arrange as arrangeLayout,
+} from "./layout/arrange";
+import {
+  type Pin,
+  anchorAt,
+  avoidAnchored,
+  hudBounds,
+  nextPinMode,
+  pinModeOf,
+  screenPos,
+  windowKeys,
+} from "./layout/pins";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
+import { usePins } from "./layout/usePins";
 import { plural } from "./lib/plural";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock } from "./look/DeskDock";
@@ -67,22 +91,25 @@ import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList } from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
-import { createPeerOps } from "./store/peerOps";
+import { createPeerOps, keepAdminSeen } from "./store/peerOps";
 import {
   UNASSIGNED,
   agentsByWave,
   endedWaves,
   finishedAgents,
+  isSession,
   isSupervisorId,
   localAgentCount,
   stageChip,
   supervisorHealth,
   supervisorList,
   supervisorNamespace,
+  unclassifiedAgents,
 } from "./store/reducer";
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
+import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import {
   COORDS_ID,
   COORDS_W,
@@ -105,7 +132,12 @@ const ATTN_TICK_MS = 15_000;
 /** The supervisor's age (top-bar pill, coordinators row) ticks this often while one is shown. */
 const SUPERVISOR_TICK_MS = 2000;
 
-const accentOf = (wave: string) => (wave === UNASSIGNED ? NEUTRAL_ACCENT : accentFor(wave));
+/** The group of interactive sessions (`isSession`): its own card, apart from `unassigned`. */
+export const SESSIONS = "_sessions";
+/** The groups that are not waves: a card listing their agents, a side cluster. */
+const isLooseGroup = (id: string) => id === UNASSIGNED || id === SESSIONS;
+
+const accentOf = (wave: string) => (isLooseGroup(wave) ? NEUTRAL_ACCENT : accentFor(wave));
 
 /**
  * Earliest start among a wave's agents (registry `started_at`, else first
@@ -211,16 +243,58 @@ function liveAgentCount(state: DeskState): number {
   ).length;
 }
 
+/** localStorage key for the ended waves dismissed from this Desk (wave ids). */
+export const DISMISSED_WAVES_KEY = "volley-desk:dismissed-waves";
+
+function readDismissed(): ReadonlySet<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]") as unknown;
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Ended waves dismissed from this Desk: Desk-side only, kept in this browser. */
+function useDismissedWaves() {
+  const [dismissed, set] = useState<ReadonlySet<string>>(readDismissed);
+  const update = (next: ReadonlySet<string>) => {
+    set(next);
+    try {
+      localStorage.setItem(DISMISSED_WAVES_KEY, JSON.stringify([...next]));
+    } catch {
+      // A blocked localStorage only forgets the dismissal on reload.
+    }
+  };
+  return [dismissed, update] as const;
+}
+
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
-  const { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers } = useViewport();
-  const vw = useViewportWidth();
+  const { view, setView, zoomAt, panBy, fitTo: fitView, stageRef, stageHandlers } = useViewport();
+  const screenSize = useScreenSize();
+  const vw = screenSize.width;
   const narrow = vw < NARROW_PX;
+  const {
+    pins,
+    setPin,
+    save: savePinsNow,
+    reset: resetPins,
+  } = usePins(narrow ? "phone" : "desktop");
+  /** The screen-anchored layer, above the canvas (C12). */
+  const [hud, setHud] = useState<HTMLDivElement | null>(null);
+  /** Anchored windows expanded at phone width (they start collapsed to their title bar). */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
   const [me] = useState(() => meFromSearch(window.location.search));
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  /** Ended waves put back on the canvas one by one (the coordinators window's Show). */
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
+  const [dismissed, setDismissed] = useDismissedWaves();
+  /** An ended wave just shown: the viewport fits to it once it has a place on the canvas. */
+  const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
   const steering = useSteering(state, writer, identity);
@@ -272,10 +346,12 @@ export default function App() {
     () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
     [authOps],
   );
-  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it.
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
+  // an admin Desk then checks in with volleyd hourly, so Broker accounts never calls it stale.
   useEffect(() => {
-    void peerOps?.admin();
-  }, [peerOps]);
+    if (peerOps === null || authOps === null) return;
+    return keepAdminSeen(peerOps, authOps);
+  }, [peerOps, authOps]);
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
   /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
@@ -287,19 +363,39 @@ export default function App() {
   };
 
   const allGroups = agentsByWave(state);
-  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on.
-  const finished = finishedAgents(state, now, look.finishedGraceMin * 60_000);
+  // Interactive sessions leave the unassigned agents for a Sessions group of their own.
+  {
+    const loose = allGroups[UNASSIGNED] ?? [];
+    allGroups[SESSIONS] = loose.filter(isSession);
+    allGroups[UNASSIGNED] = loose.filter((a) => !isSession(a));
+  }
+  // Agents that finished longer ago than the grace leave the canvas unless "show finished" is on,
+  // and so do old records with no status that nothing live has been heard from.
+  const graceMs = look.finishedGraceMin * 60_000;
+  const unclassified = unclassifiedAgents(state, now, graceMs);
+  const finished = finishedAgents(state, now, graceMs);
+  for (const id of unclassified.stale) finished.add(id);
   const finishedCount = Object.values(allGroups).reduce(
     (n, l) => n + l.filter((a) => finished.has(a.id)).length,
     0,
   );
   const finishedHidden = look.showFinished ? 0 : finishedCount;
+  // While the Desk (re)syncs, an agent with no status (its registry entry replayed ahead of
+  // it, or a reconnect's resync) may be finished: it is not laid out until its status says
+  // which (C11). One already on the canvas keeps its place. Once synced, an agent that still
+  // has none is shown, with its "no signal" mark.
+  const onCanvas = useRef<ReadonlySet<string>>(new Set());
+  const classifying = settling || syncing;
+  const offCanvas = (a: AgentView) =>
+    (classifying && unclassified.all.has(a.id) && !onCanvas.current.has(a.id)) ||
+    (finishedHidden > 0 && finished.has(a.id));
   const groups =
-    finishedHidden === 0
+    finishedHidden === 0 && (!classifying || unclassified.all.size === 0)
       ? allGroups
       : Object.fromEntries(
-          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !finished.has(a.id))]),
+          Object.entries(allGroups).map(([id, l]) => [id, l.filter((a) => !offCanvas(a))]),
         );
+  onCanvas.current = new Set(Object.values(groups).flatMap((l) => l.map((a) => a.id)));
   const firstStart = useRef<Record<string, number>>({});
   const startedAt = (id: string): number | null => {
     const t = waveStartedAt(allGroups[id] ?? []);
@@ -307,17 +403,27 @@ export default function App() {
     if (t !== null && (prev === undefined || t < prev)) firstStart.current[id] = t;
     return firstStart.current[id] ?? null;
   };
+  // A dismissed wave leaves the Desk while it stays ended. A dismissal ends once its wave is
+  // seen running: a reused id that runs (and ends) again is back. An id that is only missing
+  // is kept, since on a slow link a wave's retained state can arrive after the replay settles.
+  const ended = endedWaves(state);
+  const gone = (id: string) => ended.has(id) && dismissed.has(id);
+  const rerun = [...dismissed].filter((id) => state.waves[id] !== undefined && !ended.has(id));
+  useEffect(() => {
+    if (rerun.length > 0) setDismissed(new Set([...dismissed].filter((id) => !rerun.includes(id))));
+  });
+  /** An ended wave is on the canvas under "Show finished" or once shown on its own. */
+  const endedShown = (id: string) => look.showFinished || revealed.has(id);
   const waveIds = [
-    ...Object.keys(state.waves),
-    ...((groups[UNASSIGNED]?.length ?? 0) > 0 ? [UNASSIGNED] : []),
+    ...Object.keys(state.waves).filter((id) => !gone(id)),
+    ...[UNASSIGNED, SESSIONS].filter((id) => (groups[id]?.length ?? 0) > 0),
   ];
   /** A window's rendered width: the prototype width, clamped on a phone. */
   const clampW = (w: number) => clampWindowWidth(w, vw);
   // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is
   // on; a folded wave takes no slot in the layout, so it leaves no gap.
-  const ended = endedWaves(state);
   const layout = placeholderLayout(
-    waveIds.filter((id) => look.showFinished || !ended.has(id)),
+    waveIds.filter((id) => !ended.has(id) || endedShown(id)),
     groups,
     clampW,
   );
@@ -329,19 +435,15 @@ export default function App() {
   const slotOf = (id: string): Pos => {
     if (slots === null) {
       const out: Record<string, Pos> = {};
-      const shown = [
-        ...visible.flatMap((w) => [
-          { id: w, w: WAVE_W, h: WAVE_H },
-          ...(groups[w] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
-        ]),
-        ...(coordsShown ? [{ id: COORDS_ID, w: COORDS_W, h: coordsH(coordsRows) }] : []),
-      ];
+      const shown = shownIds().filter((id) => !anchored(id));
       const taken: Rect[] = [];
-      for (const b of [...shown.filter((x) => moved[x.id]), ...shown.filter((x) => !moved[x.id])]) {
+      const isPlaced = (id: string) => placedAt(id) !== undefined;
+      for (const id of [...shown.filter(isPlaced), ...shown.filter((x) => !isPlaced(x))]) {
+        const b = { id, ...dims(id) };
         const { w, h } = sizeOf(b.id, b.w, b.h);
-        const at = moved[b.id] ?? layout[b.id] ?? { x: 0, y: 0 };
+        const at = placedAt(b.id) ?? layout[b.id] ?? { x: 0, y: 0 };
         let y = at.y;
-        if (!moved[b.id]) {
+        if (!isPlaced(b.id)) {
           const hit = () =>
             taken.find((r) => at.x < r.x + r.w && r.x < at.x + w && y < r.y + r.h && r.y < y + h);
           for (let r = hit(); r; r = hit()) y = r.y + r.h + GAP;
@@ -353,12 +455,114 @@ export default function App() {
     }
     return slots[id] ?? layout[id] ?? { x: 0, y: 0 };
   };
-  const pos = (id: string): Pos => moved[id] ?? slotOf(id);
-  const move = (id: string) => (dx: number, dy: number) =>
+  const pos = (id: string): Pos => placedAt(id) ?? slotOf(id);
+  const move = (id: string) => (dx: number, dy: number) => {
+    // A pinned window's pin follows the drag through updaters, saved on the drop (`onDrag`).
+    const pin = pinOf(id);
+    if (pin?.mode === "screen") {
+      const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+      setPin(
+        keyOf(id),
+        (p) => {
+          if (p?.mode !== "screen") return p;
+          const { left, top } = screenPos(p, { w, h }, screenSize, bounds);
+          return anchorAt({ x: left + dx, y: top + dy, w, h }, screenSize, bounds);
+        },
+        { save: false },
+      );
+      return;
+    }
+    if (pin?.mode === "place") {
+      setPin(keyOf(id), (p) => (p?.mode === "place" ? { ...p, x: p.x + dx, y: p.y + dy } : p), {
+        save: false,
+      });
+      return;
+    }
     setMoved((m) => {
       const p = m[id] ?? pos(id);
       return { ...m, [id]: { x: p.x + dx, y: p.y + dy } };
     });
+  };
+
+  // ------------------------------------------------------------ pinning (C12)
+  const keys = windowKeys(
+    [COORDS_ID],
+    waveIds,
+    Object.values(state.agents).map((a) => ({
+      id: a.id,
+      wave: a.wave,
+      task: a.task,
+      role: a.role,
+      holds:
+        !!a.task &&
+        !!a.role &&
+        state.waves[a.wave]?.state?.tasks.find((t) => t.id === a.task)?.agents[a.role] === a.id,
+    })),
+  );
+  const keyOf = (id: string) => keys[id] ?? id;
+  const pinOf = (id: string): Pin | undefined => pins[keyOf(id)];
+  const anchored = (id: string) => pinOf(id)?.mode === "screen";
+  /** A window pinned in place or placed by a drag or an arrange; undefined until then. */
+  const placedAt = (id: string): Pos | undefined => {
+    const pin = pinOf(id);
+    return pin?.mode === "place" ? { x: pin.x, y: pin.y } : moved[id];
+  };
+  /** A window's default size: the coordinators window, a wave window or an agent window. */
+  const dims = (id: string) =>
+    id === COORDS_ID
+      ? { w: COORDS_W, h: coordsH(coordsRows) }
+      : waveIds.includes(id)
+        ? { w: WAVE_W, h: WAVE_H }
+        : { w: AGENT_W, h: AGENT_H };
+  /** Every window shown: the visible waves and their agents, then the coordinators window. */
+  const shownIds = () => [
+    ...visible.flatMap((w) => [w, ...(groups[w] ?? []).map((a) => a.id)]),
+    ...(coordsShown ? [COORDS_ID] : []),
+  ];
+  const bounds = hudBounds(screenSize, narrow);
+  /** An anchored window's rect on screen (its measured size, or its default). */
+  const hudRect = (id: string): Rect | undefined => {
+    const pin = pinOf(id);
+    if (pin?.mode !== "screen") return undefined;
+    const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+    const { left, top } = screenPos(pin, { w, h }, screenSize, bounds);
+    return { x: left, y: top, w, h };
+  };
+  const hudRects = () => shownIds().flatMap((id) => hudRect(id) ?? []);
+  /** Fit the view to world rects, leaving room for the windows anchored to the screen. */
+  const fitTo = (rs: readonly Rect[]) =>
+    fitView(rs, avoidAnchored(fitToArea(screenSize), hudRects()));
+  /** The pin toggle: unpinned, then pinned in place, then anchored to the screen, then unpinned. */
+  const cyclePin = (id: string) => {
+    const key = keyOf(id);
+    const mode = nextPinMode(pinModeOf(pinOf(id)));
+    const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+    if (mode === "place") {
+      setPin(key, { mode: "place", ...pos(id) });
+    } else if (mode === "screen") {
+      // Anchored where it is on screen now, at its full size.
+      const p = pos(id);
+      setPin(
+        key,
+        anchorAt({ x: view.x + p.x * view.s, y: view.y + p.y * view.s, w, h }, screenSize, bounds),
+      );
+    } else {
+      // Back on the canvas under where it was on screen.
+      const r = hudRect(id);
+      if (r)
+        setMoved((m) => ({
+          ...m,
+          [id]: { x: (r.x - view.x) / view.s, y: (r.y - view.y) / view.s },
+        }));
+      setPin(key, null);
+      setExpanded((e) => {
+        if (!e.has(id)) return e;
+        const next = new Set(e);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
 
   const sizes = useRef<Record<string, { w: number; h: number }>>({});
   // Until a window is measured it is its (clamped) default size.
@@ -370,13 +574,15 @@ export default function App() {
     const { w: sw, h: sh } = sizeOf(id, w, h);
     return { ...pos(id), w: sw, h: sh };
   };
-  const clusterOf = (id: string): Rect[] => [
-    rectOf(id, WAVE_W, WAVE_H),
-    ...(groups[id] ?? []).map((a) => rectOf(a.id, AGENT_W, AGENT_H)),
-  ];
-  const endedHidden = look.showFinished ? 0 : ended.size;
-  const visible = waveIds.filter((id) => !hidden.has(id) && (look.showFinished || !ended.has(id)));
-  const waveList = Object.values(state.waves).filter((w) => w.state !== null);
+  // A window anchored to the screen is not on the canvas: no fit frames it.
+  const clusterOf = (id: string): Rect[] =>
+    [id, ...(groups[id] ?? []).map((a) => a.id)]
+      .filter((x) => !anchored(x))
+      .map((x) => rectOf(x, dims(x).w, dims(x).h));
+  const endedHidden = waveIds.filter((id) => ended.has(id) && !endedShown(id)).length;
+  // Only what is shown takes part in a fit or an arrange: a folded or hidden wave is not on the canvas.
+  const visible = waveIds.filter((id) => !hidden.has(id) && (!ended.has(id) || endedShown(id)));
+  const waveList = Object.values(state.waves).filter((w) => w.state !== null && !gone(w.id));
   // The coordinators window's supervisor row; the demo has no volleyd to report as absent.
   const supervisors = demo ? undefined : supervisorList(state);
   // One clock for both, so the pill and the row show the same age.
@@ -384,10 +590,10 @@ export default function App() {
   const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
-  const rects: Rect[] = [
-    ...visible.flatMap(clusterOf),
-    ...(coordsShown ? [rectOf(COORDS_ID, COORDS_W, coordsH(coordsRows))] : []),
-  ];
+  // The first fit frames only the unpinned windows.
+  const rects: Rect[] = shownIds()
+    .filter((id) => pinOf(id) === undefined)
+    .map((id) => rectOf(id, dims(id).w, dims(id).h));
   const fitted = useRef(false);
   useEffect(() => {
     if (fitted.current || rects.length === 0) return;
@@ -413,24 +619,55 @@ export default function App() {
       ...visible.map((id) => ({
         main: sizeOf(id, WAVE_W, WAVE_H),
         kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
-        ...(id === UNASSIGNED ? { side: true } : {}),
+        ...(isLooseGroup(id) ? { side: true } : {}),
       })),
       ...(coordsShown
         ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
         : []),
     ];
-    const r = arrangeLayout(clusters, { width: window.innerWidth, height: window.innerHeight });
+    // Pinned windows are skipped: one pinned in place is kept clear of, and the fit
+    // area leaves room for those anchored to the screen.
+    const scr = { width: window.innerWidth, height: window.innerHeight };
+    const shownNow = shownIds();
+    const r = arrangeLayout(clusters, scr, {
+      area: avoidAnchored(arrangeArea(scr), hudRects()),
+      pinned: Object.fromEntries(
+        shownNow
+          .filter((id) => pinOf(id)?.mode === "place")
+          .map((id) => [id, rectOf(id, dims(id).w, dims(id).h)]),
+      ),
+      skip: new Set(shownNow.filter(anchored)),
+    });
     if (!r) return;
     setAnimating(true);
     setMoved((m) => ({ ...m, ...r.place }));
-    setView(r.view);
+    // An ended wave just shown: fit to it in its new place rather than to everything.
+    const shown = fitPending.current;
+    fitPending.current = null;
+    const fitRects = shown
+      ? [
+          { id: shown, w: WAVE_W, h: WAVE_H },
+          ...(groups[shown] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
+        ].flatMap((b) => {
+          const at = r.place[b.id];
+          if (!at) return [];
+          const { w, h } = sizeOf(b.id, b.w, b.h);
+          return [{ ...at, w, h }];
+        })
+      : [];
+    if (fitRects.length > 0) fitTo(fitRects);
+    else setView(r.view);
     clearTimeout(animEnd.current);
     animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
   };
+  // A window anchored to the screen leaves the canvas (or comes back): that re-arranges too.
   const layoutKey = [
     coordsShown ? "c" : "",
     ...visible,
     ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
+    ...shownIds()
+      .filter(anchored)
+      .map((id) => `@${id}`),
   ].join("|");
   // A reconnect's resync empties the waves and the replay rebuilds them: hold the
   // key until it settles, so only windows that really came or went re-arrange.
@@ -443,16 +680,62 @@ export default function App() {
     arrange,
     hold: settling && settledOnce.current,
   });
+  // Settings, General, Reset layout: arrange once the cleared pins have rendered.
+  const [resetTick, setResetTick] = useState(0);
+  const arrangeNow = useRef(arrange);
+  arrangeNow.current = arrange;
+  useEffect(() => {
+    if (resetTick > 0) arrangeNow.current();
+  }, [resetTick]);
+
+  // Without auto-arrange nothing re-lays the canvas: fit to the shown wave once it is rendered.
+  useEffect(() => {
+    const id = fitPending.current;
+    if (id === null || autoArrange || !visible.includes(id)) return;
+    fitPending.current = null;
+    fitTo(clusterOf(id));
+    focus(id);
+  });
+  const showEnded = (id: string) => {
+    if (visible.includes(id)) {
+      // Already on the canvas: fit to it now.
+      fitTo(clusterOf(id));
+      focus(id);
+      return;
+    }
+    fitPending.current = id;
+    setRevealed((r) => new Set(r).add(id));
+    setHidden((h) => {
+      if (!h.has(id)) return h;
+      const next = new Set(h);
+      next.delete(id);
+      return next;
+    });
+    focus(id);
+  };
+  const dismiss = (id: string) => {
+    setDismissed(new Set(dismissed).add(id));
+    setRevealed((r) => {
+      if (!r.has(id)) return r;
+      const next = new Set(r);
+      next.delete(id);
+      return next;
+    });
+  };
+  const dismissedCount = [...ended].filter((id) => dismissed.has(id)).length;
 
   const place = (id: string, attn?: Attention) => ({
-    pos: pos(id),
+    ...placeOnScreen(id),
+    pin: { mode: pinModeOf(pinOf(id)), onCycle: () => cyclePin(id) },
     z: z(id),
-    scale: view.s,
     chrome: look.chrome,
     attnStyle: look.attn,
     onMove: move(id),
     onFocus: () => focus(id),
-    onDrag: (on: boolean) => setDragging((d) => (on ? id : d === id ? null : d)),
+    onDrag: (on: boolean) => {
+      setDragging((d) => (on ? id : d === id ? null : d));
+      if (!on && pinOf(id)) savePinsNow();
+    },
     // A window not laid out yet (0 × 0) keeps its fallback size.
     onSize: (w: number, h: number) => {
       if (w > 0 && h > 0) sizes.current[id] = { w, h };
@@ -460,6 +743,29 @@ export default function App() {
     ...(narrow ? { maxWidth: phoneMaxWidth(vw) } : {}),
     ...(attn ? { attn } : {}),
   });
+  /** On the canvas at its world position, or anchored: in the `.hud` layer, unscaled. */
+  function placeOnScreen(id: string) {
+    const r = hudRect(id);
+    if (!r) return { pos: pos(id), scale: view.s };
+    const open = !narrow || expanded.has(id);
+    return {
+      pos: { x: r.x, y: r.y },
+      scale: 1,
+      layer: hud,
+      ...(narrow
+        ? {
+            collapsed: !open,
+            onCollapse: (c: boolean) =>
+              setExpanded((e) => {
+                const next = new Set(e);
+                if (c) next.delete(id);
+                else next.add(id);
+                return next;
+              }),
+          }
+        : {}),
+    };
+  }
   const frame = (id: string, accent: string, width: number) => ({
     id,
     accent,
@@ -498,7 +804,12 @@ export default function App() {
     });
   const goTo = (t: NeedsYouTarget) => {
     show(t.wave);
-    fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
+    if (anchored(t.id)) {
+      // Already on screen: open it if it is collapsed.
+      if (narrow) setExpanded((e) => new Set(e).add(t.id));
+    } else {
+      fitTo(t.kind === "wave" ? clusterOf(t.id) : [rectOf(t.id, AGENT_W, AGENT_H)]);
+    }
     focus(t.id);
   };
 
@@ -517,26 +828,29 @@ export default function App() {
       .map((a) => ({
         key: `agent:${a.id}`,
         tier: agentAttn[a.id]?.tier ?? "none",
-        title: `${a.task ? `${a.wave} · ${a.task}` : a.id} needs you`,
+        title: `${purposeOf(a, state.waves[a.wave]).label} needs you`,
         body: agentAttn[a.id]?.reason ?? "",
       })),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
 
   // Tethers: wave window → each of its agents, for visible waves.
+  // None to or from a window anchored to the screen: it is not on the canvas.
   const tethers: Tether[] = visible
-    .filter((id) => !ended.has(id))
+    .filter((id) => !ended.has(id) && !anchored(id))
     .flatMap((id) =>
-      (groups[id] ?? []).map((a) => ({
-        id: a.id,
-        waveId: id,
-        // The rendered width: on a phone the wave window is clamped.
-        wave: rectOf(id, WAVE_W, WAVE_H),
-        agent: pos(a.id),
-        accent: accentOf(id),
-        // A new `progress` envelope sends a pulse down the cable (D10).
-        beat: progressBeat(a.feed),
-      })),
+      (groups[id] ?? [])
+        .filter((a) => !anchored(a.id))
+        .map((a) => ({
+          id: a.id,
+          waveId: id,
+          // The rendered width: on a phone the wave window is clamped.
+          wave: rectOf(id, WAVE_W, WAVE_H),
+          agent: pos(a.id),
+          accent: accentOf(id),
+          // A new `progress` envelope sends a pulse down the cable (D10).
+          beat: progressBeat(a.feed),
+        })),
     );
   useDeskKeys({
     stageRef,
@@ -587,6 +901,14 @@ export default function App() {
               fitTo={fitTo}
               clusterOf={clusterOf}
               onClose={() => setCoordsOpen(false)}
+              shownEnded={new Set([...ended].filter(endedShown))}
+              onShowEnded={showEnded}
+              onDismiss={dismiss}
+              dismissed={{
+                count: dismissedCount,
+                onRestore: () =>
+                  setDismissed(new Set([...dismissed].filter((id) => !ended.has(id)))),
+              }}
               {...(supervisors ? { supervisors } : {})}
               now={supNow}
               finished={{
@@ -601,9 +923,26 @@ export default function App() {
           {visible.map((id) => {
             const wave = state.waves[id];
             if (!wave) {
+              const members = groups[id] ?? [];
+              const sessions = id === SESSIONS;
               return (
-                <Frame key={id} {...frame(id, NEUTRAL_ACCENT, WAVE_W)} title={id}>
-                  <div className="dim">{plural(groups[id]?.length ?? 0, "agent")} with no wave</div>
+                <Frame
+                  key={id}
+                  {...frame(id, NEUTRAL_ACCENT, WAVE_W)}
+                  title={sessions ? "Sessions" : id}
+                >
+                  <div className="dim">
+                    {sessions
+                      ? plural(members.length, "interactive session")
+                      : `${plural(members.length, "agent")} with no wave`}
+                  </div>
+                  <ul className="loose-list">
+                    {members.map((a) => (
+                      <li key={a.id} className="ell" title={a.id}>
+                        {purposeOf(a, undefined).label}
+                      </li>
+                    ))}
+                  </ul>
                 </Frame>
               );
             }
@@ -670,6 +1009,7 @@ export default function App() {
                   narrationFx={look.narr}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
+                  stale={staleProgressFor(a, state.waves[a.wave], ctx)?.label ?? null}
                   syncing={syncing && !ended.has(a.wave)}
                   stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
                   usage={state.usage?.[a.id] ?? null}
@@ -699,7 +1039,10 @@ export default function App() {
                         ...(a.role ? { role: a.role } : {}),
                         ...(blocked !== undefined ? { noInterrupt: blocked } : {}),
                       },
-                      label: a.task && a.role ? `${a.task} · ${ROLE_LABEL[a.role]}` : a.id,
+                      // The window's own name, as its title bar and chat button say it.
+                      label: [headlineOf(a, state.waves[a.wave]), a.role && ROLE_LABEL[a.role]]
+                        .filter(Boolean)
+                        .join(" · "),
                       coordinator: false,
                       // `volleyd steer` resolves the same slot, so a stale agent gets no command.
                       copy:
@@ -715,6 +1058,8 @@ export default function App() {
           )}
         </World>
       </div>
+
+      <div className="hud" ref={setHud} />
 
       <TopBar
         state={state}
@@ -789,6 +1134,11 @@ export default function App() {
             },
           }}
           onArrange={arrange}
+          onResetLayout={() => {
+            resetPins();
+            setExpanded(new Set());
+            setResetTick((t) => t + 1);
+          }}
           onClose={() => setDeskSettings(null)}
         />
       )}

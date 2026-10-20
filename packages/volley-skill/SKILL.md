@@ -246,7 +246,7 @@ Then wait for the user's next message. If their reply, lowercased and trimmed, e
 
 INVALID_AGENT_ID: if the id doesn't match the grammar, fail before the tool call with `agent_id "..." does not match [a-z0-9][a-z0-9_-]{0,62}`.
 
-NOT_REGISTERED: if `vol_send_mailbox` returns `{ code: "NOT_REGISTERED" }`, the MCP session has no registered agent — `vol_register` hasn't been called yet. Tell the user what happened. Then call `vol_register({ capabilities: [] })` directly via the MCP tool (the empty-capabilities call is fine for ad-hoc sessions; `vol_register` reads `agent_id` and `namespace` from the MCP server's env vars, not from arguments). Retry the `msg` once registration succeeds. Do not auto-retry without registering; surface the gap so the user understands the session state.
+NOT_REGISTERED: if `vol_send_mailbox` returns `{ code: "NOT_REGISTERED" }`, the MCP session has no registered agent — `vol_register` hasn't been called yet. Tell the user what happened. Then call `vol_register({ capabilities: [], title: "<one line: what this session is doing>" })` directly via the MCP tool (the empty-capabilities call is fine for ad-hoc sessions; `vol_register` reads `agent_id` and `namespace` from the MCP server's env vars, not from arguments; `title` is optional, one line of 1–120 characters, and the Desk shows it as the agent window's name). Retry the `msg` once registration succeeds. Do not auto-retry without registering; surface the gap so the user understands the session state.
 
 BROKER_DOWN: same handling as `list`.
 

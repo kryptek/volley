@@ -43,15 +43,45 @@ jobs:
       - run: bun run typecheck
 
   test:
-    name: Unit tests (Aedes)
+    # Every package's suite is `vitest run`, whose bin is a node script: `bun run test` runs the
+    # vitest suites on Node. The bun version reaches only `bun install`, `bun test ./scripts` and
+    # the tests that spawn `bun`. The bun-runner job below runs volleyd's suite on bun itself.
+    name: Unit tests (vitest on Node, Aedes; bun ${{ matrix.bun-version }} for install + scripts)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every bun in engines.bun: a newer bun can break the suite without anything else changing.
+        bun-version: ["1.3", "1.4"]
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3"
+          bun-version: ${{ matrix.bun-version }}
       - run: bun install --frozen-lockfile
+      # The root `test` script runs every suite under scripts/check-tmp-leaks.ts: a test that
+      # leaves a temp dir behind fails the job, naming its prefix.
       - run: bun run test
+
+  test-bun-runner:
+    # volleyd runs on bun in production; this is the only job that runs its suite on the bun
+    # runtime, under bun's own test runner. A separate job so it runs in parallel with `test`.
+    name: volleyd unit tests (bun test runner, bun ${{ matrix.bun-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bun-version: ["1.3", "1.4"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun-version }}
+      - run: bun install --frozen-lockfile
+      # 15 s per test: the budget volleyd's vitest.config.ts declares (bun's default is 5 s).
+      # Under the temp-dir leak guard, like `bun run test`.
+      - run: bun ../../scripts/check-tmp-leaks.ts -- bun test --timeout 15000
+        working-directory: packages/volleyd
 
   react-bits:
     name: React Bits allow-list (volley-desk)
@@ -111,12 +141,12 @@ jobs:
           (echo > /dev/tcp/127.0.0.1/1883) 2>/dev/null || { echo "mosquitto did not start in 30s"; exit 1; }
       - name: Run integration tests
         working-directory: packages/volley-mcp
-        run: bun run test:integration
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:integration
       - name: Run volley-hooks integration tests (MQTT 5 drain)
         working-directory: packages/volley-hooks
         env:
           VOLLEY_BROKER_URL: mqtt://127.0.0.1:1883
-        run: bun run test:integration
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:integration
       - name: Stop mosquitto
         if: always()
         run: docker rm -f mosquitto
@@ -160,19 +190,19 @@ jobs:
           VOLLEY_DYNSEC_BROKER_URL: mqtt://127.0.0.1:1884
           VOLLEY_DYNSEC_WS_URL: ws://127.0.0.1:9002
           VOLLEY_DYNSEC_ADMIN_PASSWORD: ${{ env.DYNSEC_ADMIN_PASSWORD }}
-        run: bunx vitest run test/integration/mosquitto-dynsec.test.ts
+        run: bun ../../scripts/check-tmp-leaks.ts -- bunx vitest run test/integration/mosquitto-dynsec.test.ts
       - name: Run auth integration tests (volley-mcp)
         working-directory: packages/volley-mcp
         env:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
-        run: bunx vitest run test/integration/mosquitto-auth.test.ts
+        run: bun ../../scripts/check-tmp-leaks.ts -- bunx vitest run test/integration/mosquitto-auth.test.ts
       - name: Run hooks auth integration tests
         working-directory: packages/volley-hooks
         env:
           VOLLEY_INTEGRATION: "1"
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
-        run: bunx vitest run test/integration/mosquitto-acl.test.ts
+        run: bun ../../scripts/check-tmp-leaks.ts -- bunx vitest run test/integration/mosquitto-acl.test.ts
       - name: Run volleyd auth integration tests (daemon, account roles, agent logins)
         working-directory: packages/volleyd
         env:
@@ -180,7 +210,9 @@ jobs:
           VOLLEY_AUTH_BROKER_URL: mqtt://127.0.0.1:1884
           VOLLEY_DYNSEC_BROKER_URL: mqtt://127.0.0.1:1884
           VOLLEY_DYNSEC_ADMIN_PASSWORD: ${{ env.DYNSEC_ADMIN_PASSWORD }}
-        run: bunx vitest run test/integration/daemon-auth.test.ts test/integration/mosquitto-roles.test.ts test/integration/dynsec-agents.test.ts
+        run: >-
+          bun ../../scripts/check-tmp-leaks.ts -- bunx vitest run test/integration/daemon-auth.test.ts
+          test/integration/mosquitto-roles.test.ts test/integration/dynsec-agents.test.ts
       - name: Broker log
         if: failure()
         run: docker logs mosquitto-dynsec

@@ -263,7 +263,8 @@ export function resolveControlTarget(
   env: Record<string, string | undefined>,
   cwd: string = process.cwd(),
 ): ControlTarget {
-  return { ...resolveTarget(values, env), auth: controlAuth(env, cwd) };
+  const target = resolveTarget(values, env);
+  return { ...target, auth: controlAuth(env, cwd, target.brokerUrl) };
 }
 
 /**

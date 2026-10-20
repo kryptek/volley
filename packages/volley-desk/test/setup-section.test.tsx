@@ -95,6 +95,35 @@ describe("Settings › Setup & Security", () => {
     expect(screen.queryByText(/printed in the terminal/i)).not.toBeInTheDocument();
   });
 
+  it("issues the shared desk login a new password, after asking, and shows it once", async () => {
+    const password = "N3w-desk-pa55word-0123456789abcdef";
+    const { ops, calls } = fakeOps({
+      setup_plan: () => ({ ok: true, result: PLAN }),
+      desk_password: () => ({
+        ok: true,
+        result: { username: "desk" },
+        secret: { username: "desk", password },
+      }),
+    });
+    section(ops, true);
+    fireEvent.click(screen.getByRole("button", { name: "New desk password" }));
+    // It signs out whatever uses the old one: asked first, nothing sent yet.
+    expect(screen.getByText(/signs out whatever signs in as desk now/i)).toBeInTheDocument();
+    expect(calls.map((c) => c.op)).not.toContain("desk_password");
+    fireEvent.click(screen.getByRole("button", { name: "Issue it" }));
+    expect(await screen.findByText(password)).toBeInTheDocument();
+    expect(screen.getByText(/desk login password \(shown once\)/i)).toBeInTheDocument();
+    expect(calls.map((c) => c.op)).toContain("desk_password");
+  });
+
+  it("says what to do when volleyd cannot issue the desk password", async () => {
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    section(ops, true);
+    fireEvent.click(screen.getByRole("button", { name: "New desk password" }));
+    fireEvent.click(screen.getByRole("button", { name: "Issue it" }));
+    expect(await screen.findByText(/cannot issue the desk password/i)).toBeInTheDocument();
+  });
+
   it("says where the token went when volleyd printed it in its terminal", async () => {
     const { ops, calls } = fakeOps({
       setup_plan: () => ({ ok: true, result: PLAN }),

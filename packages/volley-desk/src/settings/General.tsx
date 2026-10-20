@@ -1,5 +1,6 @@
 /**
- * Settings › General: the canvas (auto-arrange with "Arrange & fit now",
+ * Settings › General: the canvas (auto-arrange with "Arrange & fit now", the
+ * window layout's Reset layout, which clears every window pin (C12),
  * finished agents shown or hidden and the grace before they leave), the
  * notifications (the sound and the browser notifications, the same settings
  * as the top bar's toggles) and the agent windows' narration effect. The
@@ -52,12 +53,15 @@ export function General({
   notify,
   setNotify,
   onArrange,
+  onResetLayout,
 }: {
   look: Look;
   setLook: (change: Partial<Look>) => void;
   notify: NotifyOptions;
   setNotify: SetNotify;
   onArrange: () => void;
+  /** Clear every window pin (pinned in place, anchored to the screen) in this browser (the desktop and phone layouts both). */
+  onResetLayout?: () => void;
 }) {
   const { toggle: toggleNotify, blocked } = useNotifyToggle(setNotify);
   return (
@@ -73,6 +77,16 @@ export function General({
             onChange={(autoArrange) => setLook({ autoArrange })}
           />
         </Row>
+        {onResetLayout && (
+          <Row
+            label="Window layout"
+            hint="Unpin every window pinned in place or anchored to the screen, then arrange"
+          >
+            <button type="button" className="btn btn--sm" onClick={onResetLayout}>
+              Reset layout
+            </button>
+          </Row>
+        )}
         <Row
           label="Show finished agents"
           hint={`Agents that are done, failed or gone for more than ${look.finishedGraceMin} min`}

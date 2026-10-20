@@ -215,15 +215,26 @@ export function writeActivity(stateDir: string, activity: Activity): void {
   writeFileAtomic(join(stateDir, "activity.json"), `${JSON.stringify(activity)}\n`);
 }
 
-/** How often a drain hook checks that the registry still carries the harness model. */
-const MODEL_CHECK_MS = 30_000;
+/** How often a drain hook checks that the registry still carries the harness fields. */
+export const MODEL_CHECK_MS = 30_000;
 
 interface HarnessModel {
   model: string;
   checked_at?: number;
 }
 
+/** The registry fields only SessionStart can compute (`registryFields`). */
+export type RegistryFields = { session_url?: string; workspace?: string; workspace_title?: string };
+
+/** `<stateDir>/registry-fields.json`: SessionStart's fields, and the drain hooks' last check. */
+interface StoredRegistryFields {
+  fields: RegistryFields;
+  checked_at?: number;
+}
+
 const modelPath = (stateDir: string) => join(stateDir, "model.json");
+const fieldsPath = (stateDir: string) => join(stateDir, "registry-fields.json");
+const FIELD_NAMES = ["session_url", "workspace", "workspace_title"] as const;
 
 /** Remember the harness-reported model (SessionStart / PostModelSwitch), or forget it. */
 export function writeHarnessModel(stateDir: string, model: string | undefined): void {
@@ -244,9 +255,47 @@ function readHarnessModel(stateDir: string): HarnessModel | null {
 }
 
 /**
+ * Remember SessionStart's registry fields (`session_url`, `workspace`, `workspace_title`) so
+ * the drain hooks can put them back after the MCP server's own register drops them. Written
+ * on every SessionStart, empty included, so an earlier session's fields never outlive it.
+ */
+export function writeRegistryFields(stateDir: string, fields: RegistryFields): void {
+  writeStoredFields(stateDir, { fields });
+}
+
+function writeStoredFields(stateDir: string, stored: StoredRegistryFields): void {
+  writeFileAtomic(fieldsPath(stateDir), `${JSON.stringify(stored)}\n`);
+}
+
+export function readRegistryFields(stateDir: string): StoredRegistryFields {
+  try {
+    const raw = JSON.parse(readFileSync(fieldsPath(stateDir), "utf-8")) as {
+      fields?: Record<string, unknown>;
+      checked_at?: unknown;
+    };
+    const fields: RegistryFields = {};
+    for (const k of FIELD_NAMES) {
+      const v = raw.fields?.[k];
+      if (typeof v === "string" && v !== "") fields[k] = v;
+    }
+    return {
+      fields,
+      ...(typeof raw.checked_at === "number" && Number.isFinite(raw.checked_at)
+        ? { checked_at: raw.checked_at }
+        : {}),
+    };
+  } catch {
+    return { fields: {} };
+  }
+}
+
+/**
  * The MCP server's own register (its startup auto-register, or the agent's `vol_register`)
- * replaces the whole registry entry and drops the harness model. At most every 30 s, put it
- * back when the retained entry no longer carries it.
+ * replaces the whole registry entry: it drops the harness model and SessionStart's fields
+ * (`session_url`, `workspace`, `workspace_title`). At most every 30 s, a drain hook puts them
+ * back when the retained entry no longer carries the model (`model_source: "harness-hook"`) or
+ * any remembered field. With no model known, the fields are restored alone (`model_source`
+ * then says `unknown`, as SessionStart published it).
  */
 export async function ensureHarnessModel(
   session: HookSession,
@@ -254,25 +303,26 @@ export async function ensureHarnessModel(
 ): Promise<void> {
   const { stateDir } = session.identity;
   const known = readHarnessModel(stateDir);
-  if (known === null) return;
-  if (known.checked_at !== undefined && now() - known.checked_at < MODEL_CHECK_MS) return;
+  const stored = readRegistryFields(stateDir);
+  const fields = stored.fields;
+  if (known === null && Object.keys(fields).length === 0) return;
+  const checkedAt = stored.checked_at ?? known?.checked_at;
+  if (checkedAt !== undefined && now() - checkedAt < MODEL_CHECK_MS && now() >= checkedAt) return;
   const raw = await session.broker.queryRetained(registryTopic(session.identity.agentId), 300);
   const p = (raw === null ? null : parseEnvelope(raw)?.payload) as Record<string, unknown> | null;
-  if (p?.model !== known.model || p?.model_source !== "harness-hook") {
-    await session.republishRegistry(known.model);
-  }
-  writeFileAtomic(
-    modelPath(stateDir),
-    `${JSON.stringify({ model: known.model, checked_at: now() } satisfies HarnessModel)}\n`,
-  );
+  const modelLost =
+    known !== null && (p?.model !== known.model || p?.model_source !== "harness-hook");
+  const fieldLost = FIELD_NAMES.some((k) => fields[k] !== undefined && p?.[k] !== fields[k]);
+  if (modelLost || fieldLost) await session.republishRegistry(known?.model, fields);
+  writeStoredFields(stateDir, { fields, checked_at: now() });
 }
 
 /**
  * The cmux workspace ref of the pane this hook runs in (`cmux identify`), if any.
  *
- * The one child process the hooks start. It runs outside volleyd's authority fence on purpose:
- * the hooks are the agent's own harness (not the supervisor), the call is read-only, and its
- * binary is cmux's own CMUX_BUNDLED_CLI_PATH (set by cmux in the pane's environment) or `cmux`
+ * One of the two child processes the hooks start (the other is `cmuxWorkspaceTitle`). Both run
+ * outside volleyd's authority fence on purpose: the hooks are the agent's own harness (not the
+ * supervisor), the calls are read-only, and the binary is cmux's own CMUX_BUNDLED_CLI_PATH (set by cmux in the pane's environment) or `cmux`
  * on PATH. Bounded by a 1 s timeout; any failure just leaves the workspace unknown.
  */
 function cmuxWorkspace(env: Env): string | undefined {
@@ -288,6 +338,71 @@ function cmuxWorkspace(env: Env): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The longest `workspace_title` published. */
+const WORKSPACE_TITLE_MAX = 120;
+
+function boundTitle(title: unknown): string | undefined {
+  if (typeof title !== "string") return undefined;
+  const t = title.trim();
+  return t === "" ? undefined : t.slice(0, WORKSPACE_TITLE_MAX);
+}
+
+/**
+ * The title of this session's workspace in `cmux list-workspaces --json` output: a list of
+ * `{ ref: "workspace:1", id: "<uuid>", index, title, selected }` (top level, or under
+ * `workspaces`), matched on `ref` or `id`. Trimmed, cut to 120 characters; anything else is
+ * no title.
+ */
+export function workspaceTitleFrom(
+  json: unknown,
+  match: { ref?: string; id?: string },
+): string | undefined {
+  const list = Array.isArray(json)
+    ? json
+    : typeof json === "object" && json !== null
+      ? (json as { workspaces?: unknown }).workspaces
+      : undefined;
+  if (!Array.isArray(list)) return undefined;
+  const ws = list.find((w): w is Record<string, unknown> => {
+    if (typeof w !== "object" || w === null) return false;
+    const r = w as Record<string, unknown>;
+    return (
+      (match.ref !== undefined && r.ref === match.ref) ||
+      (match.id !== undefined && r.id === match.id)
+    );
+  });
+  return boundTitle(ws?.title);
+}
+
+/** `cmux list-workspaces --json`: same binary, timeout and failure handling as `cmuxWorkspace`. */
+function cmuxWorkspaceTitle(env: Env, ref: string | undefined): string | undefined {
+  const id = env.CMUX_WORKSPACE_ID;
+  if (id === undefined) return undefined;
+  try {
+    const out = execFileSync(env.CMUX_BUNDLED_CLI_PATH ?? "cmux", ["list-workspaces", "--json"], {
+      encoding: "utf-8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return workspaceTitleFrom(JSON.parse(out), { ...(ref !== undefined ? { ref } : {}), id });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The coordinator registry fields SessionStart re-publishes: the attention fields below plus
+ * `workspace_title` (`VOLLEY_WORKSPACE_TITLE`, else the cmux workspace's title), so the Desk
+ * can say what an interactive session is for. Not on the awaiting_input events, and empty in
+ * agent mode.
+ */
+export function registryFields(identity: HookIdentity, env: Env): RegistryFields {
+  const fields = coordinatorFields(identity, env);
+  if (identity.mode !== "coordinator") return fields;
+  const title = boundTitle(env.VOLLEY_WORKSPACE_TITLE) ?? cmuxWorkspaceTitle(env, fields.workspace);
+  return title === undefined ? fields : { ...fields, workspace_title: title };
 }
 
 /**

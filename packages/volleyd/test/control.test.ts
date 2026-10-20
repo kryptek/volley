@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +26,7 @@ import {
 } from "./helpers/fake-host";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const EXAMPLE = fileURLToPath(new URL("./fixtures/example.yaml", import.meta.url));
 const WAVE = "2026-10-20-example";
@@ -143,16 +143,12 @@ describe("volleyd daemon + control channel", () => {
 
   it("refuses a second daemon on another home while one is live on the broker", async () => {
     await t.start();
-    const other = mkdtempSync(join(tmpdir(), "volleyd-home2-"));
-    try {
-      await expect(Daemon.start(t.options({ home: other }))).rejects.toThrow(
-        /already running \(retained/,
-      );
-      // The refused daemon did not take over the live one's session.
-      expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
-    } finally {
-      rmSync(other, { recursive: true, force: true });
-    }
+    const other = tempDir("volleyd-home2-");
+    await expect(Daemon.start(t.options({ home: other }))).rejects.toThrow(
+      /already running \(retained/,
+    );
+    // The refused daemon did not take over the live one's session.
+    expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
   });
 
   it("replaces a stale home lock left by a dead process", async () => {
@@ -440,7 +436,7 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       users: Object.fromEntries(USERS.map((u) => [u, pw(u)])),
       canPublish,
     });
-    home = mkdtempSync(join(tmpdir(), "volleyd-peer-doctor-"));
+    home = tempDir("volleyd-peer-doctor-");
     writeFileSync(
       join(home, "config.yaml"),
       "hosts:\n  box-a:\n    target: dev@box-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
@@ -480,7 +476,6 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
     }
     await daemon.stop();
     await broker.close();
-    rmSync(home, { recursive: true, force: true });
   });
 
   /** One account op as `user`, answered on the account-op reply topic. */

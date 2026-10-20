@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Role } from "../../src/brief";
 import {
@@ -13,10 +12,11 @@ import { assertAllowed } from "../../src/fence";
 import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
-import type { JournalEvent, NewEvent, NudgeOnMerge } from "../../src/types";
+import type { BranchUpdate, JournalEvent, NewEvent, NudgeOnMerge } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
 import { FIXTURES } from "./fake-host";
+import { tempDir } from "./tmp";
 
 /**
  * The pipeline driver on an in-memory journal and a scripted git/GitHub "world": no broker, no
@@ -85,6 +85,8 @@ export interface Spawned {
   worktree: string;
   start?: SpawnStart;
   files: Record<string, string>;
+  /** How the step tells a rebase role to bring the branch up to date (absent: rebase). */
+  branch_update?: BranchUpdate;
 }
 
 export interface HarnessOptions {
@@ -104,10 +106,12 @@ export interface HarnessOptions {
   nudgeOnMerge?: NudgeOnMerge;
   /** What the daemon adds to a decision before opening it (F6: `respawn on <best>`). */
   decideWith?: (input: DecisionInput, extra: Record<string, unknown>) => DecisionInput;
+  /** The `branch_update` tunable the driver reads (default: absent, i.e. `rebase`). */
+  branchUpdate?: BranchUpdate;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
-  const home = mkdtempSync(join(tmpdir(), "volleyd-pipeline-"));
+  const home = tempDir("volleyd-pipeline-");
   const wave = parseWaveFile(
     [
       "wave: w1",
@@ -294,13 +298,26 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const retired: { agent_id: string; status: string }[] = [];
   /** Role spawns the daemon holds (budget, admission, a refused launch) while this is true. */
   let holdSpawns = false;
-  const spawnAgent = async (role: Role, start?: SpawnStart, files: Record<string, string> = {}) => {
+  let branchUpdate = o.branchUpdate;
+  const spawnAgent = async (
+    role: Role,
+    start?: SpawnStart,
+    files: Record<string, string> = {},
+    update?: BranchUpdate,
+  ) => {
     const attempt = (attempts[role] ?? 0) + 1;
     attempts[role] = attempt;
     const agent_id = agentIdFor("w1", "T1", role, attempt);
     const worktree = `/wt/w1/T1-${role}-${attempt}`;
     const branch = start?.detach ? "HEAD" : branchName("w1", "T1", role, attempt);
-    spawns.push({ role, agent_id, worktree, ...(start !== undefined ? { start } : {}), files });
+    spawns.push({
+      role,
+      agent_id,
+      worktree,
+      ...(start !== undefined ? { start } : {}),
+      files,
+      ...(update !== undefined ? { branch_update: update } : {}),
+    });
     if (start !== undefined) world.local[worktree] = start.ref;
     await journal({
       type: "agent_spawned",
@@ -335,7 +352,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     home,
     record: () => rec,
     journal,
-    spawn: async (_task, role, req) => (holdSpawns ? null : spawnAgent(role, req.start, req.files)),
+    spawn: async (_task, role, req) =>
+      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
+    branchUpdate: () => branchUpdate ?? "rebase",
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);
@@ -465,6 +484,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         headRefOid: head,
       });
     },
+    /** Change the `branch_update` tunable (a config_set): only a step entered later sees it. */
+    setBranchUpdate(m: BranchUpdate) {
+      branchUpdate = m;
+    },
     /**
      * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,
      * CI `ci` on it), and it reports `status` with `result`.
@@ -513,7 +536,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     openDecisions: () =>
       (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),
-    cleanup: () => rmSync(home, { recursive: true, force: true }),
+    /** @deprecated Nothing to release: `home` is a tempDir, removed when the test ends. */
+    cleanup: () => {},
   };
   return h;
 }

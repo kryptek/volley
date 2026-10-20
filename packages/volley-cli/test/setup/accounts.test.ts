@@ -1,16 +1,22 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
 import { type DynsecCommand, cmd } from "../../src/auth/dynsec";
 import { ROLE_ACLS, VOLLEY_ROLES, roleName } from "../../src/auth/roles";
-import { PHONE_LABEL, keychainAddCommand, planAccounts, planPhone } from "../../src/setup/accounts";
+import {
+  PHONE_LABEL,
+  keychainAddCommand,
+  newDeskPassword,
+  planAccounts,
+  planPhone,
+} from "../../src/setup/accounts";
 import { planSecurity } from "../../src/setup/broker";
 import { encodeQr, renderQr } from "../../src/setup/qr";
 import type { StepPlan } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 describe("setup: accounts", () => {
   let dir: string;
@@ -42,12 +48,11 @@ describe("setup: accounts", () => {
   };
 
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-accounts-"));
+    dir = tempDir("volley-setup-accounts-");
     fake = await startFakeDynsec();
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("is blocked until the broker takes the admin login", async () => {
@@ -98,6 +103,26 @@ describe("setup: accounts", () => {
     expect(tokens[0].kind).toBe("admin");
   });
 
+  it("hands the one-time admin token to deliverToken when set, never to stdout", async () => {
+    await setUp();
+    const delivered: { token: string; token_id: string; expires_at: string }[] = [];
+    m.ctx.deliverToken = (t) => {
+      delivered.push(t);
+    };
+    const lines = await applyAll(await planAccounts(m.ctx));
+    expect(delivered).toHaveLength(1);
+    const [t] = delivered;
+    expect(t?.token).toMatch(/^vly_admin_[0-9a-f]{8}_[0-9a-f]{32}$/);
+    expect(t?.token).toContain(`_${t?.token_id}_`);
+    const stored = JSON.parse(readFileSync(authFile("tokens.json"), "utf-8")).tokens;
+    expect(t?.expires_at).toBe(stored[0].expires_at);
+    expect(m.io.readStdout()).not.toMatch(/vly_admin_/);
+    expect(lines.join("\n")).not.toMatch(/vly_admin_/);
+    expect(lines).toContain(
+      `Issued a one-time admin token (${t?.token_id}, until ${t?.expires_at}).`,
+    );
+  });
+
   it("a second plan finds everything done (the admin token is pending)", async () => {
     await setUp();
     await applyAll(await planAccounts(m.ctx));
@@ -125,6 +150,40 @@ describe("setup: accounts", () => {
     expect(m.io.readStdout()).toMatch(/desk\s+pw-/);
     expect(m.io.readStdout()).not.toMatch(/coordinator\s+pw-/);
     expect((await planAccounts(m.ctx)).changes).toEqual([]);
+  });
+
+  it("under the Desk (deliverToken set), never promises a desk password it will not show", async () => {
+    await setUp();
+    m.ctx.deliverToken = () => {};
+    const [create] = (await planAccounts(m.ctx)).changes;
+    expect(create?.summary).toBe(
+      "Create Volley's 8 shared roles and the identities volleyd, desk, coordinator (desk's password is not shown here: Setup & Security › New desk password issues one, shown once)",
+    );
+    await applyAll(await planAccounts(m.ctx));
+    await admin([cmd.deleteClient("coordinator")]);
+    // coordinator's password goes to its file: nothing to say about it.
+    expect((await planAccounts(m.ctx)).changes[0]?.summary).toBe(
+      "Create the missing identity coordinator",
+    );
+  });
+
+  it("newDeskPassword gives the desk login a new password and returns it, once", async () => {
+    await setUp();
+    await applyAll(await planAccounts(m.ctx));
+    const before = fake.clients();
+    m.freshIO();
+    const password = await newDeskPassword(m.ctx);
+    expect(fake.clients().get("desk")?.password).toBe(password);
+    expect(password).not.toBe(before.get("desk")?.password);
+    for (const u of ["volleyd", "coordinator", "dynsec-admin"]) {
+      expect(fake.clients().get(u)?.password).toBe(before.get(u)?.password);
+    }
+    expect(m.io.readStdout()).not.toContain(password);
+  });
+
+  it("newDeskPassword refuses while the desk login does not exist", async () => {
+    await setUp();
+    await expect(newDeskPassword(m.ctx)).rejects.toThrow(/no desk login .*accounts step/);
   });
 
   it("rotates an identity whose credential file is gone, writing the file", async () => {
@@ -236,7 +295,7 @@ describe("setup: phone", () => {
     for (const c of plan.changes) await c.apply();
   };
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-phone-"));
+    dir = tempDir("volley-setup-phone-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir, { lan: true });
     await applyAll(await planSecurity(m.ctx));
@@ -245,7 +304,6 @@ describe("setup: phone", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it("issues a steer sign-in link for the phone and prints it as a QR code and a URL", async () => {

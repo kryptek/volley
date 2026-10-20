@@ -342,6 +342,7 @@ export class SshTmuxHost implements RemoteHost {
     const session = await this.freeSession(sessionName(spec.name)).catch((e: unknown) => {
       throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`);
     });
+    await this.syncTmuxPath();
     const r = await this.run(
       [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
       spec.launch !== undefined ? { launch: spec.launch } : {},
@@ -354,6 +355,33 @@ export class SshTmuxHost implements RemoteHost {
       });
     }
     return { workspace: session };
+  }
+
+  /**
+   * Give the box's tmux server the PATH an ssh session gets there now (its login shell's, e.g.
+   * from ~/.zshenv): a server started earlier keeps the PATH it started with, and its new
+   * sessions inherit that, so a fixed PATH would not reach the agent. It may be the user's own
+   * server (no -L: the default socket), so the ssh PATH goes first and every directory the
+   * server already has stays, after it: nothing a working PATH had is dropped. Best effort, and
+   * nothing to do with no server running: the server `new-session` starts gets the ssh PATH.
+   */
+  private async syncTmuxPath(): Promise<void> {
+    const dirs = (path: string) => path.split(":").filter((d) => d.startsWith("/"));
+    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(() => null);
+    const ssh = r?.code === 0 && !r.stdout.trim().includes("\n") ? dirs(r.stdout.trim()) : [];
+    if (ssh.length === 0) return;
+    const shown = await this.run([{ argv: ["tmux", "show-environment", "-g", "PATH"] }]).catch(
+      () => null,
+    );
+    const line = shown?.code === 0 ? shown.stdout.trim() : "";
+    // `PATH=<dirs>`; `-PATH` (removed) or anything else: the server has no PATH to keep.
+    if (shown?.code !== 0 || line.includes("\n")) return;
+    const server = line.startsWith("PATH=") ? dirs(line.slice(5)) : [];
+    const merged = [...new Set([...ssh, ...server])];
+    if (merged.length === server.length) return;
+    await this.run([{ argv: ["tmux", "set-environment", "-g", "PATH", merged.join(":")] }]).catch(
+      () => null,
+    );
   }
 
   /** `base`, or `base-2`, `base-3`, … — the first name no tmux session has. */

@@ -1,21 +1,13 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LAYOUTS, type Layout } from "../../src/auth/config";
+import { LAYOUTS, type Layout, generateConfig } from "../../src/auth/config";
 import { ACCOUNT_ROLE_MAP, VOLLEY_ROLES, roleName } from "../../src/auth/roles";
 import { auth } from "../../src/commands/auth";
 import { makeBufferIO } from "../../src/io";
 import { type TestDeps, fakeDeps } from "../helpers/auth-deps";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
+import { tempDir } from "../helpers/tmp";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const AGENTS = ["w1-t1-implementer-1", "w1-t2-reviewer-1"];
@@ -31,7 +23,7 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     join(worktrees, "w1", id.replace(/^w1-/, "").replace(/-1$/, ""), ".volley", "agent.json");
 
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-migrate-"));
+    dir = tempDir("volley-migrate-");
     fake = await startFakeDynsec();
     authDir = join(dir, "etc", "volley");
     worktrees = join(dir, "worktrees");
@@ -111,7 +103,6 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const run = async (argv: string[], deps: TestDeps) => {
@@ -213,6 +204,35 @@ describe("volley auth migrate (acl_file + password_file → Dynamic Security)", 
     ]) {
       expect(rerun).not.toContain(c);
     }
+  });
+
+  it("leaves a config `volley setup` wrote alone: only the header names another tool", async () => {
+    const deps = fakeDeps(fake, layout);
+    expect((await run(["migrate"], deps)).code).toBe(0);
+    const bySetup = generateConfig({ ...layout, by: "volley setup" });
+    writeFileSync(layout.config, bySetup);
+    const backups = readdirSync(join(dir, "etc")).length;
+    const again = await run(["migrate"], deps);
+    expect(again.code).toBe(0);
+    expect(readFileSync(layout.config, "utf-8")).toBe(bySetup);
+    expect(readdirSync(join(dir, "etc")).length).toBe(backups);
+  });
+
+  it("keeps a LAN WebSocket listener from the old config, and shows the change before writing", async () => {
+    writeFileSync(
+      layout.config,
+      `listener 1883 127.0.0.1\nlistener 9001\nprotocol websockets\nallow_anonymous false\npassword_file ${authDir}/passwd\nacl_file ${authDir}/acl.conf\n`,
+    );
+    const r = await run(["migrate"], fakeDeps(fake, layout));
+    expect(r.code).toBe(0);
+    const conf = readFileSync(layout.config, "utf-8");
+    expect(conf).toMatch(/^listener 9001$/m);
+    expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+    expect(r.stdout).toContain(`-password_file ${authDir}/passwd`);
+    expect(r.stdout).toContain("open to the LAN");
+    expect(r.stdout.indexOf(`--- ${layout.config}`)).toBeLessThan(
+      r.stdout.indexOf(`Wrote ${layout.config}`),
+    );
   });
 
   it("an agent.json without a password gets a new one, written before its login exists", async () => {

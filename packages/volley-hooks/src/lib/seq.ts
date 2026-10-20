@@ -105,7 +105,7 @@ export function releaseLock(path: string, token: string): void {
 }
 
 /** Run `fn` holding `path`, waiting (polling) up to `waitMs` for it. */
-async function withLock<T>(path: string, fn: () => T, waitMs = 2000): Promise<T> {
+export async function withLock<T>(path: string, fn: () => T, waitMs = 2000): Promise<T> {
   const deadline = Date.now() + waitMs;
   let token = tryLock(path);
   while (token === null) {

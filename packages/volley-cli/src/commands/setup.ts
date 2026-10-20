@@ -1,17 +1,23 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, ensureOwnedDir, realAuthDeps, volleydHome } from "../auth/context";
+import { type AuthContext, realAuthDeps, volleydHome } from "../auth/context";
 import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
+import {
+  appendSetupLog,
+  readSetupInstall,
+  setupLogFile,
+  writeSetupInstall,
+} from "../setup/journal";
 import { planServices } from "../setup/services";
 import {
   type Planner,
@@ -20,6 +26,7 @@ import {
   type StepName,
   type StepPlan,
   fencedExec,
+  listenerUrls,
   setupFence,
 } from "../setup/step";
 import { defaultAuthDir } from "./auth";
@@ -36,7 +43,8 @@ import { DESK_PORT } from "./desk-serve";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Services  volleyd, the hooks for coordinator sessions, the Desk built and served
+ *   4. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *                coordinator sessions, the Desk built and served
  *   5. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
@@ -89,6 +97,68 @@ function findBun(path: string): string {
   return process.execPath;
 }
 
+/** What the hidden prompt has read so far: the value, and an escape sequence being skipped. */
+export interface HiddenInput {
+  value: string;
+  /** Inside ESC (`esc`), ESC [ … (`csi`) or ESC O x (`ss3`): an arrow or function key. */
+  skip: "" | "esc" | "csi" | "ss3";
+}
+
+/**
+ * Feed typed text to the hidden prompt: Enter ends it, Backspace edits, Ctrl-C cancels, Ctrl-D
+ * gives up; an arrow or function key (an escape sequence) adds nothing. Null while it goes on.
+ */
+export function hiddenKeys(state: HiddenInput, text: string): "enter" | "cancel" | "eof" | null {
+  for (const ch of text) {
+    if (state.skip === "esc") {
+      state.skip = ch === "[" ? "csi" : ch === "O" ? "ss3" : "";
+      continue;
+    }
+    if (state.skip === "ss3") {
+      state.skip = "";
+      continue;
+    }
+    if (state.skip === "csi") {
+      // Parameters and intermediates until the final byte (@ to ~).
+      if (ch >= "@" && ch <= "~") state.skip = "";
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") return "enter";
+    if (ch === "\u0003") return "cancel";
+    if (ch === "\u0004") return "eof";
+    if (ch === "\u001b") state.skip = "esc";
+    else if (ch === "\u007f" || ch === "\b") state.value = state.value.slice(0, -1);
+    else if (ch >= " ") state.value += ch;
+  }
+  return null;
+}
+
+/**
+ * Read one line from the terminal without echoing it (raw mode; see `hiddenKeys`). Null when
+ * stdin is not a terminal or on Ctrl-D; Ctrl-C rejects ("cancelled").
+ */
+function askHidden(prompt: string): Promise<string | null> {
+  const stdin = process.stdin;
+  if (stdin.isTTY !== true) return Promise.resolve(null);
+  process.stdout.write(prompt);
+  return new Promise((resolve, reject) => {
+    const state: HiddenInput = { value: "", skip: "" };
+    const onData = (d: Buffer) => {
+      const end = hiddenKeys(state, d.toString("utf-8"));
+      if (end === null) return;
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stdout.write("\n");
+      if (end === "cancel") reject(new Error("cancelled (Ctrl-C): nothing was stored"));
+      else resolve(end === "enter" ? state.value : null);
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+}
+
 export const realSetupDeps = (env: Record<string, string | undefined>): SetupDeps => ({
   auth: realAuthDeps,
   exec: (argv, opts) =>
@@ -135,6 +205,7 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
     }
   },
   interactive: process.stdin.isTTY === true,
+  askSecret: (prompt) => askHidden(prompt),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   platform: process.platform,
   uid: process.getuid?.() ?? 0,
@@ -176,6 +247,12 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
   const str = (k: string) => values[k] as string | undefined;
   const given = injected ?? realSetupDeps(env);
+  const invoker = given.auth.invokingUser(env);
+  const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
+  const home = volleydHome(env, sudoHome);
+  // The install the last finished run used: without --layout (or with the same one) it is the
+  // default, so `volley setup --step services` after a `sudo volley setup --layout …` keeps it.
+  const saved = readSetupInstall(home);
   let layout: Layout = given.auth.layout();
   const layoutFlag = str("layout");
   if (layoutFlag !== undefined) {
@@ -184,6 +261,15 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       return EXIT.USAGE;
     }
     layout = LAYOUTS[layoutFlag as LayoutName];
+  }
+  const fromRecord = saved !== null && (layoutFlag ?? saved.layout) === saved.layout;
+  if (fromRecord && layoutFlag === undefined) {
+    layout = {
+      ...LAYOUTS[saved.layout],
+      config: saved.config,
+      stateFile: saved.state_file,
+      authDir: saved.auth_dir,
+    };
   }
   const only = (values.step as string[] | undefined) ?? [];
   const names = STEPS.map(([n]) => n as string);
@@ -194,7 +280,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     );
     return EXIT.USAGE;
   }
-  const portText = str("desk-port") ?? String(DESK_PORT);
+  const portText =
+    str("desk-port") ?? String((fromRecord ? saved.desk_port : undefined) ?? DESK_PORT);
   if (!/^\d+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65_535) {
     io.stderr("volley setup: --desk-port must be a port number (1..65535)\n");
     return EXIT.USAGE;
@@ -206,26 +293,20 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
 
   const url = resolveBrokerUrl(str("broker-url"), env);
-  let broker: URL;
-  try {
-    broker = new URL(url);
-  } catch {
-    io.stderr(`volley setup: not a broker URL: ${url}\n`);
-    return EXIT.USAGE;
-  }
-  if (broker.protocol !== "mqtt:" && broker.protocol !== "tcp:") {
-    io.stderr(
-      `volley setup: ${broker.protocol === "mqtts:" || broker.protocol === "wss:" ? "TLS is not supported by `volley setup` yet" : "the broker URL must be mqtt://"} (got ${url})\n`,
-    );
+  const listeners = listenerUrls(url);
+  if ("error" in listeners) {
+    io.stderr(`volley setup: ${listeners.error}\n`);
     return EXIT.USAGE;
   }
   // Every command goes through the fence: the exact commands the steps run, nothing else.
   const fence = setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun });
   const deps: SetupDeps = { ...given, exec: fencedExec(given.exec, fence) };
-  const invoker = deps.auth.invokingUser(env);
-  const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const auth: AuthContext = {
-    dir: str("dir") ?? env.VOLLEY_AUTH_DIR ?? defaultAuthDir(layout),
+    dir:
+      str("dir") ??
+      env.VOLLEY_AUTH_DIR ??
+      (fromRecord ? saved.auth_dir : undefined) ??
+      defaultAuthDir(layout),
     layout,
     url,
     io,
@@ -235,12 +316,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   const ctx: SetupContext = {
     auth,
     deps,
-    config: str("config") ?? layout.config,
-    stateFile: str("state-file") ?? layout.stateFile,
-    tcpUrl: url,
-    wsUrl: `ws://${broker.hostname.includes(":") ? `[${broker.hostname}]` : broker.hostname}:9001`,
+    config: str("config") ?? (fromRecord ? saved.config : layout.config),
+    stateFile: str("state-file") ?? (fromRecord ? saved.state_file : layout.stateFile),
+    ...listeners,
     home: sudoHome ?? env.HOME ?? homedir(),
-    volleydHome: volleydHome(env, sudoHome),
+    volleydHome: home,
     repair: values.repair === true,
     yes: values.yes === true,
     ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
@@ -248,27 +328,21 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     deskPort: Number(portText),
   };
 
-  const logFile = join(ctx.volleydHome, "setup.log");
-  const journal = (step: StepName, event: string, summary?: string) => {
-    try {
-      const owner = typeof invoker === "object" ? invoker : null;
-      ensureOwnedDir(deps.auth, ctx.volleydHome, owner);
-      appendFileSync(
-        logFile,
-        `${JSON.stringify({ at: io.now().toISOString(), step, event, ...(summary !== undefined ? { summary } : {}) })}\n`,
-        { mode: 0o600 },
-      );
-      // Under sudo the journal is the invoking user's, like the rest of $VOLLEYD_HOME.
-      if (owner !== null) deps.auth.chown(logFile, owner.uid, owner.gid);
-    } catch {
-      // The journal is a record, not a gate: an unwritable home never stops the setup.
-    }
-  };
+  const logFile = setupLogFile(ctx.volleydHome);
+  const journal = (step: StepName, event: string, summary?: string) =>
+    appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
+    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
+  // A run that stops once the Services step has checked cmux (often at the cmux change itself:
+  // the runs where its mode matters most) still records the mode it found, and replaces an
+  // earlier run's.
+  const stopped = () => {
+    if (ctx.cmuxSocketMode !== undefined) writeSetupInstall(ctx);
+    return EXIT.ERROR;
+  };
   const skipped: string[] = [];
   for (const [i, [name, planner]] of STEPS.entries()) {
     if (only.length > 0 && !only.includes(name)) continue;
@@ -278,14 +352,14 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     } catch (e) {
       journal(name, "failed", e instanceof Error ? e.message : String(e));
       io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
-      return EXIT.ERROR;
+      return stopped();
     }
     io.stdout(`\n[${i + 1}/${STEPS.length}] ${plan.title}\n`);
     for (const f of plan.found) io.stdout(`  · ${f}\n`);
     if (plan.blocked !== undefined) {
       journal(name, "blocked", plan.blocked.split("\n")[0]);
       io.stdout(`  ✗ Blocked: ${plan.blocked}\n`);
-      return EXIT.ERROR;
+      return stopped();
     }
     if (plan.skipped !== undefined) {
       journal(name, "skipped", plan.skipped);
@@ -311,7 +385,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stdout(
         `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
       );
-      return EXIT.ERROR;
+      return stopped();
     }
     for (const c of plan.changes) {
       try {
@@ -323,7 +397,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         const msg = e instanceof Error ? e.message : String(e);
         journal(name, "failed", `${c.summary}: ${msg}`);
         io.stderr(`volley setup: ${plan.title}: ${c.summary}: ${msg}\n`);
-        return EXIT.ERROR;
+        return stopped();
       }
     }
     const problems = (await plan.verify?.()) ?? [];
@@ -332,10 +406,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stderr(
         `volley setup: ${plan.title}: after the changes:\n${problems.map((p) => `  - ${p}\n`).join("")}`,
       );
-      return EXIT.ERROR;
+      return stopped();
     }
+    for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
     journal(name, "verified");
   }
+  // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
+  writeSetupInstall(ctx);
   io.stdout(
     [
       "",
@@ -343,7 +420,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         ? "Setup complete."
         : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
       "Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
-      `${join(auth.dir, "coordinator.json")} (in the MCP server env and your shell profile).`,
+      `${join(auth.dir, "coordinator.json")}, in the MCP server's env. The volley and volleyd`,
+      "commands on this machine use that login on their own (keychain, then coordinator.json).",
       `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
       "",
     ].join("\n"),
@@ -367,8 +445,12 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Services  volleyd (launchd / systemd --user), the Volley hooks for coordinator sessions,
-               the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
+  4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+               PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
+               --user), on macOS the cmux socket password volleyd's service needs (asked for,
+               hidden), the Volley hooks for coordinator sessions (your status line keeps
+               working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
+               (stops if another program listens on that port)
   5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 

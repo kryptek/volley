@@ -2,17 +2,32 @@
  * The coordinators window, ported from the prototype `CoordinatorsWindow`: one
  * row per wave with its coordinator's state (`Working` / `Waiting for your
  * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
- * viewport to the wave and its agents) and show/hide. A wave that has ended
- * shows a neutral `Complete` / `Stopped` instead: its coordinator is gone
- * because the work is done, and there is nothing to claim; with its agents it
- * folds off the canvas under "Show finished" like finished agents. A
+ * viewport to the wave and its agents) and show/hide. Every row carries a status
+ * chip (`working`, `needs you`, `completed`, `stopped`), apart from its left
+ * bar, which is the wave's identity colour (the supervisor row's bar is neutral
+ * and its health is a chip too, red when down), so a colour never means two things.
+ * Active waves come first; ended ones (their coordinator is gone because the
+ * work is done, nothing to claim) sit in a collapsed `Ended · N` group at the
+ * bottom. With its agents an ended wave folds off the canvas under "Show
+ * finished" like finished agents; its row offers Show (put its window back on
+ * the canvas and fit to it) and Dismiss (drop it from this Desk: Desk-side
+ * state only, the wave and its journal are untouched). A
  * coordinator idle with a background wait armed reads `Working · waiting on
  * events`: it wakes on the wave's events, nobody has to answer. Hidden waves keep
  * running and still count towards the top-bar pill and notifications. The
  * first row is the supervisor (`volleyd`) with the top-bar pill's health: it
  * runs the waves, but it is not an agent and has no window of its own.
  */
-import { Cancel01Icon, CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
+import {
+  ArrowDown01Icon,
+  ArrowRight01Icon,
+  Cancel01Icon,
+  CenterFocusIcon,
+  EyeIcon,
+  ViewOffIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { type ReactNode, useState } from "react";
 import type { EffectiveCoordinator } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
@@ -43,6 +58,34 @@ export const ENDED_LABEL: Partial<Record<string, string>> = {
   complete: "Complete",
   stopped: "Stopped",
 };
+
+const Icon = ({ i }: { i: typeof Cancel01Icon }) => (
+  <HugeiconsIcon icon={i} size={13} strokeWidth={1.8} />
+);
+
+export type StatusChip = "working" | "needs" | "completed" | "stopped" | "failed";
+
+const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
+  complete: "completed",
+  stopped: "stopped",
+};
+
+export const CHIP_LABEL: Record<StatusChip, string> = {
+  working: "working",
+  needs: "needs you",
+  completed: "completed",
+  stopped: "stopped",
+  failed: "failed",
+};
+
+/** A wave row's status chip: its end state once ended, else whether its coordinator needs you. */
+export function waveChip(w: WaveView, c: EffectiveCoordinator): StatusChip {
+  return ENDED_CHIP[w.state?.status ?? ""] ?? (c.state === "working" ? "working" : "needs");
+}
+
+export function Chip({ kind, label }: { kind: StatusChip; label?: string }) {
+  return <span className={`chip st-chip st-chip--${kind}`}>{label ?? CHIP_LABEL[kind]}</span>;
+}
 
 export interface CoordinatorsWindowProps {
   /** Waves with state, in display order. */
@@ -77,6 +120,14 @@ export interface CoordinatorsWindowProps {
     graceMin: number;
     onToggle: () => void;
   };
+  /** Ended waves on the canvas (Show, or "Show finished"); the rest of the ended ones are folded. */
+  shownEnded?: ReadonlySet<string>;
+  /** Show: put an ended wave's window back on the canvas and fit the viewport to it. */
+  onShowEnded?: (wave: string) => void;
+  /** Dismiss: drop an ended wave from this Desk (Desk-side only). */
+  onDismiss?: (wave: string) => void;
+  /** How many ended waves are dismissed, and how to bring them back. */
+  dismissed?: { count: number; onRestore: () => void };
   /** The supervisors for the first row; `[]` says volleyd is absent, omitted shows no row (demo). */
   supervisors?: readonly SupervisorView[];
   /** Clock for the supervisor's age (the App's attention tick). */
@@ -93,9 +144,12 @@ function SupervisorRow({ sup, now }: { sup: SupervisorView | undefined; now: num
       aria-label={`Supervisor ${id}`}
       className={`coord coord--sup st-${h.down ? "gone" : "working"}`}
     >
-      <span className="coord-dot" />
+      <span className="coord-dot coord-dot--neutral" />
       <div className="coord-main">
-        <div className="coord-name">Supervisor</div>
+        <div className="coord-name">
+          Supervisor{" "}
+          <Chip kind={h.down ? "failed" : "working"} label={h.down ? "down" : "running"} />
+        </div>
         <div className="coord-sub">
           <span className="coord-state">{parts.join(" · ")}</span>
           {sup?.version && <span className="dim"> · v{sup.version}</span>}
@@ -115,7 +169,59 @@ function pctOf(w: WaveView): number {
     : 0;
 }
 
+/** A wave's row: identity bar, name, status chip, coordinator line, progress; `children` are its actions. */
+function WaveRow({
+  w,
+  c,
+  p,
+  hidden,
+  children,
+}: {
+  w: WaveView;
+  c: EffectiveCoordinator;
+  p: CoordinatorsWindowProps;
+  hidden: boolean;
+  children: ReactNode;
+}) {
+  const accent = accentFor(w.id);
+  const mine = isMine(w.state?.owner, p.me, p.identity);
+  const ended = ENDED_LABEL[w.state?.status ?? ""];
+  return (
+    <li
+      aria-label={w.id}
+      className={`coord st-${ended ? "ended" : c.state}${hidden ? " coord--hidden" : ""}`}
+    >
+      <span className="coord-dot" style={{ background: accent }} />
+      <div className="coord-main">
+        <div className="coord-name">
+          <Clawd size={16} waiting={!ended && c.state === "awaiting_input"} /> {w.id}{" "}
+          <Chip kind={waveChip(w, c)} />
+          {mine && <span className="chip chip--mine">★ yours</span>}
+        </div>
+        <div className="coord-sub">
+          {c.id ?? "no owner"} ·{" "}
+          <span className="coord-state">
+            {ended ??
+              (c.state === "working" && c.waitingOnEvents
+                ? WAITING_ON_EVENTS_LABEL
+                : STATE_LABEL[c.state])}
+          </span>
+          {ended && hidden && <span className="dim"> · hidden</span>}
+        </div>
+        <div className="coord-bar">
+          <span style={{ width: `${pctOf(w)}%`, background: accent }} />
+        </div>
+      </div>
+      <div className="coord-actions">{children}</div>
+    </li>
+  );
+}
+
 export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
+  const [endedOpen, setEndedOpen] = useState(false);
+  const isEnded = (w: WaveView) => ENDED_LABEL[w.state?.status ?? ""] !== undefined;
+  const active = p.waves.filter((w) => !isEnded(w));
+  const ended = p.waves.filter(isEnded);
   const goTo = (id: string) => {
     const rects = p.clusterOf?.(id) ?? [];
     if (rects.length) p.fitTo?.(rects);
@@ -148,48 +254,70 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
         {p.supervisors?.map((s) => (
           <SupervisorRow key={s.id} sup={s} now={p.now ?? Date.now()} />
         ))}
-        {p.waves.map((w) => {
+        {active.map((w) => {
           const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
-          const accent = accentFor(w.id);
           const hidden = p.hidden.has(w.id);
-          const mine = isMine(w.state?.owner, p.me, p.identity);
-          const ended = ENDED_LABEL[w.state?.status ?? ""];
           return (
-            <li
-              key={w.id}
-              aria-label={w.id}
-              className={`coord st-${ended ? "ended" : c.state}${hidden ? " coord--hidden" : ""}`}
-            >
-              <span className="coord-dot" style={{ background: accent }} />
-              <div className="coord-main">
-                <div className="coord-name">
-                  <Clawd size={16} waiting={!ended && c.state === "awaiting_input"} /> {w.id}{" "}
-                  {mine && <span className="chip chip--mine">★ yours</span>}
-                </div>
-                <div className="coord-sub">
-                  {c.id ?? "no owner"} ·{" "}
-                  <span className="coord-state">
-                    {ended ??
-                      (c.state === "working" && c.waitingOnEvents
-                        ? WAITING_ON_EVENTS_LABEL
-                        : STATE_LABEL[c.state])}
-                  </span>
-                </div>
-                <div className="coord-bar">
-                  <span style={{ width: `${pctOf(w)}%`, background: accent }} />
-                </div>
-              </div>
-              <div className="coord-actions">
-                <IconBtn label={`Go to ${w.id}`} i={CenterFocusIcon} onClick={() => goTo(w.id)} />
-                <IconBtn
-                  label={hidden ? `Show ${w.id}` : `Hide ${w.id}`}
-                  i={hidden ? ViewOffIcon : EyeIcon}
-                  onClick={() => p.onToggle(w.id)}
-                />
-              </div>
-            </li>
+            <WaveRow key={w.id} w={w} c={c} p={p} hidden={hidden}>
+              <IconBtn label={`Go to ${w.id}`} i={CenterFocusIcon} onClick={() => goTo(w.id)} />
+              <IconBtn
+                label={hidden ? `Show ${w.id}` : `Hide ${w.id}`}
+                i={hidden ? ViewOffIcon : EyeIcon}
+                onClick={() => p.onToggle(w.id)}
+              />
+            </WaveRow>
           );
         })}
+        {(ended.length > 0 || (p.dismissed?.count ?? 0) > 0) && (
+          <li className="coord-group" aria-label="Ended waves">
+            <button
+              type="button"
+              className="coord-group-head"
+              aria-expanded={endedOpen}
+              onClick={() => setEndedOpen((o) => !o)}
+            >
+              <Icon i={endedOpen ? ArrowDown01Icon : ArrowRight01Icon} />
+              Ended · {ended.length}
+            </button>
+            {endedOpen && (
+              <ul className="coord-list">
+                {ended.map((w) => {
+                  const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
+                  const onCanvas = p.shownEnded?.has(w.id) ?? false;
+                  return (
+                    <WaveRow key={w.id} w={w} c={c} p={p} hidden={!onCanvas}>
+                      <button
+                        type="button"
+                        className="coord-btn"
+                        aria-label={`Show ${w.id} on the canvas`}
+                        onClick={() => p.onShowEnded?.(w.id)}
+                      >
+                        Show
+                      </button>
+                      <button
+                        type="button"
+                        className="coord-btn"
+                        aria-label={`Dismiss ${w.id} from the Desk`}
+                        title="Hide it from this Desk (the wave and its journal are not touched)"
+                        onClick={() => p.onDismiss?.(w.id)}
+                      >
+                        Dismiss
+                      </button>
+                    </WaveRow>
+                  );
+                })}
+                {(p.dismissed?.count ?? 0) > 0 && (
+                  <li className="coord-dismissed">
+                    {plural(p.dismissed?.count ?? 0, "dismissed wave")} ·{" "}
+                    <button type="button" className="coord-link" onClick={p.dismissed?.onRestore}>
+                      Bring back
+                    </button>
+                  </li>
+                )}
+              </ul>
+            )}
+          </li>
+        )}
       </ul>
       <p className="coord-note">
         Hidden waves keep running. A wave that needs you still counts in the top bar and raises a

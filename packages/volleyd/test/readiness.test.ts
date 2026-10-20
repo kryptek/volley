@@ -1,7 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { foldHost, hostSamples } from "../src/admission";
 import { DEFAULT_SHARING, readSharing } from "../src/claude/sharing";
 import type { MachineRecord } from "../src/machines";
@@ -13,6 +12,7 @@ import {
   readinessTopic,
 } from "../src/readiness";
 import { envelope, schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const CHECKED = new Date("2026-10-19T09:00:00.000Z");
 
@@ -276,9 +276,8 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
 describe("requirements.sharing is the supervisor's sharing.yaml", () => {
   let root: string;
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "volleyd-readiness-"));
+    root = tempDir("volleyd-readiness-");
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
 
   it("equals readSharing's modes", () => {
     writeFileSync(join(root, "sharing.yaml"), "skills: own\nmcp: own\n");

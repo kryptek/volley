@@ -60,10 +60,10 @@ function renderAgent(
 }
 
 describe("AgentWindow", () => {
-  it("title shows task, issue, the wave chip in the wave accent, and the role", () => {
+  it("title shows the purpose (task · title), the wave chip in the wave accent, and the role", () => {
     const { container } = renderAgent(stateWith(), FIXUP);
     const bar = container.querySelector(".win-bar") as HTMLElement;
-    expect(bar.querySelector(".t-name")).toHaveTextContent("T1 #102");
+    expect(bar.querySelector(".t-name")).toHaveTextContent("T1 · Chip mapper + null-case handling");
     const chip = within(bar).getByText("status-chip");
     expect(chip).toHaveClass("chip--wave");
     expect(chip.querySelector("i")).toHaveStyle({ background: ACCENT });
@@ -72,10 +72,10 @@ describe("AgentWindow", () => {
     expect(container.querySelector(".win")).toHaveStyle({ width: "460px" });
   });
 
-  it("shows the task title from the wave spec and the latest narration", () => {
+  it("shows the task title from the wave spec as the purpose line and the latest narration", () => {
     const { container } = renderAgent(stateWith(), FIXUP);
-    expect(container.querySelector(".a-title")).toHaveTextContent(
-      "Chip mapper + null-case handling",
+    expect(container.querySelector(".a-purpose-text")).toHaveTextContent(
+      "T1 · Chip mapper + null-case handling",
     );
     expect(container.querySelector(".narr")).toHaveTextContent(
       "Addressing quality P1: legacy CLSD alias falls through to the raw enum",
@@ -137,7 +137,7 @@ describe("AgentWindow", () => {
       `--acc: ${NEUTRAL_ACCENT}`,
     );
     expect(screen.getByText(UNASSIGNED)).toHaveClass("chip--wave");
-    expect(container.querySelector(".a-title")).toBeNull();
+    expect(container.querySelector(".a-purpose")).toBeNull();
     expect(container.querySelector(".pipe")).toBeNull();
     // The title already names a task-less agent by its id; it is not repeated.
     expect(screen.getAllByText("adhoc-1")).toHaveLength(1);
@@ -182,7 +182,9 @@ describe("AgentWindow", () => {
   it("the chat glyph emits a callback with the agent id", () => {
     const onChat = vi.fn();
     renderAgent(stateWith(), FIXUP, { onChat });
-    fireEvent.click(screen.getByRole("button", { name: "Message T1 fixup" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Message T1 · Chip mapper + null-case handling fixup" }),
+    );
     expect(onChat).toHaveBeenCalledWith(FIXUP);
   });
 
@@ -326,7 +328,7 @@ describe("App agent windows", () => {
     act(() => {
       vi.advanceTimersByTime(22_500);
     });
-    expect(born().map((n) => n.textContent)).toEqual(["T1 #102"]);
+    expect(born().map((n) => n.textContent)).toEqual(["T1 · Chip mapper + null-case handling"]);
     expect(container.querySelector(".world .win--born .chip--role")).toHaveTextContent(
       "spec review",
     );

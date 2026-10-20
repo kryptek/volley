@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -10,8 +9,9 @@ import {
   markSuperseded,
   readBlocks,
 } from "../src/lib/steering-file";
+import { tempDir } from "./helpers/tmp";
 
-const path = () => join(mkdtempSync(join(tmpdir(), "volley-hooks-steer-")), "STEERING.md");
+const path = () => join(tempDir("volley-hooks-steer-"), "STEERING.md");
 const base = { type: "steering", from: "coord-a", at: "2026-10-18T10:00:00.000Z" };
 
 describe("STEERING.md", () => {

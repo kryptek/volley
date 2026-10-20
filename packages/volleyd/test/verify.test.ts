@@ -8,6 +8,7 @@ import { cleanupPlan } from "../src/commands/cleanup";
 import { Journal } from "../src/journal";
 import { LAUNCH_COMMAND } from "../src/launch";
 import { retainedTopics } from "../src/retire";
+import { lastOutputNote } from "../src/screens";
 import { type SpawnOutcome, spawnAgent } from "../src/spawn";
 import { trustDecisionId } from "../src/trust";
 import { sameModel, watchAgent } from "../src/verify";
@@ -289,7 +290,7 @@ describe("verify through hook signals (Aedes)", () => {
     const d = env.events.find((e) => e.type === "decision_opened");
     expect(d?.data).toMatchObject({
       kind: "repo_untrusted",
-      decision_id: trustDecisionId(env.repo),
+      decision_id: trustDecisionId("w1", env.repo),
     });
     const pointer = (d?.data.pointers as { screen?: string }).screen as string;
     expect(existsSync(pointer)).toBe(true);
@@ -429,6 +430,28 @@ describe("verify through hook signals (Aedes)", () => {
     expect(d?.data).toMatchObject({ kind: "unknown_screen", screen_class: "login" });
     const pointer = (d?.data.pointers as { screen?: string }).screen as string;
     expect(readFileSync(pointer, "utf-8")).toBe(screen("login.txt"));
+  });
+
+  it("an unknown_screen decision quotes the session's last output (why it did not start)", async () => {
+    const said =
+      "volleyd: cannot start the agent: claude is not on this session's PATH (/usr/bin:/bin). Put its directory on the PATH a non-interactive shell gets (zsh: ~/.zshenv; bash: the top of ~/.bashrc), then relaunch.";
+    const out = await spawnWith(async () => {}, [`$ bash .volley/launch.sh\n${said}\n\n`]);
+    expect(out).toMatchObject({ kind: "decision", decision: "unknown_screen" });
+    const d = env.events.find((e) => e.type === "decision_opened");
+    expect(d?.data.question).toContain("did not start");
+    expect(d?.data.question).toContain("Last output: “");
+    expect(d?.data.question).toContain("claude is not on this session's PATH");
+    expect(d?.data.last_output).toContain("claude is not on this session's PATH");
+  });
+
+  it("an empty screen says the session showed nothing (it may have exited at once)", async () => {
+    await spawnWith(async () => {}, [screen("blank.txt")]);
+    const d = env.events.find((e) => e.type === "decision_opened");
+    expect(d?.data.question).toContain("screen: empty");
+    expect(d?.data.question).toContain("nothing on screen: its session may have ended at once");
+    // A local agent: no remote ssh PATH hint.
+    expect(d?.data.question).not.toContain("ssh PATH");
+    expect(lastOutputNote(null, true)).toContain("non-interactive ssh PATH");
   });
 
   /** What volley-hooks writes when the broker refuses its CONNECT (runHook's AUTH_FAILED path). */

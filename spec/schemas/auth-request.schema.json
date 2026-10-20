@@ -36,6 +36,7 @@
                 "setup_plan",
                 "setup_apply",
                 "admin_token",
+                "desk_password",
                 "peer_doctor"
               ]
             },
@@ -186,6 +187,19 @@
                 "properties": {
                   "op": {
                     "const": "admin_token"
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "reply_key"],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "desk_password"
                   }
                 }
               },

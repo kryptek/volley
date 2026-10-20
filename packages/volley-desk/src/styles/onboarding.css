@@ -6,29 +6,60 @@
   flex-direction: column;
   gap: 14px;
 }
-/* The wizard's own modal, as the prototype's `Modal wide`. */
+/* The wizard's own modal, as the prototype's `Modal wide`. It never outgrows the viewport, and
+   its body scrolls inside it (a phone included). */
 .modal--wide {
   width: min(860px, 100%);
+  min-width: 0;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
 }
 .wiz-stepper {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  min-height: 0;
   padding: 14px 16px 16px;
   overflow: auto;
+}
+.wiz-stepper > *,
+.wiz-stepper .stepper__header,
+.wiz-stepper .stepper__body {
+  min-width: 0;
 }
 .wiz-stepper .stepper {
   background: transparent;
 }
+.wiz-stepper .stepper__header {
+  overflow-x: auto;
+}
+/* Clipped, not a scroll container: the action row below can stick to the wizard's bottom. */
+.wiz-stepper .stepper__viewport {
+  overflow: clip;
+}
+/* The step row is a progress display here, not buttons. */
+.wiz-stepper .stepper__segment {
+  cursor: default;
+}
+.wiz-stepper .stepper__badge[data-status="attention"] {
+  background: var(--amber);
+  box-shadow: none;
+  color: #1a1204;
+}
 .kv {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 6px 16px;
   margin: 0 0 10px;
   font-size: 13.5px;
 }
 .kv span {
   color: var(--dim);
+}
+.kv b {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .wiz-terminal {
   display: flex;
@@ -56,6 +87,18 @@
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* Back / Continue / Done stay in reach at the bottom of a tall step (over the scroller's own
+   bottom padding, which a sticky box otherwise keeps clear of). */
+.wiz-actions:not(.wiz-actions--inline) {
+  position: sticky;
+  bottom: -16px;
+  z-index: 1;
+  margin: 0 -16px -16px;
+  padding: 10px 16px 16px;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 15px 15px;
+  background: var(--panel-solid);
 }
 .wiz-actions--inline {
   justify-content: flex-start;
@@ -99,6 +142,9 @@
   display: flex;
   gap: 8px;
   align-items: baseline;
+}
+.checks li > svg {
+  flex-shrink: 0;
 }
 .checks li > span {
   min-width: 0;
@@ -164,6 +210,27 @@
 }
 .role--agent {
   color: var(--mute);
+}
+/* A device admin sign-in not seen for over a day (Broker accounts). */
+.role--stale {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.stale-note {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+.stale-note p {
+  margin: 0;
+}
+.stale-note .row-actions {
+  justify-content: flex-start;
 }
 .btn--danger {
   background: rgba(255, 90, 90, 0.16);
@@ -292,9 +359,24 @@
   font-size: 12.5px;
   color: #ffb3b3;
 }
+@media (max-width: 699.98px) {
+  /* Outranks responsive.css's phone `.modal` max-height (a % of the scrim: no bound at all). */
+  .modal.modal--wide {
+    max-width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+}
 @media (max-width: 560px) {
   .pair-grid {
     grid-template-columns: 1fr;
+  }
+  .wiz-stepper .kv {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .wiz-detail {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .acct-table th:nth-child(3),
   .acct-table td:nth-child(3):not(.agents-note) {

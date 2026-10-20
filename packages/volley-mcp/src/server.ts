@@ -11,6 +11,15 @@ import { volSendMailbox } from "./tools/send-mailbox";
 import { volSubscribe } from "./tools/subscribe";
 import { volTap } from "./tools/tap";
 
+/** A `links` issue / PR (SPEC §6.2): a number in `links.repo`, or an http(s) URL. */
+const REF = z.union([
+  z.number().int().positive(),
+  z
+    .string()
+    .url()
+    .regex(/^https?:\/\//, "http(s) URL"),
+]);
+
 /**
  * CallToolResult-compatible response shape. The index signature satisfies the SDK's
  * `{ [x: string]: unknown; content: ...; isError?: boolean }` requirement.
@@ -50,12 +59,30 @@ export function createServer(state: ServerState): McpServer {
   server.registerTool(
     "vol_register",
     {
-      description: "Register this agent in the Volley registry and flip status to `registered`.",
+      description:
+        'Register this agent in the Volley registry and flip status to `registered`. `title`: one line (at most 120 characters; blank is no title) saying what this agent is working on (the Desk shows it on the agent\'s window); call again to change it. `links`: `{ repo: "owner/name", issue, pr }`, each a number or an http(s) URL.',
       inputSchema: {
         capabilities: z.array(z.string()),
         parent_id: z.string().nullable().optional(),
         model: z.string().optional(),
         cwd: z.string().optional(),
+        title: z
+          .string()
+          .trim()
+          .max(120)
+          .regex(/^[^\r\n]*$/, "one line")
+          .optional(),
+        links: z
+          .object({
+            repo: z
+              .string()
+              .regex(/^[^/\s]+\/[^/\s]+$/, "owner/name")
+              .optional(),
+            issue: REF.optional(),
+            pr: REF.optional(),
+          })
+          .strict()
+          .optional(),
       },
     },
     wrap(volRegister),

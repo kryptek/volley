@@ -1,12 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-defaults";
 import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
 import { Journal, readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
 import { envelope, schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 let home: string;
 const now = () => new Date("2026-10-18T12:00:00.000Z");
@@ -14,10 +14,7 @@ const open = () =>
   ConfigStore.load({ home, system: Journal.open(join(home, "waves", SYSTEM_WAVE)), now });
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "volleyd-config-"));
-});
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
+  home = tempDir("volleyd-config-");
 });
 
 describe("volleydHome", () => {
@@ -87,6 +84,22 @@ describe("ConfigStore layering", () => {
 
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
+  });
+
+  it("branch_update defaults to rebase and agent_mcp to strict; both layer like any tunable", () => {
+    writeFileSync(join(home, "config.yaml"), "branch_update: merge\n");
+    const c = open();
+    expect(CONFIG_DEFAULTS.branch_update).toBe("rebase");
+    expect(CONFIG_DEFAULTS.agent_mcp).toBe("strict");
+    expect(c.get("branch_update")).toBe("merge");
+    c.setWaveOverrides("w1", { branch_update: "rebase", agent_mcp: "inherit" });
+    expect(c.effective("w1")).toMatchObject({ branch_update: "rebase", agent_mcp: "inherit" });
+    expect(c.effective().agent_mcp).toBe("strict");
+    const r = c.applyPatch({ agent_mcp: "everything" } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
   });
 
   it("rejects Object prototype names as config paths", () => {

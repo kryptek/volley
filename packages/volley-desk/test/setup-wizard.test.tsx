@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { encodeQr, matrixText, qrPath } from "../src/lib/qr";
 import { SetupWizard } from "../src/settings/SetupWizard";
@@ -10,6 +11,14 @@ import { PLAN, fakeOps } from "./helpers/auth-ops";
 const TOKEN = "vly_admin_89abcdef_0123456789abcdef0123456789abcdef";
 const SIGNIN = "vly_signin_0a1b2c3d_00112233445566778899aabbccddeeff";
 const DESK = "http://desk.example:5199/";
+/**
+ * volleyd's notes for the keychain (`KEYCHAIN_UNCHECKED` / `KEYCHAIN_STALE` in its setup ops). The
+ * Desk keys on the step's `notes` field, never on these words: they are sample data here.
+ */
+const KEYCHAIN_UNCHECKED =
+  "The macOS keychain can't be checked from the Desk; `volley setup` checks it in a terminal (and stores the coordinator's login there if it is missing)";
+const KEYCHAIN_STALE =
+  "The Desk gave the coordinator's login a new password, so the copy in the macOS keychain is stale (or missing): run `volley setup --step accounts` in a terminal to store the new one";
 
 function wizard(ops: AuthOps, extra: { repair?: boolean } = {}) {
   const onClose = vi.fn();
@@ -223,8 +232,102 @@ describe("SetupWizard", () => {
     next();
     expect(screen.getAllByText(/it needs sudo/)).toHaveLength(2);
     expect(screen.getAllByText("sudo volley setup --step security --lan")).toHaveLength(2);
-    // Every change here needs a terminal: nothing to apply from the Desk.
-    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    // Every change here needs a terminal: nothing to apply from the Desk, so no Apply at all.
+    expect(screen.queryByRole("button", { name: /^Apply/ })).toBeNull();
+    expect(
+      screen.getByText(
+        "Every change here needs a terminal; run the command above, then check again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check again" })).toBeEnabled();
+  });
+
+  it("a keychain volleyd cannot check is a neutral note: no warning, no Apply, no attention badge", async () => {
+    // As volleyd sends it: the found lines in the planner's order, the note in `notes`.
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("accounts", (s) => ({
+          found: [...s.found, "An admin account exists (admin account admin-1)"],
+          notes: [KEYCHAIN_UNCHECKED],
+          changes: [],
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    const note = screen.getByText(KEYCHAIN_UNCHECKED).closest("li");
+    expect(note).toHaveAttribute("data-kind", "note");
+    // Not a check that passed, and not a warning either; the notes come after the checks.
+    const found = [
+      "Volley's shared roles are on the broker",
+      "An admin account exists (admin account admin-1)",
+    ];
+    for (const f of found) {
+      expect(screen.getByText(f).closest("li")).toHaveAttribute("data-kind", "found");
+    }
+    expect(
+      [...(note?.parentElement?.children ?? [])].map((li) => li.getAttribute("data-kind")),
+    ).toEqual(["found", "found", "note"]);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText(/Already done: nothing to change/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Apply/ })).toBeNull();
+    next();
+    expect(screen.getByLabelText(/^Step 3: Accounts/)).toHaveAttribute("data-status", "complete");
+  });
+
+  it("a note is known by its field, not its words: a found line that reads like one is a check", async () => {
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("accounts", (s) => ({
+          found: [...s.found, KEYCHAIN_UNCHECKED],
+          changes: [],
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    expect(screen.getByText(KEYCHAIN_UNCHECKED).closest("li")).toHaveAttribute(
+      "data-kind",
+      "found",
+    );
+  });
+
+  it("a keychain copy the Desk made stale: the note says so, the command is shown, no Apply", async () => {
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("accounts", (s) => ({
+          found: [...s.found, "An admin account exists (admin account admin-1)"],
+          notes: [KEYCHAIN_STALE],
+          changes: [
+            {
+              summary:
+                "Store the coordinator's broker login in the macOS keychain (service volley-broker)",
+              terminal: {
+                reason:
+                  "the macOS keychain opens only in your logged-in session, which volleyd running as a service may not have",
+                command: "volley setup --step accounts",
+              },
+            },
+          ],
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    expect(screen.getByText(KEYCHAIN_STALE).closest("li")).toHaveAttribute("data-kind", "note");
+    expect(screen.getAllByText("volley setup --step accounts").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /^Apply/ })).toBeNull();
+    next();
+    expect(screen.getByLabelText(/^Step 3: Accounts/)).toHaveAttribute("data-status", "attention");
   });
 
   it("shows the reconnecting notice while the broker restarts, until the plan answers", async () => {
@@ -375,6 +478,38 @@ describe("SetupWizard", () => {
     );
   });
 
+  it("Run setup again: the phone step's copy agrees with its button", async () => {
+    const { ops, calls } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("phone", () => ({
+          found: [
+            'Skipped under --repair (`volley auth signin-link --role steer --label "Desk on phone"` issues a link any time)',
+          ],
+          changes: [],
+        })),
+      }),
+      signin_link: () => ({
+        ok: true,
+        result: { link_base: DESK, expires_at: "2026-10-19T10:10:00Z" },
+        secret: { token: SIGNIN },
+      }),
+    });
+    wizard(ops, { repair: true });
+    await planned();
+    for (let i = 0; i < 4; i++) next();
+    // Not "Skipped" beside a live button: a repair makes no link on its own, the button makes one.
+    expect(screen.queryByText(/Skipped under --repair/)).toBeNull();
+    expect(
+      screen.getByText(
+        "Run setup again checks and fixes; it makes no phone link by itself. If your phone needs one, make it here.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Make a phone link" }));
+    expect(await screen.findByRole("img", { name: /QR code/i })).toBeInTheDocument();
+    expect(calls.filter((c) => c.op === "signin_link")).toHaveLength(1);
+  });
+
   it("points at `volley setup` when this volleyd cannot run setup", async () => {
     const { ops } = fakeOps({});
     wizard(ops);
@@ -396,6 +531,58 @@ describe("SetupWizard", () => {
     expect(await screen.findByText(/did not answer/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await planned()).toBeInTheDocument();
+  });
+
+  it("shows the plan under StrictMode (its effects run, are cleaned up and run again)", async () => {
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    render(
+      <StrictMode>
+        <SetupWizard ops={ops} deskUrl={DESK} onClose={() => {}} />
+      </StrictMode>,
+    );
+    expect(await planned()).toBeInTheDocument();
+  });
+
+  it("never spins on a plan request that fails outright: it offers Try again", async () => {
+    let n = 0;
+    const { ops } = fakeOps({
+      setup_plan: () => {
+        if (n++ === 0) throw new Error("the connection closed");
+        return { ok: true, result: PLAN };
+      },
+    });
+    wizard(ops);
+    expect(await screen.findByText(/the connection closed/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await planned()).toBeInTheDocument();
+  });
+
+  it("does not tick a step left with changes only a terminal can make", async () => {
+    const terminal = {
+      reason: "it needs sudo",
+      command: "sudo volley setup --step security --no-lan",
+    };
+    const { ops } = fakeOps({
+      setup_plan: () => ({
+        ok: true,
+        result: planWith("security", (s) => ({
+          changes: s.changes.map((c) => ({ ...c, terminal })),
+        })),
+      }),
+    });
+    wizard(ops);
+    await planned();
+    next();
+    next();
+    const badge = (n: number, t: string) => screen.getByLabelText(new RegExp(`^Step ${n}: ${t}`));
+    // Broker is done; Security still waits on a terminal, so it asks for attention instead.
+    expect(badge(1, "Broker")).toHaveAttribute("data-status", "complete");
+    expect(badge(2, "Security")).toHaveAttribute("data-status", "attention");
+    expect(screen.getByLabelText(/^Step 2: Security/)).toHaveAccessibleName(
+      "Step 2: Security, needs a terminal",
+    );
+    expect(badge(3, "Accounts")).toHaveAttribute("data-status", "active");
+    expect(badge(4, "Services")).toHaveAttribute("data-status", "upcoming");
   });
 });
 

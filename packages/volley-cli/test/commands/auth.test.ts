@@ -2,23 +2,23 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LAYOUTS, type Layout } from "../../src/auth/config";
+import { LAYOUTS, type Layout, generateConfig } from "../../src/auth/config";
 import { realAuthDeps } from "../../src/auth/context";
 import { ACCOUNT_ROLE_MAP, DYNSEC_ADMIN_USER, VOLLEY_ROLES, roleName } from "../../src/auth/roles";
 import { auth } from "../../src/commands/auth";
 import { makeBufferIO } from "../../src/io";
+import { encodeQr, renderQr } from "../../src/setup/qr";
 import { type TestDeps, fakeDeps } from "../helpers/auth-deps";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
+import { tempDir } from "../helpers/tmp";
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
@@ -28,7 +28,7 @@ describe("volley auth", () => {
   let layout: Layout;
   let authDir: string;
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-auth-cli-"));
+    dir = tempDir("volley-auth-cli-");
     fake = await startFakeDynsec();
     authDir = join(dir, "auth");
     layout = {
@@ -40,7 +40,6 @@ describe("volley auth", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const run = async (
@@ -95,6 +94,147 @@ describe("volley auth", () => {
       expect(r.stdout).toContain("desk           pw-3");
       expect(r.stdout).toContain("coordinator    pw-4");
       expect(r.stdout).toContain("brew services restart mosquitto");
+    });
+
+    it("keeps the WebSocket listener open to the LAN when `volley setup --lan` opened it", async () => {
+      const lan = generateConfig({
+        ...layout,
+        stateFile: layout.stateFile,
+        wsBind: "",
+        by: "volley setup",
+      });
+      writeFileSync(layout.config, lan);
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      // Only the header names another tool: the config is in place, LAN listener and all.
+      expect(readFileSync(layout.config, "utf-8")).toBe(lan);
+      expect(readFileSync(layout.config, "utf-8")).toMatch(/^listener 9001$/m);
+      expect(r.stdout).not.toContain("Wrote");
+    });
+
+    it("keeps a LAN bind from an older config and shows the config change before writing it", async () => {
+      // A config from before the LAN comment: init rewrites it, keeping 9001 on every interface.
+      const old = generateConfig({ ...layout, wsBind: "" }).replace(
+        /\nset_tcp_nodelay true\n/,
+        "\n",
+      );
+      writeFileSync(layout.config, old);
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001$/m);
+      expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+      expect(conf).toContain("set_tcp_nodelay true");
+      expect(r.stdout).toContain(`--- ${layout.config}`);
+      expect(r.stdout).toContain("+set_tcp_nodelay true");
+      expect(r.stdout).toContain("open to the LAN");
+      // The diff comes before the write it describes.
+      expect(r.stdout.indexOf(`--- ${layout.config}`)).toBeLessThan(
+        r.stdout.indexOf(`Wrote ${layout.config}`),
+      );
+    });
+
+    it("keeps a hand-written WebSocket bind; a TCP listener change is named in the diff", async () => {
+      writeFileSync(
+        layout.config,
+        "listener 1883\nlistener 9001 192.0.2.10\nprotocol websockets\nallow_anonymous true\n",
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 192\.0\.2\.10$/m);
+      expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+      expect(r.stdout).toContain("-allow_anonymous true");
+      expect(r.stdout).not.toContain("-listener 9001 192.0.2.10");
+      expect(r.stdout).toMatch(/^-listener 1883$/m);
+      expect(r.stdout).toMatch(/^\+listener 1883 127\.0\.0\.1$/m);
+      expect(r.stdout).toContain("Listener change: TCP 1883 on every interface → 127.0.0.1");
+    });
+
+    it("with no config to read, takes the LAN choice setup.json recorded", async () => {
+      const home = join(dir, "volleyd-home");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(
+        join(home, "setup.json"),
+        JSON.stringify({
+          layout: "brew-arm64",
+          config: layout.config,
+          state_file: layout.stateFile,
+          auth_dir: authDir,
+          lan: true,
+        }),
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001$/m);
+      expect(conf).toMatch(/^listener 1883 127\.0\.0\.1$/m);
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) open to the LAN, as `volley setup` recorded (`volley setup --no-lan` closes it).",
+      );
+    });
+
+    it("a loopback 9001 in the config beats a stale `lan: true` in setup.json", async () => {
+      const home = join(dir, "volleyd-home");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, "setup.json"), JSON.stringify({ layout: "brew-arm64", lan: true }));
+      const old = generateConfig(layout).replace(/\nset_tcp_nodelay true\n/, "\n");
+      writeFileSync(layout.config, old);
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toMatch(/^listener 9001$/m);
+      expect(r.stdout).not.toContain("Kept the WebSocket listener");
+    });
+
+    it("keeps the bind of the 9001 WebSocket listener, never another WebSocket listener's", async () => {
+      writeFileSync(
+        layout.config,
+        "listener 1883 127.0.0.1\nlistener 8080\nprotocol websockets\nlistener 9001 127.0.0.1\nprotocol websockets\n",
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toMatch(/^listener 9001$/m);
+      expect(r.stdout).toContain("Listener change: WebSocket 8080 on every interface removed");
+      expect(r.stdout).not.toContain("Kept the WebSocket listener");
+    });
+
+    it("a hand-written bind is kept without claiming `volley setup --lan` opened it", async () => {
+      writeFileSync(
+        layout.config,
+        "listener 1883 127.0.0.1\nlistener 9001 192.0.2.10\nprotocol websockets\n",
+      );
+      const r = await run(["init"]);
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).not.toContain("volley setup --lan");
+      expect(conf).toContain("kept from the previous config");
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) on 192.0.2.10, as the previous config had it.",
+      );
+      expect(r.stdout).not.toContain("--no-lan");
+    });
+
+    it("on the container layout a loopback 9001 is kept with no `--no-lan` hint", async () => {
+      layout = {
+        ...LAYOUTS.container,
+        config: layout.config,
+        authDir,
+        stateFile: layout.stateFile,
+      };
+      writeFileSync(layout.config, "listener 1883\nlistener 9001 127.0.0.1\nprotocol websockets\n");
+      const r = await run(["init"], fakeDeps(fake, layout));
+      expect(r.code).toBe(0);
+      const conf = readFileSync(layout.config, "utf-8");
+      expect(conf).toMatch(/^listener 9001 127\.0\.0\.1$/m);
+      expect(conf).not.toContain("volley setup --lan");
+      expect(r.stdout).toContain(
+        "Kept the WebSocket listener (9001) on 127.0.0.1, as the previous config had it.",
+      );
+      expect(r.stdout).not.toContain("--no-lan");
     });
 
     it("refuses a broker older than 2.1 before anything is written", async () => {
@@ -528,6 +668,9 @@ describe("volley auth", () => {
         expect(r.code).toBe(0);
         expect(r.stdout).toContain(TOKEN);
         expect(r.stdout).toContain("10 minutes");
+        // The sign-in form has no token field: the link is what works.
+        expect(r.stdout).toContain(`http://localhost:5199/#signin=${TOKEN}`);
+        expect(r.stdout).not.toContain("paste it");
         expect(JSON.stringify(tokens())).not.toContain(TOKEN);
         expect(tokens().tokens).toEqual([
           {
@@ -546,6 +689,59 @@ describe("volley auth", () => {
         });
         expect(fake.canPublish("00000001", "volley-auth/redeem/00000001")).toBe(true);
         expect(fake.canPublish("00000001", "volley-auth/redeem/00000002")).toBe(false);
+      });
+
+      it("token links to the Desk `volley setup` recorded (its port and LAN address)", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+          }),
+        );
+        const r = await run(["token"], deps);
+        expect(r.stdout).toContain(`http://localhost:5288/#signin=${TOKEN}`);
+        expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
+      });
+
+      it("signin-link prints the ready-to-open link on setup's LAN address, and its QR code", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+          }),
+        );
+        const r = await run(["signin-link", "--role", "steer", "--label", "tablet"], deps);
+        expect(r.code).toBe(0);
+        const token = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(r.stdout)?.[0] as string;
+        const url = `http://192.0.2.7:5288/#signin=${token}`;
+        expect(r.stdout).toContain(`  ${url}\n`);
+        expect(r.stdout).toContain(renderQr(encodeQr(url)));
+        expect(r.stdout).not.toContain("localhost");
+        // Without a setup record: this machine's Desk, saying to use its address elsewhere.
+        rmSync(join(home, "setup.json"));
+        const local = await run(["signin-link", "--role", "watch", "--label", "tv"], deps);
+        const t2 = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(local.stdout)?.[0] as string;
+        expect(local.stdout).toContain(`http://localhost:5199/#signin=${t2}`);
+        expect(local.stdout).toContain("use this machine's address instead");
+        // --json stays the bare machine-readable answer.
+        const j = await run(["signin-link", "--role", "steer", "--label", "x", "--json"], deps);
+        expect(Object.keys(JSON.parse(j.stdout))).toEqual(["token", "username", "expires_at"]);
       });
 
       it("token --json prints the token, its broker login and expiry", async () => {

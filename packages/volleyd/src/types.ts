@@ -97,6 +97,16 @@ export interface Tunables {
   credential_sweep_interval_s: number;
   /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
   claude: { default_account: string | null; warn_at_pct: number };
+  /**
+   * How the pipeline's rebase step brings a PR branch up to date with the moved release branch:
+   * `rebase` (rebase, then a lease-guarded force-push) or `merge` (merge it in, a normal push).
+   */
+  branch_update: BranchUpdate;
+  /**
+   * The MCP servers a launched agent loads: `strict` only volleyd's `volley` server; `inherit`
+   * the user's own servers (plugins, connectors) too, with volleyd's `volley` taking that name.
+   */
+  agent_mcp: AgentMcp;
   hosts: Record<string, RemoteHostConfig>;
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
@@ -130,6 +140,9 @@ export interface PlacementConfig {
   /** Seconds a machine with unfinished tasks stays down before its `machine_down` decision opens. */
   down_decision_after_s: number;
 }
+
+export type BranchUpdate = "rebase" | "merge";
+export type AgentMcp = "strict" | "inherit";
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
 export type TunablesPatch = {
@@ -347,6 +360,11 @@ export const WAVE_EVENT_TYPES = [
   "account_revoked",
   "signin_link_issued",
   "token_redeemed",
+  // The setup ops (setup-ops.ts): a step applied for the Desk, a one-time admin token issued, the
+  // shared desk login's new password issued.
+  "setup_step_applied",
+  "admin_token_issued",
+  "desk_password_issued",
   // Claude account profiles (src/claude/): the registry and sign-ins in `_system`; a move in its wave.
   "claude_account_added",
   "claude_signin_started",

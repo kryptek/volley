@@ -393,7 +393,7 @@ describe("daemon spawn loop", () => {
       kind: "repo_untrusted",
       task: "T1",
       question: `Needs you: trust ${repo} for dispatch?`,
-      id: trustDecisionId(repo),
+      id: trustDecisionId("w1", repo),
     });
     expect(daemon.record("w1")?.state?.open_decisions).toEqual([d.decision_id]);
     await daemon.tick();

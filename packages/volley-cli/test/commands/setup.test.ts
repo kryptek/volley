@@ -1,21 +1,32 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
 import { cmd } from "../../src/auth/dynsec";
-import { SETUP_HELP, lanAddress, setup } from "../../src/commands/setup";
+import {
+  type HiddenInput,
+  SETUP_HELP,
+  hiddenKeys,
+  lanAddress,
+  setup,
+} from "../../src/commands/setup";
 import { makeBufferIO } from "../../src/io";
 import { LAN_QUESTION } from "../../src/setup/broker";
+import { CMUX_CHECK_SCRIPT } from "../../src/setup/cmux";
+import { readSetupInstall } from "../../src/setup/journal";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
+import { tempDir } from "../helpers/tmp";
 
 /** Commands that only read state. */
 const READ_ONLY = (a: string[]) =>
   a.includes("--dry-run") ||
   (a[0] === "launchctl" && a[1] === "print") ||
-  (a[0] === "security" && a[1] === "find-generic-password");
+  (a[0] === "security" && a[1] === "find-generic-password") ||
+  // Who listens on the Desk's port.
+  a[0] === "lsof" ||
+  a[0] === "ss";
 
 /** What the run's last lines say once every step is in place. */
 const COMPLETE = "Setup complete.";
@@ -26,7 +37,7 @@ describe("volley setup", () => {
   let m: FakeMachine;
   let probes: string[];
   beforeEach(async () => {
-    dir = mkdtempSync(join(tmpdir(), "volley-setup-"));
+    dir = tempDir("volley-setup-");
     fake = await startFakeDynsec();
     m = fakeMachine(fake, dir);
     probes = [];
@@ -38,7 +49,6 @@ describe("volley setup", () => {
   });
   afterEach(async () => {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const env = () => ({
@@ -103,6 +113,17 @@ describe("volley setup", () => {
     expect(r.stdout).toMatch(/vly_admin_[0-9a-f]{8}_[0-9a-f]{32}/);
     expect(r.stdout).toMatch(/http:\/\/desk\.example:5199\/#signin=vly_signin_/);
     expect(r.stdout).toContain(COMPLETE);
+    // The security step says what it checked once it passed.
+    expect(r.stdout).toContain(
+      `  ✓ Listener ${new URL(fake.url).port}: refuses anonymous clients\n`,
+    );
+    expect(r.stdout).toContain("  ✓ Listener 9001: refuses anonymous clients\n");
+    expect(r.stdout).toContain(
+      "  ✓ Listener 9001 from the LAN (ws://desk.example:9001): reachable, refuses anonymous clients\n",
+    );
+    // The CLIs here find the coordinator's login themselves: no password for a shell profile.
+    expect(r.stdout).not.toContain("shell profile");
+    expect(r.stdout).toContain("use that login on their own");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     // The journal records every step, never a secret.
     const log = readFileSync(join(m.ctx.volleydHome, "setup.log"), "utf-8");
@@ -123,6 +144,7 @@ describe("volley setup", () => {
       "services",
       "services",
       "services",
+      "services",
       "phone",
     ]);
   });
@@ -134,7 +156,8 @@ describe("volley setup", () => {
     expect(readFileSync(m.layout.config, "utf-8")).toContain("listener 9001 127.0.0.1");
     expect(r.stdout).toContain("LAN access: off");
     expect(r.stdout).toContain("– skipped: a phone cannot reach the broker's WebSocket listener");
-    expect(r.stdout).not.toMatch(/#signin=/);
+    // No phone link (the admin token's link to this machine's Desk is printed either way).
+    expect(r.stdout).not.toMatch(/#signin=vly_signin_/);
     expect(r.stdout).not.toContain(COMPLETE);
     expect(r.stdout).toContain("Setup finished, except the step skipped above (Phone)");
     const tokens = JSON.parse(readFileSync(join(m.layout.authDir, "tokens.json"), "utf-8")).tokens;
@@ -173,6 +196,155 @@ describe("volley setup", () => {
     for (const argv of m.execCalls) {
       expect(() => fence(argv, argv[1] === "run" ? { cwd: desk } : undefined)).not.toThrow();
     }
+  });
+
+  it("records the install it used (layout, config, state file, auth dir, Desk, LAN) for volleyd's Desk plans", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
+    const saved = JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8"));
+    expect(saved).toEqual({
+      layout: m.layout.name,
+      config: m.layout.config,
+      state_file: m.layout.stateFile,
+      auth_dir: m.layout.authDir,
+      desk_host: "desk.example",
+      desk_port: 5288,
+      lan: true,
+    });
+    expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
+  });
+
+  it("records cmux's socket mode in setup.json, and a run that did not check cmux keeps it", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(
+          argv[4] as string,
+          '{"access_mode":"automation"}\nvolley-cmux-caps=0\nworkspace:1\nvolley-cmux-exit=0\n',
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    const r = await run(["--yes", "--lan"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("cmux's socket control mode: Automation mode");
+    expect(readSetupInstall(m.ctx.volleydHome)?.cmux_socket_mode).toBe("automation");
+    expect((await run(["--step", "security"])).code).toBe(0);
+    expect(readSetupInstall(m.ctx.volleydHome)?.cmux_socket_mode).toBe("automation");
+  });
+
+  it("a later run without the flags (`--step services` as the user) keeps and uses the record", async () => {
+    expect((await run(["--yes", "--lan", "--desk-port", "5288"])).code).toBe(0);
+    const file = join(m.ctx.volleydHome, "setup.json");
+    // As if setup had run with --layout container --config … --dir …: what volleyd plans with.
+    const recorded = { ...JSON.parse(readFileSync(file, "utf-8")), layout: "brew-intel" };
+    writeFileSync(file, JSON.stringify(recorded));
+    const r = await run(["--yes", "--step", "services"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("brew-intel layout (from the last volley setup)");
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual(recorded);
+  });
+
+  it("records nothing for a run that stops before it finishes", async () => {
+    m.auth.mosquittoVersion = async () => null;
+    const r = await run(["--yes"]);
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
+  });
+
+  it("a run that stops at cmux replaces an earlier run's cmux mode in setup.json", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    let answer = '{"access_mode":"automation"}\nvolley-cmux-caps=0\nok\nvolley-cmux-exit=0\n';
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        writeFileSync(argv[4] as string, answer);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    m.deps.interactive = false;
+    const recorded = () =>
+      JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8")).cmux_socket_mode;
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    expect(recorded()).toBe("automation");
+    // cmux set back to Password mode: the rerun stops at cmux, and says so in setup.json too.
+    answer =
+      "ERROR: Invalid password\nvolley-cmux-caps=1\nERROR: Invalid password\nvolley-cmux-exit=1\n";
+    expect((await run(["--yes", "--step", "services"])).code).toBe(1);
+    expect(recorded()).toBe("password");
+  });
+
+  it("prints the admin token as a link to the Desk it serves (its --desk-port)", async () => {
+    const r = await run(["--yes", "--desk-port", "5288"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(
+      /Open the Desk with it on this machine: http:\/\/localhost:5288\/#signin=vly_admin_[0-9a-f]+_[0-9a-f]+/,
+    );
+    // From another device: the address the phone's link uses.
+    expect(r.stdout).toMatch(
+      /From another device: http:\/\/desk\.example:5288\/#signin=vly_admin_/,
+    );
+  });
+
+  it("when cmux refuses volleyd's service and nobody can answer, it never says done or complete", async () => {
+    const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "cmux"), "");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) => {
+      if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
+        // cmux in Password mode, and volleyd has no password.
+        writeFileSync(
+          argv[4] as string,
+          "ERROR: Invalid password\nvolley-cmux-caps=1\nERROR: Invalid password\nvolley-cmux-exit=1\n",
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return inner(argv, o);
+    };
+    m.deps.interactive = false;
+    const r = await run(["--yes", "--lan"]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain(COMPLETE);
+    expect(r.stdout).toContain("(cmux said: ERROR: Invalid password)");
+    expect(r.stderr).toContain("Give volleyd the cmux socket password");
+    expect(r.stderr).toContain("volley setup --step services");
+    // The run stopped at cmux, and setup.json records the mode the check found.
+    const recorded = () =>
+      JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8")).cmux_socket_mode;
+    expect(recorded()).toBe("password");
+    // Every other service is in place: only cmux is left.
+    expect(
+      existsSync(join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist")),
+    ).toBe(true);
+    // A rerun does not call the Services step done either.
+    const again = await run([]);
+    expect(again.stdout).not.toContain(COMPLETE);
+    expect(again.stdout.match(/already done/g)?.length ?? 0).toBeLessThan(5);
+  });
+
+  it("a rerun whose Desk plist launchd will not load exits non-zero, with the Desk still loaded", async () => {
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+    writeFileSync(plist, "<plist>older</plist>\n");
+    const inner = m.deps.exec;
+    m.deps.exec = async (argv, o) =>
+      argv[1] === "bootstrap" && readFileSync(plist, "utf-8").includes("0.0.0.0")
+        ? { code: 1, stdout: "", stderr: "Bootstrap failed: 1: Operation not permitted" }
+        : inner(argv, o);
+    const r = await run(["--yes", "--step", "services"]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain(COMPLETE);
+    expect(r.stderr).toContain("Operation not permitted");
+    expect(r.stderr).toContain("loaded it again");
+    expect(m.loaded.has("systems.volley.desk")).toBe(true);
+    expect(journal().slice(-1)[0]).toMatchObject({ step: "services", event: "failed" });
   });
 
   it("a second run reports every step as already done and changes nothing", async () => {
@@ -236,7 +408,7 @@ describe("volley setup", () => {
       LAN_QUESTION,
       "Apply these 3 changes (Security)?",
       "Apply these 3 changes (Accounts)?",
-      "Apply these 4 changes (Services)?",
+      "Apply these 5 changes (Services)?",
       "Apply this change (Phone)?",
     ]);
   });
@@ -313,5 +485,30 @@ describe("volley setup", () => {
     expect(r.stdout).toBe(SETUP_HELP);
     expect((await run(["--frobnicate"])).code).toBe(2);
     expect(existsSync(join(m.ctx.volleydHome, "setup.log"))).toBe(false);
+  });
+});
+
+describe("the hidden password prompt", () => {
+  const type = (...chunks: string[]) => {
+    const state: HiddenInput = { value: "", skip: "" };
+    let end: ReturnType<typeof hiddenKeys> = null;
+    for (const c of chunks) end = end ?? hiddenKeys(state, c);
+    return { value: state.value, end };
+  };
+
+  it("ends on Enter, edits on Backspace", () => {
+    expect(type("hunter", "3\u007f2\r")).toEqual({ value: "hunter2", end: "enter" });
+  });
+
+  it("drops arrow and function keys whole, even split across reads", () => {
+    expect(type("ab\u001b[A\u001b[1;5Cc\u001bOP", "\u001b", "[", "D", "d\r")).toEqual({
+      value: "abcd",
+      end: "enter",
+    });
+  });
+
+  it("Ctrl-C cancels, Ctrl-D gives up", () => {
+    expect(type("abc\u0003")).toEqual({ value: "abc", end: "cancel" });
+    expect(type("\u0004")).toEqual({ value: "", end: "eof" });
   });
 });

@@ -189,13 +189,15 @@ describe("relaunch of a spawn-type decision", () => {
     });
     // No by-hand credential edits are asked of anyone.
     expect(String(opened.data.question)).not.toMatch(/volley auth add-agent|agent\.json/);
-    // Paused at once: Escape in its workspace and a steering that says why.
-    expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
-    const steer = journal().find(
+    // Paused at once: Escape in its workspace and a steering that says why. The pause runs after
+    // the verification resolves, which `settled()` does not count, and its steer is a broker round
+    // trip: await its journal event rather than read the journal and race it.
+    const steer = await event(
       (e) =>
         e.type === "steering_sent" && e.data.agent_id === A1 && e.data.reason === "auth_failed",
     );
-    expect(steer?.data.text).toMatch(/stop: your broker login is being repaired/);
+    expect(host.keys).toContainEqual({ workspace: "workspace:1", key: "Escape" });
+    expect(steer.data.text).toMatch(/stop: your broker login is being repaired/);
 
     await resolve(opened.data.decision_id as string, "relaunch");
     const relaunched = await event("relaunched");
@@ -213,7 +215,7 @@ describe("relaunch of a spawn-type decision", () => {
       lock_released: true,
     });
     expect(creds.revoked).toEqual([A1]);
-    for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
+    expect(await env.stillRetained(retainedTopics(NS, A1))).toEqual([]);
     // A new login for attempt 2, the same role spawned again, and it registers.
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
     expect(creds.minted).toEqual([A1, A2]);
@@ -253,7 +255,7 @@ describe("relaunch of a spawn-type decision", () => {
     await resolve(opened.data.decision_id as string, "relaunch");
     expect((await event("relaunched")).data).toMatchObject({ from_agent: A1, to_agent: A2 });
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
-    for (const topic of retainedTopics(NS, A1)) expect(await env.retained(topic)).toBeNull();
+    expect(await env.stillRetained(retainedTopics(NS, A1))).toEqual([]);
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
   });

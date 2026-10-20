@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -21,6 +20,7 @@ import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 const WAVE = "w-ctl";
 const yaml = (wave: string) => `wave: ${wave}
@@ -62,7 +62,7 @@ beforeEach(async () => {
   interrupted.length = 0;
   clock = fakeClock();
   broker = await startTestBroker();
-  home = mkdtempSync(join(tmpdir(), "volleyd-controls-"));
+  home = tempDir("volleyd-controls-");
   daemon = await start();
   client = await ControlClient.connect(broker.url, NS);
   agent = new VolleyBroker();
@@ -87,7 +87,6 @@ afterEach(async () => {
   await client.close();
   await daemon.stop();
   await broker.close();
-  rmSync(home, { recursive: true, force: true });
 });
 
 const task = (id: string) => daemon.snapshot(WAVE)?.tasks.find((x) => x.id === id);
@@ -657,7 +656,9 @@ describe("CLI", () => {
     expect((await runCli(["decisions"], env())).stdout).toBe("no open decisions\n");
   });
 
-  it("pause, resume, steer, claim, stop and stop --all / resume --all", async () => {
+  // One step per test: every CLI call waits out the caller's registry scan, and a claim the
+  // owner's liveness probe, so the whole sequence in one test outgrows bun's 5 s test default.
+  it("pause, resume and steer", async () => {
     expect((await runCli(["pause", WAVE], as("coord-a"))).stdout).toBe(`paused wave ${WAVE}\n`);
     expect((await runCli(["resume", WAVE], as("coord-a"))).stdout).toBe(`resumed wave ${WAVE}\n`);
     const steer = await runCli(
@@ -666,11 +667,17 @@ describe("CLI", () => {
     );
     expect(steer.stderr).toBe("");
     expect(steer.stdout).toContain("steer #1 → agent-a1 (implementer): delivered");
+  });
+
+  it("claim needs an identity and is refused while the owner may be alive", async () => {
     const anonymous = await runCli(["claim", WAVE], env());
     expect(anonymous.exitCode).toBe(1);
     expect(anonymous.stderr).toContain("claim needs an identity");
     // coord-a has never been seen by the broker: not claimable until it is gone.
     expect((await runCli(["claim", WAVE], as("coord-b"))).stderr).toContain("owned by coord-a");
+  });
+
+  it("claim takes over once the owner is reaped", async () => {
     const pub = new VolleyBroker();
     await pub.connect({ url: broker.url, agentId: "coord-a" });
     await pub.publish(
@@ -689,7 +696,12 @@ describe("CLI", () => {
     await pub.disconnect();
     const claim = await runCli(["claim", WAVE], as("coord-b"));
     expect(claim.stdout).toContain(`claimed wave ${WAVE} for coord-b (was coord-a)`);
-    const stop = await runCli(["stop", WAVE], as("coord-b"));
+    // The new owner can act on the wave.
+    expect((await runCli(["pause", WAVE], as("coord-b"))).stdout).toBe(`paused wave ${WAVE}\n`);
+  });
+
+  it("stop and stop --all / resume --all", async () => {
+    const stop = await runCli(["stop", WAVE], as("coord-a"));
     expect(stop.stdout).toBe(`stopped wave ${WAVE}; cancel sent to 1 agent(s): agent-a1\n`);
     const all = await runCli(["stop", "--all"], env());
     expect(all.stdout).toContain("kill switch engaged");

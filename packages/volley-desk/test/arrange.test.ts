@@ -284,3 +284,66 @@ describe("arrange", () => {
     });
   });
 });
+
+describe("pinned windows (C12)", () => {
+  const rectsOf = (place: Record<string, { x: number; y: number }>) =>
+    Object.entries(place).map(([id, p]) => ({
+      ...p,
+      w: sizeOf[id]?.w ?? 0,
+      h: sizeOf[id]?.h ?? 0,
+    }));
+  const overlaps = (
+    a: { x: number; y: number; w: number; h: number },
+    b: { x: number; y: number; w: number; h: number },
+  ) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+  it("skips a window pinned in place: it gets no new position", () => {
+    const pinned = { coordinators: { x: 0, y: 0, w: 430, h: 360 } };
+    const r = arrange(clusters, screen, { pinned });
+    expect(r?.place.coordinators).toBeUndefined();
+    expect(Object.keys(r?.place ?? {}).sort()).toEqual(
+      ["wave-a", "a1", "a2", "a3", "a4", "wave-b", "b1", "b2"].sort(),
+    );
+  });
+
+  it("lays the other windows clear of the pinned ones", () => {
+    const pinned = { coordinators: { x: 0, y: 0, w: 430, h: 360 } };
+    const r = arrange(clusters, screen, { pinned });
+    for (const rect of rectsOf(r?.place ?? {})) {
+      expect(overlaps(rect, pinned.coordinators)).toBe(false);
+    }
+  });
+
+  it("a pinned wave window keeps its place; its agents are still arranged", () => {
+    const pinned = { "wave-a": { x: -2000, y: -2000, w: 620, h: 600 } };
+    const r = arrange(clusters, screen, { pinned });
+    expect(r?.place["wave-a"]).toBeUndefined();
+    for (const id of ["a1", "a2", "a3", "a4"]) expect(r?.place[id]).toBeDefined();
+  });
+
+  it("a pinned agent keeps its place and the rest of its cluster packs without it", () => {
+    const pinned = { a1: { x: 5000, y: 5000, w: 460, h: 500 } };
+    const r = arrange(clusters, screen, { pinned });
+    expect(r?.place.a1).toBeUndefined();
+    expect(r?.place["wave-a"]).toBeDefined();
+  });
+
+  it("fits the given area: windows anchored to the screen are left room", () => {
+    const area = { x: 24 + 460, y: 64, w: 1552 - 460, h: 826 };
+    const r = arrange(clusters, screen, { area });
+    const s = r?.view.s ?? 0;
+    const b = bounds(r?.place ?? {});
+    // the arranged block lands inside the area, on screen
+    expect(r?.view.x ?? 0).toBeGreaterThanOrEqual(area.x - 0.5);
+    expect((r?.view.x ?? 0) + b.W * s).toBeLessThanOrEqual(area.x + area.w + 0.5);
+    // a narrower area fits at a smaller (or equal) scale than the whole screen
+    expect(s).toBeLessThanOrEqual(arrange(clusters, screen)?.view.s ?? 0);
+  });
+
+  it("with every window pinned there is nothing to arrange", () => {
+    const pinned = Object.fromEntries(
+      Object.values(sizeOf).map((b) => [b.id, { x: 0, y: 0, w: b.w, h: b.h }]),
+    );
+    expect(arrange(clusters, screen, { pinned })).toBeNull();
+  });
+});
