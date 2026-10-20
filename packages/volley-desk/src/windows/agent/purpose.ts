@@ -133,7 +133,7 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
       }
       const pr = task?.pr?.number;
       const prUrl = prHref(task);
-      if (typeof pr === "number")
+      if (typeof pr === "number" && Number.isSafeInteger(pr) && pr > 0)
         links.push({ text: `PR #${pr}`, href: prUrl, label: prUrl ? prLabel(pr) : `PR #${pr}` });
       return make(`${a.task} · ${title}`, "wave", links);
     }

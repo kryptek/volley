@@ -141,6 +141,24 @@ describe("purposeOf", () => {
     ]);
   });
 
+  it.each([0, 1.5, -3])("a PR number that is not a positive integer (%p): no PR link", (n) => {
+    const p = purposeOf(
+      agent({ wave: "w1", task: "T3", role: "implementer" }),
+      wave({
+        tasks: [
+          {
+            id: "T3",
+            issue: 42,
+            stage: "implement",
+            agents: {},
+            pr: { number: n, url: PR.url },
+          },
+        ],
+      }),
+    );
+    expect(p.links.map((l) => l.text)).toEqual(["#42"]);
+  });
+
   it("an ad-hoc agent: its registered title; links resolve against links.repo", () => {
     const p = purposeOf(
       agent({
