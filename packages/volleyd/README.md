@@ -231,6 +231,15 @@ wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#voll
   carries `per_machine` and `held[].host` / `queue[].host`. `config_set` and `config.yaml` refuse
   a `per_machine` above `capacity` (`lease_pools.<pool>.per_machine: must be at most capacity
   (<n>)`), also when the patch lowers `capacity` under it.
+- **Per-machine overrides**: `per_machine_overrides: { <machine>: n }` caps one machine's
+  holders in place of `per_machine` (0 to `capacity`; 0: none there), so a laptop and a large
+  server take different shares of one pool. `<machine>` is a `hosts.<name>` key, this machine's
+  `fleet.local_name`, or `local` (resolved to this machine's name in the effective config). An
+  override alone, without `per_machine`, caps only the machine it names. An override above
+  `capacity` is refused with its path (`lease_pools.js-suite.per_machine_overrides.box-a: 5 is
+  over capacity 3`). The queue line names the cap in force (`queued l-2: 1/1 js-suite leases held
+  on laptop (per machine)`), the pool state carries `per_machine_overrides`, and the readiness
+  verdict's `heavy.<pool>.per_machine` is the cap in force on that machine.
 - **A lease ends** on release, on TTL expiry (`ttl_s` of the request, else the pool's, else
   1 hour; `renew` restarts it — `volley lease run` renews at half the TTL), or when the holder's
   retained `status` turns `reaped`, `done` or `failed`.
@@ -781,6 +790,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
+| `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
@@ -1511,7 +1521,8 @@ where. The pieces, in the order a machine meets them:
 | Remote sign-in | `claude_signin { acct: "primary@<name>" }` runs `claude auth login` on the machine and forwards its localhost callback for the length of the sign-in | [Claude accounts](#claude-accounts) |
 | Readiness | a retained verdict per machine: ready, eligible, and why not, in plain words | [readiness](#fleet-readiness-the-supervisors-card-repair) |
 | Placement | `placement: auto` scores the eligible machines and writes a "why here" line for each | [placement](#fleet-placement) |
-| Leases per machine | a pool's `per_machine` caps the holders on one machine; each holder carries its host | [Leases](#leases) |
+| Leases per machine | a pool's `per_machine` caps the holders on one machine (`per_machine_overrides` per named machine); each holder carries its host | [Leases](#leases) |
+| This machine as a fallback | `fleet.local_agents`: with a paired machine, this one takes auto-placed work only while no peer is eligible, under a lighter profile | [The supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback) |
 | Down, overload, drain, remove | the owner decides every re-placement; a running agent is never moved | [down, overload, drain, remove](#fleet-down-overload-drain-remove) |
 | The fence | the doctor's argv, the PATH probe and the sign-in's `ssh -N -L` forward are the only Fleet commands volleyd may run | [The authority fence](#the-authority-fence) |
 
@@ -1732,6 +1743,55 @@ Tunables (`config set`, hot): `placement.load_per_core_max`, `placement.mem_avai
 `placement.disk_free_min_gb`, `placement.weights.{cpu,slots,mem,usage}` (not all four 0).
 A machine that stays down, re-placement and drain are the owner's decisions (next section):
 nothing running is ever moved.
+
+### The supervisor's own machine as a fallback
+
+On a laptop that also runs the broker, the Desk and its owner's own sessions, a paired machine
+should take the work while it can. `fleet.local_agents` (SPEC §4.6.15) says how this machine takes
+auto-placed tasks:
+
+- `always`: a candidate like any peer, scored on headroom.
+- `fallback`: a candidate only while no paired machine is eligible, and then under the fallback
+  profile: at most `fleet.fallback.max_agents` (default 3) of its own agents (`hard_ceiling` still
+  caps the total), and in each heavy pool at most `fleet.fallback.per_machine.<pool>` slots (a
+  pool it does not name gets 1 when the pool has a per-machine cap here; 0 keeps heavy tasks
+  off it). A peer that is down counts as ineligible only after `placement.down_decision_after_s`
+  (the `machine_down` grace), so a tunnel blip never pulls work onto this machine; until then a
+  task waits with `fallback: box-a may be back (down 40 s, grace 300 s)`.
+- `never`: never a candidate for an auto-placed task; a task that names `host: local` still runs
+  here (`volleyd validate` warns about it).
+- `null`, the default: `fallback` once any `hosts.<name>` is configured, else `always`. The
+  retained config carries the resolved mode, and the first host added (or the last removed)
+  journals `config_changed` for `fleet.local_agents` by `volleyd-defaults`.
+
+```yaml
+fleet:
+  local_agents: fallback
+  fallback:
+    max_agents: 3
+    per_machine: { js-suite: 1, backend-it: 0 }
+lease_pools:
+  js-suite:
+    capacity: 4
+    per_machine: 2
+    per_machine_overrides: { box-a: 3, local: 1 }
+    match: ["bun run test"]
+```
+
+This machine's candidate line says why:
+
+```
+local (fallback: no peer eligible: box-a: tunnel down to box-a: no heartbeat (readiness)) · load 0.4 on 10 cores · 0/3 agents · …
+ineligible: fallback: box-a is eligible
+ineligible: local_agents: never
+```
+
+When a peer is eligible again the next placement goes to it; the agents already running here
+finish here, and a task placed here stays here for every role. This machine's readiness verdict
+carries `local_agents: { mode, active, why? }`, and `volleyd status` prints it after the logins
+line while a paired machine is configured: `local agents: fallback (idle: box-a eligible)`,
+`local agents: fallback (active: box-a: tunnel down to box-a: no heartbeat (readiness))`,
+`local agents: always` or `local agents: never`.
 
 ---
 

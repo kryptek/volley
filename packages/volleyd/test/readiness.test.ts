@@ -7,6 +7,7 @@ import type { MachineRecord } from "../src/machines";
 import {
   READINESS_CHANNEL,
   type ReadinessInput,
+  machineView,
   parsePathProbe,
   readiness,
   readinessTopic,
@@ -270,6 +271,84 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
       ).toEqual([]);
     }
     expect(readinessTopic("box-a")).toBe("volley/_system/machines/box-a/readiness");
+  });
+});
+
+describe("local_agents on the supervisor's own verdict (SPEC §4.6.15)", () => {
+  const NOW = Date.parse("2026-10-19T09:00:00.000Z");
+  const OWN = {
+    ...FILTER,
+    local_agents: "fallback" as const,
+    fallback: { max_agents: 3, per_machine: {} },
+    now: NOW,
+    down_grace_ms: 300_000,
+  };
+  /** Placement's view of peer box-a from its own verdict. */
+  const peer = (over: Partial<ReadinessInput> = {}) => {
+    const i = input({ filter: OWN, ...over });
+    const v = readiness(i);
+    return machineView(i, v, v.usage.five_hour_pct);
+  };
+  const DOWN = { record: record({ tunnel: "down", reason: "heartbeat_timeout" as const }) };
+  const own = (peers: ReturnType<typeof peer>[], filter: ReadinessInput["filter"] = OWN) =>
+    readiness(
+      input({
+        name: "laptop",
+        record: record({ name: "laptop", kind: "supervisor", tunnel: "local" }),
+        local: true,
+        host: { max_agents: 12, drain: false },
+        localAgents: 0,
+        peers,
+        filter,
+      }),
+    );
+
+  it("an eligible peer: the own machine is not eligible, and the fallback is idle", () => {
+    const v = own([peer()]);
+    expect(v).toMatchObject({
+      eligible: false,
+      ineligible_reason: "fallback: box-a is eligible",
+      local_agents: { mode: "fallback", active: false, why: "box-a eligible" },
+    });
+    expect(
+      schemaErrors("readiness.schema.json", envelope(READINESS_CHANNEL, "readiness", v)),
+    ).toEqual([]);
+  });
+
+  it("no peer eligible: the own machine is eligible, the fallback active with the peer's reason", () => {
+    const v = own([peer({ ...DOWN, downSince: NOW - 400_000 })]);
+    expect(v).toMatchObject({
+      eligible: true,
+      local_agents: {
+        mode: "fallback",
+        active: true,
+        why: "box-a: tunnel down to box-a: no heartbeat (readiness)",
+      },
+    });
+    expect(v.ineligible_reason).toBeUndefined();
+  });
+
+  it("a peer down within the grace keeps the own machine closed: it may be back", () => {
+    const v = own([peer({ ...DOWN, downSince: NOW - 40_000 })]);
+    expect(v).toMatchObject({
+      eligible: false,
+      ineligible_reason: "fallback: box-a may be back (down 40 s, grace 300 s)",
+      local_agents: { mode: "fallback", active: false },
+    });
+  });
+
+  it("a peer's verdict never has local_agents; always and never say so on the own", () => {
+    expect(readiness(input({ filter: OWN }))).not.toHaveProperty("local_agents");
+    expect(own([peer()], { ...OWN, local_agents: "always" }).local_agents).toEqual({
+      mode: "always",
+      active: false,
+    });
+    expect(own([peer()], { ...OWN, local_agents: "always" }).eligible).toBe(true);
+    expect(own([], { ...OWN, local_agents: "never" })).toMatchObject({
+      eligible: false,
+      ineligible_reason: "local_agents: never",
+      local_agents: { mode: "never", active: false },
+    });
   });
 });
 

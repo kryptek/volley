@@ -2,7 +2,8 @@ import { basename } from "node:path";
 import type { Sharing } from "./claude/sharing";
 import { PATH_PROBE_TOOLS } from "./fence";
 import { type MachineRecord, machineTopic } from "./machines";
-import { type FilterOptions, type MachineView, machineIneligible } from "./placement";
+import { type FilterOptions, type MachineView, localRole, machineIneligible } from "./placement";
+import type { LocalAgentsMode } from "./types";
 
 /**
  * Readiness (SPEC §4.6.15), as pure logic: the supervisor's verdict on one machine, its own
@@ -57,6 +58,15 @@ export interface ReadinessInput {
   probeError?: string;
   /** Live supervised agents on the machine, plus placements reserved for it. */
   placed: number;
+  /** The supervisor's own machine: its own agents alone (`MachineView.local_agents`). */
+  localAgents?: number;
+  /** A peer the supervisor marked down: since when (epoch ms, `MachineView.down_since`). */
+  downSince?: number;
+  /**
+   * The supervisor's own machine: placement's view of every peer, which its `local_agents` mode
+   * (`filter.local_agents`) weighs (SPEC §4.6.15).
+   */
+  peers?: MachineView[];
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { account: string | null; five_hour_pct: number | null };
   /** The lowest bun the supervisor accepts (the wave repo's `packageManager` / `engines.bun`). */
@@ -84,6 +94,8 @@ export interface ReadinessPayload {
   usage: { account: string | null; five_hour_pct: number | null };
   eligible: boolean;
   ineligible_reason?: string;
+  /** The supervisor's own machine only: its `fleet.local_agents` mode and whether the fallback is in force. */
+  local_agents?: { mode: LocalAgentsMode; active: boolean; why?: string };
   checked_at: string;
 }
 
@@ -169,7 +181,7 @@ function blockers(i: ReadinessInput): string[] {
 
 /** What placement knows about the machine of `v` (its verdict without the eligibility). */
 export function machineView(
-  i: Pick<ReadinessInput, "name" | "local" | "record" | "held">,
+  i: Pick<ReadinessInput, "name" | "local" | "record" | "held" | "localAgents" | "downSince">,
   v: Pick<ReadinessPayload, "ready" | "reasons" | "drain" | "max_agents" | "placed" | "heavy">,
   usagePct: number | null,
 ): MachineView {
@@ -182,6 +194,8 @@ export function machineView(
     drain: v.drain,
     max_agents: v.max_agents,
     agents: v.placed,
+    ...(i.localAgents !== undefined ? { local_agents: i.localAgents } : {}),
+    ...(i.downSince !== undefined ? { down_since: i.downSince } : {}),
     heavy: v.heavy,
     usage_pct: usagePct,
     held: i.held,
@@ -204,8 +218,10 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
     },
     i.usage.five_hour_pct,
   );
-  const why = machineIneligible(view, { machines: [view], reservations: {} }, i.filter);
+  const snap = { machines: [view, ...(i.local ? (i.peers ?? []) : [])], reservations: {} };
+  const why = machineIneligible(view, snap, i.filter);
   const ineligible = why[0] !== undefined ? line(why[0]) : undefined;
+  const role = i.local && i.filter.local_agents !== undefined ? localRole(snap, i.filter) : null;
   return {
     name: i.name,
     ready,
@@ -223,6 +239,15 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
     usage: i.usage,
     eligible: ineligible === undefined,
     ...(ineligible !== undefined ? { ineligible_reason: ineligible } : {}),
+    ...(role !== null
+      ? {
+          local_agents: {
+            mode: role.mode,
+            active: role.active,
+            ...(role.why !== undefined ? { why: line(role.why) } : {}),
+          },
+        }
+      : {}),
     checked_at: i.checkedAt.toISOString(),
   };
 }

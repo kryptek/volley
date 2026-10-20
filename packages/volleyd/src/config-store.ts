@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { dateOf, systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
-import { localMachineName } from "./fleet-name";
+import { LOCAL_HOST, localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
 import { type PathError, toPathErrors, validator } from "./schemas";
-import type { ConfigPayload, Tunables, TunablesPatch, WaveId } from "./types";
+import type { ConfigPayload, LocalAgentsMode, Tunables, TunablesPatch, WaveId } from "./types";
 
 /** `$VOLLEYD_HOME`, else `~/.volley/volleyd`. */
 export function volleydHome(env: Record<string, string | undefined>): string {
@@ -84,7 +84,59 @@ const TUNABLES = "config.schema.json#/$defs/tunables";
  * whose errors (`must match "then" schema`) name neither the field nor the bound.
  */
 function tunablesErrors(value: unknown, host: string): PathError[] {
-  return [...fleetNameErrors(value, host), ...poolErrors(value).map(rewordWeights)];
+  return [
+    ...fleetNameErrors(value, host),
+    ...overrideErrors(value),
+    ...poolErrors(value).map(rewordWeights),
+  ];
+}
+
+/**
+ * Every `lease_pools.<pool>.per_machine_overrides.<host>` above the pool's `capacity` (SPEC
+ * §4.6.5): the schema's `perMachineWithinCapacity` trick does not extend to a map.
+ */
+function overrideErrors(value: unknown): PathError[] {
+  const pools = isPlain(value) && isPlain(value.lease_pools) ? value.lease_pools : {};
+  return Object.entries(pools).flatMap(([name, p]) => {
+    if (!isPlain(p) || typeof p.capacity !== "number" || !isPlain(p.per_machine_overrides))
+      return [];
+    const capacity = p.capacity;
+    return Object.entries(p.per_machine_overrides).flatMap(([host, n]) =>
+      typeof n === "number" && n > capacity
+        ? [
+            {
+              path: `lease_pools.${name}.per_machine_overrides.${host}`,
+              reason: `${n} is over capacity ${capacity}`,
+            },
+          ]
+        : [],
+    );
+  });
+}
+
+/** `fleet.local_agents`, resolved: null is `fallback` when any host is configured, else `always`. */
+export function resolveLocalAgents(t: Pick<Tunables, "fleet" | "hosts">): LocalAgentsMode {
+  return t.fleet.local_agents ?? (Object.keys(t.hosts).length > 0 ? "fallback" : "always");
+}
+
+/**
+ * `t` as clients and subsystems read it: `fleet.local_agents` resolved, and each pool's
+ * `per_machine_overrides.local` under the supervisor's machine name `local`.
+ */
+function resolved(t: Tunables, local: string): Tunables {
+  const pools = Object.fromEntries(
+    Object.entries(t.lease_pools).map(([name, p]) => {
+      const o = p.per_machine_overrides;
+      if (o === undefined || !Object.hasOwn(o, LOCAL_HOST)) return [name, p];
+      const { [LOCAL_HOST]: own, ...rest } = o;
+      return [name, { ...p, per_machine_overrides: { ...rest, [local]: own as number } }];
+    }),
+  );
+  return {
+    ...t,
+    lease_pools: pools,
+    fleet: { ...t.fleet, local_agents: resolveLocalAgents(t) },
+  };
 }
 
 /** The reason all four `placement.weights` at 0 are refused with (SPEC §4.6.15). */
@@ -243,10 +295,14 @@ export class ConfigStore {
     this.waves.delete(wave);
   }
 
-  /** The full effective tunables: global, or global with `wave`'s overrides applied. */
+  /**
+   * The full effective tunables: global, or global with `wave`'s overrides applied, with
+   * `fleet.local_agents` and the `local` alias of `per_machine_overrides` resolved.
+   */
   effective(wave?: WaveId): Tunables {
     const over = wave !== undefined ? this.waves.get(wave) : undefined;
-    return over === undefined ? structuredClone(this.global) : merge(this.global, over);
+    const eff = over === undefined ? structuredClone(this.global) : merge(this.global, over);
+    return resolved(eff, this.localName());
   }
 
   /**
@@ -341,18 +397,34 @@ export class ConfigStore {
     mkdirSync(join(this.file, ".."), { recursive: true });
     writeFileAtomic(this.file, stringify(nextLayer));
 
+    const mode = resolveLocalAgents(this.global);
+    this.fileLayer = nextLayer;
+    this.global = nextGlobal;
+    this.record(patch, previous, by);
+    // A derived `local_agents` (null) that the change flipped (the first host added, the last
+    // removed) is journaled as the defaults' own change, so clients see the new mode.
+    const next = resolveLocalAgents(nextGlobal);
+    if (next !== mode) {
+      this.record(
+        { fleet: { local_agents: next } } as TunablesPatch,
+        { fleet: { local_agents: mode } },
+        DEFAULTS_AUTHOR,
+      );
+    }
+    return { applied: true, rejected: [], version: this.version };
+  }
+
+  /** Journal one `config_changed`, bump `version` and notify listeners. */
+  private record(patch: TunablesPatch, previous: Record<string, unknown>, by: string): void {
     const version = this.version + 1;
     const ev = this.system.append(
       { type: "config_changed", data: { by, patch, previous, version } },
       this.now(),
     );
-    this.fileLayer = nextLayer;
-    this.global = nextGlobal;
     this.version = version;
     this.updatedAt = ev.at;
     this.updatedBy = by;
     const change: ConfigChange = { seq: ev.seq, version, by, at: ev.at, patch, previous };
     for (const l of this.listeners) l(change);
-    return { applied: true, rejected: [], version };
   }
 }

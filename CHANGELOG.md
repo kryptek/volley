@@ -62,6 +62,21 @@ All workspace packages share one version. Dates are release-tag dates.
 - volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
   wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
   `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)
+- volleyd: an adaptive hub. `fleet.local_agents: always | fallback | never` sets how the
+  supervisor's own machine takes auto-placed tasks; `null`, the default, is `fallback` once any
+  `hosts.<name>` is configured, else `always`. Under `fallback` the own machine takes a task only
+  while no paired machine is eligible (a peer down for less than
+  `placement.down_decision_after_s` may be back, so it waits), and then under a lighter profile:
+  at most `fleet.fallback.max_agents` (default 3) of its own agents and
+  `fleet.fallback.per_machine.<pool>` heavy slots (default 1). Nothing running is moved when a
+  peer comes back. The candidate line says why (`local (fallback: no peer eligible: …)`,
+  `ineligible: fallback: box-a is eligible`, `ineligible: local_agents: never`); the own
+  readiness verdict carries `local_agents { mode, active, why? }`, `volleyd status` prints
+  `local agents: fallback (active: …)`, and `volleyd validate` warns about a task pinned to
+  `local` under `never`. `lease_pools.<pool>.per_machine_overrides: { <host>: n }` caps one
+  machine's share of a pool (0 allowed, `local` names the supervisor's own), enforced by the lease
+  book and shown in the pool state, `volley lease status` and the Desk's lease pools; the Desk's
+  supervisor card shows the mode as a chip. (#233)
 
 ## 0.4.0 — 2026-10-20
 
