@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Volley is an agent-messaging protocol — an MQTT topic + JSON envelope convention that lets agents from any vendor (Claude Code, Codex, plain shell scripts) coordinate across machines. This repo ships the spec, a reference MCP server, a CLI, the `volleyd` wave supervisor, Claude Code hooks, the Volley Desk dashboard, and Claude Code skills (`/volley`, `/volley-issues`).
 
-**Status:** public; pre-1.0. The last tagged release is `v0.1.3` (notify subcommand + dashboard browser notifications); `v0.3.0` is in release prep — every package is versioned `0.3.0`. It ships what `v0.2.0` planned (volleyd, volley-hooks, broker auth on mosquitto ≥ 2.1 Dynamic Security, the Desk; owner smoke path `docs/SMOKE-v0.2.md`) plus onboarding: `volley setup`, the Desk's setup wizard and one-time sign-in links, `volley peer` pairing and `volley claude` accounts (owner smoke: `SMOKE.md` Plan 11). Canonical repository URL is in `spec/SPEC.md`.
+**Status:** public; pre-1.0. The last tagged release is `v0.3.1`; every package is versioned `0.3.1`. `v0.3.0` shipped what `v0.2.0` planned (volleyd, volley-hooks, broker auth on mosquitto ≥ 2.1 Dynamic Security, the Desk; owner smoke path `docs/SMOKE-v0.2.md`) plus onboarding: `volley setup`, the Desk's setup wizard and one-time sign-in links, `volley peer` pairing and `volley claude` accounts (owner smoke: `SMOKE.md` Plan 11). Canonical repository URL is in `spec/SPEC.md`.
 
 **Authoritative docs (read these before changing anything substantive):**
 - `spec/SPEC.md` — wire-format contract, MUST/SHOULD/MAY conformance, error codes
