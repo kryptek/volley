@@ -127,3 +127,5 @@
 #                                # fence; merged_by_supervisor) or manual (a human merges)
 #   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
 #                                # (decision merge_refused: retry, manual or cancel)
+#   reconnect_grace_s: 900       # a wave owned by a coordinator name whose session went away reads
+#                                # coordinator.state "reconnecting" this long (60..86400), then "gone"

@@ -202,7 +202,14 @@ import {
   parseMachine,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
-import { claimVerdict, guardMutation } from "./ownership";
+import {
+  type Binding,
+  type RegistryEntry,
+  bindOwner,
+  claimVerdict,
+  guardMutation,
+  parseRegistryEntry,
+} from "./ownership";
 import { type DoctorRun, type PeerReply, PeerService } from "./peers";
 import {
   AUTO_HOST,
@@ -785,6 +792,8 @@ const OWNER_GONE = new Set(["reaped", "done", "failed"]);
 /** The wave_complete decision's id (one per wave, never shared with another wave). */
 const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
 
+/** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
+const REGISTRY_FILTER = "volley/_system/registry/+";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -933,6 +942,15 @@ export class Daemon {
     string,
     Omit<CoordinatorAttention, "agent_id" | "last_seen">
   >();
+  /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
+  private readonly namedEntries = new Map<string, RegistryEntry>();
+  /**
+   * Coordinator name → the agent bound to it (`bindOwner`); `gone_at` (daemon ms) once that agent
+   * went away with no other bound, which starts `autopilot.reconnect_grace_s`.
+   */
+  private readonly bindings = new Map<string, Binding & { gone_at?: number }>();
+  /** Per coordinator name: the timer that turns its waves' `reconnecting` into `gone`. */
+  private readonly reconnectTimers = new Map<string, TimerHandle>();
   /** Mailbox topics (one per namespace) whose stray retained message this process cleared. */
   private readonly clearedMailboxes = new Set<string>();
   private lastReading: PressureReading | null = null;
@@ -1489,6 +1507,9 @@ export class Daemon {
     // The journal is the record: every item is re-published (an answered one until its ttl).
     await this.sweepInbox();
     for (const item of this.inbox.values()) await this.publishInboxItem(item);
+    // Before the statuses: a replayed terminal status of a session carrying a coordinator name
+    // is kept only once its registry entry is known (`bindOwner` needs it).
+    await this.subscribeRegistry();
     await this.subscribeLeaseInputs();
     await this.publishAllPools();
     // One pressure sample before the first admission (`tick` samples first): a daemon restarted
@@ -1612,35 +1633,171 @@ export class Daemon {
     if (before !== JSON.stringify(next)) this.ownerChanged(agent);
   }
 
+  /** Does `agent` own a wave itself, or as the agent bound to the coordinator name owning it? */
   private ownsAWave(agent: string): boolean {
-    for (const log of this.waves.values()) if (log.record.state?.owner === agent) return true;
+    for (const log of this.waves.values()) {
+      const owner = log.record.state?.owner;
+      if (owner != null && this.actsAs(agent, owner)) return true;
+    }
     return false;
+  }
+
+  /** `agent` is `owner`, or the agent bound to the coordinator name `owner`. */
+  private actsAs(agent: string, owner: string): boolean {
+    return owner === agent || this.bindings.get(owner)?.agent_id === agent;
   }
 
   /** An agent's status or attention changed: re-publish the waves it owns (`coordinator`). */
   private ownerChanged(agent: string): void {
     if (!this.running) return;
     for (const [wave, log] of this.waves) {
-      if (log.record.state?.owner === agent) void this.enqueue(() => this.publishState(wave));
+      const owner = log.record.state?.owner;
+      if (owner != null && this.actsAs(agent, owner))
+        void this.enqueue(() => this.publishState(wave));
     }
   }
 
-  /** wave-state `coordinator` for `owner`; undefined until anything of it was seen. */
+  /**
+   * wave-state `coordinator` for `owner` (through its binding when it is a coordinator name);
+   * undefined until anything of it was seen. A bound agent that went away is `reconnecting` for
+   * `autopilot.reconnect_grace_s`, then `gone`.
+   */
   private coordinatorFor(owner: string): CoordinatorAttention | undefined {
-    const status = this.statusOf.get(owner);
-    const attention = this.attentionOf.get(owner);
-    if (status === undefined && attention === undefined) return undefined;
+    const binding = this.bindings.get(owner);
+    const agent = binding?.agent_id ?? owner;
+    const status = this.statusOf.get(agent);
+    const attention = this.attentionOf.get(agent);
+    if (status === undefined && attention === undefined && binding === undefined) return undefined;
     const seen = [
-      this.lastSeen.get(owner),
+      this.lastSeen.get(agent),
       status !== undefined ? Date.parse(status.at) : undefined,
+      binding !== undefined ? Date.parse(binding.since) : undefined,
     ]
       .filter((t): t is number => t !== undefined && !Number.isNaN(t))
       .sort((a, b) => b - a)[0];
     const last_seen = new Date(seen ?? this.now()).toISOString();
     if (status !== undefined && OWNER_GONE.has(status.type)) {
-      return { agent_id: owner, state: "gone", last_seen };
+      // Not yet stamped: the status was just seen and its rebind is still queued.
+      const away = binding?.gone_at ?? this.wentAwayAt(status.at);
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
+      const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
+      return { agent_id: agent, state, last_seen };
     }
-    return { agent_id: owner, ...(attention ?? { state: "working" }), last_seen };
+    return { agent_id: agent, ...(attention ?? { state: "working" }), last_seen };
+  }
+
+  /**
+   * When a bound agent went away: its terminal status's own time (a restart replays a long-past
+   * `done` as if fresh), never later than now; now when unknown.
+   */
+  private wentAwayAt(at: string | undefined): number {
+    const t = at !== undefined ? Date.parse(at) : Number.NaN;
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
+  }
+
+  /** Every agent's registry entry: the coordinator names they carry feed `bindings`. */
+  private async subscribeRegistry(): Promise<void> {
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
+        const id = m.topic.split("/")[3] ?? "";
+        const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
+        const before = this.namedEntries.get(id)?.coordinator;
+        if (entry?.coordinator !== undefined && entry.agent_id === id) {
+          this.namedEntries.set(id, entry);
+        } else {
+          this.namedEntries.delete(id);
+        }
+        for (const name of new Set([before, entry?.coordinator])) {
+          if (name !== undefined) void this.enqueue(() => this.rebind(name));
+        }
+      }),
+    );
+  }
+
+  /**
+   * Re-bind coordinator name `name` to its newest live registry entry (`bindOwner`). A new agent
+   * on a name that already had one is a reconnect: journaled `owner_reconnected` in each unfinished
+   * wave the name owns (once: a replayed registry after a restart finds it journaled). With no live
+   * entry the binding stays on its last agent, marked away (it no longer acts for the name), so
+   * its waves read `reconnecting` until
+   * `autopilot.reconnect_grace_s` passes. Runs on the queue.
+   */
+  private async rebind(name: string): Promise<void> {
+    const statuses = new Map([...this.statusOf].map(([id, s]) => [id, s.type]));
+    const prev = this.bindings.get(name);
+    let next = bindOwner([...this.namedEntries.values()], statuses, name);
+    // An older entry whose status was never seen is most likely a session long gone (its status
+    // forgotten), not a coordinator coming back: the current binding keeps the name.
+    const startedAt = (id: string | undefined) =>
+      id !== undefined ? (this.namedEntries.get(id)?.started_at ?? "") : "";
+    if (
+      next !== null &&
+      prev !== undefined &&
+      !statuses.has(next) &&
+      startedAt(next) < startedAt(prev.agent_id)
+    )
+      next = null;
+    const owned = [...this.waves].filter(([, log]) => log.record.state?.owner === name);
+    if (next !== null && next !== prev?.agent_id) {
+      this.bindings.set(name, {
+        agent_id: next,
+        since: dateOf(this.time).toISOString(),
+        status: statuses.get(next) ?? null,
+      });
+      this.time.clearTimeout(this.reconnectTimers.get(name));
+      this.reconnectTimers.delete(name);
+      // A binding made before its agent's status was known (a restart replays the registry before
+      // the statuses), or to an agent already gone when it was bound, was never a live session:
+      // moving off it is no reconnect, unless a wave journaled that agent as its owner.
+      const left = prev !== undefined ? this.statusOf.get(prev.agent_id) : undefined;
+      const provisional =
+        prev !== undefined &&
+        (left === undefined ||
+          (OWNER_GONE.has(left.type) && Date.parse(left.at) < Date.parse(prev.since)));
+      for (const [wave, log] of owned) {
+        const waveStatus = log.record.state?.status;
+        if (
+          prev === undefined ||
+          waveStatus === "complete" ||
+          waveStatus === "stopped" ||
+          log.record.owner_agent === next ||
+          (provisional && log.record.owner_agent !== prev.agent_id)
+        ) {
+          await this.publishState(wave);
+          continue;
+        }
+        await this.append(wave, {
+          type: "owner_reconnected",
+          data: { owner: name, agent_id: next, previous_agent_id: prev.agent_id },
+        });
+        this.log(`wave ${wave}: owner ${name} reconnected as ${next} (was ${prev.agent_id})`);
+      }
+      return;
+    }
+    if (prev === undefined) return;
+    const status = statuses.get(prev.agent_id) ?? null;
+    const away = OWNER_GONE.has(status ?? "");
+    const { gone_at, ...binding } = prev;
+    const awayAt = gone_at ?? this.wentAwayAt(this.statusOf.get(prev.agent_id)?.at);
+    this.bindings.set(name, { ...binding, status, ...(away ? { gone_at: awayAt } : {}) });
+    if (away && gone_at === undefined) {
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
+      const left = Math.max(0, grace - (this.now() - awayAt));
+      this.reconnectTimers.set(
+        name,
+        this.time.setTimeout(() => {
+          this.reconnectTimers.delete(name);
+          for (const [wave, log] of this.waves) {
+            if (log.record.state?.owner === name) void this.enqueue(() => this.publishState(wave));
+          }
+        }, left),
+      );
+    } else if (!away) {
+      this.time.clearTimeout(this.reconnectTimers.get(name));
+      this.reconnectTimers.delete(name);
+    }
+    for (const [wave] of owned) await this.publishState(wave);
   }
 
   /** False for a progress message already handled (same topic and bytes); bounded memory. */
@@ -1801,6 +1958,8 @@ export class Daemon {
     if (closeControl) void this.dynsec?.close();
     for (const t of this.stopGrace.values()) this.time.clearTimeout(t);
     this.stopGrace.clear();
+    for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
+    this.reconnectTimers.clear();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -1995,14 +2154,20 @@ export class Daemon {
         const env = parseEnvelope(m.payload);
         if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
           const prev = this.statusOf.get(holder)?.type;
-          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder)) {
+          const name = this.namedEntries.get(holder)?.coordinator;
+          // A session carrying a coordinator name keeps its status: `bindOwner` needs it. Each
+          // coordinator restart adds one; registry reaping (clearing `namedEntries`) bounds them.
+          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder) && name === undefined) {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);
             this.attentionOf.delete(holder);
           } else {
             this.statusOf.set(holder, { type: env.type, at: env.wall_time });
           }
-          if (prev !== env.type) this.ownerChanged(holder);
+          if (prev !== env.type) {
+            this.ownerChanged(holder);
+            if (name !== undefined) void this.enqueue(() => this.rebind(name));
+          }
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
         // Checked in queue order, so an `acquire` from this holder still waiting in the queue
@@ -7023,7 +7188,8 @@ export class Daemon {
         if (typeof p.by !== "string" || p.by === "")
           return {
             ok: false,
-            error: "claim needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID",
+            error:
+              "claim needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID",
           };
         // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
         if (!isValidAgentId(p.by))
@@ -7287,6 +7453,8 @@ export class Daemon {
     const log = this.waves.get(wave.wave);
     const existing = log?.record.state;
     if (log === undefined || existing == null) return { wave, owner };
+    if (existing.owner !== null && owner !== null && this.actsAs(owner, existing.owner))
+      return { wave, owner: existing.owner, existing: log };
     if (existing.owner !== null && existing.owner !== owner) {
       return refuse({
         ok: false,
@@ -7477,7 +7645,7 @@ export class Daemon {
         ok: false,
         error: `unknown decision '${id}'${wave !== undefined ? ` in wave '${wave}'` : ""}`,
       };
-    const refused = guardMutation(state, by, "resolve");
+    const refused = guardMutation(state, by, "resolve", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     let where: InboxWhere = { kind: "cli" };
     if (p.where !== undefined) {
@@ -7525,7 +7693,7 @@ export class Daemon {
       return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
     if (typeof sha !== "string" || !/^[0-9a-f]{7,40}$/.test(sha))
       return { ok: false, error: "merged requires payload.sha (7 to 40 lowercase hex digits)" };
-    const refused = guardMutation(state, by, "merged");
+    const refused = guardMutation(state, by, "merged", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     const driver = this.pipelineFor(w.wave);
     const defer = (async (): Promise<Reply> => {
@@ -7625,18 +7793,25 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const owner = w.log.record.state?.owner ?? null;
-    const info = owner !== null && owner !== by ? await this.ownerLiveness(owner) : null;
+    // A coordinator name is measured by its newest binding, never by an agent id it left.
+    const bound = owner !== null ? this.bindings.get(owner)?.agent_id : undefined;
+    const agent = bound ?? owner;
+    const info = agent !== null && agent !== by ? await this.ownerLiveness(agent) : null;
     const verdict = claimVerdict({
       owner,
       by,
+      ...(bound !== undefined ? { bound } : {}),
       status: info?.status ?? null,
       registryAt: info?.registryAt ?? null,
-      heartbeatAt: owner !== null ? (this.lastSeen.get(owner) ?? this.startedAt) : null,
+      heartbeatAt: agent !== null ? (this.lastSeen.get(agent) ?? this.startedAt) : null,
       ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
       now: this.now(),
       claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
+    // The agent bound to a coordinator-name owner already acts for it: the name keeps the wave.
+    if (bound !== undefined && bound === by)
+      return { ok: true, result: { wave: w.wave, owner, previous: owner, why: verdict.why } };
     if (owner !== by) {
       await this.append(w.wave, {
         type: "owner_claimed",
@@ -7683,7 +7858,7 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const state = w.log.record.state as WaveState;
-    const refused = guardMutation(state, by, op);
+    const refused = guardMutation(state, by, op, this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     const done = (changed: boolean): HandlerResult => ({
       ok: true,
@@ -7992,7 +8167,7 @@ export class Daemon {
     const urgent = escapeOnly || p.urgent === true;
     if (!escapeOnly && (typeof p.text !== "string" || p.text.trim() === ""))
       return { ok: false, error: "steer requires a non-empty payload.text" };
-    const refused = guardMutation(w.log.record.state as WaveState, by, "steer");
+    const refused = guardMutation(w.log.record.state as WaveState, by, "steer", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     if (p.role !== undefined && (typeof p.role !== "string" || !isTaskRole(p.role)))
       return {
