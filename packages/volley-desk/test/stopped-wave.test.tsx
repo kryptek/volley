@@ -9,6 +9,8 @@ import { WaveWindow } from "../src/windows/wave/WaveWindow";
 import {
   NOW,
   S,
+  archiveMsg,
+  cleared,
   fakeClient,
   progress,
   registry,
@@ -231,6 +233,31 @@ describe("stopped wave — App fold under Show finished", () => {
       vi.advanceTimersByTime(100);
     });
     expect(within(coords()).getByRole("button", { name: "Ended · 1" })).toBeInTheDocument();
+  });
+
+  it("an archived wave leaves the canvas and the coordinators window; the index is counted", () => {
+    localStorage.setItem(DISMISSED_WAVES_KEY, JSON.stringify(["w9"]));
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ showFinished: true, tethers: true }));
+    const { f } = mount();
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+    act(() => {
+      // The agent was retired first: its retained records are gone.
+      f.emit(cleared("volley/_system/registry/impl-1"));
+      f.emit(cleared("volley/default/impl-1/status"));
+      f.emit(waveMsg({ ...stopped(), status: "archived" }));
+      f.emit(cleared("volley/_waves/w1/state"));
+      f.emit(archiveMsg(["w1"]));
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.queryByRole("region", { name: "w1" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "w1 · T1 · implementer" })).toBeNull();
+    // Not even as an agent with no wave: its records are gone, so it is dropped.
+    const labels = screen.queryAllByRole("region").map((r) => r.getAttribute("aria-label") ?? "");
+    expect(labels.filter((l) => l.includes("impl-1"))).toEqual([]);
+    expect(within(coords()).queryByRole("listitem", { name: "w1" })).toBeNull();
+    expect(coords()).toHaveTextContent("1 archived (volleyd archive)");
+    // The per-browser dismissals are untouched.
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w9"]);
   });
 
   it("keeps a dismissal whose wave has not been replayed yet (a slow link)", () => {

@@ -27,3 +27,10 @@ export async function runCli(
   const exitCode = await main({ argv, env, io });
   return { exitCode, stdout: io.readStdout(), stderr: io.readStderr() };
 }
+
+/** `run`'s stderr without its ownerless-wave warning (a test that submits without an owner). */
+export const withoutOwnerWarning = (stderr: string): string =>
+  stderr
+    .split(/(?<=\n)/)
+    .filter((l) => !/^warning: wave \S+ has no owner: /.test(l))
+    .join("");

@@ -35,6 +35,7 @@
 import {
   type AgentAttention,
   type AgentView,
+  type ArchivePayload,
   type ClaudeAccountPayload,
   type ClaudeSignin,
   type ConfigPayload,
@@ -93,6 +94,7 @@ export type Route =
   | { kind: "wave"; wave: string }
   | { kind: "decision"; wave: string; decisionId: string }
   | { kind: "config" }
+  | { kind: "archive" }
   | { kind: "lease"; pool: string }
   | { kind: "admission" }
   | { kind: "claudeAccount"; acct: string }
@@ -120,6 +122,7 @@ export function routeTopic(topic: string): Route | null {
   }
   if (a === "_waves") {
     if (p.length === 3 && b === "_config") return { kind: "config" };
+    if (p.length === 3 && b === "_archive") return { kind: "archive" };
     if (p.length === 4 && b && c === "state") return { kind: "wave", wave: b };
     if (p.length === 5 && b && c === "decisions" && d) {
       return { kind: "decision", wave: b, decisionId: d };
@@ -141,6 +144,7 @@ export function initialState(): DeskState {
     coordinators: {},
     supervisors: {},
     config: null,
+    archive: null,
     leases: {},
     admission: null,
   };
@@ -179,6 +183,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceDecision(state, route.wave, route.decisionId, m);
     case "config":
       return { ...state, config: (m.envelope?.payload as ConfigPayload | undefined) ?? null };
+    case "archive":
+      return { ...state, archive: (m.envelope?.payload as ArchivePayload | undefined) ?? null };
     case "lease": {
       const leases = { ...state.leases };
       if (m.envelope) leases[route.pool] = m.envelope.payload as LeasePoolPayload;
@@ -337,6 +343,7 @@ export function resync(state: DeskState): DeskState {
     coordinators: {},
     supervisors,
     config: null,
+    archive: null,
     leases: {},
     admission: null,
     claudeAccounts: {},
@@ -822,9 +829,13 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
   if (m.envelope === null) {
     if (!waves[id]) return state;
     delete waves[id];
+    // The wave's agents move to "no wave", except those whose retained records are all gone
+    // (retired, then the wave archived): nothing would ever bring them back, so they go.
     const agents: Record<string, AgentView> = {};
     for (const a of Object.values(state.agents)) {
-      agents[a.id] = a.wave === id ? { ...a, wave: UNASSIGNED, task: null, role: null } : a;
+      if (a.wave !== id) agents[a.id] = a;
+      else if (a.status !== null || a.registry !== null)
+        agents[a.id] = { ...a, wave: UNASSIGNED, task: null, role: null };
     }
     return { ...state, waves, agents };
   }
@@ -999,7 +1010,7 @@ export function agentsByWave(state: DeskState): Record<string, AgentView[]> {
 }
 
 /** Wave statuses after which nothing runs: the wave window renders dimmed and folds under Show finished. */
-const ENDED_WAVE = new Set(["stopped", "complete"]);
+const ENDED_WAVE = new Set(["stopped", "complete", "archived"]);
 
 export function isEndedWave(w: WaveView | undefined): boolean {
   return ENDED_WAVE.has(w?.state?.status ?? "");

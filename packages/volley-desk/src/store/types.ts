@@ -155,7 +155,8 @@ export interface WaveStatePayload {
   owner: string | null;
   repo: string;
   release_branch: string;
-  status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.16). */
+  status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped" | "archived";
   tasks: WaveTask[];
   open_decisions: string[];
   gates: string[];
@@ -249,6 +250,18 @@ export interface Tunables {
   /** The Fleet's names (SPEC §4.6.15): `local_name` is the supervisor's own machine. */
   fleet?: { local_name?: string | null };
   [key: string]: unknown;
+}
+
+/** Retained `volley/_waves/_archive` payload (archive.schema.json): archived waves, newest first. */
+export interface ArchivePayload {
+  archived: {
+    wave: string;
+    status: "stopped" | "complete";
+    archived_at: string;
+    by: string;
+    reason: string;
+  }[];
+  updated_at: string;
 }
 
 /** Retained `volley/_waves/_config` payload. */
@@ -534,6 +547,8 @@ export interface DeskState {
   /** Supervisors by agent id; they are never in `agents`. */
   supervisors: Record<string, SupervisorView>;
   config: ConfigPayload | null;
+  /** The supervisor's index of archived waves (`volley/_waves/_archive`); null until retained. */
+  archive?: ArchivePayload | null;
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */
   admission: Record<string, unknown> | null;

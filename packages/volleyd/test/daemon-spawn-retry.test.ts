@@ -18,7 +18,7 @@ import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES, type FakeHost, fakeHost } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
-import { runCli } from "./helpers/run-cli";
+import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
 
 const ID = "w1-t1-implementer-1";
 const T0 = Date.parse("2026-10-18T12:00:00.000Z");
@@ -202,7 +202,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     );
     const r = await runCli(["run", wave], env.env);
     if (o.release === "missing" || o.origin !== undefined) return r;
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     return r;
   }
@@ -575,7 +575,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   it("require_fresh_base off: a local-only repo is accepted (cut from the local copy)", async () => {
     const r = await setup("spawn_retry_max: 5, require_fresh_base: false", { origin: "none" });
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     await event("task_admitted");
   });
@@ -590,7 +590,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
 
   it("run does not check the local repo for a wave whose every task runs on a remote host", async () => {
     const r = await setup("spawn_retry_max: 5", { release: "missing", taskHost: "build-box.lan" });
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     expect(gitCalls().filter((a) => a[3] === "rev-parse" && a[4] === "--verify")).toEqual([]);
     await event("task_admitted");

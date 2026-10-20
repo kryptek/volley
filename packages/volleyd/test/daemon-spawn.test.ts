@@ -32,7 +32,7 @@ import {
   fakeRemoteHost,
 } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
-import { runCli } from "./helpers/run-cli";
+import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
@@ -500,7 +500,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
     );
     const r = await runCli(["run", file], env.env);
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
   };
 
