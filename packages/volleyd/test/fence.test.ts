@@ -18,6 +18,7 @@ import {
   MODEL_ID,
   assertAllowed,
   mintConsentToken,
+  mintMergeToken,
   mintModelSwitchToken,
   mintScriptToken,
   mintSetupToken,
@@ -1159,5 +1160,77 @@ describe("the sign-in forward (F8): `ssh -N -L` only with the token a remote sig
     expect(() => assertAllowed(["ssh", "-T", TARGET, "bash", "-s"], { forward })).toThrow(
       FenceError,
     );
+  });
+});
+
+describe("merge token (autopilot merging)", () => {
+  const H = "a".repeat(40);
+  const H2 = "b".repeat(40);
+  const token = (pr = 7, head = H) =>
+    mintMergeToken({ wave: "w", task: "T1", pr, head, release_branch: "release/x" });
+  const MERGE = ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H];
+
+  it("gh pr merge is denied without a token", () => {
+    expect(() => assertAllowed(MERGE)).toThrow(/FENCE_DENIED: gh pr merge/);
+  });
+
+  it("allows exactly the gated PR at exactly the gated head, with --delete-branch optional", () => {
+    const merge = token();
+    expect(() => assertAllowed(MERGE, { merge })).not.toThrow();
+    expect(() => assertAllowed([...MERGE, "--delete-branch"], { merge })).not.toThrow();
+  });
+
+  it("denies another PR, another head, other strategies, admin/auto and loose shapes", () => {
+    expect(() => assertAllowed(MERGE, { merge: token(8) })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { merge: token(7, H2) })).toThrow(FenceError);
+    const merge = token();
+    const variants: string[][] = [
+      ["gh", "pr", "merge", "7", "--merge", "--match-head-commit", H],
+      ["gh", "pr", "merge", "7", "--rebase", "--match-head-commit", H],
+      [...MERGE, "--admin"],
+      [...MERGE, "--auto"],
+      [...MERGE, "--merge"],
+      ["gh", "pr", "merge", "7", "--squash"],
+      ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H.slice(0, 7)],
+      ["gh", "pr", "merge", "7", "--squash", `--match-head-commit=${H}`],
+      ["gh", "pr", "merge", "--squash", "--match-head-commit", H, "7"],
+      ["gh", "pr", "merge", "07", "--squash", "--match-head-commit", H],
+      [...MERGE, "--delete-branch", "--delete-branch"],
+      [...MERGE, "--body", "x"],
+    ];
+    for (const argv of variants) {
+      expect(() => assertAllowed(argv, { merge }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("a merge token unlocks nothing else", () => {
+    const merge = token();
+    expect(() => assertAllowed(["git", "merge", "x"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["git", "push"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["git", "rebase", "main"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["gh", "workflow", "run", "ci"], { merge })).toThrow(FenceError);
+  });
+
+  it("is checked by identity: a look-alike token is rejected", () => {
+    const forged = {
+      wave: "w",
+      task: "T1",
+      pr: 7,
+      head: H,
+      release_branch: "release/x",
+    } as unknown as ReturnType<typeof mintMergeToken>;
+    expect(() => assertAllowed(MERGE, { merge: forged })).toThrow(FenceError);
+  });
+
+  it("exec passes the token through to the fence", async () => {
+    // A forged token is refused at the fence, before anything spawns.
+    const forged = { pr: 7, head: H } as unknown as ReturnType<typeof mintMergeToken>;
+    await expect(exec(MERGE, { merge: forged })).rejects.toThrow(FenceError);
+    await expect(exec(MERGE)).rejects.toThrow(FenceError);
+  });
+
+  it("refuses to mint over a short head or a non-positive PR", () => {
+    expect(() => token(7, "abc1234")).toThrow(FenceError);
+    expect(() => token(0)).toThrow(FenceError);
   });
 });
