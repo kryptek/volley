@@ -155,7 +155,7 @@ export interface WaveStatePayload {
   owner: string | null;
   repo: string;
   release_branch: string;
-  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.16). */
+  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.17). */
   status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped" | "archived";
   tasks: WaveTask[];
   open_decisions: string[];

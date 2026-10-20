@@ -512,7 +512,7 @@ describe("reducer — Fleet readiness (SPEC §4.6.15)", () => {
   });
 });
 
-describe("reducer — archived waves (SPEC §4.6.16)", () => {
+describe("reducer — archived waves (SPEC §4.6.17)", () => {
   const archived = () => {
     const e = example("wave-state-running");
     return msg("volley/_waves/w1/state", {

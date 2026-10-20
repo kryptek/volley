@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/archive.schema.json",
   "title": "Volley Archived Waves Index",
-  "description": "Retained index of archived waves, published by a supervisor to volley/_waves/_archive (the leading underscore keeps it out of the wave id space). Newest first, capped by the supervisor. Every client can show how many waves were archived without reading journals. See spec section 4.6.16.",
+  "description": "Retained index of archived waves, published by a supervisor to volley/_waves/_archive (the leading underscore keeps it out of the wave id space). Newest first, capped by the supervisor. Every client can show how many waves were archived without reading journals. See spec section 4.6.17.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {

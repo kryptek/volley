@@ -59,7 +59,7 @@ export const WAITING_ON_EVENTS_LABEL = "Working · waiting on events";
 export const ENDED_LABEL: Partial<Record<string, string>> = {
   complete: "Complete",
   stopped: "Stopped",
-  // Seen only in the one publish before an archived wave's state is cleared (SPEC §4.6.16).
+  // Seen only in the one publish before an archived wave's state is cleared (SPEC §4.6.17).
   archived: "Archived",
 };
 

@@ -1,4 +1,6 @@
 import { ARCHIVED_ANSWER } from "./archive";
+import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
+import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
@@ -60,6 +62,8 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+  /** What autopilot answered and escalated (SPEC §4.6.16); absent in older snapshots. */
+  autopilot?: AutopilotRecord;
   /** When the wave last ended (`wave_stopped` / `wave_complete`); null after a resume. */
   ended_at?: string | null;
   /** Set by `wave_archived` (archive.ts): when, by whom, why, and how the wave had ended. */
@@ -142,6 +146,7 @@ export function emptyRecord(): WaveRecord {
     pipeline: {},
     spawnFailures: {},
     budget_raised: 0,
+    autopilot: emptyAutopilot(),
   };
 }
 
@@ -382,13 +387,33 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           return x !== undefined && x.task === d.task && parksTask(x);
         });
         const parked = task !== undefined && task.stage === "awaiting_decision";
-        // An archive's close (SPEC §4.6.16) leaves the task parked: its wave has ended for good.
+        // An archive's close (SPEC §4.6.17) leaves the task parked: its wave has ended for good.
         const archiveClose =
           d.resolved.answer === ARCHIVED_ANSWER &&
           (state.status === "stopped" || state.status === "complete");
         if (task !== undefined && parked && parksTask(d) && !stillOpen && !archiveClose) {
           task.stage = d.resume_stage ?? "queued";
         }
+      }
+      break;
+    }
+    case "decision_auto_resolved":
+      // The decision_resolved that follows resolves it; this counts the answer and its budget.
+      next.autopilot = foldAutoResolved(
+        next.autopilot ?? emptyAutopilot(),
+        ev.data.budget as Budget | undefined,
+      );
+      break;
+    case "decision_escalated": {
+      const a = next.autopilot ?? emptyAutopilot();
+      next.autopilot = { ...a, escalated: a.escalated + 1 };
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d !== undefined) {
+        const budget = ev.data.budget as Budget | undefined;
+        d.escalated = {
+          why: ev.data.why as EscalateWhy,
+          ...(budget !== undefined ? { budget } : {}),
+        };
       }
       break;
     }
@@ -586,6 +611,17 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+  // Autopilot's tally, once it has done anything (the daemon sets `enabled` from the effective
+  // config when it publishes).
+  const a = rec.autopilot;
+  if (a !== undefined && a.resolved + a.escalated > 0) {
+    state.autopilot = {
+      enabled: state.autopilot?.enabled ?? rec.overrides.autopilot?.enabled ?? true,
+      auto_resolved: a.resolved,
+      escalated: a.escalated,
+      budgets: structuredClone(a.budgets),
+    };
+  }
 }
 
 /** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */

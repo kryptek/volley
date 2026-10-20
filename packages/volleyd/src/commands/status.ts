@@ -150,6 +150,12 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  // What autopilot did in the wave (absent: a state from before autopilot).
+  const ap = s.autopilot;
+  const autopilot =
+    ap !== undefined
+      ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
+      : "";
   const archived =
     s.archived !== undefined
       ? `  archived ${s.archived.at} by ${s.archived.by}: ${s.archived.reason}\n`
@@ -171,7 +177,7 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + archived + preface + hygiene + rows.join("") + decisions.join("");
+  return header + archived + autopilot + preface + hygiene + rows.join("") + decisions.join("");
 }
 
 /**

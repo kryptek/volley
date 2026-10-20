@@ -27,7 +27,7 @@ A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also 
 tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
 `;
 
-/** Printed when `run` submits a wave with no owner (SPEC §4.6.16). */
+/** Printed when `run` submits a wave with no owner (SPEC §4.6.17). */
 export const noOwnerWarning = (wave: string) =>
   `wave ${wave} has no owner: nobody can answer its decisions (pass --owner, set VOLLEY_AGENT_ID, or run from a registered session); it is archived automatically once ended`;
 

@@ -44,7 +44,7 @@
             "wave": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "description": "archive: the ended wave an admin archives (spec section 4.6.16)."
+              "description": "archive: the ended wave an admin archives (spec section 4.6.17)."
             },
             "dry_run": {
               "type": "boolean",

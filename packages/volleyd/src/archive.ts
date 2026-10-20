@@ -3,7 +3,7 @@ import type { WaveRecord } from "./reducer";
 import type { JournalEvent, NewEvent, Tunables, WaveId, WaveStatus } from "./types";
 
 /**
- * Archiving an ended wave (SPEC §4.6.16). Pure: the daemon reads the record, the clock and the
+ * Archiving an ended wave (SPEC §4.6.17). Pure: the daemon reads the record, the clock and the
  * effective config, and journals what this returns.
  */
 

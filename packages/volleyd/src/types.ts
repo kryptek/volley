@@ -135,11 +135,35 @@ export interface Tunables {
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
-  // --- Archiving (SPEC §4.6.16) ---
+  /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16). */
+  autopilot: AutopilotConfig;
+  // --- Archiving (SPEC §4.6.17) ---
   /** Hours after its `wave_stopped` / `wave_complete` an ended wave is archived; 0: never. */
   archive_ended_after_h: number;
   /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
   archive_on_ack: boolean;
+}
+
+/**
+ * Config `autopilot` (SPEC §4.6.16): whether volleyd answers routine decisions itself, the kinds
+ * it never answers, and its remediation budgets (each `*_max` is per wave, per budget key).
+ */
+export interface AutopilotConfig {
+  enabled: boolean;
+  /** Decision kinds only the owner answers (`release_go` / `stage_go` arrive with the release train). */
+  owner_only: string[];
+  /** Relaunches of one `<task>/<role>` after a bad launch. */
+  relaunch_max: number;
+  /** Extra nudges of one stalled run (`<task>/<role>/<attempt>`). */
+  nudge_max: number;
+  /** Respawns of one `<task>/<role>`. */
+  respawn_max: number;
+  /** Re-reviews of one task (a moved head, a stale review at the gate). */
+  rereview_max: number;
+  /** Agent questions answered for one run. */
+  question_max: number;
+  /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
+  budget_raise_max: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -346,9 +370,20 @@ export interface WaveState {
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
   hygiene_level?: HygieneLevel;
+  /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
+  autopilot?: AutopilotState;
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
   updated_at: string;
+}
+
+/** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
+export interface AutopilotState {
+  enabled: boolean;
+  auto_resolved: number;
+  escalated: number;
+  /** Each budget key autopilot answered under: answers given (or spawns allowed) and its max. */
+  budgets: Record<string, { used: number; max: number }>;
 }
 
 /** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
@@ -458,6 +493,9 @@ export const WAVE_EVENT_TYPES = [
   "peer_drain_started",
   // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
   "repo_visibility_detected",
+  // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
+  "decision_auto_resolved",
+  "decision_escalated",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
