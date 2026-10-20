@@ -350,18 +350,42 @@ describe("App: pinning windows (demo mode)", () => {
     expect(v.x + Number.parseFloat(wave.style.left) * v.s).toBeGreaterThanOrEqual(8 + 430);
   });
 
-  it("the first fit frames only unpinned windows", () => {
+  /** A canvas window's screen rect (430 wide) lies inside the 1600 x 1000 viewport. */
+  const inViewport = (c: HTMLElement, el: HTMLElement) => {
+    const v = view(c);
+    const x = v.x + Number.parseFloat(el.style.left) * v.s;
+    const y = v.y + Number.parseFloat(el.style.top) * v.s;
+    expect(x).toBeGreaterThanOrEqual(0);
+    expect(x + 430 * v.s).toBeLessThanOrEqual(1600);
+    expect(y).toBeGreaterThanOrEqual(0);
+    expect(y).toBeLessThanOrEqual(1000);
+  };
+
+  it("the first fit frames pinned windows too", () => {
     // Auto-arrange off: only the first fit sets the view.
     localStorage.setItem("volley-desk-look", JSON.stringify({ autoArrange: false }));
     const baseline = renderApp();
     const s0 = view(baseline.container).s;
-    // pin the coordinators window in place far away, then reload
+    // pin the coordinators window in place far away (not so far that even the fit minimum
+    // zoom could not frame it), then reload
     fireEvent.click(pinBtn(coords()));
-    dragBar(coords(), -20_000, -20_000);
+    dragBar(coords(), -4000, -4000);
     baseline.unmount();
     const again = renderApp();
-    // a fit that included it would zoom far out; one without it frames the rest as before or closer
-    expect(view(again.container).s).toBeGreaterThanOrEqual(s0);
+    // the fit includes it: it zooms out, and the window is on screen
+    expect(view(again.container).s).toBeLessThan(s0);
+    inViewport(again.container, coords());
+  });
+
+  it("arrange & fit keeps a window pinned in place on screen", () => {
+    const { container } = renderApp();
+    advance(400 + ARRANGE_ANIM_MS);
+    dragBar(coords(), -900, 300);
+    const placed = at(coords());
+    fireEvent.click(pinBtn(coords()));
+    arrangeNow();
+    expect(at(coords())).toEqual(placed);
+    inViewport(container, coords());
   });
 
   describe("at phone width", () => {

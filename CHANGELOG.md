@@ -10,6 +10,9 @@ All workspace packages share one version. Dates are release-tag dates.
   stuck task (a rebase agent, on a downstream wave) stayed silently in its stage. Every role's
   `blocked` now opens an `agent_blocked` decision with the agent's reason (`continue | respawn |
   cancel`); the agent is not retired while it is open (SPEC §5.2). (#196)
+- volley-desk: Arrange & fit and the first fit framed only the arranged (unpinned) windows, so a
+  window pinned in place could be left off-screen; the view now frames the pinned windows with
+  the rest, and the layout is chosen to fit beside them. (#221)
 
 ### Added
 

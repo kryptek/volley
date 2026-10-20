@@ -177,6 +177,17 @@ describe("arrange", () => {
     expect(ARRANGE_MIN_SCALE).toBe(FIT_MIN_SCALE);
   });
 
+  it("with no pinned windows the layout and the view are unchanged (snapshot)", () => {
+    const r = arrange(clusters, screen);
+    if (!r) throw new Error("no arrangement");
+    expect(r.view.x).toBeCloseTo(24, 6);
+    expect(r.view.s).toBeCloseTo(0.58921792, 6);
+    expect(r.view.y).toBeCloseTo(114.041762, 6);
+    const win = candidates(clusters, screen).find((c) => c.cols === 3 && c.rows === 2);
+    expect(r.place).toEqual(win?.place);
+    expect(arrange(clusters, screen, { pinned: {} })).toEqual(r);
+  });
+
   it("returns null with nothing to arrange", () => {
     expect(arrange([], screen)).toBeNull();
   });
@@ -306,11 +317,58 @@ describe("pinned windows (C12)", () => {
     );
   });
 
-  it("lays the other windows clear of the pinned ones", () => {
-    const pinned = { coordinators: { x: 0, y: 0, w: 430, h: 360 } };
-    const r = arrange(clusters, screen, { pinned });
-    for (const rect of rectsOf(r?.place ?? {})) {
-      expect(overlaps(rect, pinned.coordinators)).toBe(false);
+  type R = { x: number; y: number; w: number; h: number };
+  const inflate = (r: R): R => ({
+    x: r.x - CGAP,
+    y: r.y - CGAP,
+    w: r.w + 2 * CGAP,
+    h: r.h + 2 * CGAP,
+  });
+  const twoPins = {
+    coordinators: { x: 0, y: 0, w: 430, h: 360 },
+    b2: { x: 3000, y: 2500, w: 460, h: 450 },
+  };
+  const portrait = { width: 390, height: 844 };
+
+  for (const [name, sc] of [
+    ["landscape, block moves right", screen],
+    ["portrait, block moves down", portrait],
+  ] as const) {
+    for (const [what, pinned] of [
+      ["one pinned window", { coordinators: twoPins.coordinators }],
+      ["two pinned windows", twoPins],
+    ] as const) {
+      it(`lays the other windows clear of the pinned ones, gap included (${name}, ${what})`, () => {
+        const r = arrange(clusters, sc, { pinned });
+        if (!r) throw new Error("no arrangement");
+        for (const id of Object.keys(pinned)) expect(r.place[id]).toBeUndefined();
+        for (const rect of rectsOf(r.place)) {
+          for (const p of Object.values(pinned)) expect(overlaps(rect, inflate(p))).toBe(false);
+        }
+      });
+    }
+  }
+
+  /** A world rect, mapped through the view, lies inside the fit area. */
+  const onScreen = (r: { view: { x: number; y: number; s: number } }, rect: R) => {
+    const { x, y, s } = r.view;
+    expect(x + rect.x * s).toBeGreaterThanOrEqual(24 - 0.5);
+    expect(x + (rect.x + rect.w) * s).toBeLessThanOrEqual(24 + 1552 + 0.5);
+    expect(y + rect.y * s).toBeGreaterThanOrEqual(64 - 0.5);
+    expect(y + (rect.y + rect.h) * s).toBeLessThanOrEqual(64 + 826 + 0.5);
+  };
+
+  it("the view frames the pinned windows with the arranged ones", () => {
+    const cases: [Cluster[], Record<string, R>][] = [
+      [[waveA, waveB], { coordinators: { x: 0, y: 0, w: 430, h: 360 } }],
+      [[waveA, waveB], { coordinators: { x: -1500, y: 400, w: 430, h: 360 } }],
+      [clusters, twoPins],
+    ];
+    for (const [cls, pinned] of cases) {
+      const r = arrange(cls, screen, { pinned });
+      if (!r) throw new Error("no arrangement");
+      for (const rect of rectsOf(r.place)) onScreen(r, rect);
+      for (const p of Object.values(pinned)) onScreen(r, p);
     }
   });
 

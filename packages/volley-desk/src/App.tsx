@@ -613,9 +613,9 @@ export default function App() {
   const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
-  // The first fit frames only the unpinned windows.
+  // The first fit frames the canvas: every shown window but the anchored ones.
   const rects: Rect[] = shownIds()
-    .filter((id) => pinOf(id) === undefined)
+    .filter((id) => !anchored(id))
     .map((id) => rectOf(id, dims(id).w, dims(id).h));
   const fitted = useRef(false);
   useEffect(() => {
