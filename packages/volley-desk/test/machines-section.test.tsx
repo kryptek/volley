@@ -735,7 +735,7 @@ describe("Settings › Machines", () => {
     expect(screen.getByRole("button", { name: "Create a new code" })).toBeInTheDocument();
   });
 
-  it("a new machine record flips the Stepper to Joined, which stays; Done closes it", async () => {
+  it("a new machine record flips the Stepper to Joined, which stays; Done (step 5) closes it", async () => {
     const { rerender } = setup();
     await act(flush);
     await addMachine();
@@ -747,7 +747,11 @@ describe("Settings › Machines", () => {
     // Its record going away again does not send the Stepper back to a spent code.
     rerender({ machines: { "box-a": boxA, "box-b": boxB } });
     expect(screen.getByRole("heading", { name: /box-c joined/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    });
     expect(screen.queryByRole("heading", { name: /box-c joined/ })).toBeNull();
     expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
   });

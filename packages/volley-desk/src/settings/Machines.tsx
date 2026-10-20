@@ -32,8 +32,9 @@ import type {
   ReadinessPayload,
   WaveStatePayload,
 } from "../store/types";
-import { MachineCard, countdown } from "./MachineCard";
-import { CopyCommand } from "./MachineRows";
+import { DEFAULT_MAX_AGENTS, MachineCard, ReadinessLine, countdown } from "./MachineCard";
+import { CheckRows, CopyCommand } from "./MachineRows";
+import { RepairSheet } from "./RepairSheet";
 import type { ConfigTransport } from "./configTransport";
 import "../styles/machines.css";
 
@@ -184,17 +185,28 @@ type Pairing =
 function AddMachine({
   ops,
   machines,
+  readiness,
+  config,
+  signIn,
   now,
   host,
   onClose,
 }: {
   ops: PeerOps;
   machines: Record<string, MachinePayload>;
+  readiness: Record<string, ReadinessPayload>;
+  config: ConfigTransport | null;
+  signIn: ((machine: string) => ReactNode) | undefined;
   now: number;
   host: string;
   onClose: () => void;
 }) {
   const [s, setS] = useState<Pairing>({ phase: "creating" });
+  /** After the join: 0 Checks, 1 Claude on <machine>, 2 Ready. */
+  const [after, setAfter] = useState(0);
+  const [repairing, setRepairing] = useState(false);
+  const [checking, setChecking] = useState<"idle" | "busy" | { error: string }>("idle");
+  const [cap, setCap] = useState<string | null>(null);
   const [to, setTo] = useState("");
   const panel = useRef<HTMLDivElement>(null);
   // The panel opens below the cards: bring it into view (jsdom has no scrollIntoView).
@@ -229,7 +241,36 @@ function AddMachine({
     void create();
   }, [create]);
 
-  const step = joined ? 3 : s.phase === "waiting" ? 2 : 1;
+  const step = joined ? 3 + after : s.phase === "waiting" ? 2 : 1;
+  const rec = joined ? machines[joined] : undefined;
+  const verdict = joined ? readiness[joined] : undefined;
+  const ctx = { machine: joined ?? "", repo: rec?.repo?.path };
+  const currentCap = verdict?.max_agents ?? DEFAULT_MAX_AGENTS;
+  const capValue = Number(cap ?? currentCap);
+  const capValid = Number.isInteger(capValue) && capValue >= 1 && capValue <= 100;
+  // Check again: a dry doctor run makes the machine publish a fresh record, and volleyd a verdict.
+  const checkAgain = async () => {
+    if (!joined) return;
+    setChecking("busy");
+    const a = await ops.doctor(joined, { fix: false });
+    setChecking(a.ok ? "idle" : { error: a.error });
+  };
+  const done = async () => {
+    if (joined && config && capValid && capValue !== currentCap) {
+      await config.send(
+        { hosts: { [joined]: { max_agents: capValue } } },
+        { text: `set ${joined} max_agents to ${capValue}` },
+      );
+    }
+    onClose();
+  };
+  const next = (
+    <div className="ny-actions">
+      <button type="button" className="btn btn--hot" onClick={() => setAfter((n) => n + 1)}>
+        Next
+      </button>
+    </div>
+  );
   return (
     <div ref={panel} className="pair pair--machine">
       <Stepper
@@ -335,16 +376,110 @@ function AddMachine({
             </>
           )}
         </Step>
-        <Step title="Ready" description="Joined">
+        <Step title="Checks" description="Joined">
           <h3>
             <HugeiconsIcon icon={Tick02Icon} size={15} strokeWidth={1.8} /> {joined} joined
           </h3>
-          <p className="dim">
-            Its tunnel is up and it reports its health here. New waves can now place agents on{" "}
-            {joined}.
-          </p>
+          {rec?.checks?.length ? (
+            <CheckRows checks={rec.checks} ctx={ctx} label={`Checks on ${joined}`} />
+          ) : (
+            <p className="dim">
+              <span className="spinner" aria-hidden="true" /> Waiting for its first doctor report…
+            </p>
+          )}
+          {rec && <ReadinessLine m={rec} r={verdict} now={now} />}
           <div className="ny-actions">
-            <button type="button" className="btn btn--hot" onClick={onClose}>
+            {rec?.checks?.some((c) => !c.ok) && (
+              <button type="button" className="btn" onClick={() => setRepairing(true)}>
+                Repair…
+              </button>
+            )}
+            <button type="button" className="btn btn--hot" onClick={() => setAfter(1)}>
+              Next
+            </button>
+          </div>
+          {repairing && joined && (
+            <RepairSheet
+              machine={joined}
+              ops={ops}
+              repo={rec?.repo?.path}
+              onClose={() => setRepairing(false)}
+            />
+          )}
+        </Step>
+        <Step title="Claude" description={joined ? `On ${joined}` : "Sign in"}>
+          <h3>Claude on {joined}</h3>
+          {rec?.auth?.claude === "signed_in" ? (
+            <p className="dim">Claude Code is signed in on {joined}.</p>
+          ) : (
+            (joined && signIn?.(joined)) || (
+              <ol className="m-steps">
+                <li>
+                  On {joined}, run claude there and sign in (<code className="mono">/login</code>)
+                  with the account its agents should use.
+                </li>
+                <li>Run claude once in the wave repo and accept the trust dialog.</li>
+                <li>Check again here.</li>
+              </ol>
+            )
+          )}
+          {rec?.auth?.claude === "signed_in" && rec.auth.trust !== "ok" && (
+            <p className="s-hint">
+              Then run claude once in the wave repo on {joined} and accept the trust dialog.
+            </p>
+          )}
+          {typeof checking === "object" && (
+            <p className="s-error" role="alert">
+              {checking.error}
+            </p>
+          )}
+          <div className="ny-actions">
+            <button
+              type="button"
+              className="btn"
+              disabled={checking === "busy"}
+              onClick={() => void checkAgain()}
+            >
+              {checking === "busy" ? "Checking…" : "Check again"}
+            </button>
+          </div>
+          {next}
+        </Step>
+        <Step title="Ready" description="Placement">
+          <h3>{verdict?.ready ? `${joined} is ready for agents` : `${joined} is not ready yet`}</h3>
+          {verdict && !verdict.ready && (
+            <ul className="m-reasons">
+              {verdict.reasons.map((x) => (
+                <li key={x}>{x}</li>
+              ))}
+            </ul>
+          )}
+          <p className="dim">
+            Waves with <code className="mono">placement: auto</code> (or a task with{" "}
+            <code className="mono">host: auto</code>) can place agents on {joined} while it is
+            ready; every other task runs where its wave file says.
+          </p>
+          {config && (
+            <label className="m-cap">
+              <span className="s-hint">Max agents</span>
+              <input
+                className="recessed mono"
+                type="number"
+                min={1}
+                max={100}
+                aria-label={`Max agents on ${joined}`}
+                value={cap ?? String(currentCap)}
+                onChange={(e) => setCap(e.target.value)}
+              />
+            </label>
+          )}
+          <div className="ny-actions">
+            <button
+              type="button"
+              className="btn btn--hot"
+              disabled={!capValid}
+              onClick={() => void done()}
+            >
               Done
             </button>
           </div>
@@ -439,6 +574,9 @@ export function Machines(p: MachinesProps) {
         <AddMachine
           ops={p.ops}
           machines={shown}
+          readiness={p.readiness ?? {}}
+          config={p.configTransport ?? null}
+          signIn={p.signIn}
           now={now}
           host={p.host ?? ""}
           onClose={() => setAdding(false)}

@@ -60,7 +60,7 @@ function specs(m: MachinePayload): string {
 }
 
 /** volleyd's verdict, in one line (or the reasons it is not ready). */
-function ReadinessLine({
+export function ReadinessLine({
   m,
   r,
   now,

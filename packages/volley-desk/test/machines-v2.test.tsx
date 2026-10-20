@@ -230,6 +230,111 @@ describe("Settings › Machines v2: the machine card", () => {
   });
 });
 
+describe("Add a machine: steps 3–5", () => {
+  const boxC = machineRecord({
+    name: "box-c",
+    auth: { gh: "ok", claude: "not_signed_in", trust: "missing" },
+    checks: [
+      { id: "tool.git", ok: true, severity: "block", detail: "git 2.47.0" },
+      { id: "claude.signin", ok: false, severity: "block", detail: "claude is not signed in" },
+    ],
+  });
+  const notReady = readiness({
+    name: "box-c",
+    ready: false,
+    eligible: false,
+    reasons: ["claude is not signed in on box-c"],
+  });
+
+  async function joined(props: Partial<MachinesProps> = {}) {
+    const ops = fakePeerOps({ known: vi.fn(() => "admin" as const) });
+    const config = fakeConfig();
+    const base: MachinesProps = {
+      machines: { "box-a": machineRecord() },
+      readiness: { "box-a": readiness() },
+      hosts: ["box-a", "box-c"],
+      hubUp: true,
+      ops,
+      configTransport: config,
+      now: NOW,
+      ...props,
+    };
+    const r = render(<Machines {...base} />);
+    await act(flush);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "+ Add a machine" }));
+    });
+    const join = (more: Partial<MachinesProps>) => r.rerender(<Machines {...base} {...more} />);
+    join({
+      machines: { "box-a": machineRecord(), "box-c": boxC },
+      readiness: { "box-a": readiness(), "box-c": notReady },
+    });
+    return { ops, config, join };
+  }
+
+  const pair = () => within(document.querySelector(".pair--machine") as HTMLElement);
+
+  it("step 3 shows the new machine's checks and readiness from its first heartbeat, with Repair", async () => {
+    const { ops } = await joined();
+    expect(pair().getByRole("heading", { name: /box-c joined/ })).toBeInTheDocument();
+    const rows = within(pair().getByRole("list", { name: "Checks on box-c" }));
+    expect(rows.getByRole("listitem", { name: /^claude\.signin/ })).toHaveTextContent("✗");
+    expect(pair().getByText("claude is not signed in on box-c")).toBeInTheDocument();
+    fireEvent.click(pair().getByRole("button", { name: "Repair…" }));
+    expect(screen.getByRole("dialog", { name: "Repair box-c" })).toBeInTheDocument();
+    expect(ops.doctor).toHaveBeenCalledWith("box-c", { fix: false });
+  });
+
+  it("step 4 gives the manual Claude sign-in steps and Check again runs the doctor", async () => {
+    const { ops } = await joined();
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    expect(pair().getByRole("heading", { name: "Claude on box-c" })).toBeInTheDocument();
+    expect(pair().getByText(/with the account its agents should use/)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(pair().getByRole("button", { name: "Check again" }));
+    });
+    expect(ops.doctor).toHaveBeenCalledWith("box-c", { fix: false });
+  });
+
+  it("step 4 fills the sign-in slot when the Desk has one, and says so once Claude is signed in", async () => {
+    const { join } = await joined({
+      signIn: (m) => <button type="button">Sign in on {m}</button>,
+    });
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    expect(pair().getByRole("button", { name: "Sign in on box-c" })).toBeInTheDocument();
+    join({
+      machines: {
+        "box-a": machineRecord(),
+        "box-c": { ...boxC, auth: { gh: "ok", claude: "signed_in", trust: "ok" } },
+      },
+      readiness: { "box-a": readiness(), "box-c": readiness({ name: "box-c" }) },
+      signIn: (m) => <button type="button">Sign in on {m}</button>,
+    });
+    expect(pair().getByText("Claude Code is signed in on box-c.")).toBeInTheDocument();
+  });
+
+  it("step 5 sums it up and Done sets max_agents", async () => {
+    const { config, join } = await joined();
+    join({
+      machines: { "box-a": machineRecord(), "box-c": boxC },
+      readiness: { "box-a": readiness(), "box-c": readiness({ name: "box-c" }) },
+    });
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    expect(pair().getByRole("heading", { name: "box-c is ready for agents" })).toBeInTheDocument();
+    expect(pair().getByText(/placement: auto/)).toBeInTheDocument();
+    fireEvent.change(pair().getByLabelText("Max agents on box-c"), { target: { value: "6" } });
+    await act(async () => {
+      fireEvent.click(pair().getByRole("button", { name: "Done" }));
+    });
+    expect(config.send).toHaveBeenCalledWith(
+      { hosts: { "box-c": { max_agents: 6 } } },
+      expect.anything(),
+    );
+    expect(document.querySelector(".pair--machine")).toBeNull();
+  });
+});
+
 describe("agentsOnMachines", () => {
   it("lists each machine's live agents from the waves' placed tasks", () => {
     const s = waveState({
