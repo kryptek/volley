@@ -65,6 +65,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     nudge_max: 1,
     respawn_max: 1,
     rereview_max: 2,
+    ci_fixup_max: 2,
     question_max: 1,
     budget_raise_max: 2,
     inbox_answered_ttl_s: 600,
@@ -219,6 +220,8 @@ export const DAEMON_DEFAULTS = {
   blocked_reason_max_chars: 500,
   /** A terminal status (done / blocked / failed) nothing in the journal names for this long alarms. */
   terminal_unjournaled_alarm_ms: 60_000,
+  /** The tail of a red head's failed-run logs kept on its ci_failed decision (a CI fixup's directive). */
+  ci_log_max_chars: 4_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
   pipeline_io_ms: 30_000,
   /** How often the screen publisher checks which agents are due a capture. */

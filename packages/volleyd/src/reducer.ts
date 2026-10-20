@@ -654,6 +654,10 @@ const GROUP_NAME: Record<string, string> = {
  * closed stage enum is unchanged: `stage` is the group's first stage.
  */
 function withStageGroup(t: TaskState, p: TaskPipeline | undefined): TaskState {
+  // A fixup whose only job is CI red on the pipeline's own head (a ci_failed answered `fixup`).
+  const ci = p?.directive?.ci === "red" && p.directive.from === undefined;
+  if (ci && t.stage === "fixup" && p?.roles.length === 1 && p.roles[0] === "fixup")
+    return { ...t, stage_label: "fixup (CI directive)" };
   if (p === undefined || p.roles.length < 2 || p.rebasing) return t;
   const groupStages = new Set(["spec_review", "quality_review", "fixup", "implement"]);
   if (!groupStages.has(t.stage)) return t;

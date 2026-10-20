@@ -28,7 +28,8 @@ export type CountedBudget =
   | "nudge_max"
   | "respawn_max"
   | "rereview_max"
-  | "question_max";
+  | "question_max"
+  | "ci_fixup_max";
 
 /** What a counted budget is per: the task, one role of it, or one run (`<task>/<role>/<attempt>`). */
 export type BudgetScope = "task" | "task_role" | "run";
@@ -164,7 +165,7 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: "respawn",
     budget: { name: "respawn_max", per: "task_role" },
     rationale:
-      "a second stall needs a fresh agent (escalated no_policy while the decision does not offer respawn)",
+      "a second stall needs a fresh agent: an implementer continues its pushed branch and PR",
   },
   {
     policy: "agent_blocked/respawn-failed",
@@ -174,6 +175,16 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: "respawn",
     budget: { name: "respawn_max", per: "task_role" },
     rationale: "a fresh agent picks the work up where the failed one left it",
+  },
+  {
+    policy: "agent_blocked/respawn-unverifiable",
+    kinds: ["agent_blocked"],
+    condition: 'pipeline.on === "verify"',
+    when: onOneOf("verify"),
+    answer: "respawn",
+    budget: { name: "respawn_max", per: "task_role" },
+    rationale:
+      "re-verifying a retired agent's missing work fails the same way; a fresh one finishes it",
   },
   {
     policy: "agent_blocked/respawn-result",
@@ -271,12 +282,24 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "the end of a wave needs no answer; the owner reads its outcome",
   },
   {
+    policy: "ci_failed/fixup-own-change",
+    kinds: ["ci_failed"],
+    condition:
+      'pipeline.on === "ci_failed" and classification: own_change (unclassified: infra === false)',
+    // Nothing sets classification until A3 classifies red heads: until then this is `infra === false`.
+    when: (d) =>
+      on(d) === "ci_failed" &&
+      (d.classification === "own_change" || (d.classification === undefined && d.infra === false)),
+    answer: "fixup",
+    budget: { name: "ci_fixup_max", per: "task" },
+    rationale: "a fixup agent with the CI result as its directive is what a person would do",
+  },
+  {
     policy: "ci_failed/owner",
     kinds: ["ci_failed"],
-    condition: "always (ci_none included)",
+    condition: "otherwise (ci_none included)",
     answer: null,
-    rationale:
-      "a CI fixup and the flake route need pipeline work; a repository without workflows is the owner's",
+    rationale: "an infra-shaped red head and a repository without workflows are the owner's",
   },
   {
     policy: "pr/owner",
@@ -299,6 +322,8 @@ const EVIDENCE = [
   "acct",
   "pct",
   "ci",
+  "infra",
+  "classification",
   "used",
   "budget",
   "host",
