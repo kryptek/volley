@@ -454,6 +454,8 @@ export interface DaemonOptions {
     exec?: ExecFn;
     signinPollMs?: number;
     signinTimeoutMs?: number;
+    /** How long a paired machine's sign-in forward must stay up (default: config-defaults). */
+    forwardSettleMs?: number;
   };
 }
 
@@ -1090,6 +1092,17 @@ export class Daemon {
       headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
       onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
+      // --- Fleet (F8): a paired machine's sign-in (`primary@<name>`) and its forward ---
+      remote: (name) => this.remoteFor(name),
+      reservedPorts: () => [
+        brokerAddress(opts.brokerUrl).port,
+        ...Object.values(this.config.effective().hosts).map(
+          (h) => h.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
+        ),
+      ],
+      ...(opts.claude?.forwardSettleMs !== undefined
+        ? { forwardSettleMs: opts.claude.forwardSettleMs }
+        : {}),
     });
     this.machines = new MachineHealth({
       now: this.now,

@@ -81,6 +81,7 @@ import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on
 import { useNotifySettings } from "./notify/use-notify-settings";
 import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
+import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
 import { SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
@@ -1147,6 +1148,21 @@ export default function App() {
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
               (id) => isLiveAgent(state, id),
             ),
+            // A paired machine's Claude sign-in (volleyd's `primary@<name>`), on its card and in
+            // Add a machine's step 4.
+            ...(control
+              ? {
+                  signIn: (name: string) => (
+                    <PeerSignin
+                      machine={name}
+                      signin={state.signins?.[peerAccount(name)]}
+                      signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
+                      control={control}
+                      ops={peerOps}
+                    />
+                  ),
+                }
+              : {}),
           }}
           onboarding={{
             ops: authOps,

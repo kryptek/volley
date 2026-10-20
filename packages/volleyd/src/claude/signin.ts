@@ -44,7 +44,15 @@ export const signinDir = (root: string, acct: string) => join(root, ".signin", a
 export type SigninFlow = "browser_callback" | "manual_code";
 
 export type SigninEvent =
-  | { type: "claude_signin_url"; acct: string; url: string; flow: SigninFlow; attach: string }
+  | {
+      type: "claude_signin_url";
+      acct: string;
+      url: string;
+      flow: SigninFlow;
+      attach: string;
+      /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+      manual_url?: string;
+    }
   | { type: "claude_signin_done"; acct: string; plan?: string }
   | { type: "claude_signin_failed"; acct: string; reason: string };
 

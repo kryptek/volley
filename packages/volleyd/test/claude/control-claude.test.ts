@@ -12,6 +12,7 @@ import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
+import { SIGNIN_CALLBACK, type SigninBoxOptions, fakeSigninBox } from "../helpers/fake-host";
 import { journalWait } from "../helpers/journal-wait";
 import { tempDir } from "../helpers/tmp";
 
@@ -280,6 +281,118 @@ describe("claude_* control ops", () => {
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
+    }
+  });
+});
+
+describe("claude_signin for a paired machine (primary@<name>)", () => {
+  const HOSTS =
+    "hosts:\n  box-a:\n    target: dev@box-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n";
+
+  async function remoteSetup(o: SigninBoxOptions = {}) {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), HOSTS);
+    const b = fakeSigninBox(o);
+    const root = join(tempDir("volleyd-claude-"), "claude");
+    const daemon = await env.start({
+      claude: { root, exec: b.exec, signinPollMs: 20, signinTimeoutMs: 5000, forwardSettleMs: 20 },
+      spawner: { remoteExec: b.exec },
+    });
+    const waits = journalWait(env.home, () => daemon);
+    const client = await ControlClient.connect(env.broker.url, NS);
+    const watcher = new VolleyBroker();
+    await watcher.connect({ url: env.broker.url, agentId: "signin-watcher" });
+    const seen: { topic: string; type: string; payload: Record<string, unknown> }[] = [];
+    await watcher.subscribeStream("volley/_system/claude/+/signin", ({ topic, payload }) => {
+      const e = parseEnvelope(payload);
+      if (e !== null)
+        seen.push({ topic, type: e.type, payload: e.payload as Record<string, unknown> });
+    });
+    const close = async () => {
+      await client.close();
+      await watcher.disconnect();
+    };
+    return { b, daemon, waits, client, seen, close };
+  }
+
+  it("answers with the forwarded URL, the phone's manual_url and the ssh attach; done carries the box's plan", async () => {
+    const t = await remoteSetup({ signInAfter: 4 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      const r = await t.client.request("claude_signin", { acct: "primary@box-a", by: "owner-1" });
+      expect(r.ok).toBe(true);
+      expect(r.result).toMatchObject({
+        acct: "primary@box-a",
+        topic: "volley/_system/claude/primary@box-a/signin",
+        url: SIGNIN_CALLBACK,
+        flow: "browser_callback",
+        attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
+        manual_url: expect.stringContaining("platform.claude.com"),
+      });
+      expect(t.b.forwards.map((f) => f.argv[3])).toEqual(["127.0.0.1:51051:127.0.0.1:51051"]);
+      await done;
+      await eventually(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      expect(t.seen.map((e) => [e.topic, e.type])).toEqual([
+        ["volley/_system/claude/primary@box-a/signin", "claude_signin_url"],
+        ["volley/_system/claude/primary@box-a/signin", "claude_signin_done"],
+      ]);
+      expect(t.seen.at(-1)?.payload).toMatchObject({ acct: "primary@box-a", plan: "max" });
+      await eventually(() => t.b.forwards.every((f) => f.stopped));
+      expect(t.b.box.session).toBe(false);
+      const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
+      expect(journal).toContain('"claude_signin_started"');
+      expect(journal).not.toContain("oauth/authorize");
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_accounts shows a waiting paired-machine sign-in to a late client", async () => {
+    const t = await remoteSetup();
+    try {
+      await t.client.request("claude_signin", { acct: "primary@box-a" });
+      const list = await t.client.request("claude_accounts", {});
+      expect((list.result as { remote_signins: unknown[] }).remote_signins).toEqual([
+        {
+          acct: "primary@box-a",
+          state: "pending",
+          url: SIGNIN_CALLBACK,
+          flow: "browser_callback",
+          attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
+          manual_url: expect.stringContaining("platform.claude.com"),
+        },
+      ]);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("refuses a machine that is not configured, and one already signed in", async () => {
+    const t = await remoteSetup({ signInAfter: 1 });
+    try {
+      const unknown = await t.client.request("claude_signin", { acct: "primary@box-z" });
+      expect(unknown.ok).toBe(false);
+      expect(unknown.error).toContain("box-z");
+      const signed = await t.client.request("claude_signin", { acct: "primary@box-a" });
+      expect(signed.ok).toBe(false);
+      expect(signed.error).toMatch(/already signed in/);
+      expect(signed.error).toContain("ssh dev@box-a claude auth logout");
+      expect(t.b.forwards).toEqual([]);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("the daemon stopping ends the sign-in: the session and the forward go", async () => {
+    const t = await remoteSetup();
+    try {
+      await t.client.request("claude_signin", { acct: "primary@box-a" });
+      expect(t.b.forwards).toHaveLength(1);
+      await t.daemon.stop();
+      expect(t.b.forwards[0]?.stopped).toBe(true);
+      expect(t.b.box.session).toBe(false);
+    } finally {
+      await t.close();
     }
   });
 });

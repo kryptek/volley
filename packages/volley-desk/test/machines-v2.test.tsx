@@ -3,6 +3,7 @@ import path from "node:path";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Machines, type MachinesProps, agentsOnMachines } from "../src/settings/Machines";
+import { PeerSignin } from "../src/settings/PeerSigninSheet";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { fixFor } from "../src/settings/machineFixes";
 import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
@@ -319,6 +320,24 @@ describe("Add a machine: steps 3–5", () => {
       signIn: (m) => <button type="button">Sign in on {m}</button>,
     });
     expect(pair().getByText("Claude Code is signed in on box-c.")).toBeInTheDocument();
+  });
+
+  it("step 4's sign-in is Sign in on <machine>: the remote Claude sign-in sheet", async () => {
+    const control = vi.fn(async () => ({ ok: true, result: {} }));
+    await joined({
+      signIn: (m) => <PeerSignin machine={m} signin={undefined} control={control} ops={null} />,
+    });
+    fireEvent.click(pair().getByRole("button", { name: "Next" }));
+    await act(async () => {
+      fireEvent.click(pair().getByRole("button", { name: "Sign in on box-c" }));
+    });
+    expect(screen.getByRole("dialog", { name: "Sign in on box-c" })).toBeInTheDocument();
+    expect(control).toHaveBeenCalledWith(
+      "claude_signin",
+      { acct: "primary@box-c" },
+      expect.any(String),
+      expect.any(Number),
+    );
   });
 
   it("step 5 sums it up and Done sets max_agents", async () => {
