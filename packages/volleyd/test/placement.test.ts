@@ -549,3 +549,198 @@ describe("preview", () => {
     expect(preview(wave(), snapshot, OPTS)).toBeNull();
   });
 });
+
+describe("fleet.local_agents: the supervisor's own machine as a fallback (SPEC §4.6.15)", () => {
+  const NOW = Date.parse("2026-10-20T12:00:00.000Z");
+  const GRACE = 300_000;
+  const FB: PlaceOptions = {
+    ...OPTS,
+    local_agents: "fallback",
+    fallback: { max_agents: 3, per_machine: {} },
+    now: NOW,
+    down_grace_ms: GRACE,
+  };
+  /** The supervisor's laptop: 12 cores, idle, the best headroom on paper. */
+  const laptop = (over: Partial<MachineView> = {}) =>
+    machine(LOCAL, {
+      record: record(LOCAL, { tunnel: "local", cores: 12, load: [0.2, 0.2, 0.2] }),
+      local_agents: 0,
+      ...over,
+    });
+  const peerUp = (over: Partial<MachineView> = {}) =>
+    machine("box-a", { record: record("box-a", { load: [3, 3, 3] }), ...over });
+  const peerDown = (downFor: number) =>
+    machine("box-a", {
+      record: record("box-a", { tunnel: "down" }),
+      ready: false,
+      reasons: ["tunnel down"],
+      down_since: NOW - downFor,
+    });
+  /** Admit `n` auto tasks in one tick, reserving as admission does. */
+  const admitN = (n: number, s: Snapshot, o: PlaceOptions, w = AUTO, id = "T1") => {
+    let cur = s;
+    const out: ReturnType<typeof place>[] = [];
+    for (let k = 0; k < n; k++) {
+      const p = place(task(w, id), w, cur, o);
+      out.push(p);
+      if (p.host !== null) cur = reserve(cur, p.host, task(w, id), w);
+    }
+    return out;
+  };
+
+  it("with a healthy peer, every admission in one tick lands on the peer and none locally", () => {
+    const peer = peerUp({ max_agents: 8 });
+    const placed = admitN(5, snap(laptop(), peer), FB);
+    expect(placed.map((p) => p.host)).toEqual(["box-a", "box-a", "box-a", "box-a", "box-a"]);
+    const first = placed[0];
+    if (first === undefined || first.host === null) throw new Error("unplaced");
+    expect(first.candidates.find((c) => c.host === LOCAL)).toEqual({
+      host: LOCAL,
+      score: null,
+      line: "ineligible: fallback: box-a is eligible",
+    });
+    // Under always the idle laptop scores higher and wins, as before.
+    expect(place(task(), AUTO, snap(laptop(), peer), { ...FB, local_agents: "always" }).host).toBe(
+      LOCAL,
+    );
+  });
+
+  it("the peer full in the tick: the next admission falls back to the laptop", () => {
+    const placed = admitN(5, snap(laptop(), peerUp()), FB);
+    // box-a's max_agents is 4; the fifth finds no peer eligible.
+    expect(placed.map((p) => p.host)).toEqual(["box-a", "box-a", "box-a", "box-a", LOCAL]);
+  });
+
+  it("never: the laptop is no candidate, even with no peer; a pinned task still runs there", () => {
+    const never = { ...FB, local_agents: "never" as const };
+    const r = place(task(), AUTO, snap(laptop()), never);
+    expect(r.host).toBeNull();
+    expect(r.candidates).toEqual([
+      { host: LOCAL, score: null, line: "ineligible: local_agents: never" },
+    ]);
+    const pinned = wave("placement: auto\n", "  T1: { issue: 1, host: local }\n");
+    expect(place(task(pinned), pinned, snap(laptop()), never)).toMatchObject({
+      host: LOCAL,
+      by: "wave_file",
+      candidates: [{ host: LOCAL, line: "named in the wave file" }],
+    });
+  });
+
+  it("peer down past the grace: the task lands locally under the fallback cap", () => {
+    const s = snap(laptop(), peerDown(400_000));
+    const placed = admitN(4, s, FB);
+    expect(placed.map((p) => p.host)).toEqual([LOCAL, LOCAL, LOCAL, null]);
+    const first = placed[0];
+    if (first === undefined || first.host === null) throw new Error("unplaced");
+    expect(first).toMatchObject({ host: LOCAL, local: true, by: "auto" });
+    expect(first.candidates[0]?.line).toMatch(
+      /^local \(fallback: no peer eligible: box-a: tunnel down \(readiness\)\) · load 0\.2 on 12 cores · 0\/3 agents/,
+    );
+    const fourth = placed[3];
+    if (fourth === undefined || fourth.host !== null) throw new Error("placed");
+    expect(fourth.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: 3/3 agents (fallback max_agents)",
+    );
+  });
+
+  it("the fallback counts the laptop's own agents, not every supervised agent", () => {
+    // 6 agents supervised (most on peers), 1 on the laptop: 1/3 under the fallback profile.
+    const r = place(
+      task(),
+      AUTO,
+      snap(laptop({ agents: 6, local_agents: 1 }), peerDown(400_000)),
+      FB,
+    );
+    if (r.host === null) throw new Error("unplaced");
+    expect(r.candidates[0]?.line).toContain("· 1/3 agents ·");
+  });
+
+  it("peer down within the grace: nothing is placed, and why says it may be back", () => {
+    const r = place(task(), AUTO, snap(laptop(), peerDown(40_000)), FB);
+    expect(r.host).toBeNull();
+    if (r.host !== null) throw new Error("placed");
+    expect(r.why).toContain("fallback: box-a may be back (down 40 s, grace 300 s)");
+    expect(r.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: fallback: box-a may be back (down 40 s, grace 300 s)",
+    );
+  });
+
+  it("heavy tasks under the fallback get one slot per pool by default; 0 keeps them off", () => {
+    const heavy = wave(
+      "placement: auto\nheavy_pools: [js-suite]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2 }\n",
+    );
+    const s = snap(
+      laptop({ heavy: { "js-suite": { held: 0, per_machine: 3 } } }),
+      peerDown(400_000),
+    );
+    const two = admitN(2, s, FB, heavy);
+    expect(two.map((p) => p.host)).toEqual([LOCAL, null]);
+    const second = two[1];
+    if (second === undefined || second.host !== null) throw new Error("placed");
+    expect(second.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: heavy slots 0/1 free (js-suite)",
+    );
+    const zero = { ...FB, fallback: { max_agents: 3, per_machine: { "js-suite": 0 } } };
+    expect(place(task(heavy), heavy, s, zero).host).toBeNull();
+    expect(place(task(heavy, "T2"), heavy, s, zero).host).toBe(LOCAL);
+  });
+
+  it("peer back: the next task goes to the peer; the laptop's agents are not mentioned moving", () => {
+    const r = place(task(), AUTO, snap(laptop({ agents: 2, local_agents: 2 }), peerUp()), FB);
+    expect(r.host).toBe("box-a");
+    if (r.host === null) throw new Error("unplaced");
+    expect(r.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: fallback: box-a is eligible",
+    );
+    expect(JSON.stringify(r)).not.toMatch(/mov/);
+  });
+
+  it("a re-placement off the peer counts it as ineligible, so the laptop is the fallback", () => {
+    const r = place(task(), AUTO, snap(laptop(), peerUp()), { ...FB, exclude: ["box-a"] });
+    expect(r.host).toBe(LOCAL);
+  });
+
+  it("a peer eligible but with its heavy slots full keeps the laptop closed: the heavy task waits", () => {
+    // "No peer eligible" is the task-agnostic verdict (machineIneligible), so readiness and
+    // placement agree; full heavy slots on a peer do not open the laptop's fallback slot.
+    const heavy = wave(
+      "placement: auto\nheavy_pools: [js-suite]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2 }\n",
+    );
+    const s = snap(
+      laptop({ heavy: { "js-suite": { held: 0, per_machine: 3 } } }),
+      peerUp({ heavy: { "js-suite": { held: 3, per_machine: 3 } } }),
+    );
+    const r = place(task(heavy), heavy, s, FB);
+    expect(r.host).toBeNull();
+    expect(r.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      "ineligible: fallback: box-a is eligible",
+    );
+    expect(r.candidates.find((c) => c.host === "box-a")?.line).toBe(
+      "ineligible: heavy slots 0/3 free (js-suite)",
+    );
+    expect(place(task(heavy, "T2"), heavy, s, FB).host).toBe("box-a");
+  });
+});
+
+describe("per-machine lease overrides in placement (SPEC §4.6.5)", () => {
+  it("a heavy task skips a machine whose override is 0 and lands on the other", () => {
+    const heavy = wave(
+      "placement: auto\nheavy_pools: [js-suite]\n",
+      "  T1: { issue: 1, heavy: true }\n  T2: { issue: 2 }\n",
+    );
+    // The daemon's heavy map carries the cap in force per machine (capFor).
+    const none = machine("box-a", { heavy: { "js-suite": { held: 0, per_machine: 0 } } });
+    const three = machine("box-b", {
+      record: record("box-b", { load: [12, 12, 12] }),
+      heavy: { "js-suite": { held: 2, per_machine: 3 } },
+    });
+    const r = place(task(heavy), heavy, snap(none, three), OPTS);
+    expect(r.host).toBe("box-b");
+    expect(r.candidates.find((c) => c.host === "box-a")?.line).toBe(
+      "ineligible: heavy slots 0/0 free (js-suite)",
+    );
+    expect(place(task(heavy, "T2"), heavy, snap(none, three), OPTS).host).toBe("box-a");
+  });
+});

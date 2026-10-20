@@ -218,14 +218,24 @@ export interface DecisionPayload {
 
 // ------------------------------------------------------- config and leases
 
+/** How the supervisor's own machine takes auto-placed tasks (`fleet.local_agents`). */
+export type LocalAgentsMode = "always" | "fallback" | "never";
+
+/** config.schema.json `$defs/leasePool`: one configured lease pool. */
+export interface LeasePoolConfig {
+  capacity: number;
+  per_machine?: number;
+  /** The per-machine cap in force on a named machine in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
+  ttl_s?: number;
+  match?: string[];
+}
+
 /** config.schema.json `$defs/tunables` (all optional: per-wave overrides share it). */
 export interface Tunables {
   hard_ceiling?: number;
   spawn_budget_multiplier?: number;
-  lease_pools?: Record<
-    string,
-    { capacity: number; per_machine?: number; ttl_s?: number; match?: string[] }
-  >;
+  lease_pools?: Record<string, LeasePoolConfig>;
   admission?: {
     memory_pressure_max_level?: number;
     cmux_ping_max_ms?: number;
@@ -247,8 +257,16 @@ export interface Tunables {
   claude?: { default_account?: string | null; warn_at_pct?: number };
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
-  /** The Fleet's names (SPEC §4.6.15): `local_name` is the supervisor's own machine. */
-  fleet?: { local_name?: string | null };
+  /**
+   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
+   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
+   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
+   */
+  fleet?: {
+    local_name?: string | null;
+    local_agents?: LocalAgentsMode | null;
+    fallback?: { max_agents?: number; per_machine?: Record<string, number> };
+  };
   [key: string]: unknown;
 }
 
@@ -265,6 +283,8 @@ export interface LeasePoolPayload {
   capacity: number;
   /** The cap per machine (SPEC §4.6.5); absent means `capacity`. */
   per_machine?: number;
+  /** The cap in force on a named machine in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
   /** `host`: the holder's machine; `null` for a holder volleyd did not spawn, absent from an older one. */
   held: { lease_id: string; holder: string; host?: string | null; since: string; ttl_s: number }[];
   queue: { lease_id: string; holder: string; host?: string | null; since: string }[];
@@ -388,11 +408,17 @@ export interface ReadinessPayload {
   placed: number;
   path_ok: { claude: boolean | null; bun: boolean | null };
   requirements: { volley: string; bun?: string; sharing?: Record<string, string> };
+  /** Per heavy pool: leases held on this machine and the cap in force there (may be 0). */
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { account: string | null; five_hour_pct: number | null };
   eligible: boolean;
   ineligible_reason?: string;
   checked_at: string;
+  /**
+   * The supervisor's own machine only (absent from an older supervisor): its `fleet.local_agents`
+   * mode, whether the fallback profile is in force, and why.
+   */
+  local_agents?: { mode: LocalAgentsMode; active: boolean; why?: string };
 }
 
 /** inbox-item.schema.json payload.kind. */

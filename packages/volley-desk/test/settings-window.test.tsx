@@ -15,6 +15,7 @@ import { type ConfigClient, createConfigTransport } from "../src/settings/config
 import { SETTINGS_SECTIONS, type SectionKey } from "../src/settings/sections";
 import { DeskStoreProvider } from "../src/store/context";
 import type { ConfigPayload, DeskMessage, Envelope } from "../src/store/types";
+import { machineRecord, readiness } from "./helpers/desk-msgs";
 
 const config: ConfigPayload = {
   version: 7,
@@ -163,6 +164,36 @@ describe("SettingsWindow", () => {
     expect(heading()).toHaveTextContent("About Volley");
     rerender(<Harness initial="machines" machines={{ ...machines, focusSeq: 2 }} />);
     expect(heading()).toHaveTextContent("Machines");
+  });
+
+  it("the machine card's local agents chip opens Supervisor at the fleet.local_agents row", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      const hub = machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" });
+      render(
+        <Harness
+          initial="machines"
+          config={{ ...config, fleet: { local_name: "hub", local_agents: "fallback" } }}
+          machines={{
+            machines: { hub },
+            readiness: {
+              hub: readiness({ name: "hub", local_agents: { mode: "fallback", active: false } }),
+            },
+            localName: "hub",
+            hubUp: true,
+            ops: null,
+          }}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Local agents: fallback" }));
+      expect(heading()).toHaveTextContent("Supervisor");
+      const select = screen.getByRole("combobox", { name: "Fleet local agents" });
+      expect(spy.mock.contexts.at(-1)).toBe(select.closest(".cfg-row"));
+      expect(select).toHaveFocus();
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
   });
 
   it("closes on Escape, the close button and a scrim click", () => {
