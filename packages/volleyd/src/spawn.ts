@@ -16,7 +16,7 @@ import {
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
-import { sealLaunchScript } from "./fence";
+import { mintConsentToken, sealLaunchScript } from "./fence";
 import type { Host, WorktreeResult } from "./hosts/host";
 import {
   type AgentCredentials,
@@ -69,6 +69,8 @@ import { branchName, expandHome, worktreePath } from "./worktree";
  * The journal's event types are the closed wave-event enum, so the steps map onto it:
  *   refusals (SPAWN_LOCKED, SPAWN_BRIEF_REJECTED, ISSUE_MISMATCH, …) → alarm_raised { code }
  *   a launch (worktree, issue, credentials, workspace)            → agent_spawned
+ *   a launch whose outcome is unknown (reconcileLaunch)            → spawn_adopted, then
+ *     agent_spawned { adopted }; or launch_orphan_closed / spawn_identity_burned, then the refusal
  *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
  *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
  *   hook signals verified                                           → agent_registered
@@ -180,6 +182,8 @@ export interface SpawnDeps {
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
   relaunchSettleMs?: number;
+  /** After a launch with an unknown outcome, how long its agent may take to register. */
+  launchReconcileMs?: number;
   /**
    * Bring a Claude account profile in line before its agent launches (sharing.yaml, the MCP
    * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
@@ -592,6 +596,7 @@ async function launchAttempt(
     // real clock: the hooks process stamps its error file with its own.
     const launchedAt = systemClock.now();
     let workspace: string;
+    let adopted = false;
     try {
       if (recovered !== undefined) {
         // The relaunch reuses the workspace (never a second session in one worktree): its shell
@@ -602,14 +607,22 @@ async function launchAttempt(
       } else {
         ({ workspace } = await host.launch({
           cwd: ctx.worktree,
-          name: `${req.wave.wave} ${req.task} ${req.role}`,
+          name: launchName(req),
           command: LAUNCH_COMMAND,
           launch,
         }));
       }
     } catch (e) {
-      await watch.close();
-      throw e;
+      const found =
+        recovered === undefined && launchOutcomeUnknown(e)
+          ? await reconcileLaunch(ctx, { agentId, attempt, watch, error: e })
+          : null;
+      if (found === null) {
+        await watch.close();
+        throw e;
+      }
+      workspace = found.workspace;
+      adopted = true;
     }
     await deps.journal({
       type: "agent_spawned",
@@ -635,6 +648,7 @@ async function launchAttempt(
         ...(recovered !== undefined
           ? { recovered_from: recovered.from, recovery: recovered.reason }
           : {}),
+        ...(adopted ? { adopted: true } : {}),
       },
     });
     if (req.role === "implementer" && attempt === 1) {
@@ -649,6 +663,89 @@ async function launchAttempt(
     throw e;
   }
 }
+
+/** A launch that failed without saying nothing was created: the workspace may exist. */
+const launchOutcomeUnknown = (e: unknown) =>
+  e instanceof SpawnError && e.code === "LAUNCH_FAILED" && e.detail.outcome === "unknown";
+
+/**
+ * A launch whose outcome is unknown (a timed-out cmux may still have opened the workspace and
+ * started the agent): reconcile before anything retries it, so no second session ever runs under
+ * the same agent id. Look the workspace up by the name volleyd gave it, and wait (on the watch
+ * subscribed before the launch) for the agent's hook signals:
+ * - they arrived: adopt it (`spawn_adopted`) and resolve with its workspace, so the launch
+ *   continues exactly like a normal one;
+ * - none, and a workspace was found: close it (`launch_orphan_closed`) and resolve null (the
+ *   launch fails; its retry may reuse the identity: that session is known gone);
+ * - none, nothing found: resolve null;
+ * - none, and the host could not be asked or the workspace not closed: `spawn_identity_burned`
+ *   and resolve null; the retry takes the next attempt (daemon.ts agentAttempt).
+ */
+async function reconcileLaunch(
+  ctx: Ctx,
+  launch: { agentId: string; attempt: number; watch: AgentWatch; error: unknown },
+): Promise<{ workspace: string } | null> {
+  const { req, deps } = ctx;
+  const { host } = deps;
+  const { agentId, attempt, watch } = launch;
+  const name = launchName(req);
+  const candidate = launch.error instanceof SpawnError ? launch.error.detail.candidate : undefined;
+  const find = () =>
+    host.findWorkspace(name, typeof candidate === "string" ? candidate : undefined).then(
+      (ws) => ({ ws }),
+      (e: unknown) => ({ ws: null, error: e instanceof Error ? e.message : String(e) }),
+    );
+  const now = nowOf(deps);
+  const started = now();
+  const first = await find();
+  const registered = await watch.waitFor(
+    hookSignalsArrived,
+    deps.launchReconcileMs ?? DAEMON_DEFAULTS.launch_reconcile_ms,
+  );
+  const last = first.ws === null ? await find() : first;
+  const ws = last.ws ?? first.ws;
+  if (registered) {
+    await deps.journal({
+      type: "spawn_adopted",
+      task: req.task,
+      data: {
+        agent_id: agentId,
+        role: req.role,
+        attempt,
+        workspace: ws ?? "unknown",
+        after: "launch_unknown",
+        waited_ms: now() - started,
+      },
+    });
+    return { workspace: ws ?? "" };
+  }
+  const burn = async (why: string) => {
+    await deps.journal({
+      type: "spawn_identity_burned",
+      task: req.task,
+      data: { agent_id: agentId, role: req.role, attempt, why },
+    });
+    return null;
+  };
+  if (ws === null) {
+    return "error" in last ? burn(`workspace lookup failed: ${last.error}`) : null;
+  }
+  try {
+    // volleyd opened this workspace itself and no agent registered in it.
+    await host.close(ws, mintConsentToken(`reconcile ${agentId}`));
+  } catch (e) {
+    return burn(`closing ${ws} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  await deps.journal({
+    type: "launch_orphan_closed",
+    task: req.task,
+    data: { agent_id: agentId, role: req.role, attempt, workspace: ws },
+  });
+  return null;
+}
+
+/** The workspace title a launch gives its terminal: `<wave> <task> <role>`. */
+const launchName = (req: SpawnRequest) => `${req.wave.wave} ${req.task} ${req.role}`;
 
 /**
  * Step 6: verify through the hook signals. On an update prompt: press Enter, and relaunch once

@@ -2,6 +2,20 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## Unreleased
+
+### Fixed
+
+- **volleyd: a launch whose outcome is unknown is reconciled before any retry.** A `cmux
+  new-workspace` that timed out (on the cmux side, or volleyd's new `launch_timeout_ms` bound)
+  could still have started the agent, and the retry then ran a second session under the same
+  agent id. A failed launch now says whether it created nothing (`refused`) or may have
+  (`unknown`); for an unknown one volleyd looks the workspace up by name and waits
+  `launch_reconcile_ms` for the agent's registration, then adopts it (`spawn_adopted`), closes
+  the empty workspace (`launch_orphan_closed`) or, when the host cannot be asked, burns the
+  attempt (`spawn_identity_burned`) so the retry takes the next agent id. Launches are
+  serialized per host. (#193)
+
 ## 0.4.0 — 2026-10-20
 
 The Fleet release: volleyd judges which machines can run an agent, places a wave's tasks across

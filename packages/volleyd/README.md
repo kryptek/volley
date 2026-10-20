@@ -874,6 +874,33 @@ per agent attempt; the task shows its most recent one, and its decision resolves
 is still failing. The backoff carries over a restart: the retry runs when the journal's
 `next_retry_at` says, and stopped retries stay stopped until someone answers "retry now".
 
+**Launches whose outcome is unknown.** A launch can fail without saying whether it created
+anything: the cmux CLI gives up on its own (`Error: Command timed out`) or hits volleyd's bound
+on it (`launch_timeout_ms`, 60 s), exits with no workspace ref, or ssh drops after a remote
+`tmux new-session` was sent. Such a launch may still have opened the workspace and started the
+agent, so before anything retries it volleyd reconciles: it looks the workspace up by the exact
+name it gave it (`cmux list-workspaces`; `tmux has-session` on a remote host) and waits up to
+`launch_reconcile_ms` (30 s) for the agent's hook signals on the watch it subscribed before the
+launch.
+
+- The agent registered: it is **adopted**. The journal gets `spawn_adopted { agent_id, role,
+  attempt, workspace, after: "launch_unknown", waited_ms }`, then the usual `agent_spawned`
+  with `adopted: true`; nothing is launched a second time and verification goes on as for any
+  launch.
+- A workspace is there but no agent registered: volleyd closes it (`launch_orphan_closed {
+  agent_id, workspace }`) and the spawn fails as above; its retry may reuse the agent id, since
+  that session is known gone.
+- Nothing is there and the host answered: the spawn fails as above.
+- The host could not be asked (the lookup failed or timed out) or the workspace could not be
+  closed: the attempt is **burned** (`spawn_identity_burned { agent_id, role, attempt, why }`),
+  its login revoked, and the retry takes the next attempt number, so no retry ever reuses an
+  agent id that may be live. Its branch follows (`-2` after a never-used `-1`). The failure
+  still counts toward `spawn_retry_max`.
+
+A launch cmux refused (not running, not installed, refusing volleyd) created nothing and fails
+straight away. Launches are serialized per host: one `cmux new-workspace` (or remote
+`tmux new-session`) is in flight at a time, so a slow cmux does not stack them.
+
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
 shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
 wave owner, else `volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker`

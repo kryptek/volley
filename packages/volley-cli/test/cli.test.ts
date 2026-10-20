@@ -47,7 +47,9 @@ describe("cli", () => {
   it("the CHANGELOG's newest section and bun.lock's workspaces carry that version", () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
     const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf-8");
-    expect(changelog.match(/^## (\S+)/m)?.[1]).toBe(pkg.version);
+    // An `## Unreleased` section collects changes for the next release; the newest released
+    // section is the one that must match.
+    expect(changelog.match(/^## (?!Unreleased\b)(\S+)/m)?.[1]).toBe(pkg.version);
     const lock = readFileSync(join(root, "bun.lock"), "utf-8");
     const workspaces = [
       ...lock.matchAll(/"packages\/[^"]+": \{\s*"name": "([^"]+)",\s*"version": "([^"]+)"/g),
