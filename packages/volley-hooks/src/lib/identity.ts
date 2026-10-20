@@ -234,3 +234,30 @@ export async function resolveCoordinatorIdentity(
     await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 500));
   }
 }
+
+/** `<stateDir>/retired.json`: volleyd's marker that it retired the agent (SPEC §4.6.4). */
+export const RETIRED_FILE = "retired.json";
+
+export interface RetiredMarker {
+  agent_id: string;
+  status: string;
+  at: string;
+}
+
+/** The retired marker in `stateDir`, or null (none, unreadable or malformed: never loud). */
+export function readRetiredMarker(stateDir: string): RetiredMarker | null {
+  try {
+    const m = JSON.parse(readFileSync(join(stateDir, RETIRED_FILE), "utf-8")) as Record<
+      string,
+      unknown
+    >;
+    if (typeof m?.agent_id !== "string" || m.agent_id === "") return null;
+    return {
+      agent_id: m.agent_id,
+      status: typeof m.status === "string" ? m.status : "",
+      at: typeof m.at === "string" ? m.at : "",
+    };
+  } catch {
+    return null;
+  }
+}

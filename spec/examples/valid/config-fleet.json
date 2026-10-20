@@ -93,6 +93,7 @@
       "nudge_on_merge": "files"
     },
     "require_fresh_base": true,
+    "retire_close_session": true,
     "fleet": {
       "local_name": "studio"
     }

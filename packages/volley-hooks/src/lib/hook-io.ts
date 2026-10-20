@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type ConnectTarget,
   CredentialsError,
+  HOOKS_ERROR_FILE,
   type HooksError,
   isAuthFailed,
   resolveHooksAuth,
@@ -13,6 +16,7 @@ import {
   coordinatorStateDir,
   projectDirOf,
   readAgentIdentity,
+  readRetiredMarker,
   resolveCoordinatorIdentity,
 } from "./identity";
 import { hookTimeoutMs } from "./seq";
@@ -119,7 +123,8 @@ export function questionOf(text: string | undefined): string | null {
  * registry lookup costs one connection per minute per directory (misses are cached too), so
  * the hooks stay cheap in a global settings file. `afterEmit` collects the handler's
  * deferred callbacks; the caller runs them once stdout is written. `trace` records who the hook
- * connects as.
+ * connects as. An agent volleyd retired (`.volley/retired.json` naming its own id) returns ""
+ * before any connect: its login is gone on purpose, so there is nothing to report.
  */
 export async function invokeHook(
   event: string,
@@ -151,6 +156,13 @@ export async function invokeHook(
     });
   }
   if (identity === null) return "";
+  if (
+    identity.mode === "agent" &&
+    readRetiredMarker(identity.stateDir)?.agent_id === identity.agentId
+  ) {
+    noteRetired(event, identity.stateDir, identity.agentId);
+    return "";
+  }
   trace.target = identity;
   const text = await handler({
     event,
@@ -162,6 +174,29 @@ export async function invokeHook(
   if (text !== null && typeof text === "object") return resultOutput(event, text);
   if (text === null || text === "" || !CONTEXT_EVENTS.has(event)) return "";
   return contextOutput(event, text);
+}
+
+/** `hooks-error.json` says RETIRED once (later hooks leave it be). Never throws. */
+function noteRetired(event: string, stateDir: string, agentId: string): void {
+  try {
+    const prev = JSON.parse(readFileSync(join(stateDir, HOOKS_ERROR_FILE), "utf-8")) as {
+      code?: unknown;
+    };
+    if (prev?.code === "RETIRED") return;
+  } catch {
+    // none yet, or unreadable: (re)write it
+  }
+  const note: HooksError = {
+    code: "RETIRED",
+    at: new Date().toISOString(),
+    hook_event: event,
+    agent_id: agentId,
+  };
+  try {
+    writeHooksError(stateDir, note);
+  } catch {
+    // a retired agent's hooks stay quiet either way
+  }
 }
 
 /** How much older than the SessionStart hook this session's own registry entry may be. */

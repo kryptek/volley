@@ -100,6 +100,7 @@ describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", (
       { mode: 0o600 },
     );
     const run = startDaemon(home);
+    let code: number | null = null;
     try {
       for (let i = 0; i < 200 && (await status()) !== "working"; i++) {
         // broker round-trip: the daemon child process's retained status on the real mosquitto.
@@ -120,9 +121,12 @@ describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", (
         await client.close();
       }
     } finally {
+      // Even when an assertion above fails: the temp $HOME goes only once the daemon (which
+      // waits for its own children) has exited.
       run.child.kill("SIGTERM");
+      code = await run.exited;
     }
-    expect(await run.exited, run.out()).toBe(0);
+    expect(code, run.out()).toBe(0);
     expect(await status()).toBe("done");
   }, 60_000);
 });
