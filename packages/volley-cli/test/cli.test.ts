@@ -44,6 +44,18 @@ describe("cli", () => {
       expect(`${name}@${v}`).toBe(`${name}@${pkg.version}`);
   });
 
+  it("the CHANGELOG's newest section and bun.lock's workspaces carry that version", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf-8");
+    expect(changelog.match(/^## (\S+)/m)?.[1]).toBe(pkg.version);
+    const lock = readFileSync(join(root, "bun.lock"), "utf-8");
+    const workspaces = [
+      ...lock.matchAll(/"packages\/[^"]+": \{\s*"name": "([^"]+)",\s*"version": "([^"]+)"/g),
+    ];
+    expect(workspaces.length).toBeGreaterThan(5);
+    for (const [, name, v] of workspaces) expect(`${name}@${v}`).toBe(`${name}@${pkg.version}`);
+  });
+
   it("with an unknown subcommand, prints an error and exits 2", async () => {
     const r = await runCli({ argv: ["bogus"] });
     expect(r.exitCode).toBe(2);
