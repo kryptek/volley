@@ -11,7 +11,7 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release (v0.3.1).** This package has the wave file, journal, reducer, scheduler,
+> **Status: pre-release (v0.3.2).** This package has the wave file, journal, reducer, scheduler,
 > fence, config store, daemon, CLI and service (launchd on macOS; `volley setup` installs a
 > systemd user unit on Linux), plus decisions, wave ownership, pause/stop
 > and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn

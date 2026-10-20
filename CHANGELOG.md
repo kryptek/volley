@@ -2,7 +2,9 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
-## Unreleased
+## 0.3.2 — 2026-10-20
+
+Fixes found running a downstream project's wave through volleyd 0.3.0.
 
 ### Fixed
 
