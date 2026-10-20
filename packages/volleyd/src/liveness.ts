@@ -125,6 +125,10 @@ const QUESTION_TYPES = new Set(["permission_prompt", "agent_needs_input"]);
 /** Statuses during which an idle agent is a stall (not: blocked, which waits on purpose). */
 const STALLABLE = new Set(["spawning", "registered", "working"]);
 
+/** Whether an agent in `status` can stall at all (checkLiveness ignores every other status). */
+export const stallable = (status: string | null): boolean =>
+  status !== null && STALLABLE.has(status);
+
 /** A `harness-hook` progress envelope as a hook signal, else null (narration, junk, a clear). */
 export function parseHookSignal(raw: string, now: number): HookSignal | null {
   if (raw === "") return null;
@@ -280,7 +284,7 @@ export function checkLiveness(
   },
 ): Step {
   const { now, status, tunables } = sample;
-  if (status === null || !STALLABLE.has(status)) return { state: prev, actions: [] };
+  if (!stallable(status)) return { state: prev, actions: [] };
   const s = structuredClone(prev);
   const actions: LivenessAction[] = [];
   const graceMs = secondsMs(tunables.idle_grace_s);
@@ -423,6 +427,7 @@ export function rebase(prev: AgentLiveness, at: number): AgentLiveness {
   if (s.last_heartbeat !== null) s.last_heartbeat.at = Math.max(s.last_heartbeat.at, at);
   s.activity_at = Math.max(s.activity_at, at);
   if (s.steered_at !== null) s.steered_at = Math.max(s.steered_at, at);
+  if (s.background_wait !== null) s.background_wait.since = Math.max(s.background_wait.since, at);
   if (s.silence?.phase === "probing") s.silence = null;
   return s;
 }

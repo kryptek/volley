@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
@@ -365,6 +365,11 @@ describe("liveness: silence → screen fallback", () => {
 });
 
 describe("liveness: an idle agent waiting on its own work", () => {
+  it("rebase after a wake moves the background wait forward with the other clocks", () => {
+    const waiting = run(fresh(), [signal("idle-background-wait.json", T0)]).state;
+    expect(rebase(waiting, T0 + 60 * MIN).background_wait).toEqual({ since: T0 + 60 * MIN });
+  });
+
   it("idle with background_wait is never steered or called a stall; resumed ends the wait", () => {
     const r = run(fresh(), [
       signal("idle-background-wait.json", T0),
@@ -400,7 +405,7 @@ describe("liveness: an idle agent waiting on its own work", () => {
     for (const [evidence, reason] of [
       [{ lease_held: true, lease_pool: "it" }, "holds lease it"],
       [{ shells_running: 2 }, "2 shells still running"],
-      [{ worktree_write_at: at(6) - 40_000 }, "worktree written 40 s ago"],
+      [{ worktree_write_at: at(6) - 40_000 }, "worktree written in the last 3 min"],
     ] as const) {
       const r = run(idle, [check(at(3), "working", evidence), check(at(6), "working", evidence)]);
       expect(r.actions).toEqual([]);
@@ -628,6 +633,59 @@ describe("daemon: hook-signal liveness", () => {
     await s.daemon.tick();
     await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
     await s.daemon.tick();
+    await s.settled();
+    expect(steers()).toHaveLength(1);
+  });
+
+  it("an idle agent whose terminal footer counts running shells is not nudged; once they end it is", async () => {
+    const clock = fakeClock(Date.now() + 10 * MIN);
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const screen = (name: string) => readFileSync(join(FIXTURES, "screens", name), "utf-8");
+    s.host.screens = [screen("working-shells.txt")];
+    await s.daemon.tickScreens();
+    await s.hook("idle-stop.json");
+    await s.consumed();
+    const steers = () =>
+      s.journal().filter((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    await clock.advance(4 * MIN);
+    await s.daemon.tick();
+    await s.settled();
+    expect(steers()).toEqual([]);
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe(
+      "idle 4 min: 2 shells still running",
+    );
+
+    s.host.screens = [screen("working.txt")];
+    await s.daemon.tickScreens();
+    await s.daemon.tick();
+    await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    await s.settled();
+    expect(steers()).toHaveLength(1);
+  });
+
+  it("an idle local agent whose worktree was written within idle_grace_s is not nudged", async () => {
+    const clock = fakeClock(Date.now() + 10 * MIN);
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const worktree = s.journal().find((e) => e.type === "agent_spawned")?.data.worktree;
+    expect(typeof worktree).toBe("string");
+    await s.hook("idle-stop.json");
+    await s.consumed();
+    await clock.advance(4 * MIN);
+    const log = join(worktree as string, "it.log");
+    writeFileSync(log, "x");
+    utimesSync(log, clock.now() / 1000, clock.now() / 1000);
+    const steers = () =>
+      s.journal().filter((e) => e.type === "steering_sent" && e.data.reason === "idle");
+    await s.daemon.tick();
+    await s.settled();
+    expect(steers()).toEqual([]);
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe(
+      "idle 4 min: worktree written in the last 3 min",
+    );
+
+    await clock.advance(4 * MIN); // the write is now older than idle_grace_s
+    await s.daemon.tick();
+    await s.event((e) => e.type === "steering_sent" && e.data.reason === "idle");
     await s.settled();
     expect(steers()).toHaveLength(1);
   });

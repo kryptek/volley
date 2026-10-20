@@ -233,6 +233,7 @@ import {
   observeSignal,
   parseHookSignal,
   rebase,
+  stallable,
   trackAgent,
   whyWaiting,
 } from "./liveness";
@@ -3313,7 +3314,11 @@ export class Daemon {
         retained?.type === "reaped" && retained.wall_time === a.suppressedReap
           ? (a.liveStatus ?? "working")
           : (retained?.type ?? null);
-      const evidence = a.liveness.activity === "idle" ? await this.evidence(a, now) : undefined;
+      // Only an agent that can stall needs evidence: a finished one's worktree is never walked.
+      const evidence =
+        a.liveness.activity === "idle" && stallable(status)
+          ? await this.evidence(a, now)
+          : undefined;
       if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
       await this.applyLiveness(
         agentId,
@@ -3335,13 +3340,15 @@ export class Daemon {
    */
   private async evidence(a: Supervised, now: number): Promise<ActivityEvidence> {
     const id = a.liveness.agent_id;
-    const pool = Object.entries(this.leases).find(([, p]) =>
-      [...p.held, ...p.queue].some((l) => l.holder === id),
-    )?.[0];
+    const mine = (l: { holder: string }) => l.holder === id;
+    const held = Object.entries(this.leases).find(([, p]) => p.held.some(mine))?.[0];
+    const queued = Object.entries(this.leases).find(([, p]) => p.queue.some(mine))?.[0];
+    const pool = held ?? queued;
     const e: ActivityEvidence = {
       background_wait: a.liveness.background_wait,
       lease_held: pool !== undefined,
       ...(pool !== undefined ? { lease_pool: pool } : {}),
+      ...(held === undefined && queued !== undefined ? { lease_queued: true } : {}),
       shells_running: a.shellsRunning ?? null,
       worktree_write_at: null,
     };

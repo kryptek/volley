@@ -30,12 +30,19 @@ describe("ownWorkReason", () => {
     expect(ownWorkReason(all, NOW, T)).toBe("waiting on its own background task");
     expect(ownWorkReason({ ...all, background_wait: null }, NOW, T)).toBe("holds lease it");
     expect(ownWorkReason(ev({ lease_held: true }), NOW, T)).toBe("holds a lease");
+    expect(
+      ownWorkReason(ev({ lease_held: true, lease_pool: "it", lease_queued: true }), NOW, T),
+    ).toBe("waits on lease it");
     expect(ownWorkReason(ev({ shells_running: 2, worktree_write_at: NOW - 40_000 }), NOW, T)).toBe(
       "2 shells still running",
     );
     expect(ownWorkReason(ev({ shells_running: 1 }), NOW, T)).toBe("1 shell still running");
     expect(ownWorkReason(ev({ worktree_write_at: NOW - 40_000 }), NOW, T)).toBe(
-      "worktree written 40 s ago",
+      "worktree written in the last 3 min",
+    );
+    // Stable across ticks: the reason never republishes the wave state by itself.
+    expect(ownWorkReason(ev({ worktree_write_at: NOW - 170_000 }), NOW, T)).toBe(
+      "worktree written in the last 3 min",
     );
   });
 
@@ -68,11 +75,22 @@ describe("newestWrite", () => {
     utimesSync(p, at / 1000, at / 1000);
   };
 
-  it("returns the newest mtime, ignoring .git, .volley, node_modules, target and build", async () => {
+  it("returns the newest mtime, ignoring .git, .volley and dependency / build output trees", async () => {
     const root = tempDir("volleyd-evidence-");
     file(root, "src/a.ts", NOW - 20 * 60_000);
     file(root, "src/deep/b.ts", NOW - 15 * 60_000);
-    for (const skip of [".git", ".volley", "node_modules", "target", "build"])
+    for (const skip of [
+      ".git",
+      ".volley",
+      "node_modules",
+      "target",
+      "build",
+      "dist",
+      ".venv",
+      ".next",
+      "coverage",
+      ".turbo",
+    ])
       file(root, `${skip}/x`, NOW - 1000);
     expect(await newestWrite(root, opts())).toBe(NOW - 15 * 60_000);
   });

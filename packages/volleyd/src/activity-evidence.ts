@@ -14,6 +14,8 @@ export interface ActivityEvidence {
   lease_held: boolean;
   /** The pool of that lease, for the reason text. */
   lease_pool?: string;
+  /** The agent is only queued for that lease, not holding it. */
+  lease_queued?: boolean;
   /** The terminal footer says N shells are still running (null: footer not readable). */
   shells_running: number | null;
   /** Newest mtime under the worktree (excluding .git and .volley); null: unknown / remote. */
@@ -51,18 +53,35 @@ export function ownWorkReason(
     now - e.background_wait.since < secondsMs(t.background_wait_max_s)
   )
     return "waiting on its own background task";
-  if (e.lease_held)
-    return e.lease_pool !== undefined ? `holds lease ${e.lease_pool}` : "holds a lease";
+  if (e.lease_held) {
+    if (e.lease_pool === undefined)
+      return e.lease_queued === true ? "waits on a lease" : "holds a lease";
+    return e.lease_queued === true
+      ? `waits on lease ${e.lease_pool}`
+      : `holds lease ${e.lease_pool}`;
+  }
   const n = e.shells_running;
   if (n !== null && n > 0) return `${n} shell${n === 1 ? "" : "s"} still running`;
   const w = e.worktree_write_at;
   if (w !== null && now - w < secondsMs(t.idle_grace_s))
-    return `worktree written ${Math.max(0, Math.floor((now - w) / 1000))} s ago`;
+    // Stable while it holds (no seconds): a changing reason would republish the wave state.
+    return `worktree written in the last ${Math.ceil(t.idle_grace_s / 60)} min`;
   return null;
 }
 
 /** Directories never walked: git's own, volley's, and dependency / build output trees. */
-const SKIP = new Set([".git", ".volley", "node_modules", "target", "build"]);
+const SKIP = new Set([
+  ".git",
+  ".volley",
+  "node_modules",
+  "target",
+  "build",
+  "dist",
+  ".venv",
+  ".next",
+  "coverage",
+  ".turbo",
+]);
 
 /**
  * The newest file mtime under `root`, breadth first, so the shallow files (logs, reports) are
