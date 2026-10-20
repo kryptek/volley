@@ -120,6 +120,27 @@ describe("purposeOf", () => {
     ]);
   });
 
+  it("a PR whose url is not http(s): `PR #n` shown unlinked, not dropped", () => {
+    const p = purposeOf(
+      agent({ wave: "w1", task: "T3", role: "implementer" }),
+      wave({
+        tasks: [
+          {
+            id: "T3",
+            issue: 42,
+            stage: "implement",
+            agents: {},
+            pr: { number: 7, url: "javascript:alert(1)" },
+          },
+        ],
+      }),
+    );
+    expect(p.links).toEqual([
+      { text: "#42", href: null, label: "Issue #42" },
+      { text: "PR #7", href: null, label: "PR #7" },
+    ]);
+  });
+
   it("an ad-hoc agent: its registered title; links resolve against links.repo", () => {
     const p = purposeOf(
       agent({

@@ -133,8 +133,8 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
       }
       const pr = task?.pr?.number;
       const prUrl = prHref(task);
-      if (prUrl !== null && typeof pr === "number")
-        links.push({ text: `PR #${pr}`, href: prUrl, label: prLabel(pr) });
+      if (typeof pr === "number")
+        links.push({ text: `PR #${pr}`, href: prUrl, label: prUrl ? prLabel(pr) : `PR #${pr}` });
       return make(`${a.task} · ${title}`, "wave", links);
     }
   }
