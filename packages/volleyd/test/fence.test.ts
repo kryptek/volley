@@ -29,6 +29,11 @@ const PLIST = join(
 );
 
 const DENIED: string[][] = [
+  // procs.ts lists processes with exactly one argv; signals are never a spawned `kill`.
+  ["ps", "aux"],
+  ["ps", "-axo", "pid=,command=", "-u", "root"],
+  ["kill", "-9", "1234"],
+  ["pkill", "claude"],
   // git: history rewriting, publishing, destructive
   ["git", "merge", "release/w1"],
   ["git", "push", "origin", "HEAD"],
@@ -312,6 +317,7 @@ const DENIED: string[][] = [
 ];
 
 const ALLOWED: string[][] = [
+  ["ps", "-axo", "pid=,command="],
   ["mosquitto", "-h"],
   ["volley", "auth", "list", "--json"],
   ["volley", "auth", "add", "phone", "--role", "steer", "--json"],

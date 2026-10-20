@@ -317,9 +317,11 @@ import {
 } from "./recovery";
 import {
   type ReapDeps,
+  type SessionEnder,
   closableAfterRestart,
   reapAndRevoke,
   retireAgent,
+  retiredMarkerPath,
   withJointRevokes,
 } from "./retire";
 import { ScreenPublisher } from "./screen-publisher";
@@ -546,6 +548,8 @@ interface Supervised {
   shellsRunning?: number | null;
   /** The agent's worktree from its `agent_spawned` record (null: none recorded), once looked up. */
   worktree?: string | null;
+  /** Resumed after a restart: `workspace` is the journaled ref, which may name another now. */
+  restored?: boolean;
 }
 
 /** The liveness decision slot a decision's `class` fills. */
@@ -4381,6 +4385,7 @@ export class Daemon {
     if (spawned?.task === undefined) return;
     const d = spawned.data;
     const [host] = this.hostOfTask(wave, spawned.task);
+    const title = `${wave} ${spawned.task} ${String(d.role)}`;
     await this.screens.untrack(agentId);
     await retireAgent(
       {
@@ -4396,6 +4401,7 @@ export class Daemon {
         ...(typeof d.lock === "string" ? { lockPath: d.lock } : {}),
         minted: d.credentials === "minted",
         ...(typeof d.workspace === "string" ? { workspace: d.workspace } : {}),
+        ...(typeof d.worktree === "string" ? { worktree: d.worktree } : {}),
       },
       {
         ...this.reapDeps((ev) => this.append(wave, ev), credentials),
@@ -4404,15 +4410,72 @@ export class Daemon {
             unlinkSync(path);
           } catch {}
         },
-        // A ref from the journal is closed only if it still names this agent's workspace.
-        closeWorkspace: closableAfterRestart(
-          typeof d.workspace === "string" ? d.workspace : "",
-          sessionName(`${wave} ${spawned.task} ${String(d.role)}`),
-        )
-          ? (ws) => host.close(ws, mintConsentToken(`retire ${agentId}`))
-          : null,
+        writeMarker: this.markerWriter(host),
+        // A ref from the journal is closed only if it still names this agent's workspace;
+        // otherwise the workspace is re-found by its title.
+        endSession: this.sessionEnder(wave, agentId, host, {
+          title,
+          trusted: closableAfterRestart(
+            typeof d.workspace === "string" ? d.workspace : "",
+            sessionName(title),
+          ),
+        }),
       },
     );
+  }
+
+  /** Writes a retire's marker on the agent's host (retiredMarkerPath, SPEC §4.6.4). */
+  private markerWriter(
+    host: Host,
+  ): (worktree: string, m: { agent_id: string; status: string }) => Promise<void> {
+    return (worktree, m) =>
+      host.writeFile(
+        retiredMarkerPath(worktree),
+        `${JSON.stringify({ ...m, at: dateOf(this.time).toISOString() })}\n`,
+      );
+  }
+
+  /**
+   * How a retire ends the agent's session: null when the wave keeps finished sessions open
+   * (`retire_close_session: false`). `trusted`: the ref still names the agent's own workspace;
+   * otherwise it is re-found by its `<wave> <task> <role>` title, and is left alone (only the
+   * processes are stopped) when it cannot be. Nothing is done to a workspace or worktree another
+   * of the wave's live agents now holds (a relaunch into the same worktree, under the same title).
+   */
+  private sessionEnder(
+    wave: WaveId,
+    agentId: string,
+    host: Host,
+    ref: { title: string; trusted: boolean },
+  ): SessionEnder | null {
+    if (!this.config.effective(wave).retire_close_session) return null;
+    return async (workspace, worktree) => {
+      const events = this.journalEvents(wave);
+      const retired = new Set(
+        events.filter((e) => e.type === "agent_retired").map((e) => e.data.agent_id as string),
+      );
+      const others = events.filter(
+        (e) =>
+          e.type === "agent_spawned" &&
+          e.data.agent_id !== agentId &&
+          !retired.has(e.data.agent_id as string),
+      );
+      const shared = worktree !== null && others.some((e) => e.data.worktree === worktree);
+      let ws = workspace;
+      if (ws !== null && !ref.trusted) {
+        const found =
+          shared || host.findWorkspace === undefined
+            ? null
+            : await host.findWorkspace(ref.title).catch(() => null);
+        ws = found !== null && !others.some((e) => e.data.workspace === found) ? found : null;
+      }
+      const end = await host.endSession(
+        ws,
+        shared ? null : worktree,
+        mintConsentToken(`retire ${agentId}`),
+      );
+      return ws !== workspace ? { ...end, workspace: ws } : end;
+    };
   }
 
   /** Capture a supervised agent's terminal (screen-publisher.ts): at spawn, and on resume. */
@@ -4446,12 +4509,10 @@ export class Daemon {
       .catch(() => null);
     const result =
       resultRaw !== null && resultRaw !== "" ? parseEnvelope(resultRaw)?.payload : undefined;
-    const waveAgents = new Set(
-      log.journal
-        .readAll()
-        .filter((e) => e.type === "agent_spawned")
-        .map((e) => e.data.agent_id as string),
-    );
+    const spawnedAll = log.journal.readAll().filter((e) => e.type === "agent_spawned");
+    const waveAgents = new Set(spawnedAll.map((e) => e.data.agent_id as string));
+    const worktree =
+      a.worktree ?? spawnedAll.filter((e) => e.data.agent_id === agentId).at(-1)?.data.worktree;
     await retireAgent(
       {
         wave: a.wave,
@@ -4466,9 +4527,16 @@ export class Daemon {
         ...(terminal !== undefined ? { terminal } : {}),
         ...(result !== undefined ? { result } : {}),
         workspace: a.workspace,
+        ...(typeof worktree === "string" ? { worktree } : {}),
       },
       {
-        closeWorkspace: (ws) => a.host.close(ws, mintConsentToken(`retire ${agentId}`)),
+        writeMarker: this.markerWriter(a.host),
+        endSession: this.sessionEnder(a.wave, agentId, a.host, {
+          title: `${a.wave} ${a.task} ${a.role}`,
+          trusted:
+            a.restored !== true ||
+            closableAfterRestart(a.workspace, sessionName(`${a.wave} ${a.task} ${a.role}`)),
+        }),
         ...this.reapDeps((ev) => this.append(a.wave, ev), credentials),
         releaseLock: (path) => {
           try {
@@ -5491,6 +5559,8 @@ export class Daemon {
         lockFile ?? "",
         ...this.hostOfTask(wave, t.task),
       );
+      const resumed = this.supervised.get(id);
+      if (resumed !== undefined) resumed.restored = true;
     });
   }
 

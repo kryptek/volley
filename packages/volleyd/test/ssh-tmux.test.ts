@@ -301,6 +301,26 @@ describe("SshTmuxHost", () => {
     ]);
   });
 
+  it("endSession is kill-session (tmux ends the pane's processes); no ref, nothing run", async () => {
+    const r = remote();
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    expect(await r.host.endSession("w1-T1-implementer", "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: true,
+      pids: [],
+      how: "kill-session",
+    });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
+    ]);
+    const r2 = remote();
+    expect(await r2.host.endSession(null, "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: false,
+      pids: [],
+      how: "none",
+    });
+    expect(r2.steps()).toEqual([]);
+  });
+
   it("prepareWorktree fetches the release branch, then cuts the worktree from it, no tracking", async () => {
     const wt = "/home/dev/wt/w1/T1-implementer";
     const r = remote((s) =>

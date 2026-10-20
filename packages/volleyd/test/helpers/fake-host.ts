@@ -24,6 +24,11 @@ export interface FakeHost extends Host {
   texts: { workspace: string; text: string }[];
   /** Workspaces closed (retire, cleanup). */
   closed: string[];
+  /** Sessions ended (retire): the workspace (null: unknown) and worktree it was asked about. */
+  sessionsEnded: { workspace: string | null; worktree: string | null }[];
+  /** What findWorkspace answers, by title; every name asked is recorded in `found`. */
+  workspaceTitles: Record<string, string>;
+  found: string[];
   /** Screens returned by successive readScreen calls (the last one repeats); null = unreadable. */
   screens: (string | null)[];
   /** Called after each launch, e.g. to publish the hook signals a real agent would. */
@@ -46,6 +51,9 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     keys: [],
     texts: [],
     closed: [],
+    sessionsEnded: [],
+    workspaceTitles: {},
+    found: [],
     screens: [],
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
@@ -77,6 +85,16 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async close(workspace: string, _consent: ConsentToken) {
       host.closed.push(workspace);
+    },
+    async endSession(workspace, worktree, consent) {
+      host.sessionsEnded.push({ workspace, worktree });
+      if (workspace === null) return { closed: false, pids: [], how: "none" };
+      await host.close(workspace, consent);
+      return { closed: true, pids: [], how: "close-workspace" };
+    },
+    async findWorkspace(name) {
+      host.found.push(name);
+      return host.workspaceTitles[name] ?? null;
     },
   };
   return host;

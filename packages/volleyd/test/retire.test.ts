@@ -245,23 +245,75 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
     expect(existsSync(path)).toBe(true);
   });
 
-  it("closes only its own workspace; a ref it cannot trust (closeWorkspace null) is left, journaled closed: false", async () => {
-    const closed: string[] = [];
-    await retireAgent(req({ workspace: "workspace:1" }), {
+  it("ends only its own session, journaled agent_session_closed before agent_retired; a kept session (endSession null) is journaled closed: false", async () => {
+    const ended: (string | null)[][] = [];
+    await retireAgent(req({ workspace: "workspace:1", worktree: "/wt/a" }), {
       ...deps(),
-      closeWorkspace: async (ws: string) => {
-        closed.push(ws);
+      endSession: async (ws, wt) => {
+        ended.push([ws, wt]);
+        return { closed: true, pids: [42], how: "close-workspace" };
       },
     });
-    expect(closed).toEqual(["workspace:1"]);
+    expect(ended).toEqual([["workspace:1", "/wt/a"]]);
+    expect(events.map((e) => e.type).slice(-2)).toEqual(["agent_session_closed", "agent_retired"]);
+    expect(events.at(-2)?.data).toEqual({
+      agent_id: ID,
+      workspace: "workspace:1",
+      how: "close-workspace",
+      pids: [42],
+    });
     expect(events.at(-1)?.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
-    await retireAgent(req({ workspace: "workspace:2" }), { ...deps(), closeWorkspace: null });
-    expect(closed).toEqual(["workspace:1"]);
+    events = [];
+    await retireAgent(req({ workspace: "workspace:2" }), { ...deps(), endSession: null });
+    expect(ended).toHaveLength(1);
+    expect(events.map((e) => e.type)).not.toContain("agent_session_closed");
     expect(events.at(-1)?.data).toMatchObject({
       workspace: "workspace:2",
       workspace_closed: false,
     });
   });
+
+  it("a failing endSession is journaled as nothing done; the retire still completes", async () => {
+    await retireAgent(req({ workspace: "workspace:1" }), {
+      ...deps(),
+      endSession: async () => {
+        throw new Error("cmux hung");
+      },
+    });
+    expect(events.at(-2)?.data).toMatchObject({ how: "none", pids: [] });
+    expect(events.at(-1)?.data).toMatchObject({ workspace_closed: false });
+  });
+
+  it("writes the retired marker before the login is deleted", async () => {
+    const markers: unknown[] = [];
+    await retireAgent(req({ status: "failed", worktree: "/wt/a" }), {
+      ...deps(),
+      writeMarker: async (wt, m) => {
+        log.push(`marker ${wt}`);
+        markers.push(m);
+      },
+    });
+    expect(markers).toEqual([{ agent_id: ID, status: "failed" }]);
+    expect(log.indexOf("marker /wt/a")).toBeLessThan(log.indexOf(`deleteClient ${ID}`));
+  });
+
+  it.each([["working"], ["blocked"], [null]])(
+    "a %s agent writes no marker and ends no session",
+    async (status) => {
+      const touched: string[] = [];
+      await retireAgent(req({ status, worktree: "/wt/a", workspace: "workspace:1" }), {
+        ...deps(),
+        writeMarker: async () => {
+          touched.push("marker");
+        },
+        endSession: async () => {
+          touched.push("end");
+          return { closed: true, pids: [], how: "close-workspace" };
+        },
+      }).catch(() => {});
+      expect(touched).toEqual([]);
+    },
+  );
 });
 
 describe("closableAfterRestart (a workspace ref read back from the journal)", () => {

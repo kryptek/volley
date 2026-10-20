@@ -12,9 +12,17 @@ import { DAEMON_DEFAULTS } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import type { ConsentToken } from "../fence";
+import { reapUnder } from "../procs";
 import { SpawnError } from "../spawn-error";
 import { addWorktree } from "../worktree";
-import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
+import type {
+  Host,
+  LaunchSpec,
+  SessionEnd,
+  TypedTextTokens,
+  WorktreeResult,
+  WorktreeSpec,
+} from "./host";
 
 /**
  * The local host: worktrees on this machine, agents in cmux workspaces. Every command goes
@@ -103,8 +111,60 @@ export class LocalCmuxHost implements Host {
   }
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
-    await this.cmux(["cmux", "close-workspace", "--workspace", workspace], { consent });
+    // Bounded: a slow cmux must not hold a retire (or cleanup) forever.
+    const r = await this.cmux(["cmux", "close-workspace", "--workspace", workspace], {
+      consent,
+      timeoutMs: DAEMON_DEFAULTS.workspace_close_timeout_ms,
+    });
+    if (r.timedOut) throw new Error(`cmux close-workspace ${workspace} timed out`);
+    if (r.code !== 0)
+      throw new Error(`cmux close-workspace ${workspace}: ${r.stderr.trim() || `exit ${r.code}`}`);
   }
+
+  /**
+   * Close the workspace, then stop whatever still runs under the agent's worktree: a closed
+   * cmux workspace does not always end its `claude` process.
+   */
+  async endSession(
+    workspace: string | null,
+    worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd> {
+    let closed = false;
+    if (workspace !== null)
+      closed = await this.close(workspace, consent).then(
+        () => true,
+        () => false,
+      );
+    const pids =
+      worktree === null
+        ? []
+        : await reapUnder(this.exec, worktree).then(
+            (r) => r.stopped.map((s) => s.pid),
+            () => [],
+          );
+    return { closed, pids, how: closed ? "close-workspace" : pids.length > 0 ? "signal" : "none" };
+  }
+
+  async findWorkspace(name: string): Promise<string | null> {
+    const r = await this.cmux(["cmux", "list-workspaces"], {
+      timeoutMs: DAEMON_DEFAULTS.screen_read_timeout_ms,
+    }).catch(() => null);
+    if (r === null || r.code !== 0 || r.timedOut) return null;
+    const refs = parseWorkspaceList(r.stdout).filter((w) => w.title === name);
+    return refs.length === 1 ? (refs[0] as { ref: string }).ref : null;
+  }
+}
+
+/**
+ * `cmux list-workspaces` output (`[* ]workspace:<n>  <title>[  [selected]]` per line) → refs and
+ * titles. Pure.
+ */
+export function parseWorkspaceList(stdout: string): { ref: string; title: string }[] {
+  return stdout.split("\n").flatMap((line) => {
+    const m = /^[\s*]*(workspace:[A-Za-z0-9-]+)\s+(.*?)(?:\s+\[selected\])?\s*$/.exec(line);
+    return m === null ? [] : [{ ref: m[1] as string, title: m[2] as string }];
+  });
 }
 
 /**

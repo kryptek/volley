@@ -1,7 +1,9 @@
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanupPlan } from "../src/commands/cleanup";
 import { Journal } from "../src/journal";
+import { retiredMarkerPath } from "../src/retire";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
@@ -13,12 +15,72 @@ describe("retire closes the agent's workspace", () => {
   let s: SupervisedEnv;
   afterEach(async () => s.cleanup());
 
-  it("a failed agent: its workspace is closed and agent_retired says so", async () => {
+  /** The implementer's worktree, from its agent_spawned record. */
+  const worktreeOf = () =>
+    String(
+      s.journal().find((e) => e.type === "agent_spawned" && e.data.agent_id === AGENT)?.data
+        .worktree,
+    );
+
+  it("a failed agent: its session is ended (journaled before agent_retired), its marker written", async () => {
     s = await makeSupervisedEnv();
     await s.status("failed", { reason: "gave up" });
     const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
     expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
     expect(s.host.closed).toEqual(["workspace:1"]);
+    const types = s.journal().map((e) => e.type);
+    const ended = s.journal().find((e) => e.type === "agent_session_closed");
+    expect(ended?.data).toEqual({
+      agent_id: AGENT,
+      workspace: "workspace:1",
+      how: "close-workspace",
+      pids: [],
+    });
+    expect(types.indexOf("agent_session_closed")).toBeLessThan(types.indexOf("agent_retired"));
+    expect(s.host.sessionsEnded).toEqual([{ workspace: "workspace:1", worktree: worktreeOf() }]);
+    const marker = JSON.parse(readFileSync(retiredMarkerPath(worktreeOf()), "utf-8"));
+    expect(marker).toMatchObject({ agent_id: AGENT, status: "failed" });
+    expect(typeof marker.at).toBe("string");
+  });
+
+  it("retire_close_session: false keeps the session open, still writes the marker", async () => {
+    s = await makeSupervisedEnv({ config: "retire_close_session: false" });
+    await s.status("failed", { reason: "gave up" });
+    const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: false });
+    expect(s.journal().some((e) => e.type === "agent_session_closed")).toBe(false);
+    expect(s.host.closed).toEqual([]);
+    expect(s.host.sessionsEnded).toEqual([]);
+    expect(existsSync(retiredMarkerPath(worktreeOf()))).toBe(true);
+  });
+
+  it("after a restart, the short journaled ref is not trusted: the workspace is re-found by title", async () => {
+    s = await makeSupervisedEnv();
+    await s.daemon.stop();
+    s.host.workspaceTitles["w1 T1 implementer"] = "workspace:7";
+    await s.restart();
+    await s.event("reconciled");
+    await s.settled();
+    await s.status("failed", { reason: "gave up after the restart" });
+    const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.host.found).toEqual(["w1 T1 implementer"]);
+    expect(s.host.closed).toEqual(["workspace:7"]);
+    expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: true });
+    const ended = s.journal().find((e) => e.type === "agent_session_closed");
+    expect(ended?.data).toMatchObject({ workspace: "workspace:7", how: "close-workspace" });
+  });
+
+  it("after a restart, a title nobody holds: no workspace is closed, the processes still are", async () => {
+    s = await makeSupervisedEnv();
+    await s.daemon.stop();
+    await s.restart();
+    await s.event("reconciled");
+    await s.settled();
+    await s.status("failed", { reason: "gave up after the restart" });
+    const r = await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.host.closed).toEqual([]);
+    expect(s.host.sessionsEnded).toEqual([{ workspace: null, worktree: worktreeOf() }]);
+    expect(r.data).toMatchObject({ workspace: "workspace:1", workspace_closed: false });
   });
 
   it("a force-retired agent at stop: its workspace is closed too", async () => {
