@@ -218,6 +218,27 @@ describe("runRemoteSignin", () => {
     expect(w.box.session).toBe(true);
   });
 
+  it("superseded while `claude auth status` is in flight: the newer session is not killed, nothing published", async () => {
+    const abort = new AbortController();
+    // The newer sign-in aborts this one and has killed the old session, not yet started its own.
+    const w = world({
+      onAuthStatus: (box) => {
+        if (abort.signal.aborted) return;
+        abort.abort(SUPERSEDED);
+        box.session = false;
+      },
+    });
+    const last = await w.run(abort.signal);
+    expect(last).toMatchObject({
+      type: "claude_signin_failed",
+      reason: expect.stringMatching(/superseded/),
+    });
+    expect(w.events.map((e) => e.type)).toEqual(["claude_signin_url"]);
+    expect(w.ran("tmux", "kill-session")).toHaveLength(1);
+    expect(w.ran("tmux", "has-session")).toEqual([]);
+    expect(w.forwards[0]?.stopped).toBe(true);
+  });
+
   it("the daemon stopping fails it and cleans up", async () => {
     const w = world();
     const abort = new AbortController();

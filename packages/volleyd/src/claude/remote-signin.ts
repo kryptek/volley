@@ -134,7 +134,16 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
   // A newer sign-in or the daemon stopping frees the port at once, not at the next poll.
   d.signal?.addEventListener("abort", () => void dropForward(), { once: true });
   const kill = () => run([{ argv: ["tmux", "kill-session", "-t", session] }]);
+  const superseded = async (): Promise<SigninEvent> => {
+    await dropForward();
+    return { type: "claude_signin_failed", acct, reason: "superseded by a newer sign-in" };
+  };
+  /**
+   * Kill the session, drop the forward, publish. Superseded mid-step (an ssh round trip takes
+   * seconds), the session and the topic are the newer sign-in's: only the forward goes.
+   */
   const finish = async (e: SigninEvent): Promise<SigninEvent> => {
+    if (aborted() && d.signal?.reason === SUPERSEDED) return superseded();
     await kill();
     await dropForward();
     await d.publish(e);
@@ -184,8 +193,7 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
   for (let poll = 1; ; poll++) {
     if (aborted()) {
       if (d.signal?.reason !== SUPERSEDED) return fail("the supervisor stopped");
-      await dropForward();
-      return { type: "claude_signin_failed", acct, reason: "superseded by a newer sign-in" };
+      return superseded();
     }
     if (!published) {
       const file = await run([{ argv: ["cat", urlFile] }]);
@@ -210,6 +218,8 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
               `port ${port} on this machine is taken (${opened.reason}), so the sign-in on ${target} cannot reach this browser; run \`${attach}\` and sign in there`,
             );
           restarted = true;
+          // start() kills the session first, which may be a newer sign-in's by now.
+          if (aborted()) continue;
           const again = await start();
           if (again !== null) return fail(again);
           await d.sleep(d.pollMs);
@@ -242,6 +252,8 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
     const status = await run([{ argv: ["claude", "auth", "status"] }], {
       timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
     });
+    // Aborted during the round trip: the loop's top settles it.
+    if (aborted()) continue;
     const s = status !== null ? parseAuthStatus(status.stdout) : null;
     if (s?.loggedIn === true)
       return finish({

@@ -355,6 +355,8 @@ export interface SigninBoxOptions {
   noTmux?: boolean;
   /** The box's HOME (default /home/dev). */
   home?: string;
+  /** Runs while a `claude auth status` is in flight, before it answers. */
+  onAuthStatus?: (box: { session: boolean }) => void;
 }
 
 /**
@@ -398,6 +400,7 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
         out += f;
       } else if (p === "claude") {
         box.polls++;
+        o.onAuthStatus?.(box);
         return o.signInAfter !== undefined && box.polls >= o.signInAfter
           ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
           : { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
