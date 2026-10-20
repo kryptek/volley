@@ -25,7 +25,7 @@ export function holdReason(rec: WaveRecord, killSwitch: boolean): string | null 
   const status = rec.state?.status;
   if (status === "paused") return "wave paused";
   if (status === "stopped") return "wave stopped";
-  // Every task is settled; the release train runs stages, never tasks (SPEC §4.6.18).
+  // Every task is settled; the release train runs stages, never tasks (SPEC §4.6.19).
   if (status === "releasing") return "wave releasing";
   return killSwitch ? KILL_SWITCH_REASON : null;
 }

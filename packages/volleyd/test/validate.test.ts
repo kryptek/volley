@@ -227,7 +227,7 @@ describe("volleyd validate: the brief preface", () => {
   });
 });
 
-describe("volleyd validate: the release playbook (SPEC §4.6.18)", () => {
+describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
   let dir: string;
   let repo: string;
   beforeEach(() => {

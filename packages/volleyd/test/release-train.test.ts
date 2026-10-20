@@ -14,7 +14,7 @@ import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemo
 import { schemaErrors } from "./helpers/schema";
 import { tempDir } from "./helpers/tmp";
 
-// The release train (SPEC §4.6.18): a settled wave whose repo ships a playbook starts releasing
+// The release train (SPEC §4.6.19): a settled wave whose repo ships a playbook starts releasing
 // instead of opening the wave_complete decision, and asks the owner release_go once every stage
 // is verified. Running a stage is A8's; here the stage events are journaled by hand.
 

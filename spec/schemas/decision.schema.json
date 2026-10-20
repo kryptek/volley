@@ -66,11 +66,11 @@
             "stage": {
               "type": "string",
               "minLength": 1,
-              "description": "stage_go: the release playbook stage (spec section 4.6.18) that runs only on go."
+              "description": "stage_go: the release playbook stage (spec section 4.6.19) that runs only on go."
             },
             "stages": {
               "type": "array",
-              "description": "release_go: every release playbook stage (spec section 4.6.18), each verified, with where its evidence lives.",
+              "description": "release_go: every release playbook stage (spec section 4.6.19), each verified, with where its evidence lives.",
               "items": {
                 "type": "object",
                 "additionalProperties": false,

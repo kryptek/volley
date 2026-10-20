@@ -75,7 +75,8 @@
       "respawn_max": 1,
       "rereview_max": 2,
       "question_max": 1,
-      "budget_raise_max": 2
+      "budget_raise_max": 2,
+      "inbox_answered_ttl_s": 600
     }
   }
 }

@@ -360,7 +360,7 @@ describe("task_placed (SPEC §4.6.15)", () => {
   });
 });
 
-describe("the release train (SPEC §4.6.18)", () => {
+describe("the release train (SPEC §4.6.19)", () => {
   const last = events.at(-1) as JournalEvent;
   let seq = last.seq;
   const ev = (type: string, data: Record<string, unknown> = {}): JournalEvent =>

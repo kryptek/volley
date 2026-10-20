@@ -160,7 +160,7 @@ export function formatWave(
     ap !== undefined
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
       : "";
-  // The release train (SPEC §4.6.18): the stage running or awaiting its go, and how far it is.
+  // The release train (SPEC §4.6.19): the stage running or awaiting its go, and how far it is.
   const r = s.release;
   const release =
     r !== undefined

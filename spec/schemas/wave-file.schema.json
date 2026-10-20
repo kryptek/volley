@@ -56,7 +56,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^[^-]",
-      "description": "The repository's release playbook (spec section 4.6.18): a path relative to repo, or absolute, or none (the wave has no release train). Absent: .volley/release.yaml in repo, when it exists."
+      "description": "The repository's release playbook (spec section 4.6.19): a path relative to repo, or absolute, or none (the wave has no release train). Absent: .volley/release.yaml in repo, when it exists."
     },
     "merge": {
       "enum": ["auto", "manual"],

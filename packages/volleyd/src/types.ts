@@ -161,6 +161,8 @@ export interface AutopilotConfig {
   question_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
   budget_raise_max: number;
+  /** How long an answered inbox item stays retained (with `answered`) before it is cleared. */
+  inbox_answered_ttl_s: number;
   /** The merge mode for a wave file without `merge:` (SPEC §4.6.17). */
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
@@ -277,7 +279,7 @@ export interface Wave {
   placement_avoid?: string[];
   /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
   merge?: MergeMode;
-  /** `playbook:` as written (SPEC §4.6.18): a path, or `none`; absent: `.volley/release.yaml`. */
+  /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
   playbook?: string;
 }
 
@@ -382,12 +384,12 @@ export interface WaveState {
   hygiene_level?: HygieneLevel;
   /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
   autopilot?: AutopilotState;
-  /** The release train (SPEC §4.6.18), from `release_started` on; absent for a wave without one. */
+  /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
   updated_at: string;
 }
 
-/** One release stage's state in the wave state (SPEC §4.6.1, §4.6.18). */
+/** One release stage's state in the wave state (SPEC §4.6.1, §4.6.19). */
 export type ReleaseStageState = "pending" | "awaiting_go" | "running" | "verified" | "failed";
 
 /** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
@@ -520,13 +522,16 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
-  // The release train (SPEC §4.6.18): a settled wave whose repo has a playbook starts releasing;
+  // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",
   "release_stage_entered",
   "release_stage_verified",
   "release_stage_failed",
   "release_done",
+  // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
+  "inbox_opened",
+  "inbox_answered",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

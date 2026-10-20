@@ -384,6 +384,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
       });
       expect(host.closed).toEqual(["workspace:1"]);
       expect(of("spawn_identity_burned")).toEqual([]);
+      // The failed spawn is over (its decision and inbox item opened) before the clock moves on.
+      await settle();
 
       host.launchOutcome = "ok";
       sessions.open();

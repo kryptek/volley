@@ -39,6 +39,9 @@ export type ControlOp =
   // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
   | "decisions"
   | "resolve"
+  // The needs-you inbox: list its open items, answer one through the referee (autopilot/inbox.ts).
+  | "inbox"
+  | "inbox_answer"
   // Autopilot's effective policy table (autopilot/policy.ts).
   | "policy"
   | "claim"

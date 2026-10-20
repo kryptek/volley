@@ -332,7 +332,7 @@ describe("volleyd status formatting", () => {
   });
 });
 
-describe("volleyd run: the release playbook (SPEC §4.6.18)", () => {
+describe("volleyd run: the release playbook (SPEC §4.6.19)", () => {
   it("prints the playbook line; an invalid playbook fails before the daemon is asked", async () => {
     const env = await makeDaemonEnv();
     try {

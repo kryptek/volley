@@ -75,7 +75,7 @@ export interface DecisionPayload {
   tasks?: TaskId[];
   /** machine_down: what is wrong with `host` (absent: down). */
   machine?: MachineTrouble;
-  /** stage_go: the release playbook stage that runs only on go (SPEC §4.6.18). */
+  /** stage_go: the release playbook stage that runs only on go (SPEC §4.6.19). */
   stage?: string;
   /** release_go: every release stage, verified, with where its evidence lives. */
   stages?: { name: string; evidence?: string }[];

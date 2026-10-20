@@ -56,6 +56,7 @@ describe("createMqttClient (desk)", () => {
       "volley/_system/claude-accounts/+",
       "volley/_system/claude/+/signin",
       "volley/_system/machines/#",
+      "volley/_inbox/+",
       "volley/_system/auth/replies/+",
     ]);
     client = createMqttClient({ url: broker.url, reconnectPeriod: 0 });

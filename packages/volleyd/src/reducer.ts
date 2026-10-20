@@ -472,7 +472,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       break;
     default: {
       const status = WAVE_STATUS[ev.type];
-      // A releasing wave that was paused resumes releasing (SPEC §4.6.18).
+      // A releasing wave that was paused resumes releasing (SPEC §4.6.19).
       if (status !== undefined)
         state.status =
           status === "running" && state.release !== undefined && ev.type === "wave_resumed"

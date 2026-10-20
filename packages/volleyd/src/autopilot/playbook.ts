@@ -8,7 +8,7 @@ import type { JournalEvent, ReleaseStageState, ReleaseState, WaveId } from "../t
 import { expandHome } from "../worktree";
 
 /**
- * The release train's playbook (SPEC §4.6.18): `<repo>/.volley/release.yaml`, the stages volleyd
+ * The release train's playbook (SPEC §4.6.19): `<repo>/.volley/release.yaml`, the stages volleyd
  * runs once a wave's tasks are all merged, before it asks the owner `release_go`. Pure apart from
  * `readPlaybook`'s one file read. Running a stage is A8's; this is the file and the train's state.
  */
