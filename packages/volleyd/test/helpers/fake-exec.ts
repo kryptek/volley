@@ -6,7 +6,9 @@ export interface ExecCall {
   opts: ExecOptions;
 }
 
-type Reply = Partial<ExecResult> | ((argv: string[], opts: ExecOptions) => Partial<ExecResult>);
+type Reply =
+  | Partial<ExecResult>
+  | ((argv: string[], opts: ExecOptions) => Partial<ExecResult> | Promise<Partial<ExecResult>>);
 
 /**
  * A fake `exec` that records every argv and answers from scripted replies: the first rule whose
@@ -37,7 +39,7 @@ export function fakeExec(): FakeExec {
         rule === undefined
           ? {}
           : typeof rule.reply === "function"
-            ? rule.reply([...argv], opts)
+            ? await rule.reply([...argv], opts)
             : rule.reply;
       return { code: 0, stdout: "", stderr: "", timedOut: false, ...r };
     },
