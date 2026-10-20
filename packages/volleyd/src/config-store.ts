@@ -402,6 +402,9 @@ export class ConfigStore {
     const derived =
       this.global.fleet.local_agents === null && nextGlobal.fleet.local_agents === null;
     const mode = resolveLocalAgents(this.global);
+    // In-memory config moves before the journal append: record() notifies listeners, which read
+    // the new config. config.yaml is already written, so a failed append leaves memory matching
+    // the file, only the journal and `version` behind.
     this.fileLayer = nextLayer;
     this.global = nextGlobal;
     this.record(patch, previous, by);

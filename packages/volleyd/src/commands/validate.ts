@@ -69,15 +69,17 @@ function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base
 
 /**
  * `warning: T1 pins host: local while fleet.local_agents is never …`, one line per task of a
- * `placement: auto` wave that names the own machine while config.yaml sets `never` (SPEC
- * §4.6.15): the wave file is explicit, so the task still runs there. Empty otherwise.
+ * `placement: auto` wave that names the own machine while the wave's `config:` or config.yaml
+ * sets `never` (SPEC §4.6.15): the wave file is explicit, so the task still runs there. Empty
+ * otherwise.
  */
 export function localPinWarnings(wave: Wave, env: CommandArgs["env"]): string {
   if (wave.placement !== AUTO_HOST) return "";
   const file = join(volleydHome(env), "config.yaml");
-  let mode: unknown;
+  // The wave's own `config:` layer wins over config.yaml, as it does in effective config.
+  let mode: unknown = (wave.config as { fleet?: { local_agents?: unknown } }).fleet?.local_agents;
   try {
-    mode = existsSync(file)
+    mode ??= existsSync(file)
       ? (parse(readFileSync(file, "utf-8")) as { fleet?: { local_agents?: unknown } } | null)?.fleet
           ?.local_agents
       : undefined;

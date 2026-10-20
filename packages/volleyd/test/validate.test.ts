@@ -374,4 +374,14 @@ describe("volleyd validate: a task pinned to local under fleet.local_agents: nev
       "",
     );
   });
+
+  it("reads the wave's own config: block over config.yaml", () => {
+    const never = wave("placement: auto\nconfig:\n  fleet:\n    local_agents: never\n", PINNED);
+    expect(localPinWarnings(never, homeWith(null))).toContain("warning: T1 pins host: local");
+    const fallback = wave(
+      "placement: auto\nconfig:\n  fleet:\n    local_agents: fallback\n",
+      PINNED,
+    );
+    expect(localPinWarnings(fallback, homeWith("fleet:\n  local_agents: never\n"))).toBe("");
+  });
 });

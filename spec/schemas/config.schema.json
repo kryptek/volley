@@ -416,7 +416,7 @@
                   "type": "object",
                   "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
                   "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
-                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it sets per_machine. 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
+                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it has a per-machine cap there (per_machine or a per_machine_overrides entry). 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
                 }
               }
             }
