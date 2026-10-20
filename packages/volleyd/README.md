@@ -649,8 +649,11 @@ left for you, with one push.
 
 - **Answered**: when a decision opens, in the same serial turn, volleyd journals
   `decision_auto_resolved { decision_id, kind, policy, answer, rationale, evidence, budget? }`
-  and then the ordinary `decision_resolved { by: "volleyd" }`. The retained decision is published
-  resolved and cleared like any other; the notify bridge does **not** ring for it.
+  and then the ordinary `decision_resolved { by: "volleyd" }`, once the answer is accepted (a
+  refused answer journals neither and spends no budget). The retained decision is published
+  resolved and cleared like any other; the notify bridge does **not** ring for it. A decision a
+  launch opens while it is being verified is answered only once that agent is supervised, so a
+  relaunch never retires an agent volleyd is not yet watching.
 - **Escalated**: a decision no rule answers (`no_policy`), one whose kind is in
   `autopilot.owner_only` (`owner_only`), one whose budget is spent (`budget_exhausted`), or one
   whose answer could not be applied (`unattended_safety`, e.g. an account move the account

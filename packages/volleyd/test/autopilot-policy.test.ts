@@ -102,6 +102,13 @@ describe("evaluate: the policy table, row by row", () => {
     expect(answerOf(evaluate(d, ctx()))).toBe("blocker");
   });
 
+  it("answers with the option as the decision spells it", () => {
+    const d = rec("reviewers_disagree", ["Blocker", "fine"], {
+      pipeline: { on: "reviewers_disagree" },
+    });
+    expect(answerOf(evaluate(d, ctx()))).toBe("Blocker");
+  });
+
   it("agent_stalled asked once: nudge again, under nudge_max per run", () => {
     const d = rec("agent_stalled", ["nudge again", "stop task"], {
       class: "agent_stalled",

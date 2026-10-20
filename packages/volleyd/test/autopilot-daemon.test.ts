@@ -180,4 +180,62 @@ describe("autopilot in the daemon (SPEC §4.6.16)", () => {
       budgets: { budget_raise_max: { used: 1 } },
     });
   });
+  /** Open a decision with extra facts kept on it (what a supervisor's own opener passes). */
+  const openWith = (input: object, extra: Record<string, unknown>) => {
+    const d = s.daemon as unknown as {
+      serial: <T>(fn: () => Promise<T>) => Promise<T>;
+      openDecisionNow: (
+        w: string,
+        i: object,
+        x: Record<string, unknown>,
+      ) => Promise<{ decision_id: string }>;
+    };
+    return d.serial(() => d.openDecisionNow("w1", input, extra));
+  };
+
+  it("a refused answer escalates unattended_safety: nothing auto-resolved, no budget spent", async () => {
+    s = await makeSupervisedEnv({ daemon: AUTOPILOT_ON });
+    const b = await bridge();
+    // The suggested account is the one the wave is on: the move is refused before it journals.
+    const d = await openWith(
+      {
+        kind: "account_limit",
+        task: null,
+        question: "primary is at 90%: move?",
+        options: ["move wave w1 to primary", "not now"],
+      },
+      { acct: "primary", pct: 90, resets_at: "2026-10-20T15:00:00.000Z", suggested: "primary" },
+    );
+    await s.settled();
+    await s.consumed();
+
+    expect(s.daemon.record("w1")?.state?.open_decisions).toContain(d.decision_id);
+    expect(types()).not.toContain("decision_auto_resolved");
+    expect(types()).not.toContain("decision_resolved");
+    const esc = s.journal().filter((e) => e.type === "decision_escalated");
+    expect(esc.map((e) => e.data)).toEqual([
+      expect.objectContaining({ decision_id: d.decision_id, why: "unattended_safety" }),
+    ]);
+    expect(s.daemon.snapshot("w1")?.autopilot).toMatchObject({ auto_resolved: 0, escalated: 1 });
+    expect(b.ids().filter((id) => id === d.decision_id)).toHaveLength(1);
+    await b.close();
+  });
+
+  it("a failure after the answer is journaled never escalates or re-publishes the decision", async () => {
+    s = await makeSupervisedEnv({ daemon: AUTOPILOT_ON });
+    const b = await bridge();
+    (s.daemon as unknown as { onRecoveryResolved: () => Promise<void> }).onRecoveryResolved =
+      async () => {
+        throw new Error("boom");
+      };
+    const d = await s.daemon.openDecision("w1", disagree);
+    await s.settled();
+    await s.consumed();
+
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved?.by).toBe("volleyd");
+    expect(types()).not.toContain("decision_escalated");
+    expect(await s.env.retained(decisionTopic("w1", d.decision_id))).toBeNull();
+    expect(b.ids()).not.toContain(d.decision_id);
+    await b.close();
+  });
 });

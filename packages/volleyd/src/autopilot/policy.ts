@@ -312,10 +312,11 @@ function evidenceOf(d: Facts, ctx: PolicyContext): Record<string, unknown> {
   return out;
 }
 
-/** An answer the decision offers (any, for a free-text decision with no options). */
-const offered = (d: DecisionRecord, answer: string): boolean =>
-  d.options === undefined ||
-  d.options.some((o) => o.trim().toLowerCase() === answer.trim().toLowerCase());
+/** The option the decision offers for `answer`, as it spells it (`answer`, for free text). */
+const offered = (d: DecisionRecord, answer: string): string | undefined =>
+  d.options === undefined
+    ? answer
+    : d.options.find((o) => o.trim().toLowerCase() === answer.trim().toLowerCase());
 
 /** The table's answer for a decision, its escalation, or `{ off }` when autopilot is disabled. */
 export function evaluate(
@@ -330,8 +331,9 @@ export function evaluate(
   if (rule === undefined) return { escalate: "no_policy" };
   const { policy } = rule;
   if (rule.answer === null) return { escalate: rule.escalate ?? "no_policy", policy };
-  const answer = typeof rule.answer === "function" ? rule.answer(f, ctx) : rule.answer;
-  if (answer === "" || !offered(d, answer)) return { escalate: "no_policy", policy };
+  const asked = typeof rule.answer === "function" ? rule.answer(f, ctx) : rule.answer;
+  const answer = asked === "" ? undefined : offered(d, asked);
+  if (answer === undefined) return { escalate: "no_policy", policy };
   let outcome: Outcome = { answer };
   if (rule.decide !== undefined) outcome = rule.decide(f, ctx, answer);
   else if (rule.budget !== undefined) {
