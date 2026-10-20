@@ -2869,7 +2869,7 @@ export class PipelineDriver {
     by: string,
   ): Promise<{ ok: true; merge_sha: string | null } | { ok: false; error: string }> {
     let prep: { v: PipelineView; token: MergeToken; branch: string; own: boolean } | string =
-      "not checked";
+      "volleyd is stopping"; // stays so only when the queue dropped the check (the daemon stopped)
     await this.deps.enqueue(async () => {
       prep = await this.mergeNowPrep(task);
     });

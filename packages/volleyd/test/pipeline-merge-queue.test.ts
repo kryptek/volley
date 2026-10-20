@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { releaseLockOn } from "../src/pipeline";
 import {
   type Harness,
   type HarnessOptions,
@@ -55,6 +56,12 @@ async function threeGated(o: HarnessOptions = {}) {
     await h.finish("implementer", { task: t, head: H[t], ci: "green" });
   for (const t of ["T1", "T2", "T3"]) expect(h.task(t)?.stage).toBe("merge_ready");
   expect(mergeCalls()).toEqual([]);
+}
+
+/** A release-branch lock shared with "other waves": `held` maps branch → holder key. */
+function sharedLock() {
+  const held = new Map<string, string>();
+  return { held, lock: releaseLockOn(held) };
 }
 
 describe("merge queue", () => {
@@ -169,18 +176,7 @@ describe("merge queue", () => {
   });
 
   it("two waves on one release branch: the lock is shared", async () => {
-    const held = new Map<string, string>();
-    const lock = {
-      acquire: (branch: string, key: string) => {
-        const k = held.get(branch);
-        if (k !== undefined && k !== key) return false;
-        held.set(branch, key);
-        return true;
-      },
-      release: (branch: string, key: string) => {
-        if (held.get(branch) === key) held.delete(branch);
-      },
-    };
+    const { held, lock } = sharedLock();
     held.set("/repo#release/w1", "other-wave/T9");
     await threeGated({ releaseLock: lock });
     await h.tick();
@@ -233,18 +229,7 @@ describe("merge queue", () => {
   });
 
   it("a stopped wave keeps the release branch while its merge is in flight", async () => {
-    const held = new Map<string, string>();
-    const lock = {
-      acquire: (branch: string, key: string) => {
-        const k = held.get(branch);
-        if (k !== undefined && k !== key) return false;
-        held.set(branch, key);
-        return true;
-      },
-      release: (branch: string, key: string) => {
-        if (held.get(branch) === key) held.delete(branch);
-      },
-    };
+    const { held, lock } = sharedLock();
     await threeGated({ releaseLock: lock });
     let release: (() => void) | undefined;
     const gate = new Promise<void>((r) => {
@@ -295,6 +280,62 @@ describe("merge queue", () => {
       H.T1,
       "--delete-branch",
     ]);
+  });
+});
+
+describe("mergeNow (volleyd merge)", () => {
+  const BRANCH = "/repo#release/w1";
+
+  it("is refused while another task holds the release branch, naming the holder", async () => {
+    const { held, lock } = sharedLock();
+    await threeGated({ merge: "manual", releaseLock: lock });
+    held.set(BRANCH, "other-wave/T9");
+    const r = await h.driver.mergeNow("T1", "coord-1");
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toContain("other-wave/T9 holds release/w1");
+    expect(mergeCalls()).toEqual([]);
+    expect(held.get(BRANCH)).toBe("other-wave/T9");
+  });
+
+  it("a head no token can be minted for is refused and the release branch is released", async () => {
+    const { held, lock } = sharedLock();
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      merge: "manual",
+      releaseLock: lock,
+    });
+    await h.start();
+    h.openPr("abc1234", "T1", 7);
+    await h.finish("implementer", { task: "T1", head: "abc1234", ci: "green" });
+    expect(h.task("T1")?.stage).toBe("merge_ready");
+    const r = await h.driver.mergeNow("T1", "coord-1");
+    expect(r.ok === false && r.error).toContain("no merge token can be minted");
+    expect(mergeCalls()).toEqual([]);
+    expect(held.get(BRANCH)).toBeUndefined();
+  });
+
+  it("a refused merge answers not merged and releases the release branch", async () => {
+    const { held, lock } = sharedLock();
+    await threeGated({ merge: "manual", releaseLock: lock });
+    h.world.mergeRefuse = "Pull request is not mergeable: required checks";
+    const r = await h.driver.mergeNow("T1", "coord-1");
+    expect(r).toEqual({
+      ok: false,
+      error: "not merged: Pull request is not mergeable: required checks",
+    });
+    expect(mergedPrs()).toEqual([7]);
+    expect(held.get(BRANCH)).toBeUndefined();
+    expect(h.task("T1")?.stage).toBe("merge_ready");
+  });
+
+  it("a merge that fails to run answers not merged and releases the release branch", async () => {
+    const { held, lock } = sharedLock();
+    await threeGated({ merge: "manual", releaseLock: lock });
+    h.world.fail = (a) => a[0] === "gh" && a[1] === "pr" && a[2] === "merge";
+    const r = await h.driver.mergeNow("T1", "coord-1");
+    expect(r.ok === false && r.error).toContain("not merged: ");
+    expect(r.ok === false && r.error).toContain("ENOENT");
+    expect(held.get(BRANCH)).toBeUndefined();
   });
 });
 
