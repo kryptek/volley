@@ -67,6 +67,38 @@ describe("merge-ready evidence package", () => {
     expect(h.calls).toContainEqual(["git", "-C", "/wt/w1/T1-fixup-1", "diff", "--stat", H1, H2]);
   });
 
+  it("a run superseded on the gated head is listed under ci.superseded, not ci.runs", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ciRuns[H1] = [
+      { status: "completed", conclusion: "cancelled", id: 1201, workflow: "CI" },
+      { status: "completed", conclusion: "success", id: 1202, workflow: "CI" },
+    ];
+    await h.finish("implementer", { head: H1 });
+    expect(h.openDecisions()).toEqual([]);
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
+    h.world.ciRuns[H2] = h.world.ciRuns[H1];
+    await h.finish("fixup", { head: H2, result: result("fixup-resolved") });
+    const md = h.task()?.evidence_path as string;
+    const json = JSON.parse(readFileSync(md.replace(/\.md$/, ".json"), "utf-8")) as EvidenceJson;
+    expect(json.ci).toEqual({
+      status: "green",
+      runs: [expect.objectContaining({ id: 1202 })],
+      superseded: [
+        {
+          id: 1201,
+          url: "https://github.com/example/repo/actions/runs/1201",
+          conclusion: "cancelled",
+        },
+      ],
+    });
+    expect(readFileSync(md, "utf-8")).toContain(
+      "superseded (not this head's CI): cancelled — https://github.com/example/repo/actions/runs/1201",
+    );
+  });
+
   it("wave state gets gates: ['T1'] and the evidence_path, and stays schema-valid", async () => {
     await gated();
     const state = h.record().state;

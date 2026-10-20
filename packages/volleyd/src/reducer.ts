@@ -2,8 +2,11 @@ import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
+import { hygieneLevel } from "./reviews";
 import type {
   JournalEvent,
+  PublicHygiene,
+  RepoVisibility,
   TaskAgents,
   TaskId,
   TaskPlacement,
@@ -44,6 +47,8 @@ export interface WaveRecord {
    * supersede (`message_id`; an additive steer such as a merge nudge never becomes it).
    */
   steers: Record<TaskId, { seq: number; message_id?: string }>;
+  /** Steers held for each task's next agent, in order (`steering_queued`), until sent or dropped. */
+  queued_steers: Record<TaskId, QueuedSteer[]>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
   pipeline: Record<TaskId, TaskPipeline>;
   /**
@@ -54,6 +59,19 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+}
+
+/** A steer journaled while its task had no live agent: delivered to the next one to register. */
+export interface QueuedSteer {
+  message_id: string;
+  seq: number;
+  supersedes?: string;
+  /** Only an agent of this role takes it; absent: whichever role registers next. */
+  role?: keyof TaskAgents;
+  text: string;
+  by: string;
+  /** When it was queued. */
+  at: string;
 }
 
 /** A role's latest failed spawn: what failed, how often in a row, and when it is retried. */
@@ -89,6 +107,13 @@ function clearSpawnFailure(rec: WaveRecord, task: TaskId, role: string): void {
   if (Object.keys(roles).length === 0) delete rec.spawnFailures[task];
 }
 
+/** Take `ids` off `task`'s steer queue (and the task's entry once it is empty). */
+function unqueue(rec: WaveRecord, task: TaskId, ids: readonly unknown[]): void {
+  const left = (rec.queued_steers[task] ?? []).filter((q) => !ids.includes(q.message_id));
+  if (left.length > 0) rec.queued_steers[task] = left;
+  else delete rec.queued_steers[task];
+}
+
 /**
  * A snapshot record as read from disk, with fields added after it was written defaulted (e.g.
  * `decisions`/`steers` in snapshots from before decisions existed).
@@ -108,6 +133,7 @@ export function emptyRecord(): WaveRecord {
     overrides: {},
     decisions: {},
     steers: {},
+    queued_steers: {},
     pipeline: {},
     spawnFailures: {},
     budget_raised: 0,
@@ -260,7 +286,10 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         break;
       }
       task.stage = ev.data.stage as TaskStage;
-      if (task.stage === "done") delete next.spawnFailures[task.id];
+      if (task.stage === "done") {
+        delete next.spawnFailures[task.id];
+        delete next.queued_steers[task.id];
+      }
       break;
     case "spawn_failed":
       if (ev.task !== undefined) {
@@ -285,6 +314,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       break;
     case "task_cancelled":
       if (ev.task !== undefined) delete next.spawnFailures[ev.task];
+      if (ev.task !== undefined) delete next.queued_steers[ev.task];
       if (task !== undefined) task.stage = "cancelled";
       // A cancelled task gives back its admission (it may have been admitted but not spawned).
       if (ev.task !== undefined) next.admitted = next.admitted.filter((id) => id !== ev.task);
@@ -355,20 +385,50 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "steering_sent":
       if (ev.task !== undefined && ev.data.type === "steering") {
-        // An additive steer takes the next seq but leaves what the next steer supersedes.
-        const prev = next.steers[ev.task]?.message_id;
-        const id = isAdditiveSteer(ev.data.reason) ? prev : (ev.data.message_id as string);
-        next.steers[ev.task] = {
-          seq: ev.data.seq as number,
-          ...(id !== undefined ? { message_id: id } : {}),
-        };
+        // A queued steer delivered late never moves the numbering back; an additive steer takes
+        // the next seq but leaves what the next steer supersedes.
+        const seq = ev.data.seq as number;
+        if (seq >= (next.steers[ev.task]?.seq ?? 0)) {
+          const prev = next.steers[ev.task]?.message_id;
+          const id = isAdditiveSteer(ev.data.reason) ? prev : (ev.data.message_id as string);
+          next.steers[ev.task] = { seq, ...(id !== undefined ? { message_id: id } : {}) };
+        }
+        unqueue(next, ev.task, [ev.data.message_id]);
       }
+      break;
+    case "steering_queued":
+      if (ev.task !== undefined) {
+        const d = ev.data;
+        const q: QueuedSteer = {
+          message_id: d.message_id as string,
+          seq: d.seq as number,
+          ...(typeof d.supersedes === "string" ? { supersedes: d.supersedes } : {}),
+          ...(typeof d.role === "string" ? { role: d.role as keyof TaskAgents } : {}),
+          text: d.text as string,
+          by: d.by as string,
+          at: ev.at,
+        };
+        next.queued_steers[ev.task] = [...(next.queued_steers[ev.task] ?? []), q];
+        next.steers[ev.task] = { seq: q.seq, message_id: q.message_id };
+      }
+      break;
+    case "steering_dropped":
+      if (ev.task !== undefined) unqueue(next, ev.task, (ev.data.message_ids as unknown[]) ?? []);
       break;
     case "alarm_raised":
       // Gated without reviews: the wave file's pipeline for the task lists none.
       if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
         task.reviews_skipped_by_plan = true;
       break;
+    case "repo_visibility_detected": {
+      const visibility = (ev.data.visibility as RepoVisibility | null | undefined) ?? null;
+      state.repo_visibility = visibility;
+      state.hygiene_level = hygieneLevel(
+        (ev.data.public_hygiene as PublicHygiene | undefined) ?? "auto",
+        visibility,
+      );
+      break;
+    }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       break;
@@ -443,6 +503,10 @@ function derive(state: WaveState, rec: WaveRecord): void {
           };
     },
   );
+  state.tasks = state.tasks.map(({ queued_steers: _q, ...t }) => {
+    const n = rec.queued_steers[t.id]?.length ?? 0;
+    return n > 0 ? { ...t, queued_steers: n } : t;
+  });
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );

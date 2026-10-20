@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CiRun, RebaseCheck } from "./artifacts";
+import type { CiRun, RebaseCheck, SupersededRun } from "./artifacts";
 import {
   type Disagreement,
   type FixupResult,
@@ -29,6 +29,8 @@ export interface EvidenceInput {
   ci: "green" | "none";
   /** CI runs on exactly `head`. */
   ci_runs: CiRun[];
+  /** Runs on `head` a newer run of the same workflow and event replaced: not `head`'s CI. */
+  ci_superseded?: SupersededRun[];
   /** The latest review per reviewer. */
   reviews: Partial<Record<ReviewerRole, { round: number; head: string; result: ReviewResult }>>;
   /** Every fixup that ran, oldest first. */
@@ -69,7 +71,8 @@ export interface EvidenceJson {
   head_sha: string;
   branch: string;
   release_branch: string;
-  ci: { status: "green" | "none"; runs: CiRun[] };
+  /** `superseded`: present when a run on the head was replaced (kept as evidence only). */
+  ci: { status: "green" | "none"; runs: CiRun[]; superseded?: SupersededRun[] };
   reviews: Partial<
     Record<
       ReviewerRole,
@@ -145,7 +148,11 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
     head_sha: e.head,
     branch: e.branch,
     release_branch: e.release_branch,
-    ci: { status: e.ci, runs: e.ci_runs },
+    ci: {
+      status: e.ci,
+      runs: e.ci_runs,
+      ...((e.ci_superseded ?? []).length > 0 ? { superseded: e.ci_superseded } : {}),
+    },
     reviews,
     unresolved_p1: unresolved,
     fixups: e.fixups.map((f) => ({
@@ -194,6 +201,9 @@ export function renderEvidenceMd(j: EvidenceJson): string {
       : []),
     `- CI on this exact head: **${j.ci.status}**`,
     ...j.ci.runs.map((r) => `  - ${r.name}: ${r.conclusion ?? r.status} — ${r.url}`),
+    ...(j.ci.superseded ?? []).map(
+      (r) => `  - superseded (not this head's CI): ${r.conclusion ?? "not finished"} — ${r.url}`,
+    ),
     `- Branch current with release branch: ${releaseLine(j)} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
     "",
     "volleyd never merges. A human merges this PR after reading the above.",

@@ -38,6 +38,9 @@ export interface BriefVars {
   worktree: string;
   /** Repo-specific notes (`<repo>/.volley/brief-extra.md`), rendered as their own section. */
   extra: string;
+  /** Reviewer briefs: the hygiene check line and its contract bullet (reviews.ts hygieneText). */
+  hygiene_rule: string;
+  hygiene_contract: string;
 }
 
 /**
@@ -54,11 +57,29 @@ export function loadTemplate(role: Role, dir: string = BRIEFS_DIR, variant?: "me
 /**
  * Fill `{{name}}` placeholders in one pass, so text substituted in (an issue title that itself
  * contains `{{…}}`) is never expanded again. An unknown placeholder is an error: a template and
- * this module never silently drift apart.
+ * this module never silently drift apart. A placeholder alone on its line that fills to "" drops
+ * the line (and, between two blank lines, one of them), so it leaves no gap behind. That holds
+ * for every placeholder in every template, e.g. an empty `{{extra}}` (no repo notes) as well as
+ * `{{hygiene_rule}}` / `{{hygiene_contract}}` under `off`.
  */
 export function renderBrief(template: string, vars: BriefVars): string {
   const table = vars as unknown as Record<string, string | number>;
-  return template.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_m, name: string) => {
+  const lines: string[] = [];
+  let dropped = false;
+  for (const line of template.split("\n")) {
+    const only = /^\s*\{\{\s*([a-z_]+)\s*\}\}\s*$/.exec(line)?.[1];
+    if (only !== undefined && Object.hasOwn(table, only) && String(table[only]) === "") {
+      dropped = lines.at(-1) === "";
+      continue;
+    }
+    if (dropped && line === "") {
+      dropped = false;
+      continue;
+    }
+    dropped = false;
+    lines.push(line);
+  }
+  return lines.join("\n").replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_m, name: string) => {
     if (!Object.hasOwn(table, name)) throw new Error(`brief template: unknown {{${name}}}`);
     return String(table[name]);
   });

@@ -172,10 +172,10 @@ export function execProbes(exec: ExecFn): ReconcileProbes {
       const pr = Array.isArray(prs) ? prs.find((p) => p.headRefName === branch) : undefined;
       if (pr === undefined || typeof pr.number !== "number" || typeof pr.url !== "string")
         return null;
-      const checks = await exec(["gh", "pr", "checks", String(pr.number), "--json", "bucket"], {
-        cwd: repo,
-        timeoutMs: DAEMON_DEFAULTS.reconcile_probe_ms,
-      }).catch(() => null);
+      const checks = await exec(
+        ["gh", "pr", "checks", String(pr.number), "--json", "bucket,workflow,event,link"],
+        { cwd: repo, timeoutMs: DAEMON_DEFAULTS.reconcile_probe_ms },
+      ).catch(() => null);
       return {
         number: pr.number,
         url: pr.url,
@@ -186,16 +186,37 @@ export function execProbes(exec: ExecFn): ReconcileProbes {
   };
 }
 
-/** `gh pr checks --json bucket` → the wave-state CI value. */
+/**
+ * `gh pr checks --json bucket,workflow,event,link` → the wave-state CI value. Checks are jobs;
+ * their run is the id in `link` (`/actions/runs/<id>/job/…`). Only the latest run per workflow
+ * and event counts (artifacts.ts latestRuns): a cancelled run a newer one replaced is ignored, a
+ * run cancelled with nothing replacing it is red even when some of its jobs passed. A check with
+ * no workflow or run id is always counted.
+ */
 export function ciOf(stdout: string): "green" | "red" | "running" | "none" {
-  let checks: { bucket?: unknown }[];
+  let checks: { bucket?: unknown; workflow?: unknown; event?: unknown; link?: unknown }[];
   try {
     checks = JSON.parse(stdout);
   } catch {
     return "none";
   }
   if (!Array.isArray(checks) || checks.length === 0) return "none";
-  const buckets = checks.map((c) => c.bucket);
+  const runOf = (c: (typeof checks)[number]) => {
+    const m = typeof c.link === "string" ? /\/actions\/runs\/(\d+)/.exec(c.link) : null;
+    return m !== null && typeof c.workflow === "string" ? Number(m[1]) : null;
+  };
+  const key = (c: (typeof checks)[number]) => `${String(c.workflow)}\u0000${String(c.event)}`;
+  const latest = new Map<string, number>();
+  for (const c of checks) {
+    const run = runOf(c);
+    if (run !== null && run > (latest.get(key(c)) ?? -1)) latest.set(key(c), run);
+  }
+  const buckets = checks
+    .filter((c) => {
+      const run = runOf(c);
+      return run === null || latest.get(key(c)) === run;
+    })
+    .map((c) => c.bucket);
   if (buckets.some((b) => b === "fail" || b === "cancel")) return "red";
   if (buckets.some((b) => b === "pending")) return "running";
   return "green";

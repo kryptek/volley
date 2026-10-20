@@ -17,6 +17,16 @@ export function screenTail(text: string, max: number): string[] {
     .slice(-max);
 }
 
+/**
+ * The harness chrome `screenTail` drops: the lines from the input box's top rule down (the
+ * status bar is below the box). Empty when the screen has no input box.
+ */
+export function screenFooter(text: string): string[] {
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, "").trimEnd());
+  const box = inputBoxTop(lines);
+  return box === -1 ? [] : lines.slice(box);
+}
+
 /** A horizontal rule: Claude Code's `────` input-box border, or a box's top edge `╭───╮`. */
 const RULE = /^\s*[╭┌]?[─━]{3,}[╮┐]?\s*$/;
 /** The input prompt line: `❯ …`, or `│ > …` / `│ ❯ …` inside a box. */

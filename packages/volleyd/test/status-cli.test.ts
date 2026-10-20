@@ -237,6 +237,14 @@ describe("volleyd status formatting", () => {
     expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
   });
 
+  it("shows a task's queued steers", () => {
+    const out = formatWave({
+      ...plain,
+      tasks: [{ id: "T1", issue: 101, stage: "fixup", agents: {}, queued_steers: 1 }],
+    });
+    expect(out).toContain("  T1  #101   fixup           steer queued (1)\n");
+  });
+
   it("marks a task gated without reviews because its plan has none", () => {
     const out = formatWave({
       ...plain,

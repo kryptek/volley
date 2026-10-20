@@ -45,6 +45,7 @@ import {
   redeemToken,
   tokenReplyTopic,
 } from "./accounts";
+import { type ActivityEvidence, newestWrite } from "./activity-evidence";
 import {
   type AdmissionState,
   type AdmissionSummary,
@@ -206,6 +207,7 @@ import {
   readinessTopic,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
+import { readRepoVisibility } from "./repo-visibility";
 import {
   type Admission,
   activeTasks,
@@ -224,8 +226,11 @@ import type {
   JournalEvent,
   NewEvent,
   NudgeOnMerge,
+  PublicHygiene,
+  RepoVisibility,
   TaskAgents,
   TaskId,
+  TaskStage,
   TaskState,
   Tunables,
   TunablesPatch,
@@ -280,6 +285,7 @@ import {
   observeSignal,
   parseHookSignal,
   rebase,
+  stallable,
   trackAgent,
   whyWaiting,
 } from "./liveness";
@@ -488,6 +494,13 @@ export interface SpawnerOptions {
   remoteExec?: ExecFn;
 }
 
+/** `repo_visibility_detected` data: the repo's visibility for a wave version, and why. */
+interface VisibilityFacts {
+  visibility: RepoVisibility | null;
+  source: "gh" | "config";
+  public_hygiene: PublicHygiene;
+}
+
 /** How the pipeline (or an account move) starts a spawn (startSpawn). */
 interface SpawnPipelineOptions {
   start?: SpawnStart;
@@ -529,6 +542,10 @@ interface Supervised {
   liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
   liveness: AgentLiveness;
+  /** Background shells the latest screen capture's footer counts (null: unreadable). */
+  shellsRunning?: number | null;
+  /** The agent's worktree from its `agent_spawned` record (null: none recorded), once looked up. */
+  worktree?: string | null;
 }
 
 /** The liveness decision slot a decision's `class` fills. */
@@ -679,6 +696,9 @@ const retiredAgents = (log: WaveLog): Set<string> =>
       .filter((e) => e.type === "agent_retired")
       .map((e) => e.data.agent_id as string),
   );
+
+/** Task stages a steer is refused in: nothing will ever read it. */
+const UNSTEERABLE: ReadonlySet<TaskStage> = new Set(["done", "cancelled", "blocked"]);
 
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
@@ -1173,7 +1193,9 @@ export class Daemon {
     // The capture feeds the silence fallback (single reader): when each screen last changed.
     this.screens.onCapture((c) => {
       const a = this.supervised.get(c.agentId);
-      if (a !== undefined && c.tail !== null) {
+      if (a === undefined) return;
+      a.shellsRunning = c.footer.shells_running;
+      if (c.tail !== null) {
         a.liveness = noteCapture(a.liveness, { hash: c.tail.hash, at: this.now() });
       }
     });
@@ -3030,6 +3052,7 @@ export class Daemon {
         attempt,
         ...rest,
         account: { id: account.id, dir: account.dir },
+        hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
         ...(carried !== undefined ? { continueBranch: carried } : {}),
       };
@@ -4319,6 +4342,8 @@ export class Daemon {
     };
     watch.onStatus(check);
     if (watch.state.status !== null) check(watch.state.status.type);
+    if (outcome.kind === "registered")
+      void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
   }
 
   /**
@@ -4477,6 +4502,7 @@ export class Daemon {
       journal: (ev) => this.append(wave, ev),
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
       branchUpdate: () => this.config.effective(wave).branch_update,
+      hygiene: () => log.record.state?.hygiene_level ?? "p1",
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -4792,12 +4818,63 @@ export class Daemon {
         retained?.type === "reaped" && retained.wall_time === a.suppressedReap
           ? (a.liveStatus ?? "working")
           : (retained?.type ?? null);
+      // Only an agent that can stall needs evidence: a finished one's worktree is never walked.
+      const evidence =
+        a.liveness.activity === "idle" && stallable(status)
+          ? await this.evidence(a, now)
+          : undefined;
+      if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
       await this.applyLiveness(
         agentId,
         a,
-        checkLiveness(a.liveness, { now, status, tunables: eff }),
+        checkLiveness(a.liveness, {
+          now,
+          status,
+          tunables: eff,
+          ...(evidence !== undefined ? { evidence } : {}),
+        }),
       );
     }
+  }
+
+  /**
+   * What an idle agent shows of its own work (activity-evidence.ts): the hooks' flag, a lease it
+   * holds or waits on, the running shells its terminal footer counts, and, only when none of
+   * those says so, the newest write under its worktree (a local agent's only).
+   */
+  private async evidence(a: Supervised, now: number): Promise<ActivityEvidence> {
+    const id = a.liveness.agent_id;
+    const mine = (l: { holder: string }) => l.holder === id;
+    const held = Object.entries(this.leases).find(([, p]) => p.held.some(mine))?.[0];
+    const queued = Object.entries(this.leases).find(([, p]) => p.queue.some(mine))?.[0];
+    const pool = held ?? queued;
+    const e: ActivityEvidence = {
+      background_wait: a.liveness.background_wait,
+      lease_held: pool !== undefined,
+      ...(pool !== undefined ? { lease_pool: pool } : {}),
+      ...(held === undefined && queued !== undefined ? { lease_queued: true } : {}),
+      shells_running: a.shellsRunning ?? null,
+      worktree_write_at: null,
+    };
+    if (e.background_wait !== null || e.lease_held || (e.shells_running ?? 0) > 0) return e;
+    if (a.host.name !== "local") return e;
+    const eff = this.config.effective(a.wave);
+    // Past background_wait_max_s of idle no evidence counts (ownWorkReason): skip the walk.
+    if (now - a.liveness.activity_at >= secondsMs(eff.background_wait_max_s)) return e;
+    if (a.worktree === undefined) {
+      const spawned = this.journalEvents(a.wave)
+        .reverse()
+        .find((ev) => ev.type === "agent_spawned" && ev.data.agent_id === id);
+      a.worktree = typeof spawned?.data.worktree === "string" ? spawned.data.worktree : null;
+    }
+    const worktree = a.worktree;
+    if (worktree === null) return e;
+    e.worktree_write_at = await newestWrite(worktree, {
+      now,
+      freshMs: secondsMs(eff.idle_grace_s),
+      maxEntries: DAEMON_DEFAULTS.worktree_scan_max_entries,
+    });
+    return e;
   }
 
   /** Adopt a liveness step and carry out its actions (inside the serial queue). */
@@ -4863,11 +4940,11 @@ export class Daemon {
           {
             kind: "agent_stalled",
             task,
-            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.`,
+            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
             options: ["nudge again", STOP_ANSWER],
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
-          { class: "agent_stalled", idle_s: x.idle_s },
+          { class: "agent_stalled", idle_s: x.idle_s, asked: x.asked },
         );
       case "credit_exhausted": {
         const now = this.now();
@@ -5595,7 +5672,32 @@ export class Daemon {
   private async append(wave: WaveId, ev: NewEvent): Promise<JournalEvent> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
-    return this.track(this.publishAppended(wave, log.append(ev, dateOf(this.time))));
+    const queued = log.record.queued_steers;
+    const event = log.append(ev, dateOf(this.time));
+    const published = this.track(this.publishAppended(wave, event));
+    // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
+    const ended =
+      event.type === "wave_stopped"
+        ? Object.keys(queued)
+        : event.task !== undefined &&
+            (event.type === "task_cancelled" ||
+              (event.type === "stage_entered" && event.data.stage === "done"))
+          ? [event.task]
+          : [];
+    for (const task of ended) {
+      const ids = (queued[task] ?? []).map((q) => q.message_id);
+      if (ids.length === 0) continue;
+      const reason =
+        event.type === "wave_stopped"
+          ? "wave stopped"
+          : `task ${event.type === "task_cancelled" ? "cancelled" : "done"}`;
+      await this.append(wave, {
+        type: "steering_dropped",
+        task,
+        data: { message_ids: ids, reason },
+      });
+    }
+    return published;
   }
 
   /** An appended event's `/events` mirror, then the wave state it changed. */
@@ -6417,29 +6519,73 @@ export class Daemon {
     if ("refusal" in preface) return preface.refusal;
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
-    if (first.existing !== undefined) {
-      return this.resubmit(first.existing, first.wave, p.wave_yaml as string, preface);
-    }
     const text = p.wave_yaml as string;
-    if (this.opts.issueBody === undefined)
-      return this.commitSubmit(first.wave, first.owner, {}, text, preface);
-    // Fetching issue bodies can take seconds: do it off the serial queue (control ops and ticks,
-    // the kill switch included, keep running), then commit inside it, re-checking what may have
-    // changed meanwhile (the kill switch, a racing submit of the same wave id).
+    const fetchFiles = first.existing === undefined && this.opts.issueBody !== undefined;
+    if (!fetchFiles && !this.readsVisibility(first.wave)) {
+      const visibility = await this.repoVisibility(first.wave);
+      return first.existing !== undefined
+        ? this.resubmit(first.existing, first.wave, text, preface, visibility)
+        : this.commitSubmit(first.wave, first.owner, {}, text, preface, visibility);
+    }
+    // Fetching issue bodies and the repo's visibility can take seconds: do it off the serial
+    // queue (control ops and ticks, the kill switch included, keep running), then commit inside
+    // it, re-checking what may have changed meanwhile (the kill switch, a racing submit of the
+    // same wave id).
     return {
       ok: true,
-      defer: this.fetchIssueFiles(first.wave).then((files) =>
+      defer: Promise.all([
+        fetchFiles ? this.fetchIssueFiles(first.wave) : {},
+        this.repoVisibility(first.wave),
+      ]).then(([files, visibility]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
           if (again.existing !== undefined)
-            return this.resubmit(again.existing, again.wave, text, preface);
-          return this.commitSubmit(again.wave, again.owner, files, text, preface);
+            return this.resubmit(again.existing, again.wave, text, preface, visibility);
+          return this.commitSubmit(again.wave, again.owner, files, text, preface, visibility);
         }),
       ),
     };
+  }
+
+  /** The wave's `public_hygiene` as submitted: its `config:` override, else the global value. */
+  private publicHygiene(wave: Wave): PublicHygiene {
+    return wave.config.public_hygiene ?? this.config.effective().public_hygiene;
+  }
+
+  /**
+   * Whether submitting `wave` runs `gh repo view`: under `public_hygiene: auto`, on a daemon that
+   * spawns agents (one that spawns none writes no reviewer briefs).
+   */
+  private readsVisibility(wave: Wave): boolean {
+    return this.opts.spawner !== undefined && this.publicHygiene(wave) === "auto";
+  }
+
+  /**
+   * The `repo_visibility_detected` facts for a wave version: under `auto` read with `gh repo
+   * view` (`unknown` on any failure), under `on` / `off` from config. Null: not recorded (a
+   * daemon without a spawner); the wave's hygiene level is then p1.
+   */
+  private async repoVisibility(wave: Wave): Promise<VisibilityFacts | null> {
+    if (this.opts.spawner === undefined) return null;
+    const mode = this.publicHygiene(wave);
+    if (mode !== "auto") return { visibility: null, source: "config", public_hygiene: mode };
+    const visibility = await readRepoVisibility(this.host.exec, expandHome(wave.repo));
+    return { visibility, source: "gh", public_hygiene: mode };
+  }
+
+  /** Journal a wave version's visibility, and the alarm when it could not be read. */
+  private async journalVisibility(wave: WaveId, facts: VisibilityFacts | null): Promise<void> {
+    if (facts === null) return;
+    await this.append(wave, { type: "repo_visibility_detected", data: { ...facts } });
+    if (facts.visibility === "unknown") {
+      await this.append(wave, {
+        type: "alarm_raised",
+        data: { alarm: "repo_visibility_unknown" },
+      });
+    }
   }
 
   /**
@@ -6552,6 +6698,7 @@ export class Daemon {
     issueFiles: Record<TaskId, string[]>,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
+    visibility: VisibilityFacts | null,
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
     const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
@@ -6564,6 +6711,7 @@ export class Daemon {
       type: "wave_submitted",
       data: { wave, owner, brief_preface: preface.info },
     });
+    await this.journalVisibility(wave.wave, visibility);
     if (preface.info === null) {
       await this.append(wave.wave, {
         type: "alarm_raised",
@@ -7073,12 +7221,12 @@ export class Daemon {
     by: string,
     messageId: string,
     extra: Record<string, unknown> = {},
+    numbered?: { seq: number; supersedes?: string },
   ): Promise<void> {
     const log = this.waves.get(wave) as WaveLog;
     // A merge nudge is additive: it never supersedes an earlier (owner or pipeline) steer.
-    const { seq, supersedes } = nextSteer(log.record, task, {
-      additive: isAdditiveSteer(extra.reason),
-    });
+    const { seq, supersedes } =
+      numbered ?? nextSteer(log.record, task, { additive: isAdditiveSteer(extra.reason) });
     await this.publish(
       buildTopic(target.namespace, target.agent_id, "mailbox"),
       this.envelope(
@@ -7114,6 +7262,65 @@ export class Daemon {
     });
   }
 
+  /** Journal a steer for `task`'s next agent (of `role`, when given); the steer op's answer. */
+  private async queueSteer(
+    wave: WaveId,
+    task: TaskId,
+    text: string,
+    by: string,
+    role: keyof TaskAgents | undefined,
+  ): Promise<Record<string, unknown>> {
+    const log = this.waves.get(wave) as WaveLog;
+    const { seq, supersedes } = nextSteer(log.record, task);
+    const messageId = randomUUID();
+    await this.append(wave, {
+      type: "steering_queued",
+      task,
+      data: {
+        ...(role !== undefined ? { role } : {}),
+        message_id: messageId,
+        seq,
+        ...(supersedes !== undefined ? { supersedes } : {}),
+        text,
+        by,
+      },
+    });
+    this.log(`steer ${wave}/${task} #${seq} queued for its next ${role ?? "agent"} by ${by}`);
+    return {
+      wave,
+      task,
+      message_id: messageId,
+      seq,
+      ...(supersedes !== undefined ? { supersedes } : {}),
+      delivery: "queued",
+      queued_for: role ?? "next agent",
+      received: false,
+      acked: false,
+    };
+  }
+
+  /**
+   * A new agent of `task` registered (its hooks drain the mailbox): every steer queued for the
+   * task's next agent, or for its role, goes to it in order, with the id and seq it was queued with.
+   */
+  private async deliverQueued(wave: WaveId, task: TaskId, role: Role, agentId: string) {
+    const a = this.supervised.get(agentId);
+    const queue = this.waves.get(wave)?.record.queued_steers[task] ?? [];
+    if (a === undefined) return;
+    for (const q of queue.filter((x) => x.role === undefined || x.role === role)) {
+      await this.deliverSteer(
+        wave,
+        task,
+        { role, agent_id: agentId, namespace: a.namespace },
+        q.text,
+        q.by,
+        q.message_id,
+        { queued: true, queued_at: q.at },
+        { seq: q.seq, ...(q.supersedes !== undefined ? { supersedes: q.supersedes } : {}) },
+      );
+    }
+  }
+
   /**
    * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
    * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
@@ -7136,14 +7343,19 @@ export class Daemon {
         error: `unknown role '${String(p.role)}' (one of ${TASK_ROLES.join(", ")})`,
       };
     const role = p.role;
-    const target = steerTarget(w.log.record, p.task, role);
+    const t = w.log.record.state?.tasks.find((x) => x.id === p.task);
+    if (t === undefined)
+      return { ok: false, error: `unknown task '${p.task}' in wave '${w.wave}'` };
+    if (UNSTEERABLE.has(t.stage)) return { ok: false, error: `task '${p.task}' is ${t.stage}` };
+    const target = steerTarget(w.log.record, p.task, retiredAgents(w.log), role);
     if (target === null) {
-      return {
-        ok: false,
-        error: w.log.record.state?.tasks.some((t) => t.id === p.task)
-          ? `task '${p.task}' has no agent${role !== undefined ? ` in role ${role}` : ""} to steer`
-          : `unknown task '${p.task}' in wave '${w.wave}'`,
-      };
+      // No live agent (between stages, or not spawned yet): held for the task's next one.
+      if (urgent) return { ok: false, error: "no live agent to interrupt" };
+      if (typeof p.text !== "string") return { ok: false, error: "steer requires payload.text" };
+      const status = w.log.record.state?.status;
+      if (status === "stopped" || status === "complete")
+        return { ok: false, error: `wave '${w.wave}' is ${status}: task '${p.task}' has no agent` };
+      return { ok: true, result: await this.queueSteer(w.wave, p.task, p.text, by, role) };
     }
     // Urgent: interrupt (Escape) before delivering, so the message lands in a stopped session.
     const interrupted = urgent ? await this.tryInterrupt(target.agent_id) : undefined;
@@ -7206,6 +7418,7 @@ export class Daemon {
     wave: Wave,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
+    visibility: VisibilityFacts | null,
   ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
@@ -7259,6 +7472,7 @@ export class Daemon {
         });
       }
     }
+    await this.journalVisibility(wave.wave, visibility);
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
       if (d.op === "resolve") {

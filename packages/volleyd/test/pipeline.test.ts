@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
+import type { HygieneLevel } from "../src/reviews";
 import { FIXTURES } from "./helpers/fake-host";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
@@ -21,7 +22,7 @@ const types = () => h.events.map((e) => e.type);
 const stage = () => h.task()?.stage;
 
 /** Implementer done with its PR open and CI green on H1. */
-async function implemented(o: { pipeline?: string } = {}) {
+async function implemented(o: { pipeline?: string; hygiene?: HygieneLevel } = {}) {
   h = pipelineHarness(o);
   await h.start();
   h.openPr(H1);
@@ -107,6 +108,39 @@ describe("pipeline: the default sequence", () => {
     await h.resolve(d?.decision_id as string, "skip");
     expect(h.spawns.some((s) => s.role === "fixup")).toBe(false);
     expect(stage()).toBe("merge_ready");
+  });
+
+  it("public hygiene p1: a review without the hygiene block is steered once, with the 0.3.1 text", async () => {
+    await implemented();
+    await h.finish("spec_reviewer", { result: result("no-hygiene") });
+    expect(h.steers).toHaveLength(1);
+    expect(h.steers[0]?.text).toBe(
+      'Your done arrived without a parseable review result. Publish it first — vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1"|"P2"|"P3", "file": "<path>", "line": <n>, "text": "<finding>" }], "verdict": "approve"|"changes_requested", "hygiene": { "checked": true, "findings": [<public-hygiene P1s, same shape>] } }) — then publish done again.',
+    );
+  });
+
+  it("public hygiene p3 (private repo): a review without the block is accepted; hits stay P3", async () => {
+    await implemented({ hygiene: "p3" });
+    await h.finish("spec_reviewer", { result: result("no-hygiene") });
+    expect(h.steers).toEqual([]);
+    expect(h.run("spec_reviewer")?.retired).toBe("done");
+    await h.finish("quality_reviewer", {
+      result: {
+        findings: [],
+        verdict: "approve",
+        hygiene: {
+          checked: true,
+          findings: [{ severity: "P1", file: "docs/ops.md", line: 3, text: "a hostname" }],
+        },
+      },
+    });
+    expect(h.steers).toEqual([]);
+    const verified = h.events.filter(
+      (e) => e.type === "artifact_verified" && e.data.role === "quality_reviewer",
+    );
+    expect((verified.at(-1)?.data.review as { findings: { severity: string }[] }).findings).toEqual(
+      [expect.objectContaining({ severity: "P3", file: "docs/ops.md" })],
+    );
   });
 
   it("an unparseable result → respawn answer starts a fresh reviewer at the same head", async () => {

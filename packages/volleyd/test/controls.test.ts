@@ -468,13 +468,125 @@ describe("steer", () => {
     expect(res.result).toMatchObject({ delivery: "delivered", received: false, acked: false });
   });
 
-  it("steer by a non-owner is refused; steer to a task without an agent is an error", async () => {
+  it("steer by a non-owner is refused; an unknown, cancelled or done task is an error", async () => {
     expect(
       (await client.request("steer", { wave: WAVE, task: "A", text: "x", by: "coord-z" })).error,
     ).toContain("owned by coord-a");
     expect(
+      (await client.request("steer", { wave: WAVE, task: "Z", text: "x", by: "coord-a" })).error,
+    ).toContain("unknown task 'Z'");
+    await daemon.recordEvent(WAVE, { type: "task_cancelled", task: "B", data: {} });
+    expect(
       (await client.request("steer", { wave: WAVE, task: "B", text: "x", by: "coord-a" })).error,
-    ).toContain("task 'B' has no agent");
+    ).toContain("task 'B' is cancelled");
+    await daemon.recordEvent(WAVE, { type: "stage_entered", task: "A", data: { stage: "done" } });
+    expect(
+      (await client.request("steer", { wave: WAVE, task: "A", text: "x", by: "coord-a" })).error,
+    ).toContain("task 'A' is done");
+    expect(daemon.journalEvents(WAVE).some((e) => e.type.startsWith("steering_"))).toBe(false);
+  });
+
+  it("a task with no live agent (its implementer retired) gets the steer queued at once", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    const seen: string[] = [];
+    const unsub = await agent.subscribeStream(`volley/${NS}/agent-a1/mailbox`, ({ payload }) => {
+      seen.push(parseEnvelope(payload)?.type ?? "?");
+    });
+    // No ack wait: the answer comes back without the clock moving.
+    const res = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      text: "use the shared table",
+      by: "coord-a",
+      wait_ack_ms: 30_000,
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toMatchObject({
+      wave: WAVE,
+      task: "A",
+      delivery: "queued",
+      queued_for: "next agent",
+      seq: 1,
+    });
+    expect(res.result).not.toHaveProperty("agent_id");
+    const messageId = (res.result as { message_id: string }).message_id;
+    expect(messageId).toEqual(expect.any(String));
+    // The retired agent's mailbox gets nothing.
+    await drained(agent);
+    await unsub();
+    expect(seen).toEqual([]);
+    const queued = daemon.journalEvents(WAVE).filter((e) => e.type === "steering_queued");
+    expect(queued.map((e) => e.data)).toEqual([
+      { message_id: messageId, seq: 1, text: "use the shared table", by: "coord-a" },
+    ]);
+    expect(daemon.journalEvents(WAVE).some((e) => e.type === "steering_sent")).toBe(false);
+    expect(task("A")?.queued_steers).toBe(1);
+
+    // --role: queued for that role's next agent; numbered after the first.
+    const second = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      text: "and keep v1",
+      role: "fixup",
+      by: "coord-a",
+    });
+    expect(second.result).toMatchObject({
+      delivery: "queued",
+      queued_for: "fixup",
+      seq: 2,
+      supersedes: messageId,
+    });
+    expect(task("A")?.queued_steers).toBe(2);
+  });
+
+  it("urgent / escape_only with no live agent is an error and interrupts nobody", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    for (const extra of [
+      { urgent: true, text: "stop" },
+      { urgent: true, escape_only: true },
+    ]) {
+      const res = await client.request("steer", { wave: WAVE, task: "A", by: "coord-a", ...extra });
+      expect(res).toMatchObject({ ok: false, error: "no live agent to interrupt" });
+    }
+    expect(interrupted).toEqual([]);
+    expect(daemon.journalEvents(WAVE).some((e) => e.type.startsWith("steering_"))).toBe(false);
+  });
+
+  it("a stopped wave drops its queued steers and queues no more", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    const res = await client.request("steer", { wave: WAVE, task: "A", text: "x", by: "coord-a" });
+    expect(res.result).toMatchObject({ delivery: "queued" });
+    expect((await client.request("stop", { wave: WAVE, by: "coord-a" })).ok).toBe(true);
+    const dropped = daemon.journalEvents(WAVE).filter((e) => e.type === "steering_dropped");
+    expect(dropped.map((e) => [e.task, e.data])).toEqual([
+      [
+        "A",
+        {
+          message_ids: [(res.result as { message_id: string }).message_id],
+          reason: "wave stopped",
+        },
+      ],
+    ]);
+    expect(task("A")?.queued_steers).toBeUndefined();
+    const again = await client.request("steer", {
+      wave: WAVE,
+      task: "A",
+      text: "y",
+      by: "coord-a",
+    });
+    expect(again.error).toContain("is stopped");
   });
 
   it("refuses a role that is not a task role (no prototype keys), journaling nothing", async () => {
@@ -585,9 +697,34 @@ describe("controls (pure)", () => {
   it("steerTarget follows the stage; nextSteer numbers from the journaled steers", () => {
     const rec = daemon.record(WAVE);
     if (rec === undefined) throw new Error("no record");
-    expect(steerTarget(rec, "A")).toEqual({ role: "implementer", agent_id: "agent-a1" });
-    expect(steerTarget(rec, "B")).toBeNull();
+    const none = new Set<string>();
+    expect(steerTarget(rec, "A", none)).toEqual({ role: "implementer", agent_id: "agent-a1" });
+    expect(steerTarget(rec, "B", none)).toBeNull();
     expect(nextSteer(rec, "A")).toEqual({ seq: 1 });
+  });
+
+  it("steerTarget never names a retired agent", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    await daemon.recordEvent(WAVE, { type: "stage_entered", task: "A", data: { stage: "fixup" } });
+    const retired = new Set(["agent-a1"]);
+    const between = daemon.record(WAVE);
+    if (between === undefined) throw new Error("no record");
+    // Between stages: no fixup agent yet, and the implementer fallback is retired.
+    expect(steerTarget(between, "A", retired)).toBeNull();
+    expect(steerTarget(between, "A", retired, "implementer")).toBeNull();
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "fixup", agent_id: "agent-f1" },
+    });
+    const live = daemon.record(WAVE);
+    if (live === undefined) throw new Error("no record");
+    expect(steerTarget(live, "A", retired)).toEqual({ role: "fixup", agent_id: "agent-f1" });
+    expect(steerTarget(live, "A", retired, "implementer")).toBeNull();
   });
 
   it("killSwitchEngaged reads the last all-waves stop/resume in the system journal", () => {
@@ -667,6 +804,24 @@ describe("CLI", () => {
     );
     expect(steer.stderr).toBe("");
     expect(steer.stdout).toContain("steer #1 → agent-a1 (implementer): delivered");
+  });
+
+  it("steer with no live agent prints that it is queued", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    const steer = await runCli(["steer", WAVE, "A", "use", "the", "table"], as("coord-a"));
+    expect(steer.stderr).toBe("");
+    expect(steer.stdout).toMatch(
+      /^steer #1 \(A\): queued for the next agent of the task\nmessage [0-9a-f-]+\n$/,
+    );
+    const role = await runCli(["steer", WAVE, "A", "x", "--role", "fixup"], as("coord-a"));
+    expect(role.stdout).toContain("steer #2 (A): queued for the next fixup of the task\n");
+    expect(role.stdout).toContain("(supersedes ");
+    const status = await runCli(["status", WAVE], env());
+    expect(status.stdout).toContain("steer queued (2)");
   });
 
   it("claim needs an identity and is refused while the owner may be alive", async () => {

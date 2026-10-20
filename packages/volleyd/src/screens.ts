@@ -126,3 +126,19 @@ export function lastOutputNote(out: string | null, remote: boolean): string {
     ? ` Last output: “${out}”.`
     : ` There is nothing on screen: its session may have ended at once${remote ? " (on a remote machine, check that claude and bun are on its non-interactive ssh PATH)" : ""}.`;
 }
+
+/** Claude Code's status bar count of background work, e.g. `· 2 shells still running`. */
+const SHELLS_RUNNING = /\b(\d+)\s+(?:background\s+)?(?:shells?|tasks?)\s+(?:still\s+)?running\b/i;
+
+/**
+ * How many background shells the footer (the lines from Claude Code's input box down, see
+ * `screenFooter`) says are still running: 0 when the footer says none, null without a footer.
+ */
+export function shellsRunning(footer: readonly string[]): number | null {
+  if (footer.length === 0) return null;
+  for (const line of footer) {
+    const m = SHELLS_RUNNING.exec(line);
+    if (m !== null) return Number(m[1]);
+  }
+  return 0;
+}

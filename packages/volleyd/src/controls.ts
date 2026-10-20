@@ -66,10 +66,15 @@ export const TASK_ROLES: readonly (keyof TaskAgents)[] = [
 export const isTaskRole = (r: string): r is keyof TaskAgents =>
   (TASK_ROLES as readonly string[]).includes(r);
 
-/** Who a steer to `task` reaches: `role`'s agent, else the current stage's, else the implementer. */
+/**
+ * Who a steer to `task` reaches: `role`'s agent, else the current stage's, else the implementer;
+ * never one in `retired` (task.agents keeps the last agent per role after it is retired). Null
+ * when no live agent fits: the steer is queued for the task's next one.
+ */
 export function steerTarget(
   rec: WaveRecord,
   task: TaskId,
+  retired: ReadonlySet<string>,
   role?: keyof TaskAgents,
 ): { role: keyof TaskAgents; agent_id: string } | null {
   const t = rec.state?.tasks.find((x) => x.id === task);
@@ -78,7 +83,7 @@ export function steerTarget(
     role !== undefined ? [role] : [ROLE_FOR_STAGE[t.stage] ?? "implementer", "implementer"];
   for (const r of order) {
     const id = Object.hasOwn(t.agents, r) ? t.agents[r] : undefined;
-    if (id !== undefined) return { role: r, agent_id: id };
+    if (id !== undefined && !retired.has(id)) return { role: r, agent_id: id };
   }
   return null;
 }

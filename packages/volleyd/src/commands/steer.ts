@@ -7,7 +7,9 @@ const HELP = `Usage: volleyd steer <wave> <task> <text...> [--role <role>] [--wa
 Send mailbox steering to the task's current agent (owner only). Each steer carries a per-task
 seq and supersedes the previous one. Waits up to --wait-ack-ms (default 30000; 0 = don't wait)
 for the agent's steering_acked and reports \`acked\`, \`received\` (mailbox ack only) or
-\`delivered\`.
+\`delivered\`. With no live agent on the task (between stages, or with --role, none in that
+role) the steer is \`queued\` at once and delivered to the task's next agent (of that role) when
+it registers.
 `;
 
 export const steer = opCommand({
@@ -34,8 +36,10 @@ export const steer = opCommand({
   },
   print: (res) => {
     const r = res.result as {
+      task: string;
       agent_id: string;
       role: string;
+      queued_for?: string;
       seq: number;
       supersedes?: string;
       delivery: string;
@@ -43,6 +47,11 @@ export const steer = opCommand({
       message_id: string;
     };
     const sup = r.supersedes !== undefined ? ` (supersedes ${r.supersedes})` : "";
+    if (r.delivery === "queued") {
+      const next =
+        r.queued_for === undefined || r.queued_for === "next agent" ? "agent" : r.queued_for;
+      return `steer #${r.seq} (${r.task}): queued for the next ${next} of the task\nmessage ${r.message_id}${sup}\n`;
+    }
     const state =
       r.delivery === "acked"
         ? `acked by ${r.acked_by}`

@@ -23,6 +23,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   idle_grace_s: 180,
+  background_wait_max_s: 7200,
+  stall_backoff_max_s: 1800,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
@@ -38,6 +40,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   claude: { default_account: null, warn_at_pct: 90 },
   branch_update: "rebase",
   agent_mcp: "strict",
+  public_hygiene: "auto",
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
@@ -150,6 +153,8 @@ export const DAEMON_DEFAULTS = {
   steer_wait_ack_max_ms: 300_000,
   /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
   issue_fetch_ms: 15_000,
+  /** How long the daemon waits for `gh repo view --json visibility` (at submit, under `auto`). */
+  repo_visibility_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
   /** Kill a `volley auth` account command (accounts.ts) after this long. */
@@ -195,6 +200,8 @@ export const DAEMON_DEFAULTS = {
   screen_capture_lines: 60,
   /** Lines kept in a published screen tail (screen.schema.json maxItems). */
   screen_tail_lines: 40,
+  /** Entries an idle agent's worktree walk visits before it gives up (activity-evidence.ts). */
+  worktree_scan_max_entries: 2000,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */

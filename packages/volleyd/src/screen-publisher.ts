@@ -4,7 +4,8 @@ import { type Clock, type TimerHandle, systemClock, withNow } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { DAEMON_AGENT_ID } from "./control";
 import type { Host } from "./hosts/host";
-import { screenHash, screenTail } from "./screen-tail";
+import { screenFooter, screenHash, screenTail } from "./screen-tail";
+import { shellsRunning } from "./screens";
 
 /**
  * Per-agent screen tails (SPEC §4.6.6). The daemon is the only process that reads agents'
@@ -51,6 +52,11 @@ export interface ScreenCapture {
   /** True when the tail differed from the last one and was published. */
   changed: boolean;
   stale: boolean;
+  /**
+   * Read from the chrome below the input box before the tail cuts it (never published):
+   * `shells_running` is null when the read failed or the screen has no input box.
+   */
+  footer: { shells_running: number | null };
 }
 
 export interface ScreenPublisherDeps {
@@ -250,6 +256,7 @@ export class ScreenPublisher {
       tail,
       changed,
       stale: a.stale,
+      footer: { shells_running: screen === null ? null : shellsRunning(screenFooter(screen)) },
     };
     for (const cb of this.listeners) {
       try {

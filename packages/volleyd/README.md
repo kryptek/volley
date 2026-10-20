@@ -145,7 +145,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
-| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's agent; reports `acked`, `received` or `delivered`. |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent; reports `acked`, `received` or `delivered`, or `queued` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
@@ -686,6 +686,21 @@ steer supersedes the one before the nudge). The steer is journaled as
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).
 
+A steer never goes to a retired agent (`task.agents` keeps the last agent per role after it is
+retired, and nobody drains its mailbox). When the task has no live agent, between stages or before
+its next agent is up (with `--role`, none in that role), the steer is **queued**: journaled as
+`steering_queued` (same `seq` / `supersedes` numbering), answered at once with
+`delivery: "queued"` and `queued_for` (the role, else `next agent`), with no ack wait. The wave
+state's `tasks[].queued_steers` counts them and `volleyd status` prints `steer queued (n)`. The
+next agent of the task to register (of that role, when one was named) gets every matching queued
+steer in order, with the id and `seq` it was queued with, journaled as `steering_sent` with
+`queued: true`. A steer sent after the next agent is spawned but before it registers goes to it
+directly, so it can arrive ahead of the queued ones; its `seq` is still the higher one, so order
+by `seq`. A task that is cancelled or done, or a wave that stops, drops its queue
+(`steering_dropped { message_ids, reason }`); the journal keeps it across a restart. `urgent` /
+`escape_only` with no live agent is an error (`no live agent to interrupt`), a task that is
+done, cancelled or blocked cannot be steered, and a stopped or complete wave queues nothing.
+
 `urgent: true` interrupts the agent's session (the same interrupt as `stop`: the configured
 hook, else Escape into the spawned agent's workspace) **before** the steering message is published, and the answer adds `interrupted`.
 `escape_only: true` (implies `urgent`; `text` not needed) only interrupts: nothing is published or
@@ -735,7 +750,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `wake_grace_s` | next monitor tick | — |
+| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `wake_grace_s` | next monitor tick | — |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
@@ -752,6 +767,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems
@@ -1753,7 +1769,8 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 |---|---|---|
 | `awaiting_input` with `permission_prompt` (bypass mode: the agent used `AskUserQuestion`) or `agent_needs_input` | decision `agent_question` at once, with the Stop text of the current idle (never an earlier turn's: `resumed` clears it; else the notification text) and a pointer to the agent's screen topic. No screen read | the answer: resolving it steers the answer to the agent (a numbered `steering`, acks tracked); `resumed` closes it if the agent went on by itself |
 | `idle` (Stop) with no terminal status and no `resumed` for `idle_grace_s` (default 3 min; an `idle_prompt` confirms the idle sooner) | one steer: "Continue; publish done/blocked/failed when finished" | — |
-| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge: a further decision only if it is still idle a full `idle_grace_s` later; `stop task` cancels it |
+| still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `stop task`) | the answer is steered to the agent and counts as the next nudge; each further decision of the same idle waits twice as long after the answer (`idle_grace_s` × 2, × 4, …, at most `stall_backoff_max_s`, default 30 min) and says how many times it asked; `resumed` resets the count, so an agent the answer wakes starts again from one grace at its next idle; `stop task` cancels it |
+| `idle` while the agent waits on its own work: the hooks' `background_wait` (a background shell still running), a lease it holds or waits on, a terminal footer counting running shells, or (local agents) a file under its worktree written within `idle_grace_s` (`.git`, `.volley`, `node_modules`, `target`, `build`, `dist`, `.venv`, `.next`, `coverage`, `.turbo` skipped; at most 2000 entries walked, a larger tree gives no write evidence); none of it counts once the idle is older than `background_wait_max_s` (default 2 h), so a shell that never exits still ends in a nudge | nothing: no steer, no `agent_stalled`; the task's `why_waiting` says `idle N min: <reason>` (e.g. `waiting on its own background task`, `holds lease <pool>`, `waits on lease <pool>`, `2 shells still running`, `worktree written in the last 3 min`) | — |
 | `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
 | `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
 | no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` | read the screen (bounded, once per tick until decided) and classify it: | |
@@ -1803,7 +1820,10 @@ that is not `done` / `merge_ready` / `cancelled`, its current agents — the lat
 not retired — are compared with the retained registry entry and status, any heartbeat seen while
 reconciling (the daemon keeps none across a restart, so only a live one counts), the worktree
 lock, git (`rev-parse --verify` of the branch) and — for an agent that reported `done` while the
-daemon was down — GitHub (`gh pr list --head`, `gh pr checks`). The probes run concurrently and
+daemon was down — GitHub (`gh pr list --head`, `gh pr checks --json
+bucket,workflow,event,link`; checks are grouped by the run id in `link` and only the latest
+run per workflow and event counts, so `volleyd status` shows the replacement's CI, and a run
+cancelled with nothing replacing it stays red even when some of its jobs passed). The probes run concurrently and
 beside the serial queue, after the mailbox loop started (control ops are answered meanwhile);
 one `reconciled { agent_id, drift, action?, branch: { name, exists, head } }` per agent is
 journaled inside it:
@@ -1917,9 +1937,16 @@ The steer names what the role publishes: the implementer its branch and PR, the 
 `git push origin HEAD:<PR branch>`, the rebase its lease-guarded push (under `branch_update: merge`,
 its merge and normal push).
 
-**CI** is never re-run. Red on the head → a `ci_failed` decision with the run URLs and failed
-job names; an infra-shaped failure (cancelled, runner lost, checkout or network steps) adds
-"check the hosting provider's status page first". Pending CI is re-checked every
+**CI** is never re-run. CI on a head is the latest run per workflow and trigger event: a run that
+a newer run of the same workflow and event replaced on the same head (a concurrency
+`cancel-in-progress` cancel, a re-push) is superseded. It decides nothing, is left out of the run
+URLs and check counts, and is listed under `ci.superseded` in the evidence package; a `push` run
+and a `pull_request` run of one workflow are both the head's CI. Red on the head → a `ci_failed`
+decision with the run URLs and failed job names (`data.infra`, and `data.infra_reason`:
+`startup` \| `steps` \| `cancelled` \| `null`). A run that never started, or failed only in
+runner, checkout or network steps, adds "check the hosting provider's status page first"; when
+every failed run was cancelled and nothing replaced it, the decision says to re-run it (or push
+again) instead. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
 `ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
@@ -1933,14 +1960,33 @@ first stage, `spec_review`) and the state adds `stage_label: "review (spec + qua
 prints the label and one line per role.
 
 **Reviews.** Reviewers publish `vol_publish(channel="result", type="review", payload={ findings:
-[{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene: { checked: true, findings } })`
-(`review-result.schema.json`). Both reviewer briefs carry a fixed public-hygiene line, whatever
-the repo's preface says: "flag as P1 any person name, local username, machine path (home
-directories, temp paths), private hostname or IP in the diff, commit messages or PR text".
-`hygiene.findings` lists those hits; volleyd folds them into the review's findings, so the
-fixup gets them. A result without `hygiene.checked` is not a parseable result. A `done`
-without a parseable result is steered once, then `agent_blocked` (`respawn` / `skip`). The
-spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
+[{ severity: P1|P2|P3, file, line?, text }], verdict, hygiene?: { checked: true, findings } })`
+(`review-result.schema.json`). Both reviewer briefs carry a hygiene line, whatever the repo's
+preface says, at the wave's hygiene level:
+
+- **P1** (a public repository, one whose visibility could not be read, or `public_hygiene: on`):
+  "flag as P1 any person name, local username, machine path (home directories, temp paths),
+  private hostname or IP in the diff, commit messages or PR text". The `hygiene` block is
+  required: a result without `hygiene.checked` is not a parseable result, and every hit in
+  `hygiene.findings` is a P1, whatever severity the reviewer gave it.
+- **P3** (a private or internal repository under `auto`): the same check as a non-blocking note.
+  The block is optional; its hits are P3s, never promoted.
+- **off** (`public_hygiene: off`): no hygiene line, no block; a block a reviewer sends anyway is
+  ignored.
+
+volleyd folds the hits into the review's findings, so the fixup gets them. **`public_hygiene:
+auto | on | off`** (a tunable: `config.yaml`, `config_set` or a wave file's `config:`; default
+`auto`) picks the level. Under `auto` the daemon reads the repository's visibility once per wave
+version, at `run` (off the serial queue, beside the issue fetches), with `gh repo view --json
+visibility` in the repo (bounded by `repo_visibility_ms`), and journals `repo_visibility_detected
+{ visibility: public|private|internal|unknown, source: "gh", public_hygiene }`; `on` and `off`
+skip `gh` and journal `visibility: null, source: "config"`. A failed or timed-out read is
+`unknown` plus `alarm_raised { alarm: "repo_visibility_unknown" }`, and is treated as public. The
+wave state carries `repo_visibility` and `hygiene_level`, and `volleyd status` prints
+`hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)`, `P1 (forced)` or `off` under the
+header. A daemon that spawns no agents reads and journals nothing (the level is then P1). A
+`done` without a parseable result (at that level) is steered once with the level's contract,
+then `agent_blocked` (`respawn` / `skip`). The spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
 `ISSUE.md` in its worktree). A P1 from
 one reviewer that the other rated P3 on the same hunk (same file, lines within
 `review_hunk_lines`) opens `reviewers_disagree` (`blocker` / `fine`; `fine` hands it to the fixup
@@ -2115,7 +2161,7 @@ ALLOW (program by bare name only — never a path):
     (in any case); fetch takes a remote name or a
     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
     write refs/remotes/…
-  gh issue view · gh pr view | list | checks · gh run list | view | watch ·
+  gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)
   cmux — exact argv shapes only, because cmux types into an agent's shell:

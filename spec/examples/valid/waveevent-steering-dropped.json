@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T14:02:11.000Z",
+  "channel": "_waves/events",
+  "type": "steering_dropped",
+  "payload": {
+    "wave": "w1",
+    "seq": 24,
+    "at": "2026-10-20T14:02:11.000Z",
+    "task": "T1",
+    "data": {
+      "message_ids": [
+        "5f0c8a52-3d1e-4b7a-9c2f-6a1e0d4b8c31"
+      ],
+      "reason": "task cancelled"
+    }
+  }
+}

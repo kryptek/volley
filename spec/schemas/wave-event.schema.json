@@ -30,6 +30,8 @@
             "stage_entered",
             "artifact_verified",
             "steering_sent",
+            "steering_queued",
+            "steering_dropped",
             "decision_opened",
             "decision_resolved",
             "lease_requested",
@@ -73,7 +75,8 @@
             "machine_readiness_changed",
             "merge_nudge_sent",
             "peer_doctor_run",
-            "peer_drain_started"
+            "peer_drain_started",
+            "repo_visibility_detected"
           ]
         },
         "payload": {

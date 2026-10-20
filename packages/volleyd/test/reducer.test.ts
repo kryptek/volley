@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { nextSteer } from "../src/controls";
 import { apply, emptyRecord, reduce, replay } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -160,6 +161,63 @@ describe("reduce", () => {
     expect(stopped.status).toBe("running");
     expect(stopped.owner).toBe("coordinator-cd34");
     expect(stopped.tasks.find((t) => t.id === "T3")?.stage).toBe("cancelled");
+  });
+
+  it("queues steers per task: steering_sent with the same id or steering_dropped empties it", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    let seq = last.seq;
+    const ev = (type: JournalEvent["type"], data: Record<string, unknown>): JournalEvent => ({
+      seq: ++seq,
+      at,
+      type,
+      task: "T1",
+      data,
+    });
+    const queued = (id: string, n: number, extra: Record<string, unknown> = {}) =>
+      ev("steering_queued", { message_id: id, seq: n, text: `t${n}`, by: "coord", ...extra });
+    let rec = replay([...events, queued("m1", 1)]);
+    expect(rec.queued_steers.T1).toEqual([
+      { message_id: "m1", seq: 1, text: "t1", by: "coord", at },
+    ]);
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.queued_steers).toBe(1);
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+    // Queued and delivered steers share one numbering per task.
+    expect(nextSteer(rec, "T1")).toEqual({ seq: 2, supersedes: "m1" });
+    rec = apply(rec, queued("m2", 2, { supersedes: "m1", role: "fixup" }));
+    expect(rec.queued_steers.T1?.map((q) => q.message_id)).toEqual(["m1", "m2"]);
+    expect(rec.queued_steers.T1?.[1]).toMatchObject({ role: "fixup", supersedes: "m1" });
+
+    // The first is delivered: off the queue, and the numbering stays at the latest (2).
+    rec = apply(
+      rec,
+      ev("steering_sent", { type: "steering", message_id: "m1", seq: 1, queued: true }),
+    );
+    expect(rec.queued_steers.T1?.map((q) => q.message_id)).toEqual(["m2"]);
+    expect(nextSteer(rec, "T1")).toEqual({ seq: 3, supersedes: "m2" });
+
+    rec = apply(rec, ev("steering_dropped", { message_ids: ["m2"], reason: "task cancelled" }));
+    expect(rec.queued_steers.T1).toBeUndefined();
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.queued_steers).toBeUndefined();
+  });
+
+  it("a cancelled task drops its queue", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const rec = replay([
+      ...events,
+      {
+        seq: last.seq + 1,
+        at,
+        type: "steering_queued",
+        task: "T1",
+        data: { message_id: "m1", seq: 1, text: "x", by: "coord" },
+      },
+      { seq: last.seq + 2, at, type: "task_cancelled", task: "T1", data: {} },
+    ]);
+    expect(rec.queued_steers.T1).toBeUndefined();
   });
 });
 
