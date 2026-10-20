@@ -149,7 +149,7 @@ describe("stopped wave — App fold under Show finished", () => {
       f.emit(progress("impl-1", "narration", NOW - 2 * S, { msg: "still here" }));
       vi.advanceTimersByTime(100);
     });
-    return view;
+    return { ...view, f };
   }
 
   it("hides the stopped wave and its agents by default", () => {
@@ -210,5 +210,35 @@ describe("stopped wave — App fold under Show finished", () => {
     fireEvent.click(screen.getByRole("button", { name: "Bring back" }));
     expect(within(coords()).getByRole("listitem", { name: "w1" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+  });
+
+  it("a dismissal lasts while the wave stays ended: a reused id that runs and ends again is back", () => {
+    const { f } = mount();
+    openEnded();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss w1 from the Desk" }));
+    act(() => {
+      vi.advanceTimersByTime(5000); // the replay settles; w1 is still ended, so still dismissed
+    });
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w1"]);
+    act(() => {
+      f.emit({ ...waveMsg(waveState()), retained: false }); // w1 is reused and runs
+      vi.advanceTimersByTime(100);
+    });
+    expect(screen.getByRole("region", { name: "w1" })).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual([]);
+    act(() => {
+      f.emit({ ...waveMsg(stopped()), retained: false }); // …and ends again
+      vi.advanceTimersByTime(100);
+    });
+    expect(within(coords()).getByRole("button", { name: "Ended · 1" })).toBeInTheDocument();
+  });
+
+  it("keeps a dismissal whose wave has not been replayed yet (a slow link)", () => {
+    localStorage.setItem(DISMISSED_WAVES_KEY, JSON.stringify(["w9"]));
+    mount();
+    act(() => {
+      vi.advanceTimersByTime(40_000);
+    });
+    expect(JSON.parse(localStorage.getItem(DISMISSED_WAVES_KEY) ?? "[]")).toEqual(["w9"]);
   });
 });

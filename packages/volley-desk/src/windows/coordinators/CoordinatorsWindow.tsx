@@ -3,9 +3,9 @@
  * row per wave with its coordinator's state (`Working` / `Waiting for your
  * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
  * viewport to the wave and its agents) and show/hide. Every row carries a status
- * chip (`working`, `needs you`, `completed`, `stopped`, `failed`), apart from its
- * left bar, which is the wave's identity colour (the supervisor row's bar is
- * neutral and its health is a chip too), so a colour never means two things.
+ * chip (`working`, `needs you`, `completed`, `stopped`), apart from its left
+ * bar, which is the wave's identity colour (the supervisor row's bar is neutral
+ * and its health is a chip too, red when down), so a colour never means two things.
  * Active waves come first; ended ones (their coordinator is gone because the
  * work is done, nothing to claim) sit in a collapsed `Ended · N` group at the
  * bottom. With its agents an ended wave folds off the canvas under "Show
@@ -57,8 +57,6 @@ export const WAITING_ON_EVENTS_LABEL = "Working · waiting on events";
 export const ENDED_LABEL: Partial<Record<string, string>> = {
   complete: "Complete",
   stopped: "Stopped",
-  // Not a v0 wave status; listed so a supervisor that reports one reads as ended, in red.
-  failed: "Failed",
 };
 
 const Icon = ({ i }: { i: typeof Cancel01Icon }) => (
@@ -70,7 +68,6 @@ export type StatusChip = "working" | "needs" | "completed" | "stopped" | "failed
 const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
   complete: "completed",
   stopped: "stopped",
-  failed: "failed",
 };
 
 export const CHIP_LABEL: Record<StatusChip, string> = {
