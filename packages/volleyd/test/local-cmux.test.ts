@@ -160,6 +160,8 @@ describe("LocalCmuxHost", () => {
   });
 
   it("findWorkspace looks a workspace up by the exact name volleyd gave it", async () => {
+    // Shapes from live `cmux list-workspaces`: a `--name` title stays listed while the agent
+    // sets its terminal title; only a workspace with no custom title lists `✳ <process title>`.
     const lines = [
       "  workspace:1621  w0 T9 rebase",
       "* workspace:880  ✳ something else  [selected]",

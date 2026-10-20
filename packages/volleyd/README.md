@@ -911,10 +911,11 @@ first (`w1 T1 fixup 2`), so the lookup never finds a workspace an earlier attemp
   that session is known gone.
 - Nothing is there and the host answered: the spawn fails as above.
 - The host could not be asked (the lookup failed or timed out), more than one workspace carries
-  the name (which one is this launch's cannot be told) or the workspace could not be closed: the attempt is **burned** (`spawn_identity_burned { agent_id, role, attempt, why }`),
-  its login revoked, and the retry takes the next attempt number, so no retry ever reuses an
-  agent id that may be live. Its branch follows (`-2` after a never-used `-1`). The failure
-  still counts toward `spawn_retry_max`.
+  the name (which one is this launch's cannot be told) or the workspace could not be closed:
+  the attempt is **burned** (`spawn_identity_burned { agent_id, role, attempt, why }`), its
+  login revoked, and the retry takes the next attempt number, so no retry ever reuses an agent
+  id that may be live. Its branch follows (`-2` after a never-used `-1`). The failure still
+  counts toward `spawn_retry_max`.
 
 A launch cmux refused (not running, not installed, refusing volleyd) created nothing and fails
 straight away. Launches are serialized per host: one `cmux new-workspace` (or remote

@@ -419,7 +419,11 @@ export class SshTmuxHost implements RemoteHost {
     );
   }
 
-  /** `base`, or `base-2`, `base-3`, … — the first name no tmux session has. */
+  /**
+   * `base`, or `base-2`, `base-3`, … — the first name no tmux session has. A fallback can equal
+   * a later attempt's base (`w1-T1-role-2` is also attempt 2's `sessionName`); that is harmless,
+   * since a reconcile looks up the exact candidate the launch tried, not the base.
+   */
   private async freeSession(base: string): Promise<string> {
     for (let i = 1; i <= DAEMON_DEFAULTS.tmux_session_attempts; i++) {
       const name = i === 1 ? base : `${base}-${i}`;

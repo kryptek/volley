@@ -173,6 +173,9 @@ export function parseWorkspaceRef(stdout: string): string | null {
  * (`[*] workspace:<n>  <title>  [[selected]]`), or JSON (an array, or `{ workspaces }`, of
  * `{ ref | workspace_ref | id, name | title | custom_title }`). Null when none has that title;
  * throws when more than one has it (which one a launch opened cannot be told, spawn.ts burns it).
+ * A `--name` title is a custom title: checked against live cmux, it stays the listed title (and
+ * `custom_title`) while the agent in the workspace sets its terminal title. Only workspaces with
+ * no custom title list the process's title (`✳ …`).
  */
 export function parseWorkspaceList(stdout: string, name: string): string | null {
   const want = name.trim();
