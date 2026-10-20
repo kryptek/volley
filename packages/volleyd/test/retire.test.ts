@@ -301,7 +301,7 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
     "a %s agent writes no marker and ends no session",
     async (status) => {
       const touched: string[] = [];
-      await retireAgent(req({ status, worktree: "/wt/a", workspace: "workspace:1" }), {
+      const err = await retireAgent(req({ status, worktree: "/wt/a", workspace: "workspace:1" }), {
         ...deps(),
         writeMarker: async () => {
           touched.push("marker");
@@ -310,7 +310,8 @@ describe("the delete path (reapAndRevoke) and retireAgent", () => {
           touched.push("end");
           return { closed: true, pids: [], how: "close-workspace" };
         },
-      }).catch(() => {});
+      }).catch((e: unknown) => e);
+      expect((err as SpawnError).code).toBe("RETIRE_REFUSED");
       expect(touched).toEqual([]);
     },
   );
