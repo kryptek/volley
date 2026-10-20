@@ -20,13 +20,14 @@ export function githubOf(value: unknown): GitHubRepo | undefined {
   return { slug, url };
 }
 
-const isNumber = (n: unknown): n is number =>
+/** True for an issue or PR number: a positive safe integer. */
+export const isIssueNumber = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n > 0;
 
 /** Issue `n` on the wave's repository; null without a `github` or a number. */
 export function issueHref(github: unknown, n: unknown): string | null {
   const gh = githubOf(github);
-  return gh && isNumber(n) ? `${gh.url.replace(/\/+$/, "")}/issues/${n}` : null;
+  return gh && isIssueNumber(n) ? `${gh.url.replace(/\/+$/, "")}/issues/${n}` : null;
 }
 
 /** The task's PR URL when it has one (http(s) only); never derived from a number. */

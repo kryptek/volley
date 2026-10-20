@@ -17,7 +17,7 @@
  * The window, the steering panel, the unassigned / sessions cards and the
  * Needs-you notification all use the same `label`.
  */
-import { issueHref, issueLabel, prHref, prLabel } from "../../lib/github";
+import { isIssueNumber, issueHref, issueLabel, prHref, prLabel } from "../../lib/github";
 import { isSession } from "../../store/reducer";
 import type { AgentView, WaveView } from "../../store/types";
 
@@ -71,7 +71,7 @@ function labelOf(kind: "issue" | "pr", n: string | null, href: string | null): s
 /** `#42` / `PR #57` for a number (linked when `repo` is known), the URL's own number for a URL. */
 function link(kind: "issue" | "pr", ref: unknown, repo: string | null): PurposeLink | null {
   const prefix = kind === "pr" ? "PR #" : "#";
-  if (typeof ref === "number" && Number.isSafeInteger(ref) && ref > 0) {
+  if (isIssueNumber(ref)) {
     const path = kind === "pr" ? "pull" : "issues";
     const href = repo ? `https://github.com/${repo}/${path}/${ref}` : null;
     return { text: `${prefix}${ref}`, href, label: labelOf(kind, String(ref), href) };
@@ -122,7 +122,7 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
       const task = s.tasks.find((t) => t.id === a.task);
       const issue = task?.issue ?? s.spec?.tasks[a.task]?.issue;
       const links: PurposeLink[] = [];
-      if (typeof issue === "number" && Number.isSafeInteger(issue) && issue > 0) {
+      if (isIssueNumber(issue)) {
         const href = issueHref(s.github, issue);
         // The wave's own repository is on GitHub (an Enterprise host included).
         links.push({
@@ -133,7 +133,7 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
       }
       const pr = task?.pr?.number;
       const prUrl = prHref(task);
-      if (typeof pr === "number" && Number.isSafeInteger(pr) && pr > 0)
+      if (isIssueNumber(pr))
         links.push({ text: `PR #${pr}`, href: prUrl, label: prUrl ? prLabel(pr) : `PR #${pr}` });
       return make(`${a.task} · ${title}`, "wave", links);
     }
