@@ -11,7 +11,7 @@ const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-
 
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else
-VOLLEY_COORDINATOR, else VOLLEY_AGENT_ID, else the session registered for this directory).
+VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR).
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.

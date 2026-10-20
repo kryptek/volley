@@ -573,4 +573,43 @@ describe("coordinator names (pure)", () => {
       { id: "coord-env", auto: true },
     );
   });
+
+  it("resolveCaller prefers VOLLEY_AGENT_ID and the cwd's session over an inherited VOLLEY_COORDINATOR", async () => {
+    const worker = JSON.stringify(
+      buildEnvelope({
+        agentId: "w1-a-implementer-1",
+        parentId: "volleyd",
+        channel: "_system/registry",
+        type: "registered",
+        payload: { cwd: "/wt/a", started_at: "2026-10-18T09:00:00Z" },
+      }),
+    );
+    const fake = {
+      readRegistry: async () => [worker],
+      readStatuses: async () => new Map<string, string>(),
+    };
+    const env = { VOLLEY_COORDINATOR: "coord-main" };
+    expect(await resolveCaller(fake, undefined, env, "/wt/a")).toEqual({
+      id: "w1-a-implementer-1",
+      auto: true,
+    });
+    expect(
+      await resolveCaller(fake, undefined, { ...env, VOLLEY_AGENT_ID: "w1-a-implementer-1" }, "/x"),
+    ).toEqual({ id: "w1-a-implementer-1", auto: true });
+    // No session here: the exported name is the caller.
+    expect(await resolveCaller(fake, undefined, env, "/elsewhere")).toEqual({
+      id: "coord-main",
+      auto: true,
+    });
+  });
+
+  it("resolveCaller ignores an invalid VOLLEY_COORDINATOR with a warning", async () => {
+    const fake = {
+      readRegistry: async () => [],
+      readStatuses: async () => new Map<string, string>(),
+    };
+    const who = await resolveCaller(fake, undefined, { VOLLEY_COORDINATOR: "Coord Main" }, "/x");
+    expect(who.id).toBeNull();
+    expect(who.warning).toMatch(/VOLLEY_COORDINATOR "Coord Main"/);
+  });
 });

@@ -162,14 +162,23 @@ export function detectOwner(
     const own = entries.find((e) => e.agent_id === caller.agentId);
     return own?.coordinator ?? caller.agentId;
   }
+  const session = sessionsIn(entries, caller, statuses).find((e) => e.parent_id === null);
+  return session === undefined ? null : (session.coordinator ?? session.agent_id);
+}
+
+/** Live registry entries whose cwd contains the caller's, innermost and newest first. */
+function sessionsIn(
+  entries: RegistryEntry[],
+  caller: { cwd: string; namespace?: string | undefined },
+  statuses: ReadonlyMap<string, string>,
+): RegistryEntry[] {
   // `/repo/` and `/repo` are the same directory; `/` stays matchable as the empty base.
   const base = (dir: string) => dir.replace(/\/+$/, "");
   const inCwd = (dir: string) =>
     base(caller.cwd) === base(dir) || caller.cwd.startsWith(`${base(dir)}/`);
-  const match = entries
+  return entries
     .filter(
       (e): e is RegistryEntry & { cwd: string } =>
-        e.parent_id === null &&
         e.agent_id !== DAEMON_AGENT_ID &&
         (caller.namespace === undefined || e.namespace === caller.namespace) &&
         e.cwd !== undefined &&
@@ -181,15 +190,15 @@ export function detectOwner(
         base(b.cwd).length - base(a.cwd).length ||
         (b.started_at ?? "").localeCompare(a.started_at ?? ""),
     );
-  const session = match[0];
-  return session === undefined ? null : (session.coordinator ?? session.agent_id);
 }
 
 /**
- * The CLI caller's identity: `--by`/`--owner` flag, else `VOLLEY_COORDINATOR`, else
- * `VOLLEY_AGENT_ID`, else the registry session for the caller's cwd (its coordinator name when
- * it has one), else null. `auto` is true when it was detected, not given.
- * `warning` is set when `VOLLEY_AGENT_ID` names an agent with no registry entry.
+ * The CLI caller's identity: `--by`/`--owner` flag, else `VOLLEY_AGENT_ID`, else the registry
+ * session for the caller's cwd (its coordinator name when it has one; a supervised worker's own
+ * id), else `VOLLEY_COORDINATOR`, else null. The exported name comes last: a supervised worker whose shell inherited it is its
+ * own session, never the coordinator. `auto` is true when it was detected, not given.
+ * `warning` is set when `VOLLEY_AGENT_ID` names an agent with no registry entry, or when
+ * `VOLLEY_COORDINATOR` is not in the agent-id grammar (it is then ignored).
  */
 export async function resolveCaller(
   client: {
@@ -203,8 +212,6 @@ export async function resolveCaller(
   cwd: string = process.cwd(),
 ): Promise<{ id: string | null; auto: boolean; warning?: string }> {
   if (flag !== undefined && flag !== "") return { id: flag, auto: false };
-  const name = env.VOLLEY_COORDINATOR;
-  if (name !== undefined && name !== "") return { id: name, auto: true };
   const entries = (await client.readRegistry()).flatMap((raw) => {
     const e = parseRegistryEntry(raw);
     return e === null ? [] : [e];
@@ -220,8 +227,20 @@ export async function resolveCaller(
           warning: `VOLLEY_AGENT_ID=${agentId} has no registry entry; using it anyway`,
         };
   }
-  return {
-    id: detectOwner(entries, { cwd, namespace: client.namespace }, await client.readStatuses()),
-    auto: true,
-  };
+  const statuses = await client.readStatuses();
+  const session = detectOwner(entries, { cwd, namespace: client.namespace }, statuses);
+  if (session !== null) return { id: session, auto: true };
+  // A supervised worker (its entry has a parent) in this directory acts as itself, never as a
+  // coordinator name its shell inherited.
+  const worker = sessionsIn(entries, { cwd, namespace: client.namespace }, statuses)[0];
+  if (worker !== undefined) return { id: worker.agent_id, auto: true };
+  const name = env.VOLLEY_COORDINATOR;
+  if (name === undefined || name === "") return { id: null, auto: true };
+  return isValidAgentId(name)
+    ? { id: name, auto: true }
+    : {
+        id: null,
+        auto: true,
+        warning: `VOLLEY_COORDINATOR "${name}" does not match [a-z0-9][a-z0-9_-]{0,62}; ignoring it`,
+      };
 }

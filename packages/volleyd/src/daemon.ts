@@ -1690,8 +1690,20 @@ export class Daemon {
       });
       this.time.clearTimeout(this.reconnectTimers.get(name));
       this.reconnectTimers.delete(name);
+      // A binding made before its agent's status was known (a restart replays the registry before
+      // the statuses), or to an agent already gone when it was bound, was never a live session:
+      // moving off it is no reconnect, unless a wave journaled that agent as its owner.
+      const left = prev !== undefined ? this.statusOf.get(prev.agent_id) : undefined;
+      const provisional =
+        prev !== undefined &&
+        (left === undefined ||
+          (OWNER_GONE.has(left.type) && Date.parse(left.at) < Date.parse(prev.since)));
       for (const [wave, log] of owned) {
-        if (prev === undefined || log.record.owner_agent === next) {
+        if (
+          prev === undefined ||
+          log.record.owner_agent === next ||
+          (provisional && log.record.owner_agent !== prev.agent_id)
+        ) {
           await this.publishState(wave);
           continue;
         }
@@ -1888,6 +1900,8 @@ export class Daemon {
     if (closeControl) void this.dynsec?.close();
     for (const t of this.stopGrace.values()) this.time.clearTimeout(t);
     this.stopGrace.clear();
+    for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
+    this.reconnectTimers.clear();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -6769,7 +6783,8 @@ export class Daemon {
         if (typeof p.by !== "string" || p.by === "")
           return {
             ok: false,
-            error: "claim needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID",
+            error:
+              "claim needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID",
           };
         // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
         if (!isValidAgentId(p.by))

@@ -163,6 +163,22 @@ describe("a wave owned by a coordinator name", () => {
     expect(reconnects()).toHaveLength(1);
   });
 
+  it("a restart replaying a stale entry before the live one journals no reconnect", async () => {
+    // The name was only ever bound to b2 (no reconnect journaled); a1 is an older, reaped entry
+    // still retained. On restart the registry replays before the statuses, so a1 may bind first.
+    await daemon.stop();
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "reaped");
+    clock.sleepHost(60_000);
+    await registry("coordinator-b2");
+    await status("coordinator-b2", "working");
+    daemon = await t.start({ clock });
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2", state: "working" }),
+    );
+    expect(reconnects()).toHaveLength(0);
+  });
+
   it("turns gone once the bound agent stays away past reconnect_grace_s", async () => {
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");

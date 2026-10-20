@@ -40,6 +40,8 @@ describe("launch.sh", () => {
   it("is a bash script that exports VOLLEY_HOOKS_DIR and passes the hooks via --settings", () => {
     expect(script.startsWith("#!/usr/bin/env bash\n")).toBe(true);
     expect(script).toContain("export VOLLEY_HOOKS_DIR='/opt/volley/packages/volley-hooks'");
+    // A coordinator name exported in the person's profile never reaches a worker.
+    expect(script).toContain("unset VOLLEY_COORDINATOR\n");
     expect(script).toContain(
       "--settings '/opt/volley/packages/volley-hooks/settings.volley-hooks.json'",
     );

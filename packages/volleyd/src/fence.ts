@@ -1511,8 +1511,8 @@ function isLaunchScript(content: string, worktree: string): boolean {
   // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
   const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
-  // The exports end before launch.sh's claude check (the line before the exec).
-  for (const line of lines.slice(profile !== null ? 7 : 5, -3)) {
+  // The exports end before launch.sh's `unset VOLLEY_COORDINATOR` and claude check.
+  for (const line of lines.slice(profile !== null ? 7 : 5, -4)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);

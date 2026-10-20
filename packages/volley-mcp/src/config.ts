@@ -272,7 +272,8 @@ export function loadConfig(
     parentId,
     ...(auth !== null ? { auth } : {}),
     ...(identity?.claudeAccount !== undefined ? { claudeAccount: identity.claudeAccount } : {}),
-    ...(env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
+    // A supervised agent (identity file) is never a coordinator, whatever its shell exported.
+    ...(identity === null && env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
   };
 }
 

@@ -5,7 +5,7 @@ const HELP = `Usage: volleyd claim <wave> [--by <agent-id>] [--json] [--broker-u
 Take ownership of a wave. Succeeds when the current owner's status is reaped/done/failed, or it
 has been silent (registry, status, heartbeats) for the configured claim_after_s.
 Otherwise refused, naming the owner. The claim is journaled. Needs an identity: --by, else
-VOLLEY_COORDINATOR, else VOLLEY_AGENT_ID, else the session registered for this directory.
+VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR.
 `;
 
 export const claim = opCommand({

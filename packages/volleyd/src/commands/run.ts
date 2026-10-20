@@ -16,7 +16,7 @@ Validate a wave file locally, then submit it to the running daemon. Returns as s
 daemon has journaled the wave; tasks start as the scheduler admits them.
 
 The wave's owner (the one coordinator allowed to resolve, pause, stop and steer it) is --owner,
-else VOLLEY_COORDINATOR, else VOLLEY_AGENT_ID, else the session registered for this directory
+else VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR
 (printed as "(auto)"); a session whose MCP server sets VOLLEY_COORDINATOR owns it by that name,
 so the session keeps its waves when its MCP server restarts under a new agent id.
 Paths a task shares with a running wave's task are printed as overlap warnings (advisory).

@@ -111,7 +111,7 @@ export interface LaunchScriptVars {
  * `--mcp-config=<worktree>/.volley/mcp.json`. The `=` form gives the variadic option exactly one
  * value and `--` ends option parsing, so the prompt (last) is never swallowed as a config. The
  * brief is read from `.volley/brief.md` at launch, so it never appears in any argv volleyd
- * builds. Identity comes from `.volley/agent.json`; `env` exports (remote hosts) are for tooling
+ * builds. It unsets `VOLLEY_COORDINATOR` (a worker is never the coordinator). Identity comes from `.volley/agent.json`; `env` exports (remote hosts) are for tooling
  * that reads env only — the identity file wins. Under a Claude account profile it exports
  * `CLAUDE_CONFIG_DIR` and unsets every credential variable, so the profile's own login is the one
  * claude uses.
@@ -128,6 +128,8 @@ export function renderLaunchScript(v: LaunchScriptVars): string {
       ? [`export CLAUDE_CONFIG_DIR=${shq(v.claudeConfigDir)}`, `unset ${CREDENTIAL_ENV.join(" ")}`]
       : []),
     ...Object.entries(v.env ?? {}).map(([k, val]) => `export ${k}=${shq(val)}`),
+    // A coordinator name in the person's profile must not make every worker a coordinator.
+    "unset VOLLEY_COORDINATOR",
     LAUNCH_CLAUDE_CHECK,
     `exec claude --dangerously-skip-permissions --model ${shq(v.model)} --settings ${shq(hooksSettingsPath(v.hooksDir))}${strict} --mcp-config=${shq(mcpConfigPath(v.worktree))} --name ${shq(v.agentId)} -- "$(cat .volley/brief.md)"`,
     "",
