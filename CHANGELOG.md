@@ -13,6 +13,14 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Added
 
+- volley-desk: the agent window's title bar is two rows that never bunch: the status mark, the
+  wave, role, stage and machine chips and the actions on the first; the headline in full (at
+  most two lines), its issue and PR links and the account picker on the second. Under 420 px the
+  window is compact (an icon-only account picker, shorter chips). The new machine chip says where
+  the agent runs (a paired machine's name or `this machine`) with an up / down / overloaded dot,
+  a why-here and load tooltip on hover or focus, and opens Settings › Machines at that machine's
+  card; it replaces the footer's `on <host>`, and the body's purpose line now shows only when the
+  headline does not already. (#220)
 - volleyd: a terminal-status watchdog. A `done`, `blocked` or `failed` status that nothing in the
   wave journal names within 60 s (`terminal_unjournaled_alarm_ms`) raises
   `alarm_raised { alarm: "terminal_status_unjournaled" }` once, cleared when something does. (#196)

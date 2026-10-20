@@ -11,7 +11,8 @@ import { machineRecord, placement, readiness } from "./helpers/desk-msgs";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 const FIXUP = "status-chip-t1-fixup-1";
-const LONG = "A deliberately long task title that runs to about ninety characters, so it has to wrap";
+const LONG =
+  "A deliberately long task title that runs to about ninety characters, so it has to wrap";
 
 const frame = {
   pos: { x: 0, y: 0 },

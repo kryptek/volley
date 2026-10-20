@@ -115,8 +115,8 @@ import {
 import type { AgentView, DeskState } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
-import { machineFor } from "./windows/agent/machine";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
+import { machineFor } from "./windows/agent/machine";
 import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import { useTerminalPopouts } from "./windows/agent/useTerminalPopouts";
 import {

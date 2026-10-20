@@ -145,7 +145,12 @@ describe("SettingsWindow", () => {
   it("an open window follows a new section it is given (a machine chip asks for Machines)", () => {
     const { rerender } = render(<Harness initial="general" />);
     open("About Volley");
-    rerender(<Harness initial="machines" machines={{ machines: {}, hubUp: true, ops: null, focus: "box-a" }} />);
+    rerender(
+      <Harness
+        initial="machines"
+        machines={{ machines: {}, hubUp: true, ops: null, focus: "box-a" }}
+      />,
+    );
     expect(heading()).toHaveTextContent("Machines");
   });
 

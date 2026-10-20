@@ -383,9 +383,7 @@ export function AgentWindow({
     .join(" ")}`;
   const ctx = contextMeter(usage);
   const account = usage?.account ?? str(agent.registry?.claude_account);
-  const nameText = named
-    ? purpose.full
-    : `${headline}${issue !== undefined ? ` #${issue}` : ""}`;
+  const nameText = named ? purpose.full : `${headline}${issue !== undefined ? ` #${issue}` : ""}`;
   const subtitle = (
     <>
       <span className="t-head">
