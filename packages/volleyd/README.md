@@ -743,6 +743,70 @@ autopilot: on
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
 
+### The release train
+
+What turns a merged release branch into a release (the version bump, the changelog, a staging
+deploy, a smoke run, the release notes) differs in every project, so volleyd does not know it: a
+repository tells it, in a **release playbook** at `<repo>/.volley/release.yaml`
+(`spec/schemas/release-playbook.schema.json`, SPEC §4.6.19). Each stage is generic: a `brief`
+for the agent that runs it, the argv lines it runs (`run`, shown in its brief verbatim), the
+facts volleyd checks afterwards (`verify`) and who lets it start (`gate`):
+
+```yaml
+version: 1
+stages:
+  - name: bump
+    brief: Bump every package to the release version and assemble the changelog from changes/.
+    run:
+      - [bun, run, changelog, --version, 0.5.0, --date, 2026-10-20, --commit]
+    verify: { commits_on_release: true, files: [CHANGELOG.md] }
+  - name: staging
+    brief: Deploy the release branch to staging and run the smoke checks against it.
+    run:
+      - [make, deploy-staging]
+      - [make, smoke]
+    verify: { result: { smoke: passed } }
+    timeout_s: 1800
+    heavy: staging          # a lease pool the stage holds while it runs
+  - name: notes
+    brief: Draft the release notes from the changelog section and tag the release.
+    gate: owner             # a stage_go decision asks before it runs
+    verify: { tag: "v*" }
+```
+
+- **Where**: `.volley/release.yaml` in the wave's repo; a wave file's `playbook: <path>`
+  (relative to `repo`, or absolute) points elsewhere, and `playbook: none` opts the wave out.
+  `volleyd validate` and `volleyd run` print `release playbook: <path> (N stages, M
+  owner-gated)` or `release playbook: none`. A playbook that does not validate (or a configured
+  one that does not exist) fails `validate` and refuses the wave at `run` with
+  `RELEASE_PLAYBOOK_INVALID` and its path-qualified errors (`stages[1].name: duplicate stage
+  'smoke'`).
+- **When**: once every task of a running wave is done or cancelled, under autopilot, volleyd
+  journals `release_started { done, cancelled, playbook: { path, sha256, stages } }` instead of
+  `wave_complete`, and the wave's `status` is `releasing`. The wave state carries `release: {
+  stage, stages: [{ name, state }] }`, `state` being `pending`, `awaiting_go`, `running`,
+  `verified` or `failed`; `volleyd status` prints `release: <stage> (k/N verified)`. No
+  `wave_complete` decision opens for it. A releasing wave admits no tasks and takes no new
+  version; it can be paused (and resumes releasing) or stopped.
+  The playbook is read from the repo's working tree (whatever is checked out there) when the
+  wave is submitted and again when it settles; `release_started` records the path and sha256 of
+  the file used. A wave whose repo is not on volleyd's machine has no playbook to read, so it
+  completes without a train.
+- **The end is always yours**: once every stage is `verified`, volleyd opens `release_go`
+  (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
+  owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,
+  decision_id }` and the wave is `complete`; `hold` (or any other answer) keeps it `releasing`
+  and asks again at once (the new decision carries `class: held`), so a held
+  `release_go` is straight back in the inbox. volleyd never deploys to production
+  on its own: a deploy-shaped stage says `gate: owner`.
+- **Without a playbook** (or with autopilot off) nothing changes: the wave completes, and its
+  `wave_complete` decision is auto-acknowledged under autopilot. A playbook that stopped
+  validating since the wave was submitted is not run; the `wave_complete` question says why.
+
+Running the stages (the `release` role, its brief, `verify` and stage evidence, opening `stage_go`
+before a `gate: owner` stage) arrives with the next part of the train; until then a stage moves
+only when its `release_stage_*` events are journaled.
+
 ---
 
 ## Needs-you inbox

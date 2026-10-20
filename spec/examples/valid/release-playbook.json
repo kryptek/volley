@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "stages": [
+    {
+      "name": "bump",
+      "brief": "Bump every package to the release version and assemble the changelog from changes/.",
+      "run": [
+        ["bun", "run", "changelog", "--version", "0.5.0", "--date", "2026-10-20", "--commit"]
+      ],
+      "verify": { "commits_on_release": true, "files": ["CHANGELOG.md"] }
+    },
+    {
+      "name": "staging",
+      "brief": "Deploy the release branch to staging and run the smoke checks against it.",
+      "run": [["make", "deploy-staging"], ["make", "smoke"]],
+      "verify": { "result": { "smoke": "passed" } },
+      "timeout_s": 1800,
+      "heavy": "staging"
+    },
+    {
+      "name": "notes",
+      "brief": "Draft the release notes from the changelog section and tag the release.",
+      "gate": "owner",
+      "verify": { "tag": "v*" }
+    }
+  ]
+}

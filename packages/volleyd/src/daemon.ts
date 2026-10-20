@@ -90,6 +90,15 @@ import {
   whereLabel,
 } from "./autopilot/inbox";
 import {
+  DEFAULT_PLAYBOOK,
+  PlaybookError,
+  type WavePlaybook,
+  allVerified,
+  playbookPath,
+  releaseGoInput,
+  wavePlaybook,
+} from "./autopilot/playbook";
+import {
   type Budget,
   type EscalateWhy,
   POLICY_TABLE,
@@ -923,6 +932,8 @@ export class Daemon {
   ]);
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
+  /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
+  private readonly playbookNotRun = new Map<WaveId, string>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
@@ -2341,7 +2352,10 @@ export class Daemon {
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     await this.watchTerminals();
-    for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
+    for (const wave of this.waves.keys()) {
+      await this.completeIfSettled(wave);
+      await this.releaseGoIfVerified(wave);
+    }
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
@@ -3216,6 +3230,18 @@ export class Daemon {
     if (!state.tasks.every((t) => t.stage === "done" || t.stage === "cancelled")) return;
     const done = state.tasks.filter((t) => t.stage === "done").map((t) => t.id);
     const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
+    // The release train (SPEC §4.6.19): under autopilot, a repo with a playbook starts releasing
+    // instead; the owner hears from release_go once every stage is verified.
+    const train = this.releasePlaybook(wave);
+    if (typeof train === "object" && train !== null) {
+      const { path, sha256, playbook } = train;
+      await this.append(wave, {
+        type: "release_started",
+        data: { done, cancelled, playbook: { path, sha256, stages: playbook.stages } },
+      });
+      this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
+      return;
+    }
     // The decision first: once wave_complete is journaled the wave is no longer `running` and no
     // later tick comes back here, so a failed open must leave the wave to retry.
     if (rec.decisions[waveCompleteDecisionId(wave)] === undefined) {
@@ -3224,13 +3250,74 @@ export class Daemon {
         kind: "wave_complete",
         task: null,
         id: waveCompleteDecisionId(wave),
-        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
+        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.${typeof train === "string" ? ` Its release playbook was not run: ${train}` : ""}`,
         options: ["acknowledged"],
       });
     }
     await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
     this.log(
       `wave ${wave} complete: done ${done.join(", ") || "-"}; cancelled ${cancelled.join(", ") || "-"}`,
+    );
+  }
+
+  /**
+   * The playbook a settled wave releases with (SPEC §4.6.19): null when it has none or autopilot
+   * is off for it; a string saying why when it no longer validates (the wave completes as
+   * without one, and its wave_complete question says so on one line, naming the playbook as the
+   * wave file does).
+   */
+  private releasePlaybook(wave: WaveId): WavePlaybook | string | null {
+    const plan = this.waves.get(wave)?.record.wave;
+    if (plan == null || !this.config.effective(wave).autopilot.enabled) return null;
+    try {
+      return wavePlaybook(plan);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (this.playbookNotRun.get(wave) !== msg) {
+        this.playbookNotRun.set(wave, msg);
+        this.log(`wave ${wave}: release playbook not run: ${msg}`);
+      }
+      const path = playbookPath(plan.repo, plan.playbook);
+      const named = path === null ? msg : msg.replace(path, plan.playbook ?? DEFAULT_PLAYBOOK);
+      return named.replace(/:\n\s*/, ": ").replace(/\n\s*/g, "; ");
+    }
+  }
+
+  /**
+   * Once every stage of a releasing wave is verified, ask the owner `release_go` (owner-only,
+   * wave-level), unless one is open already. After a `hold` it is asked again (`class: held`), so
+   * the Desk keeps showing it.
+   */
+  private async releaseGoIfVerified(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    const state = log?.record.state;
+    if (log === undefined || state?.status !== "releasing" || state.release === undefined) return;
+    if (!allVerified(state.release)) return;
+    if (openDecisions(log.record).some((d) => d.kind === "release_go")) return;
+    const asked = Object.values(log.record.decisions).filter((d) => d.kind === "release_go");
+    // Answered go, but release_done was not journaled (it failed): journal it now.
+    const go = asked.find((d) => d.resolved?.answer.trim().toLowerCase() === "go");
+    if (go?.resolved !== undefined) {
+      await this.append(wave, {
+        type: "release_done",
+        data: { by: go.resolved.by, decision_id: go.decision_id },
+      });
+      return;
+    }
+    const evidence = new Map<string, string>();
+    for (const e of log.journal.readAll()) {
+      if (e.type === "release_stage_verified" && typeof e.data.evidence === "string")
+        evidence.set(String(e.data.stage), e.data.evidence);
+    }
+    const { input, stages } = releaseGoInput(wave, state.release, evidence);
+    const id =
+      asked.length === 0
+        ? waveDecisionId("release_go", wave)
+        : waveDecisionId("release_go", wave, String(asked.length));
+    await this.openDecisionNow(
+      wave,
+      { ...input, id },
+      { stages, ...(asked.length > 0 ? { class: "held" } : {}) },
     );
   }
 
@@ -6252,6 +6339,8 @@ export class Daemon {
               (event.type === "stage_entered" && event.data.stage === "done"))
           ? [event.task]
           : [];
+    // The last stage of the release train verified: the owner's release_go (SPEC §4.6.19).
+    if (event.type === "release_stage_verified") await this.releaseGoIfVerified(wave);
     for (const task of ended) {
       const ids = (queued[task] ?? []).map((q) => q.message_id);
       if (ids.length === 0) continue;
@@ -6601,6 +6690,12 @@ export class Daemon {
     if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
       await this.askAgainRefused(wave, d, r.answer, refused);
     if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
+    if (d.kind === "release_go") {
+      // go: the release is the owner's, and done. Anything else holds it: asked again.
+      if (r.answer.trim().toLowerCase() === "go")
+        await this.append(wave, { type: "release_done", data: { by: r.by, decision_id: id } });
+      else await this.releaseGoIfVerified(wave);
+    }
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       if (r.answer.trim().toLowerCase() === "cancel") {
         await this.append(wave, {
@@ -7591,6 +7686,8 @@ export class Daemon {
     if ("refusal" in first) return first.refusal;
     const preface = this.briefPreface(first.wave);
     if ("refusal" in preface) return preface.refusal;
+    const playbook = this.playbookRefusal(first.wave);
+    if (playbook !== null) return playbook;
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
     const text = p.wave_yaml as string;
@@ -7677,6 +7774,20 @@ export class Daemon {
       return { info: prefaceInfo(readBriefPreface(path, max)), path };
     } catch (e) {
       if (e instanceof BriefPrefaceTooLarge) return { refusal: { ok: false, error: e.message } };
+      throw e;
+    }
+  }
+
+  /**
+   * RELEASE_PLAYBOOK_INVALID (with its path-qualified errors) when the wave's release playbook
+   * (SPEC §4.6.19) does not validate, or is configured and missing; null when it is fine or none.
+   */
+  private playbookRefusal(wave: Wave): Reply | null {
+    try {
+      wavePlaybook(wave);
+      return null;
+    } catch (e) {
+      if (e instanceof PlaybookError) return { ok: false, error: e.message, errors: e.errors };
       throw e;
     }
   }
@@ -8144,17 +8255,18 @@ export class Daemon {
     });
     if (op === "pause") {
       if (state.status === "paused") return done(false);
-      if (state.status !== "running")
+      // A releasing wave pauses too, and resumes releasing (SPEC §4.6.19).
+      if (state.status !== "running" && state.status !== "releasing")
         return {
           ok: false,
-          error: `wave '${w.wave}' is ${state.status}; only a running wave can be paused`,
+          error: `wave '${w.wave}' is ${state.status}; only a running or releasing wave can be paused`,
         };
       await this.append(w.wave, { type: "wave_paused", data: { by } });
       await this.tickNow();
       return done(true);
     }
     if (op === "resume") {
-      if (state.status === "running") return done(false);
+      if (state.status === "running" || state.status === "releasing") return done(false);
       if (this.killSwitch)
         return { ok: false, error: `${KILL_SWITCH_REASON}: \`volleyd resume --all\` first` };
       if (state.status === "complete") return { ok: false, error: `wave '${w.wave}' is complete` };
@@ -8533,7 +8645,7 @@ export class Daemon {
     const rec = log.record;
     const state = rec.state;
     if (state === null) return { ok: false, error: `wave '${wave.wave}' has no state` };
-    if (state.status === "complete" || state.status === "stopped") {
+    if (state.status === "complete" || state.status === "stopped" || state.status === "releasing") {
       return {
         ok: false,
         error: `wave '${wave.wave}' is ${state.status}; a new version applies only to a live wave`,

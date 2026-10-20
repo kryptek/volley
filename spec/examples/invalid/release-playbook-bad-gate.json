@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "stages": [{ "name": "deploy", "brief": "Deploy to production.", "gate": "later" }]
+}

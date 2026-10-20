@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
@@ -51,9 +52,13 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   // Validate locally first: a bad file fails fast, with or without a daemon.
   let text: string;
   let wave: ReturnType<typeof parseWaveFile>;
+  let playbookLine: string;
   try {
     text = await readFile(file, "utf-8");
     wave = parseWaveFile(text, file);
+    // The release playbook as read here (the daemon reads it again and is authoritative).
+    const playbook = wavePlaybook(wave);
+    playbookLine = `${formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null)}\n`;
   } catch (e) {
     io.stderr(`volleyd run: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
@@ -85,12 +90,12 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       io.stderr(warnings);
     } else if (res.plan !== undefined) {
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${placement}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placement}${formatWave(state)}`,
       );
     }
     return EXIT.OK;
