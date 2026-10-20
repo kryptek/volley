@@ -2185,6 +2185,12 @@ export class Daemon {
             this.ownerChanged(holder);
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
           }
+          // A session that ended answers none of its open pickers or handoffs any more.
+          if (OWNER_GONE.has(env.type))
+            void this.enqueue(async () => {
+              await this.closeOpenItems(holder, "picker", "session ended");
+              await this.closeOpenItems(holder, "handoff", "session ended");
+            });
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
         // Checked in queue order, so an `acquire` from this holder still waiting in the queue
@@ -6686,6 +6692,11 @@ export class Daemon {
   // The needs-you inbox (SPEC §4.6.18): volleyd is the referee
   // -------------------------------------------------------------------------------------------
 
+  /** The agent coordinator name `name` is bound to, if any. */
+  bindingOf(name: string): string | undefined {
+    return this.bindings.get(name)?.agent_id;
+  }
+
   /** One inbox item (open, or answered and not yet cleared). */
   inboxItem(id: string): InboxItem | undefined {
     return this.inbox.get(id);
@@ -6757,6 +6768,8 @@ export class Daemon {
         };
       }
     } else {
+      const refused = this.guardSessionAnswer(item, req.by);
+      if (refused !== null) return { refused };
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
       else {
@@ -6772,6 +6785,17 @@ export class Daemon {
       await this.recordInboxAnswer(item, req);
     }
     return { item: this.inbox.get(id) as InboxItem };
+  }
+
+  /**
+   * null when `by` may answer a picker or handoff; else the refusal. A coordinator session's own
+   * (`owner_only`) is answered only by that session's owner: its agent id, or the coordinator
+   * name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   */
+  private guardSessionAnswer(item: InboxItem, by: string): string | null {
+    if (!item.owner_only || (item.kind !== "picker" && item.kind !== "handoff")) return null;
+    if (this.actsAs(item.agent_id, by)) return null;
+    return `inbox item '${item.id}' is ${item.agent_id}'s own: only its owner answers it, not ${by}`;
   }
 
   /**
@@ -6826,6 +6850,8 @@ export class Daemon {
       if (typeof p.question !== "string" || p.question.trim() === "") return;
       if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) return;
       if (this.supervised.has(agent)) return; // a wave agent's question is a decision (liveness)
+      // Only the Stop hook's: a Notification repeats it (idle_prompt) or asks for a permission.
+      if (p.hook_event !== "Stop") return;
       const question = p.question;
       void this.enqueue(() =>
         this.openInboxItemNow(
@@ -6836,7 +6862,11 @@ export class Daemon {
       (env.type === "activity" && p.msg === PROMPT_RECEIVED) ||
       (env.type === "resumed" && p.hook_event === "UserPromptSubmit")
     ) {
-      void this.enqueue(() => this.closeOpenItems(agent, "handoff", "answered in its terminal"));
+      void this.enqueue(async () => {
+        await this.closeOpenItems(agent, "handoff", "answered in its terminal");
+        // A picker interrupted with Esc / Ctrl-C ends no turn: the next prompt is past it.
+        await this.closeOpenItems(agent, "picker", "dismissed in its terminal");
+      });
     } else if (env.type === "idle") {
       void this.enqueue(() => this.closeOpenItems(agent, "picker", "dismissed in its terminal"));
     }

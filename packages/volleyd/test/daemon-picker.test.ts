@@ -210,4 +210,45 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
       where: { kind: "terminal" },
     });
   });
+
+  it("picker_answered arriving while a Desk answer is being carried: one inbox_answered, on the Desk", async () => {
+    s = await makeSupervisedEnv();
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    s.host.screens = [screen("picker-single")];
+    const send = s.host.sendKeys.bind(s.host);
+    let raced = false;
+    s.host.sendKeys = async (workspace, key, tokens) => {
+      if (!raced) {
+        raced = true;
+        // The PostToolUse hook fires as soon as the pick lands, before the carry returns.
+        await hook("picker_answered", {
+          tool_use_id: "toolu_01Fruit",
+          answers: { "Which fruit do you want?": "Banana" },
+        });
+        // broker round-trip: the hook's delivery reaches the daemon while the carry is in flight.
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return send(workspace, key, tokens);
+    };
+    const r = await answer(item.id, "Banana");
+    expect(r.error).toBeUndefined();
+    await s.consumed();
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject({ by: "owner", where: phone });
+    expect(s.journal().filter((e) => e.type === "inbox_answered")).toHaveLength(1);
+  });
+
+  it("a wave agent's picker is anyone's who may steer (not owner_only)", async () => {
+    s = await makeSupervisedEnv();
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    s.host.screens = [screen("picker-single")];
+    client ??= await ControlClient.connect(s.env.broker.url, NS);
+    const r = await client.request("inbox_answer", {
+      id: item.id,
+      version: 1,
+      answer: "Banana",
+      where: phone,
+      by: "a-teammate",
+    });
+    expect(r.error).toBeUndefined();
+  });
 });

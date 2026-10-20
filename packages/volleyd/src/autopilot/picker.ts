@@ -195,6 +195,8 @@ export function keysFor(p: ParsedPicker, choice: PickerChoice): Key[] | null {
     return keys;
   }
   if (index.length === 0 && !typed) return null;
+  // Only the option rows are made to match: an Other row already ticked is left as it is when
+  // the answer has no free text (one already holding typed text cannot take more: refused above).
   const want = new Set(index);
   p.options.forEach((o, i) => {
     if ((o.checked === true) === want.has(i)) return;
@@ -212,16 +214,28 @@ export function keysFor(p: ParsedPicker, choice: PickerChoice): Key[] | null {
 
 /**
  * An inbox answer as a selection: a label, else free text; for multi-select the labels joined
- * with `, ` (how Claude Code reports them), whatever is not a label being the free text.
+ * with `, ` (how Claude Code reports them), whatever is not a label being the free text. The
+ * longest run of parts that is a label wins, so a label holding `, ` itself is matched whole.
  */
 export function choiceFor(answer: string, want: PickerWant): PickerChoice {
   const labels = want.options.map((o) => o.label);
   if (labels.includes(answer)) return { labels: [answer] };
   if (!want.multi) return { labels: [], other: answer };
   const parts = answer.split(", ").map((s) => s.trim());
-  const picked = parts.filter((s) => labels.includes(s));
-  const rest = parts.filter((s) => s !== "" && !labels.includes(s)).join(", ");
-  return rest === "" ? { labels: picked } : { labels: picked, other: rest };
+  const picked: string[] = [];
+  const rest: string[] = [];
+  for (let i = 0; i < parts.length; ) {
+    let end = parts.length;
+    while (end > i && !labels.includes(parts.slice(i, end).join(", "))) end--;
+    if (end > i) {
+      picked.push(parts.slice(i, end).join(", "));
+      i = end;
+    } else {
+      if (parts[i] !== "") rest.push(parts[i] as string);
+      i++;
+    }
+  }
+  return rest.length === 0 ? { labels: picked } : { labels: picked, other: rest.join(", ") };
 }
 
 /** Multi-select's review screen: the keys that press `Submit answers`, or null when not shown. */

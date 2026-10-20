@@ -191,6 +191,22 @@ describe("choiceFor (an inbox answer → what to select)", () => {
       other: "anchovies",
     });
   });
+
+  it("multi-select: a label that itself contains ', ' is matched whole", () => {
+    const want = {
+      question: "Which toppings do you want?",
+      multi: true,
+      options: [{ label: "Cheese, extra" }, { label: "Cheese" }, { label: "Olives" }],
+    };
+    expect(choiceFor("Cheese, extra, Olives", want)).toEqual({
+      labels: ["Cheese, extra", "Olives"],
+    });
+    expect(choiceFor("Olives, Cheese", want)).toEqual({ labels: ["Olives", "Cheese"] });
+    expect(choiceFor("Cheese, extra, anchovies, more", want)).toEqual({
+      labels: ["Cheese, extra"],
+      other: "anchovies, more",
+    });
+  });
 });
 
 describe("parseReview (multi-select: the review screen after Submit)", () => {
