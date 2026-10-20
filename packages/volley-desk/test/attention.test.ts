@@ -399,6 +399,7 @@ describe("needsYouTargets", () => {
       },
       supervisors: {},
       config: null,
+      archive: null,
       leases: {},
       admission: null,
     };

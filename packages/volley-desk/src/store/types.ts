@@ -548,7 +548,7 @@ export interface DeskState {
   supervisors: Record<string, SupervisorView>;
   config: ConfigPayload | null;
   /** The supervisor's index of archived waves (`volley/_waves/_archive`); null until retained. */
-  archive?: ArchivePayload | null;
+  archive: ArchivePayload | null;
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */
   admission: Record<string, unknown> | null;

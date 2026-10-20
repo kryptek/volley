@@ -13,7 +13,7 @@ export interface RunResult {
  * A default env that can never reach the live broker or the real `~/.volley/volleyd`: port 1 on
  * loopback refuses connections, and the home is a path under the temp dir that is never created.
  */
-const SAFE_ENV = {
+export const SAFE_ENV = {
   VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1",
   VOLLEYD_HOME: join(tmpdir(), "volleyd-test-no-home"),
 };

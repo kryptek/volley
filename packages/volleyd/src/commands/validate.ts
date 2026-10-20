@@ -79,7 +79,10 @@ function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weight
   }
 }
 
-/** `volleyd run` needs an owner to answer its decisions (an ownerless wave only auto-archives). */
+/**
+ * `volleyd run` needs an owner to answer its decisions (an ownerless wave only auto-archives).
+ * Shown unless VOLLEY_AGENT_ID names the caller (validate is offline: the registry is not read).
+ */
 const OWNER_NOTE =
   "note: `volleyd run` needs an owner (--owner, VOLLEY_AGENT_ID or a registered session): an ownerless wave's decisions go unanswered\n";
 
@@ -165,7 +168,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${OWNER_NOTE}${note}${prefaceLine}\n${placement}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n${env.VOLLEY_AGENT_ID ? "" : OWNER_NOTE}${note}${prefaceLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {

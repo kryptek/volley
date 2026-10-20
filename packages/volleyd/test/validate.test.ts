@@ -9,7 +9,7 @@ import { CONFIG_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC } from "../src/control";
 import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
-import { runCli } from "./helpers/run-cli";
+import { SAFE_ENV, runCli } from "./helpers/run-cli";
 import { tempDir } from "./helpers/tmp";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -74,6 +74,15 @@ describe("volleyd validate: the release branch", () => {
     const r = await runCli(["validate", waveFile(repo, "{ issue: 1, host: build-box.lan }")]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("note: `volleyd run` needs an owner");
+  });
+
+  it("skips the owner note when VOLLEY_AGENT_ID names the caller", async () => {
+    const r = await runCli(["validate", waveFile(repo, "{ issue: 1, host: build-box.lan }")], {
+      ...SAFE_ENV,
+      VOLLEY_AGENT_ID: "coord-1",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toContain("needs an owner");
   });
 
   /** An origin remote (never contacted: validate stays offline). */

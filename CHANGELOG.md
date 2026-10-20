@@ -56,7 +56,8 @@ All workspace packages share one version. Dates are release-tag dates.
   id. An admin may archive any ended wave through its account-op topic. New tunables
   `archive_ended_after_h` (default 24; 0: never) and `archive_on_ack` (default true) archive
   ended waves automatically. A retained index, `volley/_waves/_archive` (`archive.schema.json`),
-  lists archived waves (SPEC §4.6.16). (#192)
+  lists archived waves (SPEC §4.6.16). On upgrade, the first tick archives every wave that
+  ended more than 24 h ago in one pass; set `archive_ended_after_h: 0` first to keep them. (#192)
 - **Desk: archived waves leave every Desk.** The coordinators window and the canvas drop an
   archived wave for every client, not just the browser that dismissed it, and the window's footer
   counts `N archived (volleyd archive)` from the index. Dismiss stays for ended waves not archived

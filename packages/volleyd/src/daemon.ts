@@ -3058,6 +3058,7 @@ export class Daemon {
     this.heldBack.delete(wave);
     this.issueFiles.delete(wave);
     this.legacyEndedAt.delete(wave);
+    this.pipelines.delete(wave);
     this.config.clearWave(wave);
     await this.publishArchiveIndex();
     this.log(`wave ${wave} archived by ${by} (${reason}); closed ${closed.length} decision(s)`);
@@ -6227,7 +6228,10 @@ export class Daemon {
     );
   }
 
-  /** The reduced record of a wave (undefined when unknown). */
+  /**
+   * The reduced record of a wave, live or archived (undefined when unknown). An archived wave's
+   * journal is closed to `append`: a subsystem that journals after reading it checks `waves` first.
+   */
   record(wave: WaveId) {
     return (this.waves.get(wave) ?? this.archived.get(wave))?.record;
   }
