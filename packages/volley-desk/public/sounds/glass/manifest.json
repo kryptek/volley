@@ -1,0 +1,149 @@
+{
+  "theme": "glass",
+  "label": "Glass",
+  "version": 28,
+  "generated_at": "2026-10-20T04:30:42.617Z",
+  "clips": {
+    "ui_click": {
+      "file": "ui_click.ogg",
+      "ms": 403,
+      "variant": 1
+    },
+    "ui_drag_start": {
+      "file": "ui_drag_start.ogg",
+      "ms": 487,
+      "variant": 3
+    },
+    "ui_drop": {
+      "file": "ui_drop.ogg",
+      "ms": 412,
+      "variant": 2
+    },
+    "tethers_on": {
+      "file": "tethers_on.ogg",
+      "ms": 448,
+      "variant": 1
+    },
+    "tethers_off": {
+      "file": "tethers_off.ogg",
+      "ms": 430,
+      "variant": 3
+    },
+    "panel_open": {
+      "file": "panel_open.ogg",
+      "ms": 405,
+      "variant": 2
+    },
+    "panel_close": {
+      "file": "panel_close.ogg",
+      "ms": 487,
+      "variant": 1
+    },
+    "agent_spawned": {
+      "file": "agent_spawned.ogg",
+      "ms": 687,
+      "variant": 2
+    },
+    "agent_working": {
+      "file": "agent_working.ogg",
+      "ms": 607,
+      "variant": 1
+    },
+    "agent_complete": {
+      "file": "agent_complete.ogg",
+      "ms": 506,
+      "variant": 3
+    },
+    "agent_failed": {
+      "file": "agent_failed.ogg",
+      "ms": 486,
+      "variant": 1
+    },
+    "agent_reaped": {
+      "file": "agent_reaped.ogg",
+      "ms": 757,
+      "variant": 3
+    },
+    "review_written": {
+      "file": "review_written.ogg",
+      "ms": 353,
+      "variant": 3
+    },
+    "decision_answered": {
+      "file": "decision_answered.ogg",
+      "ms": 574,
+      "variant": 1
+    },
+    "ci_passed": {
+      "file": "ci_passed.ogg",
+      "ms": 547,
+      "variant": 3
+    },
+    "ci_failed": {
+      "file": "ci_failed.ogg",
+      "ms": 754,
+      "variant": 3
+    },
+    "merge_ready": {
+      "file": "merge_ready.ogg",
+      "ms": 704,
+      "variant": 3
+    },
+    "pr_merged": {
+      "file": "pr_merged.ogg",
+      "ms": 887,
+      "variant": 2
+    },
+    "wave_start": {
+      "file": "wave_start.ogg",
+      "ms": 1327,
+      "variant": 2
+    },
+    "wave_complete": {
+      "file": "wave_complete.ogg",
+      "ms": 647,
+      "variant": 3
+    },
+    "wave_stopped": {
+      "file": "wave_stopped.ogg",
+      "ms": 1487,
+      "variant": 2
+    },
+    "steering_sent": {
+      "file": "steering_sent.ogg",
+      "ms": 607,
+      "variant": 3
+    },
+    "steering_delivered": {
+      "file": "steering_delivered.ogg",
+      "ms": 468,
+      "variant": 3
+    },
+    "account_limit": {
+      "file": "account_limit.ogg",
+      "ms": 727,
+      "variant": 1
+    },
+    "machine_down": {
+      "file": "machine_down.ogg",
+      "ms": 554,
+      "variant": 2
+    },
+    "broker_disconnected": {
+      "file": "broker_disconnected.ogg",
+      "ms": 807,
+      "variant": 1
+    },
+    "broker_reconnected": {
+      "file": "broker_reconnected.ogg",
+      "ms": 807,
+      "variant": 1
+    },
+    "attention_needed": {
+      "file": "attention_needed.ogg",
+      "ms": 555,
+      "variant": 2
+    }
+  },
+  "missing": []
+}
